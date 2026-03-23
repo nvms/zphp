@@ -1,0 +1,280 @@
+const std = @import("std");
+
+pub const Token = struct {
+    tag: Tag,
+    start: u32,
+    end: u32,
+
+    pub fn lexeme(self: Token, source: []const u8) []const u8 {
+        return source[self.start..self.end];
+    }
+
+    pub const Tag = enum(u8) {
+        // literals
+        integer,
+        float,
+        string,
+        identifier,
+        variable,
+
+        // keywords
+        kw_abstract,
+        kw_and,
+        kw_array,
+        kw_as,
+        kw_break,
+        kw_callable,
+        kw_case,
+        kw_catch,
+        kw_class,
+        kw_clone,
+        kw_const,
+        kw_continue,
+        kw_declare,
+        kw_default,
+        kw_die,
+        kw_do,
+        kw_echo,
+        kw_else,
+        kw_elseif,
+        kw_empty,
+        kw_enddeclare,
+        kw_endfor,
+        kw_endforeach,
+        kw_endif,
+        kw_endswitch,
+        kw_endwhile,
+        kw_enum,
+        kw_eval,
+        kw_exit,
+        kw_extends,
+        kw_false,
+        kw_final,
+        kw_finally,
+        kw_fn,
+        kw_for,
+        kw_foreach,
+        kw_function,
+        kw_global,
+        kw_goto,
+        kw_if,
+        kw_implements,
+        kw_include,
+        kw_include_once,
+        kw_instanceof,
+        kw_insteadof,
+        kw_interface,
+        kw_isset,
+        kw_list,
+        kw_match,
+        kw_namespace,
+        kw_new,
+        kw_null,
+        kw_or,
+        kw_parent,
+        kw_print,
+        kw_private,
+        kw_protected,
+        kw_public,
+        kw_readonly,
+        kw_require,
+        kw_require_once,
+        kw_return,
+        kw_self,
+        kw_static,
+        kw_switch,
+        kw_throw,
+        kw_trait,
+        kw_true,
+        kw_try,
+        kw_unset,
+        kw_use,
+        kw_var,
+        kw_while,
+        kw_xor,
+        kw_yield,
+
+        // single-character tokens
+        plus,
+        minus,
+        star,
+        slash,
+        percent,
+        equal,
+        bang,
+        lt,
+        gt,
+        amp,
+        pipe,
+        caret,
+        tilde,
+        at,
+        dot,
+        question,
+        l_paren,
+        r_paren,
+        l_brace,
+        r_brace,
+        l_bracket,
+        r_bracket,
+        semicolon,
+        comma,
+        colon,
+        backslash,
+        dollar,
+
+        // multi-character operators
+        plus_plus,
+        minus_minus,
+        star_star,
+        equal_equal,
+        equal_equal_equal,
+        bang_equal,
+        bang_equal_equal,
+        lt_equal,
+        gt_equal,
+        lt_gt,
+        spaceship,
+        amp_amp,
+        pipe_pipe,
+        question_question,
+        arrow,
+        fat_arrow,
+        colon_colon,
+        ellipsis,
+        lt_lt,
+        gt_gt,
+
+        // compound assignment
+        plus_equal,
+        minus_equal,
+        star_equal,
+        slash_equal,
+        percent_equal,
+        star_star_equal,
+        dot_equal,
+        amp_equal,
+        pipe_equal,
+        caret_equal,
+        lt_lt_equal,
+        gt_gt_equal,
+        question_question_equal,
+
+        // php tags
+        open_tag,
+        open_tag_echo,
+        close_tag,
+        inline_html,
+
+        // special
+        hash_bracket,
+        eof,
+        invalid,
+
+        const kw_map = std.StaticStringMap(Tag).initComptime(.{
+            .{ "abstract", .kw_abstract },
+            .{ "and", .kw_and },
+            .{ "array", .kw_array },
+            .{ "as", .kw_as },
+            .{ "break", .kw_break },
+            .{ "callable", .kw_callable },
+            .{ "case", .kw_case },
+            .{ "catch", .kw_catch },
+            .{ "class", .kw_class },
+            .{ "clone", .kw_clone },
+            .{ "const", .kw_const },
+            .{ "continue", .kw_continue },
+            .{ "declare", .kw_declare },
+            .{ "default", .kw_default },
+            .{ "die", .kw_die },
+            .{ "do", .kw_do },
+            .{ "echo", .kw_echo },
+            .{ "else", .kw_else },
+            .{ "elseif", .kw_elseif },
+            .{ "empty", .kw_empty },
+            .{ "enddeclare", .kw_enddeclare },
+            .{ "endfor", .kw_endfor },
+            .{ "endforeach", .kw_endforeach },
+            .{ "endif", .kw_endif },
+            .{ "endswitch", .kw_endswitch },
+            .{ "endwhile", .kw_endwhile },
+            .{ "enum", .kw_enum },
+            .{ "eval", .kw_eval },
+            .{ "exit", .kw_exit },
+            .{ "extends", .kw_extends },
+            .{ "false", .kw_false },
+            .{ "final", .kw_final },
+            .{ "finally", .kw_finally },
+            .{ "fn", .kw_fn },
+            .{ "for", .kw_for },
+            .{ "foreach", .kw_foreach },
+            .{ "function", .kw_function },
+            .{ "global", .kw_global },
+            .{ "goto", .kw_goto },
+            .{ "if", .kw_if },
+            .{ "implements", .kw_implements },
+            .{ "include", .kw_include },
+            .{ "include_once", .kw_include_once },
+            .{ "instanceof", .kw_instanceof },
+            .{ "insteadof", .kw_insteadof },
+            .{ "interface", .kw_interface },
+            .{ "isset", .kw_isset },
+            .{ "list", .kw_list },
+            .{ "match", .kw_match },
+            .{ "namespace", .kw_namespace },
+            .{ "new", .kw_new },
+            .{ "null", .kw_null },
+            .{ "or", .kw_or },
+            .{ "parent", .kw_parent },
+            .{ "print", .kw_print },
+            .{ "private", .kw_private },
+            .{ "protected", .kw_protected },
+            .{ "public", .kw_public },
+            .{ "readonly", .kw_readonly },
+            .{ "require", .kw_require },
+            .{ "require_once", .kw_require_once },
+            .{ "return", .kw_return },
+            .{ "self", .kw_self },
+            .{ "static", .kw_static },
+            .{ "switch", .kw_switch },
+            .{ "throw", .kw_throw },
+            .{ "trait", .kw_trait },
+            .{ "true", .kw_true },
+            .{ "try", .kw_try },
+            .{ "unset", .kw_unset },
+            .{ "use", .kw_use },
+            .{ "var", .kw_var },
+            .{ "while", .kw_while },
+            .{ "xor", .kw_xor },
+            .{ "yield", .kw_yield },
+        });
+
+        pub fn keyword(bytes: []const u8) ?Tag {
+            if (bytes.len > 16) return null;
+            var buf: [16]u8 = undefined;
+            for (bytes, 0..) |c, i| {
+                buf[i] = std.ascii.toLower(c);
+            }
+            return kw_map.get(buf[0..bytes.len]);
+        }
+    };
+};
+
+test "keyword lookup" {
+    try std.testing.expectEqual(Token.Tag.kw_if, Token.Tag.keyword("if").?);
+    try std.testing.expectEqual(Token.Tag.kw_if, Token.Tag.keyword("IF").?);
+    try std.testing.expectEqual(Token.Tag.kw_if, Token.Tag.keyword("If").?);
+    try std.testing.expectEqual(Token.Tag.kw_class, Token.Tag.keyword("class").?);
+    try std.testing.expectEqual(Token.Tag.kw_class, Token.Tag.keyword("CLASS").?);
+    try std.testing.expectEqual(Token.Tag.kw_function, Token.Tag.keyword("function").?);
+    try std.testing.expectEqual(Token.Tag.kw_require_once, Token.Tag.keyword("require_once").?);
+    try std.testing.expect(Token.Tag.keyword("notakeyword") == null);
+    try std.testing.expect(Token.Tag.keyword("iff") == null);
+    try std.testing.expect(Token.Tag.keyword("") == null);
+}
+
+test "token lexeme" {
+    const source = "hello world";
+    const tok = Token{ .tag = .identifier, .start = 0, .end = 5 };
+    try std.testing.expectEqualStrings("hello", tok.lexeme(source));
+}

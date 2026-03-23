@@ -235,6 +235,37 @@ if the user says "retire":
 
 do NOT use the GitHub MCP server for creating repos or any write operations. the MCP server is only useful for reading public repos.
 
+## zig 0.15.x gotchas
+
+- `std.io.getStdOut()` does not exist in 0.15.1. use `std.posix.write(std.posix.STDOUT_FILENO, ...)` for stdout or `std.debug.print` for stderr
+- `std.StaticStringMap` works and is the right choice for comptime lookup tables
+- switch ranges use `...` (inclusive): `'a'...'z'`, `0x80...0xff`
+- `@intCast` infers target type from context: `const x: u32 = @intCast(some_usize);`
+
+## current status
+
+phase 1 in progress: lexer complete, parser next.
+
+### what exists
+- `src/pipeline/token.zig` - all PHP 8.x token types (145 variants), case-insensitive keyword lookup via StaticStringMap, Token struct with u32 start/end byte offsets
+- `src/pipeline/lexer.zig` - full PHP lexer with HTML/PHP modal lexing, comprehensive tests (37 tests covering operators, keywords, numbers, strings, comments, attributes, mixed HTML/PHP, edge cases)
+- `src/main.zig` - CLI entry point, imports pipeline modules for test discovery
+
+### lexer design decisions
+- tokens reference byte offsets into source (zero-copy, no allocations)
+- PHP keywords are case-insensitive (lowercased before lookup)
+- strings are lexed as single tokens (interpolation handled later by compiler)
+- heredocs/nowdocs not yet supported (will produce invalid token)
+- `#[` produces hash_bracket token (not treated as comment)
+- bare `$` produces dollar token (for variable-variable support later)
+- the lexer never errors - invalid input produces `.invalid` tokens
+- HTML mode scans for `<?php` (with trailing whitespace) and `<?=` only, no short open tags
+
+### next up
+- parser (recursive descent, AST nodes in ast.zig)
+- start with: expressions, variables, function calls, control flow (if/else/while/for), function definitions
+- then: classes, interfaces, traits, closures
+
 ## self-improvement
 
 keep this CLAUDE.md up to date. after making changes, review and update: architecture notes, design decisions, gotchas, anything the next session needs to know. this is not optional.
