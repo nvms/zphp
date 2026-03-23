@@ -21,7 +21,6 @@ zig 0.15.x. `zig build test` must pass before pushing. short lowercase commits, 
 - type hints: parsed, not enforced. heredoc/nowdoc: not supported
 - `strtotime`: YYYY-MM-DD and relative only, UTC
 - trait conflict resolution (`insteadof`/`as`): not implemented
-- `zphp serve`: no static file serving, no WebSocket support yet
 
 ## gotchas
 
@@ -35,15 +34,24 @@ zig 0.15.x. `zig build test` must pass before pushing. short lowercase commits, 
 
 **stdlib conflicts**: functions registered later in registry.zig overwrite earlier ones. check existing stubs before adding implementations
 
-**zig 0.15.x**: no `std.io.getStdOut()` (use `std.posix.write`). `std.ArrayList(T)` is unmanaged. `const` in structs after all fields. `link_libc = true` required for C libs.
+**zig 0.15.x**: no `std.io.getStdOut()` (use `std.posix.write`). `std.ArrayList(T)` is unmanaged. `const` in structs after all fields. `link_libc = true` required for C libs. `std.http.Client` uses vtable-based Writer in 0.15 - use curl via `std.process.Child.run` for HTTP instead.
+
+## CLI
+
+- `zphp run <file>` - execute PHP file
+- `zphp serve <file> [--port N] [--workers N]` - HTTP server with pre-compiled bytecode, VM pooling, keep-alive, static files, ETag/304
+- `zphp test [file]` - test runner with assertion functions, test discovery, TUI output
+- `zphp install` - install packages from composer.json, write zphp.lock
+- `zphp add <pkg>` / `zphp remove <pkg>` - manage dependencies
+- `zphp packages` - list installed packages
 
 ## CI
 
-4 jobs: `zig build test` (ubuntu + macos), PHP compat (`tests/run`, 66 files), serve integration (`tests/serve_test`, 26 assertions)
+6 jobs: `zig build test` (ubuntu + macos), serve integration (`tests/serve_test`, 26 assertions), test runner (`tests/test_runner_test`, 15 assertions), packages (`tests/pkg_test`, 10 assertions), PHP compat (`tests/run`, 66 files)
 
 ## roadmap
 
-next: WebSocket support for serve (design toward event-loop-per-worker for long-lived connections), `SplStack`/`ArrayObject`, `zphp build`/`test`/`fmt`, fibers, gzip compression for static files
+next: `zphp fmt`, gzip compression for serve static files, `SplStack`/`ArrayObject`, fibers, WebSocket support for serve (design toward event-loop-per-worker for long-lived connections - don't assume all connections are short-lived request/response)
 
 ## distribution
 
