@@ -132,6 +132,7 @@ const Parser = struct {
             .kw_for => self.parseForStmt(),
             .kw_foreach => self.parseForeachStmt(),
             .kw_function => self.parseFunctionDecl(),
+            .kw_const => self.parseConstDecl(),
             .kw_return => self.parseReturnStmt(),
             .kw_break => self.parseSimpleStmt(.break_stmt),
             .kw_continue => self.parseSimpleStmt(.continue_stmt),
@@ -299,6 +300,15 @@ const Parser = struct {
         const body = try self.parseStatementOrBlock();
         const extra = try self.addExtra(&.{ iterable, value, key });
         return self.addNode(.{ .tag = .foreach_stmt, .main_token = tok, .data = .{ .lhs = extra, .rhs = body } });
+    }
+
+    fn parseConstDecl(self: *Parser) Error!u32 {
+        _ = self.advance(); // const
+        const name_tok = try self.expect(.identifier);
+        _ = try self.expect(.equal);
+        const value = try self.parseExpression();
+        _ = try self.expect(.semicolon);
+        return self.addNode(.{ .tag = .const_decl, .main_token = name_tok, .data = .{ .lhs = value } });
     }
 
     fn parseFunctionDecl(self: *Parser) Error!u32 {
@@ -523,7 +533,7 @@ const Parser = struct {
             .kw_isset, .kw_empty, .kw_unset, .kw_eval, .kw_exit, .kw_die => self.addLiteral(.identifier),
             .kw_function => self.parseClosureExpr(),
             .kw_fn => self.parseArrowFunc(),
-            .l_paren => self.parseGroupedExpr(),
+            .l_paren => if (self.isCastExpr()) self.parseCastExpr() else self.parseGroupedExpr(),
             .l_bracket => self.parseArrayLiteral(),
             .kw_array => self.parseArrayKw(),
             .kw_static, .kw_self, .kw_parent => self.addLiteral(.identifier),
@@ -532,6 +542,27 @@ const Parser = struct {
                 return error.ParseError;
             },
         };
+    }
+
+    fn isCastExpr(self: *const Parser) bool {
+        if (self.peekAt(2) != .r_paren) return false;
+        const next = self.peekAt(1);
+        if (next == .kw_array) return true;
+        if (next != .identifier) return false;
+        const lex = self.lexemeAt(1);
+        return std.mem.eql(u8, lex, "int") or std.mem.eql(u8, lex, "integer") or
+            std.mem.eql(u8, lex, "string") or std.mem.eql(u8, lex, "bool") or
+            std.mem.eql(u8, lex, "boolean") or std.mem.eql(u8, lex, "float") or
+            std.mem.eql(u8, lex, "double") or std.mem.eql(u8, lex, "real") or
+            std.mem.eql(u8, lex, "object") or std.mem.eql(u8, lex, "unset");
+    }
+
+    fn parseCastExpr(self: *Parser) Error!u32 {
+        _ = self.advance(); // (
+        const type_tok = self.advance(); // type name
+        _ = self.advance(); // )
+        const operand = try self.parseExprPrec(18);
+        return self.addNode(.{ .tag = .cast_expr, .main_token = type_tok, .data = .{ .lhs = operand } });
     }
 
     fn addLiteral(self: *Parser, tag: NodeTag) Error!u32 {
@@ -694,6 +725,18 @@ const Parser = struct {
     fn peek(self: *const Parser) Tag {
         if (self.pos >= self.tokens.len) return .eof;
         return self.tokens[self.pos].tag;
+    }
+
+    fn peekAt(self: *const Parser, offset: u32) Tag {
+        const i = self.pos + offset;
+        if (i >= self.tokens.len) return .eof;
+        return self.tokens[i].tag;
+    }
+
+    fn lexemeAt(self: *const Parser, offset: u32) []const u8 {
+        const i = self.pos + offset;
+        if (i >= self.tokens.len) return "";
+        return self.tokens[i].lexeme(self.source);
     }
 
     fn advance(self: *Parser) u32 {
@@ -862,6 +905,13 @@ fn renderNode(ast: *const Ast, idx: u32, buf: *Buf) !void {
             try w.writeByte(')');
         },
         .grouped_expr => try renderNode(ast, node.data.lhs, buf),
+        .cast_expr => {
+            try w.writeAll("(cast ");
+            try w.writeAll(ast.tokenSlice(node.main_token));
+            try w.writeByte(' ');
+            try renderNode(ast, node.data.lhs, buf);
+            try w.writeByte(')');
+        },
         .closure_expr => {
             try w.writeAll("(closure");
             for (ast.extraSlice(node.data.lhs)) |param| {
@@ -975,6 +1025,13 @@ fn renderNode(ast: *const Ast, idx: u32, buf: *Buf) !void {
             }
             try w.writeAll(") ");
             try renderNode(ast, node.data.rhs, buf);
+            try w.writeByte(')');
+        },
+        .const_decl => {
+            try w.writeAll("(const ");
+            try w.writeAll(ast.tokenSlice(node.main_token));
+            try w.writeAll(" = ");
+            try renderNode(ast, node.data.lhs, buf);
             try w.writeByte(')');
         },
         .inline_html => try w.writeAll("(html)"),

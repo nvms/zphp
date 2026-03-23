@@ -259,8 +259,8 @@ phase 1 complete: full pipeline from source to execution. zphp can run real PHP 
 - `src/runtime/vm.zig` - stack-based bytecode interpreter with per-frame variable scoping, function calls, closures with captures, arrays, foreach, native function dispatch, output capture (61 integration tests)
 - `src/runtime/stdlib.zig` - 60+ native PHP functions: array (push/pop/shift/keys/values/merge/slice/reverse/unique/sort/rsort/search/in_array/key_exists/range/array_map/array_filter/usort), string (substr/strpos/str_replace/explode/implode/trim/ltrim/rtrim/strtolower/strtoupper/str_contains/str_starts_with/str_ends_with/str_repeat/str_pad/ucfirst/lcfirst), math (abs/floor/ceil/round/min/max/rand), type (gettype/is_array/is_null/is_int/is_float/is_string/is_bool/is_numeric/intval/floatval/strval/isset/empty/count/strlen)
 - `src/main.zig` - CLI entry point with `zphp run <file>`, imports all modules for test discovery
-- 158 unit tests total across all modules
-- 26 PHP compatibility test files in tests/ verified against PHP 8.3
+- 171 unit tests total across all modules
+- 28 PHP compatibility test files in tests/ verified against PHP 8.3
 
 ### lexer design decisions
 - tokens reference byte offsets into source (zero-copy, no allocations)

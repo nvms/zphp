@@ -114,7 +114,15 @@ const Compiler = struct {
             .for_stmt => try self.compileFor(node),
             .foreach_stmt => try self.compileForeach(node),
             .function_decl => try self.compileFunction(node),
+            .const_decl => {
+                try self.compileNode(node.data.lhs);
+                const name = self.ast.tokenSlice(node.main_token);
+                const name_idx = try self.addConstant(.{ .string = name });
+                try self.emitOp(.define_const);
+                try self.emitU16(name_idx);
+            },
             .closure_expr => try self.compileClosure(node),
+            .cast_expr => try self.compileCast(node),
             .inline_html => {
                 const text = self.ast.tokenSlice(node.main_token);
                 const idx2 = try self.addConstant(.{ .string = text });
@@ -776,6 +784,22 @@ const Compiler = struct {
         sub.functions.deinit(self.allocator);
         for (sub.string_allocs.items) |s| try self.string_allocs.append(self.allocator, s);
         sub.string_allocs.deinit(self.allocator);
+    }
+
+    fn compileCast(self: *Compiler, node: Ast.Node) Error!void {
+        try self.compileNode(node.data.lhs);
+        const type_name = self.ast.tokenSlice(node.main_token);
+        if (std.mem.eql(u8, type_name, "int") or std.mem.eql(u8, type_name, "integer")) {
+            try self.emitOp(.cast_int);
+        } else if (std.mem.eql(u8, type_name, "float") or std.mem.eql(u8, type_name, "double") or std.mem.eql(u8, type_name, "real")) {
+            try self.emitOp(.cast_float);
+        } else if (std.mem.eql(u8, type_name, "string")) {
+            try self.emitOp(.cast_string);
+        } else if (std.mem.eql(u8, type_name, "bool") or std.mem.eql(u8, type_name, "boolean")) {
+            try self.emitOp(.cast_bool);
+        } else if (std.mem.eql(u8, type_name, "array")) {
+            try self.emitOp(.cast_array);
+        }
     }
 
     fn compileClosure(self: *Compiler, node: Ast.Node) Error!void {

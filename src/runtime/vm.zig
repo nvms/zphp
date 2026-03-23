@@ -52,6 +52,7 @@ pub const VM = struct {
     strings: std.ArrayListUnmanaged([]const u8) = .{},
     arrays: std.ArrayListUnmanaged(*PhpArray) = .{},
     captures: std.ArrayListUnmanaged(CaptureEntry) = .{},
+    php_constants: std.StringHashMapUnmanaged(Value) = .{},
     allocator: Allocator,
 
     const CallFrame = struct {
@@ -63,7 +64,53 @@ pub const VM = struct {
     pub fn init(allocator: Allocator) RuntimeError!VM {
         var vm = VM{ .allocator = allocator };
         try @import("stdlib.zig").register(&vm.native_fns, allocator);
+        try initConstants(&vm.php_constants, allocator);
         return vm;
+    }
+
+    fn initConstants(c: *std.StringHashMapUnmanaged(Value), a: Allocator) !void {
+        try c.put(a, "TRUE", .{ .bool = true });
+        try c.put(a, "FALSE", .{ .bool = false });
+        try c.put(a, "NULL", .null);
+        try c.put(a, "PHP_EOL", .{ .string = "\n" });
+        try c.put(a, "PHP_INT_MAX", .{ .int = std.math.maxInt(i64) });
+        try c.put(a, "PHP_INT_MIN", .{ .int = std.math.minInt(i64) });
+        try c.put(a, "PHP_INT_SIZE", .{ .int = 8 });
+        try c.put(a, "PHP_MAJOR_VERSION", .{ .int = 8 });
+        try c.put(a, "PHP_MINOR_VERSION", .{ .int = 3 });
+        try c.put(a, "PHP_VERSION", .{ .string = "8.3.0" });
+        try c.put(a, "PHP_SAPI", .{ .string = "cli" });
+        try c.put(a, "PHP_OS", .{ .string = if (@import("builtin").os.tag == .macos) "Darwin" else "Linux" });
+        try c.put(a, "DIRECTORY_SEPARATOR", .{ .string = "/" });
+        try c.put(a, "PATH_SEPARATOR", .{ .string = ":" });
+        try c.put(a, "STR_PAD_RIGHT", .{ .int = 1 });
+        try c.put(a, "STR_PAD_LEFT", .{ .int = 0 });
+        try c.put(a, "STR_PAD_BOTH", .{ .int = 2 });
+        try c.put(a, "SORT_REGULAR", .{ .int = 0 });
+        try c.put(a, "SORT_NUMERIC", .{ .int = 1 });
+        try c.put(a, "SORT_STRING", .{ .int = 2 });
+        try c.put(a, "SORT_ASC", .{ .int = 4 });
+        try c.put(a, "SORT_DESC", .{ .int = 3 });
+        try c.put(a, "ARRAY_FILTER_USE_BOTH", .{ .int = 1 });
+        try c.put(a, "ARRAY_FILTER_USE_KEY", .{ .int = 2 });
+        try c.put(a, "JSON_PRETTY_PRINT", .{ .int = 128 });
+        try c.put(a, "JSON_UNESCAPED_SLASHES", .{ .int = 64 });
+        try c.put(a, "JSON_UNESCAPED_UNICODE", .{ .int = 256 });
+        try c.put(a, "E_ERROR", .{ .int = 1 });
+        try c.put(a, "E_WARNING", .{ .int = 2 });
+        try c.put(a, "E_NOTICE", .{ .int = 8 });
+        try c.put(a, "E_ALL", .{ .int = 32767 });
+        try c.put(a, "PHP_FLOAT_MAX", .{ .float = std.math.floatMax(f64) });
+        try c.put(a, "PHP_FLOAT_MIN", .{ .float = std.math.floatMin(f64) });
+        try c.put(a, "PHP_FLOAT_EPSILON", .{ .float = std.math.floatEps(f64) });
+        try c.put(a, "PHP_MAXPATHLEN", .{ .int = 4096 });
+        try c.put(a, "M_PI", .{ .float = std.math.pi });
+        try c.put(a, "M_E", .{ .float = std.math.e });
+        try c.put(a, "M_SQRT2", .{ .float = std.math.sqrt2 });
+        try c.put(a, "M_LN2", .{ .float = std.math.ln2 });
+        try c.put(a, "M_LN10", .{ .float = @log(10.0) });
+        try c.put(a, "INF", .{ .float = std.math.inf(f64) });
+        try c.put(a, "NAN", .{ .float = std.math.nan(f64) });
     }
 
     pub fn deinit(self: *VM) void {
@@ -74,6 +121,7 @@ pub const VM = struct {
         for (self.strings.items) |s| self.allocator.free(s);
         self.strings.deinit(self.allocator);
         self.captures.deinit(self.allocator);
+        self.php_constants.deinit(self.allocator);
         for (self.arrays.items) |a| {
             a.deinit(self.allocator);
             self.allocator.destroy(a);
@@ -114,7 +162,8 @@ pub const VM = struct {
                 .get_var => {
                     const idx = self.readU16();
                     const name = self.currentChunk().constants.items[idx].string;
-                    const val = self.currentFrame().vars.get(name) orelse .null;
+                    const val = self.currentFrame().vars.get(name) orelse
+                        self.php_constants.get(name) orelse .null;
                     self.push(val);
                 },
                 .set_var => {
@@ -346,6 +395,50 @@ pub const VM = struct {
                 .iter_end => {
                     _ = self.pop();
                     _ = self.pop();
+                },
+
+                .cast_int => {
+                    const v = self.pop();
+                    self.push(.{ .int = Value.toInt(v) });
+                },
+                .cast_float => {
+                    const v = self.pop();
+                    self.push(.{ .float = Value.toFloat(v) });
+                },
+                .cast_string => {
+                    const v = self.pop();
+                    if (v == .string) {
+                        self.push(v);
+                    } else {
+                        var buf = std.ArrayListUnmanaged(u8){};
+                        try v.format(&buf, self.allocator);
+                        const s = try buf.toOwnedSlice(self.allocator);
+                        try self.strings.append(self.allocator, s);
+                        self.push(.{ .string = s });
+                    }
+                },
+                .cast_bool => {
+                    const v = self.pop();
+                    self.push(.{ .bool = v.isTruthy() });
+                },
+                .cast_array => {
+                    const v = self.pop();
+                    if (v == .array) {
+                        self.push(v);
+                    } else {
+                        const arr = try self.allocator.create(PhpArray);
+                        arr.* = .{};
+                        try arr.append(self.allocator, v);
+                        try self.arrays.append(self.allocator, arr);
+                        self.push(.{ .array = arr });
+                    }
+                },
+
+                .define_const => {
+                    const name_idx = self.readU16();
+                    const name = self.currentChunk().constants.items[name_idx].string;
+                    const val = self.pop();
+                    try self.php_constants.put(self.allocator, name, val);
                 },
 
                 .closure_bind => {
@@ -811,4 +904,73 @@ test "string interpolation curly array" {
 
 test "string no interpolation single quotes" {
     try expectOutput("<?php $x = 1; echo '$x';", "$x");
+}
+
+// constants
+
+test "predefined constant PHP_EOL" {
+    try expectOutput("<?php echo 'a' . PHP_EOL . 'b';", "a\nb");
+}
+
+test "predefined constant PHP_INT_MAX" {
+    try expectOutput("<?php echo PHP_INT_MAX;", "9223372036854775807");
+}
+
+test "predefined constant STR_PAD_LEFT" {
+    try expectOutput("<?php echo STR_PAD_LEFT;", "0");
+}
+
+test "predefined constant TRUE FALSE NULL" {
+    try expectOutput("<?php echo TRUE;", "1");
+    try expectOutput("<?php echo FALSE;", "");
+    try expectOutput("<?php echo NULL;", "");
+}
+
+test "define constant" {
+    try expectOutput("<?php define('FOO', 42); echo FOO;", "42");
+}
+
+test "const declaration" {
+    try expectOutput("<?php const BAR = 'hello'; echo BAR;", "hello");
+}
+
+test "defined function" {
+    try expectOutput("<?php define('X', 1); echo defined('X') ? 'y' : 'n';", "y");
+    try expectOutput("<?php echo defined('NOPE') ? 'y' : 'n';", "n");
+}
+
+test "constant function" {
+    try expectOutput("<?php define('VAL', 99); echo constant('VAL');", "99");
+}
+
+// type casting
+
+test "cast int" {
+    try expectOutput("<?php echo (int)'42';", "42");
+    try expectOutput("<?php echo (int)3.7;", "3");
+    try expectOutput("<?php echo (int)true;", "1");
+    try expectOutput("<?php echo (int)false;", "0");
+}
+
+test "cast float" {
+    try expectOutput("<?php echo (float)'3.14';", "3.14");
+    try expectOutput("<?php echo (float)42;", "42");
+}
+
+test "cast string" {
+    try expectOutput("<?php echo (string)42;", "42");
+    try expectOutput("<?php echo (string)3.14;", "3.14");
+    try expectOutput("<?php echo (string)true;", "1");
+    try expectOutput("<?php echo (string)null;", "");
+}
+
+test "cast bool" {
+    try expectOutput("<?php echo (bool)1 ? 'y' : 'n';", "y");
+    try expectOutput("<?php echo (bool)0 ? 'y' : 'n';", "n");
+    try expectOutput("<?php echo (bool)'' ? 'y' : 'n';", "n");
+    try expectOutput("<?php echo (bool)'hello' ? 'y' : 'n';", "y");
+}
+
+test "cast array" {
+    try expectOutput("<?php $a = (array)42; echo count($a); echo $a[0];", "142");
 }

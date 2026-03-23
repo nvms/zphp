@@ -53,6 +53,7 @@ pub const Ast = struct {
             for_stmt, // lhs = extra index -> {init, cond, update}, rhs = body
             foreach_stmt, // lhs = extra index -> {iter, value, key_or_0}, rhs = body
             function_decl, // main_token = name, lhs = extra index -> {count, param...}, rhs = body
+            const_decl, // main_token = identifier, lhs = value expression
             inline_html, // main_token = inline_html token
 
             // literals
@@ -85,6 +86,9 @@ pub const Ast = struct {
             call, // lhs = callee, rhs = extra index -> {count, arg...}
             array_access, // lhs = array, rhs = index expr
             property_access, // main_token = ->, lhs = object, rhs = property node
+
+            // casts
+            cast_expr, // main_token = type identifier (int/string/etc), lhs = operand
 
             // closures
             closure_expr, // main_token = function, lhs = extra index -> {count, param...}, rhs = extra index -> {body, use_count, use_vars...}

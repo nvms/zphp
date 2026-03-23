@@ -74,6 +74,9 @@ pub fn register(map: *std.StringHashMapUnmanaged(*const fn (*NativeContext, []co
         .{ "sort", native_sort },
         .{ "rsort", native_rsort },
         .{ "range", native_range },
+        .{ "define", native_define },
+        .{ "defined", native_defined },
+        .{ "constant", native_constant },
         .{ "array_map", array_map },
         .{ "array_filter", array_filter },
         .{ "usort", native_usort },
@@ -84,6 +87,22 @@ pub fn register(map: *std.StringHashMapUnmanaged(*const fn (*NativeContext, []co
 // ======================================================================
 // type functions
 // ======================================================================
+
+fn native_define(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len < 2 or args[0] != .string) return .{ .bool = false };
+    try ctx.vm.php_constants.put(ctx.allocator, args[0].string, args[1]);
+    return .{ .bool = true };
+}
+
+fn native_defined(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len == 0 or args[0] != .string) return .{ .bool = false };
+    return .{ .bool = ctx.vm.php_constants.contains(args[0].string) };
+}
+
+fn native_constant(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len == 0 or args[0] != .string) return .null;
+    return ctx.vm.php_constants.get(args[0].string) orelse .null;
+}
 
 fn count(_: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len == 0) return .{ .int = 0 };
