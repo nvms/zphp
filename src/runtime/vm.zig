@@ -9,7 +9,26 @@ const parser = @import("../pipeline/parser.zig");
 
 const Allocator = std.mem.Allocator;
 const RuntimeError = error{ RuntimeError, OutOfMemory };
-const NativeFn = *const fn ([]const Value) Value;
+pub const NativeContext = struct {
+    allocator: Allocator,
+    arrays: *std.ArrayListUnmanaged(*PhpArray),
+    strings: *std.ArrayListUnmanaged([]const u8),
+
+    pub fn createArray(self: *NativeContext) !*PhpArray {
+        const arr = try self.allocator.create(PhpArray);
+        arr.* = .{};
+        try self.arrays.append(self.allocator, arr);
+        return arr;
+    }
+
+    pub fn createString(self: *NativeContext, data: []const u8) ![]const u8 {
+        const owned = try self.allocator.dupe(u8, data);
+        try self.strings.append(self.allocator, owned);
+        return owned;
+    }
+};
+
+const NativeFn = *const fn (*NativeContext, []const Value) RuntimeError!Value;
 
 pub const VM = struct {
     frames: [64]CallFrame = undefined,
@@ -31,14 +50,7 @@ pub const VM = struct {
 
     pub fn init(allocator: Allocator) RuntimeError!VM {
         var vm = VM{ .allocator = allocator };
-        try vm.native_fns.put(allocator, "count", nativeCount);
-        try vm.native_fns.put(allocator, "strlen", nativeStrlen);
-        try vm.native_fns.put(allocator, "intval", nativeIntval);
-        try vm.native_fns.put(allocator, "strval", nativeStrval);
-        try vm.native_fns.put(allocator, "is_array", nativeIsArray);
-        try vm.native_fns.put(allocator, "is_null", nativeIsNull);
-        try vm.native_fns.put(allocator, "is_int", nativeIsInt);
-        try vm.native_fns.put(allocator, "is_string", nativeIsString);
+        try @import("stdlib.zig").register(&vm.native_fns, allocator);
         return vm;
     }
 
@@ -225,7 +237,12 @@ pub const VM = struct {
                         const ac: usize = arg_count;
                         for (0..ac) |i| args[i] = self.stack[self.sp - ac + i];
                         self.sp -= ac;
-                        self.push(native(args[0..ac]));
+                        var ctx = NativeContext{
+                            .allocator = self.allocator,
+                            .arrays = &self.arrays,
+                            .strings = &self.strings,
+                        };
+                        self.push(try native(&ctx, args[0..ac]));
                     } else if (self.functions.get(name)) |func| {
                         if (arg_count != func.arity) return error.RuntimeError;
                         var new_vars: std.StringHashMapUnmanaged(Value) = .{};
@@ -366,59 +383,6 @@ pub const VM = struct {
         return self.stack[self.sp - 1];
     }
 
-    // ==================================================================
-    // native functions
-    // ==================================================================
-
-    fn nativeCount(args: []const Value) Value {
-        if (args.len == 0) return .{ .int = 0 };
-        return switch (args[0]) {
-            .array => |a| .{ .int = a.length() },
-            .string => |s| .{ .int = @intCast(s.len) },
-            else => .{ .int = 0 },
-        };
-    }
-
-    fn nativeStrlen(args: []const Value) Value {
-        if (args.len == 0) return .{ .int = 0 };
-        return switch (args[0]) {
-            .string => |s| .{ .int = @intCast(s.len) },
-            else => .{ .int = 0 },
-        };
-    }
-
-    fn nativeIntval(args: []const Value) Value {
-        if (args.len == 0) return .{ .int = 0 };
-        return .{ .int = Value.toInt(args[0]) };
-    }
-
-    fn nativeStrval(args: []const Value) Value {
-        if (args.len == 0) return .{ .string = "" };
-        return switch (args[0]) {
-            .string => args[0],
-            else => .{ .string = "" },
-        };
-    }
-
-    fn nativeIsArray(args: []const Value) Value {
-        if (args.len == 0) return .{ .bool = false };
-        return .{ .bool = args[0] == .array };
-    }
-
-    fn nativeIsNull(args: []const Value) Value {
-        if (args.len == 0) return .{ .bool = true };
-        return .{ .bool = args[0] == .null };
-    }
-
-    fn nativeIsInt(args: []const Value) Value {
-        if (args.len == 0) return .{ .bool = false };
-        return .{ .bool = args[0] == .int };
-    }
-
-    fn nativeIsString(args: []const Value) Value {
-        if (args.len == 0) return .{ .bool = false };
-        return .{ .bool = args[0] == .string };
-    }
 };
 
 // ==========================================================================

@@ -89,4 +89,5 @@ test {
     _ = @import("pipeline/compiler.zig");
     _ = @import("runtime/value.zig");
     _ = @import("runtime/vm.zig");
+    _ = @import("runtime/stdlib.zig");
 }
