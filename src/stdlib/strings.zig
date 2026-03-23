@@ -274,11 +274,13 @@ fn native_strcmp(_: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len < 2) return .{ .int = 0 };
     const a = if (args[0] == .string) args[0].string else "";
     const b = if (args[1] == .string) args[1].string else "";
-    return .{ .int = switch (std.mem.order(u8, a, b)) {
-        .lt => -1,
-        .eq => 0,
-        .gt => 1,
-    } };
+    const min_len = @min(a.len, b.len);
+    for (0..min_len) |i| {
+        if (a[i] != b[i]) return .{ .int = @as(i64, a[i]) - @as(i64, b[i]) };
+    }
+    const al: i64 = @intCast(a.len);
+    const bl: i64 = @intCast(b.len);
+    return .{ .int = al - bl };
 }
 
 fn native_strncmp(_: *NativeContext, args: []const Value) RuntimeError!Value {

@@ -5,7 +5,7 @@ echo sqrt(144);
 echo "\n";
 echo round(log(M_E));
 echo "\n";
-echo round(log2(8));
+echo round(log(8, 2));
 echo "\n";
 echo round(log10(1000));
 echo "\n";

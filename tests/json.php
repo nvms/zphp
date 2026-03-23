@@ -18,11 +18,11 @@ echo "\n";
 echo $decoded[1];
 echo "\n";
 
-$obj = json_decode('{"name":"zphp","version":1}');
+$obj = json_decode('{"name":"zphp","version":1}', true);
 echo $obj['name'];
 echo "\n";
 echo $obj['version'];
 echo "\n";
 
-echo json_encode(json_decode('{"a":true,"b":false,"c":null}'));
+echo json_encode(json_decode('{"a":true,"b":false,"c":null}', true));
 echo "\n";
