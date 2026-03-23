@@ -244,11 +244,12 @@ do NOT use the GitHub MCP server for creating repos or any write operations. the
 - `std.ArrayList(T)` is now the UNMANAGED version (no stored allocator). use `.{}` to init, pass allocator to `append(gpa, item)`, `writer(gpa)`, `deinit(gpa)`, `toOwnedSlice(gpa)`. the managed version with stored allocator is deprecated
 - `std.ArrayListUnmanaged(T)` is identical to `std.ArrayList(T)` in 0.15.1
 - `std.crypto.hash.Md5.hash` takes 3 args: `(data, &out_buf, .{})` - not 2
-- `PCRE2_UNSET` C macro can't be translated by zig's @cImport - use `std.math.maxInt(usize)` instead
+- C system libraries: always set `link_libc = true` on the module, otherwise dynamic symbol resolution segfaults on Linux at runtime
+- prefer manual `extern` declarations with `callconv(.c)` over `@cImport` for C library bindings. `@cImport` macro translation breaks across platforms
 
 ## external dependencies
 
-- **libpcre2** - linked via zig's system library support for regex (preg_* functions). install: `apt install libpcre2-dev` (ubuntu), `brew install pcre2` (macos). CI workflow installs it in the build step
+- **libpcre2** - linked via zig's system library support for regex (preg_* functions). install: `apt install libpcre2-dev` (ubuntu), `brew install pcre2` (macos). CI workflow installs it in the build step. uses manual extern declarations (not @cImport) for cross-platform reliability. `link_libc = true` is required on all modules that link pcre2
 
 ## current status
 
