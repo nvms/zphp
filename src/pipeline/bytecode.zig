@@ -68,6 +68,12 @@ pub const OpCode = enum(u8) {
     array_get, // pop key, pop array, push value
     array_set, // pop value, pop key, pop array, set, push value
 
+    // exceptions
+    throw,
+    push_handler, // u16: catch offset
+    pop_handler,
+    instance_check, // pop class name string, pop object, push bool
+
     // classes
     class_decl, // u16: class name, u8: method count, then method_count * (u16 name, u8 arity)
     new_obj, // u16: class name constant, u8: arg count

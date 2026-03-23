@@ -98,6 +98,11 @@ pub const Ast = struct {
             // closures
             closure_expr, // main_token = function, lhs = extra index -> {count, param...}, rhs = extra index -> {body, use_count, use_vars...}
 
+            // exceptions
+            throw_expr, // lhs = expression to throw
+            try_catch, // lhs = try body, rhs = extra index -> {catch_count, catch_nodes..., finally_node_or_0}
+            catch_clause, // main_token = variable, lhs = type name node (0 = catch all), rhs = body block
+
             // classes
             class_decl, // main_token = class name, lhs = extra index -> {count, member_nodes...}, rhs = parent class node (0 = none)
             class_method, // main_token = method name, lhs = extra index -> {count, param...}, rhs = body block

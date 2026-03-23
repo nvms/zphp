@@ -138,6 +138,8 @@ const Parser = struct {
             .kw_break => self.parseSimpleStmt(.break_stmt),
             .kw_continue => self.parseSimpleStmt(.continue_stmt),
             .kw_class => self.parseClassDecl(),
+            .kw_throw => self.parseThrowStmt(),
+            .kw_try => self.parseTryCatch(),
             .l_brace => self.parseBlock(),
             .semicolon => {
                 _ = self.advance();
@@ -461,6 +463,63 @@ const Parser = struct {
         const body = try self.parseBlock();
         const extra = try self.addExtraList(params.items);
         return self.addNode(.{ .tag = .function_decl, .main_token = name_tok, .data = .{ .lhs = extra, .rhs = body } });
+    }
+
+    fn parseThrowStmt(self: *Parser) Error!u32 {
+        const tok = self.advance(); // throw
+        const expr = try self.parseExpression();
+        _ = try self.expect(.semicolon);
+        return self.addNode(.{ .tag = .throw_expr, .main_token = tok, .data = .{ .lhs = expr } });
+    }
+
+    fn parseTryCatch(self: *Parser) Error!u32 {
+        const try_tok = self.advance(); // try
+        const try_body = try self.parseBlock();
+
+        var catches = std.ArrayListUnmanaged(u32){};
+        defer catches.deinit(self.allocator);
+
+        while (self.peek() == .kw_catch) {
+            try catches.append(self.allocator, try self.parseCatchClause());
+        }
+
+        var finally_node: u32 = 0;
+        if (self.peek() == .kw_finally) {
+            _ = self.advance();
+            finally_node = try self.parseBlock();
+        }
+
+        // rhs = extra -> {catch_count, catch_nodes..., finally_node}
+        var extra_data = std.ArrayListUnmanaged(u32){};
+        defer extra_data.deinit(self.allocator);
+        try extra_data.append(self.allocator, @intCast(catches.items.len));
+        try extra_data.appendSlice(self.allocator, catches.items);
+        try extra_data.append(self.allocator, finally_node);
+        const rhs_extra = try self.addExtra(extra_data.items);
+
+        return self.addNode(.{ .tag = .try_catch, .main_token = try_tok, .data = .{ .lhs = try_body, .rhs = rhs_extra } });
+    }
+
+    fn parseCatchClause(self: *Parser) Error!u32 {
+        _ = self.advance(); // catch
+        _ = try self.expect(.l_paren);
+
+        // catch type (class name)
+        var type_node: u32 = 0;
+        if (self.peek() == .identifier) {
+            type_node = try self.addLiteral(.identifier);
+        }
+
+        // optional variable
+        var var_tok: u32 = 0;
+        if (self.peek() == .variable) {
+            var_tok = self.advance();
+        }
+
+        _ = try self.expect(.r_paren);
+        const body = try self.parseBlock();
+
+        return self.addNode(.{ .tag = .catch_clause, .main_token = var_tok, .data = .{ .lhs = type_node, .rhs = body } });
     }
 
     fn parseNewExpr(self: *Parser) Error!u32 {
@@ -1137,7 +1196,7 @@ const Parser = struct {
                     return;
                 },
                 .r_brace => return,
-                .kw_if, .kw_while, .kw_for, .kw_foreach, .kw_function, .kw_return, .kw_echo, .kw_class => return,
+                .kw_if, .kw_while, .kw_for, .kw_foreach, .kw_function, .kw_return, .kw_echo, .kw_class, .kw_try, .kw_throw => return,
                 else => _ = self.advance(),
             }
         }
@@ -1429,6 +1488,13 @@ fn renderNode(ast: *const Ast, idx: u32, buf: *Buf) !void {
             try w.writeByte(')');
         },
         .inline_html => try w.writeAll("(html)"),
+        .throw_expr => {
+            try w.writeAll("(throw ");
+            try renderNode(ast, node.data.lhs, buf);
+            try w.writeByte(')');
+        },
+        .try_catch => try w.writeAll("(try/catch)"),
+        .catch_clause => try w.writeAll("(catch)"),
         .class_decl => {
             try w.writeAll("(class ");
             try w.writeAll(ast.tokenSlice(node.main_token));

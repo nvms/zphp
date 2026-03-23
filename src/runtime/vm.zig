@@ -85,7 +85,16 @@ pub const VM = struct {
     captures: std.ArrayListUnmanaged(CaptureEntry) = .{},
     php_constants: std.StringHashMapUnmanaged(Value) = .{},
     classes: std.StringHashMapUnmanaged(ClassDef) = .{},
+    exception_handlers: [32]ExceptionHandler = undefined,
+    handler_count: usize = 0,
     allocator: Allocator,
+
+    const ExceptionHandler = struct {
+        catch_ip: usize, // absolute IP to jump to on throw
+        frame_count: usize, // frame count when handler was pushed
+        sp: usize, // stack pointer when handler was pushed
+        chunk: *const Chunk, // chunk the handler belongs to
+    };
 
     const CallFrame = struct {
         chunk: *const Chunk,
@@ -97,7 +106,75 @@ pub const VM = struct {
         var vm = VM{ .allocator = allocator };
         try @import("../stdlib/registry.zig").register(&vm.native_fns, allocator);
         try initConstants(&vm.php_constants, allocator);
+        try initBuiltinClasses(&vm, allocator);
         return vm;
+    }
+
+    fn initBuiltinClasses(vm: *VM, a: Allocator) !void {
+        // Exception base class
+        var exc_def = ClassDef{ .name = "Exception" };
+        try exc_def.properties.append(a, .{ .name = "message", .default = .{ .string = "" } });
+        try exc_def.properties.append(a, .{ .name = "code", .default = .{ .int = 0 } });
+        try exc_def.methods.put(a, "__construct", .{ .name = "__construct", .arity = 2 });
+        try exc_def.methods.put(a, "getMessage", .{ .name = "getMessage", .arity = 0 });
+        try exc_def.methods.put(a, "getCode", .{ .name = "getCode", .arity = 0 });
+        try vm.classes.put(a, "Exception", exc_def);
+
+        // native method implementations
+        try vm.native_fns.put(a, "Exception::__construct", nativeExceptionConstruct);
+        try vm.native_fns.put(a, "Exception::getMessage", nativeExceptionGetMessage);
+        try vm.native_fns.put(a, "Exception::getCode", nativeExceptionGetCode);
+
+        // RuntimeException extends Exception
+        var rte_def = ClassDef{ .name = "RuntimeException" };
+        rte_def.parent = "Exception";
+        try vm.classes.put(a, "RuntimeException", rte_def);
+
+        // InvalidArgumentException extends Exception
+        var iae_def = ClassDef{ .name = "InvalidArgumentException" };
+        iae_def.parent = "Exception";
+        try vm.classes.put(a, "InvalidArgumentException", iae_def);
+
+        // LogicException extends Exception
+        var le_def = ClassDef{ .name = "LogicException" };
+        le_def.parent = "Exception";
+        try vm.classes.put(a, "LogicException", le_def);
+
+        // BadMethodCallException extends LogicException
+        var bmce_def = ClassDef{ .name = "BadMethodCallException" };
+        bmce_def.parent = "LogicException";
+        try vm.classes.put(a, "BadMethodCallException", bmce_def);
+
+        // OverflowException extends RuntimeException
+        var oe_def = ClassDef{ .name = "OverflowException" };
+        oe_def.parent = "RuntimeException";
+        try vm.classes.put(a, "OverflowException", oe_def);
+
+        // TypeError extends Error (but we don't have Error yet, use Exception)
+        var te_def = ClassDef{ .name = "TypeError" };
+        te_def.parent = "Exception";
+        try vm.classes.put(a, "TypeError", te_def);
+    }
+
+    fn nativeExceptionConstruct(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+        const this_val = ctx.vm.currentFrame().vars.get("$this") orelse return .null;
+        if (this_val != .object) return .null;
+        const obj = this_val.object;
+        if (args.len >= 1) try obj.set(ctx.allocator, "message", args[0]);
+        if (args.len >= 2) try obj.set(ctx.allocator, "code", args[1]);
+        return .null;
+    }
+
+    fn nativeExceptionGetMessage(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+        const this_val = ctx.vm.currentFrame().vars.get("$this") orelse return .null;
+        if (this_val != .object) return .null;
+        return this_val.object.get("message");
+    }
+
+    fn nativeExceptionGetCode(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+        const this_val = ctx.vm.currentFrame().vars.get("$this") orelse return .null;
+        if (this_val != .object) return .null;
+        return this_val.object.get("code");
     }
 
     fn initConstants(c: *std.StringHashMapUnmanaged(Value), a: Allocator) !void {
@@ -494,6 +571,52 @@ pub const VM = struct {
                     });
                 },
 
+                .throw => {
+                    const exception = self.pop();
+                    if (self.handler_count == 0) return error.RuntimeError;
+
+                    const handler = self.exception_handlers[self.handler_count - 1];
+                    self.handler_count -= 1;
+
+                    // unwind frames back to where handler was set
+                    while (self.frame_count > handler.frame_count) {
+                        self.frame_count -= 1;
+                        self.frames[self.frame_count].vars.deinit(self.allocator);
+                    }
+
+                    // restore stack and push exception
+                    self.sp = handler.sp;
+                    self.push(exception);
+
+                    // jump to catch code
+                    self.currentFrame().ip = handler.catch_ip;
+                },
+
+                .push_handler => {
+                    const offset = self.readU16();
+                    self.exception_handlers[self.handler_count] = .{
+                        .catch_ip = self.currentFrame().ip + offset,
+                        .frame_count = self.frame_count,
+                        .sp = self.sp,
+                        .chunk = self.currentChunk(),
+                    };
+                    self.handler_count += 1;
+                },
+
+                .pop_handler => {
+                    if (self.handler_count > 0) self.handler_count -= 1;
+                },
+
+                .instance_check => {
+                    const class_name_val = self.pop();
+                    const obj_val = self.pop();
+                    if (obj_val == .object and class_name_val == .string) {
+                        self.push(.{ .bool = self.isInstanceOf(obj_val.object.class_name, class_name_val.string) });
+                    } else {
+                        self.push(.{ .bool = false });
+                    }
+                },
+
                 .class_decl => {
                     const name_idx = self.readU16();
                     const class_name = self.currentChunk().constants.items[name_idx].string;
@@ -576,7 +699,28 @@ pub const VM = struct {
                     const ctor_name = self.resolveMethod(class_name, "__construct") catch null;
 
                     if (ctor_name) |cn| {
-                        if (self.functions.get(cn)) |func| {
+                        if (self.native_fns.get(cn)) |native| {
+                            // native constructor
+                            var args_buf: [16]Value = undefined;
+                            for (0..ac) |i| args_buf[i] = self.stack[self.sp - ac + i];
+                            self.sp -= ac;
+
+                            var tmp_vars: std.StringHashMapUnmanaged(Value) = .{};
+                            try tmp_vars.put(self.allocator, "$this", .{ .object = obj });
+                            self.frames[self.frame_count] = .{ .chunk = self.currentChunk(), .ip = self.currentFrame().ip, .vars = tmp_vars };
+                            self.frame_count += 1;
+
+                            var ctx = NativeContext{
+                                .allocator = self.allocator,
+                                .arrays = &self.arrays,
+                                .strings = &self.strings,
+                                .vm = self,
+                            };
+                            _ = try native(&ctx, args_buf[0..ac]);
+
+                            self.frame_count -= 1;
+                            self.frames[self.frame_count].vars.deinit(self.allocator);
+                        } else if (self.functions.get(cn)) |func| {
                             var new_vars: std.StringHashMapUnmanaged(Value) = .{};
                             try new_vars.put(self.allocator, "$this", .{ .object = obj });
                             for (0..ac) |i| {
@@ -635,7 +779,31 @@ pub const VM = struct {
 
                     // look up method in class hierarchy
                     const full_name = try self.resolveMethod(obj.class_name, method_name);
-                    if (self.functions.get(full_name)) |func| {
+                    if (self.native_fns.get(full_name)) |native| {
+                        // native method - call with $this in a temporary frame
+                        var args_buf: [16]Value = undefined;
+                        for (0..ac) |i| args_buf[i] = self.stack[self.sp - ac + i];
+                        self.sp -= ac;
+                        self.sp -= 1;
+
+                        // push a temporary frame so native can read $this
+                        var tmp_vars: std.StringHashMapUnmanaged(Value) = .{};
+                        try tmp_vars.put(self.allocator, "$this", .{ .object = obj });
+                        self.frames[self.frame_count] = .{ .chunk = self.currentChunk(), .ip = self.currentFrame().ip, .vars = tmp_vars };
+                        self.frame_count += 1;
+
+                        var ctx = NativeContext{
+                            .allocator = self.allocator,
+                            .arrays = &self.arrays,
+                            .strings = &self.strings,
+                            .vm = self,
+                        };
+                        const result = try native(&ctx, args_buf[0..ac]);
+
+                        self.frame_count -= 1;
+                        self.frames[self.frame_count].vars.deinit(self.allocator);
+                        self.push(result);
+                    } else if (self.functions.get(full_name)) |func| {
                         var new_vars: std.StringHashMapUnmanaged(Value) = .{};
                         try new_vars.put(self.allocator, "$this", .{ .object = obj });
 
@@ -649,7 +817,6 @@ pub const VM = struct {
                             try new_vars.put(self.allocator, func.params[i], self.stack[self.sp - ac + i]);
                         }
                         self.sp -= ac;
-                        // remove object from stack too
                         self.sp -= 1;
                         self.frames[self.frame_count] = .{ .chunk = &func.chunk, .ip = 0, .vars = new_vars };
                         self.frame_count += 1;
@@ -706,6 +873,20 @@ pub const VM = struct {
         }
     }
 
+    fn isInstanceOf(self: *VM, obj_class: []const u8, target_class: []const u8) bool {
+        var current = obj_class;
+        while (true) {
+            if (std.mem.eql(u8, current, target_class)) return true;
+            if (self.classes.get(current)) |cls| {
+                if (cls.parent) |p| {
+                    current = p;
+                    continue;
+                }
+            }
+            return false;
+        }
+    }
+
     fn currentDefiningClass(self: *VM) ?[]const u8 {
         // find which class the currently executing function belongs to
         // by scanning function names for ClassName::method pattern
@@ -727,9 +908,16 @@ pub const VM = struct {
         var buf: [256]u8 = undefined;
         while (true) {
             const full = std.fmt.bufPrint(&buf, "{s}::{s}", .{ current, method_name }) catch return error.RuntimeError;
+            // check compiled functions
             if (self.functions.get(full)) |_| {
-                // need stable string - use the key from functions map
                 var iter = self.functions.keyIterator();
+                while (iter.next()) |k| {
+                    if (std.mem.eql(u8, k.*, full)) return k.*;
+                }
+            }
+            // check native functions
+            if (self.native_fns.get(full)) |_| {
+                var iter = self.native_fns.keyIterator();
                 while (iter.next()) |k| {
                     if (std.mem.eql(u8, k.*, full)) return k.*;
                 }
@@ -1618,4 +1806,146 @@ test "inherited property defaults" {
         \\$c = new AppConfig();
         \\echo $c->debug . ' ' . $c->name;
     , "0 app");
+}
+
+// ==========================================================================
+// exception tests
+// ==========================================================================
+
+test "basic throw catch" {
+    try expectOutput(
+        \\<?php
+        \\try {
+        \\    throw new Exception('oops');
+        \\} catch (Exception $e) {
+        \\    echo $e->getMessage();
+        \\}
+    , "oops");
+}
+
+test "catch skips remaining try body" {
+    try expectOutput(
+        \\<?php
+        \\try {
+        \\    echo 'before ';
+        \\    throw new Exception('err');
+        \\    echo 'after ';
+        \\} catch (Exception $e) {
+        \\    echo 'caught';
+        \\}
+    , "before caught");
+}
+
+test "code after try catch runs" {
+    try expectOutput(
+        \\<?php
+        \\try {
+        \\    throw new Exception('x');
+        \\} catch (Exception $e) {
+        \\    echo 'caught ';
+        \\}
+        \\echo 'done';
+    , "caught done");
+}
+
+test "typed catch matching" {
+    try expectOutput(
+        \\<?php
+        \\try {
+        \\    throw new RuntimeException('rt');
+        \\} catch (InvalidArgumentException $e) {
+        \\    echo 'wrong';
+        \\} catch (RuntimeException $e) {
+        \\    echo $e->getMessage();
+        \\}
+    , "rt");
+}
+
+test "parent class catch" {
+    try expectOutput(
+        \\<?php
+        \\try {
+        \\    throw new RuntimeException('child');
+        \\} catch (Exception $e) {
+        \\    echo $e->getMessage();
+        \\}
+    , "child");
+}
+
+test "nested try catch propagation" {
+    try expectOutput(
+        \\<?php
+        \\try {
+        \\    try {
+        \\        throw new Exception('inner');
+        \\    } catch (RuntimeException $e) {
+        \\        echo 'wrong';
+        \\    }
+        \\} catch (Exception $e) {
+        \\    echo $e->getMessage();
+        \\}
+    , "inner");
+}
+
+test "finally runs on normal path" {
+    try expectOutput(
+        \\<?php
+        \\try {
+        \\    echo 'try ';
+        \\} finally {
+        \\    echo 'finally';
+        \\}
+    , "try finally");
+}
+
+test "finally runs on exception path" {
+    try expectOutput(
+        \\<?php
+        \\try {
+        \\    throw new Exception('x');
+        \\} catch (Exception $e) {
+        \\    echo 'catch ';
+        \\} finally {
+        \\    echo 'finally';
+        \\}
+    , "catch finally");
+}
+
+test "exception getMessage and getCode" {
+    try expectOutput(
+        \\<?php
+        \\$e = new Exception('msg', 42);
+        \\echo $e->getMessage() . ' ' . $e->getCode();
+    , "msg 42");
+}
+
+test "throw in function caught by caller" {
+    try expectOutput(
+        \\<?php
+        \\function risky() {
+        \\    throw new Exception('boom');
+        \\}
+        \\try {
+        \\    risky();
+        \\} catch (Exception $e) {
+        \\    echo $e->getMessage();
+        \\}
+    , "boom");
+}
+
+test "throw in method caught by caller" {
+    try expectOutput(
+        \\<?php
+        \\class Svc {
+        \\    public function run() {
+        \\        throw new Exception('fail');
+        \\    }
+        \\}
+        \\try {
+        \\    $s = new Svc();
+        \\    $s->run();
+        \\} catch (Exception $e) {
+        \\    echo $e->getMessage();
+        \\}
+    , "fail");
 }

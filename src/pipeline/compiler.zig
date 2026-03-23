@@ -152,6 +152,9 @@ const Compiler = struct {
             .call => try self.compileCall(node),
             .array_access => try self.compileArrayAccess(node),
             .property_access => try self.compilePropertyAccess(node),
+            .throw_expr => try self.compileThrow(node),
+            .try_catch => try self.compileTryCatch(node),
+            .catch_clause => {},
             .class_decl => try self.compileClassDecl(node),
             .class_method, .class_property => {},
             .new_expr => try self.compileNewExpr(node),
@@ -805,6 +808,93 @@ const Compiler = struct {
         sub.functions.deinit(self.allocator);
         for (sub.string_allocs.items) |s| try self.string_allocs.append(self.allocator, s);
         sub.string_allocs.deinit(self.allocator);
+    }
+
+    fn compileThrow(self: *Compiler, node: Ast.Node) Error!void {
+        try self.compileNode(node.data.lhs);
+        try self.emitOp(.throw);
+    }
+
+    fn compileTryCatch(self: *Compiler, node: Ast.Node) Error!void {
+        const catch_count = self.ast.extra_data[node.data.rhs];
+        const catch_nodes = self.ast.extra_data[node.data.rhs + 1 .. node.data.rhs + 1 + catch_count];
+        const finally_node = self.ast.extra_data[node.data.rhs + 1 + catch_count];
+
+        // emit push_handler with placeholder catch offset
+        try self.emitOp(.push_handler);
+        const handler_offset_pos = self.chunk.offset();
+        try self.emitU16(0xffff);
+
+        // compile try body
+        try self.compileNode(node.data.lhs);
+
+        // normal exit: pop handler and jump past catches
+        try self.emitOp(.pop_handler);
+        const skip_catches = try self.emitJump(.jump);
+
+        // patch catch offset to here
+        self.patchJump(handler_offset_pos);
+
+        // exception is on the stack when we arrive here
+        var end_jumps = std.ArrayListUnmanaged(usize){};
+        defer end_jumps.deinit(self.allocator);
+
+        for (catch_nodes, 0..) |catch_idx, ci| {
+            const catch_node = self.ast.nodes[catch_idx];
+            const type_node_idx = catch_node.data.lhs;
+            const body_idx = catch_node.data.rhs;
+            _ = ci;
+
+            if (type_node_idx != 0) {
+                // typed catch: check instanceof, skip if no match
+                try self.emitOp(.dup);
+                const type_name = self.ast.tokenSlice(self.ast.nodes[type_node_idx].main_token);
+                const type_idx = try self.addConstant(.{ .string = type_name });
+                try self.emitConstant(type_idx);
+                try self.emitOp(.instance_check);
+                const skip = try self.emitJump(.jump_if_false);
+                try self.emitOp(.pop);
+
+                if (catch_node.main_token != 0) {
+                    const var_name = self.ast.tokenSlice(catch_node.main_token);
+                    const var_idx = try self.addConstant(.{ .string = var_name });
+                    try self.emitOp(.set_var);
+                    try self.emitU16(var_idx);
+                }
+                try self.emitOp(.pop);
+
+                try self.compileNode(body_idx);
+                const ej = try self.emitJump(.jump);
+                try end_jumps.append(self.allocator, ej);
+
+                self.patchJump(skip);
+                try self.emitOp(.pop);
+            } else {
+                // untyped catch-all
+                if (catch_node.main_token != 0) {
+                    const var_name = self.ast.tokenSlice(catch_node.main_token);
+                    const var_idx = try self.addConstant(.{ .string = var_name });
+                    try self.emitOp(.set_var);
+                    try self.emitU16(var_idx);
+                }
+                try self.emitOp(.pop);
+
+                try self.compileNode(body_idx);
+                const ej = try self.emitJump(.jump);
+                try end_jumps.append(self.allocator, ej);
+            }
+        }
+
+        // if no catch matched, re-throw
+        try self.emitOp(.throw);
+
+        self.patchJump(skip_catches);
+        for (end_jumps.items) |ej| self.patchJump(ej);
+
+        // finally block runs on both paths
+        if (finally_node != 0) {
+            try self.compileNode(finally_node);
+        }
     }
 
     fn compileClassDecl(self: *Compiler, node: Ast.Node) Error!void {

@@ -262,9 +262,9 @@ phase 1 complete: full pipeline from source to execution. zphp can run real PHP 
 ### what exists
 - `src/pipeline/token.zig` - 145 PHP 8.x token types, case-insensitive keyword lookup (42 tests in lexer)
 - `src/pipeline/lexer.zig` - full PHP lexer with HTML/PHP modal lexing
-- `src/pipeline/ast.zig` - flat array AST, 49 node tags (closure_expr, cast_expr, const_decl, switch_stmt/case/default, match_expr/arm, class_decl/method/property, new_expr, method_call, static_call)
+- `src/pipeline/ast.zig` - flat array AST, 52 node tags (closure_expr, cast_expr, const_decl, switch_stmt/case/default, match_expr/arm, class_decl/method/property, new_expr, method_call, static_call)
 - `src/pipeline/parser.zig` - Pratt-based recursive descent parser with 2-token lookahead for cast detection, class declaration parsing with visibility modifier skipping, method call detection in property access (52 tests)
-- `src/pipeline/bytecode.zig` - ~60 opcodes (call_indirect, closure_bind, define_const, dup, cast_int/float/string/bool/array, class_decl, new_obj, get_prop, set_prop, method_call, static_call), Chunk struct, ObjFunction struct
+- `src/pipeline/bytecode.zig` - ~64 opcodes (call_indirect, closure_bind, define_const, dup, cast_int/float/string/bool/array, class_decl, new_obj, get_prop, set_prop, method_call, static_call), Chunk struct, ObjFunction struct
 - `src/pipeline/compiler.zig` - single-pass AST -> bytecode compiler with jump patching, function compilation, numeric literal parsing, string interpolation
 - `src/runtime/value.zig` - PHP Value tagged union (null, bool, int, float, string, array, object) with arithmetic, truthiness, string-aware comparison, formatting. PhpObject struct with property hashmap (4 tests)
 - `src/runtime/vm.zig` - stack-based bytecode interpreter with per-frame variable scoping, function calls, closures with captures, arrays, foreach, switch/match, constants table, type casts, native function dispatch, class registry, object instantiation, property access, method dispatch with $this binding, output capture (93 integration tests)
@@ -278,8 +278,8 @@ phase 1 complete: full pipeline from source to execution. zphp can run real PHP 
   - `io.zig` - file_get_contents/file_put_contents/file_exists/is_file/is_dir/basename/dirname/pathinfo/realpath/time/microtime/date
   - `pcre.zig` - preg_match/preg_match_all/preg_replace/preg_split (FFI bindings to libpcre2)
 - `src/main.zig` - CLI entry point with `zphp run <file>`, imports all modules for test discovery
-- 203 unit tests total across all modules
-- 43 PHP compatibility test files in tests/ verified against PHP 8.3
+- 215 unit tests total across all modules
+- 44 PHP compatibility test files in tests/ verified against PHP 8.3
 
 ### lexer design decisions
 - tokens reference byte offsets into source (zero-copy, no allocations)
@@ -345,7 +345,8 @@ phase 1 complete: full pipeline from source to execution. zphp can run real PHP 
 - type casting: `(int)`, `(float)`, `(string)`, `(bool)`, `(array)`
 - native functions: 150+ stdlib functions across strings, arrays, math, types, json, io, pcre (see src/stdlib/ for complete list)
 - string interpolation: `"Hello $name"`, `"{$var}"`, `"$arr[0]"`, `"{$arr['key']}"`, escaped `\$`
-- classes: declaration with properties (with defaults) and methods, `new ClassName(args)`, `$obj->method(args)`, `$obj->prop`, `$this` binding in methods, `__construct` auto-call, `ClassName::method()` static calls
+- classes: declaration with properties (with defaults) and methods, `new ClassName(args)`, `$obj->method(args)`, `$obj->prop`, `$this` binding in methods, `__construct` auto-call, `ClassName::method()` static calls, `extends` inheritance, `parent::method()` calls
+- exceptions: try/catch/finally, throw, typed catch with instanceof checking, multi-catch, nested try/catch with propagation, re-throw on no match, built-in Exception/RuntimeException/etc classes
 - echo: single and multi-expression
 - mixed HTML/PHP output
 
@@ -414,6 +415,17 @@ phase 1 complete: full pipeline from source to execution. zphp can run real PHP 
 - property names stripped of `$` prefix at compile time (PHP variables have `$` but property names in objects don't)
 - visibility modifiers (public/protected/private) are parsed and skipped - not enforced yet
 
+### exception handling architecture
+- `ExceptionHandler` struct: catch_ip (absolute jump target), frame_count/sp (state to restore), chunk pointer
+- VM maintains a stack of 32 exception handlers (push_handler/pop_handler)
+- `throw` opcode: pops exception from stack, unwinds frames to handler's frame_count, restores sp, pushes exception, jumps to catch_ip
+- catch clauses compiled inline with `instance_check` type testing. `dup` exception, push class name, `instance_check` (walks parent chain), `jump_if_false` to skip. if no catch matches, re-throw opcode propagates to next handler
+- `instance_check` opcode: `isInstanceOf()` walks the class parent chain, so `catch (Exception $e)` catches RuntimeException etc
+- finally blocks compile after both normal and catch paths - they execute on both code paths (no special opcode needed since they're reached by normal flow)
+- built-in Exception class registered at VM init with native method implementations for __construct, getMessage, getCode. native methods get `$this` via a temporary frame pushed around the native call
+- built-in exception hierarchy: Exception, RuntimeException, InvalidArgumentException, LogicException, BadMethodCallException, OverflowException, TypeError
+- when throw fires inside a function/method, frame unwinding cleans up call frames back to the handler's level, correctly crossing function boundaries
+
 ### dangling pointer gotcha in temp variable names
 switch/match compilation generates temp variable names like `__match_0` using `std.fmt.allocPrint` (heap allocated, tracked in string_allocs). originally used stack-allocated `bufPrint` which caused use-after-free when the constant pool held a pointer to the expired stack buffer. the bug was latent - only manifested when other changes shifted the stack layout enough to overwrite the buffer. rule: any string stored in the constant pool must be either a source slice or a heap allocation tracked by string_allocs
 
@@ -476,7 +488,7 @@ remaining:
 **5. classes (advanced)**
 inheritance with `extends`, `parent::`, `static` methods/properties, visibility (public/protected/private), abstract classes, interfaces, traits. needed for any real composer package
 
-**6. try/catch/throw**
+**6. try/catch/throw** (DONE)
 exceptions are objects in PHP, so this depends on basic classes. compile try/catch as exception handler frames with jump targets. throw creates an exception object and unwinds to the nearest handler
 
 **7. stdlib expansion pass 2 - OOP-dependent functions**
