@@ -241,14 +241,18 @@ do NOT use the GitHub MCP server for creating repos or any write operations. the
 - `std.StaticStringMap` works and is the right choice for comptime lookup tables
 - switch ranges use `...` (inclusive): `'a'...'z'`, `0x80...0xff`
 - `@intCast` infers target type from context: `const x: u32 = @intCast(some_usize);`
+- `std.ArrayList(T)` is now the UNMANAGED version (no stored allocator). use `.{}` to init, pass allocator to `append(gpa, item)`, `writer(gpa)`, `deinit(gpa)`, `toOwnedSlice(gpa)`. the managed version with stored allocator is deprecated
+- `std.ArrayListUnmanaged(T)` is identical to `std.ArrayList(T)` in 0.15.1
 
 ## current status
 
-phase 1 in progress: lexer complete, parser next.
+phase 1 in progress: lexer and parser complete. bytecode compiler + VM next.
 
 ### what exists
 - `src/pipeline/token.zig` - all PHP 8.x token types (145 variants), case-insensitive keyword lookup via StaticStringMap, Token struct with u32 start/end byte offsets
-- `src/pipeline/lexer.zig` - full PHP lexer with HTML/PHP modal lexing, comprehensive tests (37 tests covering operators, keywords, numbers, strings, comments, attributes, mixed HTML/PHP, edge cases)
+- `src/pipeline/lexer.zig` - full PHP lexer with HTML/PHP modal lexing, comprehensive tests (42 tests)
+- `src/pipeline/ast.zig` - AST node definitions. flat array design: nodes stored contiguously with u32 indices, extra_data array for variable-length children. 35 node tags covering literals, operators, control flow, functions, arrays, property access
+- `src/pipeline/parser.zig` - Pratt-based recursive descent parser with 52 tests. handles full PHP operator precedence (19 levels), all assignment operators, short-circuit ops, ternary (including short form), postfix chains (calls, indexing, property access), function declarations, control flow (if/elseif/else, while, do-while, for, foreach), array literals, mixed HTML/PHP, error recovery
 - `src/main.zig` - CLI entry point, imports pipeline modules for test discovery
 
 ### lexer design decisions
@@ -261,10 +265,22 @@ phase 1 in progress: lexer complete, parser next.
 - the lexer never errors - invalid input produces `.invalid` tokens
 - HTML mode scans for `<?php` (with trailing whitespace) and `<?=` only, no short open tags
 
+### parser design decisions
+- flat AST: nodes in a contiguous array, children referenced by u32 index. extra_data array for variable-length children (function params, call args, block statements, echo expressions, array elements)
+- root node always at index 0. lhs/rhs = 0 means "no child" for optional fields
+- Pratt parser for expressions: single infixPrec() function maps token tags to precedence levels 1-19. right-associative ops (assignment, ??, **) use prec-1 for right side
+- short-circuit ops (&&, ||, ??, and, or) get dedicated AST tags (logical_and, logical_or, null_coalesce) for distinct codegen. regular binary ops share a single binary_op tag with the operator stored in main_token
+- `elseif` is parsed as nested if_else in the else branch. `else if` (two words) naturally produces the same structure
+- function params: just variable nodes for now (no type hints, no defaults, no variadic). return type hints are skipped
+- `<?= expr ?>` is transformed into echo_stmt during parsing
+- open_tag and close_tag tokens are consumed/skipped by the parser, not represented in the AST
+- error recovery: on parse error, skip to next `;`, `}`, or statement keyword and continue
+- S-expression renderer in test helpers makes parser tests compact and readable
+
 ### next up
-- parser (recursive descent, AST nodes in ast.zig)
-- start with: expressions, variables, function calls, control flow (if/else/while/for), function definitions
-- then: classes, interfaces, traits, closures
+- bytecode compiler (AST -> bytecode chunks)
+- VM interpreter (execute bytecode)
+- start with: arithmetic, variables, echo, function calls, if/while
 
 ## self-improvement
 

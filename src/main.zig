@@ -7,4 +7,6 @@ pub fn main() !void {
 test {
     _ = @import("pipeline/token.zig");
     _ = @import("pipeline/lexer.zig");
+    _ = @import("pipeline/ast.zig");
+    _ = @import("pipeline/parser.zig");
 }
