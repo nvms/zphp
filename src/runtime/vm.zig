@@ -1,6 +1,7 @@
 const std = @import("std");
 const Value = @import("value.zig").Value;
 const PhpArray = @import("value.zig").PhpArray;
+const PhpObject = @import("value.zig").PhpObject;
 const Chunk = @import("../pipeline/bytecode.zig").Chunk;
 const OpCode = @import("../pipeline/bytecode.zig").OpCode;
 const ObjFunction = @import("../pipeline/bytecode.zig").ObjFunction;
@@ -28,6 +29,13 @@ pub const NativeContext = struct {
         return owned;
     }
 
+    pub fn createObject(self: *NativeContext, class_name: []const u8) !*PhpObject {
+        const obj = try self.allocator.create(PhpObject);
+        obj.* = .{ .class_name = class_name };
+        try self.vm.objects.append(self.allocator, obj);
+        return obj;
+    }
+
     pub fn callFunction(self: *NativeContext, name: []const u8, args: []const Value) RuntimeError!Value {
         return self.vm.callByName(name, args);
     }
@@ -41,6 +49,28 @@ const CaptureEntry = struct {
     value: Value,
 };
 
+const ClassDef = struct {
+    name: []const u8,
+    methods: std.StringHashMapUnmanaged(MethodInfo) = .{},
+    properties: std.ArrayListUnmanaged(PropertyDef) = .{},
+    parent: ?[]const u8 = null,
+
+    const MethodInfo = struct {
+        name: []const u8,
+        arity: u8,
+    };
+
+    const PropertyDef = struct {
+        name: []const u8,
+        default: Value,
+    };
+
+    fn deinit(self: *ClassDef, allocator: Allocator) void {
+        self.methods.deinit(allocator);
+        self.properties.deinit(allocator);
+    }
+};
+
 pub const VM = struct {
     frames: [64]CallFrame = undefined,
     frame_count: usize = 0,
@@ -51,8 +81,10 @@ pub const VM = struct {
     output: std.ArrayListUnmanaged(u8) = .{},
     strings: std.ArrayListUnmanaged([]const u8) = .{},
     arrays: std.ArrayListUnmanaged(*PhpArray) = .{},
+    objects: std.ArrayListUnmanaged(*PhpObject) = .{},
     captures: std.ArrayListUnmanaged(CaptureEntry) = .{},
     php_constants: std.StringHashMapUnmanaged(Value) = .{},
+    classes: std.StringHashMapUnmanaged(ClassDef) = .{},
     allocator: Allocator,
 
     const CallFrame = struct {
@@ -127,6 +159,14 @@ pub const VM = struct {
             self.allocator.destroy(a);
         }
         self.arrays.deinit(self.allocator);
+        for (self.objects.items) |o| {
+            o.deinit(self.allocator);
+            self.allocator.destroy(o);
+        }
+        self.objects.deinit(self.allocator);
+        var class_iter = self.classes.valueIterator();
+        while (class_iter.next()) |c| c.deinit(self.allocator);
+        self.classes.deinit(self.allocator);
     }
 
     pub fn interpret(self: *VM, result: *const CompileResult) RuntimeError!void {
@@ -453,6 +493,211 @@ pub const VM = struct {
                         .value = val,
                     });
                 },
+
+                .class_decl => {
+                    const name_idx = self.readU16();
+                    const class_name = self.currentChunk().constants.items[name_idx].string;
+                    const method_count = self.readByte();
+
+                    var def = ClassDef{ .name = class_name };
+
+                    for (0..method_count) |_| {
+                        const mname_idx = self.readU16();
+                        const method_name = self.currentChunk().constants.items[mname_idx].string;
+                        const arity = self.readByte();
+                        try def.methods.put(self.allocator, method_name, .{
+                            .name = method_name,
+                            .arity = arity,
+                        });
+                    }
+
+                    const prop_count = self.readByte();
+
+                    // count how many have defaults (to know how many stack values to collect)
+                    // read all property metadata first
+                    var prop_names: [32][]const u8 = undefined;
+                    var prop_has_default: [32]u8 = undefined;
+                    for (0..prop_count) |pi| {
+                        const pname_idx = self.readU16();
+                        prop_names[pi] = self.currentChunk().constants.items[pname_idx].string;
+                        prop_has_default[pi] = self.readByte();
+                    }
+
+                    // defaults were pushed in forward order, pop in reverse
+                    var defaults: [32]Value = undefined;
+                    var default_count: usize = 0;
+                    for (0..prop_count) |pi| {
+                        if (prop_has_default[pi] == 1) default_count += 1;
+                    }
+                    // pop all defaults (they were pushed in forward order, so last is on top)
+                    // reverse-pop to match forward order
+                    var di: usize = default_count;
+                    while (di > 0) {
+                        di -= 1;
+                        defaults[di] = self.pop();
+                    }
+
+                    // now assign defaults to properties
+                    var dj: usize = 0;
+                    for (0..prop_count) |pi| {
+                        const default_val = if (prop_has_default[pi] == 1) blk: {
+                            const v = defaults[dj];
+                            dj += 1;
+                            break :blk v;
+                        } else Value{ .null = {} };
+                        try def.properties.append(self.allocator, .{
+                            .name = prop_names[pi],
+                            .default = default_val,
+                        });
+                    }
+
+                    const parent_idx = self.readU16();
+                    if (parent_idx != 0xffff) {
+                        def.parent = self.currentChunk().constants.items[parent_idx].string;
+                    }
+
+                    try self.classes.put(self.allocator, class_name, def);
+                },
+
+                .new_obj => {
+                    const name_idx = self.readU16();
+                    const arg_count = self.readByte();
+                    const class_name = self.currentChunk().constants.items[name_idx].string;
+
+                    const obj = try self.allocator.create(PhpObject);
+                    obj.* = .{ .class_name = class_name };
+                    try self.objects.append(self.allocator, obj);
+
+                    // set property defaults from class and parent chain
+                    try self.initObjectProperties(obj, class_name);
+
+                    // call constructor if it exists
+                    const ac: usize = arg_count;
+                    var ctor_name_buf: [256]u8 = undefined;
+                    const ctor_name = std.fmt.bufPrint(&ctor_name_buf, "{s}::__construct", .{class_name}) catch class_name;
+
+                    if (self.functions.get(ctor_name)) |func| {
+                        var new_vars: std.StringHashMapUnmanaged(Value) = .{};
+                        try new_vars.put(self.allocator, "$this", .{ .object = obj });
+                        for (0..ac) |i| {
+                            try new_vars.put(self.allocator, func.params[i], self.stack[self.sp - ac + i]);
+                        }
+                        self.sp -= ac;
+                        self.frames[self.frame_count] = .{ .chunk = &func.chunk, .ip = 0, .vars = new_vars };
+                        self.frame_count += 1;
+
+                        const ctor_base = self.frame_count - 1;
+                        try self.runUntilFrame(ctor_base);
+
+                        // constructor returns null, discard it
+                        _ = self.pop();
+                    } else {
+                        self.sp -= ac;
+                    }
+
+                    self.push(.{ .object = obj });
+                },
+
+                .get_prop => {
+                    const name_idx = self.readU16();
+                    const prop_name = self.currentChunk().constants.items[name_idx].string;
+                    const obj_val = self.pop();
+                    if (obj_val == .object) {
+                        self.push(obj_val.object.get(prop_name));
+                    } else {
+                        self.push(.null);
+                    }
+                },
+
+                .set_prop => {
+                    const name_idx = self.readU16();
+                    const prop_name = self.currentChunk().constants.items[name_idx].string;
+                    const val = self.pop();
+                    const obj_val = self.pop();
+                    if (obj_val == .object) {
+                        try obj_val.object.set(self.allocator, prop_name, val);
+                    }
+                    self.push(val);
+                },
+
+                .method_call => {
+                    const name_idx = self.readU16();
+                    const arg_count = self.readByte();
+                    const method_name = self.currentChunk().constants.items[name_idx].string;
+                    const ac: usize = arg_count;
+
+                    // object is below args on the stack
+                    const obj_val = self.stack[self.sp - ac - 1];
+                    if (obj_val != .object) return error.RuntimeError;
+                    const obj = obj_val.object;
+
+                    // look up method in class hierarchy
+                    const full_name = try self.resolveMethod(obj.class_name, method_name);
+                    if (self.functions.get(full_name)) |func| {
+                        var new_vars: std.StringHashMapUnmanaged(Value) = .{};
+                        try new_vars.put(self.allocator, "$this", .{ .object = obj });
+
+                        for (self.captures.items) |cap| {
+                            if (std.mem.eql(u8, cap.closure_name, full_name)) {
+                                try new_vars.put(self.allocator, cap.var_name, cap.value);
+                            }
+                        }
+
+                        for (0..ac) |i| {
+                            try new_vars.put(self.allocator, func.params[i], self.stack[self.sp - ac + i]);
+                        }
+                        self.sp -= ac;
+                        // remove object from stack too
+                        self.sp -= 1;
+                        self.frames[self.frame_count] = .{ .chunk = &func.chunk, .ip = 0, .vars = new_vars };
+                        self.frame_count += 1;
+                    } else return error.RuntimeError;
+                },
+
+                .static_call => {
+                    const class_idx = self.readU16();
+                    const method_idx = self.readU16();
+                    const arg_count = self.readByte();
+                    const class_name = self.currentChunk().constants.items[class_idx].string;
+                    const method_name = self.currentChunk().constants.items[method_idx].string;
+
+                    const full_name = try self.resolveMethod(class_name, method_name);
+                    try self.callNamedFunction(full_name, arg_count);
+                },
+            }
+        }
+    }
+
+    fn resolveMethod(self: *VM, class_name: []const u8, method_name: []const u8) RuntimeError![]const u8 {
+        var current = class_name;
+        var buf: [256]u8 = undefined;
+        while (true) {
+            const full = std.fmt.bufPrint(&buf, "{s}::{s}", .{ current, method_name }) catch return error.RuntimeError;
+            if (self.functions.get(full)) |_| {
+                // need stable string - use the key from functions map
+                var iter = self.functions.keyIterator();
+                while (iter.next()) |k| {
+                    if (std.mem.eql(u8, k.*, full)) return k.*;
+                }
+            }
+            if (self.classes.get(current)) |cls| {
+                if (cls.parent) |p| {
+                    current = p;
+                    continue;
+                }
+            }
+            return error.RuntimeError;
+        }
+    }
+
+    fn initObjectProperties(self: *VM, obj: *PhpObject, class_name: []const u8) RuntimeError!void {
+        // walk parent chain first (parent properties set first, child overrides)
+        if (self.classes.get(class_name)) |cls| {
+            if (cls.parent) |parent| {
+                try self.initObjectProperties(obj, parent);
+            }
+            for (cls.properties.items) |prop| {
+                try obj.set(self.allocator, prop.name, prop.default);
             }
         }
     }
@@ -1082,4 +1327,134 @@ test "match assigned to variable" {
         \\$result = match($x) { 'a' => 1, 'b' => 2, 'c' => 3 };
         \\echo $result;
     , "2");
+}
+
+// ==========================================================================
+// class tests
+// ==========================================================================
+
+test "class basic instantiation" {
+    try expectOutput(
+        \\<?php
+        \\class Foo {
+        \\    public function hello() {
+        \\        echo 'hi';
+        \\    }
+        \\}
+        \\$f = new Foo();
+        \\$f->hello();
+    , "hi");
+}
+
+test "class constructor" {
+    try expectOutput(
+        \\<?php
+        \\class Person {
+        \\    public $name;
+        \\    public function __construct($n) {
+        \\        $this->name = $n;
+        \\    }
+        \\    public function greet() {
+        \\        echo 'Hello ' . $this->name;
+        \\    }
+        \\}
+        \\$p = new Person('Alice');
+        \\$p->greet();
+    , "Hello Alice");
+}
+
+test "class property access" {
+    try expectOutput(
+        \\<?php
+        \\class Box {
+        \\    public $value;
+        \\    public function __construct($v) {
+        \\        $this->value = $v;
+        \\    }
+        \\}
+        \\$b = new Box(42);
+        \\echo $b->value;
+    , "42");
+}
+
+test "class property default" {
+    try expectOutput(
+        \\<?php
+        \\class Counter {
+        \\    public $count = 0;
+        \\    public function inc() {
+        \\        $this->count = $this->count + 1;
+        \\    }
+        \\    public function get() {
+        \\        return $this->count;
+        \\    }
+        \\}
+        \\$c = new Counter();
+        \\$c->inc();
+        \\$c->inc();
+        \\$c->inc();
+        \\echo $c->get();
+    , "3");
+}
+
+test "class multiple instances" {
+    try expectOutput(
+        \\<?php
+        \\class Dog {
+        \\    public $name;
+        \\    public function __construct($n) {
+        \\        $this->name = $n;
+        \\    }
+        \\}
+        \\$a = new Dog('Rex');
+        \\$b = new Dog('Spot');
+        \\echo $a->name . ' ' . $b->name;
+    , "Rex Spot");
+}
+
+test "class method with return value" {
+    try expectOutput(
+        \\<?php
+        \\class Math {
+        \\    public function add($a, $b) {
+        \\        return $a + $b;
+        \\    }
+        \\}
+        \\$m = new Math();
+        \\echo $m->add(3, 4);
+    , "7");
+}
+
+test "class method chaining state" {
+    try expectOutput(
+        \\<?php
+        \\class Acc {
+        \\    public $val = 0;
+        \\    public function add($n) {
+        \\        $this->val = $this->val + $n;
+        \\    }
+        \\}
+        \\$a = new Acc();
+        \\$a->add(10);
+        \\$a->add(20);
+        \\echo $a->val;
+    , "30");
+}
+
+test "class new without parens" {
+    try expectOutput(
+        \\<?php
+        \\class Empty2 {}
+        \\$e = new Empty2;
+        \\echo $e !== null ? 'ok' : 'fail';
+    , "ok");
+}
+
+test "class gettype" {
+    try expectOutput(
+        \\<?php
+        \\class Foo {}
+        \\$f = new Foo();
+        \\echo gettype($f);
+    , "object");
 }

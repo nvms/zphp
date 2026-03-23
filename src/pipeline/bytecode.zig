@@ -68,6 +68,14 @@ pub const OpCode = enum(u8) {
     array_get, // pop key, pop array, push value
     array_set, // pop value, pop key, pop array, set, push value
 
+    // classes
+    class_decl, // u16: class name, u8: method count, then method_count * (u16 name, u8 arity)
+    new_obj, // u16: class name constant, u8: arg count
+    get_prop, // u16: property name constant
+    set_prop, // u16: property name constant
+    method_call, // u16: method name constant, u8: arg count
+    static_call, // u16: class name, u16: method name, u8: arg count
+
     // foreach iteration
     iter_begin, // push index 0 (array already on stack)
     iter_check, // u16: exit offset. peek array+index, push key+value or jump

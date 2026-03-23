@@ -56,6 +56,23 @@ pub const PhpArray = struct {
     }
 };
 
+pub const PhpObject = struct {
+    class_name: []const u8,
+    properties: std.StringHashMapUnmanaged(Value) = .{},
+
+    pub fn deinit(self: *PhpObject, allocator: std.mem.Allocator) void {
+        self.properties.deinit(allocator);
+    }
+
+    pub fn get(self: *const PhpObject, name: []const u8) Value {
+        return self.properties.get(name) orelse .null;
+    }
+
+    pub fn set(self: *PhpObject, allocator: std.mem.Allocator, name: []const u8, value: Value) !void {
+        try self.properties.put(allocator, name, value);
+    }
+};
+
 pub const Value = union(enum) {
     null,
     bool: bool,
@@ -63,6 +80,7 @@ pub const Value = union(enum) {
     float: f64,
     string: []const u8,
     array: *PhpArray,
+    object: *PhpObject,
 
     pub fn isTruthy(self: Value) bool {
         return switch (self) {
@@ -72,6 +90,7 @@ pub const Value = union(enum) {
             .float => |f| f != 0.0,
             .string => |s| s.len > 0 and !std.mem.eql(u8, s, "0"),
             .array => |a| a.entries.items.len > 0,
+            .object => true,
         };
     }
 
@@ -119,7 +138,7 @@ pub const Value = union(enum) {
     }
 
     pub fn equal(a: Value, b: Value) bool {
-        if (a == .array or b == .array) return false;
+        if (a == .array or b == .array or a == .object or b == .object) return false;
         if (a == .string and b == .string) return std.mem.eql(u8, a.string, b.string);
         return toFloat(a) == toFloat(b);
     }
@@ -133,10 +152,12 @@ pub const Value = union(enum) {
             .float => |af| af == b.float,
             .string => |as_| std.mem.eql(u8, as_, b.string),
             .array => |ap| ap == b.array,
+            .object => |ao| ao == b.object,
         };
     }
 
     pub fn lessThan(a: Value, b: Value) bool {
+        if (a == .object or b == .object) return false;
         if (a == .string and b == .string) {
             return std.mem.order(u8, a.string, b.string) == .lt;
         }
@@ -144,6 +165,7 @@ pub const Value = union(enum) {
     }
 
     pub fn compare(a: Value, b: Value) i64 {
+        if (a == .object or b == .object) return 0;
         if (a == .string and b == .string) {
             return switch (std.mem.order(u8, a.string, b.string)) {
                 .lt => -1,
@@ -165,7 +187,7 @@ pub const Value = union(enum) {
             .int => |i| i,
             .float => |f| @intFromFloat(f),
             .string => |s| std.fmt.parseInt(i64, s, 10) catch 0,
-            .array => 0,
+            .array, .object => 0,
         };
     }
 
@@ -176,7 +198,7 @@ pub const Value = union(enum) {
             .int => |i| @floatFromInt(i),
             .float => |f| f,
             .string => |s| std.fmt.parseFloat(f64, s) catch 0.0,
-            .array => 0.0,
+            .array, .object => 0.0,
         };
     }
 
@@ -187,7 +209,7 @@ pub const Value = union(enum) {
             .bool => |b| .{ .int = if (b) 1 else 0 },
             .float => |f| .{ .int = @intFromFloat(f) },
             .null => .{ .int = 0 },
-            .array => .{ .int = 0 },
+            .array, .object => .{ .int = 0 },
         };
     }
 
@@ -214,6 +236,7 @@ pub const Value = union(enum) {
             },
             .string => |s| try buf.appendSlice(allocator, s),
             .array => try buf.appendSlice(allocator, "Array"),
+            .object => try buf.appendSlice(allocator, "Object"),
         }
     }
 
@@ -262,4 +285,10 @@ test "int float promotion" {
     const a = Value{ .int = 3 };
     const b = Value{ .float = 1.5 };
     try std.testing.expectEqual(@as(f64, 4.5), Value.add(a, b).float);
+}
+
+test "identical" {
+    try std.testing.expect(Value.identical(.{ .int = 2 }, .{ .int = 2 }));
+    try std.testing.expect(!Value.identical(.{ .int = 1 }, .{ .int = 2 }));
+    try std.testing.expect(!Value.identical(.{ .int = 2 }, .{ .string = "2" }));
 }

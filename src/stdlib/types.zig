@@ -83,6 +83,7 @@ fn gettype(_: *NativeContext, args: []const Value) RuntimeError!Value {
         .float => "double",
         .string => "string",
         .array => "array",
+        .object => "object",
     } };
 }
 
@@ -208,6 +209,14 @@ fn varDumpValue(ctx: *NativeContext, val: Value, depth: usize) !void {
             try appendIndent(out, a, indent);
             try out.appendSlice(a, "}\n");
         },
+        .object => |obj| {
+            try appendIndent(out, a, indent);
+            try out.appendSlice(a, "object(");
+            try out.appendSlice(a, obj.class_name);
+            try out.appendSlice(a, ")#1 (0) {\n");
+            try appendIndent(out, a, indent);
+            try out.appendSlice(a, "}\n");
+        },
     }
 }
 
@@ -267,6 +276,14 @@ fn printRValue(a: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8), val: Valu
                     try out.appendSlice(a, "\n");
                 }
             }
+            try appendIndent(out, a, depth * 4);
+            try out.appendSlice(a, ")\n");
+        },
+        .object => |obj| {
+            try out.appendSlice(a, obj.class_name);
+            try out.appendSlice(a, " Object\n");
+            try appendIndent(out, a, depth * 4);
+            try out.appendSlice(a, "(\n");
             try appendIndent(out, a, depth * 4);
             try out.appendSlice(a, ")\n");
         },

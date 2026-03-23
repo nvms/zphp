@@ -98,6 +98,14 @@ pub const Ast = struct {
             // closures
             closure_expr, // main_token = function, lhs = extra index -> {count, param...}, rhs = extra index -> {body, use_count, use_vars...}
 
+            // classes
+            class_decl, // main_token = class name, lhs = extra index -> {count, member_nodes...}, rhs = parent class node (0 = none)
+            class_method, // main_token = method name, lhs = extra index -> {count, param...}, rhs = body block
+            class_property, // main_token = property variable, lhs = default value (0 = none)
+            new_expr, // main_token = class name, lhs = extra index -> {count, arg...}
+            method_call, // main_token = method name, lhs = object, rhs = extra index -> {count, arg...}
+            static_call, // main_token = method name, lhs = class name node, rhs = extra index -> {count, arg...}
+
             // compound
             array_literal, // main_token = [, lhs = extra index -> {count, element...}
             array_element, // lhs = value, rhs = key (0 = no key)

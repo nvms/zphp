@@ -151,7 +151,12 @@ const Compiler = struct {
             .ternary => try self.compileTernary(node),
             .call => try self.compileCall(node),
             .array_access => try self.compileArrayAccess(node),
-            .property_access => {},
+            .property_access => try self.compilePropertyAccess(node),
+            .class_decl => try self.compileClassDecl(node),
+            .class_method, .class_property => {},
+            .new_expr => try self.compileNewExpr(node),
+            .method_call => try self.compileMethodCall(node),
+            .static_call => try self.compileStaticCall(node),
             .array_literal => try self.compileArrayLiteral(node),
             .array_element => {},
             .grouped_expr => try self.compileNode(node.data.lhs),
@@ -455,6 +460,18 @@ const Compiler = struct {
             try self.compileNode(target.data.rhs);
             try self.compileNode(node.data.rhs);
             try self.emitOp(.array_set);
+            return;
+        }
+
+        if (target.tag == .property_access) {
+            try self.compileNode(target.data.lhs);
+            try self.compileNode(node.data.rhs);
+            const prop_node = self.ast.nodes[target.data.rhs];
+            var prop_name = self.ast.tokenSlice(prop_node.main_token);
+            if (prop_name.len > 0 and prop_name[0] == '$') prop_name = prop_name[1..];
+            const name_idx = try self.addConstant(.{ .string = prop_name });
+            try self.emitOp(.set_prop);
+            try self.emitU16(name_idx);
             return;
         }
 
@@ -790,6 +807,171 @@ const Compiler = struct {
         sub.string_allocs.deinit(self.allocator);
     }
 
+    fn compileClassDecl(self: *Compiler, node: Ast.Node) Error!void {
+        const class_name = self.ast.tokenSlice(node.main_token);
+        const members = self.ast.extraSlice(node.data.lhs);
+
+        // compile methods as functions named "ClassName::methodName"
+        var method_count: u8 = 0;
+        for (members) |member_idx| {
+            const member = self.ast.nodes[member_idx];
+            if (member.tag == .class_method) {
+                const method_name = self.ast.tokenSlice(member.main_token);
+                const full_name = try std.fmt.allocPrint(self.allocator, "{s}::{s}", .{ class_name, method_name });
+                try self.string_allocs.append(self.allocator, full_name);
+
+                const param_nodes = self.ast.extraSlice(member.data.lhs);
+                const param_names = try self.allocator.alloc([]const u8, param_nodes.len);
+                for (param_nodes, 0..) |p, i| {
+                    param_names[i] = self.ast.tokenSlice(self.ast.nodes[p].main_token);
+                }
+
+                var sub = Compiler{
+                    .ast = self.ast,
+                    .chunk = .{},
+                    .functions = .{},
+                    .string_allocs = .{},
+                    .allocator = self.allocator,
+                    .scope_depth = self.scope_depth + 1,
+                    .loop_start = null,
+                    .break_jumps = .{},
+                    .closure_count = self.closure_count,
+                };
+                errdefer {
+                    sub.chunk.deinit(self.allocator);
+                    sub.break_jumps.deinit(self.allocator);
+                    sub.string_allocs.deinit(self.allocator);
+                }
+
+                try sub.compileNode(member.data.rhs);
+                try sub.emitOp(.op_null);
+                try sub.emitOp(.return_val);
+                sub.break_jumps.deinit(self.allocator);
+
+                self.closure_count = sub.closure_count;
+
+                try self.functions.append(self.allocator, .{
+                    .name = full_name,
+                    .arity = @intCast(param_nodes.len),
+                    .params = param_names[0..param_nodes.len],
+                    .chunk = sub.chunk,
+                });
+
+                for (sub.functions.items) |f| try self.functions.append(self.allocator, f);
+                sub.functions.deinit(self.allocator);
+                for (sub.string_allocs.items) |s| try self.string_allocs.append(self.allocator, s);
+                sub.string_allocs.deinit(self.allocator);
+
+                method_count += 1;
+            }
+        }
+
+        // compile property default values first (they push onto the stack)
+        // emit them in reverse so the VM can pop them in forward order
+        var prop_count: u8 = 0;
+        for (members) |member_idx| {
+            const member = self.ast.nodes[member_idx];
+            if (member.tag == .class_property) prop_count += 1;
+        }
+        // push defaults in forward order (VM pops in forward order)
+        for (members) |member_idx| {
+            const member = self.ast.nodes[member_idx];
+            if (member.tag == .class_property) {
+                if (member.data.lhs != 0) {
+                    try self.compileNode(member.data.lhs);
+                }
+            }
+        }
+
+        // emit class_decl opcode (defaults are already on stack)
+        const name_idx = try self.addConstant(.{ .string = class_name });
+        try self.emitOp(.class_decl);
+        try self.emitU16(name_idx);
+        try self.emitByte(method_count);
+
+        for (members) |member_idx| {
+            const member = self.ast.nodes[member_idx];
+            if (member.tag == .class_method) {
+                const method_name_str = self.ast.tokenSlice(member.main_token);
+                const mname_idx = try self.addConstant(.{ .string = method_name_str });
+                try self.emitU16(mname_idx);
+                const param_nodes = self.ast.extraSlice(member.data.lhs);
+                try self.emitByte(@intCast(param_nodes.len));
+            }
+        }
+
+        try self.emitByte(prop_count);
+        for (members) |member_idx| {
+            const member = self.ast.nodes[member_idx];
+            if (member.tag == .class_property) {
+                var prop_name = self.ast.tokenSlice(member.main_token);
+                if (prop_name.len > 0 and prop_name[0] == '$') prop_name = prop_name[1..];
+                const pname_idx = try self.addConstant(.{ .string = prop_name });
+                try self.emitU16(pname_idx);
+                try self.emitByte(if (member.data.lhs != 0) @as(u8, 1) else @as(u8, 0));
+            }
+        }
+
+        if (node.data.rhs != 0) {
+            const parent_name = self.ast.tokenSlice(self.ast.nodes[node.data.rhs].main_token);
+            const parent_idx = try self.addConstant(.{ .string = parent_name });
+            try self.emitU16(parent_idx);
+        } else {
+            try self.emitU16(0xffff);
+        }
+    }
+
+    fn compileNewExpr(self: *Compiler, node: Ast.Node) Error!void {
+        const class_name = self.ast.tokenSlice(node.main_token);
+        const args = self.ast.extraSlice(node.data.lhs);
+        for (args) |arg| try self.compileNode(arg);
+        const name_idx = try self.addConstant(.{ .string = class_name });
+        try self.emitOp(.new_obj);
+        try self.emitU16(name_idx);
+        try self.emitByte(@intCast(args.len));
+    }
+
+    fn compilePropertyAccess(self: *Compiler, node: Ast.Node) Error!void {
+        const target = self.ast.nodes[node.data.lhs];
+
+        // check if this is an assignment target (handled by compileAssign)
+        // here we just handle reads
+        try self.compileNode(node.data.lhs);
+        const prop_node = self.ast.nodes[node.data.rhs];
+        var prop_name = self.ast.tokenSlice(prop_node.main_token);
+        // strip $ if it's a variable token used as property name
+        if (prop_name.len > 0 and prop_name[0] == '$') prop_name = prop_name[1..];
+        _ = target;
+        const name_idx = try self.addConstant(.{ .string = prop_name });
+        try self.emitOp(.get_prop);
+        try self.emitU16(name_idx);
+    }
+
+    fn compileMethodCall(self: *Compiler, node: Ast.Node) Error!void {
+        try self.compileNode(node.data.lhs);
+        const args = self.ast.extraSlice(node.data.rhs);
+        for (args) |arg| try self.compileNode(arg);
+        const method_name = self.ast.tokenSlice(node.main_token);
+        const name_idx = try self.addConstant(.{ .string = method_name });
+        try self.emitOp(.method_call);
+        try self.emitU16(name_idx);
+        try self.emitByte(@intCast(args.len));
+    }
+
+    fn compileStaticCall(self: *Compiler, node: Ast.Node) Error!void {
+        const class_node = self.ast.nodes[node.data.lhs];
+        const class_name = self.ast.tokenSlice(class_node.main_token);
+        const method_name = self.ast.tokenSlice(node.main_token);
+        const args = self.ast.extraSlice(node.data.rhs);
+        for (args) |arg| try self.compileNode(arg);
+        const class_idx = try self.addConstant(.{ .string = class_name });
+        const method_idx = try self.addConstant(.{ .string = method_name });
+        try self.emitOp(.static_call);
+        try self.emitU16(class_idx);
+        try self.emitU16(method_idx);
+        try self.emitByte(@intCast(args.len));
+    }
+
     fn compileSwitch(self: *Compiler, node: Ast.Node) Error!void {
         const prev_start = self.loop_start;
         const prev_breaks = self.break_jumps;
@@ -797,8 +979,8 @@ const Compiler = struct {
         self.loop_start = null;
 
         try self.compileNode(node.data.lhs);
-        var name_buf: [32]u8 = undefined;
-        const temp_name = std.fmt.bufPrint(&name_buf, "__switch_{d}", .{self.closure_count}) catch "__switch";
+        const temp_name = try std.fmt.allocPrint(self.allocator, "__switch_{d}", .{self.closure_count});
+        try self.string_allocs.append(self.allocator, temp_name);
         self.closure_count += 1;
         const temp_idx = try self.addConstant(.{ .string = temp_name });
         try self.emitOp(.set_var);
@@ -877,8 +1059,8 @@ const Compiler = struct {
 
     fn compileMatch(self: *Compiler, node: Ast.Node) Error!void {
         try self.compileNode(node.data.lhs);
-        var name_buf: [32]u8 = undefined;
-        const temp_name = std.fmt.bufPrint(&name_buf, "__match_{d}", .{self.closure_count}) catch "__match";
+        const temp_name = try std.fmt.allocPrint(self.allocator, "__match_{d}", .{self.closure_count});
+        try self.string_allocs.append(self.allocator, temp_name);
         self.closure_count += 1;
         const temp_idx = try self.addConstant(.{ .string = temp_name });
         try self.emitOp(.set_var);

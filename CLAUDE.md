@@ -211,6 +211,9 @@ build in this order:
 6. `zphp build` (bundle to binary)
 7. `zphp test` (test runner)
 8. `zphp fmt` (formatter)
+9. `zphp serve` (built-in HTTP server with pre-loaded VM pool)
+10. fibers (PHP 8.1 cooperative multitasking)
+11. async I/O hooks (suspend fibers on I/O, optional future work)
 
 each phase should be testable independently. write comprehensive tests at every stage - the test suite is the specification.
 
@@ -259,12 +262,12 @@ phase 1 complete: full pipeline from source to execution. zphp can run real PHP 
 ### what exists
 - `src/pipeline/token.zig` - 145 PHP 8.x token types, case-insensitive keyword lookup (42 tests in lexer)
 - `src/pipeline/lexer.zig` - full PHP lexer with HTML/PHP modal lexing
-- `src/pipeline/ast.zig` - flat array AST, 43 node tags (closure_expr, cast_expr, const_decl, switch_stmt/case/default, match_expr/arm)
-- `src/pipeline/parser.zig` - Pratt-based recursive descent parser with 2-token lookahead for cast detection (52 tests)
-- `src/pipeline/bytecode.zig` - ~54 opcodes (call_indirect, closure_bind, define_const, dup, cast_int/float/string/bool/array), Chunk struct, ObjFunction struct
+- `src/pipeline/ast.zig` - flat array AST, 49 node tags (closure_expr, cast_expr, const_decl, switch_stmt/case/default, match_expr/arm, class_decl/method/property, new_expr, method_call, static_call)
+- `src/pipeline/parser.zig` - Pratt-based recursive descent parser with 2-token lookahead for cast detection, class declaration parsing with visibility modifier skipping, method call detection in property access (52 tests)
+- `src/pipeline/bytecode.zig` - ~60 opcodes (call_indirect, closure_bind, define_const, dup, cast_int/float/string/bool/array, class_decl, new_obj, get_prop, set_prop, method_call, static_call), Chunk struct, ObjFunction struct
 - `src/pipeline/compiler.zig` - single-pass AST -> bytecode compiler with jump patching, function compilation, numeric literal parsing, string interpolation
-- `src/runtime/value.zig` - PHP Value tagged union (null, bool, int, float, string) with arithmetic, truthiness, string-aware comparison, formatting (3 tests)
-- `src/runtime/vm.zig` - stack-based bytecode interpreter with per-frame variable scoping, function calls, closures with captures, arrays, foreach, switch/match, constants table, type casts, native function dispatch, output capture (84 integration tests)
+- `src/runtime/value.zig` - PHP Value tagged union (null, bool, int, float, string, array, object) with arithmetic, truthiness, string-aware comparison, formatting. PhpObject struct with property hashmap (4 tests)
+- `src/runtime/vm.zig` - stack-based bytecode interpreter with per-frame variable scoping, function calls, closures with captures, arrays, foreach, switch/match, constants table, type casts, native function dispatch, class registry, object instantiation, property access, method dispatch with $this binding, output capture (93 integration tests)
 - `src/stdlib/` - 150+ native PHP functions split by domain:
   - `registry.zig` - central registration, imports all domain modules and registers their functions with the VM
   - `strings.zig` - substr/strpos/str_replace/explode/implode/trim/ltrim/rtrim/strtolower/strtoupper/str_contains/str_starts_with/str_ends_with/str_repeat/str_pad/ucfirst/lcfirst/strcmp/strncmp/ord/chr/str_split/substr_count/substr_replace/str_word_count/nl2br/wordwrap/chunk_split/number_format/sprintf/printf/addslashes/stripslashes/htmlspecialchars/htmlspecialchars_decode/html_entity_decode/hex2bin/bin2hex/mb_strlen/mb_substr/mb_strtolower/mb_strtoupper/str_getcsv/base64_encode/base64_decode/urlencode/urldecode/rawurlencode/rawurldecode/md5/sha1/strrev
@@ -275,8 +278,8 @@ phase 1 complete: full pipeline from source to execution. zphp can run real PHP 
   - `io.zig` - file_get_contents/file_put_contents/file_exists/is_file/is_dir/basename/dirname/pathinfo/realpath/time/microtime/date
   - `pcre.zig` - preg_match/preg_match_all/preg_replace/preg_split (FFI bindings to libpcre2)
 - `src/main.zig` - CLI entry point with `zphp run <file>`, imports all modules for test discovery
-- 181 unit tests total across all modules
-- 41 PHP compatibility test files in tests/ verified against PHP 8.3
+- 195 unit tests total across all modules
+- 42 PHP compatibility test files in tests/ verified against PHP 8.3
 
 ### lexer design decisions
 - tokens reference byte offsets into source (zero-copy, no allocations)
@@ -340,8 +343,9 @@ phase 1 complete: full pipeline from source to execution. zphp can run real PHP 
 - foreach: iterate arrays with value only or key => value
 - constants: 40+ predefined PHP constants, `define()`, `const NAME = value`, `defined()`, `constant()`
 - type casting: `(int)`, `(float)`, `(string)`, `(bool)`, `(array)`
-- native functions: 120+ stdlib functions across strings, arrays, math, types, and json (see src/stdlib/ for complete list)
+- native functions: 150+ stdlib functions across strings, arrays, math, types, json, io, pcre (see src/stdlib/ for complete list)
 - string interpolation: `"Hello $name"`, `"{$var}"`, `"$arr[0]"`, `"{$arr['key']}"`, escaped `\$`
+- classes: declaration with properties (with defaults) and methods, `new ClassName(args)`, `$obj->method(args)`, `$obj->prop`, `$this` binding in methods, `__construct` auto-call, `ClassName::method()` static calls
 - echo: single and multi-expression
 - mixed HTML/PHP output
 
@@ -398,6 +402,21 @@ phase 1 complete: full pipeline from source to execution. zphp can run real PHP 
 - match with no matching arm and no default returns null (PHP would throw UnhandledMatchError, but we don't have exceptions yet)
 - `Value.equal` was fixed to do string comparison when both operands are strings (was converting to float, causing `"php" == "js"` to be true)
 
+### class system architecture
+- `PhpObject` struct: `class_name` + `StringHashMapUnmanaged(Value)` for properties. stored as `Value.object` (pointer semantics, like arrays)
+- `ClassDef` struct in VM: name, methods hashmap (name -> arity), properties list (name + default value), optional parent class name
+- class declarations compile methods as `ClassName::methodName` functions in the global function table, then emit `class_decl` opcode with inline metadata (method names/arities, property names/defaults, parent)
+- property default expressions compile BEFORE the `class_decl` opcode so values are on the stack when the opcode handler reads them
+- `new_obj` opcode: creates PhpObject, walks parent chain to init property defaults, looks up `ClassName::__construct` and calls it via `runUntilFrame` (nested execution). constructor gets `$this` in its frame vars
+- `method_call` opcode: object is on stack below args. resolveMethod walks the class parent chain to find `ClassName::methodName`. creates new frame with `$this` bound to the object, sets params, continues execution in the same runLoop (no nested call needed - return_val handles frame pop)
+- `get_prop`/`set_prop` opcodes: pop object from stack, read/write property by name on the PhpObject
+- `static_call` opcode: resolves `ClassName::methodName` and calls via existing `callNamedFunction` (no `$this` binding)
+- property names stripped of `$` prefix at compile time (PHP variables have `$` but property names in objects don't)
+- visibility modifiers (public/protected/private) are parsed and skipped - not enforced yet
+
+### dangling pointer gotcha in temp variable names
+switch/match compilation generates temp variable names like `__match_0` using `std.fmt.allocPrint` (heap allocated, tracked in string_allocs). originally used stack-allocated `bufPrint` which caused use-after-free when the constant pool held a pointer to the expired stack buffer. the bug was latent - only manifested when other changes shifted the stack layout enough to overwrite the buffer. rule: any string stored in the constant pool must be either a source slice or a heap allocation tracked by string_allocs
+
 ### roadmap (in execution order)
 
 each step should unlock the maximum amount of real PHP code with the minimum architecture change. language features and stdlib gaps are interleaved so that each feature is immediately usable.
@@ -422,8 +441,29 @@ remaining:
 
 note: `compact` and `extract` require access to the calling scope's variables, which native functions don't currently have. these may need a VM-level mechanism or special opcode treatment
 
-**4. classes (basic)**
+**4. classes (basic)** (IN PROGRESS)
 declaration, `new`, properties, methods, `$this`, `__construct`. enough to instantiate objects and call methods. this is the minimum viable OOP that unlocks simple class-based code
+
+done:
+- class declaration parsing (skips visibility modifiers, parses methods and properties with defaults)
+- `new ClassName(args)` expression
+- `$obj->method(args)` method calls with `$this` binding
+- `$obj->prop` property read/write
+- `__construct` called automatically on new
+- property defaults set from class definition
+- `ClassName::method()` static call syntax (parsed and compiled, dispatches to `ClassName::method` function)
+- PhpObject struct with string-keyed property hashmap
+- ClassDef registry in VM (name, methods, properties with defaults, optional parent)
+- method resolution walks parent chain for inheritance support
+- `gettype()` returns "object" for objects
+
+remaining:
+- `new ClassName` without parentheses (parser handles it but needs VM-side fix for edge cases)
+- inheritance with `extends` and `parent::` calls
+- `static` methods/properties
+- visibility enforcement (public/protected/private)
+- `instanceof` operator
+- abstract classes, interfaces, traits (step 5)
 
 **5. classes (advanced)**
 inheritance with `extends`, `parent::`, `static` methods/properties, visibility (public/protected/private), abstract classes, interfaces, traits. needed for any real composer package
@@ -439,6 +479,45 @@ functions that return or consume objects: `DateTime`, `SplStack`, `ArrayObject`,
 
 **9. package manager**
 composer.json parsing, packagist API client, semver dependency resolution (SAT solver), install to vendor/, autoloader generation. this is the differentiator that makes zphp a toolchain replacement. depends on classes + file I/O + json
+
+**10. `zphp serve` - built-in HTTP server (pre-loaded VM pool)**
+the primary way to serve PHP applications with zphp. replaces PHP's built-in web server (`php -S`), and makes Swoole/Workerman/FrankenPHP/RoadRunner unnecessary for zphp users.
+
+architecture: two layers, cleanly separated.
+- **zig HTTP layer** (async): accepts connections, parses HTTP, reads/writes responses. uses zig's native I/O (epoll/kqueue/io_uring). this layer is naturally async - the event loop lives here, not in PHP-land
+- **PHP VM layer** (synchronous): PHP scripts execute top-to-bottom within each request. no async primitives needed in PHP code
+
+execution model: on startup, `zphp serve` compiles the application once (parse -> compile to bytecode). spawns N worker threads, each with its own VM instance sharing the compiled bytecode and function/class definitions. incoming requests dispatch to an available worker with a fresh variable scope (clean `$_GET`, `$_POST`, `$_SERVER`, local vars). the scope is wiped after each request, the worker is reused. no re-parsing, no re-compiling, no bootstrap cost per request.
+
+this is what RoadRunner and FrankenPHP worker mode achieve through Go-PHP bridging (Goridge IPC, CGO), but zphp gets it natively - the HTTP server and the PHP VM are in the same binary, same memory space, same language. zero IPC, zero serialization, zero protocol overhead.
+
+key design decisions:
+- application stays loaded. compiled bytecode and function/class tables are shared (read-only) across workers
+- each request gets a clean scope: fresh superglobals, clean local variables, clean output buffer
+- worker count configurable (default: CPU cores). each worker handles one request at a time, sequentially
+- the zig async layer handles connection concurrency (thousands of connections), the PHP layer handles request logic (one at a time per worker)
+- no need for opcache (the bytecode is already in memory), no need for preloading (the app is already loaded)
+
+**11. fibers (PHP 8.1 cooperative multitasking)**
+`Fiber::start()`, `Fiber::suspend()`, `Fiber::resume()`. cooperative multitasking within a single request. each fiber gets its own suspended call frame and stack. this is a VM feature, not a server feature - works with or without `zphp serve`. required for many modern PHP libraries (e.g. ReactPHP, Amp)
+
+**12. async I/O hooks (optional, future)**
+the Swoole play, but native. hook I/O operations (database queries, HTTP calls, file reads) to suspend the current fiber while waiting, allowing other fibers in the same worker to make progress. this turns the synchronous-per-worker model into a concurrent-per-worker model without changing how PHP code looks. this is the most ambitious item - it requires deep integration between the VM's fiber system and the zig HTTP layer's event loop. not needed for the initial `zphp serve` to be fast and useful
+
+## competitive positioning
+
+every existing PHP performance project - PHP-FPM, Swoole, Workerman, FrankenPHP, RoadRunner - orbits the Zend engine. PHP-FPM *is* Zend. Swoole *extends* Zend via a C extension. Workerman *runs on* Zend as pure PHP. FrankenPHP *embeds* Zend into Caddy via CGO. RoadRunner *manages* Zend processes from Go. none of them replace the engine itself. they optimize the layers around it - process model, I/O model, request lifecycle - but the actual PHP interpretation is always Zend.
+
+zphp is the only project that replaces Zend entirely. the analogy is bun: bun replaced V8 + npm + webpack + jest with a single Zig binary. zphp replaces Zend + composer + phpunit + php-cs-fixer with a single Zig binary. this is a fundamentally different bet.
+
+what makes zphp unique:
+- **toolchain unification** - `zphp run`, `zphp install`, `zphp test`, `zphp fmt`, `zphp build`, `zphp serve` - one binary, one tool. no other PHP project does this
+- **compile to standalone binary** - `zphp build` bundles bytecode + runtime into a single executable. this distribution model doesn't exist in the PHP world at all
+- **zero C dependencies in the distributed binary** - pure Zig (pcre2 is linked at build time, baked into the binary). users never need to install anything beyond zphp itself
+- **`zphp serve` with pre-loaded VM** - the HTTP server and the PHP VM are in the same binary, same memory space, same language. no IPC, no serialization, no FastCGI protocol overhead. this is what FrankenPHP and RoadRunner achieve through complex bridging (CGO, Goridge), but zphp gets it natively because the server IS the runtime
+- **fresh memory model** - Zig's allocator model, arena allocation, tagged union values in 16 bytes. no decades of Zend memory management decisions to carry
+
+the tradeoff: existing projects get full Zend compatibility for free (every PECL extension, every C binding, every edge case). zphp earns compatibility function by function, targeting the 95% of semantics that real-world code actually uses.
 
 ## self-improvement
 

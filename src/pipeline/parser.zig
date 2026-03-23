@@ -137,6 +137,7 @@ const Parser = struct {
             .kw_return => self.parseReturnStmt(),
             .kw_break => self.parseSimpleStmt(.break_stmt),
             .kw_continue => self.parseSimpleStmt(.continue_stmt),
+            .kw_class => self.parseClassDecl(),
             .l_brace => self.parseBlock(),
             .semicolon => {
                 _ = self.advance();
@@ -463,6 +464,110 @@ const Parser = struct {
         return self.addNode(.{ .tag = .function_decl, .main_token = name_tok, .data = .{ .lhs = extra, .rhs = body } });
     }
 
+    fn parseNewExpr(self: *Parser) Error!u32 {
+        _ = self.advance(); // new
+        const name_tok = try self.expect(.identifier);
+
+        var args = std.ArrayListUnmanaged(u32){};
+        defer args.deinit(self.allocator);
+
+        if (self.peek() == .l_paren) {
+            _ = self.advance();
+            if (self.peek() != .r_paren) {
+                try args.append(self.allocator, try self.parseExpression());
+                while (self.peek() == .comma) {
+                    _ = self.advance();
+                    if (self.peek() == .r_paren) break;
+                    try args.append(self.allocator, try self.parseExpression());
+                }
+            }
+            _ = try self.expect(.r_paren);
+        }
+
+        const extra = try self.addExtraList(args.items);
+        return self.addNode(.{ .tag = .new_expr, .main_token = name_tok, .data = .{ .lhs = extra } });
+    }
+
+    fn parseClassDecl(self: *Parser) Error!u32 {
+        _ = self.advance(); // class
+        const name_tok = try self.expect(.identifier);
+
+        var parent: u32 = 0;
+        if (self.peek() == .kw_extends) {
+            _ = self.advance();
+            parent = try self.addLiteral(.identifier);
+        }
+
+        _ = try self.expect(.l_brace);
+
+        var members = std.ArrayListUnmanaged(u32){};
+        defer members.deinit(self.allocator);
+
+        while (self.peek() != .r_brace and self.peek() != .eof) {
+            // skip visibility modifiers
+            while (self.peek() == .kw_public or self.peek() == .kw_protected or
+                self.peek() == .kw_private or self.peek() == .kw_static or
+                self.peek() == .kw_abstract or self.peek() == .kw_readonly)
+            {
+                _ = self.advance();
+            }
+
+            if (self.peek() == .kw_function) {
+                try members.append(self.allocator, try self.parseClassMethod());
+            } else if (self.peek() == .variable) {
+                try members.append(self.allocator, try self.parseClassProperty());
+            } else if (self.peek() == .kw_const) {
+                try members.append(self.allocator, try self.parseConstDecl());
+            } else {
+                _ = self.advance();
+            }
+        }
+        _ = try self.expect(.r_brace);
+
+        const extra = try self.addExtraList(members.items);
+        return self.addNode(.{ .tag = .class_decl, .main_token = name_tok, .data = .{ .lhs = extra, .rhs = parent } });
+    }
+
+    fn parseClassMethod(self: *Parser) Error!u32 {
+        _ = self.advance(); // function
+        const name_tok = try self.expect(.identifier);
+        _ = try self.expect(.l_paren);
+
+        var params = std.ArrayListUnmanaged(u32){};
+        defer params.deinit(self.allocator);
+
+        if (self.peek() != .r_paren) {
+            try params.append(self.allocator, try self.parseParam());
+            while (self.peek() == .comma) {
+                _ = self.advance();
+                try params.append(self.allocator, try self.parseParam());
+            }
+        }
+        _ = try self.expect(.r_paren);
+
+        // skip optional return type hint
+        if (self.peek() == .colon) {
+            _ = self.advance();
+            if (self.peek() == .question) _ = self.advance();
+            _ = self.advance();
+        }
+
+        const body = try self.parseBlock();
+        const extra = try self.addExtraList(params.items);
+        return self.addNode(.{ .tag = .class_method, .main_token = name_tok, .data = .{ .lhs = extra, .rhs = body } });
+    }
+
+    fn parseClassProperty(self: *Parser) Error!u32 {
+        const tok = self.advance(); // $variable
+        var default: u32 = 0;
+        if (self.peek() == .equal) {
+            _ = self.advance();
+            default = try self.parseExpression();
+        }
+        _ = try self.expect(.semicolon);
+        return self.addNode(.{ .tag = .class_property, .main_token = tok, .data = .{ .lhs = default } });
+    }
+
     fn parseClosureExpr(self: *Parser) Error!u32 {
         const fn_tok = self.advance(); // function
         _ = try self.expect(.l_paren);
@@ -590,6 +695,10 @@ const Parser = struct {
                     left = try self.parsePropExpr(left);
                     continue;
                 },
+                .colon_colon => {
+                    left = try self.parseStaticAccess(left);
+                    continue;
+                },
                 .plus_plus, .minus_minus => {
                     if (20 > min_prec) {
                         const tok = self.advance();
@@ -635,11 +744,12 @@ const Parser = struct {
                 const operand = try self.parseExprPrec(18);
                 return self.addNode(.{ .tag = .prefix_op, .main_token = tok, .data = .{ .lhs = operand } });
             },
-            .kw_clone, .kw_new => {
+            .kw_clone => {
                 const tok = self.advance();
                 const operand = try self.parseExprPrec(18);
                 return self.addNode(.{ .tag = .prefix_op, .main_token = tok, .data = .{ .lhs = operand } });
             },
+            .kw_new => return self.parseNewExpr(),
             else => return self.parsePrimaryExpr(),
         }
     }
@@ -772,13 +882,64 @@ const Parser = struct {
     }
 
     fn parsePropExpr(self: *Parser, object: u32) Error!u32 {
-        const arrow_tok = self.advance(); // ->
+        _ = self.advance(); // ->
         if (self.peek() != .identifier and self.peek() != .variable) {
             try self.addError(.expected_identifier);
             return error.ParseError;
         }
-        const prop = try self.addLiteral(if (self.peek() == .variable) .variable else .identifier);
-        return self.addNode(.{ .tag = .property_access, .main_token = arrow_tok, .data = .{ .lhs = object, .rhs = prop } });
+        const name_tok = self.advance();
+
+        // method call: $obj->method(...)
+        if (self.peek() == .l_paren) {
+            _ = self.advance(); // (
+            var args = std.ArrayListUnmanaged(u32){};
+            defer args.deinit(self.allocator);
+
+            if (self.peek() != .r_paren) {
+                try args.append(self.allocator, try self.parseExpression());
+                while (self.peek() == .comma) {
+                    _ = self.advance();
+                    if (self.peek() == .r_paren) break;
+                    try args.append(self.allocator, try self.parseExpression());
+                }
+            }
+            _ = try self.expect(.r_paren);
+
+            const extra = try self.addExtraList(args.items);
+            return self.addNode(.{ .tag = .method_call, .main_token = name_tok, .data = .{ .lhs = object, .rhs = extra } });
+        }
+
+        // property access: $obj->prop
+        const prop = try self.addNode(.{ .tag = .identifier, .main_token = name_tok, .data = .{} });
+        return self.addNode(.{ .tag = .property_access, .main_token = name_tok, .data = .{ .lhs = object, .rhs = prop } });
+    }
+
+    fn parseStaticAccess(self: *Parser, class_node: u32) Error!u32 {
+        _ = self.advance(); // ::
+        const name_tok = try self.expect(.identifier);
+
+        if (self.peek() == .l_paren) {
+            _ = self.advance();
+            var args = std.ArrayListUnmanaged(u32){};
+            defer args.deinit(self.allocator);
+
+            if (self.peek() != .r_paren) {
+                try args.append(self.allocator, try self.parseExpression());
+                while (self.peek() == .comma) {
+                    _ = self.advance();
+                    if (self.peek() == .r_paren) break;
+                    try args.append(self.allocator, try self.parseExpression());
+                }
+            }
+            _ = try self.expect(.r_paren);
+
+            const extra = try self.addExtraList(args.items);
+            return self.addNode(.{ .tag = .static_call, .main_token = name_tok, .data = .{ .lhs = class_node, .rhs = extra } });
+        }
+
+        // static property access could go here, but for now just treat as property
+        const prop = try self.addNode(.{ .tag = .identifier, .main_token = name_tok, .data = .{} });
+        return self.addNode(.{ .tag = .property_access, .main_token = name_tok, .data = .{ .lhs = class_node, .rhs = prop } });
     }
 
     fn parseTernary(self: *Parser, cond: u32) Error!u32 {
@@ -1203,6 +1364,52 @@ fn renderNode(ast: *const Ast, idx: u32, buf: *Buf) !void {
             try w.writeByte(')');
         },
         .inline_html => try w.writeAll("(html)"),
+        .class_decl => {
+            try w.writeAll("(class ");
+            try w.writeAll(ast.tokenSlice(node.main_token));
+            try w.writeByte(')');
+        },
+        .class_method => {
+            try w.writeAll("(method ");
+            try w.writeAll(ast.tokenSlice(node.main_token));
+            try w.writeByte(')');
+        },
+        .class_property => {
+            try w.writeAll("(prop ");
+            try w.writeAll(ast.tokenSlice(node.main_token));
+            try w.writeByte(')');
+        },
+        .new_expr => {
+            try w.writeAll("(new ");
+            try w.writeAll(ast.tokenSlice(node.main_token));
+            for (ast.extraSlice(node.data.lhs)) |arg| {
+                try w.writeByte(' ');
+                try renderNode(ast, arg, buf);
+            }
+            try w.writeByte(')');
+        },
+        .method_call => {
+            try w.writeAll("(-> ");
+            try renderNode(ast, node.data.lhs, buf);
+            try w.writeByte(' ');
+            try w.writeAll(ast.tokenSlice(node.main_token));
+            for (ast.extraSlice(node.data.rhs)) |arg| {
+                try w.writeByte(' ');
+                try renderNode(ast, arg, buf);
+            }
+            try w.writeByte(')');
+        },
+        .static_call => {
+            try w.writeAll("(:: ");
+            try renderNode(ast, node.data.lhs, buf);
+            try w.writeByte(' ');
+            try w.writeAll(ast.tokenSlice(node.main_token));
+            for (ast.extraSlice(node.data.rhs)) |arg| {
+                try w.writeByte(' ');
+                try renderNode(ast, arg, buf);
+            }
+            try w.writeByte(')');
+        },
         .root => {},
     }
 }
@@ -1353,7 +1560,7 @@ test "property access" {
 }
 
 test "method call" {
-    try expectParse("<?php $a->b();", "(call (-> $a b))");
+    try expectParse("<?php $a->b();", "(-> $a b)");
 }
 
 test "chained access" {
