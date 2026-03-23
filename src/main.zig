@@ -89,5 +89,7 @@ test {
     _ = @import("pipeline/compiler.zig");
     _ = @import("runtime/value.zig");
     _ = @import("runtime/vm.zig");
+    _ = @import("runtime/builtins.zig");
     _ = @import("stdlib/registry.zig");
+    _ = @import("integration_tests.zig");
 }
