@@ -84,9 +84,16 @@ pub const VM = struct {
     captures: std.ArrayListUnmanaged(CaptureEntry) = .{},
     php_constants: std.StringHashMapUnmanaged(Value) = .{},
     classes: std.StringHashMapUnmanaged(ClassDef) = .{},
+    statics: std.StringHashMapUnmanaged(Value) = .{},
+    static_vars: std.ArrayListUnmanaged(StaticEntry) = .{},
     exception_handlers: [32]ExceptionHandler = undefined,
     handler_count: usize = 0,
     allocator: Allocator,
+
+    const StaticEntry = struct {
+        var_name: []const u8,
+        frame_depth: usize,
+    };
 
     const ExceptionHandler = struct {
         catch_ip: usize, // absolute IP to jump to on throw
@@ -176,6 +183,11 @@ pub const VM = struct {
         var class_iter = self.classes.valueIterator();
         while (class_iter.next()) |c| c.deinit(self.allocator);
         self.classes.deinit(self.allocator);
+        // free statics keys (heap allocated)
+        var statics_iter = self.statics.keyIterator();
+        while (statics_iter.next()) |k| self.allocator.free(k.*);
+        self.statics.deinit(self.allocator);
+        self.static_vars.deinit(self.allocator);
     }
 
     pub fn interpret(self: *VM, result: *const CompileResult) RuntimeError!void {
@@ -369,12 +381,14 @@ pub const VM = struct {
                 },
                 .return_val => {
                     const result = self.pop();
+                    try self.writebackStatics();
                     self.frame_count -= 1;
                     self.frames[self.frame_count].vars.deinit(self.allocator);
                     self.push(result);
                     if (self.frame_count <= base_frame) return;
                 },
                 .return_void => {
+                    try self.writebackStatics();
                     self.frame_count -= 1;
                     self.frames[self.frame_count].vars.deinit(self.allocator);
                     self.push(.null);
@@ -538,6 +552,46 @@ pub const VM = struct {
                 .pop_handler => {
                     if (self.handler_count > 0) self.handler_count -= 1;
                 },
+
+                .get_global => {
+                    const name_idx = self.readU16();
+                    const name = self.currentChunk().constants.items[name_idx].string;
+                    // copy variable from frame 0 (global scope)
+                    const global_val = if (self.frame_count > 1)
+                        self.frames[0].vars.get(name) orelse
+                            self.php_constants.get(name) orelse .null
+                    else
+                        self.currentFrame().vars.get(name) orelse .null;
+                    try self.currentFrame().vars.put(self.allocator, name, global_val);
+                },
+
+                .get_static => {
+                    const name_idx = self.readU16();
+                    const var_name = self.currentChunk().constants.items[name_idx].string;
+                    const val = self.getStaticVar(var_name);
+                    self.push(val);
+                    // register for writeback on frame exit
+                    try self.static_vars.append(self.allocator, .{
+                        .var_name = var_name,
+                        .frame_depth = self.frame_count,
+                    });
+                },
+
+                .set_static => {},
+
+                .array_spread => {
+                    // pop source array, spread its elements into the array on top of stack
+                    const src = self.pop();
+                    if (src == .array) {
+                        const target = self.peek();
+                        if (target == .array) {
+                            for (src.array.entries.items) |entry| {
+                                try target.array.append(self.allocator, entry.value);
+                            }
+                        }
+                    }
+                },
+                .splat_call => {},
 
                 .instance_check => {
                     const class_name_val = self.pop();
@@ -805,6 +859,54 @@ pub const VM = struct {
         }
     }
 
+    fn writebackStatics(self: *VM) !void {
+        var i: usize = 0;
+        while (i < self.static_vars.items.len) {
+            const entry = self.static_vars.items[i];
+            if (entry.frame_depth == self.frame_count) {
+                // save current value back to statics table
+                const val = self.currentFrame().vars.get(entry.var_name) orelse .null;
+                try self.setStaticVar(entry.var_name, val);
+                _ = self.static_vars.swapRemove(i);
+            } else {
+                i += 1;
+            }
+        }
+    }
+
+    fn getStaticVar(self: *VM, var_name: []const u8) Value {
+        // key is the function name we're currently in + "::" + var name
+        // find current function name from the chunk pointer
+        const func_name = self.currentFuncName() orelse "__main__";
+        var key_buf: [256]u8 = undefined;
+        const key = std.fmt.bufPrint(&key_buf, "{s}::{s}", .{ func_name, var_name }) catch return .null;
+        // need to look up with a runtime key - use the statics table
+        return self.statics.get(key) orelse .null;
+    }
+
+    fn setStaticVar(self: *VM, var_name: []const u8, val: Value) !void {
+        const func_name = self.currentFuncName() orelse "__main__";
+        var key_buf: [256]u8 = undefined;
+        const lookup = std.fmt.bufPrint(&key_buf, "{s}::{s}", .{ func_name, var_name }) catch return;
+        if (self.statics.getEntry(lookup)) |entry| {
+            entry.value_ptr.* = val;
+        } else {
+            const key = try std.fmt.allocPrint(self.allocator, "{s}::{s}", .{ func_name, var_name });
+            try self.statics.put(self.allocator, key, val);
+        }
+    }
+
+    fn currentFuncName(self: *VM) ?[]const u8 {
+        const chunk_ptr = self.currentChunk();
+        var it = self.functions.iterator();
+        while (it.next()) |entry| {
+            if (entry.value_ptr.*.chunk.code.items.ptr == chunk_ptr.code.items.ptr) {
+                return entry.key_ptr.*;
+            }
+        }
+        return null;
+    }
+
     fn isInstanceOf(self: *VM, obj_class: []const u8, target_class: []const u8) bool {
         var current = obj_class;
         while (true) {
@@ -891,23 +993,44 @@ pub const VM = struct {
             self.push(try native(&ctx, args[0..ac]));
         } else if (self.functions.get(name)) |func| {
             const ac: usize = arg_count;
-            if (ac < func.required_params or ac > func.arity) return error.RuntimeError;
+            if (!func.is_variadic and (ac < func.required_params or ac > func.arity))
+                return error.RuntimeError;
+            if (func.is_variadic and ac < func.required_params)
+                return error.RuntimeError;
             var new_vars: std.StringHashMapUnmanaged(Value) = .{};
             for (self.captures.items) |cap| {
                 if (std.mem.eql(u8, cap.closure_name, name)) {
                     try new_vars.put(self.allocator, cap.var_name, cap.value);
                 }
             }
-            for (0..ac) |i| {
-                try new_vars.put(self.allocator, func.params[i], self.stack[self.sp - ac + i]);
+            if (func.is_variadic) {
+                // bind non-variadic params normally
+                const fixed: usize = func.arity - 1;
+                for (0..@min(ac, fixed)) |i| {
+                    try new_vars.put(self.allocator, func.params[i], self.stack[self.sp - ac + i]);
+                }
+                // collect remaining args into an array for the variadic param
+                const rest_arr = try self.allocator.create(PhpArray);
+                rest_arr.* = .{};
+                for (fixed..ac) |i| {
+                    try rest_arr.append(self.allocator, self.stack[self.sp - ac + i]);
+                }
+                try self.arrays.append(self.allocator, rest_arr);
+                try new_vars.put(self.allocator, func.params[fixed], .{ .array = rest_arr });
+            } else {
+                for (0..ac) |i| {
+                    try new_vars.put(self.allocator, func.params[i], self.stack[self.sp - ac + i]);
+                }
             }
             self.sp -= ac;
-            // fill missing params with defaults
-            for (ac..func.arity) |i| {
-                if (i < func.defaults.len) {
-                    try new_vars.put(self.allocator, func.params[i], func.defaults[i]);
-                } else {
-                    try new_vars.put(self.allocator, func.params[i], .null);
+            // fill missing non-variadic params with defaults
+            if (!func.is_variadic) {
+                for (ac..func.arity) |i| {
+                    if (i < func.defaults.len) {
+                        try new_vars.put(self.allocator, func.params[i], func.defaults[i]);
+                    } else {
+                        try new_vars.put(self.allocator, func.params[i], .null);
+                    }
                 }
             }
             self.frames[self.frame_count] = .{ .chunk = &func.chunk, .ip = 0, .vars = new_vars };

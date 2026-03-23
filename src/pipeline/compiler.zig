@@ -69,10 +69,16 @@ const Compiler = struct {
     allocator: Allocator,
     scope_depth: u32,
     loop_start: ?usize,
-    break_jumps: std.ArrayListUnmanaged(usize),
-    continue_jumps: std.ArrayListUnmanaged(usize),
+    break_jumps: std.ArrayListUnmanaged(LoopJump),
+    continue_jumps: std.ArrayListUnmanaged(LoopJump),
     use_continue_jumps: bool = false,
+    loop_depth: u32 = 0,
     closure_count: u32 = 0,
+
+    const LoopJump = struct {
+        offset: usize,
+        depth: u32,
+    };
 
     // ==================================================================
     // node dispatch
@@ -100,14 +106,29 @@ const Compiler = struct {
                 }
             },
             .break_stmt => {
+                const level = if (node.data.lhs > 0) node.data.lhs else 1;
                 const j = try self.emitJump(.jump);
-                try self.break_jumps.append(self.allocator, j);
+                try self.break_jumps.append(self.allocator, .{
+                    .offset = j,
+                    .depth = self.loop_depth -| (level - 1),
+                });
             },
             .continue_stmt => {
                 if (self.loop_start) |start| {
-                    if (self.use_continue_jumps) {
+                    const level = if (node.data.lhs > 0) node.data.lhs else 1;
+                    if (level > 1) {
+                        // multi-level continue: emit as forward jump, parent loop handles it
                         const j = try self.emitJump(.jump);
-                        try self.continue_jumps.append(self.allocator, j);
+                        try self.continue_jumps.append(self.allocator, .{
+                            .offset = j,
+                            .depth = self.loop_depth -| (level - 1),
+                        });
+                    } else if (self.use_continue_jumps) {
+                        const j = try self.emitJump(.jump);
+                        try self.continue_jumps.append(self.allocator, .{
+                            .offset = j,
+                            .depth = self.loop_depth,
+                        });
                     } else {
                         try self.emitLoop(start);
                     }
@@ -171,9 +192,20 @@ const Compiler = struct {
             .new_expr => try self.compileNewExpr(node),
             .method_call => try self.compileMethodCall(node),
             .static_call => try self.compileStaticCall(node),
+            .expr_list => {
+                const exprs = self.ast.extraSlice(node.data.lhs);
+                for (exprs, 0..) |expr, i| {
+                    if (i > 0) try self.emitOp(.pop);
+                    try self.compileNode(expr);
+                }
+            },
             .array_literal => try self.compileArrayLiteral(node),
             .array_element => {},
+            .array_spread => {},
             .grouped_expr => try self.compileNode(node.data.lhs),
+            .global_stmt => try self.compileGlobal(node),
+            .static_var => try self.compileStaticVar(node),
+            .splat_expr => {},
             .root => {},
         }
     }
@@ -685,10 +717,36 @@ const Compiler = struct {
         self.patchJump(else_jump);
     }
 
+    fn patchBreaks(self: *Compiler, prev_breaks: *std.ArrayListUnmanaged(LoopJump)) Error!void {
+        for (self.break_jumps.items) |bj| {
+            if (bj.depth < self.loop_depth) {
+                // target is an outer loop - propagate up
+                try prev_breaks.append(self.allocator, bj);
+            } else {
+                self.patchJump(bj.offset);
+            }
+        }
+        self.break_jumps.deinit(self.allocator);
+    }
+
+    fn patchContinues(self: *Compiler, prev_continues: *std.ArrayListUnmanaged(LoopJump)) Error!void {
+        for (self.continue_jumps.items) |cj| {
+            if (cj.depth < self.loop_depth) {
+                try prev_continues.append(self.allocator, cj);
+            } else {
+                self.patchJump(cj.offset);
+            }
+        }
+        self.continue_jumps.deinit(self.allocator);
+    }
+
     fn compileWhile(self: *Compiler, node: Ast.Node) Error!void {
         const prev_start = self.loop_start;
-        const prev_breaks = self.break_jumps;
+        var prev_breaks = self.break_jumps;
+        var prev_continues = self.continue_jumps;
         self.break_jumps = .{};
+        self.continue_jumps = .{};
+        self.loop_depth += 1;
 
         const loop_top = self.chunk.offset();
         self.loop_start = loop_top;
@@ -701,16 +759,21 @@ const Compiler = struct {
         self.patchJump(exit_jump);
         try self.emitOp(.pop);
 
-        for (self.break_jumps.items) |bj| self.patchJump(bj);
-        self.break_jumps.deinit(self.allocator);
+        try self.patchBreaks(&prev_breaks);
+        try self.patchContinues(&prev_continues);
         self.break_jumps = prev_breaks;
+        self.continue_jumps = prev_continues;
+        self.loop_depth -= 1;
         self.loop_start = prev_start;
     }
 
     fn compileDoWhile(self: *Compiler, node: Ast.Node) Error!void {
         const prev_start = self.loop_start;
-        const prev_breaks = self.break_jumps;
+        var prev_breaks = self.break_jumps;
+        var prev_continues = self.continue_jumps;
         self.break_jumps = .{};
+        self.continue_jumps = .{};
+        self.loop_depth += 1;
 
         const loop_top = self.chunk.offset();
         self.loop_start = loop_top;
@@ -723,9 +786,11 @@ const Compiler = struct {
         self.patchJump(exit_jump);
         try self.emitOp(.pop);
 
-        for (self.break_jumps.items) |bj| self.patchJump(bj);
-        self.break_jumps.deinit(self.allocator);
+        try self.patchBreaks(&prev_breaks);
+        try self.patchContinues(&prev_continues);
         self.break_jumps = prev_breaks;
+        self.continue_jumps = prev_continues;
+        self.loop_depth -= 1;
         self.loop_start = prev_start;
     }
 
@@ -735,12 +800,13 @@ const Compiler = struct {
         const update_n = self.ast.extra_data[node.data.lhs + 2];
 
         const prev_start = self.loop_start;
-        const prev_breaks = self.break_jumps;
-        const prev_continues = self.continue_jumps;
+        var prev_breaks = self.break_jumps;
+        var prev_continues = self.continue_jumps;
         const prev_use_cj = self.use_continue_jumps;
         self.break_jumps = .{};
         self.continue_jumps = .{};
         self.use_continue_jumps = (update_n != 0);
+        self.loop_depth += 1;
 
         if (init_n != 0) {
             try self.compileNode(init_n);
@@ -759,9 +825,8 @@ const Compiler = struct {
 
         try self.compileNode(node.data.rhs);
 
-        // continue lands here - patch all continue forward jumps
-        for (self.continue_jumps.items) |cj| self.patchJump(cj);
-        self.continue_jumps.deinit(self.allocator);
+        // continue lands here - patch continue forward jumps for this depth
+        try self.patchContinues(&prev_continues);
 
         if (update_n != 0) {
             try self.compileNode(update_n);
@@ -775,11 +840,11 @@ const Compiler = struct {
             try self.emitOp(.pop);
         }
 
-        for (self.break_jumps.items) |bj| self.patchJump(bj);
-        self.break_jumps.deinit(self.allocator);
+        try self.patchBreaks(&prev_breaks);
         self.break_jumps = prev_breaks;
         self.continue_jumps = prev_continues;
         self.use_continue_jumps = prev_use_cj;
+        self.loop_depth -= 1;
         self.loop_start = prev_start;
     }
 
@@ -797,11 +862,16 @@ const Compiler = struct {
         defer defaults.deinit(self.allocator);
         var required: u8 = 0;
         var seen_default = false;
+        var is_variadic = false;
 
         for (param_nodes, 0..) |p, i| {
             const pnode = self.ast.nodes[p];
             param_names[i] = self.ast.tokenSlice(pnode.main_token);
-            if (pnode.data.lhs != 0) {
+            if (pnode.data.rhs == 1) {
+                // variadic param - always last
+                is_variadic = true;
+                try defaults.append(self.allocator, .null);
+            } else if (pnode.data.lhs != 0) {
                 seen_default = true;
                 try defaults.append(self.allocator, self.evalConstExpr(pnode.data.lhs));
             } else {
@@ -809,7 +879,7 @@ const Compiler = struct {
                 try defaults.append(self.allocator, .null);
             }
         }
-        if (!seen_default) required = @intCast(param_nodes.len);
+        if (!seen_default and !is_variadic) required = @intCast(param_nodes.len);
 
         const defaults_owned = try self.allocator.alloc(Value, defaults.items.len);
         @memcpy(defaults_owned, defaults.items);
@@ -842,6 +912,7 @@ const Compiler = struct {
             .name = name,
             .arity = @intCast(param_nodes.len),
             .required_params = required,
+            .is_variadic = is_variadic,
             .params = param_names[0..param_nodes.len],
             .defaults = defaults_owned,
             .chunk = sub.chunk,
@@ -1224,7 +1295,7 @@ const Compiler = struct {
         }
 
         if (end_no_match) |j| self.patchJump(j);
-        for (self.break_jumps.items) |bj| self.patchJump(bj);
+        for (self.break_jumps.items) |bj| self.patchJump(bj.offset);
         self.break_jumps.deinit(self.allocator);
         self.break_jumps = prev_breaks;
         self.loop_start = prev_start;
@@ -1405,7 +1476,10 @@ const Compiler = struct {
         try self.emitOp(.array_new);
         for (self.ast.extraSlice(node.data.lhs)) |elem_idx| {
             const elem = self.ast.nodes[elem_idx];
-            if (elem.data.rhs != 0) {
+            if (elem.tag == .array_spread) {
+                try self.compileNode(elem.data.lhs);
+                try self.emitOp(.array_spread);
+            } else if (elem.data.rhs != 0) {
                 try self.compileNode(elem.data.rhs);
                 try self.compileNode(elem.data.lhs);
                 try self.emitOp(.array_set_elem);
@@ -1414,6 +1488,37 @@ const Compiler = struct {
                 try self.emitOp(.array_push);
             }
         }
+    }
+
+    fn compileGlobal(self: *Compiler, node: Ast.Node) Error!void {
+        for (self.ast.extraSlice(node.data.lhs)) |var_idx| {
+            const var_node = self.ast.nodes[var_idx];
+            const name = self.ast.tokenSlice(var_node.main_token);
+            const name_idx = try self.addConstant(.{ .string = name });
+            try self.emitOp(.get_global);
+            try self.emitU16(name_idx);
+        }
+    }
+
+    fn compileStaticVar(self: *Compiler, node: Ast.Node) Error!void {
+        const var_name = self.ast.tokenSlice(node.main_token);
+        const var_idx = try self.addConstant(.{ .string = var_name });
+
+        // get_static pushes the current value (or null if uninitialized)
+        // VM derives the storage key from current function name + var name
+        try self.emitOp(.get_static);
+        try self.emitU16(var_idx);
+
+        // if null (first call), initialize with default
+        if (node.data.lhs != 0) {
+            const skip = try self.emitJump(.jump_if_not_null);
+            try self.emitOp(.pop);
+            try self.compileNode(node.data.lhs);
+            self.patchJump(skip);
+        }
+
+        try self.emitOp(.set_var);
+        try self.emitU16(var_idx);
     }
 
     fn compileArrayAccess(self: *Compiler, node: Ast.Node) Error!void {
@@ -1428,8 +1533,11 @@ const Compiler = struct {
         const key_n = self.ast.extra_data[node.data.lhs + 2];
 
         const prev_start = self.loop_start;
-        const prev_breaks = self.break_jumps;
+        var prev_breaks = self.break_jumps;
+        var prev_continues = self.continue_jumps;
         self.break_jumps = .{};
+        self.continue_jumps = .{};
+        self.loop_depth += 1;
 
         try self.compileNode(iter_n);
         try self.emitOp(.iter_begin);
@@ -1462,9 +1570,11 @@ const Compiler = struct {
         self.patchJump(exit_jump);
         try self.emitOp(.iter_end);
 
-        for (self.break_jumps.items) |bj| self.patchJump(bj);
-        self.break_jumps.deinit(self.allocator);
+        try self.patchBreaks(&prev_breaks);
+        try self.patchContinues(&prev_continues);
         self.break_jumps = prev_breaks;
+        self.continue_jumps = prev_continues;
+        self.loop_depth -= 1;
         self.loop_start = prev_start;
     }
 

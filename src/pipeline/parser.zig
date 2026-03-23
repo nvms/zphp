@@ -135,12 +135,14 @@ const Parser = struct {
             .kw_const => self.parseConstDecl(),
             .kw_switch => self.parseSwitchStmt(),
             .kw_return => self.parseReturnStmt(),
-            .kw_break => self.parseSimpleStmt(.break_stmt),
-            .kw_continue => self.parseSimpleStmt(.continue_stmt),
+            .kw_break => self.parseBreakContinue(.break_stmt),
+            .kw_continue => self.parseBreakContinue(.continue_stmt),
             .kw_class => self.parseClassDecl(),
             .kw_throw => self.parseThrowStmt(),
             .kw_try => self.parseTryCatch(),
             .kw_declare => self.skipDeclare(),
+            .kw_global => self.parseGlobalStmt(),
+            .kw_static => self.parseStaticVarStmt(),
             .l_brace => self.parseBlock(),
             .semicolon => {
                 _ = self.advance();
@@ -167,6 +169,40 @@ const Parser = struct {
         }
         if (self.peek() == .semicolon) _ = self.advance();
         return self.parseStatement();
+    }
+
+    fn parseGlobalStmt(self: *Parser) Error!u32 {
+        const tok = self.advance(); // global
+        var vars = std.ArrayListUnmanaged(u32){};
+        defer vars.deinit(self.allocator);
+        try vars.append(self.allocator, try self.addNode(.{
+            .tag = .variable,
+            .main_token = try self.expect(.variable),
+            .data = .{},
+        }));
+        while (self.peek() == .comma) {
+            _ = self.advance();
+            try vars.append(self.allocator, try self.addNode(.{
+                .tag = .variable,
+                .main_token = try self.expect(.variable),
+                .data = .{},
+            }));
+        }
+        _ = try self.expect(.semicolon);
+        const extra = try self.addExtraList(vars.items);
+        return self.addNode(.{ .tag = .global_stmt, .main_token = tok, .data = .{ .lhs = extra } });
+    }
+
+    fn parseStaticVarStmt(self: *Parser) Error!u32 {
+        _ = self.advance(); // static
+        const var_tok = try self.expect(.variable);
+        var default: u32 = 0;
+        if (self.peek() == .equal) {
+            _ = self.advance();
+            default = try self.parseExpression();
+        }
+        _ = try self.expect(.semicolon);
+        return self.addNode(.{ .tag = .static_var, .main_token = var_tok, .data = .{ .lhs = default } });
     }
 
     fn parseExpressionStmt(self: *Parser) Error!u32 {
@@ -207,6 +243,18 @@ const Parser = struct {
         }
         _ = try self.expect(.semicolon);
         return self.addNode(.{ .tag = .return_stmt, .main_token = tok, .data = .{ .lhs = expr } });
+    }
+
+    fn parseBreakContinue(self: *Parser, tag: NodeTag) Error!u32 {
+        const tok = self.advance();
+        var level: u32 = 0;
+        if (self.peek() == .integer) {
+            const lit = self.tokens[self.pos].lexeme(self.source);
+            level = std.fmt.parseInt(u32, lit, 10) catch 1;
+            _ = self.advance();
+        }
+        _ = try self.expect(.semicolon);
+        return self.addNode(.{ .tag = tag, .main_token = tok, .data = .{ .lhs = level } });
     }
 
     fn parseSimpleStmt(self: *Parser, tag: NodeTag) Error!u32 {
@@ -287,16 +335,32 @@ const Parser = struct {
         const tok = self.advance();
         _ = try self.expect(.l_paren);
 
-        const init = if (self.peek() != .semicolon) try self.parseExpression() else @as(u32, 0);
+        const init = if (self.peek() != .semicolon) try self.parseForExprList() else @as(u32, 0);
         _ = try self.expect(.semicolon);
         const cond = if (self.peek() != .semicolon) try self.parseExpression() else @as(u32, 0);
         _ = try self.expect(.semicolon);
-        const update = if (self.peek() != .r_paren) try self.parseExpression() else @as(u32, 0);
+        const update = if (self.peek() != .r_paren) try self.parseForExprList() else @as(u32, 0);
         _ = try self.expect(.r_paren);
 
         const body = try self.parseStatementOrBlock();
         const extra = try self.addExtra(&.{ init, cond, update });
         return self.addNode(.{ .tag = .for_stmt, .main_token = tok, .data = .{ .lhs = extra, .rhs = body } });
+    }
+
+    // parse comma-separated expressions for for-loop init/update
+    // returns a single expression node if only one, or an expr_list node
+    fn parseForExprList(self: *Parser) Error!u32 {
+        const first = try self.parseExpression();
+        if (self.peek() != .comma) return first;
+        var exprs = std.ArrayListUnmanaged(u32){};
+        defer exprs.deinit(self.allocator);
+        try exprs.append(self.allocator, first);
+        while (self.peek() == .comma) {
+            _ = self.advance();
+            try exprs.append(self.allocator, try self.parseExpression());
+        }
+        const extra = try self.addExtraList(exprs.items);
+        return self.addNode(.{ .tag = .expr_list, .main_token = 0, .data = .{ .lhs = extra } });
     }
 
     fn parseForeachStmt(self: *Parser) Error!u32 {
@@ -804,13 +868,18 @@ const Parser = struct {
         if (self.isTypeName() or self.peek() == .question or self.peek() == .l_paren) {
             self.skipTypeHint();
         }
+        // variadic: ...$args
+        const is_variadic = self.peek() == .ellipsis;
+        if (is_variadic) _ = self.advance();
+
         const tok = try self.expect(.variable);
         var default: u32 = 0;
         if (self.peek() == .equal) {
             _ = self.advance();
             default = try self.parseExpression();
         }
-        return self.addNode(.{ .tag = .variable, .main_token = tok, .data = .{ .lhs = default } });
+        // rhs = 1 means variadic
+        return self.addNode(.{ .tag = .variable, .main_token = tok, .data = .{ .lhs = default, .rhs = if (is_variadic) 1 else 0 } });
     }
 
     // ======================================================================
@@ -986,6 +1055,11 @@ const Parser = struct {
     }
 
     fn parseArrayElement(self: *Parser) Error!u32 {
+        if (self.peek() == .ellipsis) {
+            _ = self.advance();
+            const expr = try self.parseExpression();
+            return self.addNode(.{ .tag = .array_spread, .main_token = 0, .data = .{ .lhs = expr } });
+        }
         const expr = try self.parseExpression();
         if (self.peek() == .fat_arrow) {
             _ = self.advance();
@@ -1005,17 +1079,26 @@ const Parser = struct {
         defer args.deinit(self.allocator);
 
         if (self.peek() != .r_paren) {
-            try args.append(self.allocator, try self.parseExpression());
+            try args.append(self.allocator, try self.parseCallArg());
             while (self.peek() == .comma) {
                 _ = self.advance();
                 if (self.peek() == .r_paren) break;
-                try args.append(self.allocator, try self.parseExpression());
+                try args.append(self.allocator, try self.parseCallArg());
             }
         }
         _ = try self.expect(.r_paren);
 
         const extra = try self.addExtraList(args.items);
         return self.addNode(.{ .tag = .call, .main_token = paren_tok, .data = .{ .lhs = callee, .rhs = extra } });
+    }
+
+    fn parseCallArg(self: *Parser) Error!u32 {
+        if (self.peek() == .ellipsis) {
+            _ = self.advance();
+            const expr = try self.parseExpression();
+            return self.addNode(.{ .tag = .splat_expr, .main_token = 0, .data = .{ .lhs = expr } });
+        }
+        return self.parseExpression();
     }
 
     fn parseIndexExpr(self: *Parser, array: u32) Error!u32 {

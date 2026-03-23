@@ -82,6 +82,15 @@ pub const OpCode = enum(u8) {
     method_call, // u16: method name constant, u8: arg count
     static_call, // u16: class name, u16: method name, u8: arg count
 
+    // scope
+    get_global, // u16: var name constant (copy from frame 0)
+    get_static, // u16: var name constant, u16: func name constant (get persistent static)
+    set_static, // u16: var name constant, u16: func name constant (save persistent static)
+
+    // variadic
+    array_spread, // pop array, push each element onto the array below it
+    splat_call, // pop array, spread as args to function call
+
     // foreach iteration
     iter_begin, // push index 0 (array already on stack)
     iter_check, // u16: exit offset. peek array+index, push key+value or jump
@@ -119,6 +128,7 @@ pub const ObjFunction = struct {
     name: []const u8,
     arity: u8,
     required_params: u8 = 0,
+    is_variadic: bool = false,
     params: []const []const u8,
     defaults: []const Value = &.{},
     chunk: Chunk = .{},

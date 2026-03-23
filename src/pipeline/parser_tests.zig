@@ -320,6 +320,34 @@ fn renderNode(ast: *const Ast, idx: u32, buf: *Buf) !void {
             }
             try w.writeByte(')');
         },
+        .expr_list => {
+            for (ast.extraSlice(node.data.lhs), 0..) |expr, i| {
+                if (i > 0) try w.writeAll(", ");
+                try renderNode(ast, expr, buf);
+            }
+        },
+        .global_stmt => {
+            try w.writeAll("(global");
+            for (ast.extraSlice(node.data.lhs)) |v| {
+                try w.writeByte(' ');
+                try renderNode(ast, v, buf);
+            }
+            try w.writeByte(')');
+        },
+        .static_var => {
+            try w.writeAll("(static ");
+            try w.writeAll(ast.tokenSlice(node.main_token));
+            if (node.data.lhs != 0) {
+                try w.writeAll(" = ");
+                try renderNode(ast, node.data.lhs, buf);
+            }
+            try w.writeByte(')');
+        },
+        .array_spread, .splat_expr => {
+            try w.writeAll("(...");
+            try renderNode(ast, node.data.lhs, buf);
+            try w.writeByte(')');
+        },
         .root => {},
     }
 }

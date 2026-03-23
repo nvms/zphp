@@ -114,7 +114,18 @@ pub const Ast = struct {
             // compound
             array_literal, // main_token = [, lhs = extra index -> {count, element...}
             array_element, // lhs = value, rhs = key (0 = no key)
+            array_spread, // lhs = expression to spread
             grouped_expr, // lhs = inner expression
+
+            // multi-expression (for loop init/update)
+            expr_list, // lhs = extra index -> {count, expr...}
+
+            // scope
+            global_stmt, // lhs = extra index -> {count, variable_nodes...}
+            static_var, // main_token = variable, lhs = default expression (0 = none)
+
+            // variadic
+            splat_expr, // lhs = expression to spread (used in function call args)
         };
     };
 
