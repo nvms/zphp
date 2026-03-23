@@ -68,6 +68,8 @@ pub const entries = .{
     .{ "mb_trim", native_mb_trim },
     .{ "mb_ltrim", native_mb_ltrim },
     .{ "mb_rtrim", native_mb_rtrim },
+    .{ "mb_ucfirst", native_mb_ucfirst },
+    .{ "mb_lcfirst", native_mb_lcfirst },
 };
 
 fn substr(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
@@ -1372,4 +1374,26 @@ fn native_quotemeta(ctx: *NativeContext, args: []const Value) RuntimeError!Value
     const result = try buf.toOwnedSlice(ctx.allocator);
     try ctx.strings.append(ctx.allocator, result);
     return .{ .string = result };
+}
+
+fn native_mb_ucfirst(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len == 0) return .{ .string = "" };
+    const s = if (args[0] == .string) args[0].string else return Value{ .string = "" };
+    if (s.len == 0) return .{ .string = "" };
+    const buf = try ctx.allocator.alloc(u8, s.len);
+    @memcpy(buf, s);
+    buf[0] = std.ascii.toUpper(s[0]);
+    try ctx.strings.append(ctx.allocator, buf);
+    return .{ .string = buf };
+}
+
+fn native_mb_lcfirst(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len == 0) return .{ .string = "" };
+    const s = if (args[0] == .string) args[0].string else return Value{ .string = "" };
+    if (s.len == 0) return .{ .string = "" };
+    const buf = try ctx.allocator.alloc(u8, s.len);
+    @memcpy(buf, s);
+    buf[0] = std.ascii.toLower(s[0]);
+    try ctx.strings.append(ctx.allocator, buf);
+    return .{ .string = buf };
 }

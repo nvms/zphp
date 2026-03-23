@@ -44,6 +44,7 @@ pub const entries = .{
     .{ "is_infinite", native_is_infinite },
     .{ "is_nan", native_is_nan },
     .{ "mt_rand", native_rand },
+    .{ "fpow", native_fpow },
 };
 
 fn native_abs(_: *NativeContext, args: []const Value) RuntimeError!Value {
@@ -333,4 +334,9 @@ fn native_is_nan(_: *NativeContext, args: []const Value) RuntimeError!Value {
         .float => |f| std.math.isNan(f),
         else => false,
     } };
+}
+
+fn native_fpow(_: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len < 2) return .{ .float = 0.0 };
+    return .{ .float = std.math.pow(f64, Value.toFloat(args[0]), Value.toFloat(args[1])) };
 }

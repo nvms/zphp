@@ -29,6 +29,9 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try dt_def.methods.put(a, "diff", .{ .name = "diff", .arity = 1 });
     try dt_def.methods.put(a, "setDate", .{ .name = "setDate", .arity = 3 });
     try dt_def.methods.put(a, "setTime", .{ .name = "setTime", .arity = 2 });
+    try dt_def.methods.put(a, "createFromTimestamp", .{ .name = "createFromTimestamp", .arity = 1, .is_static = true });
+    try dt_def.methods.put(a, "getMicrosecond", .{ .name = "getMicrosecond", .arity = 0 });
+    try dt_def.methods.put(a, "setMicrosecond", .{ .name = "setMicrosecond", .arity = 1 });
     try vm.classes.put(a, "DateTime", dt_def);
 
     try vm.native_fns.put(a, "DateTime::__construct", dtConstruct);
@@ -39,6 +42,9 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try vm.native_fns.put(a, "DateTime::diff", dtDiff);
     try vm.native_fns.put(a, "DateTime::setDate", dtSetDate);
     try vm.native_fns.put(a, "DateTime::setTime", dtSetTime);
+    try vm.native_fns.put(a, "DateTime::createFromTimestamp", dtCreateFromTimestamp);
+    try vm.native_fns.put(a, "DateTime::getMicrosecond", dtGetMicrosecond);
+    try vm.native_fns.put(a, "DateTime::setMicrosecond", dtSetMicrosecond);
 
     // DateTimeImmutable
     var dti_def = ClassDef{ .name = "DateTimeImmutable" };
@@ -49,6 +55,8 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try dti_def.methods.put(a, "getTimestamp", .{ .name = "getTimestamp", .arity = 0 });
     try dti_def.methods.put(a, "modify", .{ .name = "modify", .arity = 1 });
     try dti_def.methods.put(a, "diff", .{ .name = "diff", .arity = 1 });
+    try dti_def.methods.put(a, "createFromTimestamp", .{ .name = "createFromTimestamp", .arity = 1, .is_static = true });
+    try dti_def.methods.put(a, "getMicrosecond", .{ .name = "getMicrosecond", .arity = 0 });
     try vm.classes.put(a, "DateTimeImmutable", dti_def);
 
     try vm.native_fns.put(a, "DateTimeImmutable::__construct", dtConstruct);
@@ -56,6 +64,8 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try vm.native_fns.put(a, "DateTimeImmutable::getTimestamp", dtGetTimestamp);
     try vm.native_fns.put(a, "DateTimeImmutable::modify", dtiModify);
     try vm.native_fns.put(a, "DateTimeImmutable::diff", dtDiff);
+    try vm.native_fns.put(a, "DateTimeImmutable::createFromTimestamp", dtiCreateFromTimestamp);
+    try vm.native_fns.put(a, "DateTimeImmutable::getMicrosecond", dtGetMicrosecond);
 
     // DateInterval
     var di_def = ClassDef{ .name = "DateInterval" };
@@ -326,5 +336,30 @@ fn dtSetTime(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     const sec: i64 = if (args.len >= 3) Value.toInt(args[2]) else 0;
     const new_ts = io.dateToTimestamp(@intCast(year_day.year), month_day.month.numeric(), month_day.day_index + 1, Value.toInt(args[0]), Value.toInt(args[1]), sec);
     try obj.set(ctx.allocator, "timestamp", .{ .int = new_ts });
+    return .{ .object = obj };
+}
+
+fn dtCreateFromTimestamp(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len == 0) return .null;
+    const obj = try ctx.createObject("DateTime");
+    try obj.set(ctx.allocator, "timestamp", .{ .int = Value.toInt(args[0]) });
+    return .{ .object = obj };
+}
+
+fn dtiCreateFromTimestamp(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len == 0) return .null;
+    const obj = try ctx.createObject("DateTimeImmutable");
+    try obj.set(ctx.allocator, "timestamp", .{ .int = Value.toInt(args[0]) });
+    return .{ .object = obj };
+}
+
+fn dtGetMicrosecond(_: *NativeContext, _: []const Value) RuntimeError!Value {
+    // zphp timestamps are second-precision, microseconds always 0
+    return .{ .int = 0 };
+}
+
+fn dtSetMicrosecond(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    // no-op since we don't store microseconds, return $this
+    const obj = getThis(ctx) orelse return .null;
     return .{ .object = obj };
 }
