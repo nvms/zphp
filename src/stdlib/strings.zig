@@ -46,6 +46,17 @@ pub const entries = .{
     .{ "mb_strtolower", native_mb_strtolower },
     .{ "mb_strtoupper", native_mb_strtoupper },
     .{ "str_getcsv", native_str_getcsv },
+    .{ "base64_encode", native_base64_encode },
+    .{ "base64_decode", native_base64_decode },
+    .{ "urlencode", native_urlencode },
+    .{ "urldecode", native_urldecode },
+    .{ "rawurlencode", native_rawurlencode },
+    .{ "rawurldecode", native_rawurldecode },
+    .{ "md5", native_md5 },
+    .{ "sha1", native_sha1 },
+    .{ "mb_substr", native_mb_substr },
+    .{ "html_entity_decode", native_htmlspecialchars_decode },
+    .{ "strrev", native_strrev },
 };
 
 fn substr(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
@@ -920,4 +931,261 @@ fn native_str_getcsv(ctx: *NativeContext, args: []const Value) RuntimeError!Valu
         }
     }
     return .{ .array = arr };
+}
+
+const base64_chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+fn native_base64_encode(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len == 0) return .{ .string = "" };
+    const s = if (args[0] == .string) args[0].string else return Value{ .string = "" };
+    if (s.len == 0) return .{ .string = "" };
+
+    const out_len = ((s.len + 2) / 3) * 4;
+    const buf = try ctx.allocator.alloc(u8, out_len);
+    var di: usize = 0;
+    var si: usize = 0;
+    while (si + 3 <= s.len) {
+        const n: u24 = @as(u24, s[si]) << 16 | @as(u24, s[si + 1]) << 8 | @as(u24, s[si + 2]);
+        buf[di] = base64_chars[@intCast((n >> 18) & 0x3f)];
+        buf[di + 1] = base64_chars[@intCast((n >> 12) & 0x3f)];
+        buf[di + 2] = base64_chars[@intCast((n >> 6) & 0x3f)];
+        buf[di + 3] = base64_chars[@intCast(n & 0x3f)];
+        si += 3;
+        di += 4;
+    }
+    const remaining = s.len - si;
+    if (remaining == 1) {
+        const n: u24 = @as(u24, s[si]) << 16;
+        buf[di] = base64_chars[@intCast((n >> 18) & 0x3f)];
+        buf[di + 1] = base64_chars[@intCast((n >> 12) & 0x3f)];
+        buf[di + 2] = '=';
+        buf[di + 3] = '=';
+    } else if (remaining == 2) {
+        const n: u24 = @as(u24, s[si]) << 16 | @as(u24, s[si + 1]) << 8;
+        buf[di] = base64_chars[@intCast((n >> 18) & 0x3f)];
+        buf[di + 1] = base64_chars[@intCast((n >> 12) & 0x3f)];
+        buf[di + 2] = base64_chars[@intCast((n >> 6) & 0x3f)];
+        buf[di + 3] = '=';
+    }
+    try ctx.strings.append(ctx.allocator, buf);
+    return .{ .string = buf };
+}
+
+fn base64Decode(c: u8) ?u6 {
+    if (c >= 'A' and c <= 'Z') return @intCast(c - 'A');
+    if (c >= 'a' and c <= 'z') return @intCast(c - 'a' + 26);
+    if (c >= '0' and c <= '9') return @intCast(c - '0' + 52);
+    if (c == '+') return 62;
+    if (c == '/') return 63;
+    return null;
+}
+
+fn native_base64_decode(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len == 0) return .{ .bool = false };
+    const s = if (args[0] == .string) args[0].string else return Value{ .bool = false };
+    if (s.len == 0) return .{ .string = "" };
+
+    var buf = std.ArrayListUnmanaged(u8){};
+    var accum: u24 = 0;
+    var bits: u5 = 0;
+    for (s) |c| {
+        if (c == '=') break;
+        if (c == ' ' or c == '\n' or c == '\r' or c == '\t') continue;
+        const val = base64Decode(c) orelse continue;
+        accum = (accum << 6) | val;
+        bits += 6;
+        if (bits >= 8) {
+            bits -= 8;
+            try buf.append(ctx.allocator, @truncate(accum >> bits));
+        }
+    }
+    const result = try buf.toOwnedSlice(ctx.allocator);
+    try ctx.strings.append(ctx.allocator, result);
+    return .{ .string = result };
+}
+
+fn native_urlencode(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len == 0) return .{ .string = "" };
+    const s = if (args[0] == .string) args[0].string else return Value{ .string = "" };
+    var buf = std.ArrayListUnmanaged(u8){};
+    const hex = "0123456789ABCDEF";
+    for (s) |c| {
+        if (std.ascii.isAlphanumeric(c) or c == '-' or c == '_' or c == '.') {
+            try buf.append(ctx.allocator, c);
+        } else if (c == ' ') {
+            try buf.append(ctx.allocator, '+');
+        } else {
+            try buf.append(ctx.allocator, '%');
+            try buf.append(ctx.allocator, hex[c >> 4]);
+            try buf.append(ctx.allocator, hex[c & 0x0f]);
+        }
+    }
+    const result = try buf.toOwnedSlice(ctx.allocator);
+    try ctx.strings.append(ctx.allocator, result);
+    return .{ .string = result };
+}
+
+fn native_urldecode(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len == 0) return .{ .string = "" };
+    const s = if (args[0] == .string) args[0].string else return Value{ .string = "" };
+    var buf = std.ArrayListUnmanaged(u8){};
+    var i: usize = 0;
+    while (i < s.len) {
+        if (s[i] == '%' and i + 2 < s.len) {
+            const hi = hexVal(s[i + 1]) orelse {
+                try buf.append(ctx.allocator, s[i]);
+                i += 1;
+                continue;
+            };
+            const lo = hexVal(s[i + 2]) orelse {
+                try buf.append(ctx.allocator, s[i]);
+                i += 1;
+                continue;
+            };
+            try buf.append(ctx.allocator, (hi << 4) | lo);
+            i += 3;
+        } else if (s[i] == '+') {
+            try buf.append(ctx.allocator, ' ');
+            i += 1;
+        } else {
+            try buf.append(ctx.allocator, s[i]);
+            i += 1;
+        }
+    }
+    const result = try buf.toOwnedSlice(ctx.allocator);
+    try ctx.strings.append(ctx.allocator, result);
+    return .{ .string = result };
+}
+
+fn native_rawurlencode(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len == 0) return .{ .string = "" };
+    const s = if (args[0] == .string) args[0].string else return Value{ .string = "" };
+    var buf = std.ArrayListUnmanaged(u8){};
+    const hex = "0123456789ABCDEF";
+    for (s) |c| {
+        if (std.ascii.isAlphanumeric(c) or c == '-' or c == '_' or c == '.' or c == '~') {
+            try buf.append(ctx.allocator, c);
+        } else {
+            try buf.append(ctx.allocator, '%');
+            try buf.append(ctx.allocator, hex[c >> 4]);
+            try buf.append(ctx.allocator, hex[c & 0x0f]);
+        }
+    }
+    const result = try buf.toOwnedSlice(ctx.allocator);
+    try ctx.strings.append(ctx.allocator, result);
+    return .{ .string = result };
+}
+
+fn native_rawurldecode(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len == 0) return .{ .string = "" };
+    const s = if (args[0] == .string) args[0].string else return Value{ .string = "" };
+    var buf = std.ArrayListUnmanaged(u8){};
+    var i: usize = 0;
+    while (i < s.len) {
+        if (s[i] == '%' and i + 2 < s.len) {
+            const hi = hexVal(s[i + 1]) orelse {
+                try buf.append(ctx.allocator, s[i]);
+                i += 1;
+                continue;
+            };
+            const lo = hexVal(s[i + 2]) orelse {
+                try buf.append(ctx.allocator, s[i]);
+                i += 1;
+                continue;
+            };
+            try buf.append(ctx.allocator, (hi << 4) | lo);
+            i += 3;
+        } else {
+            try buf.append(ctx.allocator, s[i]);
+            i += 1;
+        }
+    }
+    const result = try buf.toOwnedSlice(ctx.allocator);
+    try ctx.strings.append(ctx.allocator, result);
+    return .{ .string = result };
+}
+
+fn native_md5(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len == 0) return .{ .string = "" };
+    const s = if (args[0] == .string) args[0].string else return Value{ .string = "" };
+    var hash: [16]u8 = undefined;
+    std.crypto.hash.Md5.hash(s, &hash, .{});
+    const hex = "0123456789abcdef";
+    var buf: [32]u8 = undefined;
+    for (hash, 0..) |byte, i| {
+        buf[i * 2] = hex[byte >> 4];
+        buf[i * 2 + 1] = hex[byte & 0x0f];
+    }
+    return .{ .string = try ctx.createString(&buf) };
+}
+
+fn native_sha1(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len == 0) return .{ .string = "" };
+    const s = if (args[0] == .string) args[0].string else return Value{ .string = "" };
+    var hash: [20]u8 = undefined;
+    std.crypto.hash.Sha1.hash(s, &hash, .{});
+    const hex = "0123456789abcdef";
+    var buf: [40]u8 = undefined;
+    for (hash, 0..) |byte, i| {
+        buf[i * 2] = hex[byte >> 4];
+        buf[i * 2 + 1] = hex[byte & 0x0f];
+    }
+    return .{ .string = try ctx.createString(&buf) };
+}
+
+fn native_mb_substr(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len < 2) return .{ .string = "" };
+    const s = if (args[0] == .string) args[0].string else return Value{ .string = "" };
+    const char_count = mbCharCount(s);
+    var start = Value.toInt(args[1]);
+    if (start < 0) start = @max(0, char_count + start);
+    if (start >= char_count) return .{ .string = "" };
+
+    var length = if (args.len >= 3) Value.toInt(args[2]) else char_count - start;
+    if (length < 0) length = @max(0, char_count - start + length);
+    if (length <= 0) return .{ .string = "" };
+
+    var byte_start: usize = 0;
+    var ci: i64 = 0;
+    var bi: usize = 0;
+    while (bi < s.len and ci < start) {
+        bi += mbCharLen(s[bi]);
+        ci += 1;
+    }
+    byte_start = bi;
+
+    var chars_remaining = length;
+    while (bi < s.len and chars_remaining > 0) {
+        bi += mbCharLen(s[bi]);
+        chars_remaining -= 1;
+    }
+
+    return .{ .string = try ctx.createString(s[byte_start..bi]) };
+}
+
+fn mbCharCount(s: []const u8) i64 {
+    var count: i64 = 0;
+    var i: usize = 0;
+    while (i < s.len) {
+        i += mbCharLen(s[i]);
+        count += 1;
+    }
+    return count;
+}
+
+fn mbCharLen(byte: u8) usize {
+    if (byte < 0x80) return 1;
+    if (byte < 0xE0) return 2;
+    if (byte < 0xF0) return 3;
+    return 4;
+}
+
+fn native_strrev(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len == 0) return .{ .string = "" };
+    const s = if (args[0] == .string) args[0].string else return Value{ .string = "" };
+    if (s.len == 0) return .{ .string = "" };
+    const buf = try ctx.allocator.alloc(u8, s.len);
+    for (s, 0..) |c, i| buf[s.len - 1 - i] = c;
+    try ctx.strings.append(ctx.allocator, buf);
+    return .{ .string = buf };
 }

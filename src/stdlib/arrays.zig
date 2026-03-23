@@ -42,6 +42,10 @@ pub const entries = .{
     .{ "shuffle", native_shuffle },
     .{ "array_rand", array_rand },
     .{ "compact", native_compact },
+    .{ "ksort", native_ksort },
+    .{ "krsort", native_krsort },
+    .{ "asort", native_asort },
+    .{ "arsort", native_arsort },
 };
 
 fn array_push(_: *NativeContext, args: []const Value) RuntimeError!Value {
@@ -646,4 +650,51 @@ fn native_compact(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     _ = ctx;
     _ = args;
     return .null;
+}
+
+fn keyLessThan(_: void, a: PhpArray.Entry, b: PhpArray.Entry) bool {
+    if (a.key == .int and b.key == .int) return a.key.int < b.key.int;
+    if (a.key == .string and b.key == .string) return std.mem.order(u8, a.key.string, b.key.string) == .lt;
+    if (a.key == .int) return true;
+    return false;
+}
+
+fn native_ksort(_: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len == 0 or args[0] != .array) return .{ .bool = false };
+    const arr = args[0].array;
+    std.mem.sort(PhpArray.Entry, arr.entries.items, {}, keyLessThan);
+    return .{ .bool = true };
+}
+
+fn native_krsort(_: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len == 0 or args[0] != .array) return .{ .bool = false };
+    const arr = args[0].array;
+    std.mem.sort(PhpArray.Entry, arr.entries.items, {}, struct {
+        fn f(_: void, a: PhpArray.Entry, b: PhpArray.Entry) bool {
+            return keyLessThan({}, b, a);
+        }
+    }.f);
+    return .{ .bool = true };
+}
+
+fn native_asort(_: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len == 0 or args[0] != .array) return .{ .bool = false };
+    const arr = args[0].array;
+    std.mem.sort(PhpArray.Entry, arr.entries.items, {}, struct {
+        fn f(_: void, a: PhpArray.Entry, b: PhpArray.Entry) bool {
+            return Value.lessThan(a.value, b.value);
+        }
+    }.f);
+    return .{ .bool = true };
+}
+
+fn native_arsort(_: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len == 0 or args[0] != .array) return .{ .bool = false };
+    const arr = args[0].array;
+    std.mem.sort(PhpArray.Entry, arr.entries.items, {}, struct {
+        fn f(_: void, a: PhpArray.Entry, b: PhpArray.Entry) bool {
+            return Value.lessThan(b.value, a.value);
+        }
+    }.f);
+    return .{ .bool = true };
 }

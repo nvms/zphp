@@ -1,0 +1,20 @@
+<?php
+echo is_dir('/tmp') ? 'true' : 'false';
+echo "\n";
+echo basename('/path/to/file.txt');
+echo "\n";
+echo dirname('/path/to/file.txt');
+echo "\n";
+$info = pathinfo('/path/to/file.txt');
+echo $info['dirname'];
+echo "\n";
+echo $info['basename'];
+echo "\n";
+echo $info['extension'];
+echo "\n";
+echo $info['filename'];
+echo "\n";
+echo basename('/just-a-file');
+echo "\n";
+echo dirname('/just-a-file');
+echo "\n";

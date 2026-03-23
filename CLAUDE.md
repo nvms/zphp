@@ -257,16 +257,17 @@ phase 1 complete: full pipeline from source to execution. zphp can run real PHP 
 - `src/pipeline/compiler.zig` - single-pass AST -> bytecode compiler with jump patching, function compilation, numeric literal parsing, string interpolation
 - `src/runtime/value.zig` - PHP Value tagged union (null, bool, int, float, string) with arithmetic, truthiness, string-aware comparison, formatting (3 tests)
 - `src/runtime/vm.zig` - stack-based bytecode interpreter with per-frame variable scoping, function calls, closures with captures, arrays, foreach, switch/match, constants table, type casts, native function dispatch, output capture (84 integration tests)
-- `src/stdlib/` - 120+ native PHP functions split by domain:
+- `src/stdlib/` - 150+ native PHP functions split by domain:
   - `registry.zig` - central registration, imports all domain modules and registers their functions with the VM
-  - `strings.zig` - substr/strpos/str_replace/explode/implode/trim/ltrim/rtrim/strtolower/strtoupper/str_contains/str_starts_with/str_ends_with/str_repeat/str_pad/ucfirst/lcfirst/strcmp/strncmp/ord/chr/str_split/substr_count/substr_replace/str_word_count/nl2br/wordwrap/chunk_split/number_format/sprintf/printf/addslashes/stripslashes/htmlspecialchars/htmlspecialchars_decode/hex2bin/bin2hex/mb_strlen/mb_strtolower/mb_strtoupper/str_getcsv
-  - `arrays.zig` - push/pop/shift/keys/values/merge/slice/reverse/unique/sort/rsort/search/in_array/key_exists/range/array_map/array_filter/usort/array_splice/array_combine/array_chunk/array_pad/array_flip/array_column/array_fill/array_fill_keys/array_intersect/array_diff/array_diff_key/array_count_values/array_sum/array_product/array_walk/array_unshift/shuffle/array_rand
+  - `strings.zig` - substr/strpos/str_replace/explode/implode/trim/ltrim/rtrim/strtolower/strtoupper/str_contains/str_starts_with/str_ends_with/str_repeat/str_pad/ucfirst/lcfirst/strcmp/strncmp/ord/chr/str_split/substr_count/substr_replace/str_word_count/nl2br/wordwrap/chunk_split/number_format/sprintf/printf/addslashes/stripslashes/htmlspecialchars/htmlspecialchars_decode/html_entity_decode/hex2bin/bin2hex/mb_strlen/mb_substr/mb_strtolower/mb_strtoupper/str_getcsv/base64_encode/base64_decode/urlencode/urldecode/rawurlencode/rawurldecode/md5/sha1/strrev
+  - `arrays.zig` - push/pop/shift/keys/values/merge/slice/reverse/unique/sort/rsort/search/in_array/key_exists/range/array_map/array_filter/usort/array_splice/array_combine/array_chunk/array_pad/array_flip/array_column/array_fill/array_fill_keys/array_intersect/array_diff/array_diff_key/array_count_values/array_sum/array_product/array_walk/array_unshift/shuffle/array_rand/ksort/krsort/asort/arsort
   - `math.zig` - abs/floor/ceil/round/min/max/rand/pow/sqrt/log/log2/log10/exp/pi/fmod/intdiv/base_convert/bindec/octdec/hexdec/decbin/decoct/dechex
   - `types.zig` - gettype/is_array/is_null/is_int/is_float/is_string/is_bool/is_numeric/intval/floatval/strval/boolval/isset/empty/count/strlen/var_dump/print_r/define/defined/constant
   - `json.zig` - json_encode/json_decode
+  - `io.zig` - file_get_contents/file_put_contents/file_exists/is_file/is_dir/basename/dirname/pathinfo/realpath/time/microtime/date
 - `src/main.zig` - CLI entry point with `zphp run <file>`, imports all modules for test discovery
 - 181 unit tests total across all modules
-- 37 PHP compatibility test files in tests/ verified against PHP 8.3
+- 40 PHP compatibility test files in tests/ verified against PHP 8.3
 
 ### lexer design decisions
 - tokens reference byte offsets into source (zero-copy, no allocations)
@@ -409,15 +410,14 @@ done:
 - json: `json_encode`, `json_decode`
 
 remaining:
-- string: `mb_substr`, `md5`, `sha1`, `base64_encode`, `base64_decode`, `urlencode`, `urldecode`, `rawurlencode`, `rawurldecode`, `html_entity_decode`, `quoted_printable_encode`, `quoted_printable_decode`
-- array: `compact`, `extract`, `ksort`, `krsort`, `asort`, `arsort`, `array_multisort`
+- string: `quoted_printable_encode`, `quoted_printable_decode`
+- array: `compact`, `extract`, `array_multisort`
 - type/misc: `settype`, `var_export`, `unset` (as function)
-- date/time: `time`, `microtime`, `date`, `strtotime`, `mktime`, `gmdate`
-- file: `file_get_contents`, `file_put_contents`, `file_exists`, `is_file`, `is_dir`, `realpath`, `basename`, `dirname`, `pathinfo`
+- date/time: `strtotime`, `mktime`, `gmdate`
 - output: `ob_start`, `ob_get_clean`, `ob_end_clean`, `header` (no-op or warning in CLI)
 - pcre: `preg_match`, `preg_match_all`, `preg_replace`, `preg_split`
 
-note: `compact` and `extract` require access to the calling scope's variables, which native functions don't currently have. these may need a VM-level mechanism or special opcode treatment
+note: `compact` and `extract` require access to the calling scope's variables, which native functions don't currently have. these may need a VM-level mechanism or special opcode treatment. pcre requires a regex engine - either a zig implementation or linking to libpcre
 
 **4. classes (basic)**
 declaration, `new`, properties, methods, `$this`, `__construct`. enough to instantiate objects and call methods. this is the minimum viable OOP that unlocks simple class-based code
