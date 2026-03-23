@@ -250,6 +250,9 @@ do NOT use the GitHub MCP server for creating repos or any write operations. the
 - `std.crypto.hash.Md5.hash` takes 3 args: `(data, &out_buf, .{})` - not 2
 - C system libraries: always set `link_libc = true` on the module, otherwise dynamic symbol resolution segfaults on Linux at runtime
 - prefer manual `extern` declarations with `callconv(.c)` over `@cImport` for C library bindings. `@cImport` macro translation breaks across platforms
+- in zig 0.15, `const` declarations inside structs MUST come after ALL fields. putting a `const` between fields causes a compile error. this is different from older zig versions
+- `@intFromFloat` requires explicit result type in 0.15: `@as(usize, @intFromFloat(expr))`
+- `std.fmt.bufPrint` precision must be comptime. for runtime precision, use a switch over possible values or write a manual formatter
 
 ## external dependencies
 
@@ -322,7 +325,7 @@ phase 1 complete: full pipeline from source to execution. zphp can run real PHP 
 - function params pre-populated in the frame's var map before execution
 - output captured in an ArrayListUnmanaged(u8) for testing. integration tests verify the entire pipeline: source -> lex -> parse -> compile -> execute -> output
 - runtime-allocated strings tracked in a separate list, freed on VM deinit
-- PHP-correct value formatting: true->"1", false->"", null->"", floats that are whole numbers display as integers
+- PHP-correct value formatting: true->"1", false->"", null->"", floats that are whole numbers display as integers, non-integer floats use 14 significant digits with trailing zero stripping (matches PHP's default precision=14 ini setting)
 - string comparison: `lessThan` and `compare` (spaceship) use lexicographic ordering when both operands are strings, float comparison otherwise. matches PHP behavior for sort/usort on string arrays
 
 ### what the VM can execute
