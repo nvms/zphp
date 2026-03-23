@@ -95,6 +95,21 @@ check_contains "html content-type" "text/html" "$ct"
 resp=$(curl -s "http://localhost:$PORT/echo?x=1")
 check_contains "request uri has query" '"/echo?x=1"' "$resp"
 
+# test: keep-alive (multiple requests on same connection)
+ka_resp=$(curl -s http://localhost:$PORT/health http://localhost:$PORT/health 2>&1)
+ka_count=$(echo "$ka_resp" | grep -o '"status":"ok"' | wc -l | tr -d ' ')
+check "keep-alive two responses" "2" "$ka_count"
+
+# test: connection header
+ka_headers=$(curl -si http://localhost:$PORT/health -H "Connection: keep-alive" 2>&1)
+check_contains "keep-alive header" "keep-alive" "$ka_headers"
+
+# test: state isolation (no leaks between requests)
+r1=$(curl -s "http://localhost:$PORT/echo?seq=1")
+r2=$(curl -s "http://localhost:$PORT/echo?seq=2")
+check_contains "isolation req1" '"seq":"1"' "$r1"
+check_contains "isolation req2" '"seq":"2"' "$r2"
+
 echo ""
 echo "$passed passed, $failed failed"
 

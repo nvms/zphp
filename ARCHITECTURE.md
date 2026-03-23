@@ -179,17 +179,16 @@ two layers: zig HTTP layer (TCP + raw HTTP parsing) + PHP VM layer (synchronous 
 4. worker threads pop connections, parse HTTP, create fresh VM, execute shared bytecode, write response
 
 ### key design decisions
-- **shared bytecode**: all workers reference the same `CompileResult`. bytecode is read-only during execution, so sharing is safe with no synchronization
-- **fresh VM per request**: each request gets `VM.init()` + `vm.interpret(&result)` + `vm.deinit()`. request isolation is guaranteed - no state leaks between requests
-- **request_vars**: superglobals ($_SERVER, $_GET, $_POST, $_REQUEST, $_COOKIE) are populated into `vm.request_vars` before interpret. interpret copies them into frame 0
-- **response headers**: `header()` PHP function stores headers in frame vars under `__response_headers`. `http_response_code()` stores status in `__response_code`. serve reads these after execution
-- **work queue**: bounded ring buffer (capacity 1024) with mutex + condition. workers block on empty queue, main thread blocks on full queue
+- **shared bytecode**: all workers reference the same `CompileResult`. bytecode is read-only during execution, safe with no synchronization
+- **VM pooling**: one VM per worker thread, created once at startup. `vm.reset()` between requests clears per-request state (output, strings, arrays, objects, generators, statics, frames) while preserving stdlib registrations, constants, class definitions
+- **keep-alive**: HTTP/1.1 persistent connections. buffer tracks consumed bytes across requests. proper Content-Length-based request boundary detection for pipelined requests
+- **request_vars**: superglobals populated into `vm.request_vars` before interpret. interpret copies them into frame 0
+- **response headers**: `header()` stores in `__response_headers`, `http_response_code()` stores in `__response_code`
+- **work queue**: bounded ring buffer (1024) with mutex + condition
 
 ### what's not yet implemented
-- connection keep-alive (currently Connection: close)
 - static file serving
 - graceful shutdown (SIGTERM handling)
-- VM pooling/reset (currently fresh VM per request, could reuse)
 - chunked transfer encoding
 - multipart form data parsing
-- websockets
+- WebSocket protocol upgrade and frame handling

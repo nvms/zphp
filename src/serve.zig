@@ -163,48 +163,80 @@ pub fn serve(allocator: Allocator, config: ServeConfig) !void {
 }
 
 fn workerLoop(allocator: Allocator, result: *const CompileResult) void {
-    while (true) {
-        const item = queue.pop() orelse return;
-        handleConnection(allocator, result, item.conn) catch {};
-    }
-}
-
-fn handleConnection(allocator: Allocator, result: *const CompileResult, conn: std.net.Server.Connection) !void {
-    defer conn.stream.close();
-
-    var buf: [65536]u8 = undefined;
-    const n = conn.stream.read(&buf) catch return;
-    if (n == 0) return;
-    const raw = buf[0..n];
-
-    var req = parseRequest(raw);
-
+    // one VM per worker, reused across requests
     var vm = VM.init(allocator) catch return;
     defer vm.deinit();
 
-    populateSuperglobals(&vm, &req, conn) catch {};
+    while (true) {
+        const item = queue.pop() orelse return;
+        handleConnection(allocator, result, &vm, item.conn);
+    }
+}
 
-    vm.interpret(result) catch {
-        const body = "500 Internal Server Error";
-        writeResponse(conn.stream, 500, "text/plain", null, body) catch {};
-        return;
-    };
+fn handleConnection(allocator: Allocator, result: *const CompileResult, vm: *VM, conn: std.net.Server.Connection) void {
+    var buf: [65536]u8 = undefined;
+    var buffered: usize = 0;
+    var keep_alive = true;
 
-    // read response metadata from frame vars
-    const frame_vars = &vm.frames[0].vars;
-    const ct_val = frame_vars.get("__response_content_type") orelse Value{ .string = "text/html" };
-    const ct = if (ct_val == .string) ct_val.string else "text/html";
+    while (keep_alive) {
+        // read more data if buffer is empty or doesn't contain a full request
+        if (buffered == 0 or std.mem.indexOf(u8, buf[0..buffered], "\r\n\r\n") == null) {
+            const n = conn.stream.read(buf[buffered..]) catch break;
+            if (n == 0) break;
+            buffered += n;
+        }
 
-    const code_val = frame_vars.get("__response_code") orelse Value{ .int = 200 };
-    const code = if (code_val == .int) code_val.int else 200;
+        const raw = buf[0..buffered];
+        var req = parseRequest(raw);
 
-    // collect extra headers
-    const extra_headers = if (frame_vars.get("__response_headers")) |v|
-        (if (v == .array) v.array else null)
-    else
-        null;
+        // HTTP/1.1 defaults to keep-alive unless Connection: close
+        const conn_hdr = req.getHeader("Connection");
+        keep_alive = if (conn_hdr) |h| !std.ascii.eqlIgnoreCase(h, "close") else true;
 
-    writeResponse(conn.stream, code, ct, extra_headers, vm.output.items) catch {};
+        // calculate consumed bytes (headers + body)
+        const header_end = (std.mem.indexOf(u8, raw, "\r\n\r\n") orelse break) + 4;
+        var body_len: usize = 0;
+        if (req.getHeader("Content-Length")) |cl| {
+            body_len = std.fmt.parseInt(usize, cl, 10) catch 0;
+        }
+        const consumed = header_end + body_len;
+
+        vm.reset();
+        populateSuperglobals(vm, &req, conn) catch break;
+
+        vm.interpret(result) catch {
+            writeResponse(conn.stream, 500, "text/plain", null, "500 Internal Server Error", keep_alive) catch break;
+            if (!keep_alive) break;
+            continue;
+        };
+
+        const frame_vars = &vm.frames[0].vars;
+        const ct_val = frame_vars.get("__response_content_type") orelse Value{ .string = "text/html" };
+        const ct = if (ct_val == .string) ct_val.string else "text/html";
+
+        const code_val = frame_vars.get("__response_code") orelse Value{ .int = 200 };
+        const code = if (code_val == .int) code_val.int else 200;
+
+        const extra_headers = if (frame_vars.get("__response_headers")) |v|
+            (if (v == .array) v.array else null)
+        else
+            null;
+
+        writeResponse(conn.stream, code, ct, extra_headers, vm.output.items, keep_alive) catch break;
+        _ = allocator;
+
+        // shift remaining data to front of buffer
+        if (consumed < buffered) {
+            std.mem.copyForwards(u8, buf[0..buffered - consumed], buf[consumed..buffered]);
+            buffered -= consumed;
+        } else {
+            buffered = 0;
+        }
+
+        if (!keep_alive) break;
+    }
+
+    conn.stream.close();
 }
 
 fn parseRequest(raw: []const u8) Request {
@@ -399,7 +431,7 @@ fn urlDecode(a: Allocator, input: []const u8) ![]const u8 {
     return buf.toOwnedSlice(a);
 }
 
-fn writeResponse(stream: std.net.Stream, code: i64, content_type: []const u8, extra_headers: ?*PhpArray, body: []const u8) !void {
+fn writeResponse(stream: std.net.Stream, code: i64, content_type: []const u8, extra_headers: ?*PhpArray, body: []const u8, keep_alive: bool) !void {
     const status_text = switch (code) {
         200 => "200 OK",
         201 => "201 Created",
@@ -418,10 +450,12 @@ fn writeResponse(stream: std.net.Stream, code: i64, content_type: []const u8, ex
 
     var hdr_buf: [4096]u8 = undefined;
     var pos: usize = 0;
-    const base = std.fmt.bufPrint(&hdr_buf, "HTTP/1.1 {s}\r\nContent-Type: {s}\r\nContent-Length: {d}\r\nConnection: close\r\n", .{
+    const conn_val = if (keep_alive) "keep-alive" else "close";
+    const base = std.fmt.bufPrint(&hdr_buf, "HTTP/1.1 {s}\r\nContent-Type: {s}\r\nContent-Length: {d}\r\nConnection: {s}\r\n", .{
         status_text,
         content_type,
         body.len,
+        conn_val,
     }) catch return;
     pos = base.len;
 

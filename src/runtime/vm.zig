@@ -241,6 +241,48 @@ pub const VM = struct {
         self.request_vars.deinit(self.allocator);
     }
 
+    pub fn reset(self: *VM) void {
+        // clear per-request state, keep stdlib/builtins/constants/classes
+        for (0..self.frame_count) |i| self.frames[i].vars.deinit(self.allocator);
+        self.frame_count = 0;
+        self.sp = 0;
+        self.handler_count = 0;
+        self.output.clearRetainingCapacity();
+        for (self.strings.items) |s| self.allocator.free(s);
+        self.strings.clearRetainingCapacity();
+        for (self.arrays.items) |a| {
+            a.deinit(self.allocator);
+            self.allocator.destroy(a);
+        }
+        self.arrays.clearRetainingCapacity();
+        for (self.objects.items) |o| {
+            o.deinit(self.allocator);
+            self.allocator.destroy(o);
+        }
+        self.objects.clearRetainingCapacity();
+        for (self.generators.items) |g| {
+            g.deinit(self.allocator);
+            self.allocator.destroy(g);
+        }
+        self.generators.clearRetainingCapacity();
+        self.captures.clearRetainingCapacity();
+        self.ob_stack.clearRetainingCapacity();
+        self.request_vars.clearRetainingCapacity();
+        // clear user-defined static vars but keep the statics table
+        var statics_iter = self.statics.keyIterator();
+        while (statics_iter.next()) |k| self.allocator.free(k.*);
+        self.statics.clearRetainingCapacity();
+        self.static_vars.clearRetainingCapacity();
+        self.loaded_files.clearRetainingCapacity();
+        for (self.compile_results.items) |r| {
+            var result = r;
+            result.deinit();
+            self.allocator.destroy(result);
+        }
+        self.compile_results.clearRetainingCapacity();
+        self.error_msg = null;
+    }
+
     pub fn interpret(self: *VM, result: *const CompileResult) RuntimeError!void {
         for (result.functions.items) |*func| {
             try self.registerFunction(func);
