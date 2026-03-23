@@ -42,6 +42,9 @@ pub fn main() !void {
             }
         }
         try @import("serve.zig").serve(allocator, config);
+    } else if (std.mem.eql(u8, cmd, "test")) {
+        const test_path = if (args.len >= 3) args[2] else null;
+        try @import("test_runner.zig").run(allocator, test_path);
     } else if (std.mem.eql(u8, cmd, "install")) {
         try @import("pkg.zig").install(allocator);
     } else if (std.mem.eql(u8, cmd, "add")) {

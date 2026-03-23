@@ -40,6 +40,8 @@ pub fn register(vm: *VM, a: Allocator) !void {
         .{ "UnderflowException", "RuntimeException" },
         .{ "ArithmeticError", "Exception" },
         .{ "DivisionByZeroError", "ArithmeticError" },
+        .{ "AssertionError", "Exception" },
+        .{ "Error", "Exception" },
     };
 
     inline for (subclasses) |entry| {

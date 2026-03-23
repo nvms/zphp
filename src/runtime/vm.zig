@@ -297,7 +297,7 @@ pub const VM = struct {
         try self.run();
     }
 
-    fn registerFunction(self: *VM, func: *const ObjFunction) RuntimeError!void {
+    pub fn registerFunction(self: *VM, func: *const ObjFunction) RuntimeError!void {
         if (self.functions.contains(func.name)) {
             const msg = std.fmt.allocPrint(self.allocator, "PHP Fatal error:  Cannot redeclare {s}()\n", .{func.name}) catch return error.RuntimeError;
             self.error_msg = msg;
@@ -310,7 +310,7 @@ pub const VM = struct {
         return self.runLoop(base_frame);
     }
 
-    fn run(self: *VM) RuntimeError!void {
+    pub fn run(self: *VM) RuntimeError!void {
         return self.runLoop(0);
     }
 
@@ -1393,7 +1393,7 @@ pub const VM = struct {
         return null;
     }
 
-    fn throwBuiltinException(self: *VM, class_name: []const u8, message: []const u8) !bool {
+    pub fn throwBuiltinException(self: *VM, class_name: []const u8, message: []const u8) !bool {
         const obj = try self.allocator.create(PhpObject);
         obj.* = .{ .class_name = class_name };
         try obj.set(self.allocator, "message", .{ .string = message });

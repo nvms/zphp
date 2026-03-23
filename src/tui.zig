@@ -19,8 +19,14 @@ const bold_red = "\x1b[1;31m";
 const bold_yellow = "\x1b[1;33m";
 const bold_white = "\x1b[1;37m";
 
-fn write(msg: []const u8) void {
+pub fn write(msg: []const u8) void {
     _ = posix.write(STDERR, msg) catch {};
+}
+
+pub fn writeColor(color: []const u8, msg: []const u8) void {
+    write(color);
+    write(msg);
+    write(reset);
 }
 
 pub fn header(label: []const u8) void {
