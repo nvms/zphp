@@ -110,6 +110,7 @@ pub const OpCode = enum(u8) {
     yield_value, // pop value, suspend generator, push received value on resume
     yield_pair, // pop value, pop key, suspend generator
     generator_return, // pop value, mark generator completed
+    yield_from, // pop iterable, delegate yield, push return value
 };
 
 

@@ -361,6 +361,11 @@ fn renderNode(ast: *const Ast, idx: u32, buf: *Buf) !void {
             }
             try w.writeByte(')');
         },
+        .yield_from_expr => {
+            try w.writeAll("(yield-from ");
+            try renderNode(ast, node.data.lhs, buf);
+            try w.writeByte(')');
+        },
         .yield_pair_expr => {
             try w.writeAll("(yield ");
             try renderNode(ast, node.data.lhs, buf);

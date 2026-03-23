@@ -217,6 +217,7 @@ const Compiler = struct {
             .static_prop_access => try self.compileStaticPropAccess(node),
             .yield_expr => try self.compileYield(node),
             .yield_pair_expr => try self.compileYieldPair(node),
+            .yield_from_expr => try self.compileYieldFrom(node),
             .expr_list => {
                 const exprs = self.ast.extraSlice(node.data.lhs);
                 for (exprs, 0..) |expr, i| {
@@ -1446,6 +1447,11 @@ const Compiler = struct {
         try self.emitOp(.yield_value);
     }
 
+    fn compileYieldFrom(self: *Compiler, node: Ast.Node) Error!void {
+        try self.compileNode(node.data.lhs);
+        try self.emitOp(.yield_from);
+    }
+
     fn compileYieldPair(self: *Compiler, node: Ast.Node) Error!void {
         try self.compileNode(node.data.lhs);
         try self.compileNode(node.data.rhs);
@@ -1455,7 +1461,7 @@ const Compiler = struct {
     fn containsYield(self: *Compiler, idx: u32) bool {
         if (idx == 0 or idx >= self.ast.nodes.len) return false;
         const n = self.ast.nodes[idx];
-        if (n.tag == .yield_expr or n.tag == .yield_pair_expr) return true;
+        if (n.tag == .yield_expr or n.tag == .yield_pair_expr or n.tag == .yield_from_expr) return true;
         if (n.tag == .function_decl or n.tag == .closure_expr) return false;
         if (n.tag == .class_decl or n.tag == .interface_decl or n.tag == .trait_decl) return false;
 

@@ -134,6 +134,7 @@ pub const Ast = struct {
             // generators
             yield_expr, // lhs = value expression (0 = yield null)
             yield_pair_expr, // lhs = key expression, rhs = value expression
+            yield_from_expr, // lhs = iterable expression
 
             // variadic
             splat_expr, // lhs = expression to spread (used in function call args)

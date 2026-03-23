@@ -70,6 +70,12 @@ pub const Generator = struct {
     return_value: Value = .null,
     implicit_key: i64 = 0,
     handler_count: usize = 0,
+    delegate: ?DelegateState = null,
+
+    pub const DelegateState = union(enum) {
+        gen: *Generator,
+        array: struct { arr: *PhpArray, index: usize },
+    };
 
     pub const State = enum { created, suspended, running, completed };
 

@@ -709,6 +709,16 @@ const Parser = struct {
     fn parseYieldExpr(self: *Parser) Error!u32 {
         const tok = self.advance(); // yield
 
+        // yield from $expr
+        if (self.peek() == .identifier) {
+            const next_tok = self.tokens[self.pos].lexeme(self.source);
+            if (std.mem.eql(u8, next_tok, "from")) {
+                _ = self.advance(); // consume "from"
+                const iterable = try self.parseExprPrec(1);
+                return self.addNode(.{ .tag = .yield_from_expr, .main_token = tok, .data = .{ .lhs = iterable } });
+            }
+        }
+
         // bare yield (no value)
         if (self.peek() == .semicolon or self.peek() == .r_paren or
             self.peek() == .r_bracket or self.peek() == .comma or self.peek() == .eof)

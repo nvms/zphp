@@ -1290,6 +1290,49 @@ pub const VM = struct {
                     return;
                 },
 
+                .yield_from => {
+                    const iterable = self.pop();
+                    const outer_gen = self.currentFrame().generator orelse return error.RuntimeError;
+
+                    if (iterable == .generator) {
+                        const inner = iterable.generator;
+                        if (inner.state == .created) try self.resumeGenerator(inner, .null);
+
+                        if (inner.state == .suspended) {
+                            outer_gen.delegate = .{ .gen = inner };
+                            outer_gen.current_value = inner.current_value;
+                            outer_gen.current_key = inner.current_key;
+                            // save ip past the yield_from opcode so we resume here
+                            outer_gen.ip = self.currentFrame().ip;
+                            outer_gen.vars = self.currentFrame().vars;
+                            outer_gen.state = .suspended;
+                            self.frame_count -= 1;
+                            return;
+                        }
+                        // inner already completed
+                        self.push(inner.return_value);
+                    } else if (iterable == .array) {
+                        const arr = iterable.array;
+                        if (arr.entries.items.len > 0) {
+                            const entry = arr.entries.items[0];
+                            outer_gen.delegate = .{ .array = .{ .arr = arr, .index = 1 } };
+                            outer_gen.current_key = switch (entry.key) {
+                                .int => |i| .{ .int = i },
+                                .string => |s| .{ .string = s },
+                            };
+                            outer_gen.current_value = entry.value;
+                            outer_gen.ip = self.currentFrame().ip;
+                            outer_gen.vars = self.currentFrame().vars;
+                            outer_gen.state = .suspended;
+                            self.frame_count -= 1;
+                            return;
+                        }
+                        self.push(.null);
+                    } else {
+                        self.push(.null);
+                    }
+                },
+
                 .generator_return => {
                     const val = self.pop();
                     const gen = self.currentFrame().generator orelse {
@@ -1376,6 +1419,45 @@ pub const VM = struct {
     fn resumeGenerator(self: *VM, gen: *Generator, sent_value: Value) RuntimeError!void {
         if (gen.state == .completed) return;
 
+        // if delegating, advance the delegate instead of resuming bytecode
+        if (gen.delegate) |*del| {
+            switch (del.*) {
+                .gen => |inner| {
+                    try self.resumeGenerator(inner, sent_value);
+                    if (inner.state == .suspended) {
+                        gen.current_value = inner.current_value;
+                        gen.current_key = inner.current_key;
+                        return;
+                    }
+                    // inner exhausted - clear delegate and resume outer with return value
+                    const ret_val = inner.return_value;
+                    gen.delegate = null;
+                    return self.resumeGeneratorWithValue(gen, ret_val);
+                },
+                .array => |*arr_state| {
+                    if (arr_state.index < arr_state.arr.entries.items.len) {
+                        const entry = arr_state.arr.entries.items[arr_state.index];
+                        arr_state.index += 1;
+                        gen.current_key = switch (entry.key) {
+                            .int => |i| .{ .int = i },
+                            .string => |s| .{ .string = s },
+                        };
+                        gen.current_value = entry.value;
+                        return;
+                    }
+                    // array exhausted
+                    gen.delegate = null;
+                    return self.resumeGeneratorWithValue(gen, .null);
+                },
+            }
+        }
+
+        return self.resumeGeneratorWithValue(gen, sent_value);
+    }
+
+    fn resumeGeneratorWithValue(self: *VM, gen: *Generator, sent_value: Value) RuntimeError!void {
+        if (gen.state == .completed) return;
+
         gen.state = .running;
         const saved_sp = self.sp;
         const return_frame = self.frame_count;
@@ -1387,7 +1469,6 @@ pub const VM = struct {
         };
         self.frame_count += 1;
 
-        // if resuming from a yield, push the sent value as the yield expression result
         if (gen.ip > 0) {
             self.push(sent_value);
         }
@@ -1399,7 +1480,6 @@ pub const VM = struct {
         if (gen.state == .running) {
             gen.state = .completed;
         }
-        // restore stack to saved position (yield/return already saved their state)
         self.sp = saved_sp;
     }
 
