@@ -47,6 +47,12 @@ pub const entries = .{
     .{ "krsort", native_krsort },
     .{ "asort", native_asort },
     .{ "arsort", native_arsort },
+    .{ "array_reduce", array_reduce },
+    .{ "array_key_first", array_key_first },
+    .{ "array_key_last", array_key_last },
+    .{ "uasort", native_uasort },
+    .{ "uksort", native_uksort },
+    .{ "array_replace", array_replace },
 };
 
 fn array_push(_: *NativeContext, args: []const Value) RuntimeError!Value {
@@ -722,4 +728,104 @@ fn native_arsort(_: *NativeContext, args: []const Value) RuntimeError!Value {
         }
     }.f);
     return .{ .bool = true };
+}
+
+fn array_reduce(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len < 2 or args[0] != .array) return .null;
+    const arr = args[0].array;
+    const cb_name = if (args[1] == .string) args[1].string else return Value.null;
+    var carry: Value = if (args.len >= 3) args[2] else .null;
+    for (arr.entries.items) |entry| {
+        carry = try ctx.callFunction(cb_name, &.{ carry, entry.value });
+    }
+    return carry;
+}
+
+fn array_key_first(_: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len == 0 or args[0] != .array) return .null;
+    const arr = args[0].array;
+    if (arr.entries.items.len == 0) return .null;
+    return switch (arr.entries.items[0].key) {
+        .int => |i| .{ .int = i },
+        .string => |s| .{ .string = s },
+    };
+}
+
+fn array_key_last(_: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len == 0 or args[0] != .array) return .null;
+    const arr = args[0].array;
+    if (arr.entries.items.len == 0) return .null;
+    return switch (arr.entries.items[arr.entries.items.len - 1].key) {
+        .int => |i| .{ .int = i },
+        .string => |s| .{ .string = s },
+    };
+}
+
+fn native_uasort(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len < 2 or args[0] != .array) return .{ .bool = false };
+    const arr = args[0].array;
+    const cb_name = if (args[1] == .string) args[1].string else return Value{ .bool = false };
+    const items = arr.entries.items;
+    var n = items.len;
+    while (n > 1) {
+        var swapped = false;
+        for (0..n - 1) |i| {
+            const cmp = try ctx.callFunction(cb_name, &.{ items[i].value, items[i + 1].value });
+            if (Value.toInt(cmp) > 0) {
+                const tmp = items[i];
+                items[i] = items[i + 1];
+                items[i + 1] = tmp;
+                swapped = true;
+            }
+        }
+        if (!swapped) break;
+        n -= 1;
+    }
+    return .{ .bool = true };
+}
+
+fn native_uksort(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len < 2 or args[0] != .array) return .{ .bool = false };
+    const arr = args[0].array;
+    const cb_name = if (args[1] == .string) args[1].string else return Value{ .bool = false };
+    const items = arr.entries.items;
+    var n = items.len;
+    while (n > 1) {
+        var swapped = false;
+        for (0..n - 1) |i| {
+            const a_key: Value = switch (items[i].key) {
+                .int => |ki| .{ .int = ki },
+                .string => |ks| .{ .string = ks },
+            };
+            const b_key: Value = switch (items[i + 1].key) {
+                .int => |ki| .{ .int = ki },
+                .string => |ks| .{ .string = ks },
+            };
+            const cmp = try ctx.callFunction(cb_name, &.{ a_key, b_key });
+            if (Value.toInt(cmp) > 0) {
+                const tmp = items[i];
+                items[i] = items[i + 1];
+                items[i + 1] = tmp;
+                swapped = true;
+            }
+        }
+        if (!swapped) break;
+        n -= 1;
+    }
+    return .{ .bool = true };
+}
+
+fn array_replace(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len == 0 or args[0] != .array) return .null;
+    var result = try ctx.createArray();
+    for (args[0].array.entries.items) |entry| {
+        try result.set(ctx.allocator, entry.key, entry.value);
+    }
+    for (args[1..]) |arg| {
+        if (arg != .array) continue;
+        for (arg.array.entries.items) |entry| {
+            try result.set(ctx.allocator, entry.key, entry.value);
+        }
+    }
+    return .{ .array = result };
 }

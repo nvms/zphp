@@ -149,6 +149,11 @@ critical boundaries:
 - `global $var`: `get_global` copies from frame 0. no write-back yet
 - `static $var = default`: `get_static`/`set_static` with `func_name::var_name` keyed storage. `writebackStatics()` on frame return
 
+### SPL classes (src/stdlib/spl.zig)
+- `SplStack`: LIFO stack backed by PhpArray in hidden `__data` property. push/pop operate on end of array. iterator goes top-to-bottom (cursor starts at len-1, decrements). implements Countable
+- `ArrayObject`: object wrapper around PhpArray. stores data in `__data`, flags in `__flags`. implements Countable. offsetGet/offsetSet/offsetExists/offsetUnset for explicit access. getArrayCopy returns a shallow copy. bracket syntax (`$ao["key"]`) not yet supported (requires VM-level ArrayAccess dispatch)
+- both registered during VM init alongside builtins and datetime
+
 ## gotchas
 
 - **dangling pointers in constant pool**: any string stored in the constant pool must be either a source slice or a heap allocation tracked by string_allocs. stack-allocated bufPrint strings cause use-after-free
@@ -162,7 +167,7 @@ every existing PHP performance project (PHP-FPM, Swoole, Workerman, FrankenPHP, 
 unique differentiators:
 - toolchain unification (run/install/test/fmt/build/serve in one binary)
 - compile to standalone binary (`zphp build`)
-- zero C dependencies in distributed binary
+- minimal C dependencies (PCRE2 for regex, with more as stdlib grows - SQLite, libcurl, etc.)
 - `zphp serve` with pre-loaded VM (no IPC/serialization overhead)
 - fresh memory model (zig allocators, tagged union values)
 

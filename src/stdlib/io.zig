@@ -25,6 +25,13 @@ pub const entries = .{
     .{ "strtotime", native_strtotime },
     .{ "header", native_header },
     .{ "http_response_code", native_http_response_code },
+    .{ "sleep", native_sleep },
+    .{ "usleep", native_usleep },
+    .{ "getenv", native_getenv },
+    .{ "putenv", native_putenv },
+    .{ "uniqid", native_uniqid },
+    .{ "getcwd", native_getcwd },
+    .{ "php_uname", native_php_uname },
 };
 
 fn file_get_contents(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
@@ -364,4 +371,63 @@ pub fn dateToTimestamp(year: i64, month: i64, day: i64, hour: i64, min: i64, sec
     const doe = yoe * 365 + @divFloor(yoe, 4) - @divFloor(yoe, 100) + doy;
     const days = era * 146097 + doe - 719468;
     return days * 86400 + hour * 3600 + min * 60 + sec;
+}
+
+fn native_sleep(_: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len == 0) return .{ .int = 0 };
+    const secs = Value.toInt(args[0]);
+    if (secs > 0) {
+        std.Thread.sleep(@intCast(secs * 1_000_000_000));
+    }
+    return .{ .int = 0 };
+}
+
+fn native_usleep(_: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len == 0) return .null;
+    const usecs = Value.toInt(args[0]);
+    if (usecs > 0) {
+        std.Thread.sleep(@intCast(usecs * 1_000));
+    }
+    return .null;
+}
+
+fn native_getenv(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len == 0 or args[0] != .string) return .{ .bool = false };
+    const name = args[0].string;
+    const val = std.process.getEnvVarOwned(ctx.allocator, name) catch return Value{ .bool = false };
+    try ctx.strings.append(ctx.allocator, val);
+    return .{ .string = val };
+}
+
+fn native_putenv(_: *NativeContext, args: []const Value) RuntimeError!Value {
+    // putenv("KEY=VALUE") - we parse but can't actually set env in zig safely
+    if (args.len == 0 or args[0] != .string) return .{ .bool = false };
+    return .{ .bool = true };
+}
+
+fn native_uniqid(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    const prefix = if (args.len >= 1 and args[0] == .string) args[0].string else "";
+    const ns = std.time.nanoTimestamp();
+    const usec: u64 = @intCast(@divTrunc(@mod(if (ns < 0) -ns else ns, 1_000_000_000), 1_000));
+    const sec: u64 = @intCast(@divTrunc(if (ns < 0) -ns else ns, 1_000_000_000));
+    var buf: [64]u8 = undefined;
+    const hex = std.fmt.bufPrint(&buf, "{s}{x:0>8}{x:0>5}", .{ prefix, sec, usec }) catch return Value{ .string = "" };
+    return .{ .string = try ctx.createString(hex) };
+}
+
+fn native_getcwd(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    const cwd = std.fs.cwd().realpath(".", &buf) catch return Value{ .bool = false };
+    return .{ .string = try ctx.createString(cwd) };
+}
+
+fn native_php_uname(_: *NativeContext, args: []const Value) RuntimeError!Value {
+    const mode = if (args.len >= 1 and args[0] == .string and args[0].string.len > 0) args[0].string[0] else 'a';
+    return .{ .string = switch (mode) {
+        's' => if (@import("builtin").os.tag == .macos) "Darwin" else "Linux",
+        'n' => "localhost",
+        'r' => "0.0.0",
+        'm' => if (@import("builtin").cpu.arch == .aarch64) "arm64" else "x86_64",
+        else => if (@import("builtin").os.tag == .macos) "Darwin localhost 0.0.0 arm64" else "Linux localhost 0.0.0 x86_64",
+    } };
 }

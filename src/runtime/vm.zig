@@ -146,6 +146,7 @@ pub const VM = struct {
         try initConstants(&vm.php_constants, allocator);
         try @import("builtins.zig").register(&vm, allocator);
         try @import("../stdlib/datetime.zig").register(&vm, allocator);
+        try @import("../stdlib/spl.zig").register(&vm, allocator);
         return vm;
     }
 

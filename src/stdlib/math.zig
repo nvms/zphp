@@ -27,6 +27,23 @@ pub const entries = .{
     .{ "decbin", native_decbin },
     .{ "decoct", native_decoct },
     .{ "dechex", native_dechex },
+    .{ "sin", native_sin },
+    .{ "cos", native_cos },
+    .{ "tan", native_tan },
+    .{ "asin", native_asin },
+    .{ "acos", native_acos },
+    .{ "atan", native_atan },
+    .{ "atan2", native_atan2 },
+    .{ "sinh", native_sinh },
+    .{ "cosh", native_cosh },
+    .{ "tanh", native_tanh },
+    .{ "deg2rad", native_deg2rad },
+    .{ "rad2deg", native_rad2deg },
+    .{ "hypot", native_hypot },
+    .{ "is_finite", native_is_finite },
+    .{ "is_infinite", native_is_infinite },
+    .{ "is_nan", native_is_nan },
+    .{ "mt_rand", native_rand },
 };
 
 fn native_abs(_: *NativeContext, args: []const Value) RuntimeError!Value {
@@ -51,7 +68,10 @@ fn native_ceil(_: *NativeContext, args: []const Value) RuntimeError!Value {
 fn native_round(_: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len == 0) return .{ .float = 0.0 };
     const v = Value.toFloat(args[0]);
-    return .{ .float = @round(v) };
+    const precision: i64 = if (args.len >= 2) Value.toInt(args[1]) else 0;
+    if (precision == 0) return .{ .float = @round(v) };
+    const factor = std.math.pow(f64, 10.0, @floatFromInt(precision));
+    return .{ .float = @round(v * factor) / factor };
 }
 
 fn native_min(_: *NativeContext, args: []const Value) RuntimeError!Value {
@@ -216,4 +236,101 @@ fn native_dechex(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     var buf: [17]u8 = undefined;
     const s = std.fmt.bufPrint(&buf, "{x}", .{@as(u64, @bitCast(val))}) catch return Value{ .string = "0" };
     return .{ .string = try ctx.createString(s) };
+}
+
+fn native_sin(_: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len == 0) return .{ .float = 0.0 };
+    return .{ .float = @sin(Value.toFloat(args[0])) };
+}
+
+fn native_cos(_: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len == 0) return .{ .float = 0.0 };
+    return .{ .float = @cos(Value.toFloat(args[0])) };
+}
+
+fn native_tan(_: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len == 0) return .{ .float = 0.0 };
+    return .{ .float = @tan(Value.toFloat(args[0])) };
+}
+
+fn native_asin(_: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len == 0) return .{ .float = 0.0 };
+    return .{ .float = std.math.asin(Value.toFloat(args[0])) };
+}
+
+fn native_acos(_: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len == 0) return .{ .float = 0.0 };
+    return .{ .float = std.math.acos(Value.toFloat(args[0])) };
+}
+
+fn native_atan(_: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len == 0) return .{ .float = 0.0 };
+    return .{ .float = std.math.atan(Value.toFloat(args[0])) };
+}
+
+fn native_atan2(_: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len < 2) return .{ .float = 0.0 };
+    return .{ .float = std.math.atan2(Value.toFloat(args[0]), Value.toFloat(args[1])) };
+}
+
+fn native_sinh(_: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len == 0) return .{ .float = 0.0 };
+    const x = Value.toFloat(args[0]);
+    return .{ .float = (@exp(x) - @exp(-x)) / 2.0 };
+}
+
+fn native_cosh(_: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len == 0) return .{ .float = 0.0 };
+    const x = Value.toFloat(args[0]);
+    return .{ .float = (@exp(x) + @exp(-x)) / 2.0 };
+}
+
+fn native_tanh(_: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len == 0) return .{ .float = 0.0 };
+    const x = Value.toFloat(args[0]);
+    const ex = @exp(x);
+    const enx = @exp(-x);
+    return .{ .float = (ex - enx) / (ex + enx) };
+}
+
+fn native_deg2rad(_: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len == 0) return .{ .float = 0.0 };
+    return .{ .float = Value.toFloat(args[0]) * (std.math.pi / 180.0) };
+}
+
+fn native_rad2deg(_: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len == 0) return .{ .float = 0.0 };
+    return .{ .float = Value.toFloat(args[0]) * (180.0 / std.math.pi) };
+}
+
+fn native_hypot(_: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len < 2) return .{ .float = 0.0 };
+    const x = Value.toFloat(args[0]);
+    const y = Value.toFloat(args[1]);
+    return .{ .float = @sqrt(x * x + y * y) };
+}
+
+fn native_is_finite(_: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len == 0) return .{ .bool = true };
+    return .{ .bool = switch (args[0]) {
+        .float => |f| !std.math.isNan(f) and !std.math.isInf(f),
+        .int => true,
+        else => true,
+    } };
+}
+
+fn native_is_infinite(_: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len == 0) return .{ .bool = false };
+    return .{ .bool = switch (args[0]) {
+        .float => |f| std.math.isInf(f),
+        else => false,
+    } };
+}
+
+fn native_is_nan(_: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len == 0) return .{ .bool = false };
+    return .{ .bool = switch (args[0]) {
+        .float => |f| std.math.isNan(f),
+        else => false,
+    } };
 }

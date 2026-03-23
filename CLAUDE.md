@@ -47,11 +47,15 @@ zig 0.15.x. `zig build test` must pass before pushing. short lowercase commits, 
 
 ## CI
 
-6 jobs: `zig build test` (ubuntu + macos), serve integration (`tests/serve_test`, 26 assertions), test runner (`tests/test_runner_test`, 15 assertions), packages (`tests/pkg_test`, 10 assertions), PHP compat (`tests/run`, 66 files)
+6 jobs: `zig build test` (ubuntu + macos), serve integration (`tests/serve_test`, 26 assertions), test runner (`tests/test_runner_test`, 15 assertions), packages (`tests/pkg_test`, 10 assertions), PHP compat (`tests/run`, 71 files)
 
 ## roadmap
 
-next: `zphp fmt`, gzip compression for serve static files, `SplStack`/`ArrayObject`, fibers, WebSocket support for serve (design toward event-loop-per-worker for long-lived connections - don't assume all connections are short-lived request/response)
+next: `zphp fmt`, gzip compression for serve static files, fibers, WebSocket support for serve (design toward event-loop-per-worker for long-lived connections - don't assume all connections are short-lived request/response), enums (PHP 8.1+ feature - frameworks and libraries increasingly depend on them, blocks real-world code adoption), `call_user_func`/`call_user_func_array` (dynamic dispatch is the backbone of PHP middleware, event systems, and DI containers - without it no real framework code runs)
+
+## SPL classes
+
+`SplStack` and `ArrayObject` implemented in `src/stdlib/spl.zig`, registered in `vm.zig` init. both implement `Countable` interface. internal data stored in hidden `__data` property as PhpArray. SplStack iterates LIFO (top to bottom). SplStack methods: push, pop, top, bottom, count, isEmpty, shift, unshift, rewind, current, key, next, valid, toArray. ArrayObject methods: offsetGet, offsetSet, offsetExists, offsetUnset, count, append, getArrayCopy, getIterator, setFlags, getFlags. ArrayAccess bracket syntax (`$ao["key"]`) not yet wired - requires VM-level dispatch for `[]` on objects.
 
 ## distribution
 

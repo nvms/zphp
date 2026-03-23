@@ -57,6 +57,14 @@ pub const entries = .{
     .{ "mb_substr", native_mb_substr },
     .{ "html_entity_decode", native_htmlspecialchars_decode },
     .{ "strrev", native_strrev },
+    .{ "stripos", native_stripos },
+    .{ "strrpos", native_strrpos },
+    .{ "strripos", native_strripos },
+    .{ "str_ireplace", native_str_ireplace },
+    .{ "ucwords", native_ucwords },
+    .{ "crc32", native_crc32 },
+    .{ "str_rot13", native_str_rot13 },
+    .{ "quotemeta", native_quotemeta },
 };
 
 fn substr(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
@@ -1188,4 +1196,153 @@ fn native_strrev(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     for (s, 0..) |c, i| buf[s.len - 1 - i] = c;
     try ctx.strings.append(ctx.allocator, buf);
     return .{ .string = buf };
+}
+
+fn toLowerBuf(allocator: std.mem.Allocator, s: []const u8) ![]u8 {
+    const buf = try allocator.alloc(u8, s.len);
+    for (s, 0..) |c, i| buf[i] = std.ascii.toLower(c);
+    return buf;
+}
+
+fn native_stripos(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len < 2) return .{ .bool = false };
+    const haystack = if (args[0] == .string) args[0].string else return Value{ .bool = false };
+    const needle = if (args[1] == .string) args[1].string else return Value{ .bool = false };
+    const offset: usize = if (args.len >= 3) @intCast(@max(0, Value.toInt(args[2]))) else 0;
+    if (offset >= haystack.len or needle.len == 0) return .{ .bool = false };
+    const h_lower = try toLowerBuf(ctx.allocator, haystack[offset..]);
+    defer ctx.allocator.free(h_lower);
+    const n_lower = try toLowerBuf(ctx.allocator, needle);
+    defer ctx.allocator.free(n_lower);
+    if (std.mem.indexOf(u8, h_lower, n_lower)) |pos| {
+        return .{ .int = @intCast(pos + offset) };
+    }
+    return .{ .bool = false };
+}
+
+fn native_strrpos(_: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len < 2) return .{ .bool = false };
+    const haystack = if (args[0] == .string) args[0].string else return Value{ .bool = false };
+    const needle = if (args[1] == .string) args[1].string else return Value{ .bool = false };
+    if (needle.len == 0 or haystack.len == 0) return .{ .bool = false };
+    if (std.mem.lastIndexOf(u8, haystack, needle)) |pos| {
+        return .{ .int = @intCast(pos) };
+    }
+    return .{ .bool = false };
+}
+
+fn native_strripos(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len < 2) return .{ .bool = false };
+    const haystack = if (args[0] == .string) args[0].string else return Value{ .bool = false };
+    const needle = if (args[1] == .string) args[1].string else return Value{ .bool = false };
+    if (needle.len == 0 or haystack.len == 0) return .{ .bool = false };
+    const h_lower = try toLowerBuf(ctx.allocator, haystack);
+    defer ctx.allocator.free(h_lower);
+    const n_lower = try toLowerBuf(ctx.allocator, needle);
+    defer ctx.allocator.free(n_lower);
+    if (std.mem.lastIndexOf(u8, h_lower, n_lower)) |pos| {
+        return .{ .int = @intCast(pos) };
+    }
+    return .{ .bool = false };
+}
+
+fn native_str_ireplace(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len < 3) return if (args.len >= 3) args[2] else Value{ .string = "" };
+    const search = if (args[0] == .string) args[0].string else return args[2];
+    const replace = if (args[1] == .string) args[1].string else return args[2];
+    const subject = if (args[2] == .string) args[2].string else return args[2];
+    if (search.len == 0) return args[2];
+
+    const s_lower = try toLowerBuf(ctx.allocator, subject);
+    defer ctx.allocator.free(s_lower);
+    const n_lower = try toLowerBuf(ctx.allocator, search);
+    defer ctx.allocator.free(n_lower);
+
+    var buf = std.ArrayListUnmanaged(u8){};
+    var i: usize = 0;
+    while (i < subject.len) {
+        if (i + search.len <= subject.len and std.mem.eql(u8, s_lower[i .. i + search.len], n_lower)) {
+            try buf.appendSlice(ctx.allocator, replace);
+            i += search.len;
+        } else {
+            try buf.append(ctx.allocator, subject[i]);
+            i += 1;
+        }
+    }
+    const s = try buf.toOwnedSlice(ctx.allocator);
+    try ctx.strings.append(ctx.allocator, s);
+    return .{ .string = s };
+}
+
+fn native_ucwords(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len == 0) return .{ .string = "" };
+    const s = if (args[0] == .string) args[0].string else return Value{ .string = "" };
+    if (s.len == 0) return .{ .string = "" };
+    const delimiters = if (args.len >= 2 and args[1] == .string) args[1].string else " \t\r\n\x0b";
+    const buf = try ctx.allocator.alloc(u8, s.len);
+    var capitalize_next = true;
+    for (s, 0..) |c, i| {
+        if (isDelimiter(c, delimiters)) {
+            buf[i] = c;
+            capitalize_next = true;
+        } else if (capitalize_next) {
+            buf[i] = std.ascii.toUpper(c);
+            capitalize_next = false;
+        } else {
+            buf[i] = c;
+        }
+    }
+    try ctx.strings.append(ctx.allocator, buf);
+    return .{ .string = buf };
+}
+
+fn isDelimiter(c: u8, delimiters: []const u8) bool {
+    for (delimiters) |d| {
+        if (c == d) return true;
+    }
+    return false;
+}
+
+fn native_crc32(_: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len == 0) return .{ .int = 0 };
+    const s = if (args[0] == .string) args[0].string else return Value{ .int = 0 };
+    const result = std.hash.crc.Crc32IsoHdlc.hash(s);
+    const signed: i32 = @bitCast(result);
+    return .{ .int = signed };
+}
+
+fn native_str_rot13(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len == 0) return .{ .string = "" };
+    const s = if (args[0] == .string) args[0].string else return Value{ .string = "" };
+    if (s.len == 0) return .{ .string = "" };
+    const buf = try ctx.allocator.alloc(u8, s.len);
+    for (s, 0..) |c, i| {
+        buf[i] = if (c >= 'a' and c <= 'z')
+            (c - 'a' + 13) % 26 + 'a'
+        else if (c >= 'A' and c <= 'Z')
+            (c - 'A' + 13) % 26 + 'A'
+        else
+            c;
+    }
+    try ctx.strings.append(ctx.allocator, buf);
+    return .{ .string = buf };
+}
+
+fn native_quotemeta(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len == 0) return .{ .string = "" };
+    const s = if (args[0] == .string) args[0].string else return Value{ .string = "" };
+    if (s.len == 0) return .{ .string = "" };
+    var buf = std.ArrayListUnmanaged(u8){};
+    for (s) |c| {
+        if (c == '.' or c == '\\' or c == '+' or c == '*' or c == '?' or
+            c == '[' or c == '^' or c == ']' or c == '(' or c == ')' or
+            c == '$')
+        {
+            try buf.append(ctx.allocator, '\\');
+        }
+        try buf.append(ctx.allocator, c);
+    }
+    const result = try buf.toOwnedSlice(ctx.allocator);
+    try ctx.strings.append(ctx.allocator, result);
+    return .{ .string = result };
 }
