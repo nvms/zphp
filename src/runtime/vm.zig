@@ -571,26 +571,28 @@ pub const VM = struct {
                     // set property defaults from class and parent chain
                     try self.initObjectProperties(obj, class_name);
 
-                    // call constructor if it exists
+                    // call constructor if it exists (walks parent chain)
                     const ac: usize = arg_count;
-                    var ctor_name_buf: [256]u8 = undefined;
-                    const ctor_name = std.fmt.bufPrint(&ctor_name_buf, "{s}::__construct", .{class_name}) catch class_name;
+                    const ctor_name = self.resolveMethod(class_name, "__construct") catch null;
 
-                    if (self.functions.get(ctor_name)) |func| {
-                        var new_vars: std.StringHashMapUnmanaged(Value) = .{};
-                        try new_vars.put(self.allocator, "$this", .{ .object = obj });
-                        for (0..ac) |i| {
-                            try new_vars.put(self.allocator, func.params[i], self.stack[self.sp - ac + i]);
+                    if (ctor_name) |cn| {
+                        if (self.functions.get(cn)) |func| {
+                            var new_vars: std.StringHashMapUnmanaged(Value) = .{};
+                            try new_vars.put(self.allocator, "$this", .{ .object = obj });
+                            for (0..ac) |i| {
+                                try new_vars.put(self.allocator, func.params[i], self.stack[self.sp - ac + i]);
+                            }
+                            self.sp -= ac;
+                            self.frames[self.frame_count] = .{ .chunk = &func.chunk, .ip = 0, .vars = new_vars };
+                            self.frame_count += 1;
+
+                            const ctor_base = self.frame_count - 1;
+                            try self.runUntilFrame(ctor_base);
+
+                            _ = self.pop();
+                        } else {
+                            self.sp -= ac;
                         }
-                        self.sp -= ac;
-                        self.frames[self.frame_count] = .{ .chunk = &func.chunk, .ip = 0, .vars = new_vars };
-                        self.frame_count += 1;
-
-                        const ctor_base = self.frame_count - 1;
-                        try self.runUntilFrame(ctor_base);
-
-                        // constructor returns null, discard it
-                        _ = self.pop();
                     } else {
                         self.sp -= ac;
                     }
@@ -658,14 +660,66 @@ pub const VM = struct {
                     const class_idx = self.readU16();
                     const method_idx = self.readU16();
                     const arg_count = self.readByte();
-                    const class_name = self.currentChunk().constants.items[class_idx].string;
+                    var class_name = self.currentChunk().constants.items[class_idx].string;
                     const method_name = self.currentChunk().constants.items[method_idx].string;
 
+                    // resolve parent/self relative to the defining class, not $this
+                    const this_val = self.currentFrame().vars.get("$this");
+                    if (std.mem.eql(u8, class_name, "parent") or std.mem.eql(u8, class_name, "self")) {
+                        // find the defining class from the current function name (ClassName::method)
+                        const defining_class = self.currentDefiningClass();
+                        if (std.mem.eql(u8, class_name, "parent")) {
+                            if (defining_class) |dc| {
+                                if (self.classes.get(dc)) |cls| {
+                                    if (cls.parent) |p| class_name = p;
+                                }
+                            }
+                        } else {
+                            if (defining_class) |dc| class_name = dc;
+                        }
+                    }
+
                     const full_name = try self.resolveMethod(class_name, method_name);
-                    try self.callNamedFunction(full_name, arg_count);
+
+                    // if we have $this, pass it through to the called method
+                    if (this_val) |tv| {
+                        if (tv == .object) {
+                            if (self.functions.get(full_name)) |func| {
+                                const ac: usize = arg_count;
+                                var new_vars: std.StringHashMapUnmanaged(Value) = .{};
+                                try new_vars.put(self.allocator, "$this", tv);
+                                for (0..ac) |i| {
+                                    try new_vars.put(self.allocator, func.params[i], self.stack[self.sp - ac + i]);
+                                }
+                                self.sp -= ac;
+                                self.frames[self.frame_count] = .{ .chunk = &func.chunk, .ip = 0, .vars = new_vars };
+                                self.frame_count += 1;
+                            } else return error.RuntimeError;
+                        } else {
+                            try self.callNamedFunction(full_name, arg_count);
+                        }
+                    } else {
+                        try self.callNamedFunction(full_name, arg_count);
+                    }
                 },
             }
         }
+    }
+
+    fn currentDefiningClass(self: *VM) ?[]const u8 {
+        // find which class the currently executing function belongs to
+        // by scanning function names for ClassName::method pattern
+        const current_chunk = self.currentChunk();
+        var iter = self.functions.iterator();
+        while (iter.next()) |entry| {
+            if (&entry.value_ptr.*.chunk == current_chunk) {
+                const name = entry.key_ptr.*;
+                if (std.mem.indexOf(u8, name, "::")) |sep| {
+                    return name[0..sep];
+                }
+            }
+        }
+        return null;
     }
 
     fn resolveMethod(self: *VM, class_name: []const u8, method_name: []const u8) RuntimeError![]const u8 {
@@ -1457,4 +1511,111 @@ test "class gettype" {
         \\$f = new Foo();
         \\echo gettype($f);
     , "object");
+}
+
+// ==========================================================================
+// inheritance tests
+// ==========================================================================
+
+test "inherited method" {
+    try expectOutput(
+        \\<?php
+        \\class Base {
+        \\    public function greet() { return 'hello'; }
+        \\}
+        \\class Child extends Base {}
+        \\$c = new Child();
+        \\echo $c->greet();
+    , "hello");
+}
+
+test "inherited constructor" {
+    try expectOutput(
+        \\<?php
+        \\class Animal {
+        \\    public $name;
+        \\    public function __construct($n) { $this->name = $n; }
+        \\}
+        \\class Dog extends Animal {}
+        \\$d = new Dog('Rex');
+        \\echo $d->name;
+    , "Rex");
+}
+
+test "method override" {
+    try expectOutput(
+        \\<?php
+        \\class Animal {
+        \\    public function sound() { return 'generic'; }
+        \\}
+        \\class Cat extends Animal {
+        \\    public function sound() { return 'meow'; }
+        \\}
+        \\$c = new Cat();
+        \\echo $c->sound();
+    , "meow");
+}
+
+test "parent method call" {
+    try expectOutput(
+        \\<?php
+        \\class Base {
+        \\    public function val() { return 'base'; }
+        \\}
+        \\class Child extends Base {
+        \\    public function val() { return parent::val() . '+child'; }
+        \\}
+        \\$c = new Child();
+        \\echo $c->val();
+    , "base+child");
+}
+
+test "parent constructor call" {
+    try expectOutput(
+        \\<?php
+        \\class Shape {
+        \\    public $color;
+        \\    public function __construct($c) { $this->color = $c; }
+        \\}
+        \\class Circle extends Shape {
+        \\    public $radius;
+        \\    public function __construct($c, $r) {
+        \\        parent::__construct($c);
+        \\        $this->radius = $r;
+        \\    }
+        \\}
+        \\$c = new Circle('red', 5);
+        \\echo $c->color . ' ' . $c->radius;
+    , "red 5");
+}
+
+test "multi-level inheritance" {
+    try expectOutput(
+        \\<?php
+        \\class A {
+        \\    public function id() { return 'A'; }
+        \\}
+        \\class B extends A {
+        \\    public function id() { return parent::id() . 'B'; }
+        \\}
+        \\class C extends B {
+        \\    public function id() { return parent::id() . 'C'; }
+        \\}
+        \\$c = new C();
+        \\echo $c->id();
+    , "ABC");
+}
+
+test "inherited property defaults" {
+    try expectOutput(
+        \\<?php
+        \\class Config {
+        \\    public $debug = 0;
+        \\}
+        \\class AppConfig extends Config {
+        \\    public $name = 'app';
+        \\}
+        \\$c = new AppConfig();
+        \\echo $c->debug . ' ' . $c->name;
+    , "0 app");
 }

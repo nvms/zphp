@@ -278,8 +278,8 @@ phase 1 complete: full pipeline from source to execution. zphp can run real PHP 
   - `io.zig` - file_get_contents/file_put_contents/file_exists/is_file/is_dir/basename/dirname/pathinfo/realpath/time/microtime/date
   - `pcre.zig` - preg_match/preg_match_all/preg_replace/preg_split (FFI bindings to libpcre2)
 - `src/main.zig` - CLI entry point with `zphp run <file>`, imports all modules for test discovery
-- 195 unit tests total across all modules
-- 42 PHP compatibility test files in tests/ verified against PHP 8.3
+- 203 unit tests total across all modules
+- 43 PHP compatibility test files in tests/ verified against PHP 8.3
 
 ### lexer design decisions
 - tokens reference byte offsets into source (zero-copy, no allocations)
@@ -457,12 +457,20 @@ done:
 - method resolution walks parent chain for inheritance support
 - `gettype()` returns "object" for objects
 
+done (continued):
+- `extends` keyword for single inheritance
+- inherited constructors (child without __construct uses parent's)
+- `parent::method()` and `parent::__construct()` calls
+- `self::method()` calls
+- multi-level inheritance (A -> B -> C) with correct parent:: resolution at each level
+- `parent::` resolves relative to the defining class, not $this->class_name (prevents infinite recursion in deep hierarchies)
+- `currentDefiningClass()` extracts class name from the function name pattern `ClassName::methodName`
+- inherited property defaults (parent properties set first, child can override)
+
 remaining:
-- `new ClassName` without parentheses (parser handles it but needs VM-side fix for edge cases)
-- inheritance with `extends` and `parent::` calls
 - `static` methods/properties
 - visibility enforcement (public/protected/private)
-- `instanceof` operator
+- `instanceof` operator (currently mapped to identical, needs own opcode)
 - abstract classes, interfaces, traits (step 5)
 
 **5. classes (advanced)**
