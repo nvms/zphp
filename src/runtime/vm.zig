@@ -159,8 +159,8 @@ pub const VM = struct {
         try c.put(a, "PHP_INT_MIN", .{ .int = std.math.minInt(i64) });
         try c.put(a, "PHP_INT_SIZE", .{ .int = 8 });
         try c.put(a, "PHP_MAJOR_VERSION", .{ .int = 8 });
-        try c.put(a, "PHP_MINOR_VERSION", .{ .int = 3 });
-        try c.put(a, "PHP_VERSION", .{ .string = "8.3.0" });
+        try c.put(a, "PHP_MINOR_VERSION", .{ .int = 4 });
+        try c.put(a, "PHP_VERSION", .{ .string = "8.4.0" });
         try c.put(a, "PHP_SAPI", .{ .string = "cli" });
         try c.put(a, "PHP_OS", .{ .string = if (@import("builtin").os.tag == .macos) "Darwin" else "Linux" });
         try c.put(a, "DIRECTORY_SEPARATOR", .{ .string = "/" });

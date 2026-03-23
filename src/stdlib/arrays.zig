@@ -53,6 +53,10 @@ pub const entries = .{
     .{ "uasort", native_uasort },
     .{ "uksort", native_uksort },
     .{ "array_replace", array_replace },
+    .{ "array_find", array_find },
+    .{ "array_find_key", array_find_key },
+    .{ "array_any", array_any },
+    .{ "array_all", array_all },
 };
 
 fn array_push(_: *NativeContext, args: []const Value) RuntimeError!Value {
@@ -828,4 +832,53 @@ fn array_replace(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
         }
     }
     return .{ .array = result };
+}
+
+fn array_find(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len < 2 or args[0] != .array) return .null;
+    const arr = args[0].array;
+    const cb_name = if (args[1] == .string) args[1].string else return Value.null;
+    for (arr.entries.items) |entry| {
+        const result = try ctx.callFunction(cb_name, &.{entry.value});
+        if (result.isTruthy()) return entry.value;
+    }
+    return .null;
+}
+
+fn array_find_key(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len < 2 or args[0] != .array) return .null;
+    const arr = args[0].array;
+    const cb_name = if (args[1] == .string) args[1].string else return Value.null;
+    for (arr.entries.items) |entry| {
+        const result = try ctx.callFunction(cb_name, &.{entry.value});
+        if (result.isTruthy()) {
+            return switch (entry.key) {
+                .int => |i| .{ .int = i },
+                .string => |s| .{ .string = s },
+            };
+        }
+    }
+    return .null;
+}
+
+fn array_any(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len < 2 or args[0] != .array) return .{ .bool = false };
+    const arr = args[0].array;
+    const cb_name = if (args[1] == .string) args[1].string else return Value{ .bool = false };
+    for (arr.entries.items) |entry| {
+        const result = try ctx.callFunction(cb_name, &.{entry.value});
+        if (result.isTruthy()) return .{ .bool = true };
+    }
+    return .{ .bool = false };
+}
+
+fn array_all(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len < 2 or args[0] != .array) return .{ .bool = true };
+    const arr = args[0].array;
+    const cb_name = if (args[1] == .string) args[1].string else return Value{ .bool = true };
+    for (arr.entries.items) |entry| {
+        const result = try ctx.callFunction(cb_name, &.{entry.value});
+        if (!result.isTruthy()) return .{ .bool = false };
+    }
+    return .{ .bool = true };
 }

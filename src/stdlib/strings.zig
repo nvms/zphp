@@ -65,6 +65,9 @@ pub const entries = .{
     .{ "crc32", native_crc32 },
     .{ "str_rot13", native_str_rot13 },
     .{ "quotemeta", native_quotemeta },
+    .{ "mb_trim", native_mb_trim },
+    .{ "mb_ltrim", native_mb_ltrim },
+    .{ "mb_rtrim", native_mb_rtrim },
 };
 
 fn substr(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
@@ -1326,6 +1329,30 @@ fn native_str_rot13(ctx: *NativeContext, args: []const Value) RuntimeError!Value
     }
     try ctx.strings.append(ctx.allocator, buf);
     return .{ .string = buf };
+}
+
+fn native_mb_trim(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len == 0) return .{ .string = "" };
+    const s = if (args[0] == .string) args[0].string else return Value{ .string = "" };
+    const chars = if (args.len >= 2 and args[1] == .string) args[1].string else " \t\n\r\x0b\x00";
+    const trimmed = std.mem.trim(u8, s, chars);
+    return .{ .string = try ctx.createString(trimmed) };
+}
+
+fn native_mb_ltrim(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len == 0) return .{ .string = "" };
+    const s = if (args[0] == .string) args[0].string else return Value{ .string = "" };
+    const chars = if (args.len >= 2 and args[1] == .string) args[1].string else " \t\n\r\x0b\x00";
+    const trimmed = std.mem.trimLeft(u8, s, chars);
+    return .{ .string = try ctx.createString(trimmed) };
+}
+
+fn native_mb_rtrim(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len == 0) return .{ .string = "" };
+    const s = if (args[0] == .string) args[0].string else return Value{ .string = "" };
+    const chars = if (args.len >= 2 and args[1] == .string) args[1].string else " \t\n\r\x0b\x00";
+    const trimmed = std.mem.trimRight(u8, s, chars);
+    return .{ .string = try ctx.createString(trimmed) };
 }
 
 fn native_quotemeta(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
