@@ -1,11 +1,68 @@
 const std = @import("std");
 
+pub const PhpArray = struct {
+    entries: std.ArrayListUnmanaged(Entry) = .{},
+    next_int_key: i64 = 0,
+
+    pub const Entry = struct {
+        key: Key,
+        value: Value,
+    };
+
+    pub const Key = union(enum) {
+        int: i64,
+        string: []const u8,
+
+        pub fn eql(a: Key, b: Key) bool {
+            if (@intFromEnum(a) != @intFromEnum(b)) return false;
+            return switch (a) {
+                .int => |ai| ai == b.int,
+                .string => |as_| std.mem.eql(u8, as_, b.string),
+            };
+        }
+    };
+
+    pub fn deinit(self: *PhpArray, allocator: std.mem.Allocator) void {
+        self.entries.deinit(allocator);
+    }
+
+    pub fn append(self: *PhpArray, allocator: std.mem.Allocator, value: Value) !void {
+        try self.entries.append(allocator, .{ .key = .{ .int = self.next_int_key }, .value = value });
+        self.next_int_key += 1;
+    }
+
+    pub fn set(self: *PhpArray, allocator: std.mem.Allocator, key: Key, value: Value) !void {
+        for (self.entries.items) |*entry| {
+            if (entry.key.eql(key)) {
+                entry.value = value;
+                return;
+            }
+        }
+        try self.entries.append(allocator, .{ .key = key, .value = value });
+        if (key == .int and key.int >= self.next_int_key) {
+            self.next_int_key = key.int + 1;
+        }
+    }
+
+    pub fn get(self: *const PhpArray, key: Key) Value {
+        for (self.entries.items) |entry| {
+            if (entry.key.eql(key)) return entry.value;
+        }
+        return .null;
+    }
+
+    pub fn length(self: *const PhpArray) i64 {
+        return @intCast(self.entries.items.len);
+    }
+};
+
 pub const Value = union(enum) {
     null,
     bool: bool,
     int: i64,
     float: f64,
     string: []const u8,
+    array: *PhpArray,
 
     pub fn isTruthy(self: Value) bool {
         return switch (self) {
@@ -14,7 +71,8 @@ pub const Value = union(enum) {
             .int => |i| i != 0,
             .float => |f| f != 0.0,
             .string => |s| s.len > 0 and !std.mem.eql(u8, s, "0"),
-            };
+            .array => |a| a.entries.items.len > 0,
+        };
     }
 
     pub fn isNull(self: Value) bool {
@@ -61,6 +119,7 @@ pub const Value = union(enum) {
     }
 
     pub fn equal(a: Value, b: Value) bool {
+        if (a == .array or b == .array) return false;
         return toFloat(a) == toFloat(b);
     }
 
@@ -72,6 +131,7 @@ pub const Value = union(enum) {
             .int => |ai| ai == b.int,
             .float => |af| af == b.float,
             .string => |as_| std.mem.eql(u8, as_, b.string),
+            .array => |ap| ap == b.array,
         };
     }
 
@@ -94,6 +154,7 @@ pub const Value = union(enum) {
             .int => |i| i,
             .float => |f| @intFromFloat(f),
             .string => |s| std.fmt.parseInt(i64, s, 10) catch 0,
+            .array => 0,
         };
     }
 
@@ -104,6 +165,18 @@ pub const Value = union(enum) {
             .int => |i| @floatFromInt(i),
             .float => |f| f,
             .string => |s| std.fmt.parseFloat(f64, s) catch 0.0,
+            .array => 0.0,
+        };
+    }
+
+    pub fn toArrayKey(v: Value) PhpArray.Key {
+        return switch (v) {
+            .int => |i| .{ .int = i },
+            .string => |s| .{ .string = s },
+            .bool => |b| .{ .int = if (b) 1 else 0 },
+            .float => |f| .{ .int = @intFromFloat(f) },
+            .null => .{ .int = 0 },
+            .array => .{ .int = 0 },
         };
     }
 
@@ -129,6 +202,7 @@ pub const Value = union(enum) {
                 }
             },
             .string => |s| try buf.appendSlice(allocator, s),
+            .array => try buf.appendSlice(allocator, "Array"),
         }
     }
 

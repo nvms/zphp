@@ -51,6 +51,19 @@ pub const OpCode = enum(u8) {
 
     echo,
     halt,
+
+    // arrays
+    array_new, // push new empty array
+    array_push, // pop value, append to array at stack top
+    array_set_elem, // pop value, pop key, set on array at stack top
+    array_get, // pop key, pop array, push value
+    array_set, // pop value, pop key, pop array, set, push value
+
+    // foreach iteration
+    iter_begin, // push index 0 (array already on stack)
+    iter_check, // u16: exit offset. peek array+index, push key+value or jump
+    iter_advance, // pop index, push index+1
+    iter_end, // pop index, pop array
 };
 
 pub const Chunk = struct {

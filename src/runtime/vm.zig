@@ -1,5 +1,6 @@
 const std = @import("std");
 const Value = @import("value.zig").Value;
+const PhpArray = @import("value.zig").PhpArray;
 const Chunk = @import("../pipeline/bytecode.zig").Chunk;
 const OpCode = @import("../pipeline/bytecode.zig").OpCode;
 const ObjFunction = @import("../pipeline/bytecode.zig").ObjFunction;
@@ -8,6 +9,7 @@ const parser = @import("../pipeline/parser.zig");
 
 const Allocator = std.mem.Allocator;
 const RuntimeError = error{ RuntimeError, OutOfMemory };
+const NativeFn = *const fn ([]const Value) Value;
 
 pub const VM = struct {
     frames: [64]CallFrame = undefined,
@@ -15,8 +17,10 @@ pub const VM = struct {
     stack: [256]Value = undefined,
     sp: usize = 0,
     functions: std.StringHashMapUnmanaged(*const ObjFunction) = .{},
+    native_fns: std.StringHashMapUnmanaged(NativeFn) = .{},
     output: std.ArrayListUnmanaged(u8) = .{},
     strings: std.ArrayListUnmanaged([]const u8) = .{},
+    arrays: std.ArrayListUnmanaged(*PhpArray) = .{},
     allocator: Allocator,
 
     const CallFrame = struct {
@@ -25,16 +29,31 @@ pub const VM = struct {
         vars: std.StringHashMapUnmanaged(Value),
     };
 
-    pub fn init(allocator: Allocator) VM {
-        return .{ .allocator = allocator };
+    pub fn init(allocator: Allocator) RuntimeError!VM {
+        var vm = VM{ .allocator = allocator };
+        try vm.native_fns.put(allocator, "count", nativeCount);
+        try vm.native_fns.put(allocator, "strlen", nativeStrlen);
+        try vm.native_fns.put(allocator, "intval", nativeIntval);
+        try vm.native_fns.put(allocator, "strval", nativeStrval);
+        try vm.native_fns.put(allocator, "is_array", nativeIsArray);
+        try vm.native_fns.put(allocator, "is_null", nativeIsNull);
+        try vm.native_fns.put(allocator, "is_int", nativeIsInt);
+        try vm.native_fns.put(allocator, "is_string", nativeIsString);
+        return vm;
     }
 
     pub fn deinit(self: *VM) void {
         for (0..self.frame_count) |i| self.frames[i].vars.deinit(self.allocator);
         self.functions.deinit(self.allocator);
+        self.native_fns.deinit(self.allocator);
         self.output.deinit(self.allocator);
         for (self.strings.items) |s| self.allocator.free(s);
         self.strings.deinit(self.allocator);
+        for (self.arrays.items) |a| {
+            a.deinit(self.allocator);
+            self.allocator.destroy(a);
+        }
+        self.arrays.deinit(self.allocator);
     }
 
     pub fn interpret(self: *VM, result: *const CompileResult) RuntimeError!void {
@@ -200,23 +219,24 @@ pub const VM = struct {
                     const name_idx = self.readU16();
                     const arg_count = self.readByte();
                     const name = self.currentChunk().constants.items[name_idx].string;
-                    const func = self.functions.get(name) orelse return error.RuntimeError;
-                    if (arg_count != func.arity) return error.RuntimeError;
 
-                    var new_vars: std.StringHashMapUnmanaged(Value) = .{};
-                    var i: u8 = 0;
-                    while (i < arg_count) : (i += 1) {
-                        const arg_val = self.stack[self.sp - arg_count + i];
-                        try new_vars.put(self.allocator, func.params[i], arg_val);
-                    }
-                    self.sp -= arg_count;
-
-                    self.frames[self.frame_count] = .{
-                        .chunk = &func.chunk,
-                        .ip = 0,
-                        .vars = new_vars,
-                    };
-                    self.frame_count += 1;
+                    if (self.native_fns.get(name)) |native| {
+                        var args: [16]Value = undefined;
+                        const ac: usize = arg_count;
+                        for (0..ac) |i| args[i] = self.stack[self.sp - ac + i];
+                        self.sp -= ac;
+                        self.push(native(args[0..ac]));
+                    } else if (self.functions.get(name)) |func| {
+                        if (arg_count != func.arity) return error.RuntimeError;
+                        var new_vars: std.StringHashMapUnmanaged(Value) = .{};
+                        const ac: usize = arg_count;
+                        for (0..ac) |i| {
+                            try new_vars.put(self.allocator, func.params[i], self.stack[self.sp - ac + i]);
+                        }
+                        self.sp -= ac;
+                        self.frames[self.frame_count] = .{ .chunk = &func.chunk, .ip = 0, .vars = new_vars };
+                        self.frame_count += 1;
+                    } else return error.RuntimeError;
                 },
                 .return_val => {
                     const result = self.pop();
@@ -237,6 +257,66 @@ pub const VM = struct {
                     try v.format(&self.output, self.allocator);
                 },
                 .halt => return,
+
+                .array_new => {
+                    const arr = try self.allocator.create(PhpArray);
+                    arr.* = .{};
+                    try self.arrays.append(self.allocator, arr);
+                    self.push(.{ .array = arr });
+                },
+                .array_push => {
+                    const val = self.pop();
+                    const arr_val = self.peek();
+                    if (arr_val == .array) try arr_val.array.append(self.allocator, val);
+                },
+                .array_set_elem => {
+                    const val = self.pop();
+                    const key = self.pop();
+                    const arr_val = self.peek();
+                    if (arr_val == .array) try arr_val.array.set(self.allocator, Value.toArrayKey(key), val);
+                },
+                .array_get => {
+                    const key = self.pop();
+                    const arr_val = self.pop();
+                    if (arr_val == .array) {
+                        self.push(arr_val.array.get(Value.toArrayKey(key)));
+                    } else {
+                        self.push(.null);
+                    }
+                },
+                .array_set => {
+                    const val = self.pop();
+                    const key = self.pop();
+                    const arr_val = self.pop();
+                    if (arr_val == .array) try arr_val.array.set(self.allocator, Value.toArrayKey(key), val);
+                    self.push(val);
+                },
+
+                .iter_begin => self.push(.{ .int = 0 }),
+                .iter_check => {
+                    const offset = self.readU16();
+                    const idx = Value.toInt(self.stack[self.sp - 1]);
+                    const arr_val = self.stack[self.sp - 2];
+                    if (arr_val != .array or idx >= arr_val.array.length()) {
+                        self.currentFrame().ip += offset;
+                    } else {
+                        const entry = arr_val.array.entries.items[@intCast(idx)];
+                        const key_val: Value = switch (entry.key) {
+                            .int => |i| .{ .int = i },
+                            .string => |s| .{ .string = s },
+                        };
+                        self.push(key_val);
+                        self.push(entry.value);
+                    }
+                },
+                .iter_advance => {
+                    const idx = self.pop();
+                    self.push(.{ .int = Value.toInt(idx) + 1 });
+                },
+                .iter_end => {
+                    _ = self.pop();
+                    _ = self.pop();
+                },
             }
         }
     }
@@ -285,6 +365,60 @@ pub const VM = struct {
     fn peek(self: *const VM) Value {
         return self.stack[self.sp - 1];
     }
+
+    // ==================================================================
+    // native functions
+    // ==================================================================
+
+    fn nativeCount(args: []const Value) Value {
+        if (args.len == 0) return .{ .int = 0 };
+        return switch (args[0]) {
+            .array => |a| .{ .int = a.length() },
+            .string => |s| .{ .int = @intCast(s.len) },
+            else => .{ .int = 0 },
+        };
+    }
+
+    fn nativeStrlen(args: []const Value) Value {
+        if (args.len == 0) return .{ .int = 0 };
+        return switch (args[0]) {
+            .string => |s| .{ .int = @intCast(s.len) },
+            else => .{ .int = 0 },
+        };
+    }
+
+    fn nativeIntval(args: []const Value) Value {
+        if (args.len == 0) return .{ .int = 0 };
+        return .{ .int = Value.toInt(args[0]) };
+    }
+
+    fn nativeStrval(args: []const Value) Value {
+        if (args.len == 0) return .{ .string = "" };
+        return switch (args[0]) {
+            .string => args[0],
+            else => .{ .string = "" },
+        };
+    }
+
+    fn nativeIsArray(args: []const Value) Value {
+        if (args.len == 0) return .{ .bool = false };
+        return .{ .bool = args[0] == .array };
+    }
+
+    fn nativeIsNull(args: []const Value) Value {
+        if (args.len == 0) return .{ .bool = true };
+        return .{ .bool = args[0] == .null };
+    }
+
+    fn nativeIsInt(args: []const Value) Value {
+        if (args.len == 0) return .{ .bool = false };
+        return .{ .bool = args[0] == .int };
+    }
+
+    fn nativeIsString(args: []const Value) Value {
+        if (args.len == 0) return .{ .bool = false };
+        return .{ .bool = args[0] == .string };
+    }
 };
 
 // ==========================================================================
@@ -300,7 +434,7 @@ fn expectOutput(source: []const u8, expected: []const u8) !void {
     var result = try @import("../pipeline/compiler.zig").compile(&ast, alloc);
     defer result.deinit();
 
-    var vm = VM.init(alloc);
+    var vm = try VM.init(alloc);
     defer vm.deinit();
     try vm.interpret(&result);
 
@@ -453,4 +587,43 @@ test "fizzbuzz" {
         \\    else { echo $i; }
         \\}
     , "12Fizz4BuzzFizz78FizzBuzz11Fizz1314FizzBuzz");
+}
+
+test "array literal" {
+    try expectOutput("<?php $a = [1, 2, 3]; echo count($a);", "3");
+}
+
+test "array access" {
+    try expectOutput("<?php $a = [10, 20, 30]; echo $a[1];", "20");
+}
+
+test "array set" {
+    try expectOutput("<?php $a = [1, 2, 3]; $a[1] = 99; echo $a[1];", "99");
+}
+
+test "array with string keys" {
+    try expectOutput("<?php $a = ['x' => 10, 'y' => 20]; echo $a['x'];", "10");
+}
+
+test "foreach" {
+    try expectOutput("<?php $a = [1, 2, 3]; foreach ($a as $v) { echo $v; }", "123");
+}
+
+test "foreach with key" {
+    try expectOutput("<?php $a = ['a' => 1, 'b' => 2]; foreach ($a as $k => $v) { echo $k . $v; }", "a1b2");
+}
+
+test "count" {
+    try expectOutput("<?php echo count([]);", "0");
+    try expectOutput("<?php echo count([1, 2, 3]);", "3");
+}
+
+test "strlen" {
+    try expectOutput("<?php echo strlen('hello');", "5");
+    try expectOutput("<?php echo strlen('');", "0");
+}
+
+test "is_array" {
+    try expectOutput("<?php echo is_array([1]) ? 'y' : 'n';", "y");
+    try expectOutput("<?php echo is_array(42) ? 'y' : 'n';", "n");
 }

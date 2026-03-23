@@ -111,7 +111,7 @@ const Compiler = struct {
             .while_stmt => try self.compileWhile(node),
             .do_while => try self.compileDoWhile(node),
             .for_stmt => try self.compileFor(node),
-            .foreach_stmt => {},
+            .foreach_stmt => try self.compileForeach(node),
             .function_decl => try self.compileFunction(node),
             .inline_html => {
                 const text = self.ast.tokenSlice(node.main_token);
@@ -136,9 +136,9 @@ const Compiler = struct {
             .null_coalesce => try self.compileNullCoalesce(node),
             .ternary => try self.compileTernary(node),
             .call => try self.compileCall(node),
-            .array_access => {},
+            .array_access => try self.compileArrayAccess(node),
             .property_access => {},
-            .array_literal => {},
+            .array_literal => try self.compileArrayLiteral(node),
             .array_element => {},
             .grouped_expr => try self.compileNode(node.data.lhs),
             .root => {},
@@ -228,6 +228,14 @@ const Compiler = struct {
     fn compileAssign(self: *Compiler, node: Ast.Node) Error!void {
         const target = self.ast.nodes[node.data.lhs];
         const op_tag = self.ast.tokens[node.main_token].tag;
+
+        if (target.tag == .array_access) {
+            try self.compileNode(target.data.lhs);
+            try self.compileNode(target.data.rhs);
+            try self.compileNode(node.data.rhs);
+            try self.emitOp(.array_set);
+            return;
+        }
 
         if (op_tag != .equal) {
             try self.compileGetVar(target);
@@ -578,6 +586,77 @@ const Compiler = struct {
             try self.emitU16(idx);
             try self.emitByte(@intCast(args.len));
         }
+    }
+
+    // ==================================================================
+    // arrays
+    // ==================================================================
+
+    fn compileArrayLiteral(self: *Compiler, node: Ast.Node) Error!void {
+        try self.emitOp(.array_new);
+        for (self.ast.extraSlice(node.data.lhs)) |elem_idx| {
+            const elem = self.ast.nodes[elem_idx];
+            if (elem.data.rhs != 0) {
+                try self.compileNode(elem.data.rhs);
+                try self.compileNode(elem.data.lhs);
+                try self.emitOp(.array_set_elem);
+            } else {
+                try self.compileNode(elem.data.lhs);
+                try self.emitOp(.array_push);
+            }
+        }
+    }
+
+    fn compileArrayAccess(self: *Compiler, node: Ast.Node) Error!void {
+        try self.compileNode(node.data.lhs);
+        try self.compileNode(node.data.rhs);
+        try self.emitOp(.array_get);
+    }
+
+    fn compileForeach(self: *Compiler, node: Ast.Node) Error!void {
+        const iter_n = self.ast.extra_data[node.data.lhs];
+        const val_n = self.ast.extra_data[node.data.lhs + 1];
+        const key_n = self.ast.extra_data[node.data.lhs + 2];
+
+        const prev_start = self.loop_start;
+        const prev_breaks = self.break_jumps;
+        self.break_jumps = .{};
+
+        try self.compileNode(iter_n);
+        try self.emitOp(.iter_begin);
+
+        const loop_top = self.chunk.offset();
+        self.loop_start = loop_top;
+
+        const exit_jump = try self.emitJump(.iter_check);
+
+        const val_name = self.ast.tokenSlice(self.ast.nodes[val_n].main_token);
+        const val_idx = try self.addConstant(.{ .string = val_name });
+        try self.emitOp(.set_var);
+        try self.emitU16(val_idx);
+        try self.emitOp(.pop);
+
+        if (key_n != 0) {
+            const key_name = self.ast.tokenSlice(self.ast.nodes[key_n].main_token);
+            const key_idx = try self.addConstant(.{ .string = key_name });
+            try self.emitOp(.set_var);
+            try self.emitU16(key_idx);
+            try self.emitOp(.pop);
+        } else {
+            try self.emitOp(.pop);
+        }
+
+        try self.compileNode(node.data.rhs);
+        try self.emitOp(.iter_advance);
+        try self.emitLoop(loop_top);
+
+        self.patchJump(exit_jump);
+        try self.emitOp(.iter_end);
+
+        for (self.break_jumps.items) |bj| self.patchJump(bj);
+        self.break_jumps.deinit(self.allocator);
+        self.break_jumps = prev_breaks;
+        self.loop_start = prev_start;
     }
 
     // ==================================================================

@@ -1,0 +1,25 @@
+<?php
+echo count([1, 2, 3]);
+echo "\n";
+echo count([]);
+echo "\n";
+echo strlen('hello');
+echo "\n";
+echo strlen('');
+echo "\n";
+echo is_array([1, 2]) ? 'true' : 'false';
+echo "\n";
+echo is_array('not array') ? 'true' : 'false';
+echo "\n";
+echo is_null(null) ? 'true' : 'false';
+echo "\n";
+echo is_null(0) ? 'true' : 'false';
+echo "\n";
+echo is_int(42) ? 'true' : 'false';
+echo "\n";
+echo is_int('42') ? 'true' : 'false';
+echo "\n";
+echo is_string('hello') ? 'true' : 'false';
+echo "\n";
+echo is_string(42) ? 'true' : 'false';
+echo "\n";

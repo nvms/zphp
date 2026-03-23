@@ -57,7 +57,10 @@ fn runFile(allocator: std.mem.Allocator, path: []const u8) !void {
     };
     defer result.deinit();
 
-    var vm = VM.init(allocator);
+    var vm = VM.init(allocator) catch {
+        try writeStderr("vm init error\n");
+        std.process.exit(1);
+    };
     defer vm.deinit();
     vm.interpret(&result) catch {
         try writeStderr("runtime error\n");
