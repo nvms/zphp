@@ -453,10 +453,9 @@ const Parser = struct {
         }
         _ = try self.expect(.r_paren);
 
-        // skip optional return type hint (: type)
         if (self.peek() == .colon) {
             _ = self.advance();
-            _ = self.advance(); // consume type name
+            self.skipTypeHint();
         }
 
         const body = try self.parseBlock();
@@ -518,6 +517,14 @@ const Parser = struct {
                 try members.append(self.allocator, try self.parseClassProperty());
             } else if (self.peek() == .kw_const) {
                 try members.append(self.allocator, try self.parseConstDecl());
+            } else if (self.isTypeName() or self.peek() == .question or self.peek() == .l_paren) {
+                // typed property: skip type hint, then parse property
+                self.skipTypeHint();
+                if (self.peek() == .variable) {
+                    try members.append(self.allocator, try self.parseClassProperty());
+                } else {
+                    _ = self.advance();
+                }
             } else {
                 _ = self.advance();
             }
@@ -545,11 +552,9 @@ const Parser = struct {
         }
         _ = try self.expect(.r_paren);
 
-        // skip optional return type hint
         if (self.peek() == .colon) {
             _ = self.advance();
-            if (self.peek() == .question) _ = self.advance();
-            _ = self.advance();
+            self.skipTypeHint();
         }
 
         const body = try self.parseBlock();
@@ -606,7 +611,7 @@ const Parser = struct {
 
         if (self.peek() == .colon) {
             _ = self.advance();
-            _ = self.advance();
+            self.skipTypeHint();
         }
 
         const body = try self.parseBlock();
@@ -642,7 +647,7 @@ const Parser = struct {
 
         if (self.peek() == .colon) {
             _ = self.advance();
-            _ = self.advance();
+            self.skipTypeHint();
         }
 
         _ = try self.expect(.fat_arrow);
@@ -659,11 +664,71 @@ const Parser = struct {
         return self.addNode(.{ .tag = .closure_expr, .main_token = fn_tok, .data = .{ .lhs = param_extra, .rhs = rhs_extra } });
     }
 
+    fn isTypeName(self: *Parser) bool {
+        const tag = self.peek();
+        return tag == .identifier or tag == .kw_array or tag == .kw_callable or
+            tag == .kw_self or tag == .kw_static or tag == .kw_null or
+            tag == .kw_true or tag == .kw_false;
+    }
+
+    // consumes a full PHP type expression: simple, nullable, union, intersection, DNF
+    // e.g. int, ?string, int|string, Foo&Bar, (Foo&Bar)|null
+    fn skipTypeHint(self: *Parser) void {
+        if (self.peek() == .question) {
+            _ = self.advance();
+            if (self.isTypeName()) _ = self.advance();
+            return;
+        }
+
+        // DNF: (Foo&Bar)|Baz
+        if (self.peek() == .l_paren) {
+            _ = self.advance();
+            while (self.isTypeName()) {
+                _ = self.advance();
+                if (self.peek() == .amp) {
+                    _ = self.advance();
+                } else break;
+            }
+            if (self.peek() == .r_paren) _ = self.advance();
+            if (self.peek() == .pipe) {
+                _ = self.advance();
+                self.skipTypeHint();
+            }
+            return;
+        }
+
+        if (!self.isTypeName()) return;
+        _ = self.advance();
+
+        // union: int|string|null or intersection: Foo&Bar
+        if (self.peek() == .pipe) {
+            while (self.peek() == .pipe) {
+                _ = self.advance();
+                if (self.peek() == .l_paren) {
+                    // DNF group mid-union
+                    _ = self.advance();
+                    while (self.isTypeName()) {
+                        _ = self.advance();
+                        if (self.peek() == .amp) {
+                            _ = self.advance();
+                        } else break;
+                    }
+                    if (self.peek() == .r_paren) _ = self.advance();
+                } else if (self.isTypeName()) {
+                    _ = self.advance();
+                }
+            }
+        } else if (self.peek() == .amp) {
+            while (self.peek() == .amp) {
+                _ = self.advance();
+                if (self.isTypeName()) _ = self.advance();
+            }
+        }
+    }
+
     fn parseParam(self: *Parser) Error!u32 {
-        // skip optional type hint
-        if (self.peek() == .identifier or self.peek() == .question) {
-            if (self.peek() == .question) _ = self.advance();
-            if (self.peek() == .identifier) _ = self.advance();
+        if (self.isTypeName() or self.peek() == .question or self.peek() == .l_paren) {
+            self.skipTypeHint();
         }
         const tok = try self.expect(.variable);
         return self.addNode(.{ .tag = .variable, .main_token = tok, .data = .{} });
@@ -1631,4 +1696,40 @@ test "parse error recovery" {
 
 test "multiple statements" {
     try expectParse("<?php $a = 1; $b = 2;", "(= $a 1) (= $b 2)");
+}
+
+test "type hint: simple param" {
+    try expectParse("<?php function f(int $x) { return $x; }", "(fn f($x) { (return $x) })");
+}
+
+test "type hint: keyword type param" {
+    try expectParse("<?php function f(array $x) { return $x; }", "(fn f($x) { (return $x) })");
+}
+
+test "type hint: nullable param" {
+    try expectParse("<?php function f(?string $x) { return $x; }", "(fn f($x) { (return $x) })");
+}
+
+test "type hint: union param" {
+    try expectParse("<?php function f(int|string $x) { return $x; }", "(fn f($x) { (return $x) })");
+}
+
+test "type hint: return type" {
+    try expectParse("<?php function f($x): int { return $x; }", "(fn f($x) { (return $x) })");
+}
+
+test "type hint: nullable return" {
+    try expectParse("<?php function f($x): ?string { return $x; }", "(fn f($x) { (return $x) })");
+}
+
+test "type hint: union return" {
+    try expectParse("<?php function f($x): int|string { return $x; }", "(fn f($x) { (return $x) })");
+}
+
+test "type hint: intersection param" {
+    try expectParse("<?php function f(Foo&Bar $x) { return $x; }", "(fn f($x) { (return $x) })");
+}
+
+test "type hint: multiple typed params" {
+    try expectParse("<?php function f(int $a, string $b) { return $a; }", "(fn f($a, $b) { (return $a) })");
 }
