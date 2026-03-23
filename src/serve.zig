@@ -13,6 +13,7 @@ pub const ServeConfig = struct {
     port: u16 = 8080,
     workers: u16 = 0,
     file: []const u8,
+    document_root: []const u8 = "",
 };
 
 const Request = struct {
@@ -131,6 +132,17 @@ pub fn serve(allocator: Allocator, config: ServeConfig) !void {
     var server = try addr.listen(.{ .reuse_address = true });
     defer server.deinit();
 
+    // resolve document root
+    const doc_root = if (config.document_root.len > 0)
+        try allocator.dupe(u8, config.document_root)
+    else blk: {
+        if (std.fs.path.dirname(abs_path)) |dir| {
+            break :blk try allocator.dupe(u8, dir);
+        }
+        break :blk try allocator.dupe(u8, ".");
+    };
+    defer allocator.free(doc_root);
+
     var port_buf: [8]u8 = undefined;
     const port_str = std.fmt.bufPrint(&port_buf, "{d}", .{config.port}) catch "?";
     try writeStderr("zphp serving ");
@@ -147,7 +159,7 @@ pub fn serve(allocator: Allocator, config: ServeConfig) !void {
     defer allocator.free(workers);
 
     for (workers) |*w| {
-        w.* = try std.Thread.spawn(.{}, workerLoop, .{ allocator, &result });
+        w.* = try std.Thread.spawn(.{}, workerLoop, .{ allocator, &result, doc_root });
     }
 
     while (true) {
@@ -162,24 +174,22 @@ pub fn serve(allocator: Allocator, config: ServeConfig) !void {
     for (workers) |w| w.join();
 }
 
-fn workerLoop(allocator: Allocator, result: *const CompileResult) void {
-    // one VM per worker, reused across requests
+fn workerLoop(allocator: Allocator, result: *const CompileResult, doc_root: []const u8) void {
     var vm = VM.init(allocator) catch return;
     defer vm.deinit();
 
     while (true) {
         const item = queue.pop() orelse return;
-        handleConnection(allocator, result, &vm, item.conn);
+        handleConnection(allocator, result, &vm, doc_root, item.conn);
     }
 }
 
-fn handleConnection(allocator: Allocator, result: *const CompileResult, vm: *VM, conn: std.net.Server.Connection) void {
+fn handleConnection(allocator: Allocator, result: *const CompileResult, vm: *VM, doc_root: []const u8, conn: std.net.Server.Connection) void {
     var buf: [65536]u8 = undefined;
     var buffered: usize = 0;
     var keep_alive = true;
 
     while (keep_alive) {
-        // read more data if buffer is empty or doesn't contain a full request
         if (buffered == 0 or std.mem.indexOf(u8, buf[0..buffered], "\r\n\r\n") == null) {
             const n = conn.stream.read(buf[buffered..]) catch break;
             if (n == 0) break;
@@ -189,7 +199,6 @@ fn handleConnection(allocator: Allocator, result: *const CompileResult, vm: *VM,
         const raw = buf[0..buffered];
         var req = parseRequest(raw);
 
-        // HTTP/1.1 defaults to keep-alive unless Connection: close
         const conn_hdr = req.getHeader("Connection");
         keep_alive = if (conn_hdr) |h| !std.ascii.eqlIgnoreCase(h, "close") else true;
 
@@ -200,6 +209,18 @@ fn handleConnection(allocator: Allocator, result: *const CompileResult, vm: *VM,
             body_len = std.fmt.parseInt(usize, cl, 10) catch 0;
         }
         const consumed = header_end + body_len;
+
+        // try static file first (skip for PHP files)
+        if (tryServeStatic(allocator, conn.stream, doc_root, &req, keep_alive)) {
+            if (consumed < buffered) {
+                std.mem.copyForwards(u8, buf[0..buffered - consumed], buf[consumed..buffered]);
+                buffered -= consumed;
+            } else {
+                buffered = 0;
+            }
+            if (!keep_alive) break;
+            continue;
+        }
 
         vm.reset();
         populateSuperglobals(vm, &req, conn) catch break;
@@ -223,7 +244,6 @@ fn handleConnection(allocator: Allocator, result: *const CompileResult, vm: *VM,
             null;
 
         writeResponse(conn.stream, code, ct, extra_headers, vm.output.items, keep_alive) catch break;
-        _ = allocator;
 
         // shift remaining data to front of buffer
         if (consumed < buffered) {
@@ -429,6 +449,98 @@ fn urlDecode(a: Allocator, input: []const u8) ![]const u8 {
         }
     }
     return buf.toOwnedSlice(a);
+}
+
+fn tryServeStatic(allocator: Allocator, stream: std.net.Stream, doc_root: []const u8, req: *const Request, keep_alive: bool) bool {
+    const path = req.path;
+
+    // skip PHP files - let the VM handle those
+    if (std.mem.endsWith(u8, path, ".php")) return false;
+
+    // skip root path - that's the PHP entry point
+    if (path.len <= 1) return false;
+
+    // strip leading slash and resolve relative to doc_root
+    const rel = if (path.len > 0 and path[0] == '/') path[1..] else path;
+    if (rel.len == 0) return false;
+
+    // prevent directory traversal
+    if (std.mem.indexOf(u8, rel, "..") != null) return false;
+
+    const file_path = std.fs.path.join(allocator, &.{ doc_root, rel }) catch return false;
+    defer allocator.free(file_path);
+
+    const file = std.fs.cwd().openFile(file_path, .{}) catch return false;
+    defer file.close();
+
+    const stat = file.stat() catch return false;
+    if (stat.kind != .file) return false;
+
+    const size = stat.size;
+    const mime = mimeType(rel);
+
+    // ETag based on size + mtime
+    var etag_buf: [64]u8 = undefined;
+    const mtime_s: u64 = @intCast(@divFloor(stat.mtime, 1_000_000_000));
+    const etag = std.fmt.bufPrint(&etag_buf, "\"{x}-{x}\"", .{ size, mtime_s }) catch return false;
+
+    // check If-None-Match
+    if (req.getHeader("If-None-Match")) |inm| {
+        if (std.mem.eql(u8, inm, etag)) {
+            const conn_val = if (keep_alive) "keep-alive" else "close";
+            var hdr_buf: [512]u8 = undefined;
+            const hdr = std.fmt.bufPrint(&hdr_buf, "HTTP/1.1 304 Not Modified\r\nETag: {s}\r\nConnection: {s}\r\n\r\n", .{ etag, conn_val }) catch return false;
+            _ = stream.write(hdr) catch return false;
+            return true;
+        }
+    }
+
+    // write response headers
+    const conn_val = if (keep_alive) "keep-alive" else "close";
+    var hdr_buf: [512]u8 = undefined;
+    const hdr = std.fmt.bufPrint(&hdr_buf, "HTTP/1.1 200 OK\r\nContent-Type: {s}\r\nContent-Length: {d}\r\nETag: {s}\r\nCache-Control: public, max-age=3600\r\nConnection: {s}\r\n\r\n", .{ mime, size, etag, conn_val }) catch return false;
+    _ = stream.write(hdr) catch return false;
+
+    // sendfile-style: read and write in chunks
+    var fbuf: [32768]u8 = undefined;
+    var remaining: u64 = size;
+    while (remaining > 0) {
+        const to_read = @min(remaining, fbuf.len);
+        const n = file.read(fbuf[0..to_read]) catch return true;
+        if (n == 0) break;
+        _ = stream.write(fbuf[0..n]) catch return true;
+        remaining -= n;
+    }
+
+    return true;
+}
+
+fn mimeType(path: []const u8) []const u8 {
+    const ext = std.fs.path.extension(path);
+    if (ext.len == 0) return "application/octet-stream";
+    if (std.mem.eql(u8, ext, ".html") or std.mem.eql(u8, ext, ".htm")) return "text/html; charset=utf-8";
+    if (std.mem.eql(u8, ext, ".css")) return "text/css; charset=utf-8";
+    if (std.mem.eql(u8, ext, ".js") or std.mem.eql(u8, ext, ".mjs")) return "application/javascript; charset=utf-8";
+    if (std.mem.eql(u8, ext, ".json")) return "application/json; charset=utf-8";
+    if (std.mem.eql(u8, ext, ".xml")) return "application/xml; charset=utf-8";
+    if (std.mem.eql(u8, ext, ".txt")) return "text/plain; charset=utf-8";
+    if (std.mem.eql(u8, ext, ".csv")) return "text/csv; charset=utf-8";
+    if (std.mem.eql(u8, ext, ".png")) return "image/png";
+    if (std.mem.eql(u8, ext, ".jpg") or std.mem.eql(u8, ext, ".jpeg")) return "image/jpeg";
+    if (std.mem.eql(u8, ext, ".gif")) return "image/gif";
+    if (std.mem.eql(u8, ext, ".svg")) return "image/svg+xml";
+    if (std.mem.eql(u8, ext, ".ico")) return "image/x-icon";
+    if (std.mem.eql(u8, ext, ".webp")) return "image/webp";
+    if (std.mem.eql(u8, ext, ".avif")) return "image/avif";
+    if (std.mem.eql(u8, ext, ".woff")) return "font/woff";
+    if (std.mem.eql(u8, ext, ".woff2")) return "font/woff2";
+    if (std.mem.eql(u8, ext, ".ttf")) return "font/ttf";
+    if (std.mem.eql(u8, ext, ".otf")) return "font/otf";
+    if (std.mem.eql(u8, ext, ".pdf")) return "application/pdf";
+    if (std.mem.eql(u8, ext, ".zip")) return "application/zip";
+    if (std.mem.eql(u8, ext, ".wasm")) return "application/wasm";
+    if (std.mem.eql(u8, ext, ".map")) return "application/json";
+    return "application/octet-stream";
 }
 
 fn writeResponse(stream: std.net.Stream, code: i64, content_type: []const u8, extra_headers: ?*PhpArray, body: []const u8, keep_alive: bool) !void {

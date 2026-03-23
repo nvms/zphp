@@ -104,6 +104,46 @@ check "keep-alive two responses" "2" "$ka_count"
 ka_headers=$(curl -si http://localhost:$PORT/health -H "Connection: keep-alive" 2>&1)
 check_contains "keep-alive header" "keep-alive" "$ka_headers"
 
+# test: static CSS file
+css_resp=$(curl -si http://localhost:$PORT/style.css 2>&1)
+check_contains "css body" "font-family" "$css_resp"
+check_contains "css content-type" "text/css" "$css_resp"
+
+# test: static JS file
+js_ct=$(curl -si http://localhost:$PORT/script.js 2>&1 | grep -i "Content-Type" | tr -d '\r')
+check_contains "js content-type" "javascript" "$js_ct"
+
+# test: static JSON file
+json_resp=$(curl -s http://localhost:$PORT/data.json)
+check_contains "json body" '"key"' "$json_resp"
+
+# test: static HTML file
+html_resp=$(curl -si http://localhost:$PORT/index.html 2>&1)
+check_contains "html static body" "<h1>Hello</h1>" "$html_resp"
+check_contains "html static content-type" "text/html" "$html_resp"
+
+# test: ETag and 304 Not Modified
+etag=$(curl -si http://localhost:$PORT/style.css 2>&1 | grep -i "ETag" | tr -d '\r' | awk '{print $2}')
+if [ -n "$etag" ]; then
+    status304=$(curl -s -o /dev/null -w "%{http_code}" -H "If-None-Match: $etag" http://localhost:$PORT/style.css)
+    check "304 not modified" "304" "$status304"
+else
+    echo "  FAIL  etag missing"
+    failed=$((failed + 1))
+fi
+
+# test: Cache-Control header on static files
+cache_hdr=$(curl -si http://localhost:$PORT/style.css 2>&1 | grep -i "Cache-Control" | tr -d '\r')
+check_contains "cache-control header" "max-age" "$cache_hdr"
+
+# test: directory traversal blocked
+traversal_status=$(curl -s -o /dev/null -w "%{http_code}" "http://localhost:$PORT/../../../etc/passwd")
+check "traversal blocked" "404" "$traversal_status"
+
+# test: PHP still works alongside static files
+php_resp=$(curl -s http://localhost:$PORT/health)
+check "php still works" '{"status":"ok"}' "$php_resp"
+
 # test: state isolation (no leaks between requests)
 r1=$(curl -s "http://localhost:$PORT/echo?seq=1")
 r2=$(curl -s "http://localhost:$PORT/echo?seq=2")
