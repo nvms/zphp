@@ -9,11 +9,24 @@ pub const ComposerJson = struct {
     require: std.StringHashMapUnmanaged([]const u8) = .{},
     require_dev: std.StringHashMapUnmanaged([]const u8) = .{},
     autoload_psr4: std.StringHashMapUnmanaged([]const u8) = .{},
+    allocator: Allocator = undefined,
 
     pub fn deinit(self: *ComposerJson) void {
-        self.require.deinit(undefined);
-        self.require_dev.deinit(undefined);
-        self.autoload_psr4.deinit(undefined);
+        if (self.name) |n| self.allocator.free(n);
+        var it = self.require.iterator();
+        while (it.next()) |entry| {
+            self.allocator.free(entry.key_ptr.*);
+            self.allocator.free(entry.value_ptr.*);
+        }
+        self.require.deinit(self.allocator);
+        var it2 = self.require_dev.iterator();
+        while (it2.next()) |entry| {
+            self.allocator.free(entry.key_ptr.*);
+            self.allocator.free(entry.value_ptr.*);
+        }
+        self.require_dev.deinit(self.allocator);
+        // psr4 keys/values are from parsed json, don't double-free
+        self.autoload_psr4.deinit(self.allocator);
     }
 };
 
@@ -26,7 +39,7 @@ pub const LockEntry = struct {
 };
 
 pub fn parseComposerJson(allocator: Allocator, source: []const u8) !ComposerJson {
-    var result = ComposerJson{};
+    var result = ComposerJson{ .allocator = allocator };
     const parsed = try json.parseFromSlice(json.Value, allocator, source, .{});
     defer parsed.deinit();
     const root = parsed.value;
@@ -162,9 +175,9 @@ pub fn downloadPackage(allocator: Allocator, entry: *const LockEntry) !void {
     defer allocator.free(zip_data);
 
     // write zip to temp file
-    const zip_path = try std.fmt.allocPrint(allocator, "vendor/{s}.zip", .{
-        std.mem.replaceOwned(u8, allocator, entry.name, "/", "--") catch return,
-    });
+    const safe_name = std.mem.replaceOwned(u8, allocator, entry.name, "/", "--") catch return;
+    defer allocator.free(safe_name);
+    const zip_path = try std.fmt.allocPrint(allocator, "vendor/{s}.zip", .{safe_name});
     defer allocator.free(zip_path);
 
     std.fs.cwd().writeFile(.{ .sub_path = zip_path, .data = zip_data }) catch return;
@@ -350,9 +363,13 @@ pub fn install(allocator: Allocator) !void {
     defer allocator.free(source);
 
     var composer = try parseComposerJson(allocator, source);
+    defer composer.deinit();
 
     // skip php version constraint
-    _ = composer.require.fetchRemove("php");
+    if (composer.require.fetchRemove("php")) |removed| {
+        allocator.free(removed.key);
+        allocator.free(removed.value);
+    }
 
     const pkg_count = composer.require.count();
     if (pkg_count == 0) {
@@ -364,7 +381,21 @@ pub fn install(allocator: Allocator) !void {
     tui.header("resolving dependencies");
 
     var entries = std.ArrayListUnmanaged(LockEntry){};
-    defer entries.deinit(allocator);
+    defer {
+        for (entries.items) |*e| {
+            allocator.free(e.name);
+            allocator.free(e.version);
+            allocator.free(e.dist_url);
+            if (e.dist_sha.len > 0) allocator.free(e.dist_sha);
+            var psr4_it = e.autoload_psr4.iterator();
+            while (psr4_it.next()) |p| {
+                allocator.free(p.key_ptr.*);
+                allocator.free(p.value_ptr.*);
+            }
+            e.autoload_psr4.deinit(allocator);
+        }
+        entries.deinit(allocator);
+    }
     var resolved: usize = 0;
 
     var it = composer.require.iterator();
