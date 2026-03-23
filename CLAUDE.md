@@ -256,9 +256,10 @@ phase 1 complete: full pipeline from source to execution. zphp can run real PHP 
 - `src/pipeline/bytecode.zig` - ~45 opcodes, Chunk struct, ObjFunction struct
 - `src/pipeline/compiler.zig` - single-pass AST -> bytecode compiler with jump patching, function compilation, numeric literal parsing
 - `src/runtime/value.zig` - PHP Value tagged union (null, bool, int, float, string) with arithmetic, truthiness, formatting (3 tests)
-- `src/runtime/vm.zig` - stack-based bytecode interpreter with per-frame variable scoping, function calls, output capture (31 integration tests including fizzbuzz)
-- `src/main.zig` - CLI entry point, imports all modules for test discovery
-- 130 tests total across all modules
+- `src/runtime/vm.zig` - stack-based bytecode interpreter with per-frame variable scoping, function calls, arrays, foreach, native functions, output capture (40 integration tests)
+- `src/main.zig` - CLI entry point with `zphp run <file>`, imports all modules for test discovery
+- 139 unit tests total across all modules
+- 21 PHP compatibility test files in tests/ verified against PHP 8.3
 
 ### lexer design decisions
 - tokens reference byte offsets into source (zero-copy, no allocations)
@@ -311,11 +312,21 @@ phase 1 complete: full pipeline from source to execution. zphp can run real PHP 
 - null coalesce: ??
 - ternary: ? : and short ternary ?:
 - variables: assignment, compound assignment (+=, -=, etc.), pre/post increment/decrement
-- control flow: if/elseif/else, while, do-while, for, break, continue
+- control flow: if/elseif/else, while, do-while, for, foreach, break, continue
 - functions: declaration, calls, return with/without value, nested calls, parameter passing
+- arrays: literals with integer and string keys, access, assignment, mixed key types
+- foreach: iterate arrays with value only or key => value
+- native functions: count(), strlen(), intval(), strval(), is_array(), is_null(), is_int(), is_string()
 - echo: single and multi-expression
 - mixed HTML/PHP output
-- fizzbuzz works end-to-end
+
+### array implementation
+- PhpArray: ordered hashmap with integer and string keys, preserves insertion order
+- linear scan for lookups (O(n), correct for small arrays, optimize later)
+- auto-increment integer key for append operations
+- arrays are reference-semantics (pointer-based). this diverges from PHP's copy-on-write semantics but is correct for most code. known limitation
+- VM tracks all array allocations and frees them on deinit (simple GC)
+- native function dispatch: VM checks native function table before user function table. native fns receive args slice and return a Value. no stack frame needed
 
 ### CLI
 - `zphp run <file>` executes a PHP file through the full pipeline
@@ -331,10 +342,10 @@ phase 1 complete: full pipeline from source to execution. zphp can run real PHP 
 - double-quoted string escape sequences (\n, \r, \t, \\, \$, \", etc.) are processed at compile time. single-quoted strings only escape \\ and \'
 
 ### next up
-- arrays as runtime values (PHP's ordered hashmap). this unlocks array functions, foreach, and most real-world PHP code
-- classes: declaration, instantiation, properties, methods, inheritance
+- more array functions: array_push, array_pop, array_merge, array_keys, array_values, in_array, array_map, array_filter, sort
+- classes: declaration, instantiation, properties, methods, inheritance, $this
 - closures / anonymous functions
-- standard library functions (strlen, substr, array_map, count, etc.)
+- more string functions: substr, strpos, str_replace, explode, implode, trim, strtolower, strtoupper
 - string interpolation in double-quoted strings ("Hello $name")
 - type casting ((int), (string), etc.)
 - try/catch/throw
