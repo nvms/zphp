@@ -55,35 +55,26 @@ src/
     strings.zig arrays.zig math.zig types.zig json.zig io.zig pcre.zig
 ```
 
-## what the VM can execute
+## scope
 
-operators: arithmetic, string concat, comparison, logical, bitwise, null coalesce, ternary, spaceship
-variables: assignment, compound assignment, pre/post increment/decrement
-control flow: if/elseif/else, while, do-while, for (multi-expr), foreach, switch/case (fallthrough), break N, continue N
-match: strict comparison, multi-value arms, default, expression result
-functions: declarations, calls, return, default params, variadic `...$args`, spread `f(...$arr)`
-closures: anonymous functions, arrow functions, `use` captures, callbacks
-arrays: literals, access, spread `[...$arr]`, 150+ stdlib functions
-classes: properties, methods, `$this`, `__construct`, `extends`, `parent::`, static methods/properties, `self::`, `instanceof`, interfaces, traits, visibility enforcement (public/protected/private)
-exceptions: try/catch/finally, throw, typed catch, multi-catch, DivisionByZeroError
-file inclusion: require, require_once, include, include_once, `__DIR__`, `__FILE__`
-namespaces: `namespace`, `use`, `use ... as`, qualified names with `\`
-other: type casting, type hints (parsed, not enforced), `declare(strict_types=1)` (skipped), global, static vars, 40+ constants, echo, mixed HTML/PHP
-
-## stdlib
-
-160+ native functions across: strings (60+), arrays (40+), math (25+), types (20+), json, io (file ops, time, output buffering), pcre (FFI to libpcre2)
+covers ~95% of PHP 8.x: operators, control flow, functions (variadic, closures, spread), classes (inheritance, static, interfaces, traits, visibility), exceptions, namespaces, require/include, 160+ stdlib functions, mixed HTML/PHP. see ARCHITECTURE.md for details per subsystem.
 
 ## known limitations
 
-- arrays use reference semantics, not PHP's copy-on-write
-- `global $var` copies value from frame 0, no write-back
-- `require` executes in isolated scope (functions/classes register globally, variables don't leak to caller)
-- type hints parsed but not enforced at runtime
-- visibility enforcement throws `\Error` exceptions (catchable), matching PHP behavior
-- heredoc/nowdoc not supported
-- `strtotime` only supports YYYY-MM-DD format and relative expressions (+N units), not complex PHP date strings
-- `mktime`/`strtotime` use UTC, not local timezone
+- arrays: reference semantics, not PHP's copy-on-write
+- `global $var`: copies from frame 0, no write-back
+- `require`: isolated scope (functions/classes register globally, variables don't leak)
+- type hints: parsed but not enforced
+- heredoc/nowdoc: not supported
+- `strtotime`: YYYY-MM-DD and relative expressions only, UTC not local timezone
+- trait conflict resolution (`insteadof`, `as`): not yet implemented
+
+## runtime error gotchas
+
+- **throwBuiltinException vs return error.RuntimeError**: for any runtime error that PHP code should be able to catch (visibility violations, type errors, division by zero, etc), use `throwBuiltinException` + `continue`, NOT `return error.RuntimeError`. the zig error bypasses the PHP exception handler stack entirely, causing hangs when a try/catch is present. pattern: `if (try self.throwBuiltinException("Error", msg)) continue; return error.RuntimeError;`
+- **catch clause qualified names**: `\Exception` is valid PHP. the parser must handle backslash-prefixed types in catch clauses via `parseQualifiedName()`, not just `.identifier` token checks
+- **visibility checks need the defining class**: `findPropertyVisibility` / `findMethodVisibility` must return which class defined the member, not just the visibility level. private access checks against the defining class, not the object's runtime class
+- **stdlib function name conflicts**: functions registered later in registry.zig overwrite earlier ones. check arrays.zig/types.zig/etc for existing stubs before adding new implementations
 
 ## zig 0.15.x gotchas
 
@@ -111,8 +102,6 @@ GitHub Actions on push: `zig build test` (ubuntu + macos), PHP compat tests agai
 - 63 test files currently
 
 ## roadmap
-
-done: constants, type casting, switch/match, stdlib pass 1 (160+ functions), classes (properties, methods, inheritance, parent::, static methods/properties, self::, interfaces, traits, visibility enforcement), instanceof, try/catch/throw (with qualified name catch types), require/include (with function redeclaration detection), namespaces/use, __DIR__/__FILE__, compact/extract, var_export, ob_start/ob_get_clean, strtotime/mktime
 
 next:
 - stdlib pass 2: OOP-dependent (`DateTime`, `SplStack`, `ArrayObject`)
