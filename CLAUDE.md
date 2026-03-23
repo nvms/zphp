@@ -52,7 +52,7 @@ src/
     builtins.zig        - Exception hierarchy, native methods
   stdlib/
     registry.zig        - function registration
-    strings.zig arrays.zig math.zig types.zig json.zig io.zig pcre.zig
+    strings.zig arrays.zig math.zig types.zig json.zig io.zig pcre.zig datetime.zig
 ```
 
 ## scope
@@ -100,12 +100,12 @@ GitHub Actions on push: `zig build test` (ubuntu + macos), PHP compat tests agai
 - `tests/*.php` files run through both `php` and `zphp run`, diff output
 - `tests/include/` has helper files for require/include tests
 - rule: every new feature gets a test file. the spec is PHP's behavior
-- 64 test files currently
+- 65 test files currently
 
 ## roadmap
 
 next:
-- stdlib pass 2: OOP-dependent (`DateTime`, `SplStack`, `ArrayObject`)
+- stdlib pass 2: remaining OOP types (`SplStack`, `ArrayObject`)
 - `yield from` delegation
 - package manager (composer.json, packagist, SAT solver, autoloader)
 - `zphp build` (bundle to binary)

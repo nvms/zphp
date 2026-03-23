@@ -161,6 +161,7 @@ test {
     _ = @import("runtime/vm.zig");
     _ = @import("runtime/builtins.zig");
     _ = @import("stdlib/registry.zig");
+    _ = @import("stdlib/datetime.zig");
     _ = @import("pipeline/parser_tests.zig");
     _ = @import("integration_tests.zig");
 }

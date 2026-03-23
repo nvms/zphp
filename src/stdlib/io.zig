@@ -273,7 +273,7 @@ fn native_strtotime(_: *NativeContext, args: []const Value) RuntimeError!Value {
     return parseRelativeTime(input, base);
 }
 
-fn parseRelativeTime(input: []const u8, base: i64) Value {
+pub fn parseRelativeTime(input: []const u8, base: i64) Value {
     var s = input;
     var sign: i64 = 1;
     if (s.len > 0 and s[0] == '-') {
@@ -311,11 +311,11 @@ fn parseRelativeTime(input: []const u8, base: i64) Value {
     return .{ .int = base + seconds };
 }
 
-fn startsWith(s: []const u8, prefix: []const u8) bool {
+pub fn startsWith(s: []const u8, prefix: []const u8) bool {
     return s.len >= prefix.len and std.mem.eql(u8, s[0..prefix.len], prefix);
 }
 
-fn dateToTimestamp(year: i64, month: i64, day: i64, hour: i64, min: i64, sec: i64) i64 {
+pub fn dateToTimestamp(year: i64, month: i64, day: i64, hour: i64, min: i64, sec: i64) i64 {
     // Howard Hinnant's civil_from_days algorithm (shifted so March = month 0)
     const m = if (month < 1) @as(i64, 1) else if (month > 12) @as(i64, 12) else month;
     const y = year - @as(i64, if (m <= 2) 1 else 0);
