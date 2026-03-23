@@ -48,6 +48,8 @@ pub const OpCode = enum(u8) {
 
     call, // u16: name constant index, u8: arg count
     call_indirect, // u8: arg count (function name on stack below args)
+    call_spread, // u16: name constant index (args array on stack)
+    call_indirect_spread, // (function name below args array on stack)
     closure_bind, // u16: var name constant (peek closure name, get_var, store capture)
     define_const, // u16: name constant index (pop value, store in constants table)
     cast_int,

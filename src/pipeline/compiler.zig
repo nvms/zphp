@@ -1450,10 +1450,41 @@ const Compiler = struct {
 
     fn compileCall(self: *Compiler, node: Ast.Node) Error!void {
         const callee = self.ast.nodes[node.data.lhs];
-
         const args = self.ast.extraSlice(node.data.rhs);
 
-        if (callee.tag == .identifier) {
+        // check if any arg is a splat expression
+        var has_splat = false;
+        for (args) |arg_idx| {
+            if (self.ast.nodes[arg_idx].tag == .splat_expr) {
+                has_splat = true;
+                break;
+            }
+        }
+
+        if (has_splat) {
+            // build args array: array_new, then push/spread each arg
+            try self.emitOp(.array_new);
+            for (args) |arg_idx| {
+                const arg_node = self.ast.nodes[arg_idx];
+                if (arg_node.tag == .splat_expr) {
+                    try self.compileNode(arg_node.data.lhs);
+                    try self.emitOp(.array_spread);
+                } else {
+                    try self.compileNode(arg_idx);
+                    try self.emitOp(.array_push);
+                }
+            }
+            if (callee.tag == .identifier) {
+                const name = self.ast.tokenSlice(callee.main_token);
+                const idx = try self.addConstant(.{ .string = name });
+                try self.emitOp(.call_spread);
+                try self.emitU16(idx);
+            } else {
+                try self.compileNode(node.data.lhs);
+                // swap so function name is below args array
+                try self.emitOp(.call_indirect_spread);
+            }
+        } else if (callee.tag == .identifier) {
             for (args) |arg| try self.compileNode(arg);
             const name = self.ast.tokenSlice(callee.main_token);
             const idx = try self.addConstant(.{ .string = name });

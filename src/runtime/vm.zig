@@ -371,13 +371,38 @@ pub const VM = struct {
                     const name_val = self.stack[self.sp - ac - 1];
                     if (name_val != .string) return error.RuntimeError;
                     const name = name_val.string;
-                    // shift args down over the name value
                     var i: usize = 0;
                     while (i < ac) : (i += 1) {
                         self.stack[self.sp - ac - 1 + i] = self.stack[self.sp - ac + i];
                     }
                     self.sp -= 1;
                     try self.callNamedFunction(name, arg_count);
+                },
+                .call_spread => {
+                    const name_idx = self.readU16();
+                    const name = self.currentChunk().constants.items[name_idx].string;
+                    // args array is on top of stack
+                    const args_val = self.pop();
+                    if (args_val != .array) return error.RuntimeError;
+                    const arr = args_val.array;
+                    // push each element onto the stack as individual args
+                    for (arr.entries.items) |entry| {
+                        self.push(entry.value);
+                    }
+                    const ac: u8 = @intCast(arr.entries.items.len);
+                    try self.callNamedFunction(name, ac);
+                },
+                .call_indirect_spread => {
+                    // stack: [... args_array, func_name]
+                    const name_val = self.pop();
+                    const args_val = self.pop();
+                    if (args_val != .array or name_val != .string) return error.RuntimeError;
+                    const arr = args_val.array;
+                    for (arr.entries.items) |entry| {
+                        self.push(entry.value);
+                    }
+                    const ac: u8 = @intCast(arr.entries.items.len);
+                    try self.callNamedFunction(name_val.string, ac);
                 },
                 .return_val => {
                     const result = self.pop();

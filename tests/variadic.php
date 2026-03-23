@@ -15,4 +15,9 @@ function first($a, ...$rest) {
 }
 echo first("hello", "a", "b", "c") . "\n";
 
-// spread in call (not yet supported, tested in array_spread.php for array context)
+// spread in call
+$args = [4, 5, 6];
+echo sum(...$args) . "\n";
+
+// mixed: regular args + spread
+echo sum(1, ...$args) . "\n";
