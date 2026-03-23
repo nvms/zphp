@@ -83,6 +83,8 @@ pub const OpCode = enum(u8) {
     set_prop, // u16: property name constant
     method_call, // u16: method name constant, u8: arg count
     static_call, // u16: class name, u16: method name, u8: arg count
+    interface_decl, // u16: name, u8: method count, then method_count * u16 method name, u16: parent (0xffff = none)
+    trait_decl, // u16: name (just registers the trait exists)
     get_static_prop, // u16: class name, u16: property name
     set_static_prop, // u16: class name, u16: property name
 

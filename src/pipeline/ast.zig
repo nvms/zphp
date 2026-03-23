@@ -104,11 +104,15 @@ pub const Ast = struct {
             catch_clause, // main_token = variable, lhs = type name node (0 = catch all), rhs = body block
 
             // classes
-            class_decl, // main_token = class name, lhs = extra index -> {count, member_nodes...}, rhs = parent class node (0 = none)
+            class_decl, // main_token = class name, lhs = extra index -> {count, member_nodes...}, rhs = extra index -> {parent_node, implements_count, implements_nodes...}
             class_method, // main_token = method name, lhs = extra index -> {count, param...}, rhs = body block
             class_property, // main_token = property variable, lhs = default value (0 = none)
             static_class_method, // same as class_method but static
             static_class_property, // same as class_property but static
+            interface_decl, // main_token = interface name, lhs = extra index -> {count, method_nodes...}, rhs = parent interface node (0 = none)
+            interface_method, // main_token = method name, lhs = extra index -> {count, param...}
+            trait_decl, // main_token = trait name, lhs = extra index -> {count, member_nodes...}
+            trait_use, // main_token = use keyword, lhs = extra index -> {count, trait_name_nodes...}
             new_expr, // main_token = class name, lhs = extra index -> {count, arg...}
             method_call, // main_token = method name, lhs = object, rhs = extra index -> {count, arg...}
             static_call, // main_token = method name, lhs = class name node, rhs = extra index -> {count, arg...}

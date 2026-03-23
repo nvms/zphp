@@ -56,22 +56,38 @@ pub const ClassDef = struct {
     properties: std.ArrayListUnmanaged(PropertyDef) = .{},
     static_props: std.StringHashMapUnmanaged(Value) = .{},
     parent: ?[]const u8 = null,
+    interfaces: std.ArrayListUnmanaged([]const u8) = .{},
+
+    pub const Visibility = enum(u8) { public = 0, protected = 1, private = 2 };
 
     const MethodInfo = struct {
         name: []const u8,
         arity: u8,
         is_static: bool = false,
+        visibility: Visibility = .public,
     };
 
     const PropertyDef = struct {
         name: []const u8,
         default: Value,
+        visibility: Visibility = .public,
     };
 
     fn deinit(self: *ClassDef, allocator: Allocator) void {
         self.methods.deinit(allocator);
         self.properties.deinit(allocator);
         self.static_props.deinit(allocator);
+        self.interfaces.deinit(allocator);
+    }
+};
+
+pub const InterfaceDef = struct {
+    name: []const u8,
+    methods: std.ArrayListUnmanaged([]const u8) = .{},
+    parent: ?[]const u8 = null,
+
+    fn deinit(self: *InterfaceDef, allocator: Allocator) void {
+        self.methods.deinit(allocator);
     }
 };
 
@@ -89,6 +105,8 @@ pub const VM = struct {
     captures: std.ArrayListUnmanaged(CaptureEntry) = .{},
     php_constants: std.StringHashMapUnmanaged(Value) = .{},
     classes: std.StringHashMapUnmanaged(ClassDef) = .{},
+    interfaces: std.StringHashMapUnmanaged(InterfaceDef) = .{},
+    traits: std.StringHashMapUnmanaged(void) = .{},
     statics: std.StringHashMapUnmanaged(Value) = .{},
     static_vars: std.ArrayListUnmanaged(StaticEntry) = .{},
     file_loader: ?*const FileLoader = null,
@@ -193,6 +211,10 @@ pub const VM = struct {
         var class_iter = self.classes.valueIterator();
         while (class_iter.next()) |c| c.deinit(self.allocator);
         self.classes.deinit(self.allocator);
+        var iface_iter = self.interfaces.valueIterator();
+        while (iface_iter.next()) |i| i.deinit(self.allocator);
+        self.interfaces.deinit(self.allocator);
+        self.traits.deinit(self.allocator);
         // free statics keys (heap allocated)
         var statics_iter = self.statics.keyIterator();
         while (statics_iter.next()) |k| self.allocator.free(k.*);
@@ -738,10 +760,12 @@ pub const VM = struct {
                         const method_name = self.currentChunk().constants.items[mname_idx].string;
                         const arity = self.readByte();
                         const is_static = self.readByte() == 1;
+                        const vis: ClassDef.Visibility = @enumFromInt(self.readByte());
                         try def.methods.put(self.allocator, method_name, .{
                             .name = method_name,
                             .arity = arity,
                             .is_static = is_static,
+                            .visibility = vis,
                         });
                     }
 
@@ -749,10 +773,12 @@ pub const VM = struct {
 
                     var prop_names: [32][]const u8 = undefined;
                     var prop_has_default: [32]u8 = undefined;
+                    var prop_vis: [32]ClassDef.Visibility = undefined;
                     for (0..prop_count) |pi| {
                         const pname_idx = self.readU16();
                         prop_names[pi] = self.currentChunk().constants.items[pname_idx].string;
                         prop_has_default[pi] = self.readByte();
+                        prop_vis[pi] = @enumFromInt(self.readByte());
                     }
 
                     const static_prop_count = self.readByte();
@@ -762,6 +788,7 @@ pub const VM = struct {
                         const pname_idx = self.readU16();
                         sprop_names[pi] = self.currentChunk().constants.items[pname_idx].string;
                         sprop_has_default[pi] = self.readByte();
+                        _ = self.readByte(); // visibility (stored but not enforced for static props yet)
                     }
 
                     // pop static property defaults (on top of stack, pushed last)
@@ -798,6 +825,7 @@ pub const VM = struct {
                         try def.properties.append(self.allocator, .{
                             .name = prop_names[pi],
                             .default = default_val,
+                            .visibility = prop_vis[pi],
                         });
                     }
 
@@ -816,7 +844,69 @@ pub const VM = struct {
                         def.parent = self.currentChunk().constants.items[parent_idx].string;
                     }
 
+                    // read implements list
+                    const iface_count = self.readByte();
+                    for (0..iface_count) |_| {
+                        const iname_idx = self.readU16();
+                        const iface_name = self.currentChunk().constants.items[iname_idx].string;
+                        try def.interfaces.append(self.allocator, iface_name);
+                    }
+
+                    // read trait list and copy trait methods
+                    const trait_count = self.readByte();
+                    for (0..trait_count) |_| {
+                        const tname_idx = self.readU16();
+                        const trait_name = self.currentChunk().constants.items[tname_idx].string;
+
+                        // copy trait methods: TraitName::method -> ClassName::method
+                        var fn_iter = self.functions.iterator();
+                        while (fn_iter.next()) |entry| {
+                            const fn_name = entry.key_ptr.*;
+                            if (fn_name.len > trait_name.len + 2 and
+                                std.mem.eql(u8, fn_name[0..trait_name.len], trait_name) and
+                                std.mem.eql(u8, fn_name[trait_name.len .. trait_name.len + 2], "::"))
+                            {
+                                const method_name = fn_name[trait_name.len + 2 ..];
+                                const class_method = try std.fmt.allocPrint(self.allocator, "{s}::{s}", .{ class_name, method_name });
+                                try self.strings.append(self.allocator, class_method);
+                                if (!self.functions.contains(class_method)) {
+                                    try self.functions.put(self.allocator, class_method, entry.value_ptr.*);
+                                    try def.methods.put(self.allocator, method_name, .{
+                                        .name = method_name,
+                                        .arity = entry.value_ptr.*.arity,
+                                    });
+                                }
+                            }
+                        }
+                    }
+
                     try self.classes.put(self.allocator, class_name, def);
+                },
+
+                .interface_decl => {
+                    const name_idx = self.readU16();
+                    const iface_name = self.currentChunk().constants.items[name_idx].string;
+                    const method_count = self.readByte();
+
+                    var idef = InterfaceDef{ .name = iface_name };
+                    for (0..method_count) |_| {
+                        const mname_idx = self.readU16();
+                        const method_name = self.currentChunk().constants.items[mname_idx].string;
+                        try idef.methods.append(self.allocator, method_name);
+                    }
+
+                    const parent_idx = self.readU16();
+                    if (parent_idx != 0xffff) {
+                        idef.parent = self.currentChunk().constants.items[parent_idx].string;
+                    }
+
+                    try self.interfaces.put(self.allocator, iface_name, idef);
+                },
+
+                .trait_decl => {
+                    const name_idx = self.readU16();
+                    const trait_name = self.currentChunk().constants.items[name_idx].string;
+                    try self.traits.put(self.allocator, trait_name, {});
                 },
 
                 .new_obj => {
@@ -886,6 +976,15 @@ pub const VM = struct {
                     const prop_name = self.currentChunk().constants.items[name_idx].string;
                     const obj_val = self.pop();
                     if (obj_val == .object) {
+                        const vr = self.findPropertyVisibility(obj_val.object.class_name, prop_name);
+                        if (!self.checkVisibility(vr.defining_class, vr.visibility)) {
+                            const msg = try std.fmt.allocPrint(self.allocator, "Cannot access {s} property {s}::${s}", .{
+                                @tagName(vr.visibility), vr.defining_class, prop_name,
+                            });
+                            try self.strings.append(self.allocator, msg);
+                            if (try self.throwBuiltinException("Error", msg)) continue;
+                            return error.RuntimeError;
+                        }
                         self.push(obj_val.object.get(prop_name));
                     } else {
                         self.push(.null);
@@ -898,6 +997,15 @@ pub const VM = struct {
                     const val = self.pop();
                     const obj_val = self.pop();
                     if (obj_val == .object) {
+                        const vr = self.findPropertyVisibility(obj_val.object.class_name, prop_name);
+                        if (!self.checkVisibility(vr.defining_class, vr.visibility)) {
+                            const msg = try std.fmt.allocPrint(self.allocator, "Cannot access {s} property {s}::${s}", .{
+                                @tagName(vr.visibility), vr.defining_class, prop_name,
+                            });
+                            try self.strings.append(self.allocator, msg);
+                            if (try self.throwBuiltinException("Error", msg)) continue;
+                            return error.RuntimeError;
+                        }
                         try obj_val.object.set(self.allocator, prop_name, val);
                     }
                     self.push(val);
@@ -913,6 +1021,18 @@ pub const VM = struct {
                     const obj_val = self.stack[self.sp - ac - 1];
                     if (obj_val != .object) return error.RuntimeError;
                     const obj = obj_val.object;
+
+                    // check visibility
+                    const mvr = self.findMethodVisibility(obj.class_name, method_name);
+                    if (!self.checkVisibility(mvr.defining_class, mvr.visibility)) {
+                        const msg = try std.fmt.allocPrint(self.allocator, "Call to {s} method {s}::{s}()", .{
+                            @tagName(mvr.visibility), mvr.defining_class, method_name,
+                        });
+                        try self.strings.append(self.allocator, msg);
+                        self.sp -= ac + 1;
+                        if (try self.throwBuiltinException("Error", msg)) continue;
+                        return error.RuntimeError;
+                    }
 
                     // look up method in class hierarchy
                     const full_name = try self.resolveMethod(obj.class_name, method_name);
@@ -1138,7 +1258,11 @@ pub const VM = struct {
         var current = obj_class;
         while (true) {
             if (std.mem.eql(u8, current, target_class)) return true;
+            // check interfaces implemented by this class
             if (self.classes.get(current)) |cls| {
+                for (cls.interfaces.items) |iface| {
+                    if (self.implementsInterface(iface, target_class)) return true;
+                }
                 if (cls.parent) |p| {
                     current = p;
                     continue;
@@ -1146,6 +1270,51 @@ pub const VM = struct {
             }
             return false;
         }
+    }
+
+    fn checkVisibility(self: *VM, target_class: []const u8, vis: ClassDef.Visibility) bool {
+        if (vis == .public) return true;
+        const caller_class = self.currentDefiningClass() orelse return false;
+        if (vis == .private) return std.mem.eql(u8, caller_class, target_class);
+        // protected: caller must be same class or in inheritance chain
+        return self.isInstanceOf(caller_class, target_class) or self.isInstanceOf(target_class, caller_class);
+    }
+
+    const VisResult = struct { visibility: ClassDef.Visibility, defining_class: []const u8 };
+
+    fn findPropertyVisibility(self: *VM, class_name: []const u8, prop_name: []const u8) VisResult {
+        var current: ?[]const u8 = class_name;
+        while (current) |cn| {
+            if (self.classes.get(cn)) |cls| {
+                for (cls.properties.items) |prop| {
+                    if (std.mem.eql(u8, prop.name, prop_name)) return .{ .visibility = prop.visibility, .defining_class = cn };
+                }
+                current = cls.parent;
+            } else break;
+        }
+        return .{ .visibility = .public, .defining_class = class_name };
+    }
+
+    fn findMethodVisibility(self: *VM, class_name: []const u8, method_name: []const u8) VisResult {
+        var current: ?[]const u8 = class_name;
+        while (current) |cn| {
+            if (self.classes.get(cn)) |cls| {
+                if (cls.methods.get(method_name)) |info| return .{ .visibility = info.visibility, .defining_class = cn };
+                current = cls.parent;
+            } else break;
+        }
+        return .{ .visibility = .public, .defining_class = class_name };
+    }
+
+    fn implementsInterface(self: *VM, iface_name: []const u8, target: []const u8) bool {
+        var current: ?[]const u8 = iface_name;
+        while (current) |name| {
+            if (std.mem.eql(u8, name, target)) return true;
+            if (self.interfaces.get(name)) |idef| {
+                current = idef.parent;
+            } else break;
+        }
+        return false;
     }
 
     fn currentDefiningClass(self: *VM) ?[]const u8 {

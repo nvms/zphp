@@ -116,7 +116,10 @@ critical boundaries:
 - static properties stored per-class in `ClassDef.static_props`, accessed via `get_static_prop`/`set_static_prop` opcodes
 - `instanceof` compiles to `instance_check` opcode which walks parent chain
 - function redeclaration (via require/include) produces a PHP-compatible fatal error
-- visibility modifiers parsed and skipped - not enforced yet
+- visibility enforced at runtime: private (defining class only), protected (defining class + subclasses), public (anywhere). violations throw catchable `\Error` exceptions
+- interfaces: `interface_decl` opcode stores method signatures. `instanceof` checks interface chain. classes store their implements list
+- traits: compiled as `TraitName::method` functions. class_decl copies trait methods to `ClassName::method`. class-defined methods take precedence over trait methods
+- catch clauses support qualified names (`\Exception`), multi-catch parsed but only first type used
 
 ### exception handling
 - handler stack of 32 `ExceptionHandler` structs (catch_ip, frame_count, sp, chunk)

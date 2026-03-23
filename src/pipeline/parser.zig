@@ -137,7 +137,9 @@ const Parser = struct {
             .kw_return => self.parseReturnStmt(),
             .kw_break => self.parseBreakContinue(.break_stmt),
             .kw_continue => self.parseBreakContinue(.continue_stmt),
-            .kw_class => self.parseClassDecl(),
+            .kw_class, .kw_abstract => self.parseClassDecl(),
+            .kw_interface => self.parseInterfaceDecl(),
+            .kw_trait => self.parseTraitDecl(),
             .kw_throw => self.parseThrowStmt(),
             .kw_try => self.parseTryCatch(),
             .kw_declare => self.skipDeclare(),
@@ -641,10 +643,17 @@ const Parser = struct {
         _ = self.advance(); // catch
         _ = try self.expect(.l_paren);
 
-        // catch type (class name)
+        // catch type: may be qualified name like \Exception or Foo\Bar
         var type_node: u32 = 0;
-        if (self.peek() == .identifier) {
-            type_node = try self.addLiteral(.identifier);
+        if (self.peek() == .identifier or self.peek() == .backslash) {
+            type_node = try self.parseQualifiedName();
+
+            // multi-catch: Exception | RuntimeException
+            while (self.peek() == .pipe) {
+                _ = self.advance();
+                _ = try self.parseQualifiedName();
+                // for now, only use the first type
+            }
         }
 
         // optional variable
@@ -698,6 +707,7 @@ const Parser = struct {
     }
 
     fn parseClassDecl(self: *Parser) Error!u32 {
+        if (self.peek() == .kw_abstract) _ = self.advance();
         _ = self.advance(); // class
         const name_tok = try self.expect(.identifier);
 
@@ -707,6 +717,160 @@ const Parser = struct {
             parent = try self.parseQualifiedName();
         }
 
+        var implements = std.ArrayListUnmanaged(u32){};
+        defer implements.deinit(self.allocator);
+        if (self.peek() == .kw_implements) {
+            _ = self.advance();
+            try implements.append(self.allocator, try self.parseQualifiedName());
+            while (self.peek() == .comma) {
+                _ = self.advance();
+                try implements.append(self.allocator, try self.parseQualifiedName());
+            }
+        }
+
+        _ = try self.expect(.l_brace);
+
+        var members = std.ArrayListUnmanaged(u32){};
+        defer members.deinit(self.allocator);
+
+        while (self.peek() != .r_brace and self.peek() != .eof) {
+            var is_static = false;
+            var is_abstract = false;
+            var visibility: u32 = 0; // 0=public, 1=protected, 2=private
+            while (self.peek() == .kw_public or self.peek() == .kw_protected or
+                self.peek() == .kw_private or self.peek() == .kw_static or
+                self.peek() == .kw_abstract or self.peek() == .kw_readonly)
+            {
+                if (self.peek() == .kw_static) is_static = true;
+                if (self.peek() == .kw_abstract) is_abstract = true;
+                if (self.peek() == .kw_protected) visibility = 1;
+                if (self.peek() == .kw_private) visibility = 2;
+                _ = self.advance();
+            }
+
+            if (self.peek() == .kw_use) {
+                try members.append(self.allocator, try self.parseTraitUse());
+            } else if (self.peek() == .kw_function) {
+                if (is_abstract) {
+                    try members.append(self.allocator, try self.parseInterfaceMethod());
+                } else {
+                    const method = try self.parseClassMethod();
+                    if (is_static) {
+                        self.nodes.items[method].tag = .static_class_method;
+                    }
+                    // encode visibility in rhs high bits (rhs is body block index)
+                    // store visibility separately in extra_data
+                    self.nodes.items[method].data.rhs = self.nodes.items[method].data.rhs | (visibility << 30);
+                    try members.append(self.allocator, method);
+                }
+            } else if (self.peek() == .variable) {
+                const prop = try self.parseClassProperty();
+                if (is_static) {
+                    self.nodes.items[prop].tag = .static_class_property;
+                }
+                // class_property rhs is unused, store visibility there
+                self.nodes.items[prop].data.rhs = visibility;
+                try members.append(self.allocator, prop);
+            } else if (self.peek() == .kw_const) {
+                try members.append(self.allocator, try self.parseConstDecl());
+            } else if (self.isTypeName() or self.peek() == .question or self.peek() == .l_paren) {
+                self.skipTypeHint();
+                if (self.peek() == .variable) {
+                    const prop = try self.parseClassProperty();
+                    if (is_static) {
+                        self.nodes.items[prop].tag = .static_class_property;
+                    }
+                    self.nodes.items[prop].data.rhs = visibility;
+                    try members.append(self.allocator, prop);
+                } else {
+                    _ = self.advance();
+                }
+            } else {
+                _ = self.advance();
+            }
+        }
+        _ = try self.expect(.r_brace);
+
+        const extra = try self.addExtraList(members.items);
+
+        // rhs encodes parent + implements: {parent_node, implements_count, impl_nodes...}
+        var rhs_data = std.ArrayListUnmanaged(u32){};
+        defer rhs_data.deinit(self.allocator);
+        try rhs_data.append(self.allocator, parent);
+        try rhs_data.append(self.allocator, @intCast(implements.items.len));
+        for (implements.items) |impl| try rhs_data.append(self.allocator, impl);
+        const rhs_idx: u32 = @intCast(self.extra_data.items.len);
+        try self.extra_data.appendSlice(self.allocator, rhs_data.items);
+
+        return self.addNode(.{ .tag = .class_decl, .main_token = name_tok, .data = .{ .lhs = extra, .rhs = rhs_idx } });
+    }
+
+    fn parseInterfaceDecl(self: *Parser) Error!u32 {
+        _ = self.advance(); // interface
+        const name_tok = try self.expect(.identifier);
+
+        var parent: u32 = 0;
+        if (self.peek() == .kw_extends) {
+            _ = self.advance();
+            parent = try self.parseQualifiedName();
+        }
+
+        _ = try self.expect(.l_brace);
+
+        var methods = std.ArrayListUnmanaged(u32){};
+        defer methods.deinit(self.allocator);
+
+        while (self.peek() != .r_brace and self.peek() != .eof) {
+            while (self.peek() == .kw_public or self.peek() == .kw_protected or
+                self.peek() == .kw_private or self.peek() == .kw_static or
+                self.peek() == .kw_abstract)
+            {
+                _ = self.advance();
+            }
+            if (self.peek() == .kw_function) {
+                try methods.append(self.allocator, try self.parseInterfaceMethod());
+            } else if (self.peek() == .kw_const) {
+                try methods.append(self.allocator, try self.parseConstDecl());
+            } else {
+                _ = self.advance();
+            }
+        }
+        _ = try self.expect(.r_brace);
+
+        const extra = try self.addExtraList(methods.items);
+        return self.addNode(.{ .tag = .interface_decl, .main_token = name_tok, .data = .{ .lhs = extra, .rhs = parent } });
+    }
+
+    fn parseInterfaceMethod(self: *Parser) Error!u32 {
+        _ = self.advance(); // function
+        const name_tok = try self.expect(.identifier);
+        _ = try self.expect(.l_paren);
+
+        var params = std.ArrayListUnmanaged(u32){};
+        defer params.deinit(self.allocator);
+
+        if (self.peek() != .r_paren) {
+            try params.append(self.allocator, try self.parseParam());
+            while (self.peek() == .comma) {
+                _ = self.advance();
+                try params.append(self.allocator, try self.parseParam());
+            }
+        }
+        _ = try self.expect(.r_paren);
+
+        if (self.peek() == .colon) {
+            _ = self.advance();
+            self.skipTypeHint();
+        }
+
+        _ = try self.expect(.semicolon);
+        const extra = try self.addExtraList(params.items);
+        return self.addNode(.{ .tag = .interface_method, .main_token = name_tok, .data = .{ .lhs = extra } });
+    }
+
+    fn parseTraitDecl(self: *Parser) Error!u32 {
+        _ = self.advance(); // trait
+        const name_tok = try self.expect(.identifier);
         _ = try self.expect(.l_brace);
 
         var members = std.ArrayListUnmanaged(u32){};
@@ -734,16 +898,6 @@ const Parser = struct {
                     self.nodes.items[prop].tag = .static_class_property;
                 }
                 try members.append(self.allocator, prop);
-            } else if (self.peek() == .kw_const) {
-                try members.append(self.allocator, try self.parseConstDecl());
-            } else if (self.isTypeName() or self.peek() == .question or self.peek() == .l_paren) {
-                // typed property: skip type hint, then parse property
-                self.skipTypeHint();
-                if (self.peek() == .variable) {
-                    try members.append(self.allocator, try self.parseClassProperty());
-                } else {
-                    _ = self.advance();
-                }
             } else {
                 _ = self.advance();
             }
@@ -751,7 +905,31 @@ const Parser = struct {
         _ = try self.expect(.r_brace);
 
         const extra = try self.addExtraList(members.items);
-        return self.addNode(.{ .tag = .class_decl, .main_token = name_tok, .data = .{ .lhs = extra, .rhs = parent } });
+        return self.addNode(.{ .tag = .trait_decl, .main_token = name_tok, .data = .{ .lhs = extra } });
+    }
+
+    fn parseTraitUse(self: *Parser) Error!u32 {
+        const use_tok = self.advance(); // use
+        var traits = std.ArrayListUnmanaged(u32){};
+        defer traits.deinit(self.allocator);
+
+        try traits.append(self.allocator, try self.parseQualifiedName());
+        while (self.peek() == .comma) {
+            _ = self.advance();
+            try traits.append(self.allocator, try self.parseQualifiedName());
+        }
+
+        // skip conflict resolution block { ... } if present
+        if (self.peek() == .l_brace) {
+            _ = self.advance();
+            while (self.peek() != .r_brace and self.peek() != .eof) _ = self.advance();
+            _ = try self.expect(.r_brace);
+        } else {
+            _ = try self.expect(.semicolon);
+        }
+
+        const extra = try self.addExtraList(traits.items);
+        return self.addNode(.{ .tag = .trait_use, .main_token = use_tok, .data = .{ .lhs = extra } });
     }
 
     fn parseClassMethod(self: *Parser) Error!u32 {

@@ -197,6 +197,10 @@ const Compiler = struct {
             .catch_clause => {},
             .class_decl => try self.compileClassDecl(node),
             .class_method, .class_property, .static_class_method, .static_class_property => {},
+            .interface_decl => try self.compileInterfaceDecl(node),
+            .interface_method => {},
+            .trait_decl => try self.compileTraitDecl(node),
+            .trait_use => {},
             .new_expr => try self.compileNewExpr(node),
             .method_call => try self.compileMethodCall(node),
             .static_call => try self.compileStaticCall(node),
@@ -1127,6 +1131,16 @@ const Compiler = struct {
         const class_name = self.ast.tokenSlice(node.main_token);
         const members = self.ast.extraSlice(node.data.lhs);
 
+        // decode rhs: {parent_node, implements_count, impl_nodes...}
+        const rhs_base = node.data.rhs;
+        const parent_node = self.ast.extra_data[rhs_base];
+        const impl_count = self.ast.extra_data[rhs_base + 1];
+        var impl_names: [16][]const u8 = undefined;
+        for (0..impl_count) |i| {
+            const impl_node = self.ast.nodes[self.ast.extra_data[rhs_base + 2 + i]];
+            impl_names[i] = self.ast.tokenSlice(impl_node.main_token);
+        }
+
         var method_count: u8 = 0;
         for (members) |member_idx| {
             const member = self.ast.nodes[member_idx];
@@ -1180,6 +1194,8 @@ const Compiler = struct {
                 const param_nodes = self.ast.extraSlice(member.data.lhs);
                 try self.emitByte(@intCast(param_nodes.len));
                 try self.emitByte(if (member.tag == .static_class_method) @as(u8, 1) else @as(u8, 0));
+                const vis: u8 = @intCast(member.data.rhs >> 30);
+                try self.emitByte(vis);
             }
         }
 
@@ -1192,6 +1208,7 @@ const Compiler = struct {
                 const pname_idx = try self.addConstant(.{ .string = prop_name });
                 try self.emitU16(pname_idx);
                 try self.emitByte(if (member.data.lhs != 0) @as(u8, 1) else @as(u8, 0));
+                try self.emitByte(@intCast(member.data.rhs));
             }
         }
 
@@ -1204,16 +1221,90 @@ const Compiler = struct {
                 const pname_idx = try self.addConstant(.{ .string = prop_name });
                 try self.emitU16(pname_idx);
                 try self.emitByte(if (member.data.lhs != 0) @as(u8, 1) else @as(u8, 0));
+                try self.emitByte(@intCast(member.data.rhs));
             }
         }
 
-        if (node.data.rhs != 0) {
-            const parent_name = self.ast.tokenSlice(self.ast.nodes[node.data.rhs].main_token);
+        if (parent_node != 0) {
+            const parent_name = self.ast.tokenSlice(self.ast.nodes[parent_node].main_token);
             const parent_idx = try self.addConstant(.{ .string = parent_name });
             try self.emitU16(parent_idx);
         } else {
             try self.emitU16(0xffff);
         }
+
+        // emit implements count and names
+        try self.emitByte(@intCast(impl_count));
+        for (0..impl_count) |i| {
+            const iname_idx = try self.addConstant(.{ .string = impl_names[i] });
+            try self.emitU16(iname_idx);
+        }
+
+        // collect all trait names from trait_use statements
+        var all_traits = std.ArrayListUnmanaged([]const u8){};
+        defer all_traits.deinit(self.allocator);
+        for (members) |member_idx| {
+            const member = self.ast.nodes[member_idx];
+            if (member.tag == .trait_use) {
+                for (self.ast.extraSlice(member.data.lhs)) |tn| {
+                    try all_traits.append(self.allocator, self.ast.tokenSlice(self.ast.nodes[tn].main_token));
+                }
+            }
+        }
+        try self.emitByte(@intCast(all_traits.items.len));
+        for (all_traits.items) |tname| {
+            const tname_idx = try self.addConstant(.{ .string = tname });
+            try self.emitU16(tname_idx);
+        }
+    }
+
+    fn compileInterfaceDecl(self: *Compiler, node: Ast.Node) Error!void {
+        const iface_name = self.ast.tokenSlice(node.main_token);
+        const members = self.ast.extraSlice(node.data.lhs);
+
+        var method_count: u8 = 0;
+        for (members) |m| {
+            if (self.ast.nodes[m].tag == .interface_method) method_count += 1;
+        }
+
+        const name_idx = try self.addConstant(.{ .string = iface_name });
+        try self.emitOp(.interface_decl);
+        try self.emitU16(name_idx);
+        try self.emitByte(method_count);
+
+        for (members) |m| {
+            const member = self.ast.nodes[m];
+            if (member.tag == .interface_method) {
+                const mname = self.ast.tokenSlice(member.main_token);
+                const mname_idx = try self.addConstant(.{ .string = mname });
+                try self.emitU16(mname_idx);
+            }
+        }
+
+        if (node.data.rhs != 0) {
+            const parent_name = self.ast.tokenSlice(self.ast.nodes[node.data.rhs].main_token);
+            const pidx = try self.addConstant(.{ .string = parent_name });
+            try self.emitU16(pidx);
+        } else {
+            try self.emitU16(0xffff);
+        }
+    }
+
+    fn compileTraitDecl(self: *Compiler, node: Ast.Node) Error!void {
+        const trait_name = self.ast.tokenSlice(node.main_token);
+        const members = self.ast.extraSlice(node.data.lhs);
+
+        // compile trait methods as TraitName::methodName functions
+        for (members) |member_idx| {
+            const member = self.ast.nodes[member_idx];
+            if (member.tag == .class_method or member.tag == .static_class_method) {
+                try self.compileClassMethodBody(trait_name, member);
+            }
+        }
+
+        const name_idx = try self.addConstant(.{ .string = trait_name });
+        try self.emitOp(.trait_decl);
+        try self.emitU16(name_idx);
     }
 
     fn compileClassMethodBody(self: *Compiler, class_name: []const u8, member: Ast.Node) Error!void {
@@ -1246,7 +1337,8 @@ const Compiler = struct {
             sub.string_allocs.deinit(self.allocator);
         }
 
-        try sub.compileNode(member.data.rhs);
+        const body_idx = member.data.rhs & 0x3FFFFFFF;
+        try sub.compileNode(body_idx);
         try sub.emitOp(.op_null);
         try sub.emitOp(.return_val);
         sub.break_jumps.deinit(self.allocator);

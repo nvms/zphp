@@ -41,11 +41,11 @@ src/
   pipeline/
     token.zig           - 145 token types, case-insensitive keyword lookup
     lexer.zig           - source -> token stream (HTML/PHP modal)
-    ast.zig             - flat array AST, 77 node tags
+    ast.zig             - flat array AST, 81 node tags
     parser.zig          - Pratt recursive descent, type hints, namespaces, variadic
     parser_tests.zig    - S-expression renderer tests
     compiler.zig        - AST -> bytecode, namespace resolution, __DIR__/__FILE__
-    bytecode.zig        - ~93 opcodes, Chunk, ObjFunction
+    bytecode.zig        - ~95 opcodes, Chunk, ObjFunction
   runtime/
     vm.zig              - stack-based interpreter, classes, exceptions, file loading
     value.zig           - Value tagged union, PhpArray, PhpObject
@@ -64,7 +64,7 @@ match: strict comparison, multi-value arms, default, expression result
 functions: declarations, calls, return, default params, variadic `...$args`, spread `f(...$arr)`
 closures: anonymous functions, arrow functions, `use` captures, callbacks
 arrays: literals, access, spread `[...$arr]`, 150+ stdlib functions
-classes: properties, methods, `$this`, `__construct`, `extends`, `parent::`, static calls, static methods/properties, `self::`, `instanceof`
+classes: properties, methods, `$this`, `__construct`, `extends`, `parent::`, static methods/properties, `self::`, `instanceof`, interfaces, traits, visibility enforcement (public/protected/private)
 exceptions: try/catch/finally, throw, typed catch, multi-catch, DivisionByZeroError
 file inclusion: require, require_once, include, include_once, `__DIR__`, `__FILE__`
 namespaces: `namespace`, `use`, `use ... as`, qualified names with `\`
@@ -80,7 +80,7 @@ other: type casting, type hints (parsed, not enforced), `declare(strict_types=1)
 - `global $var` copies value from frame 0, no write-back
 - `require` executes in isolated scope (functions/classes register globally, variables don't leak to caller)
 - type hints parsed but not enforced at runtime
-- visibility modifiers (public/protected/private) parsed but not enforced
+- visibility enforcement throws `\Error` exceptions (catchable), matching PHP behavior
 - heredoc/nowdoc not supported
 - `strtotime` only supports YYYY-MM-DD format and relative expressions (+N units), not complex PHP date strings
 - `mktime`/`strtotime` use UTC, not local timezone
@@ -108,14 +108,11 @@ GitHub Actions on push: `zig build test` (ubuntu + macos), PHP compat tests agai
 - `tests/*.php` files run through both `php` and `zphp run`, diff output
 - `tests/include/` has helper files for require/include tests
 - rule: every new feature gets a test file. the spec is PHP's behavior
-- 59 test files currently
+- 63 test files currently
 
 ## roadmap
 
-done: constants, type casting, switch/match, stdlib pass 1 (160+ functions), classes (properties, methods, inheritance, parent::, static methods/properties, self::), instanceof, try/catch/throw, require/include (with function redeclaration detection), namespaces/use, __DIR__/__FILE__, compact/extract, var_export, ob_start/ob_get_clean, strtotime/mktime
-
-in progress:
-- classes: visibility enforcement, interfaces, traits
+done: constants, type casting, switch/match, stdlib pass 1 (160+ functions), classes (properties, methods, inheritance, parent::, static methods/properties, self::, interfaces, traits, visibility enforcement), instanceof, try/catch/throw (with qualified name catch types), require/include (with function redeclaration detection), namespaces/use, __DIR__/__FILE__, compact/extract, var_export, ob_start/ob_get_clean, strtotime/mktime
 
 next:
 - stdlib pass 2: OOP-dependent (`DateTime`, `SplStack`, `ArrayObject`)

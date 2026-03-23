@@ -337,6 +337,22 @@ fn renderNode(ast: *const Ast, idx: u32, buf: *Buf) !void {
             try w.writeAll(ast.tokenSlice(node.main_token));
             try w.writeByte(')');
         },
+        .interface_decl => {
+            try w.writeAll("(interface ");
+            try w.writeAll(ast.tokenSlice(node.main_token));
+            try w.writeByte(')');
+        },
+        .interface_method => {
+            try w.writeAll("(imethod ");
+            try w.writeAll(ast.tokenSlice(node.main_token));
+            try w.writeByte(')');
+        },
+        .trait_decl => {
+            try w.writeAll("(trait ");
+            try w.writeAll(ast.tokenSlice(node.main_token));
+            try w.writeByte(')');
+        },
+        .trait_use => try w.writeAll("(use-trait)"),
         .expr_list => {
             for (ast.extraSlice(node.data.lhs), 0..) |expr, i| {
                 if (i > 0) try w.writeAll(", ");
