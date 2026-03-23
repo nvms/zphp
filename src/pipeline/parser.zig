@@ -140,6 +140,7 @@ const Parser = struct {
             .kw_class => self.parseClassDecl(),
             .kw_throw => self.parseThrowStmt(),
             .kw_try => self.parseTryCatch(),
+            .kw_declare => self.skipDeclare(),
             .l_brace => self.parseBlock(),
             .semicolon => {
                 _ = self.advance();
@@ -151,6 +152,20 @@ const Parser = struct {
 
     fn parseStatementOrBlock(self: *Parser) Error!u32 {
         if (self.peek() == .l_brace) return self.parseBlock();
+        return self.parseStatement();
+    }
+
+    // declare(strict_types=1); - skip the entire directive
+    fn skipDeclare(self: *Parser) Error!u32 {
+        _ = self.advance(); // declare
+        if (self.peek() == .l_paren) {
+            _ = self.advance();
+            while (self.peek() != .r_paren and self.peek() != .eof) {
+                _ = self.advance();
+            }
+            if (self.peek() == .r_paren) _ = self.advance();
+        }
+        if (self.peek() == .semicolon) _ = self.advance();
         return self.parseStatement();
     }
 
@@ -790,7 +805,12 @@ const Parser = struct {
             self.skipTypeHint();
         }
         const tok = try self.expect(.variable);
-        return self.addNode(.{ .tag = .variable, .main_token = tok, .data = .{} });
+        var default: u32 = 0;
+        if (self.peek() == .equal) {
+            _ = self.advance();
+            default = try self.parseExpression();
+        }
+        return self.addNode(.{ .tag = .variable, .main_token = tok, .data = .{ .lhs = default } });
     }
 
     // ======================================================================

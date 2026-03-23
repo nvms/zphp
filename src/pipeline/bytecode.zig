@@ -118,6 +118,8 @@ pub const Chunk = struct {
 pub const ObjFunction = struct {
     name: []const u8,
     arity: u8,
+    required_params: u8 = 0,
     params: []const []const u8,
+    defaults: []const Value = &.{},
     chunk: Chunk = .{},
 };

@@ -20,6 +20,7 @@ pub const CompileResult = struct {
         for (self.functions.items) |*f| {
             f.chunk.deinit(self.allocator);
             self.allocator.free(f.params);
+            if (f.defaults.len > 0) self.allocator.free(f.defaults);
         }
         self.functions.deinit(self.allocator);
         for (self.string_allocs.items) |s| self.allocator.free(s);
@@ -37,6 +38,7 @@ pub fn compile(ast: *const Ast, allocator: Allocator) Error!CompileResult {
         .scope_depth = 0,
         .loop_start = null,
         .break_jumps = .{},
+        .continue_jumps = .{},
     };
     errdefer {
         c.chunk.deinit(allocator);
@@ -45,6 +47,7 @@ pub fn compile(ast: *const Ast, allocator: Allocator) Error!CompileResult {
         for (c.string_allocs.items) |s| allocator.free(s);
         c.string_allocs.deinit(allocator);
         c.break_jumps.deinit(allocator);
+        c.continue_jumps.deinit(allocator);
     }
 
     const root = ast.nodes[0];
@@ -54,6 +57,7 @@ pub fn compile(ast: *const Ast, allocator: Allocator) Error!CompileResult {
     try c.emitOp(.halt);
 
     c.break_jumps.deinit(allocator);
+    c.continue_jumps.deinit(allocator);
     return .{ .chunk = c.chunk, .functions = c.functions, .string_allocs = c.string_allocs, .allocator = allocator };
 }
 
@@ -66,6 +70,8 @@ const Compiler = struct {
     scope_depth: u32,
     loop_start: ?usize,
     break_jumps: std.ArrayListUnmanaged(usize),
+    continue_jumps: std.ArrayListUnmanaged(usize),
+    use_continue_jumps: bool = false,
     closure_count: u32 = 0,
 
     // ==================================================================
@@ -99,7 +105,12 @@ const Compiler = struct {
             },
             .continue_stmt => {
                 if (self.loop_start) |start| {
-                    try self.emitLoop(start);
+                    if (self.use_continue_jumps) {
+                        const j = try self.emitJump(.jump);
+                        try self.continue_jumps.append(self.allocator, j);
+                    } else {
+                        try self.emitLoop(start);
+                    }
                 }
             },
             .block => {
@@ -725,7 +736,11 @@ const Compiler = struct {
 
         const prev_start = self.loop_start;
         const prev_breaks = self.break_jumps;
+        const prev_continues = self.continue_jumps;
+        const prev_use_cj = self.use_continue_jumps;
         self.break_jumps = .{};
+        self.continue_jumps = .{};
+        self.use_continue_jumps = (update_n != 0);
 
         if (init_n != 0) {
             try self.compileNode(init_n);
@@ -744,6 +759,10 @@ const Compiler = struct {
 
         try self.compileNode(node.data.rhs);
 
+        // continue lands here - patch all continue forward jumps
+        for (self.continue_jumps.items) |cj| self.patchJump(cj);
+        self.continue_jumps.deinit(self.allocator);
+
         if (update_n != 0) {
             try self.compileNode(update_n);
             try self.emitOp(.pop);
@@ -759,6 +778,8 @@ const Compiler = struct {
         for (self.break_jumps.items) |bj| self.patchJump(bj);
         self.break_jumps.deinit(self.allocator);
         self.break_jumps = prev_breaks;
+        self.continue_jumps = prev_continues;
+        self.use_continue_jumps = prev_use_cj;
         self.loop_start = prev_start;
     }
 
@@ -772,9 +793,26 @@ const Compiler = struct {
         const param_nodes = self.ast.extraSlice(node.data.lhs);
 
         const param_names = try self.allocator.alloc([]const u8, param_nodes.len);
+        var defaults = std.ArrayListUnmanaged(Value){};
+        defer defaults.deinit(self.allocator);
+        var required: u8 = 0;
+        var seen_default = false;
+
         for (param_nodes, 0..) |p, i| {
-            param_names[i] = self.ast.tokenSlice(self.ast.nodes[p].main_token);
+            const pnode = self.ast.nodes[p];
+            param_names[i] = self.ast.tokenSlice(pnode.main_token);
+            if (pnode.data.lhs != 0) {
+                seen_default = true;
+                try defaults.append(self.allocator, self.evalConstExpr(pnode.data.lhs));
+            } else {
+                if (!seen_default) required += 1;
+                try defaults.append(self.allocator, .null);
+            }
         }
+        if (!seen_default) required = @intCast(param_nodes.len);
+
+        const defaults_owned = try self.allocator.alloc(Value, defaults.items.len);
+        @memcpy(defaults_owned, defaults.items);
 
         var sub = Compiler{
             .ast = self.ast,
@@ -785,10 +823,12 @@ const Compiler = struct {
             .scope_depth = self.scope_depth + 1,
             .loop_start = null,
             .break_jumps = .{},
+            .continue_jumps = .{},
         };
         errdefer {
             sub.chunk.deinit(self.allocator);
             sub.break_jumps.deinit(self.allocator);
+            sub.continue_jumps.deinit(self.allocator);
             sub.string_allocs.deinit(self.allocator);
         }
 
@@ -796,11 +836,14 @@ const Compiler = struct {
         try sub.emitOp(.op_null);
         try sub.emitOp(.return_val);
         sub.break_jumps.deinit(self.allocator);
+        sub.continue_jumps.deinit(self.allocator);
 
         try self.functions.append(self.allocator, .{
             .name = name,
             .arity = @intCast(param_nodes.len),
+            .required_params = required,
             .params = param_names[0..param_nodes.len],
+            .defaults = defaults_owned,
             .chunk = sub.chunk,
         });
 
@@ -808,6 +851,44 @@ const Compiler = struct {
         sub.functions.deinit(self.allocator);
         for (sub.string_allocs.items) |s| try self.string_allocs.append(self.allocator, s);
         sub.string_allocs.deinit(self.allocator);
+    }
+
+    fn evalConstExpr(self: *Compiler, idx: u32) Value {
+        const n = self.ast.nodes[idx];
+        return switch (n.tag) {
+            .integer_literal => blk: {
+                const text = self.ast.tokenSlice(n.main_token);
+                break :blk .{ .int = std.fmt.parseInt(i64, text, 10) catch 0 };
+            },
+            .float_literal => blk: {
+                const text = self.ast.tokenSlice(n.main_token);
+                break :blk .{ .float = std.fmt.parseFloat(f64, text) catch 0.0 };
+            },
+            .string_literal => blk: {
+                const raw = self.ast.tokenSlice(n.main_token);
+                if (raw.len >= 2) {
+                    break :blk .{ .string = raw[1 .. raw.len - 1] };
+                }
+                break :blk .{ .string = raw };
+            },
+            .true_literal => .{ .bool = true },
+            .false_literal => .{ .bool = false },
+            .null_literal => .null,
+            .prefix_op => blk: {
+                const tok = self.ast.tokens[n.main_token];
+                if (tok.tag == .minus) {
+                    const inner = self.evalConstExpr(n.data.lhs);
+                    switch (inner) {
+                        .int => |v| break :blk Value{ .int = -v },
+                        .float => |v| break :blk Value{ .float = -v },
+                        else => {},
+                    }
+                }
+                break :blk .null;
+            },
+            .array_literal => .null,
+            else => .null,
+        };
     }
 
     fn compileThrow(self: *Compiler, node: Ast.Node) Error!void {
@@ -925,11 +1006,13 @@ const Compiler = struct {
                     .scope_depth = self.scope_depth + 1,
                     .loop_start = null,
                     .break_jumps = .{},
+                    .continue_jumps = .{},
                     .closure_count = self.closure_count,
                 };
                 errdefer {
                     sub.chunk.deinit(self.allocator);
                     sub.break_jumps.deinit(self.allocator);
+                    sub.continue_jumps.deinit(self.allocator);
                     sub.string_allocs.deinit(self.allocator);
                 }
 
@@ -1250,11 +1333,13 @@ const Compiler = struct {
             .scope_depth = self.scope_depth + 1,
             .loop_start = null,
             .break_jumps = .{},
+            .continue_jumps = .{},
             .closure_count = self.closure_count,
         };
         errdefer {
             sub.chunk.deinit(self.allocator);
             sub.break_jumps.deinit(self.allocator);
+            sub.continue_jumps.deinit(self.allocator);
             sub.string_allocs.deinit(self.allocator);
         }
 

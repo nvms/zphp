@@ -890,18 +890,26 @@ pub const VM = struct {
             };
             self.push(try native(&ctx, args[0..ac]));
         } else if (self.functions.get(name)) |func| {
-            if (arg_count != func.arity) return error.RuntimeError;
+            const ac: usize = arg_count;
+            if (ac < func.required_params or ac > func.arity) return error.RuntimeError;
             var new_vars: std.StringHashMapUnmanaged(Value) = .{};
             for (self.captures.items) |cap| {
                 if (std.mem.eql(u8, cap.closure_name, name)) {
                     try new_vars.put(self.allocator, cap.var_name, cap.value);
                 }
             }
-            const ac: usize = arg_count;
             for (0..ac) |i| {
                 try new_vars.put(self.allocator, func.params[i], self.stack[self.sp - ac + i]);
             }
             self.sp -= ac;
+            // fill missing params with defaults
+            for (ac..func.arity) |i| {
+                if (i < func.defaults.len) {
+                    try new_vars.put(self.allocator, func.params[i], func.defaults[i]);
+                } else {
+                    try new_vars.put(self.allocator, func.params[i], .null);
+                }
+            }
             self.frames[self.frame_count] = .{ .chunk = &func.chunk, .ip = 0, .vars = new_vars };
             self.frame_count += 1;
         } else return error.RuntimeError;
@@ -917,7 +925,7 @@ pub const VM = struct {
             };
             return native(&ctx, args);
         } else if (self.functions.get(name)) |func| {
-            if (args.len != func.arity) return error.RuntimeError;
+            if (args.len < func.required_params or args.len > func.arity) return error.RuntimeError;
             var new_vars: std.StringHashMapUnmanaged(Value) = .{};
             for (self.captures.items) |cap| {
                 if (std.mem.eql(u8, cap.closure_name, name)) {
@@ -926,6 +934,13 @@ pub const VM = struct {
             }
             for (0..args.len) |i| {
                 try new_vars.put(self.allocator, func.params[i], args[i]);
+            }
+            for (args.len..func.arity) |i| {
+                if (i < func.defaults.len) {
+                    try new_vars.put(self.allocator, func.params[i], func.defaults[i]);
+                } else {
+                    try new_vars.put(self.allocator, func.params[i], .null);
+                }
             }
             const base_frame = self.frame_count;
             self.frames[self.frame_count] = .{ .chunk = &func.chunk, .ip = 0, .vars = new_vars };
