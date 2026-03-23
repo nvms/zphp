@@ -1,0 +1,129 @@
+#!/bin/bash
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+ZPHP="${ZPHP:-$SCRIPT_DIR/../zig-out/bin/zphp}"
+
+passed=0
+failed=0
+errors=""
+
+check() {
+    local name="$1"
+    local expected="$2"
+    local actual="$3"
+    if [ "$expected" = "$actual" ]; then
+        passed=$((passed + 1))
+        echo "  pass  $name"
+    else
+        failed=$((failed + 1))
+        echo "  FAIL  $name"
+        errors="$errors\n--- $name ---\nexpected: $expected\ngot: $actual\n"
+    fi
+}
+
+check_contains() {
+    local name="$1"
+    local needle="$2"
+    local haystack="$3"
+    if echo "$haystack" | grep -q "$needle"; then
+        passed=$((passed + 1))
+        echo "  pass  $name"
+    else
+        failed=$((failed + 1))
+        echo "  FAIL  $name"
+        errors="$errors\n--- $name ---\nexpected to contain: $needle\ngot: $haystack\n"
+    fi
+}
+
+WORKDIR=$(mktemp -d)
+trap "rm -rf $WORKDIR" EXIT
+
+# test: passing test file
+mkdir -p "$WORKDIR/tests"
+cat > "$WORKDIR/tests/BasicTest.php" << 'EOFPHP'
+<?php
+function test_math() {
+    assert_eq(2 + 2, 4);
+}
+function test_strings() {
+    assert_eq("a" . "b", "ab");
+}
+function test_truthiness() {
+    assert_true(1);
+    assert_false(0);
+    assert_null(null);
+    assert_not_null(42);
+}
+EOFPHP
+
+output=$(cd "$WORKDIR" && "$ZPHP" test 2>&1)
+status=$?
+check "passing tests exit 0" "0" "$status"
+check_contains "shows pass" "pass" "$output"
+check_contains "shows test_math" "test_math" "$output"
+check_contains "shows test_strings" "test_strings" "$output"
+check_contains "reports all passed" "3 tests passed" "$output"
+
+# test: failing test file
+cat > "$WORKDIR/tests/FailTest.php" << 'EOFPHP'
+<?php
+function test_ok() {
+    assert_eq(1, 1);
+}
+function test_bad() {
+    assert_eq(1, 2, "one is not two");
+}
+EOFPHP
+
+output=$(cd "$WORKDIR" && "$ZPHP" test 2>&1 || true)
+check_contains "shows FAIL" "FAIL" "$output"
+check_contains "shows error message" "one is not two" "$output"
+check_contains "shows failure count" "failed" "$output"
+
+# test: exit code 1 on failure
+status=$(cd "$WORKDIR" && "$ZPHP" test 2>&1; echo $?)
+check_contains "nonzero exit on failure" "1" "$status"
+
+# test: run single file
+output=$(cd "$WORKDIR" && "$ZPHP" test tests/BasicTest.php 2>&1)
+check_contains "single file runs" "test_math" "$output"
+check_contains "single file passes" "3 tests passed" "$output"
+
+# test: assert_contains
+cat > "$WORKDIR/tests/ContainsTest.php" << 'EOFPHP'
+<?php
+function test_string_contains() {
+    assert_contains("hello world", "world");
+}
+function test_array_contains() {
+    assert_contains([10, 20, 30], 20);
+}
+EOFPHP
+
+output=$(cd "$WORKDIR" && "$ZPHP" test tests/ContainsTest.php 2>&1)
+status=$?
+check "contains tests exit 0" "0" "$status"
+check_contains "contains tests pass" "2 tests passed" "$output"
+
+# test: file without test_ functions runs as single test
+cat > "$WORKDIR/tests/ScriptTest.php" << 'EOFPHP'
+<?php
+$x = 1 + 1;
+if ($x !== 2) {
+    throw new Exception("math is broken");
+}
+EOFPHP
+
+output=$(cd "$WORKDIR" && "$ZPHP" test tests/ScriptTest.php 2>&1)
+status=$?
+check "script test exit 0" "0" "$status"
+check_contains "script test passes" "1 tests passed" "$output"
+
+echo ""
+echo "$passed passed, $failed failed"
+
+if [ $failed -gt 0 ]; then
+    echo -e "$errors"
+    exit 1
+fi
