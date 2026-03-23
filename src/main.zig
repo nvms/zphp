@@ -42,6 +42,22 @@ pub fn main() !void {
             }
         }
         try @import("serve.zig").serve(allocator, config);
+    } else if (std.mem.eql(u8, cmd, "install")) {
+        try @import("pkg.zig").install(allocator);
+    } else if (std.mem.eql(u8, cmd, "add")) {
+        if (args.len < 3) {
+            try writeStderr("usage: zphp add <package>\n");
+            std.process.exit(1);
+        }
+        try @import("pkg.zig").add(allocator, args[2]);
+    } else if (std.mem.eql(u8, cmd, "remove")) {
+        if (args.len < 3) {
+            try writeStderr("usage: zphp remove <package>\n");
+            std.process.exit(1);
+        }
+        try @import("pkg.zig").remove(allocator, args[2]);
+    } else if (std.mem.eql(u8, cmd, "packages")) {
+        try @import("pkg.zig").packages(allocator);
     } else if (std.mem.eql(u8, cmd, "version") or std.mem.eql(u8, cmd, "--version")) {
         try writeStdout("zphp 0.1.0\n");
     } else {
