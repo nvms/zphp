@@ -252,7 +252,7 @@ pub const VM = struct {
                     const a = self.pop();
                     const bi = Value.toInt(b);
                     if (bi == 0) {
-                        if (try self.throwBuiltinException("DivisionByZeroError", "Division by zero")) continue;
+                        if (try self.throwBuiltinException("DivisionByZeroError", "Modulo by zero")) continue;
                         return error.RuntimeError;
                     }
                     self.push(Value.modulo(a, b));

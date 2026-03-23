@@ -302,7 +302,7 @@ phase 1 complete: full pipeline from source to execution. zphp can run real PHP 
 - Pratt parser for expressions: single infixPrec() function maps token tags to precedence levels 1-19. right-associative ops (assignment, ??, **) use prec-1 for right side
 - short-circuit ops (&&, ||, ??, and, or) get dedicated AST tags (logical_and, logical_or, null_coalesce) for distinct codegen. regular binary ops share a single binary_op tag with the operator stored in main_token
 - `elseif` is parsed as nested if_else in the else branch. `else if` (two words) naturally produces the same structure
-- function params: just variable nodes for now (no type hints, no defaults, no variadic). return type hints are skipped
+- function params support type hints (skipped, not enforced), default values (stored in lhs), and variadic (`...`, stored in rhs). return type hints are parsed via `skipTypeHint()` which handles simple, nullable, union, intersection, and DNF types
 - `<?= expr ?>` is transformed into echo_stmt during parsing
 - open_tag and close_tag tokens are consumed/skipped by the parser, not represented in the AST
 - error recovery: on parse error, skip to next `;`, `}`, or statement keyword and continue
@@ -310,7 +310,7 @@ phase 1 complete: full pipeline from source to execution. zphp can run real PHP 
 
 ### compiler design decisions
 - single-pass AST walk: compileNode() dispatches on node tag, emits bytecodes
-- ~54 opcodes: constants, variable get/set, arithmetic, comparison, logical, bitwise, jumps, call/return, call_indirect, echo, halt, dup, cast_int/float/string/bool/array, define_const, closure_bind
+- ~76 opcodes: constants, variable get/set, arithmetic, comparison, logical, bitwise, jumps, call/return, call_indirect, call_spread, call_indirect_spread, echo, halt, dup, cast_int/float/string/bool/array, define_const, closure_bind, get_global, get_static, set_static, array_spread, throw, push_handler, pop_handler, instance_check, class_decl, new_obj, get_prop, set_prop, method_call, static_call
 - variables use `get_var`/`set_var` with string name constants (hash map lookup at runtime, not stack slots). simplifies scoping at the cost of performance
 - jump patching: emit placeholder u16, record offset, patch when target is known
 - control flow: `jump_if_false`/`jump_if_true` peek (don't pop) the condition. explicit `pop` on each path. this supports short-circuit `&&`/`||` cleanly
@@ -374,7 +374,7 @@ phase 1 complete: full pipeline from source to execution. zphp can run real PHP 
 - `tests/run` script runs each file through both `php` and `zphp run`, diffs output. any divergence fails
 - CI runs the comparison against PHP 8.3 via `shivammathur/setup-php`
 - rule: every new feature gets a test file added. the spec is PHP's behavior
-- currently 30 test files covering all supported features
+- currently 54 test files covering all supported features
 - double-quoted string escape sequences (\n, \r, \t, \\, \$, \", etc.) are processed at compile time. single-quoted strings only escape \\ and \'
 - string interpolation in double-quoted strings: `$var`, `{$var}`, `$arr[idx]`, `{$arr['key']}` - all handled at compile time by splitting into segments and emitting concat ops
 
@@ -429,7 +429,9 @@ phase 1 complete: full pipeline from source to execution. zphp can run real PHP 
 - `instance_check` opcode: `isInstanceOf()` walks the class parent chain, so `catch (Exception $e)` catches RuntimeException etc
 - finally blocks compile after both normal and catch paths - they execute on both code paths (no special opcode needed since they're reached by normal flow)
 - built-in Exception class registered at VM init with native method implementations for __construct, getMessage, getCode. native methods get `$this` via a temporary frame pushed around the native call
-- built-in exception hierarchy: Exception, RuntimeException, InvalidArgumentException, LogicException, BadMethodCallException, OverflowException, TypeError
+- built-in exception hierarchy: Exception, RuntimeException, InvalidArgumentException, LogicException, BadMethodCallException, OverflowException, TypeError, RangeException, UnexpectedValueException, LengthException, DomainException, OutOfRangeException, OutOfBoundsException, UnderflowException, ArithmeticError, DivisionByZeroError
+- `throwBuiltinException(class_name, message)` helper on VM creates and throws exception objects from opcode handlers. used by divide/modulo by zero, reusable for TypeError etc
+- division and modulo by zero throw DivisionByZeroError (PHP 8.0+ behavior)
 - when throw fires inside a function/method, frame unwinding cleans up call frames back to the handler's level, correctly crossing function boundaries
 
 ### scoping and variable features
@@ -445,6 +447,36 @@ phase 1 complete: full pipeline from source to execution. zphp can run real PHP 
 
 ### float display
 - PHP uses 14 significant digits for float formatting. `Value.format` computes digits before decimal point, derives precision as `14 - digits_before`, strips trailing zeros. uses a comptime dispatch table for precision (zig's `bufPrint` format must be comptime-known)
+
+### type hints
+- `skipTypeHint()` in the parser handles all PHP type syntax: simple (`int`), nullable (`?string`), union (`int|string`), intersection (`Foo&Bar`), DNF (`(Foo&Bar)|null`)
+- `isTypeName()` recognizes identifiers and keyword types (`array`, `callable`, `self`, `static`, `null`, `true`, `false`)
+- type hints are parsed and skipped everywhere: function params, return types, class method params/returns, closure params/returns, arrow function returns, class properties
+- types are NOT enforced at runtime yet - the information is consumed and discarded. runtime type checking (TypeError on mismatch) is a future feature
+- `declare(strict_types=1)` is parsed and skipped via `skipDeclare()`
+
+### default parameter values
+- `parseParam()` checks for `= expr` after the variable token, stores the default expression AST index in the variable node's `lhs` field
+- compiler evaluates literal defaults at compile time via `evalConstExpr()` (supports int, float, string, bool, null, negative literals)
+- defaults stored as `[]const Value` on `ObjFunction` alongside a `required_params` count
+- VM allows `arg_count >= required_params` instead of exact arity match, fills missing args from defaults
+
+### variadic params and spread
+- `parseParam()` checks for `...` (ellipsis token) before the variable, sets `rhs = 1` on the variable node to mark variadic
+- ObjFunction has `is_variadic: bool`. when true, the last param collects extra args into an array
+- VM creates a PhpArray for the variadic param and populates it with remaining stack args
+- array spread in literals: `[...$arr]` parsed as `array_spread` AST node, compiler emits array expression + `array_spread` opcode which iterates source array and appends each element to the target
+- spread in function calls: `f(...$args)` parsed as `splat_expr` AST node. compiler builds a temporary args array (reusing array_new/array_push/array_spread opcodes), then emits `call_spread` (named) or `call_indirect_spread` (dynamic) which pops the args array, pushes each element onto the stack, and calls with the runtime-determined arg count
+
+### global and static variables
+- `global $x;` compiles to `get_global` opcode which copies the variable's value from frame 0 (global scope) into the current frame. does not support write-back to global scope yet (known limitation)
+- `static $x = 0;` compiles to `get_static` opcode (loads persisted value or null) + conditional init (jump_if_not_null skips default) + set_var. statics are keyed by `funcname::varname` in a persistent hashmap on the VM
+- static vars are registered for writeback in `static_vars` list. on function return (`return_val`/`return_void`), `writebackStatics()` saves current frame values back to the statics table
+
+### for loop improvements
+- multi-expression init/update: `for ($i = 0, $j = 10; ...; $i++, $j--)` - `parseForExprList()` returns `expr_list` AST node when comma-separated, single expression node otherwise. compiler handles `expr_list` by evaluating each expression and popping intermediate results
+- `continue` in for loops: uses forward-jump patching (`continue_jumps` list) instead of backward jump. continue jumps are patched to land at the update expression, not the condition. `use_continue_jumps` flag distinguishes for loops (need forward jumps) from while/do-while (use backward jumps to condition)
+- `break N` / `continue N`: parser reads optional integer literal after break/continue, stores level in `lhs`. compiler tracks `loop_depth` counter, emits jumps with target depth. `patchBreaks()`/`patchContinues()` only patch jumps matching current depth, propagating outer-targeting jumps to the parent loop's lists
 
 ### dangling pointer gotcha in temp variable names
 switch/match compilation generates temp variable names like `__match_0` using `std.fmt.allocPrint` (heap allocated, tracked in string_allocs). originally used stack-allocated `bufPrint` which caused use-after-free when the constant pool held a pointer to the expired stack buffer. the bug was latent - only manifested when other changes shifted the stack layout enough to overwrite the buffer. rule: any string stored in the constant pool must be either a source slice or a heap allocation tracked by string_allocs
