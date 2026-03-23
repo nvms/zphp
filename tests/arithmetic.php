@@ -1,0 +1,21 @@
+<?php
+echo 2 + 3;
+echo "\n";
+echo 10 - 7;
+echo "\n";
+echo 4 * 5;
+echo "\n";
+echo 10 / 2;
+echo "\n";
+echo 10 / 5;
+echo "\n";
+echo 10 % 3;
+echo "\n";
+echo 2 ** 8;
+echo "\n";
+echo -42;
+echo "\n";
+echo 1 + 2 * 3;
+echo "\n";
+echo (1 + 2) * 3;
+echo "\n";

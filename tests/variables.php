@@ -1,0 +1,21 @@
+<?php
+$x = 42;
+echo $x;
+echo "\n";
+$x = 100;
+echo $x;
+echo "\n";
+$a = 3;
+$b = 4;
+echo $a + $b;
+echo "\n";
+$x = 10;
+$x += 5;
+echo $x;
+echo "\n";
+$x -= 3;
+echo $x;
+echo "\n";
+$x *= 2;
+echo $x;
+echo "\n";

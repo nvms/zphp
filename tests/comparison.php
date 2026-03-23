@@ -1,0 +1,23 @@
+<?php
+echo 1 == 1 ? 'T' : 'F';
+echo "\n";
+echo 1 == 2 ? 'T' : 'F';
+echo "\n";
+echo 1 === 1 ? 'T' : 'F';
+echo "\n";
+echo 1 != 2 ? 'T' : 'F';
+echo "\n";
+echo 1 < 2 ? 'T' : 'F';
+echo "\n";
+echo 2 > 1 ? 'T' : 'F';
+echo "\n";
+echo 1 <= 1 ? 'T' : 'F';
+echo "\n";
+echo 1 >= 2 ? 'T' : 'F';
+echo "\n";
+echo 1 <=> 2;
+echo "\n";
+echo 2 <=> 2;
+echo "\n";
+echo 3 <=> 2;
+echo "\n";

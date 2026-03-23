@@ -12,6 +12,7 @@ const Error = Allocator.Error || error{CompileError};
 pub const CompileResult = struct {
     chunk: Chunk,
     functions: std.ArrayListUnmanaged(ObjFunction),
+    string_allocs: std.ArrayListUnmanaged([]const u8),
     allocator: Allocator,
 
     pub fn deinit(self: *CompileResult) void {
@@ -21,6 +22,8 @@ pub const CompileResult = struct {
             self.allocator.free(f.params);
         }
         self.functions.deinit(self.allocator);
+        for (self.string_allocs.items) |s| self.allocator.free(s);
+        self.string_allocs.deinit(self.allocator);
     }
 };
 
@@ -29,6 +32,7 @@ pub fn compile(ast: *const Ast, allocator: Allocator) Error!CompileResult {
         .ast = ast,
         .chunk = .{},
         .functions = .{},
+        .string_allocs = .{},
         .allocator = allocator,
         .scope_depth = 0,
         .loop_start = null,
@@ -38,6 +42,8 @@ pub fn compile(ast: *const Ast, allocator: Allocator) Error!CompileResult {
         c.chunk.deinit(allocator);
         for (c.functions.items) |*f| f.chunk.deinit(allocator);
         c.functions.deinit(allocator);
+        for (c.string_allocs.items) |s| allocator.free(s);
+        c.string_allocs.deinit(allocator);
         c.break_jumps.deinit(allocator);
     }
 
@@ -48,13 +54,14 @@ pub fn compile(ast: *const Ast, allocator: Allocator) Error!CompileResult {
     try c.emitOp(.halt);
 
     c.break_jumps.deinit(allocator);
-    return .{ .chunk = c.chunk, .functions = c.functions, .allocator = allocator };
+    return .{ .chunk = c.chunk, .functions = c.functions, .string_allocs = c.string_allocs, .allocator = allocator };
 }
 
 const Compiler = struct {
     ast: *const Ast,
     chunk: Chunk,
     functions: std.ArrayListUnmanaged(ObjFunction),
+    string_allocs: std.ArrayListUnmanaged([]const u8),
     allocator: Allocator,
     scope_depth: u32,
     loop_start: ?usize,
@@ -158,9 +165,53 @@ const Compiler = struct {
 
     fn compileString(self: *Compiler, node: Ast.Node) Error!void {
         const lexeme = self.ast.tokenSlice(node.main_token);
-        const str = if (lexeme.len >= 2) lexeme[1 .. lexeme.len - 1] else lexeme;
-        const idx = try self.addConstant(.{ .string = str });
+        if (lexeme.len < 2) {
+            const idx = try self.addConstant(.{ .string = lexeme });
+            try self.emitConstant(idx);
+            return;
+        }
+        const quote = lexeme[0];
+        const inner = lexeme[1 .. lexeme.len - 1];
+
+        if (quote == '\'' or std.mem.indexOf(u8, inner, "\\") == null) {
+            const idx = try self.addConstant(.{ .string = inner });
+            try self.emitConstant(idx);
+            return;
+        }
+
+        const processed = try processEscapes(self.allocator, inner);
+        try self.string_allocs.append(self.allocator, processed);
+        const idx = try self.addConstant(.{ .string = processed });
         try self.emitConstant(idx);
+    }
+
+    fn processEscapes(allocator: Allocator, s: []const u8) ![]const u8 {
+        var buf = std.ArrayListUnmanaged(u8){};
+        var i: usize = 0;
+        while (i < s.len) {
+            if (s[i] == '\\' and i + 1 < s.len) {
+                switch (s[i + 1]) {
+                    'n' => try buf.append(allocator, '\n'),
+                    'r' => try buf.append(allocator, '\r'),
+                    't' => try buf.append(allocator, '\t'),
+                    'v' => try buf.append(allocator, 0x0b),
+                    'e' => try buf.append(allocator, 0x1b),
+                    'f' => try buf.append(allocator, 0x0c),
+                    '\\' => try buf.append(allocator, '\\'),
+                    '$' => try buf.append(allocator, '$'),
+                    '"' => try buf.append(allocator, '"'),
+                    else => {
+                        try buf.append(allocator, '\\');
+                        try buf.append(allocator, s[i + 1]);
+                    },
+                }
+                i += 2;
+            } else {
+                try buf.append(allocator, s[i]);
+                i += 1;
+            }
+        }
+        return buf.toOwnedSlice(allocator);
     }
 
     // ==================================================================
@@ -480,6 +531,7 @@ const Compiler = struct {
             .ast = self.ast,
             .chunk = .{},
             .functions = .{},
+            .string_allocs = .{},
             .allocator = self.allocator,
             .scope_depth = self.scope_depth + 1,
             .loop_start = null,
@@ -488,6 +540,7 @@ const Compiler = struct {
         errdefer {
             sub.chunk.deinit(self.allocator);
             sub.break_jumps.deinit(self.allocator);
+            sub.string_allocs.deinit(self.allocator);
         }
 
         try sub.compileNode(node.data.rhs);
@@ -504,6 +557,8 @@ const Compiler = struct {
 
         for (sub.functions.items) |f| try self.functions.append(self.allocator, f);
         sub.functions.deinit(self.allocator);
+        for (sub.string_allocs.items) |s| try self.string_allocs.append(self.allocator, s);
+        sub.string_allocs.deinit(self.allocator);
     }
 
     // ==================================================================
