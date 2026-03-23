@@ -11,7 +11,7 @@ require_once __DIR__ . '/include/helper.php';
 require_once __DIR__ . '/include/helper.php';
 echo "loaded once\n";
 
-// include returns true on success
-$result = include __DIR__ . '/include/helper.php';
+// include returns true on success (use a file without functions to avoid redeclaration)
+$result = include __DIR__ . '/include/simple.php';
 echo $result ? "true" : "false";
 echo "\n";

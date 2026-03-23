@@ -713,18 +713,27 @@ const Parser = struct {
         defer members.deinit(self.allocator);
 
         while (self.peek() != .r_brace and self.peek() != .eof) {
-            // skip visibility modifiers
+            var is_static = false;
             while (self.peek() == .kw_public or self.peek() == .kw_protected or
                 self.peek() == .kw_private or self.peek() == .kw_static or
                 self.peek() == .kw_abstract or self.peek() == .kw_readonly)
             {
+                if (self.peek() == .kw_static) is_static = true;
                 _ = self.advance();
             }
 
             if (self.peek() == .kw_function) {
-                try members.append(self.allocator, try self.parseClassMethod());
+                const method = try self.parseClassMethod();
+                if (is_static) {
+                    self.nodes.items[method].tag = .static_class_method;
+                }
+                try members.append(self.allocator, method);
             } else if (self.peek() == .variable) {
-                try members.append(self.allocator, try self.parseClassProperty());
+                const prop = try self.parseClassProperty();
+                if (is_static) {
+                    self.nodes.items[prop].tag = .static_class_property;
+                }
+                try members.append(self.allocator, prop);
             } else if (self.peek() == .kw_const) {
                 try members.append(self.allocator, try self.parseConstDecl());
             } else if (self.isTypeName() or self.peek() == .question or self.peek() == .l_paren) {
@@ -1244,6 +1253,12 @@ const Parser = struct {
 
     fn parseStaticAccess(self: *Parser, class_node: u32) Error!u32 {
         _ = self.advance(); // ::
+
+        if (self.peek() == .variable) {
+            const var_tok = self.advance();
+            return self.addNode(.{ .tag = .static_prop_access, .main_token = var_tok, .data = .{ .lhs = class_node } });
+        }
+
         const name_tok = try self.expect(.identifier);
 
         if (self.peek() == .l_paren) {
@@ -1265,7 +1280,7 @@ const Parser = struct {
             return self.addNode(.{ .tag = .static_call, .main_token = name_tok, .data = .{ .lhs = class_node, .rhs = extra } });
         }
 
-        // static property access could go here, but for now just treat as property
+        // class constant access - treat as identifier for now
         const prop = try self.addNode(.{ .tag = .identifier, .main_token = name_tok, .data = .{} });
         return self.addNode(.{ .tag = .property_access, .main_token = name_tok, .data = .{ .lhs = class_node, .rhs = prop } });
     }

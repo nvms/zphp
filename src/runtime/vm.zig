@@ -54,11 +54,13 @@ pub const ClassDef = struct {
     name: []const u8,
     methods: std.StringHashMapUnmanaged(MethodInfo) = .{},
     properties: std.ArrayListUnmanaged(PropertyDef) = .{},
+    static_props: std.StringHashMapUnmanaged(Value) = .{},
     parent: ?[]const u8 = null,
 
     const MethodInfo = struct {
         name: []const u8,
         arity: u8,
+        is_static: bool = false,
     };
 
     const PropertyDef = struct {
@@ -69,6 +71,7 @@ pub const ClassDef = struct {
     fn deinit(self: *ClassDef, allocator: Allocator) void {
         self.methods.deinit(allocator);
         self.properties.deinit(allocator);
+        self.static_props.deinit(allocator);
     }
 };
 
@@ -91,6 +94,8 @@ pub const VM = struct {
     file_loader: ?*const FileLoader = null,
     loaded_files: std.StringHashMapUnmanaged(void) = .{},
     compile_results: std.ArrayListUnmanaged(*CompileResult) = .{},
+    error_msg: ?[]const u8 = null,
+    ob_stack: std.ArrayListUnmanaged(usize) = .{},
     exception_handlers: [32]ExceptionHandler = undefined,
     handler_count: usize = 0,
     allocator: Allocator,
@@ -200,15 +205,25 @@ pub const VM = struct {
             self.allocator.destroy(result);
         }
         self.compile_results.deinit(self.allocator);
+        self.ob_stack.deinit(self.allocator);
     }
 
     pub fn interpret(self: *VM, result: *const CompileResult) RuntimeError!void {
         for (result.functions.items) |*func| {
-            try self.functions.put(self.allocator, func.name, func);
+            try self.registerFunction(func);
         }
         self.frames[0] = .{ .chunk = &result.chunk, .ip = 0, .vars = .{} };
         self.frame_count = 1;
         try self.run();
+    }
+
+    fn registerFunction(self: *VM, func: *const ObjFunction) RuntimeError!void {
+        if (self.functions.contains(func.name)) {
+            const msg = std.fmt.allocPrint(self.allocator, "PHP Fatal error:  Cannot redeclare {s}()\n", .{func.name}) catch return error.RuntimeError;
+            self.error_msg = msg;
+            return error.RuntimeError;
+        }
+        try self.functions.put(self.allocator, func.name, func);
     }
 
     fn runUntilFrame(self: *VM, base_frame: usize) RuntimeError!void {
@@ -653,7 +668,7 @@ pub const VM = struct {
                                     try self.compile_results.append(self.allocator, result);
 
                                     for (result.functions.items) |*func| {
-                                        try self.functions.put(self.allocator, func.name, func);
+                                        try self.registerFunction(func);
                                     }
 
                                     // execute via runUntilFrame so halt pops back here
@@ -722,16 +737,16 @@ pub const VM = struct {
                         const mname_idx = self.readU16();
                         const method_name = self.currentChunk().constants.items[mname_idx].string;
                         const arity = self.readByte();
+                        const is_static = self.readByte() == 1;
                         try def.methods.put(self.allocator, method_name, .{
                             .name = method_name,
                             .arity = arity,
+                            .is_static = is_static,
                         });
                     }
 
                     const prop_count = self.readByte();
 
-                    // count how many have defaults (to know how many stack values to collect)
-                    // read all property metadata first
                     var prop_names: [32][]const u8 = undefined;
                     var prop_has_default: [32]u8 = undefined;
                     for (0..prop_count) |pi| {
@@ -740,21 +755,39 @@ pub const VM = struct {
                         prop_has_default[pi] = self.readByte();
                     }
 
-                    // defaults were pushed in forward order, pop in reverse
+                    const static_prop_count = self.readByte();
+                    var sprop_names: [32][]const u8 = undefined;
+                    var sprop_has_default: [32]u8 = undefined;
+                    for (0..static_prop_count) |pi| {
+                        const pname_idx = self.readU16();
+                        sprop_names[pi] = self.currentChunk().constants.items[pname_idx].string;
+                        sprop_has_default[pi] = self.readByte();
+                    }
+
+                    // pop static property defaults (on top of stack, pushed last)
+                    var sdefaults: [32]Value = undefined;
+                    var sdefault_count: usize = 0;
+                    for (0..static_prop_count) |pi| {
+                        if (sprop_has_default[pi] == 1) sdefault_count += 1;
+                    }
+                    var si: usize = sdefault_count;
+                    while (si > 0) {
+                        si -= 1;
+                        sdefaults[si] = self.pop();
+                    }
+
+                    // pop instance property defaults
                     var defaults: [32]Value = undefined;
                     var default_count: usize = 0;
                     for (0..prop_count) |pi| {
                         if (prop_has_default[pi] == 1) default_count += 1;
                     }
-                    // pop all defaults (they were pushed in forward order, so last is on top)
-                    // reverse-pop to match forward order
                     var di: usize = default_count;
                     while (di > 0) {
                         di -= 1;
                         defaults[di] = self.pop();
                     }
 
-                    // now assign defaults to properties
                     var dj: usize = 0;
                     for (0..prop_count) |pi| {
                         const default_val = if (prop_has_default[pi] == 1) blk: {
@@ -766,6 +799,16 @@ pub const VM = struct {
                             .name = prop_names[pi],
                             .default = default_val,
                         });
+                    }
+
+                    var sj: usize = 0;
+                    for (0..static_prop_count) |pi| {
+                        const default_val = if (sprop_has_default[pi] == 1) blk: {
+                            const v = sdefaults[sj];
+                            sj += 1;
+                            break :blk v;
+                        } else Value{ .null = {} };
+                        try def.static_props.put(self.allocator, sprop_names[pi], default_val);
                     }
 
                     const parent_idx = self.readU16();
@@ -963,12 +1006,63 @@ pub const VM = struct {
                         try self.callNamedFunction(full_name, arg_count);
                     }
                 },
+
+                .get_static_prop => {
+                    const class_idx = self.readU16();
+                    const prop_idx = self.readU16();
+                    var class_name = self.currentChunk().constants.items[class_idx].string;
+                    const prop_name = self.currentChunk().constants.items[prop_idx].string;
+
+                    class_name = self.resolveStaticClassName(class_name);
+
+                    if (self.getStaticProp(class_name, prop_name)) |val| {
+                        self.push(val);
+                    } else {
+                        self.push(.null);
+                    }
+                },
+
+                .set_static_prop => {
+                    const class_idx = self.readU16();
+                    const prop_idx = self.readU16();
+                    var class_name = self.currentChunk().constants.items[class_idx].string;
+                    const prop_name = self.currentChunk().constants.items[prop_idx].string;
+
+                    class_name = self.resolveStaticClassName(class_name);
+
+                    const val = self.peek();
+                    if (self.classes.getPtr(class_name)) |cls| {
+                        try cls.static_props.put(self.allocator, prop_name, val);
+                    }
+                },
             }
         }
     }
 
-    // creates an exception object and throws it via the handler stack
-    // returns true if a handler caught it (caller should `continue`), false if uncaught
+    fn resolveStaticClassName(self: *VM, name: []const u8) []const u8 {
+        if (std.mem.eql(u8, name, "self") or std.mem.eql(u8, name, "static")) {
+            if (self.currentDefiningClass()) |dc| return dc;
+        } else if (std.mem.eql(u8, name, "parent")) {
+            if (self.currentDefiningClass()) |dc| {
+                if (self.classes.get(dc)) |cls| {
+                    if (cls.parent) |p| return p;
+                }
+            }
+        }
+        return name;
+    }
+
+    fn getStaticProp(self: *VM, class_name: []const u8, prop_name: []const u8) ?Value {
+        var current: ?[]const u8 = class_name;
+        while (current) |cn| {
+            if (self.classes.getPtr(cn)) |cls| {
+                if (cls.static_props.get(prop_name)) |val| return val;
+                current = cls.parent;
+            } else break;
+        }
+        return null;
+    }
+
     fn throwBuiltinException(self: *VM, class_name: []const u8, message: []const u8) !bool {
         const obj = try self.allocator.create(PhpObject);
         obj.* = .{ .class_name = class_name };

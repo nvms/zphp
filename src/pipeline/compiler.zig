@@ -196,10 +196,11 @@ const Compiler = struct {
             .try_catch => try self.compileTryCatch(node),
             .catch_clause => {},
             .class_decl => try self.compileClassDecl(node),
-            .class_method, .class_property => {},
+            .class_method, .class_property, .static_class_method, .static_class_property => {},
             .new_expr => try self.compileNewExpr(node),
             .method_call => try self.compileMethodCall(node),
             .static_call => try self.compileStaticCall(node),
+            .static_prop_access => try self.compileStaticPropAccess(node),
             .expr_list => {
                 const exprs = self.ast.extraSlice(node.data.lhs);
                 for (exprs, 0..) |expr, i| {
@@ -561,6 +562,28 @@ const Compiler = struct {
             return;
         }
 
+        if (target.tag == .static_prop_access) {
+            const class_node = self.ast.nodes[target.data.lhs];
+            const class_name = self.ast.tokenSlice(class_node.main_token);
+            var prop_name = self.ast.tokenSlice(target.main_token);
+            if (prop_name.len > 0 and prop_name[0] == '$') prop_name = prop_name[1..];
+            const class_idx = try self.addConstant(.{ .string = class_name });
+            const prop_idx = try self.addConstant(.{ .string = prop_name });
+            if (op_tag != .equal) {
+                try self.emitOp(.get_static_prop);
+                try self.emitU16(class_idx);
+                try self.emitU16(prop_idx);
+            }
+            try self.compileNode(node.data.rhs);
+            if (op_tag != .equal) {
+                try self.emitCompoundOp(op_tag);
+            }
+            try self.emitOp(.set_static_prop);
+            try self.emitU16(class_idx);
+            try self.emitU16(prop_idx);
+            return;
+        }
+
         if (op_tag != .equal) {
             try self.compileGetVar(target);
         }
@@ -602,9 +625,21 @@ const Compiler = struct {
     // ==================================================================
 
     fn compileBinaryOp(self: *Compiler, node: Ast.Node) Error!void {
+        const op_tag = self.ast.tokens[node.main_token].tag;
+
+        if (op_tag == .kw_instanceof) {
+            try self.compileNode(node.data.lhs);
+            const rhs = self.ast.nodes[node.data.rhs];
+            const class_name = self.ast.tokenSlice(rhs.main_token);
+            const idx = try self.addConstant(.{ .string = class_name });
+            try self.emitOp(.constant);
+            try self.emitU16(idx);
+            try self.emitOp(.instance_check);
+            return;
+        }
+
         try self.compileNode(node.data.lhs);
         try self.compileNode(node.data.rhs);
-        const op_tag = self.ast.tokens[node.main_token].tag;
         try self.emitOp(switch (op_tag) {
             .plus => .add,
             .minus => .subtract,
@@ -629,7 +664,6 @@ const Compiler = struct {
             .gt_gt => .shift_right,
             .lt_gt => .not_equal,
             .kw_xor => .bit_xor,
-            .kw_instanceof => .identical,
             else => .add,
         });
     }
@@ -1093,71 +1127,21 @@ const Compiler = struct {
         const class_name = self.ast.tokenSlice(node.main_token);
         const members = self.ast.extraSlice(node.data.lhs);
 
-        // compile methods as functions named "ClassName::methodName"
         var method_count: u8 = 0;
         for (members) |member_idx| {
             const member = self.ast.nodes[member_idx];
-            if (member.tag == .class_method) {
-                const method_name = self.ast.tokenSlice(member.main_token);
-                const full_name = try std.fmt.allocPrint(self.allocator, "{s}::{s}", .{ class_name, method_name });
-                try self.string_allocs.append(self.allocator, full_name);
-
-                const param_nodes = self.ast.extraSlice(member.data.lhs);
-                const param_names = try self.allocator.alloc([]const u8, param_nodes.len);
-                for (param_nodes, 0..) |p, i| {
-                    param_names[i] = self.ast.tokenSlice(self.ast.nodes[p].main_token);
-                }
-
-                var sub = Compiler{
-                    .ast = self.ast,
-                    .chunk = .{},
-                    .functions = .{},
-                    .string_allocs = .{},
-                    .allocator = self.allocator,
-                    .scope_depth = self.scope_depth + 1,
-                    .loop_start = null,
-                    .break_jumps = .{},
-                    .continue_jumps = .{},
-                    .closure_count = self.closure_count,
-                };
-                errdefer {
-                    sub.chunk.deinit(self.allocator);
-                    sub.break_jumps.deinit(self.allocator);
-                    sub.continue_jumps.deinit(self.allocator);
-                    sub.string_allocs.deinit(self.allocator);
-                }
-
-                try sub.compileNode(member.data.rhs);
-                try sub.emitOp(.op_null);
-                try sub.emitOp(.return_val);
-                sub.break_jumps.deinit(self.allocator);
-
-                self.closure_count = sub.closure_count;
-
-                try self.functions.append(self.allocator, .{
-                    .name = full_name,
-                    .arity = @intCast(param_nodes.len),
-                    .params = param_names[0..param_nodes.len],
-                    .chunk = sub.chunk,
-                });
-
-                for (sub.functions.items) |f| try self.functions.append(self.allocator, f);
-                sub.functions.deinit(self.allocator);
-                for (sub.string_allocs.items) |s| try self.string_allocs.append(self.allocator, s);
-                sub.string_allocs.deinit(self.allocator);
-
+            if (member.tag == .class_method or member.tag == .static_class_method) {
+                try self.compileClassMethodBody(class_name, member);
                 method_count += 1;
             }
         }
 
-        // compile property default values first (they push onto the stack)
-        // emit them in reverse so the VM can pop them in forward order
+        // compile instance property defaults (push onto stack)
         var prop_count: u8 = 0;
         for (members) |member_idx| {
             const member = self.ast.nodes[member_idx];
             if (member.tag == .class_property) prop_count += 1;
         }
-        // push defaults in forward order (VM pops in forward order)
         for (members) |member_idx| {
             const member = self.ast.nodes[member_idx];
             if (member.tag == .class_property) {
@@ -1167,7 +1151,21 @@ const Compiler = struct {
             }
         }
 
-        // emit class_decl opcode (defaults are already on stack)
+        // compile static property defaults (push onto stack after instance props)
+        var static_prop_count: u8 = 0;
+        for (members) |member_idx| {
+            const member = self.ast.nodes[member_idx];
+            if (member.tag == .static_class_property) static_prop_count += 1;
+        }
+        for (members) |member_idx| {
+            const member = self.ast.nodes[member_idx];
+            if (member.tag == .static_class_property) {
+                if (member.data.lhs != 0) {
+                    try self.compileNode(member.data.lhs);
+                }
+            }
+        }
+
         const name_idx = try self.addConstant(.{ .string = class_name });
         try self.emitOp(.class_decl);
         try self.emitU16(name_idx);
@@ -1175,12 +1173,13 @@ const Compiler = struct {
 
         for (members) |member_idx| {
             const member = self.ast.nodes[member_idx];
-            if (member.tag == .class_method) {
+            if (member.tag == .class_method or member.tag == .static_class_method) {
                 const method_name_str = self.ast.tokenSlice(member.main_token);
                 const mname_idx = try self.addConstant(.{ .string = method_name_str });
                 try self.emitU16(mname_idx);
                 const param_nodes = self.ast.extraSlice(member.data.lhs);
                 try self.emitByte(@intCast(param_nodes.len));
+                try self.emitByte(if (member.tag == .static_class_method) @as(u8, 1) else @as(u8, 0));
             }
         }
 
@@ -1196,6 +1195,18 @@ const Compiler = struct {
             }
         }
 
+        try self.emitByte(static_prop_count);
+        for (members) |member_idx| {
+            const member = self.ast.nodes[member_idx];
+            if (member.tag == .static_class_property) {
+                var prop_name = self.ast.tokenSlice(member.main_token);
+                if (prop_name.len > 0 and prop_name[0] == '$') prop_name = prop_name[1..];
+                const pname_idx = try self.addConstant(.{ .string = prop_name });
+                try self.emitU16(pname_idx);
+                try self.emitByte(if (member.data.lhs != 0) @as(u8, 1) else @as(u8, 0));
+            }
+        }
+
         if (node.data.rhs != 0) {
             const parent_name = self.ast.tokenSlice(self.ast.nodes[node.data.rhs].main_token);
             const parent_idx = try self.addConstant(.{ .string = parent_name });
@@ -1203,6 +1214,56 @@ const Compiler = struct {
         } else {
             try self.emitU16(0xffff);
         }
+    }
+
+    fn compileClassMethodBody(self: *Compiler, class_name: []const u8, member: Ast.Node) Error!void {
+        const method_name = self.ast.tokenSlice(member.main_token);
+        const full_name = try std.fmt.allocPrint(self.allocator, "{s}::{s}", .{ class_name, method_name });
+        try self.string_allocs.append(self.allocator, full_name);
+
+        const param_nodes = self.ast.extraSlice(member.data.lhs);
+        const param_names = try self.allocator.alloc([]const u8, param_nodes.len);
+        for (param_nodes, 0..) |p, i| {
+            param_names[i] = self.ast.tokenSlice(self.ast.nodes[p].main_token);
+        }
+
+        var sub = Compiler{
+            .ast = self.ast,
+            .chunk = .{},
+            .functions = .{},
+            .string_allocs = .{},
+            .allocator = self.allocator,
+            .scope_depth = self.scope_depth + 1,
+            .loop_start = null,
+            .break_jumps = .{},
+            .continue_jumps = .{},
+            .closure_count = self.closure_count,
+        };
+        errdefer {
+            sub.chunk.deinit(self.allocator);
+            sub.break_jumps.deinit(self.allocator);
+            sub.continue_jumps.deinit(self.allocator);
+            sub.string_allocs.deinit(self.allocator);
+        }
+
+        try sub.compileNode(member.data.rhs);
+        try sub.emitOp(.op_null);
+        try sub.emitOp(.return_val);
+        sub.break_jumps.deinit(self.allocator);
+
+        self.closure_count = sub.closure_count;
+
+        try self.functions.append(self.allocator, .{
+            .name = full_name,
+            .arity = @intCast(param_nodes.len),
+            .params = param_names[0..param_nodes.len],
+            .chunk = sub.chunk,
+        });
+
+        for (sub.functions.items) |f| try self.functions.append(self.allocator, f);
+        sub.functions.deinit(self.allocator);
+        for (sub.string_allocs.items) |s| try self.string_allocs.append(self.allocator, s);
+        sub.string_allocs.deinit(self.allocator);
     }
 
     fn compileNewExpr(self: *Compiler, node: Ast.Node) Error!void {
@@ -1254,6 +1315,18 @@ const Compiler = struct {
         try self.emitU16(class_idx);
         try self.emitU16(method_idx);
         try self.emitByte(@intCast(args.len));
+    }
+
+    fn compileStaticPropAccess(self: *Compiler, node: Ast.Node) Error!void {
+        const class_node = self.ast.nodes[node.data.lhs];
+        const class_name = self.ast.tokenSlice(class_node.main_token);
+        var prop_name = self.ast.tokenSlice(node.main_token);
+        if (prop_name.len > 0 and prop_name[0] == '$') prop_name = prop_name[1..];
+        const class_idx = try self.addConstant(.{ .string = class_name });
+        const prop_idx = try self.addConstant(.{ .string = prop_name });
+        try self.emitOp(.get_static_prop);
+        try self.emitU16(class_idx);
+        try self.emitU16(prop_idx);
     }
 
     fn compileSwitch(self: *Compiler, node: Ast.Node) Error!void {

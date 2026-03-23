@@ -42,6 +42,7 @@ pub const entries = .{
     .{ "shuffle", native_shuffle },
     .{ "array_rand", array_rand },
     .{ "compact", native_compact },
+    .{ "extract", native_extract },
     .{ "ksort", native_ksort },
     .{ "krsort", native_krsort },
     .{ "asort", native_asort },
@@ -647,9 +648,33 @@ fn array_rand(_: *NativeContext, args: []const Value) RuntimeError!Value {
 }
 
 fn native_compact(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    _ = ctx;
-    _ = args;
-    return .null;
+    const arr = try ctx.createArray();
+    const frame = ctx.vm.currentFrame();
+    for (args) |arg| {
+        if (arg != .string) continue;
+        const name = arg.string;
+        const var_name = try std.fmt.allocPrint(ctx.allocator, "${s}", .{name});
+        try ctx.strings.append(ctx.allocator, var_name);
+        if (frame.vars.get(var_name)) |val| {
+            try arr.set(ctx.allocator, .{ .string = name }, val);
+        }
+    }
+    return .{ .array = arr };
+}
+
+fn native_extract(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len == 0 or args[0] != .array) return .{ .int = 0 };
+    const arr = args[0].array;
+    const frame = ctx.vm.currentFrame();
+    var count_val: i64 = 0;
+    for (arr.entries.items) |entry| {
+        if (entry.key != .string) continue;
+        const var_name = try std.fmt.allocPrint(ctx.allocator, "${s}", .{entry.key.string});
+        try ctx.strings.append(ctx.allocator, var_name);
+        try frame.vars.put(ctx.allocator, var_name, entry.value);
+        count_val += 1;
+    }
+    return .{ .int = count_val };
 }
 
 fn keyLessThan(_: void, a: PhpArray.Entry, b: PhpArray.Entry) bool {

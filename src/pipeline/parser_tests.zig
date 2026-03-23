@@ -284,8 +284,18 @@ fn renderNode(ast: *const Ast, idx: u32, buf: *Buf) !void {
             try w.writeAll(ast.tokenSlice(node.main_token));
             try w.writeByte(')');
         },
+        .static_class_method => {
+            try w.writeAll("(static-method ");
+            try w.writeAll(ast.tokenSlice(node.main_token));
+            try w.writeByte(')');
+        },
         .class_property => {
             try w.writeAll("(prop ");
+            try w.writeAll(ast.tokenSlice(node.main_token));
+            try w.writeByte(')');
+        },
+        .static_class_property => {
+            try w.writeAll("(static-prop ");
             try w.writeAll(ast.tokenSlice(node.main_token));
             try w.writeByte(')');
         },
@@ -318,6 +328,13 @@ fn renderNode(ast: *const Ast, idx: u32, buf: *Buf) !void {
                 try w.writeByte(' ');
                 try renderNode(ast, arg, buf);
             }
+            try w.writeByte(')');
+        },
+        .static_prop_access => {
+            try w.writeAll("(::$ ");
+            try renderNode(ast, node.data.lhs, buf);
+            try w.writeByte(' ');
+            try w.writeAll(ast.tokenSlice(node.main_token));
             try w.writeByte(')');
         },
         .expr_list => {

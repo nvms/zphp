@@ -83,6 +83,8 @@ pub const OpCode = enum(u8) {
     set_prop, // u16: property name constant
     method_call, // u16: method name constant, u8: arg count
     static_call, // u16: class name, u16: method name, u8: arg count
+    get_static_prop, // u16: class name, u16: property name
+    set_static_prop, // u16: class name, u16: property name
 
     // scope
     get_global, // u16: var name constant (copy from frame 0)

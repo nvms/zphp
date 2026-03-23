@@ -126,8 +126,15 @@ fn runFile(allocator: std.mem.Allocator, path: []const u8) !void {
     defer vm.deinit();
     vm.file_loader = &loadFile;
     vm.interpret(&result) catch {
-        try writeStderr("runtime error\n");
-        std.process.exit(1);
+        if (vm.output.items.len > 0) {
+            try writeStdout(vm.output.items);
+        }
+        if (vm.error_msg) |msg| {
+            try writeStderr(msg);
+        } else {
+            try writeStderr("runtime error\n");
+        }
+        std.process.exit(255);
     };
 
     if (vm.output.items.len > 0) {

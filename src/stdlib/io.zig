@@ -16,6 +16,13 @@ pub const entries = .{
     .{ "time", native_time },
     .{ "microtime", native_microtime },
     .{ "date", native_date },
+    .{ "ob_start", native_ob_start },
+    .{ "ob_get_clean", native_ob_get_clean },
+    .{ "ob_end_clean", native_ob_end_clean },
+    .{ "ob_get_contents", native_ob_get_contents },
+    .{ "ob_get_level", native_ob_get_level },
+    .{ "mktime", native_mktime },
+    .{ "strtotime", native_strtotime },
 };
 
 fn file_get_contents(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
@@ -135,6 +142,36 @@ fn native_microtime(ctx: *NativeContext, args: []const Value) RuntimeError!Value
     return .{ .string = result };
 }
 
+fn native_ob_start(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    try ctx.vm.ob_stack.append(ctx.allocator, ctx.vm.output.items.len);
+    return .{ .bool = true };
+}
+
+fn native_ob_get_clean(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    if (ctx.vm.ob_stack.items.len == 0) return .{ .bool = false };
+    const start = ctx.vm.ob_stack.pop().?;
+    const content = try ctx.createString(ctx.vm.output.items[start..]);
+    ctx.vm.output.shrinkRetainingCapacity(start);
+    return .{ .string = content };
+}
+
+fn native_ob_end_clean(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    if (ctx.vm.ob_stack.items.len == 0) return .{ .bool = false };
+    const start = ctx.vm.ob_stack.pop().?;
+    ctx.vm.output.shrinkRetainingCapacity(start);
+    return .{ .bool = true };
+}
+
+fn native_ob_get_contents(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    if (ctx.vm.ob_stack.items.len == 0) return .{ .bool = false };
+    const start = ctx.vm.ob_stack.getLast();
+    return .{ .string = try ctx.createString(ctx.vm.output.items[start..]) };
+}
+
+fn native_ob_get_level(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    return .{ .int = @intCast(ctx.vm.ob_stack.items.len) };
+}
+
 fn native_date(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len == 0 or args[0] != .string) return .{ .string = "" };
     const format = args[0].string;
@@ -199,4 +236,94 @@ fn native_date(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     const result = try buf.toOwnedSlice(ctx.allocator);
     try ctx.strings.append(ctx.allocator, result);
     return .{ .string = result };
+}
+
+fn native_mktime(_: *NativeContext, args: []const Value) RuntimeError!Value {
+    const hour: i64 = if (args.len > 0) Value.toInt(args[0]) else 0;
+    const min: i64 = if (args.len > 1) Value.toInt(args[1]) else 0;
+    const sec: i64 = if (args.len > 2) Value.toInt(args[2]) else 0;
+    const month: i64 = if (args.len > 3) Value.toInt(args[3]) else 1;
+    const day: i64 = if (args.len > 4) Value.toInt(args[4]) else 1;
+    const year: i64 = if (args.len > 5) Value.toInt(args[5]) else 1970;
+
+    const ts = dateToTimestamp(year, month, day, hour, min, sec);
+    return .{ .int = ts };
+}
+
+fn native_strtotime(_: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len == 0 or args[0] != .string) return .{ .bool = false };
+    const input = args[0].string;
+    const base: i64 = if (args.len >= 2) Value.toInt(args[1]) else std.time.timestamp();
+
+    if (input.len >= 10 and input[4] == '-' and input[7] == '-') {
+        const year = std.fmt.parseInt(i64, input[0..4], 10) catch return Value{ .bool = false };
+        const month = std.fmt.parseInt(i64, input[5..7], 10) catch return Value{ .bool = false };
+        const day = std.fmt.parseInt(i64, input[8..10], 10) catch return Value{ .bool = false };
+        var hour: i64 = 0;
+        var min: i64 = 0;
+        var sec: i64 = 0;
+        if (input.len >= 19 and input[10] == ' ' and input[13] == ':' and input[16] == ':') {
+            hour = std.fmt.parseInt(i64, input[11..13], 10) catch 0;
+            min = std.fmt.parseInt(i64, input[14..16], 10) catch 0;
+            sec = std.fmt.parseInt(i64, input[17..19], 10) catch 0;
+        }
+        return .{ .int = dateToTimestamp(year, month, day, hour, min, sec) };
+    }
+
+    return parseRelativeTime(input, base);
+}
+
+fn parseRelativeTime(input: []const u8, base: i64) Value {
+    var s = input;
+    var sign: i64 = 1;
+    if (s.len > 0 and s[0] == '-') {
+        sign = -1;
+        s = s[1..];
+    } else if (s.len > 0 and s[0] == '+') {
+        s = s[1..];
+    }
+    while (s.len > 0 and s[0] == ' ') s = s[1..];
+
+    var num_end: usize = 0;
+    while (num_end < s.len and s[num_end] >= '0' and s[num_end] <= '9') num_end += 1;
+    if (num_end == 0) return .{ .bool = false };
+    const num = std.fmt.parseInt(i64, s[0..num_end], 10) catch return Value{ .bool = false };
+    s = s[num_end..];
+    while (s.len > 0 and s[0] == ' ') s = s[1..];
+
+    const seconds: i64 = if (startsWith(s, "second"))
+        num * sign
+    else if (startsWith(s, "minute"))
+        num * sign * 60
+    else if (startsWith(s, "hour"))
+        num * sign * 3600
+    else if (startsWith(s, "day"))
+        num * sign * 86400
+    else if (startsWith(s, "week"))
+        num * sign * 604800
+    else if (startsWith(s, "month"))
+        num * sign * 2592000
+    else if (startsWith(s, "year"))
+        num * sign * 31536000
+    else
+        return .{ .bool = false };
+
+    return .{ .int = base + seconds };
+}
+
+fn startsWith(s: []const u8, prefix: []const u8) bool {
+    return s.len >= prefix.len and std.mem.eql(u8, s[0..prefix.len], prefix);
+}
+
+fn dateToTimestamp(year: i64, month: i64, day: i64, hour: i64, min: i64, sec: i64) i64 {
+    // Howard Hinnant's civil_from_days algorithm (shifted so March = month 0)
+    const m = if (month < 1) @as(i64, 1) else if (month > 12) @as(i64, 12) else month;
+    const y = year - @as(i64, if (m <= 2) 1 else 0);
+    const era: i64 = @divFloor(if (y >= 0) y else y - 399, 400);
+    const yoe: i64 = y - era * 400;
+    const mp: i64 = if (m > 2) m - 3 else m + 9;
+    const doy = @divFloor(153 * mp + 2, 5) + day - 1;
+    const doe = yoe * 365 + @divFloor(yoe, 4) - @divFloor(yoe, 100) + doy;
+    const days = era * 146097 + doe - 719468;
+    return days * 86400 + hour * 3600 + min * 60 + sec;
 }

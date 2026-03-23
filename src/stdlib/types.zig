@@ -28,6 +28,7 @@ pub const entries = .{
     .{ "define", native_define },
     .{ "defined", native_defined },
     .{ "constant", native_constant },
+    .{ "var_export", native_var_export },
 };
 
 fn native_define(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
@@ -307,4 +308,79 @@ fn formatFloat(tmp: *[64]u8, f: f64) []const u8 {
 fn boolval(_: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len == 0) return .{ .bool = false };
     return .{ .bool = args[0].isTruthy() };
+}
+
+fn native_var_export(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len == 0) return .null;
+    const return_str = args.len >= 2 and args[1].isTruthy();
+    var buf = std.ArrayListUnmanaged(u8){};
+    try varExportValue(ctx.allocator, &buf, args[0], 0);
+    if (return_str) {
+        const s = try buf.toOwnedSlice(ctx.allocator);
+        try ctx.strings.append(ctx.allocator, s);
+        return .{ .string = s };
+    }
+    try ctx.vm.output.appendSlice(ctx.allocator, buf.items);
+    buf.deinit(ctx.allocator);
+    return .null;
+}
+
+fn varExportValue(a: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8), val: Value, depth: usize) !void {
+    switch (val) {
+        .null => try out.appendSlice(a, "NULL"),
+        .bool => |b| try out.appendSlice(a, if (b) "true" else "false"),
+        .int => |i| {
+            var tmp: [32]u8 = undefined;
+            const s = std.fmt.bufPrint(&tmp, "{d}", .{i}) catch return;
+            try out.appendSlice(a, s);
+        },
+        .float => |f| {
+            var tmp: [64]u8 = undefined;
+            if (f == @trunc(f) and @abs(f) < 1e15) {
+                const i: i64 = @intFromFloat(f);
+                const s = std.fmt.bufPrint(&tmp, "{d}.0", .{i}) catch return;
+                try out.appendSlice(a, s);
+            } else {
+                const s = std.fmt.bufPrint(&tmp, "{d}", .{f}) catch return;
+                try out.appendSlice(a, s);
+            }
+        },
+        .string => |s| {
+            try out.append(a, '\'');
+            for (s) |c| {
+                if (c == '\'') {
+                    try out.appendSlice(a, "\\'");
+                } else if (c == '\\') {
+                    try out.appendSlice(a, "\\\\");
+                } else {
+                    try out.append(a, c);
+                }
+            }
+            try out.append(a, '\'');
+        },
+        .array => |arr| {
+            try out.appendSlice(a, "array (\n");
+            for (arr.entries.items) |entry| {
+                for (0..(depth + 1) * 2) |_| try out.append(a, ' ');
+                switch (entry.key) {
+                    .int => |ki| {
+                        var tmp: [32]u8 = undefined;
+                        const ks = std.fmt.bufPrint(&tmp, "{d}", .{ki}) catch return;
+                        try out.appendSlice(a, ks);
+                    },
+                    .string => |ks| {
+                        try out.append(a, '\'');
+                        try out.appendSlice(a, ks);
+                        try out.append(a, '\'');
+                    },
+                }
+                try out.appendSlice(a, " => ");
+                try varExportValue(a, out, entry.value, depth + 1);
+                try out.appendSlice(a, ",\n");
+            }
+            for (0..depth * 2) |_| try out.append(a, ' ');
+            try out.append(a, ')');
+        },
+        .object => try out.appendSlice(a, "(object)"),
+    }
 }

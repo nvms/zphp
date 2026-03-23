@@ -107,9 +107,12 @@ pub const Ast = struct {
             class_decl, // main_token = class name, lhs = extra index -> {count, member_nodes...}, rhs = parent class node (0 = none)
             class_method, // main_token = method name, lhs = extra index -> {count, param...}, rhs = body block
             class_property, // main_token = property variable, lhs = default value (0 = none)
+            static_class_method, // same as class_method but static
+            static_class_property, // same as class_property but static
             new_expr, // main_token = class name, lhs = extra index -> {count, arg...}
             method_call, // main_token = method name, lhs = object, rhs = extra index -> {count, arg...}
             static_call, // main_token = method name, lhs = class name node, rhs = extra index -> {count, arg...}
+            static_prop_access, // main_token = $variable, lhs = class name node
 
             // compound
             array_literal, // main_token = [, lhs = extra index -> {count, element...}

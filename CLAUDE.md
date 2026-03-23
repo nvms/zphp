@@ -41,11 +41,11 @@ src/
   pipeline/
     token.zig           - 145 token types, case-insensitive keyword lookup
     lexer.zig           - source -> token stream (HTML/PHP modal)
-    ast.zig             - flat array AST, 74 node tags
+    ast.zig             - flat array AST, 77 node tags
     parser.zig          - Pratt recursive descent, type hints, namespaces, variadic
     parser_tests.zig    - S-expression renderer tests
     compiler.zig        - AST -> bytecode, namespace resolution, __DIR__/__FILE__
-    bytecode.zig        - ~91 opcodes, Chunk, ObjFunction
+    bytecode.zig        - ~93 opcodes, Chunk, ObjFunction
   runtime/
     vm.zig              - stack-based interpreter, classes, exceptions, file loading
     value.zig           - Value tagged union, PhpArray, PhpObject
@@ -64,7 +64,7 @@ match: strict comparison, multi-value arms, default, expression result
 functions: declarations, calls, return, default params, variadic `...$args`, spread `f(...$arr)`
 closures: anonymous functions, arrow functions, `use` captures, callbacks
 arrays: literals, access, spread `[...$arr]`, 150+ stdlib functions
-classes: properties, methods, `$this`, `__construct`, `extends`, `parent::`, static calls
+classes: properties, methods, `$this`, `__construct`, `extends`, `parent::`, static calls, static methods/properties, `self::`, `instanceof`
 exceptions: try/catch/finally, throw, typed catch, multi-catch, DivisionByZeroError
 file inclusion: require, require_once, include, include_once, `__DIR__`, `__FILE__`
 namespaces: `namespace`, `use`, `use ... as`, qualified names with `\`
@@ -72,7 +72,7 @@ other: type casting, type hints (parsed, not enforced), `declare(strict_types=1)
 
 ## stdlib
 
-150+ native functions across: strings (60+), arrays (40+), math (25+), types (20+), json, io, pcre (FFI to libpcre2)
+160+ native functions across: strings (60+), arrays (40+), math (25+), types (20+), json, io (file ops, time, output buffering), pcre (FFI to libpcre2)
 
 ## known limitations
 
@@ -82,7 +82,8 @@ other: type casting, type hints (parsed, not enforced), `declare(strict_types=1)
 - type hints parsed but not enforced at runtime
 - visibility modifiers (public/protected/private) parsed but not enforced
 - heredoc/nowdoc not supported
-- `instanceof` as binary operator not yet wired to instance_check opcode
+- `strtotime` only supports YYYY-MM-DD format and relative expressions (+N units), not complex PHP date strings
+- `mktime`/`strtotime` use UTC, not local timezone
 
 ## zig 0.15.x gotchas
 
@@ -107,15 +108,14 @@ GitHub Actions on push: `zig build test` (ubuntu + macos), PHP compat tests agai
 - `tests/*.php` files run through both `php` and `zphp run`, diff output
 - `tests/include/` has helper files for require/include tests
 - rule: every new feature gets a test file. the spec is PHP's behavior
-- 56 test files currently
+- 59 test files currently
 
 ## roadmap
 
-done: constants, type casting, switch/match, stdlib pass 1 (150+ functions), basic classes (properties, methods, inheritance, parent::), try/catch/throw, require/include, namespaces/use, __DIR__/__FILE__
+done: constants, type casting, switch/match, stdlib pass 1 (160+ functions), classes (properties, methods, inheritance, parent::, static methods/properties, self::), instanceof, try/catch/throw, require/include (with function redeclaration detection), namespaces/use, __DIR__/__FILE__, compact/extract, var_export, ob_start/ob_get_clean, strtotime/mktime
 
 in progress:
-- stdlib pass 1 remaining: `compact`, `extract`, `strtotime`, `mktime`, `ob_start`/`ob_get_clean`, `var_export`
-- classes: `static` methods/properties, visibility enforcement, `instanceof` operator, interfaces, traits
+- classes: visibility enforcement, interfaces, traits
 
 next:
 - stdlib pass 2: OOP-dependent (`DateTime`, `SplStack`, `ArrayObject`)

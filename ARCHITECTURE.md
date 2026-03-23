@@ -106,12 +106,16 @@ critical boundaries:
 
 ### class system
 - `PhpObject`: class_name + property hashmap. pointer semantics
-- `ClassDef`: name, methods hashmap, properties list with defaults, optional parent
-- methods compiled as `ClassName::methodName` functions in global table
-- property defaults compile BEFORE `class_decl` opcode (on stack)
+- `ClassDef`: name, methods hashmap, instance properties list with defaults, static_props hashmap, optional parent
+- methods (both static and instance) compiled as `ClassName::methodName` functions in global table
+- instance property defaults compile BEFORE static property defaults, both before `class_decl` opcode (on stack)
 - `new_obj`: creates PhpObject, walks parent chain for defaults, calls `__construct` via `runUntilFrame`
 - `method_call`: resolveMethod walks parent chain. `$this` bound in frame vars
 - `parent::` resolves relative to defining class via `currentDefiningClass()`
+- `self::` resolves to defining class for both method calls and property access
+- static properties stored per-class in `ClassDef.static_props`, accessed via `get_static_prop`/`set_static_prop` opcodes
+- `instanceof` compiles to `instance_check` opcode which walks parent chain
+- function redeclaration (via require/include) produces a PHP-compatible fatal error
 - visibility modifiers parsed and skipped - not enforced yet
 
 ### exception handling
