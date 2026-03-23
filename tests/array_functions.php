@@ -57,3 +57,25 @@ echo "\n";
 $unique = array_unique([1, 2, 2, 3, 3, 3]);
 echo implode(',', $unique);
 echo "\n";
+
+$mapped = array_map(function($x) { return $x * 2; }, [1, 2, 3]);
+echo implode(',', $mapped);
+echo "\n";
+
+$filtered = array_filter([1, 2, 3, 4, 5, 6], function($x) { return $x % 2 == 0; });
+echo implode(',', $filtered);
+echo "\n";
+
+$truthyOnly = array_filter([0, 1, false, 'yes', '', null]);
+echo count($truthyOnly);
+echo "\n";
+
+$s = [5, 3, 4, 1, 2];
+usort($s, function($a, $b) { return $a - $b; });
+echo implode(',', $s);
+echo "\n";
+
+$words = ['banana', 'apple', 'cherry'];
+usort($words, function($a, $b) { return $a <=> $b; });
+echo implode(',', $words);
+echo "\n";

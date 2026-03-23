@@ -46,6 +46,8 @@ pub const OpCode = enum(u8) {
     jump_if_not_null, // u16: forward offset (peek, no pop)
 
     call, // u16: name constant index, u8: arg count
+    call_indirect, // u8: arg count (function name on stack below args)
+    closure_bind, // u16: var name constant (peek closure name, get_var, store capture)
     return_val,
     return_void,
 

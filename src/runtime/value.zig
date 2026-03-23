@@ -136,10 +136,20 @@ pub const Value = union(enum) {
     }
 
     pub fn lessThan(a: Value, b: Value) bool {
+        if (a == .string and b == .string) {
+            return std.mem.order(u8, a.string, b.string) == .lt;
+        }
         return toFloat(a) < toFloat(b);
     }
 
     pub fn compare(a: Value, b: Value) i64 {
+        if (a == .string and b == .string) {
+            return switch (std.mem.order(u8, a.string, b.string)) {
+                .lt => -1,
+                .eq => 0,
+                .gt => 1,
+            };
+        }
         const af = toFloat(a);
         const bf = toFloat(b);
         if (af < bf) return -1;

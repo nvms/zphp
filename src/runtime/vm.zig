@@ -13,6 +13,7 @@ pub const NativeContext = struct {
     allocator: Allocator,
     arrays: *std.ArrayListUnmanaged(*PhpArray),
     strings: *std.ArrayListUnmanaged([]const u8),
+    vm: *VM,
 
     pub fn createArray(self: *NativeContext) !*PhpArray {
         const arr = try self.allocator.create(PhpArray);
@@ -26,9 +27,19 @@ pub const NativeContext = struct {
         try self.strings.append(self.allocator, owned);
         return owned;
     }
+
+    pub fn callFunction(self: *NativeContext, name: []const u8, args: []const Value) RuntimeError!Value {
+        return self.vm.callByName(name, args);
+    }
 };
 
 const NativeFn = *const fn (*NativeContext, []const Value) RuntimeError!Value;
+
+const CaptureEntry = struct {
+    closure_name: []const u8,
+    var_name: []const u8,
+    value: Value,
+};
 
 pub const VM = struct {
     frames: [64]CallFrame = undefined,
@@ -40,6 +51,7 @@ pub const VM = struct {
     output: std.ArrayListUnmanaged(u8) = .{},
     strings: std.ArrayListUnmanaged([]const u8) = .{},
     arrays: std.ArrayListUnmanaged(*PhpArray) = .{},
+    captures: std.ArrayListUnmanaged(CaptureEntry) = .{},
     allocator: Allocator,
 
     const CallFrame = struct {
@@ -61,6 +73,7 @@ pub const VM = struct {
         self.output.deinit(self.allocator);
         for (self.strings.items) |s| self.allocator.free(s);
         self.strings.deinit(self.allocator);
+        self.captures.deinit(self.allocator);
         for (self.arrays.items) |a| {
             a.deinit(self.allocator);
             self.allocator.destroy(a);
@@ -77,7 +90,15 @@ pub const VM = struct {
         try self.run();
     }
 
+    fn runUntilFrame(self: *VM, base_frame: usize) RuntimeError!void {
+        return self.runLoop(base_frame);
+    }
+
     fn run(self: *VM) RuntimeError!void {
+        return self.runLoop(0);
+    }
+
+    fn runLoop(self: *VM, base_frame: usize) RuntimeError!void {
         while (true) {
             const op: OpCode = @enumFromInt(self.readByte());
             switch (op) {
@@ -231,42 +252,34 @@ pub const VM = struct {
                     const name_idx = self.readU16();
                     const arg_count = self.readByte();
                     const name = self.currentChunk().constants.items[name_idx].string;
-
-                    if (self.native_fns.get(name)) |native| {
-                        var args: [16]Value = undefined;
-                        const ac: usize = arg_count;
-                        for (0..ac) |i| args[i] = self.stack[self.sp - ac + i];
-                        self.sp -= ac;
-                        var ctx = NativeContext{
-                            .allocator = self.allocator,
-                            .arrays = &self.arrays,
-                            .strings = &self.strings,
-                        };
-                        self.push(try native(&ctx, args[0..ac]));
-                    } else if (self.functions.get(name)) |func| {
-                        if (arg_count != func.arity) return error.RuntimeError;
-                        var new_vars: std.StringHashMapUnmanaged(Value) = .{};
-                        const ac: usize = arg_count;
-                        for (0..ac) |i| {
-                            try new_vars.put(self.allocator, func.params[i], self.stack[self.sp - ac + i]);
-                        }
-                        self.sp -= ac;
-                        self.frames[self.frame_count] = .{ .chunk = &func.chunk, .ip = 0, .vars = new_vars };
-                        self.frame_count += 1;
-                    } else return error.RuntimeError;
+                    try self.callNamedFunction(name, arg_count);
+                },
+                .call_indirect => {
+                    const arg_count = self.readByte();
+                    const ac: usize = arg_count;
+                    const name_val = self.stack[self.sp - ac - 1];
+                    if (name_val != .string) return error.RuntimeError;
+                    const name = name_val.string;
+                    // shift args down over the name value
+                    var i: usize = 0;
+                    while (i < ac) : (i += 1) {
+                        self.stack[self.sp - ac - 1 + i] = self.stack[self.sp - ac + i];
+                    }
+                    self.sp -= 1;
+                    try self.callNamedFunction(name, arg_count);
                 },
                 .return_val => {
                     const result = self.pop();
                     self.frame_count -= 1;
                     self.frames[self.frame_count].vars.deinit(self.allocator);
                     self.push(result);
-                    if (self.frame_count == 0) return;
+                    if (self.frame_count <= base_frame) return;
                 },
                 .return_void => {
                     self.frame_count -= 1;
                     self.frames[self.frame_count].vars.deinit(self.allocator);
                     self.push(.null);
-                    if (self.frame_count == 0) return;
+                    if (self.frame_count <= base_frame) return;
                 },
 
                 .echo => {
@@ -334,8 +347,81 @@ pub const VM = struct {
                     _ = self.pop();
                     _ = self.pop();
                 },
+
+                .closure_bind => {
+                    const var_idx = self.readU16();
+                    const var_name = self.currentChunk().constants.items[var_idx].string;
+                    const closure_name = self.peek().string;
+                    const val = self.currentFrame().vars.get(var_name) orelse .null;
+                    try self.captures.append(self.allocator, .{
+                        .closure_name = closure_name,
+                        .var_name = var_name,
+                        .value = val,
+                    });
+                },
             }
         }
+    }
+
+    fn callNamedFunction(self: *VM, name: []const u8, arg_count: u8) RuntimeError!void {
+        if (self.native_fns.get(name)) |native| {
+            var args: [16]Value = undefined;
+            const ac: usize = arg_count;
+            for (0..ac) |i| args[i] = self.stack[self.sp - ac + i];
+            self.sp -= ac;
+            var ctx = NativeContext{
+                .allocator = self.allocator,
+                .arrays = &self.arrays,
+                .strings = &self.strings,
+                .vm = self,
+            };
+            self.push(try native(&ctx, args[0..ac]));
+        } else if (self.functions.get(name)) |func| {
+            if (arg_count != func.arity) return error.RuntimeError;
+            var new_vars: std.StringHashMapUnmanaged(Value) = .{};
+            for (self.captures.items) |cap| {
+                if (std.mem.eql(u8, cap.closure_name, name)) {
+                    try new_vars.put(self.allocator, cap.var_name, cap.value);
+                }
+            }
+            const ac: usize = arg_count;
+            for (0..ac) |i| {
+                try new_vars.put(self.allocator, func.params[i], self.stack[self.sp - ac + i]);
+            }
+            self.sp -= ac;
+            self.frames[self.frame_count] = .{ .chunk = &func.chunk, .ip = 0, .vars = new_vars };
+            self.frame_count += 1;
+        } else return error.RuntimeError;
+    }
+
+    pub fn callByName(self: *VM, name: []const u8, args: []const Value) RuntimeError!Value {
+        if (self.native_fns.get(name)) |native| {
+            var ctx = NativeContext{
+                .allocator = self.allocator,
+                .arrays = &self.arrays,
+                .strings = &self.strings,
+                .vm = self,
+            };
+            return native(&ctx, args);
+        } else if (self.functions.get(name)) |func| {
+            if (args.len != func.arity) return error.RuntimeError;
+            var new_vars: std.StringHashMapUnmanaged(Value) = .{};
+            for (self.captures.items) |cap| {
+                if (std.mem.eql(u8, cap.closure_name, name)) {
+                    try new_vars.put(self.allocator, cap.var_name, cap.value);
+                }
+            }
+            for (0..args.len) |i| {
+                try new_vars.put(self.allocator, func.params[i], args[i]);
+            }
+            const base_frame = self.frame_count;
+            self.frames[self.frame_count] = .{ .chunk = &func.chunk, .ip = 0, .vars = new_vars };
+            self.frame_count += 1;
+
+            try self.runUntilFrame(base_frame);
+
+            return self.pop();
+        } else return error.RuntimeError;
     }
 
     // ==================================================================
@@ -590,4 +676,139 @@ test "strlen" {
 test "is_array" {
     try expectOutput("<?php echo is_array([1]) ? 'y' : 'n';", "y");
     try expectOutput("<?php echo is_array(42) ? 'y' : 'n';", "n");
+}
+
+test "closure assigned to variable" {
+    try expectOutput("<?php $add = function($a, $b) { return $a + $b; }; echo $add(3, 4);", "7");
+}
+
+test "closure passed to function" {
+    try expectOutput(
+        \\<?php
+        \\function apply($fn, $val) { return $fn($val); }
+        \\$double = function($x) { return $x * 2; };
+        \\echo apply($double, 5);
+    , "10");
+}
+
+test "arrow function" {
+    try expectOutput("<?php $sq = fn($x) => $x * $x; echo $sq(6);", "36");
+}
+
+test "array_map" {
+    try expectOutput(
+        \\<?php
+        \\$nums = [1, 2, 3];
+        \\$doubled = array_map(function($x) { return $x * 2; }, $nums);
+        \\foreach ($doubled as $v) { echo $v; }
+    , "246");
+}
+
+test "array_filter" {
+    try expectOutput(
+        \\<?php
+        \\$nums = [1, 2, 3, 4, 5];
+        \\$even = array_filter($nums, function($x) { return $x % 2 == 0; });
+        \\foreach ($even as $v) { echo $v; }
+    , "24");
+}
+
+test "usort" {
+    try expectOutput(
+        \\<?php
+        \\$a = [3, 1, 2];
+        \\usort($a, function($a, $b) { return $a - $b; });
+        \\foreach ($a as $v) { echo $v; }
+    , "123");
+}
+
+test "array_map with arrow function" {
+    try expectOutput(
+        \\<?php
+        \\$result = array_map(fn($x) => $x + 10, [1, 2, 3]);
+        \\foreach ($result as $v) { echo $v . ' '; }
+    , "11 12 13 ");
+}
+
+test "inline closure call" {
+    try expectOutput("<?php echo (function($x) { return $x + 1; })(41);", "42");
+}
+
+test "named function as callback string" {
+    try expectOutput(
+        \\<?php
+        \\function triple($x) { return $x * 3; }
+        \\$result = array_map('triple', [1, 2, 3]);
+        \\foreach ($result as $v) { echo $v; }
+    , "369");
+}
+
+test "closure use clause" {
+    try expectOutput(
+        \\<?php
+        \\$x = 10;
+        \\$add = function($y) use ($x) { return $x + $y; };
+        \\echo $add(5);
+    , "15");
+}
+
+test "closure use multiple vars" {
+    try expectOutput(
+        \\<?php
+        \\$a = 'hello';
+        \\$b = ' world';
+        \\$greet = function() use ($a, $b) { return $a . $b; };
+        \\echo $greet();
+    , "hello world");
+}
+
+test "closure use captures at creation time" {
+    try expectOutput(
+        \\<?php
+        \\$x = 1;
+        \\$fn = function() use ($x) { return $x; };
+        \\$x = 99;
+        \\echo $fn();
+    , "1");
+}
+
+test "closure use with array_map" {
+    try expectOutput(
+        \\<?php
+        \\$multiplier = 3;
+        \\$result = array_map(function($x) use ($multiplier) { return $x * $multiplier; }, [1, 2, 3]);
+        \\foreach ($result as $v) { echo $v . ' '; }
+    , "3 6 9 ");
+}
+
+test "string interpolation simple" {
+    try expectOutput("<?php $name = 'World'; echo \"Hello $name\";", "Hello World");
+}
+
+test "string interpolation multiple" {
+    try expectOutput("<?php $a = 'foo'; $b = 'bar'; echo \"$a and $b\";", "foo and bar");
+}
+
+test "string interpolation curly" {
+    try expectOutput("<?php $x = 'test'; echo \"Value: {$x}!\";", "Value: test!");
+}
+
+test "string interpolation with expr after" {
+    try expectOutput("<?php $n = 42; echo \"num=$n.\";", "num=42.");
+}
+
+test "string interpolation escaped dollar" {
+    try expectOutput("<?php echo \"price is \\$5\";", "price is $5");
+}
+
+test "string interpolation array access" {
+    try expectOutput("<?php $a = ['x', 'y']; echo \"val=$a[1]\";", "val=y");
+}
+
+test "string interpolation curly array" {
+    try expectOutput("<?php $a = ['k' => 'v']; echo \"{$a['k']}\";", "v");
+}
+
+test "string no interpolation single quotes" {
+    try expectOutput("<?php $x = 1; echo '$x';", "$x");
 }

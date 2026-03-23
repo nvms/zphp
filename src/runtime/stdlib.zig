@@ -74,6 +74,9 @@ pub fn register(map: *std.StringHashMapUnmanaged(*const fn (*NativeContext, []co
         .{ "sort", native_sort },
         .{ "rsort", native_rsort },
         .{ "range", native_range },
+        .{ "array_map", array_map },
+        .{ "array_filter", array_filter },
+        .{ "usort", native_usort },
     };
     inline for (fns) |f| try map.put(allocator, f[0], f[1]);
 }
@@ -661,6 +664,65 @@ fn native_rsort(_: *NativeContext, args: []const Value) RuntimeError!Value {
             return Value.lessThan(b.value, a.value);
         }
     }.lessThan);
+    return .{ .bool = true };
+}
+
+fn array_map(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len < 2) return .null;
+    const callback = args[0];
+    if (args[1] != .array) return .null;
+    const src = args[1].array;
+    const cb_name = if (callback == .string) callback.string else return Value.null;
+
+    var result = try ctx.createArray();
+    for (src.entries.items) |entry| {
+        const mapped = try ctx.callFunction(cb_name, &.{entry.value});
+        try result.append(ctx.allocator, mapped);
+    }
+    return .{ .array = result };
+}
+
+fn array_filter(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len == 0 or args[0] != .array) return .null;
+    const src = args[0].array;
+
+    var result = try ctx.createArray();
+    if (args.len < 2) {
+        for (src.entries.items) |entry| {
+            if (entry.value.isTruthy()) try result.set(ctx.allocator, entry.key, entry.value);
+        }
+    } else {
+        const cb_name = if (args[1] == .string) args[1].string else return Value.null;
+        for (src.entries.items) |entry| {
+            const keep = try ctx.callFunction(cb_name, &.{entry.value});
+            if (keep.isTruthy()) try result.set(ctx.allocator, entry.key, entry.value);
+        }
+    }
+    return .{ .array = result };
+}
+
+fn native_usort(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len < 2 or args[0] != .array) return .{ .bool = false };
+    const arr = args[0].array;
+    const cb_name = if (args[1] == .string) args[1].string else return Value{ .bool = false };
+
+    // bubble sort using the callback comparator
+    const items = arr.entries.items;
+    var n = items.len;
+    while (n > 1) {
+        var swapped = false;
+        for (0..n - 1) |i| {
+            const cmp = try ctx.callFunction(cb_name, &.{ items[i].value, items[i + 1].value });
+            if (Value.toInt(cmp) > 0) {
+                const tmp = items[i];
+                items[i] = items[i + 1];
+                items[i + 1] = tmp;
+                swapped = true;
+            }
+        }
+        if (!swapped) break;
+        n -= 1;
+    }
     return .{ .bool = true };
 }
 

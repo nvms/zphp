@@ -329,6 +329,97 @@ const Parser = struct {
         return self.addNode(.{ .tag = .function_decl, .main_token = name_tok, .data = .{ .lhs = extra, .rhs = body } });
     }
 
+    fn parseClosureExpr(self: *Parser) Error!u32 {
+        const fn_tok = self.advance(); // function
+        _ = try self.expect(.l_paren);
+
+        var params = std.ArrayListUnmanaged(u32){};
+        defer params.deinit(self.allocator);
+
+        if (self.peek() != .r_paren) {
+            try params.append(self.allocator, try self.parseParam());
+            while (self.peek() == .comma) {
+                _ = self.advance();
+                if (self.peek() == .r_paren) break;
+                try params.append(self.allocator, try self.parseParam());
+            }
+        }
+        _ = try self.expect(.r_paren);
+
+        var use_vars = std.ArrayListUnmanaged(u32){};
+        defer use_vars.deinit(self.allocator);
+
+        if (self.peek() == .kw_use) {
+            _ = self.advance();
+            _ = try self.expect(.l_paren);
+            if (self.peek() != .r_paren) {
+                const tok = try self.expect(.variable);
+                try use_vars.append(self.allocator, try self.addNode(.{ .tag = .variable, .main_token = tok, .data = .{} }));
+                while (self.peek() == .comma) {
+                    _ = self.advance();
+                    if (self.peek() == .r_paren) break;
+                    const vtok = try self.expect(.variable);
+                    try use_vars.append(self.allocator, try self.addNode(.{ .tag = .variable, .main_token = vtok, .data = .{} }));
+                }
+            }
+            _ = try self.expect(.r_paren);
+        }
+
+        if (self.peek() == .colon) {
+            _ = self.advance();
+            _ = self.advance();
+        }
+
+        const body = try self.parseBlock();
+        const param_extra = try self.addExtraList(params.items);
+
+        // rhs = extra -> {body, use_count, use_vars...}
+        var rhs_data = std.ArrayListUnmanaged(u32){};
+        defer rhs_data.deinit(self.allocator);
+        try rhs_data.append(self.allocator, body);
+        try rhs_data.append(self.allocator, @intCast(use_vars.items.len));
+        try rhs_data.appendSlice(self.allocator, use_vars.items);
+        const rhs_extra = try self.addExtra(rhs_data.items);
+
+        return self.addNode(.{ .tag = .closure_expr, .main_token = fn_tok, .data = .{ .lhs = param_extra, .rhs = rhs_extra } });
+    }
+
+    fn parseArrowFunc(self: *Parser) Error!u32 {
+        const fn_tok = self.advance(); // fn
+        _ = try self.expect(.l_paren);
+
+        var params = std.ArrayListUnmanaged(u32){};
+        defer params.deinit(self.allocator);
+
+        if (self.peek() != .r_paren) {
+            try params.append(self.allocator, try self.parseParam());
+            while (self.peek() == .comma) {
+                _ = self.advance();
+                if (self.peek() == .r_paren) break;
+                try params.append(self.allocator, try self.parseParam());
+            }
+        }
+        _ = try self.expect(.r_paren);
+
+        if (self.peek() == .colon) {
+            _ = self.advance();
+            _ = self.advance();
+        }
+
+        _ = try self.expect(.fat_arrow);
+        const expr = try self.parseExpression();
+
+        const ret = try self.addNode(.{ .tag = .return_stmt, .main_token = fn_tok, .data = .{ .lhs = expr } });
+        const block_extra = try self.addExtraList(&.{ret});
+        const body = try self.addNode(.{ .tag = .block, .main_token = fn_tok, .data = .{ .lhs = block_extra } });
+
+        const param_extra = try self.addExtraList(params.items);
+        // rhs = extra -> {body, 0} (no use vars for arrow functions)
+        const rhs_extra = try self.addExtra(&.{ body, 0 });
+
+        return self.addNode(.{ .tag = .closure_expr, .main_token = fn_tok, .data = .{ .lhs = param_extra, .rhs = rhs_extra } });
+    }
+
     fn parseParam(self: *Parser) Error!u32 {
         // skip optional type hint
         if (self.peek() == .identifier or self.peek() == .question) {
@@ -430,6 +521,8 @@ const Parser = struct {
             .variable => self.addLiteral(.variable),
             .identifier => self.addLiteral(.identifier),
             .kw_isset, .kw_empty, .kw_unset, .kw_eval, .kw_exit, .kw_die => self.addLiteral(.identifier),
+            .kw_function => self.parseClosureExpr(),
+            .kw_fn => self.parseArrowFunc(),
             .l_paren => self.parseGroupedExpr(),
             .l_bracket => self.parseArrayLiteral(),
             .kw_array => self.parseArrayKw(),
@@ -769,6 +862,14 @@ fn renderNode(ast: *const Ast, idx: u32, buf: *Buf) !void {
             try w.writeByte(')');
         },
         .grouped_expr => try renderNode(ast, node.data.lhs, buf),
+        .closure_expr => {
+            try w.writeAll("(closure");
+            for (ast.extraSlice(node.data.lhs)) |param| {
+                try w.writeByte(' ');
+                try renderNode(ast, param, buf);
+            }
+            try w.writeAll(" ...)");
+        },
         .call => {
             try w.writeAll("(call ");
             try renderNode(ast, node.data.lhs, buf);

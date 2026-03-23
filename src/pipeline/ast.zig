@@ -86,6 +86,9 @@ pub const Ast = struct {
             array_access, // lhs = array, rhs = index expr
             property_access, // main_token = ->, lhs = object, rhs = property node
 
+            // closures
+            closure_expr, // main_token = function, lhs = extra index -> {count, param...}, rhs = extra index -> {body, use_count, use_vars...}
+
             // compound
             array_literal, // main_token = [, lhs = extra index -> {count, element...}
             array_element, // lhs = value, rhs = key (0 = no key)

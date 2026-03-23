@@ -66,6 +66,7 @@ const Compiler = struct {
     scope_depth: u32,
     loop_start: ?usize,
     break_jumps: std.ArrayListUnmanaged(usize),
+    closure_count: u32 = 0,
 
     // ==================================================================
     // node dispatch
@@ -113,6 +114,7 @@ const Compiler = struct {
             .for_stmt => try self.compileFor(node),
             .foreach_stmt => try self.compileForeach(node),
             .function_decl => try self.compileFunction(node),
+            .closure_expr => try self.compileClosure(node),
             .inline_html => {
                 const text = self.ast.tokenSlice(node.main_token);
                 const idx2 = try self.addConstant(.{ .string = text });
@@ -173,16 +175,223 @@ const Compiler = struct {
         const quote = lexeme[0];
         const inner = lexeme[1 .. lexeme.len - 1];
 
-        if (quote == '\'' or std.mem.indexOf(u8, inner, "\\") == null) {
-            const idx = try self.addConstant(.{ .string = inner });
-            try self.emitConstant(idx);
+        if (quote == '\'') {
+            const processed = try processSingleQuoteEscapes(self.allocator, inner);
+            if (processed) |p| {
+                try self.string_allocs.append(self.allocator, p);
+                const idx = try self.addConstant(.{ .string = p });
+                try self.emitConstant(idx);
+            } else {
+                const idx = try self.addConstant(.{ .string = inner });
+                try self.emitConstant(idx);
+            }
             return;
         }
 
-        const processed = try processEscapes(self.allocator, inner);
-        try self.string_allocs.append(self.allocator, processed);
-        const idx = try self.addConstant(.{ .string = processed });
-        try self.emitConstant(idx);
+        if (std.mem.indexOf(u8, inner, "$") == null) {
+            if (std.mem.indexOf(u8, inner, "\\") == null) {
+                const idx = try self.addConstant(.{ .string = inner });
+                try self.emitConstant(idx);
+            } else {
+                const processed = try processEscapes(self.allocator, inner);
+                try self.string_allocs.append(self.allocator, processed);
+                const idx = try self.addConstant(.{ .string = processed });
+                try self.emitConstant(idx);
+            }
+            return;
+        }
+
+        try self.compileInterpolatedString(inner);
+    }
+
+    fn compileInterpolatedString(self: *Compiler, s: []const u8) Error!void {
+        var segment_count: u32 = 0;
+        var i: usize = 0;
+
+        while (i < s.len) {
+            if (s[i] == '\\' and i + 1 < s.len) {
+                if (s[i + 1] == '$') {
+                    i += 2;
+                    continue;
+                }
+            }
+            if (s[i] == '{' and i + 1 < s.len and s[i + 1] == '$') {
+                // emit literal segment before this
+                const lit = s[0..0]; // placeholder
+                _ = lit;
+                break;
+            }
+            if (s[i] == '$' and i + 1 < s.len and (isVarStart(s[i + 1]))) {
+                break;
+            }
+            i += 1;
+        }
+
+        // full scan approach: walk through and emit segments
+        i = 0;
+        var lit_start: usize = 0;
+
+        while (i < s.len) {
+            if (s[i] == '\\' and i + 1 < s.len and s[i + 1] == '$') {
+                i += 2;
+                continue;
+            }
+
+            if (s[i] == '{' and i + 1 < s.len and s[i + 1] == '$') {
+                if (i > lit_start) {
+                    try self.emitLiteralSegment(s[lit_start..i]);
+                    if (segment_count > 0) try self.emitOp(.concat);
+                    segment_count += 1;
+                }
+
+                const end = std.mem.indexOfScalarPos(u8, s, i, '}') orelse s.len;
+                const expr_inner = s[i + 1 .. end];
+                try self.emitInterpolationExpr(expr_inner);
+                if (segment_count > 0) try self.emitOp(.concat);
+                segment_count += 1;
+
+                i = if (end < s.len) end + 1 else end;
+                lit_start = i;
+                continue;
+            }
+
+            if (s[i] == '$' and i + 1 < s.len and isVarStart(s[i + 1])) {
+                if (i > lit_start) {
+                    try self.emitLiteralSegment(s[lit_start..i]);
+                    if (segment_count > 0) try self.emitOp(.concat);
+                    segment_count += 1;
+                }
+
+                var j = i + 1;
+                while (j < s.len and isVarChar(s[j])) j += 1;
+
+                // check for simple array access: $var[...]
+                if (j < s.len and s[j] == '[') {
+                    const var_name = s[i..j];
+                    const var_idx = try self.addConstant(.{ .string = var_name });
+                    try self.emitOp(.get_var);
+                    try self.emitU16(var_idx);
+
+                    const bracket_end = std.mem.indexOfScalarPos(u8, s, j, ']') orelse s.len;
+                    const key_str = s[j + 1 .. bracket_end];
+                    try self.emitArrayKeyAccess(key_str);
+                    if (segment_count > 0) try self.emitOp(.concat);
+                    segment_count += 1;
+                    i = if (bracket_end < s.len) bracket_end + 1 else bracket_end;
+                } else {
+                    const var_name = s[i..j];
+                    const var_idx = try self.addConstant(.{ .string = var_name });
+                    try self.emitOp(.get_var);
+                    try self.emitU16(var_idx);
+                    if (segment_count > 0) try self.emitOp(.concat);
+                    segment_count += 1;
+                    i = j;
+                }
+
+                lit_start = i;
+                continue;
+            }
+
+            i += 1;
+        }
+
+        if (lit_start < s.len) {
+            try self.emitLiteralSegment(s[lit_start..]);
+            if (segment_count > 0) try self.emitOp(.concat);
+            segment_count += 1;
+        }
+
+        if (segment_count == 0) {
+            const idx = try self.addConstant(.{ .string = "" });
+            try self.emitConstant(idx);
+        }
+    }
+
+    fn emitLiteralSegment(self: *Compiler, s: []const u8) Error!void {
+        if (std.mem.indexOf(u8, s, "\\") != null) {
+            const processed = try processEscapes(self.allocator, s);
+            try self.string_allocs.append(self.allocator, processed);
+            const idx = try self.addConstant(.{ .string = processed });
+            try self.emitConstant(idx);
+        } else {
+            const idx = try self.addConstant(.{ .string = s });
+            try self.emitConstant(idx);
+        }
+    }
+
+    fn emitInterpolationExpr(self: *Compiler, expr: []const u8) Error!void {
+        // handles: $var and $var[key]
+        if (expr.len == 0 or expr[0] != '$') return;
+
+        var j: usize = 1;
+        while (j < expr.len and isVarChar(expr[j])) j += 1;
+
+        const var_name = expr[0..j];
+        const var_idx = try self.addConstant(.{ .string = var_name });
+        try self.emitOp(.get_var);
+        try self.emitU16(var_idx);
+
+        if (j < expr.len and expr[j] == '[') {
+            const bracket_end = std.mem.indexOfScalarPos(u8, expr, j, ']') orelse expr.len;
+            const key_str = expr[j + 1 .. bracket_end];
+            try self.emitArrayKeyAccess(key_str);
+        }
+    }
+
+    fn emitArrayKeyAccess(self: *Compiler, key: []const u8) Error!void {
+        if (key.len > 0 and key[0] == '$') {
+            const key_idx = try self.addConstant(.{ .string = key });
+            try self.emitOp(.get_var);
+            try self.emitU16(key_idx);
+        } else if (key.len > 0 and (key[0] >= '0' and key[0] <= '9')) {
+            const int_val = parsePhpInt(key);
+            const idx = try self.addConstant(.{ .int = int_val });
+            try self.emitConstant(idx);
+        } else if (key.len >= 2 and (key[0] == '\'' or key[0] == '"')) {
+            const idx = try self.addConstant(.{ .string = key[1 .. key.len - 1] });
+            try self.emitConstant(idx);
+        } else {
+            const idx = try self.addConstant(.{ .string = key });
+            try self.emitConstant(idx);
+        }
+        try self.emitOp(.array_get);
+    }
+
+    fn isVarStart(c: u8) bool {
+        return (c >= 'a' and c <= 'z') or (c >= 'A' and c <= 'Z') or c == '_';
+    }
+
+    fn isVarChar(c: u8) bool {
+        return isVarStart(c) or (c >= '0' and c <= '9');
+    }
+
+    fn processSingleQuoteEscapes(allocator: Allocator, s: []const u8) Allocator.Error!?[]const u8 {
+        if (std.mem.indexOf(u8, s, "\\") == null) return null;
+        var buf = std.ArrayListUnmanaged(u8){};
+        var i: usize = 0;
+        while (i < s.len) {
+            if (s[i] == '\\' and i + 1 < s.len) {
+                switch (s[i + 1]) {
+                    '\\' => {
+                        try buf.append(allocator, '\\');
+                        i += 2;
+                    },
+                    '\'' => {
+                        try buf.append(allocator, '\'');
+                        i += 2;
+                    },
+                    else => {
+                        try buf.append(allocator, s[i]);
+                        i += 1;
+                    },
+                }
+            } else {
+                try buf.append(allocator, s[i]);
+                i += 1;
+            }
+        }
+        const slice: []const u8 = try buf.toOwnedSlice(allocator);
+        return slice;
     }
 
     fn processEscapes(allocator: Allocator, s: []const u8) ![]const u8 {
@@ -569,6 +778,73 @@ const Compiler = struct {
         sub.string_allocs.deinit(self.allocator);
     }
 
+    fn compileClosure(self: *Compiler, node: Ast.Node) Error!void {
+        const id = self.closure_count;
+        self.closure_count += 1;
+
+        var name_buf: [32]u8 = undefined;
+        const name = std.fmt.bufPrint(&name_buf, "__closure_{d}", .{id}) catch "__closure";
+        const owned_name = try self.allocator.dupe(u8, name);
+        try self.string_allocs.append(self.allocator, owned_name);
+
+        const param_nodes = self.ast.extraSlice(node.data.lhs);
+        const param_names = try self.allocator.alloc([]const u8, param_nodes.len);
+        for (param_nodes, 0..) |p, i| {
+            param_names[i] = self.ast.tokenSlice(self.ast.nodes[p].main_token);
+        }
+
+        // rhs = extra -> {body, use_count, use_vars...}
+        const body_node = self.ast.extra_data[node.data.rhs];
+        const use_count = self.ast.extra_data[node.data.rhs + 1];
+        const use_vars = self.ast.extra_data[node.data.rhs + 2 .. node.data.rhs + 2 + use_count];
+
+        var sub = Compiler{
+            .ast = self.ast,
+            .chunk = .{},
+            .functions = .{},
+            .string_allocs = .{},
+            .allocator = self.allocator,
+            .scope_depth = self.scope_depth + 1,
+            .loop_start = null,
+            .break_jumps = .{},
+            .closure_count = self.closure_count,
+        };
+        errdefer {
+            sub.chunk.deinit(self.allocator);
+            sub.break_jumps.deinit(self.allocator);
+            sub.string_allocs.deinit(self.allocator);
+        }
+
+        try sub.compileNode(body_node);
+        try sub.emitOp(.op_null);
+        try sub.emitOp(.return_val);
+        sub.break_jumps.deinit(self.allocator);
+
+        self.closure_count = sub.closure_count;
+
+        try self.functions.append(self.allocator, .{
+            .name = owned_name,
+            .arity = @intCast(param_nodes.len),
+            .params = param_names[0..param_nodes.len],
+            .chunk = sub.chunk,
+        });
+
+        for (sub.functions.items) |f| try self.functions.append(self.allocator, f);
+        sub.functions.deinit(self.allocator);
+        for (sub.string_allocs.items) |s| try self.string_allocs.append(self.allocator, s);
+        sub.string_allocs.deinit(self.allocator);
+
+        const idx = try self.addConstant(.{ .string = owned_name });
+        try self.emitConstant(idx);
+
+        for (use_vars) |use_var_node| {
+            const var_name = self.ast.tokenSlice(self.ast.nodes[use_var_node].main_token);
+            const var_idx = try self.addConstant(.{ .string = var_name });
+            try self.emitOp(.closure_bind);
+            try self.emitU16(var_idx);
+        }
+    }
+
     // ==================================================================
     // calls
     // ==================================================================
@@ -577,13 +853,18 @@ const Compiler = struct {
         const callee = self.ast.nodes[node.data.lhs];
 
         const args = self.ast.extraSlice(node.data.rhs);
-        for (args) |arg| try self.compileNode(arg);
 
         if (callee.tag == .identifier) {
+            for (args) |arg| try self.compileNode(arg);
             const name = self.ast.tokenSlice(callee.main_token);
             const idx = try self.addConstant(.{ .string = name });
             try self.emitOp(.call);
             try self.emitU16(idx);
+            try self.emitByte(@intCast(args.len));
+        } else {
+            try self.compileNode(node.data.lhs);
+            for (args) |arg| try self.compileNode(arg);
+            try self.emitOp(.call_indirect);
             try self.emitByte(@intCast(args.len));
         }
     }
