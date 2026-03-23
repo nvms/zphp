@@ -9,4 +9,8 @@ test {
     _ = @import("pipeline/lexer.zig");
     _ = @import("pipeline/ast.zig");
     _ = @import("pipeline/parser.zig");
+    _ = @import("pipeline/bytecode.zig");
+    _ = @import("pipeline/compiler.zig");
+    _ = @import("runtime/value.zig");
+    _ = @import("runtime/vm.zig");
 }

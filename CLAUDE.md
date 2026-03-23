@@ -246,14 +246,19 @@ do NOT use the GitHub MCP server for creating repos or any write operations. the
 
 ## current status
 
-phase 1 in progress: lexer and parser complete. bytecode compiler + VM next.
+phase 1 complete: full pipeline from source to execution. zphp can run real PHP scripts.
 
 ### what exists
-- `src/pipeline/token.zig` - all PHP 8.x token types (145 variants), case-insensitive keyword lookup via StaticStringMap, Token struct with u32 start/end byte offsets
-- `src/pipeline/lexer.zig` - full PHP lexer with HTML/PHP modal lexing, comprehensive tests (42 tests)
-- `src/pipeline/ast.zig` - AST node definitions. flat array design: nodes stored contiguously with u32 indices, extra_data array for variable-length children. 35 node tags covering literals, operators, control flow, functions, arrays, property access
-- `src/pipeline/parser.zig` - Pratt-based recursive descent parser with 52 tests. handles full PHP operator precedence (19 levels), all assignment operators, short-circuit ops, ternary (including short form), postfix chains (calls, indexing, property access), function declarations, control flow (if/elseif/else, while, do-while, for, foreach), array literals, mixed HTML/PHP, error recovery
-- `src/main.zig` - CLI entry point, imports pipeline modules for test discovery
+- `src/pipeline/token.zig` - 145 PHP 8.x token types, case-insensitive keyword lookup (42 tests in lexer)
+- `src/pipeline/lexer.zig` - full PHP lexer with HTML/PHP modal lexing
+- `src/pipeline/ast.zig` - flat array AST, 35 node tags
+- `src/pipeline/parser.zig` - Pratt-based recursive descent parser (52 tests)
+- `src/pipeline/bytecode.zig` - ~45 opcodes, Chunk struct, ObjFunction struct
+- `src/pipeline/compiler.zig` - single-pass AST -> bytecode compiler with jump patching, function compilation, numeric literal parsing
+- `src/runtime/value.zig` - PHP Value tagged union (null, bool, int, float, string) with arithmetic, truthiness, formatting (3 tests)
+- `src/runtime/vm.zig` - stack-based bytecode interpreter with per-frame variable scoping, function calls, output capture (31 integration tests including fizzbuzz)
+- `src/main.zig` - CLI entry point, imports all modules for test discovery
+- 130 tests total across all modules
 
 ### lexer design decisions
 - tokens reference byte offsets into source (zero-copy, no allocations)
@@ -277,10 +282,46 @@ phase 1 in progress: lexer and parser complete. bytecode compiler + VM next.
 - error recovery: on parse error, skip to next `;`, `}`, or statement keyword and continue
 - S-expression renderer in test helpers makes parser tests compact and readable
 
+### compiler design decisions
+- single-pass AST walk: compileNode() dispatches on node tag, emits bytecodes
+- ~45 opcodes: constants, variable get/set, arithmetic, comparison, logical, bitwise, jumps, call/return, echo, halt
+- variables use `get_var`/`set_var` with string name constants (hash map lookup at runtime, not stack slots). simplifies scoping at the cost of performance
+- jump patching: emit placeholder u16, record offset, patch when target is known
+- control flow: `jump_if_false`/`jump_if_true` peek (don't pop) the condition. explicit `pop` on each path. this supports short-circuit `&&`/`||` cleanly
+- functions: compiled as separate Chunks via sub-compiler. function list passed to VM alongside main chunk. VM pre-registers all functions before execution (implicit hoisting)
+- compound assignment (`+=` etc.): emits get_var + rhs + op + set_var
+- post-increment: emits two get_var (one for expression result, one for modification), add 1, set_var, pop
+- string concat: allocates a new string buffer at runtime, tracked by VM for cleanup
+- numeric literals: custom parser handles hex (0x), binary (0b), octal (0o), and underscore separators
+
+### VM design decisions
+- stack-based: 256-slot value stack, 64 call frames
+- per-frame variable scoping via StringHashMapUnmanaged (each call frame has its own variable hash map). correctly isolates function-local variables from the caller
+- function params pre-populated in the frame's var map before execution
+- output captured in an ArrayListUnmanaged(u8) for testing. integration tests verify the entire pipeline: source -> lex -> parse -> compile -> execute -> output
+- runtime-allocated strings tracked in a separate list, freed on VM deinit
+- PHP-correct value formatting: true->"1", false->"", null->"", floats that are whole numbers display as integers
+
+### what the VM can execute
+- arithmetic: +, -, *, /, %, ** with int/float promotion
+- string concatenation: .
+- comparison: ==, !=, ===, !==, <, <=, >, >=, <=>
+- logical: &&, ||, !, and, or
+- bitwise: &, |, ^, ~, <<, >>
+- null coalesce: ??
+- ternary: ? : and short ternary ?:
+- variables: assignment, compound assignment (+=, -=, etc.), pre/post increment/decrement
+- control flow: if/elseif/else, while, do-while, for, break, continue
+- functions: declaration, calls, return with/without value, nested calls, parameter passing
+- echo: single and multi-expression
+- mixed HTML/PHP output
+- fizzbuzz works end-to-end
+
 ### next up
-- bytecode compiler (AST -> bytecode chunks)
-- VM interpreter (execute bytecode)
-- start with: arithmetic, variables, echo, function calls, if/while
+- `zphp run <file>` CLI command to execute PHP files
+- expand language support: classes, closures, arrays as runtime values
+- standard library functions (strlen, substr, array_map, etc.)
+- package manager groundwork
 
 ## self-improvement
 
