@@ -18,7 +18,8 @@ errors=""
 # start server
 "$ZPHP" serve "$APP" --port $PORT --workers 2 &
 SERVER_PID=$!
-trap "kill $SERVER_PID 2>/dev/null; wait $SERVER_PID 2>/dev/null" EXIT
+cleanup() { kill $SERVER_PID 2>/dev/null; wait $SERVER_PID 2>/dev/null; exit "${EXIT_CODE:-0}"; }
+trap cleanup EXIT
 
 # wait for server to start
 for i in $(seq 1 20); do
@@ -99,5 +100,7 @@ echo "$passed passed, $failed failed"
 
 if [ $failed -gt 0 ]; then
     echo -e "$errors"
+    EXIT_CODE=1
     exit 1
 fi
+EXIT_CODE=0
