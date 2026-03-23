@@ -93,6 +93,9 @@ pub const OpCode = enum(u8) {
     array_spread, // pop array, push each element onto the array below it
     splat_call, // pop array, spread as args to function call
 
+    // file inclusion
+    require, // u8: 0=require, 1=require_once, 2=include, 3=include_once (path string on stack)
+
     // foreach iteration
     iter_begin, // push index 0 (array already on stack)
     iter_check, // u16: exit offset. peek array+index, push key+value or jump

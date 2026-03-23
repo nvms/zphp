@@ -143,6 +143,9 @@ const Parser = struct {
             .kw_declare => self.skipDeclare(),
             .kw_global => self.parseGlobalStmt(),
             .kw_static => self.parseStaticVarStmt(),
+            .kw_namespace => self.parseNamespaceDecl(),
+            .kw_use => self.parseUseStmt(),
+            .kw_require, .kw_require_once, .kw_include, .kw_include_once => self.parseRequireStmt(),
             .l_brace => self.parseBlock(),
             .semicolon => {
                 _ = self.advance();
@@ -203,6 +206,61 @@ const Parser = struct {
         }
         _ = try self.expect(.semicolon);
         return self.addNode(.{ .tag = .static_var, .main_token = var_tok, .data = .{ .lhs = default } });
+    }
+
+    fn parseNamespaceDecl(self: *Parser) Error!u32 {
+        const tok = self.advance(); // namespace
+        var parts = std.ArrayListUnmanaged(u32){};
+        defer parts.deinit(self.allocator);
+
+        // namespace App\Models\User;
+        try parts.append(self.allocator, self.pos);
+        _ = try self.expect(.identifier);
+        while (self.peek() == .backslash) {
+            _ = self.advance();
+            try parts.append(self.allocator, self.pos);
+            _ = try self.expect(.identifier);
+        }
+        _ = try self.expect(.semicolon);
+
+        const extra = try self.addExtraList(parts.items);
+        return self.addNode(.{ .tag = .namespace_decl, .main_token = tok, .data = .{ .lhs = extra } });
+    }
+
+    fn parseUseStmt(self: *Parser) Error!u32 {
+        const tok = self.advance(); // use
+
+        // use App\Models\User;
+        // use App\Models\User as Alias;
+        var parts = std.ArrayListUnmanaged(u32){};
+        defer parts.deinit(self.allocator);
+
+        try parts.append(self.allocator, self.pos);
+        _ = try self.expect(.identifier);
+        while (self.peek() == .backslash) {
+            _ = self.advance();
+            try parts.append(self.allocator, self.pos);
+            _ = try self.expect(.identifier);
+        }
+
+        var alias: u32 = 0;
+        if (self.peek() == .kw_as) {
+            _ = self.advance();
+            alias = self.pos;
+            _ = try self.expect(.identifier);
+        }
+        _ = try self.expect(.semicolon);
+
+        const extra = try self.addExtraList(parts.items);
+        return self.addNode(.{ .tag = .use_stmt, .main_token = tok, .data = .{ .lhs = extra, .rhs = alias } });
+    }
+
+    fn parseRequireStmt(self: *Parser) Error!u32 {
+        const tok = self.advance(); // require/require_once/include/include_once
+        const path_expr = try self.parseExpression();
+        _ = try self.expect(.semicolon);
+        const req = try self.addNode(.{ .tag = .require_expr, .main_token = tok, .data = .{ .lhs = path_expr } });
+        return self.addNode(.{ .tag = .expression_stmt, .main_token = 0, .data = .{ .lhs = req } });
     }
 
     fn parseExpressionStmt(self: *Parser) Error!u32 {
@@ -603,7 +661,17 @@ const Parser = struct {
 
     fn parseNewExpr(self: *Parser) Error!u32 {
         _ = self.advance(); // new
+        if (self.peek() == .backslash) _ = self.advance(); // leading backslash
         const name_tok = try self.expect(.identifier);
+
+        // consume qualified name parts: \Identifier\Identifier...
+        var name_parts = std.ArrayListUnmanaged(u32){};
+        defer name_parts.deinit(self.allocator);
+        try name_parts.append(self.allocator, name_tok);
+        while (self.peek() == .backslash) {
+            _ = self.advance();
+            try name_parts.append(self.allocator, try self.expect(.identifier));
+        }
 
         var args = std.ArrayListUnmanaged(u32){};
         defer args.deinit(self.allocator);
@@ -622,7 +690,11 @@ const Parser = struct {
         }
 
         const extra = try self.addExtraList(args.items);
-        return self.addNode(.{ .tag = .new_expr, .main_token = name_tok, .data = .{ .lhs = extra } });
+        const name_extra = if (name_parts.items.len > 1)
+            try self.addExtraList(name_parts.items)
+        else
+            @as(u32, 0);
+        return self.addNode(.{ .tag = .new_expr, .main_token = name_tok, .data = .{ .lhs = extra, .rhs = name_extra } });
     }
 
     fn parseClassDecl(self: *Parser) Error!u32 {
@@ -632,7 +704,7 @@ const Parser = struct {
         var parent: u32 = 0;
         if (self.peek() == .kw_extends) {
             _ = self.advance();
-            parent = try self.addLiteral(.identifier);
+            parent = try self.parseQualifiedName();
         }
 
         _ = try self.expect(.l_brace);
@@ -802,6 +874,30 @@ const Parser = struct {
         return self.addNode(.{ .tag = .closure_expr, .main_token = fn_tok, .data = .{ .lhs = param_extra, .rhs = rhs_extra } });
     }
 
+    // parse a qualified name like App\Models\User or just User
+    // returns an identifier node for simple names, qualified_name node for multi-part
+    fn parseQualifiedName(self: *Parser) Error!u32 {
+        // optional leading backslash for fully-qualified names
+        const has_leading = self.peek() == .backslash;
+        if (has_leading) _ = self.advance();
+
+        const first_tok = try self.expect(.identifier);
+        if (self.peek() != .backslash) {
+            // simple name - return as plain identifier
+            return self.addNode(.{ .tag = .identifier, .main_token = first_tok, .data = .{} });
+        }
+
+        var parts = std.ArrayListUnmanaged(u32){};
+        defer parts.deinit(self.allocator);
+        try parts.append(self.allocator, first_tok);
+        while (self.peek() == .backslash) {
+            _ = self.advance();
+            try parts.append(self.allocator, try self.expect(.identifier));
+        }
+        const extra = try self.addExtraList(parts.items);
+        return self.addNode(.{ .tag = .qualified_name, .main_token = first_tok, .data = .{ .lhs = extra } });
+    }
+
     fn isTypeName(self: *Parser) bool {
         const tag = self.peek();
         return tag == .identifier or tag == .kw_array or tag == .kw_callable or
@@ -963,6 +1059,11 @@ const Parser = struct {
                 return self.addNode(.{ .tag = .prefix_op, .main_token = tok, .data = .{ .lhs = operand } });
             },
             .kw_new => return self.parseNewExpr(),
+            .kw_require, .kw_require_once, .kw_include, .kw_include_once => {
+                const tok = self.advance();
+                const path_expr = try self.parseExprPrec(1);
+                return self.addNode(.{ .tag = .require_expr, .main_token = tok, .data = .{ .lhs = path_expr } });
+            },
             else => return self.parsePrimaryExpr(),
         }
     }

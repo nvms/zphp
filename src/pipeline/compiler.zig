@@ -29,6 +29,10 @@ pub const CompileResult = struct {
 };
 
 pub fn compile(ast: *const Ast, allocator: Allocator) Error!CompileResult {
+    return compileWithPath(ast, allocator, "");
+}
+
+pub fn compileWithPath(ast: *const Ast, allocator: Allocator, file_path: []const u8) Error!CompileResult {
     var c = Compiler{
         .ast = ast,
         .chunk = .{},
@@ -39,6 +43,7 @@ pub fn compile(ast: *const Ast, allocator: Allocator) Error!CompileResult {
         .loop_start = null,
         .break_jumps = .{},
         .continue_jumps = .{},
+        .file_path = file_path,
     };
     errdefer {
         c.chunk.deinit(allocator);
@@ -74,6 +79,9 @@ const Compiler = struct {
     use_continue_jumps: bool = false,
     loop_depth: u32 = 0,
     closure_count: u32 = 0,
+    namespace: []const u8 = "",
+    use_aliases: std.StringHashMapUnmanaged([]const u8) = .{},
+    file_path: []const u8 = "",
 
     const LoopJump = struct {
         offset: usize,
@@ -206,6 +214,10 @@ const Compiler = struct {
             .global_stmt => try self.compileGlobal(node),
             .static_var => try self.compileStaticVar(node),
             .splat_expr => {},
+            .require_expr => try self.compileRequire(node),
+            .namespace_decl => try self.compileNamespace(node),
+            .use_stmt => try self.compileUse(node),
+            .qualified_name => {},
             .root => {},
         }
     }
@@ -492,9 +504,37 @@ const Compiler = struct {
 
     fn compileGetVar(self: *Compiler, node: Ast.Node) Error!void {
         const name = self.ast.tokenSlice(node.main_token);
+
+        // magic compile-time constants
+        if (std.mem.eql(u8, name, "__DIR__")) {
+            const dir = self.getFileDir();
+            const idx = try self.addConstant(.{ .string = dir });
+            try self.emitConstant(idx);
+            return;
+        }
+        if (std.mem.eql(u8, name, "__FILE__")) {
+            const path = if (self.file_path.len > 0) self.file_path else "";
+            const idx = try self.addConstant(.{ .string = path });
+            try self.emitConstant(idx);
+            return;
+        }
+
         const idx = try self.addConstant(.{ .string = name });
         try self.emitOp(.get_var);
         try self.emitU16(idx);
+    }
+
+    fn getFileDir(self: *Compiler) []const u8 {
+        if (self.file_path.len == 0) return ".";
+        // find last / or \ separator
+        var i: usize = self.file_path.len;
+        while (i > 0) {
+            i -= 1;
+            if (self.file_path[i] == '/' or self.file_path[i] == '\\') {
+                return if (i == 0) "/" else self.file_path[0..i];
+            }
+        }
+        return ".";
     }
 
     fn compileAssign(self: *Compiler, node: Ast.Node) Error!void {
@@ -1550,6 +1590,71 @@ const Compiler = struct {
 
         try self.emitOp(.set_var);
         try self.emitU16(var_idx);
+    }
+
+    // ==================================================================
+    // namespaces and file inclusion
+    // ==================================================================
+
+    fn compileNamespace(self: *Compiler, node: Ast.Node) Error!void {
+        // reconstruct namespace name from token indices
+        const parts = self.ast.extraSlice(node.data.lhs);
+        self.namespace = try self.buildQualifiedString(parts);
+    }
+
+    fn compileUse(self: *Compiler, node: Ast.Node) Error!void {
+        const parts = self.ast.extraSlice(node.data.lhs);
+        const fqn = try self.buildQualifiedString(parts);
+
+        // alias is either explicit (use Foo\Bar as Baz;) or last part of the name
+        const alias = if (node.data.rhs != 0)
+            self.ast.tokenSlice(node.data.rhs)
+        else
+            self.ast.tokenSlice(parts[parts.len - 1]);
+
+        try self.use_aliases.put(self.allocator, alias, fqn);
+    }
+
+    fn compileRequire(self: *Compiler, node: Ast.Node) Error!void {
+        try self.compileNode(node.data.lhs);
+        const tok_tag = self.ast.tokens[node.main_token].tag;
+        const variant: u8 = switch (tok_tag) {
+            .kw_require => 0,
+            .kw_require_once => 1,
+            .kw_include => 2,
+            .kw_include_once => 3,
+            else => 0,
+        };
+        try self.emitOp(.require);
+        try self.emitByte(variant);
+    }
+
+    // joins token indices with backslash to form "App\Models\User"
+    fn buildQualifiedString(self: *Compiler, parts: []const u32) Error![]const u8 {
+        if (parts.len == 1) return self.ast.tokenSlice(parts[0]);
+        var buf = std.ArrayListUnmanaged(u8){};
+        defer buf.deinit(self.allocator);
+        for (parts, 0..) |tok_idx, i| {
+            if (i > 0) try buf.append(self.allocator, '\\');
+            try buf.appendSlice(self.allocator, self.ast.tokenSlice(tok_idx));
+        }
+        const owned = try self.allocator.dupe(u8, buf.items);
+        try self.string_allocs.append(self.allocator, owned);
+        return owned;
+    }
+
+    // resolves a class name through use aliases and current namespace
+    fn resolveClassName(self: *Compiler, name: []const u8) []const u8 {
+        // fully-qualified names (starting with \) bypass resolution
+        if (name.len > 0 and name[0] == '\\') return name[1..];
+        // check use aliases
+        if (self.use_aliases.get(name)) |fqn| return fqn;
+        // prepend current namespace
+        if (self.namespace.len == 0) return name;
+        // need to allocate the qualified name
+        const qualified = std.fmt.allocPrint(self.allocator, "{s}\\{s}", .{ self.namespace, name }) catch return name;
+        self.string_allocs.append(self.allocator, qualified) catch return name;
+        return qualified;
     }
 
     fn compileArrayAccess(self: *Compiler, node: Ast.Node) Error!void {

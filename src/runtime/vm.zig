@@ -9,6 +9,8 @@ const CompileResult = @import("../pipeline/compiler.zig").CompileResult;
 
 const Allocator = std.mem.Allocator;
 const RuntimeError = error{ RuntimeError, OutOfMemory };
+
+pub const FileLoader = fn (path: []const u8, allocator: Allocator) ?*CompileResult;
 pub const NativeContext = struct {
     allocator: Allocator,
     arrays: *std.ArrayListUnmanaged(*PhpArray),
@@ -86,6 +88,9 @@ pub const VM = struct {
     classes: std.StringHashMapUnmanaged(ClassDef) = .{},
     statics: std.StringHashMapUnmanaged(Value) = .{},
     static_vars: std.ArrayListUnmanaged(StaticEntry) = .{},
+    file_loader: ?*const FileLoader = null,
+    loaded_files: std.StringHashMapUnmanaged(void) = .{},
+    compile_results: std.ArrayListUnmanaged(*CompileResult) = .{},
     exception_handlers: [32]ExceptionHandler = undefined,
     handler_count: usize = 0,
     allocator: Allocator,
@@ -188,6 +193,13 @@ pub const VM = struct {
         while (statics_iter.next()) |k| self.allocator.free(k.*);
         self.statics.deinit(self.allocator);
         self.static_vars.deinit(self.allocator);
+        self.loaded_files.deinit(self.allocator);
+        for (self.compile_results.items) |r| {
+            var result = r;
+            result.deinit();
+            self.allocator.destroy(result);
+        }
+        self.compile_results.deinit(self.allocator);
     }
 
     pub fn interpret(self: *VM, result: *const CompileResult) RuntimeError!void {
@@ -621,6 +633,59 @@ pub const VM = struct {
                 },
 
                 .set_static => {},
+
+                .require => {
+                    const variant = self.readByte();
+                    const path_val = self.pop();
+                    if (path_val != .string) {
+                        self.push(.null);
+                    } else {
+                        const is_once = (variant == 1 or variant == 3);
+                        const is_require = (variant == 0 or variant == 1);
+                        const path = path_val.string;
+
+                        if (is_once and self.loaded_files.contains(path)) {
+                            self.push(.{ .bool = true });
+                        } else {
+                            if (self.file_loader) |loader| {
+                                if (loader(path, self.allocator)) |result| {
+                                    try self.loaded_files.put(self.allocator, path, {});
+                                    try self.compile_results.append(self.allocator, result);
+
+                                    for (result.functions.items) |*func| {
+                                        try self.functions.put(self.allocator, func.name, func);
+                                    }
+
+                                    // execute via runUntilFrame so halt pops back here
+                                    const return_frame = self.frame_count;
+                                    self.frames[self.frame_count] = .{
+                                        .chunk = &result.chunk,
+                                        .ip = 0,
+                                        .vars = .{},
+                                    };
+                                    self.frame_count += 1;
+                                    self.runUntilFrame(return_frame) catch {
+                                        if (is_require) return error.RuntimeError;
+                                        self.push(.{ .bool = false });
+                                        continue;
+                                    };
+                                    // clean up the included file's frame if halt left it
+                                    while (self.frame_count > return_frame) {
+                                        self.frame_count -= 1;
+                                        self.frames[self.frame_count].vars.deinit(self.allocator);
+                                    }
+                                    self.push(.{ .bool = true });
+                                } else {
+                                    if (is_require) return error.RuntimeError;
+                                    self.push(.{ .bool = false });
+                                }
+                            } else {
+                                if (is_require) return error.RuntimeError;
+                                self.push(.{ .bool = false });
+                            }
+                        }
+                    }
+                },
 
                 .array_spread => {
                     // pop source array, spread its elements into the array on top of stack

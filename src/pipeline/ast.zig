@@ -126,6 +126,16 @@ pub const Ast = struct {
 
             // variadic
             splat_expr, // lhs = expression to spread (used in function call args)
+
+            // file inclusion
+            // main_token = require/require_once/include/include_once keyword
+            // lhs = path expression
+            require_expr,
+
+            // namespaces
+            namespace_decl, // main_token = namespace keyword, lhs = extra index -> {count, name_token_indices...}
+            use_stmt, // main_token = use keyword, lhs = extra index -> {count, name_token_indices...}, rhs = alias token (0 = no alias)
+            qualified_name, // main_token = first identifier, lhs = extra index -> {count, token_indices...} for multi-part names
         };
     };
 

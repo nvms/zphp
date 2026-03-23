@@ -348,6 +348,39 @@ fn renderNode(ast: *const Ast, idx: u32, buf: *Buf) !void {
             try renderNode(ast, node.data.lhs, buf);
             try w.writeByte(')');
         },
+        .require_expr => {
+            try w.writeAll("(");
+            try w.writeAll(ast.tokenSlice(node.main_token));
+            try w.writeByte(' ');
+            try renderNode(ast, node.data.lhs, buf);
+            try w.writeByte(')');
+        },
+        .namespace_decl => {
+            try w.writeAll("(namespace ");
+            for (ast.extraSlice(node.data.lhs), 0..) |tok_idx, i| {
+                if (i > 0) try w.writeByte('\\');
+                try w.writeAll(ast.tokenSlice(tok_idx));
+            }
+            try w.writeByte(')');
+        },
+        .use_stmt => {
+            try w.writeAll("(use ");
+            for (ast.extraSlice(node.data.lhs), 0..) |tok_idx, i| {
+                if (i > 0) try w.writeByte('\\');
+                try w.writeAll(ast.tokenSlice(tok_idx));
+            }
+            if (node.data.rhs != 0) {
+                try w.writeAll(" as ");
+                try w.writeAll(ast.tokenSlice(node.data.rhs));
+            }
+            try w.writeByte(')');
+        },
+        .qualified_name => {
+            for (ast.extraSlice(node.data.lhs), 0..) |tok_idx, i| {
+                if (i > 0) try w.writeByte('\\');
+                try w.writeAll(ast.tokenSlice(tok_idx));
+            }
+        },
         .root => {},
     }
 }
