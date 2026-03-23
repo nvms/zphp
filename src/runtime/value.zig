@@ -229,15 +229,49 @@ pub const Value = union(enum) {
                     const s = std.fmt.bufPrint(&tmp, "{d}", .{i}) catch return;
                     try buf.appendSlice(allocator, s);
                 } else {
+                    // PHP uses 14 significant digits for float display
+                    // compute digits before decimal to get correct precision
+                    const abs_f = @abs(f);
+                    const digits_before: usize = if (abs_f >= 1.0)
+                        @as(usize, @intFromFloat(@floor(@log10(abs_f)))) + 1
+                    else
+                        1;
+                    const precision: usize = if (digits_before < 14) 14 - digits_before else 0;
                     var tmp: [64]u8 = undefined;
-                    const s = std.fmt.bufPrint(&tmp, "{d}", .{f}) catch return;
-                    try buf.appendSlice(allocator, s);
+                    const s = formatFloat(&tmp, f, precision);
+                    // strip trailing zeros after decimal point
+                    var end: usize = s.len;
+                    if (std.mem.indexOf(u8, s, ".")) |_| {
+                        while (end > 1 and s[end - 1] == '0') end -= 1;
+                        if (end > 0 and s[end - 1] == '.') end -= 1;
+                    }
+                    try buf.appendSlice(allocator, s[0..end]);
                 }
             },
             .string => |s| try buf.appendSlice(allocator, s),
             .array => try buf.appendSlice(allocator, "Array"),
             .object => try buf.appendSlice(allocator, "Object"),
         }
+    }
+
+    fn formatFloat(buf: *[64]u8, f: f64, precision: usize) []const u8 {
+        return switch (precision) {
+            0 => std.fmt.bufPrint(buf, "{d:.0}", .{f}) catch "0",
+            1 => std.fmt.bufPrint(buf, "{d:.1}", .{f}) catch "0",
+            2 => std.fmt.bufPrint(buf, "{d:.2}", .{f}) catch "0",
+            3 => std.fmt.bufPrint(buf, "{d:.3}", .{f}) catch "0",
+            4 => std.fmt.bufPrint(buf, "{d:.4}", .{f}) catch "0",
+            5 => std.fmt.bufPrint(buf, "{d:.5}", .{f}) catch "0",
+            6 => std.fmt.bufPrint(buf, "{d:.6}", .{f}) catch "0",
+            7 => std.fmt.bufPrint(buf, "{d:.7}", .{f}) catch "0",
+            8 => std.fmt.bufPrint(buf, "{d:.8}", .{f}) catch "0",
+            9 => std.fmt.bufPrint(buf, "{d:.9}", .{f}) catch "0",
+            10 => std.fmt.bufPrint(buf, "{d:.10}", .{f}) catch "0",
+            11 => std.fmt.bufPrint(buf, "{d:.11}", .{f}) catch "0",
+            12 => std.fmt.bufPrint(buf, "{d:.12}", .{f}) catch "0",
+            13 => std.fmt.bufPrint(buf, "{d:.13}", .{f}) catch "0",
+            else => std.fmt.bufPrint(buf, "{d:.14}", .{f}) catch "0",
+        };
     }
 
     const BinOp = enum { add, sub, mul };
