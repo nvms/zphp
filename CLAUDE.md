@@ -264,13 +264,13 @@ phase 1 complete: full pipeline from source to execution. zphp can run real PHP 
 ### what exists
 - `src/pipeline/token.zig` - 145 PHP 8.x token types, case-insensitive keyword lookup (42 tests in lexer)
 - `src/pipeline/lexer.zig` - full PHP lexer with HTML/PHP modal lexing
-- `src/pipeline/ast.zig` - flat array AST, ~68 node tags (closure_expr, cast_expr, const_decl, switch/match, class_decl/method/property, new_expr, method_call, static_call, throw_expr, try_catch, catch_clause, array_spread, expr_list, global_stmt, static_var, splat_expr)
+- `src/pipeline/ast.zig` - flat array AST, 74 node tags (closure_expr, cast_expr, const_decl, switch/match, class_decl/method/property, new_expr, method_call, static_call, throw_expr, try_catch, catch_clause, array_spread, expr_list, global_stmt, static_var, splat_expr, require_expr, namespace_decl, use_stmt, qualified_name)
 - `src/pipeline/parser.zig` - Pratt-based recursive descent parser with 2-token lookahead for cast detection, class declarations, method calls, try/catch, throw, global/static vars, variadic params, array spread
 - `src/pipeline/parser_tests.zig` - parser unit tests with S-expression renderer (61 tests)
-- `src/pipeline/bytecode.zig` - ~74 opcodes (class_decl, new_obj, get_prop, set_prop, method_call, static_call, throw, push_handler, pop_handler, instance_check, get_global, get_static, set_static, array_spread, splat_call), Chunk struct, ObjFunction struct with default params and variadic support
-- `src/pipeline/compiler.zig` - single-pass AST -> bytecode compiler with jump patching, function compilation, numeric literal parsing, string interpolation, class compilation, exception handling
+- `src/pipeline/bytecode.zig` - ~91 opcodes (class_decl, new_obj, get_prop, set_prop, method_call, static_call, throw, push_handler, pop_handler, instance_check, get_global, get_static, set_static, array_spread, call_spread, call_indirect_spread, require), Chunk struct, ObjFunction struct with default params and variadic support
+- `src/pipeline/compiler.zig` - single-pass AST -> bytecode compiler with jump patching, function compilation, numeric literal parsing, string interpolation, class compilation, exception handling, namespace resolution, __DIR__/__FILE__ magic constants
 - `src/runtime/value.zig` - PHP Value tagged union (null, bool, int, float, string, array, object) with arithmetic, truthiness, string-aware comparison, PHP-correct 14-digit float formatting. PhpObject struct with property hashmap (4 tests)
-- `src/runtime/vm.zig` - stack-based bytecode interpreter with per-frame variable scoping, function calls, closures with captures, arrays, foreach, switch/match, constants table, type casts, native function dispatch, class registry, object instantiation, property access, method dispatch with $this binding, exception handling with handler stack, global/static variable support
+- `src/runtime/vm.zig` - stack-based bytecode interpreter with per-frame variable scoping, function calls, closures with captures, arrays, foreach, switch/match, constants table, type casts, native function dispatch, class registry, object instantiation, property access, method dispatch with $this binding, exception handling with handler stack, global/static variable support, FileLoader for require/include, DivisionByZeroError
 - `src/runtime/builtins.zig` - built-in Exception class hierarchy with native method implementations (getMessage, getCode, __construct)
 - `src/integration_tests.zig` - end-to-end pipeline tests (111 tests)
 - `src/stdlib/` - 150+ native PHP functions split by domain:
@@ -282,9 +282,8 @@ phase 1 complete: full pipeline from source to execution. zphp can run real PHP 
   - `json.zig` - json_encode/json_decode
   - `io.zig` - file_get_contents/file_put_contents/file_exists/is_file/is_dir/basename/dirname/pathinfo/realpath/time/microtime/date
   - `pcre.zig` - preg_match/preg_match_all/preg_replace/preg_split (FFI bindings to libpcre2)
-- `src/main.zig` - CLI entry point with `zphp run <file>`, imports all modules for test discovery
-- 222 unit tests total across all modules
-- 54 PHP compatibility test files in tests/ verified against PHP 8.3
+- `src/main.zig` - CLI entry point with `zphp run <file>`, FileLoader implementation for require/include, imports all modules for test discovery
+- 56 PHP compatibility test files in tests/ verified against PHP 8.3 (including multi-file require/include tests with tests/include/ helpers)
 
 ### lexer design decisions
 - tokens reference byte offsets into source (zero-copy, no allocations)
@@ -353,6 +352,10 @@ phase 1 complete: full pipeline from source to execution. zphp can run real PHP 
 - string interpolation: `"Hello $name"`, `"{$var}"`, `"$arr[0]"`, `"{$arr['key']}"`, escaped `\$`
 - classes: declaration with properties (with defaults) and methods, `new ClassName(args)`, `$obj->method(args)`, `$obj->prop`, `$this` binding in methods, `__construct` auto-call, `ClassName::method()` static calls, `extends` inheritance, `parent::method()` calls
 - exceptions: try/catch/finally, throw, typed catch with instanceof checking, multi-catch, nested try/catch with propagation, re-throw on no match, built-in Exception/RuntimeException/etc classes
+- file inclusion: require, require_once, include, include_once with FileLoader pattern. `_once` dedup. functions/classes from loaded files are globally registered. loaded files execute in isolated scope (known limitation: variables don't leak to caller)
+- namespaces: `namespace App\Models;`, `use App\Foo\Bar;`, `use App\Foo as F;`. compile-time name resolution. qualified names with backslash separator
+- magic constants: `__DIR__` (directory of current file), `__FILE__` (absolute path of current file). resolved at compile time
+- `declare(strict_types=1)` parsed and skipped (not enforced)
 - echo: single and multi-expression
 - mixed HTML/PHP output
 
