@@ -11,6 +11,22 @@ pub const entries = .{
     .{ "min", native_min },
     .{ "max", native_max },
     .{ "rand", native_rand },
+    .{ "pow", native_pow },
+    .{ "sqrt", native_sqrt },
+    .{ "log", native_log },
+    .{ "log2", native_log2 },
+    .{ "log10", native_log10 },
+    .{ "exp", native_exp },
+    .{ "pi", native_pi },
+    .{ "fmod", native_fmod },
+    .{ "intdiv", native_intdiv },
+    .{ "base_convert", native_base_convert },
+    .{ "bindec", native_bindec },
+    .{ "octdec", native_octdec },
+    .{ "hexdec", native_hexdec },
+    .{ "decbin", native_decbin },
+    .{ "decoct", native_decoct },
+    .{ "dechex", native_dechex },
 };
 
 fn native_abs(_: *NativeContext, args: []const Value) RuntimeError!Value {
@@ -81,4 +97,123 @@ fn native_rand(_: *NativeContext, args: []const Value) RuntimeError!Value {
     const range: u64 = @intCast(hi - lo + 1);
     const r = std.crypto.random.intRangeAtMost(u64, 0, range - 1);
     return .{ .int = lo + @as(i64, @intCast(r)) };
+}
+
+fn native_pow(_: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len < 2) return .{ .int = 0 };
+    return Value.power(args[0], args[1]);
+}
+
+fn native_sqrt(_: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len == 0) return .{ .float = 0.0 };
+    return .{ .float = @sqrt(Value.toFloat(args[0])) };
+}
+
+fn native_log(_: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len == 0) return .{ .float = 0.0 };
+    const v = Value.toFloat(args[0]);
+    if (args.len >= 2) {
+        const base = Value.toFloat(args[1]);
+        return .{ .float = @log(v) / @log(base) };
+    }
+    return .{ .float = @log(v) };
+}
+
+fn native_log2(_: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len == 0) return .{ .float = 0.0 };
+    return .{ .float = std.math.log2(Value.toFloat(args[0])) };
+}
+
+fn native_log10(_: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len == 0) return .{ .float = 0.0 };
+    return .{ .float = std.math.log10(Value.toFloat(args[0])) };
+}
+
+fn native_exp(_: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len == 0) return .{ .float = 1.0 };
+    return .{ .float = @exp(Value.toFloat(args[0])) };
+}
+
+fn native_pi(_: *NativeContext, _: []const Value) RuntimeError!Value {
+    return .{ .float = std.math.pi };
+}
+
+fn native_fmod(_: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len < 2) return .{ .float = 0.0 };
+    const x = Value.toFloat(args[0]);
+    const y = Value.toFloat(args[1]);
+    if (y == 0.0) return .{ .float = std.math.nan(f64) };
+    return .{ .float = @mod(x, y) };
+}
+
+fn native_intdiv(_: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len < 2) return .{ .int = 0 };
+    const b = Value.toInt(args[1]);
+    if (b == 0) return error.RuntimeError;
+    return .{ .int = @divTrunc(Value.toInt(args[0]), b) };
+}
+
+fn native_base_convert(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len < 3) return .{ .string = "0" };
+    const num_str = if (args[0] == .string) args[0].string else return Value{ .string = "0" };
+    const from_base: u8 = @intCast(@max(2, @min(36, Value.toInt(args[1]))));
+    const to_base: u8 = @intCast(@max(2, @min(36, Value.toInt(args[2]))));
+    const val = std.fmt.parseInt(u64, num_str, from_base) catch return Value{ .string = "0" };
+    const digits = "0123456789abcdefghijklmnopqrstuvwxyz";
+    var buf: [65]u8 = undefined;
+    var pos: usize = buf.len;
+    var v = val;
+    if (v == 0) {
+        pos -= 1;
+        buf[pos] = '0';
+    } else {
+        while (v > 0) {
+            pos -= 1;
+            buf[pos] = digits[@intCast(v % to_base)];
+            v /= to_base;
+        }
+    }
+    return .{ .string = try ctx.createString(buf[pos..]) };
+}
+
+fn native_bindec(_: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len == 0) return .{ .int = 0 };
+    const s = if (args[0] == .string) args[0].string else return Value{ .int = 0 };
+    return .{ .int = std.fmt.parseInt(i64, s, 2) catch 0 };
+}
+
+fn native_octdec(_: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len == 0) return .{ .int = 0 };
+    const s = if (args[0] == .string) args[0].string else return Value{ .int = 0 };
+    return .{ .int = std.fmt.parseInt(i64, s, 8) catch 0 };
+}
+
+fn native_hexdec(_: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len == 0) return .{ .int = 0 };
+    const s = if (args[0] == .string) args[0].string else return Value{ .int = 0 };
+    return .{ .int = std.fmt.parseInt(i64, s, 16) catch 0 };
+}
+
+fn native_decbin(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len == 0) return .{ .string = "0" };
+    const val = Value.toInt(args[0]);
+    var buf: [65]u8 = undefined;
+    const s = std.fmt.bufPrint(&buf, "{b}", .{@as(u64, @bitCast(val))}) catch return Value{ .string = "0" };
+    return .{ .string = try ctx.createString(s) };
+}
+
+fn native_decoct(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len == 0) return .{ .string = "0" };
+    const val = Value.toInt(args[0]);
+    var buf: [32]u8 = undefined;
+    const s = std.fmt.bufPrint(&buf, "{o}", .{@as(u64, @bitCast(val))}) catch return Value{ .string = "0" };
+    return .{ .string = try ctx.createString(s) };
+}
+
+fn native_dechex(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len == 0) return .{ .string = "0" };
+    const val = Value.toInt(args[0]);
+    var buf: [17]u8 = undefined;
+    const s = std.fmt.bufPrint(&buf, "{x}", .{@as(u64, @bitCast(val))}) catch return Value{ .string = "0" };
+    return .{ .string = try ctx.createString(s) };
 }

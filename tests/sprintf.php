@@ -1,0 +1,23 @@
+<?php
+echo sprintf("Hello %s", "World");
+echo "\n";
+echo sprintf("%d items", 42);
+echo "\n";
+echo sprintf("%05d", 7);
+echo "\n";
+echo sprintf("%.2f", 3.14159);
+echo "\n";
+echo sprintf("%10s", "right");
+echo "\n";
+echo sprintf("%-10s|", "left");
+echo "\n";
+echo sprintf("%%");
+echo "\n";
+echo sprintf("%x", 255);
+echo "\n";
+echo sprintf("%X", 255);
+echo "\n";
+echo sprintf("%o", 8);
+echo "\n";
+echo sprintf("%b", 10);
+echo "\n";
