@@ -11,6 +11,7 @@ pub fn build(b: *std.Build) void {
     });
 
     exe_mod.linkSystemLibrary("pcre2-8", .{});
+    exe_mod.link_libc = true;
 
     const exe = b.addExecutable(.{
         .name = "zphp",
