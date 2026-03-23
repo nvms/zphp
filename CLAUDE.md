@@ -478,6 +478,29 @@ phase 1 complete: full pipeline from source to execution. zphp can run real PHP 
 - `continue` in for loops: uses forward-jump patching (`continue_jumps` list) instead of backward jump. continue jumps are patched to land at the update expression, not the condition. `use_continue_jumps` flag distinguishes for loops (need forward jumps) from while/do-while (use backward jumps to condition)
 - `break N` / `continue N`: parser reads optional integer literal after break/continue, stores level in `lhs`. compiler tracks `loop_depth` counter, emits jumps with target depth. `patchBreaks()`/`patchContinues()` only patch jumps matching current depth, propagating outer-targeting jumps to the parent loop's lists
 
+### require/include and file loading
+- `require`, `require_once`, `include`, `include_once` are parsed as expressions (can be used in assignments: `$x = require 'foo.php'`). as statements, they're wrapped in `expression_stmt` for the pop
+- `require` opcode takes a u8 variant (0=require, 1=require_once, 2=include, 3=include_once). pops path string from stack, calls FileLoader to compile the file, registers its functions/classes, executes via `runUntilFrame`, pushes bool result
+- `FileLoader` is a function pointer on the VM: `fn(path, allocator) ?*CompileResult`. set by `main.zig` to a function that reads the file, parses, compiles, and returns a heap-allocated CompileResult
+- loaded file source buffers must stay alive because compiled bytecode references slices into them. source ownership is transferred to the CompileResult's `string_allocs` for cleanup
+- `loaded_files` hashmap on the VM tracks paths for `_once` dedup. `compile_results` ArrayList tracks heap-allocated CompileResults for cleanup at VM deinit
+- loaded files execute in a new call frame. `halt` at the end returns from the nested `runLoop` call. variables defined in the loaded file are NOT visible in the caller's scope (this diverges from PHP's shared-scope behavior for require - known limitation)
+
+### __DIR__ and __FILE__ magic constants
+- resolved at compile time in `compileGetVar` by checking if the identifier text matches `__DIR__` or `__FILE__`
+- `__FILE__` emits the absolute file path as a string constant
+- `__DIR__` emits the directory portion of the absolute file path
+- `compileWithPath(ast, allocator, file_path)` passes the file path to the compiler. `compile(ast, allocator)` is a convenience wrapper that passes empty path
+- `main.zig` resolves to absolute path via `std.fs.cwd().realpathAlloc` before passing to compiler
+
+### namespaces and use statements
+- `namespace App\Models;` parsed as `namespace_decl` with token indices stored in extra_data. compiler sets `self.namespace` to the joined string
+- `use App\Foo\Bar;` and `use App\Foo\Bar as Baz;` parsed as `use_stmt`. compiler registers alias in `use_aliases` hashmap (short name -> fully qualified name)
+- `resolveClassName` checks: fully-qualified names (leading `\`) bypass resolution, then use aliases, then prepend current namespace
+- namespace resolution is a compile-time concern - the VM only sees fully-qualified names
+- `qualified_name` AST node for multi-part names (`App\Models\User`). `parseQualifiedName` consumes `identifier(\identifier)*` sequences
+- `buildQualifiedString` joins token parts with `\` separator, allocates the result string in `string_allocs`
+
 ### dangling pointer gotcha in temp variable names
 switch/match compilation generates temp variable names like `__match_0` using `std.fmt.allocPrint` (heap allocated, tracked in string_allocs). originally used stack-allocated `bufPrint` which caused use-after-free when the constant pool held a pointer to the expired stack buffer. the bug was latent - only manifested when other changes shifted the stack layout enough to overwrite the buffer. rule: any string stored in the constant pool must be either a source slice or a heap allocation tracked by string_allocs
 
