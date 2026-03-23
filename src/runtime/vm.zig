@@ -237,8 +237,26 @@ pub const VM = struct {
                 .add => self.binaryOp(Value.add),
                 .subtract => self.binaryOp(Value.subtract),
                 .multiply => self.binaryOp(Value.multiply),
-                .divide => self.binaryOp(Value.divide),
-                .modulo => self.binaryOp(Value.modulo),
+                .divide => {
+                    const b = self.pop();
+                    const a = self.pop();
+                    const bv = Value.toFloat(b);
+                    if (bv == 0.0) {
+                        if (try self.throwBuiltinException("DivisionByZeroError", "Division by zero")) continue;
+                        return error.RuntimeError;
+                    }
+                    self.push(Value.divide(a, b));
+                },
+                .modulo => {
+                    const b = self.pop();
+                    const a = self.pop();
+                    const bi = Value.toInt(b);
+                    if (bi == 0) {
+                        if (try self.throwBuiltinException("DivisionByZeroError", "Division by zero")) continue;
+                        return error.RuntimeError;
+                    }
+                    self.push(Value.modulo(a, b));
+                },
                 .power => self.binaryOp(Value.power),
                 .negate => {
                     const v = self.pop();
@@ -882,6 +900,31 @@ pub const VM = struct {
                 },
             }
         }
+    }
+
+    // creates an exception object and throws it via the handler stack
+    // returns true if a handler caught it (caller should `continue`), false if uncaught
+    fn throwBuiltinException(self: *VM, class_name: []const u8, message: []const u8) !bool {
+        const obj = try self.allocator.create(PhpObject);
+        obj.* = .{ .class_name = class_name };
+        try obj.set(self.allocator, "message", .{ .string = message });
+        try obj.set(self.allocator, "code", .{ .int = 0 });
+        try self.objects.append(self.allocator, obj);
+
+        if (self.handler_count == 0) return false;
+
+        const handler = self.exception_handlers[self.handler_count - 1];
+        self.handler_count -= 1;
+
+        while (self.frame_count > handler.frame_count) {
+            self.frame_count -= 1;
+            self.frames[self.frame_count].vars.deinit(self.allocator);
+        }
+
+        self.sp = handler.sp;
+        self.push(.{ .object = obj });
+        self.currentFrame().ip = handler.catch_ip;
+        return true;
     }
 
     fn writebackStatics(self: *VM) !void {
