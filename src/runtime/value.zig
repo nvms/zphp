@@ -56,6 +56,29 @@ pub const PhpArray = struct {
     }
 };
 
+const Chunk = @import("../pipeline/bytecode.zig").Chunk;
+const ObjFunction = @import("../pipeline/bytecode.zig").ObjFunction;
+
+pub const Generator = struct {
+    state: State = .created,
+    func: *const ObjFunction,
+    ip: usize = 0,
+    vars: std.StringHashMapUnmanaged(Value) = .{},
+    stack: std.ArrayListUnmanaged(Value) = .{},
+    current_value: Value = .null,
+    current_key: Value = .null,
+    return_value: Value = .null,
+    implicit_key: i64 = 0,
+    handler_count: usize = 0,
+
+    pub const State = enum { created, suspended, running, completed };
+
+    pub fn deinit(self: *Generator, allocator: std.mem.Allocator) void {
+        self.vars.deinit(allocator);
+        self.stack.deinit(allocator);
+    }
+};
+
 pub const PhpObject = struct {
     class_name: []const u8,
     properties: std.StringHashMapUnmanaged(Value) = .{},
@@ -81,6 +104,7 @@ pub const Value = union(enum) {
     string: []const u8,
     array: *PhpArray,
     object: *PhpObject,
+    generator: *Generator,
 
     pub fn isTruthy(self: Value) bool {
         return switch (self) {
@@ -90,7 +114,7 @@ pub const Value = union(enum) {
             .float => |f| f != 0.0,
             .string => |s| s.len > 0 and !std.mem.eql(u8, s, "0"),
             .array => |a| a.entries.items.len > 0,
-            .object => true,
+            .object, .generator => true,
         };
     }
 
@@ -153,11 +177,12 @@ pub const Value = union(enum) {
             .string => |as_| std.mem.eql(u8, as_, b.string),
             .array => |ap| ap == b.array,
             .object => |ao| ao == b.object,
+            .generator => |ag| ag == b.generator,
         };
     }
 
     pub fn lessThan(a: Value, b: Value) bool {
-        if (a == .object or b == .object) return false;
+        if (a == .object or b == .object or a == .generator or b == .generator) return false;
         if (a == .string and b == .string) {
             return std.mem.order(u8, a.string, b.string) == .lt;
         }
@@ -165,7 +190,7 @@ pub const Value = union(enum) {
     }
 
     pub fn compare(a: Value, b: Value) i64 {
-        if (a == .object or b == .object) return 0;
+        if (a == .object or b == .object or a == .generator or b == .generator) return 0;
         if (a == .string and b == .string) {
             return switch (std.mem.order(u8, a.string, b.string)) {
                 .lt => -1,
@@ -187,7 +212,7 @@ pub const Value = union(enum) {
             .int => |i| i,
             .float => |f| @intFromFloat(f),
             .string => |s| std.fmt.parseInt(i64, s, 10) catch 0,
-            .array, .object => 0,
+            .array, .object, .generator => 0,
         };
     }
 
@@ -198,7 +223,7 @@ pub const Value = union(enum) {
             .int => |i| @floatFromInt(i),
             .float => |f| f,
             .string => |s| std.fmt.parseFloat(f64, s) catch 0.0,
-            .array, .object => 0.0,
+            .array, .object, .generator => 0.0,
         };
     }
 
@@ -209,7 +234,7 @@ pub const Value = union(enum) {
             .bool => |b| .{ .int = if (b) 1 else 0 },
             .float => |f| .{ .int = @intFromFloat(f) },
             .null => .{ .int = 0 },
-            .array, .object => .{ .int = 0 },
+            .array, .object, .generator => .{ .int = 0 },
         };
     }
 
@@ -251,6 +276,7 @@ pub const Value = union(enum) {
             .string => |s| try buf.appendSlice(allocator, s),
             .array => try buf.appendSlice(allocator, "Array"),
             .object => try buf.appendSlice(allocator, "Object"),
+            .generator => try buf.appendSlice(allocator, ""),
         }
     }
 

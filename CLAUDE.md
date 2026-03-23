@@ -57,7 +57,7 @@ src/
 
 ## scope
 
-covers ~95% of PHP 8.x: operators, control flow, functions (variadic, closures, spread), classes (inheritance, static, interfaces, traits, visibility), exceptions, namespaces, require/include, 160+ stdlib functions, mixed HTML/PHP. see ARCHITECTURE.md for details per subsystem.
+covers ~95% of PHP 8.x: operators, control flow, functions (variadic, closures, spread, generators/yield), classes (inheritance, static, interfaces, traits, visibility), exceptions, namespaces, require/include, 160+ stdlib functions, mixed HTML/PHP. see ARCHITECTURE.md for details per subsystem.
 
 ## known limitations
 
@@ -72,6 +72,7 @@ covers ~95% of PHP 8.x: operators, control flow, functions (variadic, closures, 
 ## runtime error gotchas
 
 - **throwBuiltinException vs return error.RuntimeError**: for any runtime error that PHP code should be able to catch (visibility violations, type errors, division by zero, etc), use `throwBuiltinException` + `continue`, NOT `return error.RuntimeError`. the zig error bypasses the PHP exception handler stack entirely, causing hangs when a try/catch is present. pattern: `if (try self.throwBuiltinException("Error", msg)) continue; return error.RuntimeError;`
+- **generator yield/return must use `return`, not `continue`**: yield_value, yield_pair, and generator_return opcodes must `return` from runLoop to exit the nested execution, not `continue`. `continue` re-enters the while loop instead of exiting, causing the generator to execute past the yield point
 - **catch clause qualified names**: `\Exception` is valid PHP. the parser must handle backslash-prefixed types in catch clauses via `parseQualifiedName()`, not just `.identifier` token checks
 - **visibility checks need the defining class**: `findPropertyVisibility` / `findMethodVisibility` must return which class defined the member, not just the visibility level. private access checks against the defining class, not the object's runtime class
 - **stdlib function name conflicts**: functions registered later in registry.zig overwrite earlier ones. check arrays.zig/types.zig/etc for existing stubs before adding new implementations
@@ -99,13 +100,13 @@ GitHub Actions on push: `zig build test` (ubuntu + macos), PHP compat tests agai
 - `tests/*.php` files run through both `php` and `zphp run`, diff output
 - `tests/include/` has helper files for require/include tests
 - rule: every new feature gets a test file. the spec is PHP's behavior
-- 63 test files currently
+- 64 test files currently
 
 ## roadmap
 
 next:
 - stdlib pass 2: OOP-dependent (`DateTime`, `SplStack`, `ArrayObject`)
-- generators/yield
+- `yield from` delegation
 - package manager (composer.json, packagist, SAT solver, autoloader)
 - `zphp build` (bundle to binary)
 - `zphp test`, `zphp fmt`

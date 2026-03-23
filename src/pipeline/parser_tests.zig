@@ -353,6 +353,21 @@ fn renderNode(ast: *const Ast, idx: u32, buf: *Buf) !void {
             try w.writeByte(')');
         },
         .trait_use => try w.writeAll("(use-trait)"),
+        .yield_expr => {
+            try w.writeAll("(yield");
+            if (node.data.lhs != 0) {
+                try w.writeByte(' ');
+                try renderNode(ast, node.data.lhs, buf);
+            }
+            try w.writeByte(')');
+        },
+        .yield_pair_expr => {
+            try w.writeAll("(yield ");
+            try renderNode(ast, node.data.lhs, buf);
+            try w.writeAll(" => ");
+            try renderNode(ast, node.data.rhs, buf);
+            try w.writeByte(')');
+        },
         .expr_list => {
             for (ast.extraSlice(node.data.lhs), 0..) |expr, i| {
                 if (i > 0) try w.writeAll(", ");

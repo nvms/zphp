@@ -105,7 +105,13 @@ pub const OpCode = enum(u8) {
     iter_check, // u16: exit offset. peek array+index, push key+value or jump
     iter_advance, // pop index, push index+1
     iter_end, // pop index, pop array
+
+    // generators
+    yield_value, // pop value, suspend generator, push received value on resume
+    yield_pair, // pop value, pop key, suspend generator
+    generator_return, // pop value, mark generator completed
 };
+
 
 pub const Chunk = struct {
     code: std.ArrayListUnmanaged(u8) = .{},
@@ -138,6 +144,7 @@ pub const ObjFunction = struct {
     arity: u8,
     required_params: u8 = 0,
     is_variadic: bool = false,
+    is_generator: bool = false,
     params: []const []const u8,
     defaults: []const Value = &.{},
     chunk: Chunk = .{},

@@ -131,6 +131,10 @@ pub const Ast = struct {
             global_stmt, // lhs = extra index -> {count, variable_nodes...}
             static_var, // main_token = variable, lhs = default expression (0 = none)
 
+            // generators
+            yield_expr, // lhs = value expression (0 = yield null)
+            yield_pair_expr, // lhs = key expression, rhs = value expression
+
             // variadic
             splat_expr, // lhs = expression to spread (used in function call args)
 

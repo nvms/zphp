@@ -706,6 +706,28 @@ const Parser = struct {
         return self.addNode(.{ .tag = .new_expr, .main_token = name_tok, .data = .{ .lhs = extra, .rhs = name_extra } });
     }
 
+    fn parseYieldExpr(self: *Parser) Error!u32 {
+        const tok = self.advance(); // yield
+
+        // bare yield (no value)
+        if (self.peek() == .semicolon or self.peek() == .r_paren or
+            self.peek() == .r_bracket or self.peek() == .comma or self.peek() == .eof)
+        {
+            return self.addNode(.{ .tag = .yield_expr, .main_token = tok, .data = .{} });
+        }
+
+        const expr = try self.parseExprPrec(1);
+
+        // yield $key => $value
+        if (self.peek() == .fat_arrow) {
+            _ = self.advance();
+            const value = try self.parseExprPrec(1);
+            return self.addNode(.{ .tag = .yield_pair_expr, .main_token = tok, .data = .{ .lhs = expr, .rhs = value } });
+        }
+
+        return self.addNode(.{ .tag = .yield_expr, .main_token = tok, .data = .{ .lhs = expr } });
+    }
+
     fn parseClassDecl(self: *Parser) Error!u32 {
         if (self.peek() == .kw_abstract) _ = self.advance();
         _ = self.advance(); // class
@@ -1246,6 +1268,7 @@ const Parser = struct {
                 return self.addNode(.{ .tag = .prefix_op, .main_token = tok, .data = .{ .lhs = operand } });
             },
             .kw_new => return self.parseNewExpr(),
+            .kw_yield => return self.parseYieldExpr(),
             .kw_require, .kw_require_once, .kw_include, .kw_include_once => {
                 const tok = self.advance();
                 const path_expr = try self.parseExprPrec(1);

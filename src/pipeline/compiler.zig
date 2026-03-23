@@ -79,6 +79,7 @@ const Compiler = struct {
     use_continue_jumps: bool = false,
     loop_depth: u32 = 0,
     closure_count: u32 = 0,
+    is_generator: bool = false,
     namespace: []const u8 = "",
     use_aliases: std.StringHashMapUnmanaged([]const u8) = .{},
     file_path: []const u8 = "",
@@ -106,11 +107,20 @@ const Compiler = struct {
                 }
             },
             .return_stmt => {
-                if (node.data.lhs != 0) {
-                    try self.compileNode(node.data.lhs);
-                    try self.emitOp(.return_val);
+                if (self.is_generator) {
+                    if (node.data.lhs != 0) {
+                        try self.compileNode(node.data.lhs);
+                    } else {
+                        try self.emitOp(.op_null);
+                    }
+                    try self.emitOp(.generator_return);
                 } else {
-                    try self.emitOp(.return_void);
+                    if (node.data.lhs != 0) {
+                        try self.compileNode(node.data.lhs);
+                        try self.emitOp(.return_val);
+                    } else {
+                        try self.emitOp(.return_void);
+                    }
                 }
             },
             .break_stmt => {
@@ -205,6 +215,8 @@ const Compiler = struct {
             .method_call => try self.compileMethodCall(node),
             .static_call => try self.compileStaticCall(node),
             .static_prop_access => try self.compileStaticPropAccess(node),
+            .yield_expr => try self.compileYield(node),
+            .yield_pair_expr => try self.compileYieldPair(node),
             .expr_list => {
                 const exprs = self.ast.extraSlice(node.data.lhs);
                 for (exprs, 0..) |expr, i| {
@@ -962,6 +974,8 @@ const Compiler = struct {
         const defaults_owned = try self.allocator.alloc(Value, defaults.items.len);
         @memcpy(defaults_owned, defaults.items);
 
+        const gen = self.containsYield(node.data.rhs);
+
         var sub = Compiler{
             .ast = self.ast,
             .chunk = .{},
@@ -972,6 +986,7 @@ const Compiler = struct {
             .loop_start = null,
             .break_jumps = .{},
             .continue_jumps = .{},
+            .is_generator = gen,
         };
         errdefer {
             sub.chunk.deinit(self.allocator);
@@ -982,7 +997,7 @@ const Compiler = struct {
 
         try sub.compileNode(node.data.rhs);
         try sub.emitOp(.op_null);
-        try sub.emitOp(.return_val);
+        try sub.emitOp(if (gen) .generator_return else .return_val);
         sub.break_jumps.deinit(self.allocator);
         sub.continue_jumps.deinit(self.allocator);
 
@@ -991,6 +1006,7 @@ const Compiler = struct {
             .arity = @intCast(param_nodes.len),
             .required_params = required,
             .is_variadic = is_variadic,
+            .is_generator = gen,
             .params = param_names[0..param_nodes.len],
             .defaults = defaults_owned,
             .chunk = sub.chunk,
@@ -1419,6 +1435,61 @@ const Compiler = struct {
         try self.emitOp(.get_static_prop);
         try self.emitU16(class_idx);
         try self.emitU16(prop_idx);
+    }
+
+    fn compileYield(self: *Compiler, node: Ast.Node) Error!void {
+        if (node.data.lhs != 0) {
+            try self.compileNode(node.data.lhs);
+        } else {
+            try self.emitOp(.op_null);
+        }
+        try self.emitOp(.yield_value);
+    }
+
+    fn compileYieldPair(self: *Compiler, node: Ast.Node) Error!void {
+        try self.compileNode(node.data.lhs);
+        try self.compileNode(node.data.rhs);
+        try self.emitOp(.yield_pair);
+    }
+
+    fn containsYield(self: *Compiler, idx: u32) bool {
+        if (idx == 0 or idx >= self.ast.nodes.len) return false;
+        const n = self.ast.nodes[idx];
+        if (n.tag == .yield_expr or n.tag == .yield_pair_expr) return true;
+        if (n.tag == .function_decl or n.tag == .closure_expr) return false;
+        if (n.tag == .class_decl or n.tag == .interface_decl or n.tag == .trait_decl) return false;
+
+        // nodes with extra_data lists in lhs
+        if (n.tag == .block or n.tag == .root or n.tag == .echo_stmt) {
+            for (self.ast.extraSlice(n.data.lhs)) |child| {
+                if (self.containsYield(child)) return true;
+            }
+            return false;
+        }
+        if (n.tag == .if_else) {
+            if (self.containsYield(n.data.lhs)) return true;
+            const extra = self.ast.extra_data[n.data.rhs .. n.data.rhs + 2];
+            return self.containsYield(extra[0]) or self.containsYield(extra[1]);
+        }
+        if (n.tag == .for_stmt) {
+            const parts = self.ast.extra_data[n.data.lhs .. n.data.lhs + 3];
+            for (parts) |child| {
+                if (self.containsYield(child)) return true;
+            }
+            return self.containsYield(n.data.rhs);
+        }
+        if (n.tag == .call) {
+            if (self.containsYield(n.data.lhs)) return true;
+            for (self.ast.extraSlice(n.data.rhs)) |child| {
+                if (self.containsYield(child)) return true;
+            }
+            return false;
+        }
+
+        // default: recurse into lhs/rhs as node indices
+        if (n.data.lhs != 0 and n.data.lhs < self.ast.nodes.len and self.containsYield(n.data.lhs)) return true;
+        if (n.data.rhs != 0 and n.data.rhs < self.ast.nodes.len and self.containsYield(n.data.rhs)) return true;
+        return false;
     }
 
     fn compileSwitch(self: *Compiler, node: Ast.Node) Error!void {

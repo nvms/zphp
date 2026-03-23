@@ -121,6 +121,16 @@ critical boundaries:
 - traits: compiled as `TraitName::method` functions. class_decl copies trait methods to `ClassName::method`. class-defined methods take precedence over trait methods
 - catch clauses support qualified names (`\Exception`), multi-catch parsed but only first type used
 
+### generators
+- generator functions detected by `containsYield` scan of the AST subtree before compilation
+- `ObjFunction.is_generator` flag set at compile time. calling a generator function creates a `Generator` object instead of executing
+- `Generator` struct: state (created/suspended/running/completed), func pointer, ip, vars, current_value, current_key, return_value, implicit_key
+- generator is a first-class `Value` variant, not a PhpObject
+- `resumeGenerator(gen, sent_value)`: saves sp, pushes frame with generator's chunk/ip/vars, runs via `runUntilFrame`, restores sp on return
+- yield_value/yield_pair/generator_return opcodes `return` from runLoop (not `continue`) to properly exit the nested execution
+- method_call dispatches generator methods (current, key, valid, next, send, rewind, getReturn) before the object check
+- foreach iter_begin/iter_check/iter_advance detect generators via sentinel index value (-1)
+
 ### exception handling
 - handler stack of 32 `ExceptionHandler` structs (catch_ip, frame_count, sp, chunk)
 - `throw`: unwinds frames, restores sp, pushes exception, jumps to catch_ip

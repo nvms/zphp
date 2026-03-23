@@ -2,6 +2,7 @@ const std = @import("std");
 const Value = @import("value.zig").Value;
 const PhpArray = @import("value.zig").PhpArray;
 const PhpObject = @import("value.zig").PhpObject;
+const Generator = @import("value.zig").Generator;
 const Chunk = @import("../pipeline/bytecode.zig").Chunk;
 const OpCode = @import("../pipeline/bytecode.zig").OpCode;
 const ObjFunction = @import("../pipeline/bytecode.zig").ObjFunction;
@@ -102,6 +103,7 @@ pub const VM = struct {
     strings: std.ArrayListUnmanaged([]const u8) = .{},
     arrays: std.ArrayListUnmanaged(*PhpArray) = .{},
     objects: std.ArrayListUnmanaged(*PhpObject) = .{},
+    generators: std.ArrayListUnmanaged(*Generator) = .{},
     captures: std.ArrayListUnmanaged(CaptureEntry) = .{},
     php_constants: std.StringHashMapUnmanaged(Value) = .{},
     classes: std.StringHashMapUnmanaged(ClassDef) = .{},
@@ -134,6 +136,7 @@ pub const VM = struct {
         chunk: *const Chunk,
         ip: usize,
         vars: std.StringHashMapUnmanaged(Value),
+        generator: ?*Generator = null,
     };
 
     pub fn init(allocator: Allocator) RuntimeError!VM {
@@ -208,6 +211,11 @@ pub const VM = struct {
             self.allocator.destroy(o);
         }
         self.objects.deinit(self.allocator);
+        for (self.generators.items) |g| {
+            g.deinit(self.allocator);
+            self.allocator.destroy(g);
+        }
+        self.generators.deinit(self.allocator);
         var class_iter = self.classes.valueIterator();
         while (class_iter.next()) |c| c.deinit(self.allocator);
         self.classes.deinit(self.allocator);
@@ -527,26 +535,53 @@ pub const VM = struct {
                     self.push(val);
                 },
 
-                .iter_begin => self.push(.{ .int = 0 }),
+                .iter_begin => {
+                    const iterable = self.stack[self.sp - 1];
+                    if (iterable == .generator) {
+                        try self.resumeGenerator(iterable.generator, .null);
+                        self.push(.{ .int = -1 }); // sentinel: -1 means generator iteration
+                    } else {
+                        self.push(.{ .int = 0 });
+                    }
+                },
                 .iter_check => {
                     const offset = self.readU16();
-                    const idx = Value.toInt(self.stack[self.sp - 1]);
-                    const arr_val = self.stack[self.sp - 2];
-                    if (arr_val != .array or idx >= arr_val.array.length()) {
-                        self.currentFrame().ip += offset;
+                    const idx_val = self.stack[self.sp - 1];
+                    const iterable = self.stack[self.sp - 2];
+
+                    if (iterable == .generator) {
+                        const gen = iterable.generator;
+                        if (gen.state == .completed) {
+                            self.currentFrame().ip += offset;
+                        } else {
+                            self.push(gen.current_key);
+                            self.push(gen.current_value);
+                        }
+                    } else if (iterable == .array) {
+                        const idx = Value.toInt(idx_val);
+                        if (idx >= iterable.array.length()) {
+                            self.currentFrame().ip += offset;
+                        } else {
+                            const entry = iterable.array.entries.items[@intCast(idx)];
+                            const key_val: Value = switch (entry.key) {
+                                .int => |i| .{ .int = i },
+                                .string => |s| .{ .string = s },
+                            };
+                            self.push(key_val);
+                            self.push(entry.value);
+                        }
                     } else {
-                        const entry = arr_val.array.entries.items[@intCast(idx)];
-                        const key_val: Value = switch (entry.key) {
-                            .int => |i| .{ .int = i },
-                            .string => |s| .{ .string = s },
-                        };
-                        self.push(key_val);
-                        self.push(entry.value);
+                        self.currentFrame().ip += offset;
                     }
                 },
                 .iter_advance => {
-                    const idx = self.pop();
-                    self.push(.{ .int = Value.toInt(idx) + 1 });
+                    const iterable = self.stack[self.sp - 2];
+                    if (iterable == .generator) {
+                        try self.resumeGenerator(iterable.generator, .null);
+                    } else {
+                        const idx = self.pop();
+                        self.push(.{ .int = Value.toInt(idx) + 1 });
+                    }
                 },
                 .iter_end => {
                     _ = self.pop();
@@ -1017,8 +1052,37 @@ pub const VM = struct {
                     const method_name = self.currentChunk().constants.items[name_idx].string;
                     const ac: usize = arg_count;
 
-                    // object is below args on the stack
+                    // object/generator is below args on the stack
                     const obj_val = self.stack[self.sp - ac - 1];
+
+                    // generator method dispatch
+                    if (obj_val == .generator) {
+                        const gen = obj_val.generator;
+                        self.sp -= ac;
+                        self.sp -= 1; // pop generator
+                        if (std.mem.eql(u8, method_name, "current")) {
+                            self.push(gen.current_value);
+                        } else if (std.mem.eql(u8, method_name, "key")) {
+                            self.push(gen.current_key);
+                        } else if (std.mem.eql(u8, method_name, "valid")) {
+                            self.push(.{ .bool = gen.state != .completed });
+                        } else if (std.mem.eql(u8, method_name, "next")) {
+                            try self.resumeGenerator(gen, .null);
+                            self.push(.null);
+                        } else if (std.mem.eql(u8, method_name, "send")) {
+                            const sent = if (ac > 0) self.stack[self.sp + 1] else Value{ .null = {} };
+                            try self.resumeGenerator(gen, sent);
+                            self.push(.null);
+                        } else if (std.mem.eql(u8, method_name, "rewind")) {
+                            self.push(.null);
+                        } else if (std.mem.eql(u8, method_name, "getReturn")) {
+                            self.push(gen.return_value);
+                        } else {
+                            return error.RuntimeError;
+                        }
+                        continue;
+                    }
+
                     if (obj_val != .object) return error.RuntimeError;
                     const obj = obj_val.object;
 
@@ -1142,6 +1206,50 @@ pub const VM = struct {
                     }
                 },
 
+                .yield_value => {
+                    const val = self.pop();
+                    const gen = self.currentFrame().generator orelse return error.RuntimeError;
+                    gen.current_value = val;
+                    gen.current_key = .{ .int = gen.implicit_key };
+                    gen.implicit_key += 1;
+                    gen.ip = self.currentFrame().ip;
+                    gen.vars = self.currentFrame().vars;
+                    gen.state = .suspended;
+                    self.frame_count -= 1;
+                    return;
+                },
+
+                .yield_pair => {
+                    const val = self.pop();
+                    const key = self.pop();
+                    const gen = self.currentFrame().generator orelse return error.RuntimeError;
+                    gen.current_value = val;
+                    gen.current_key = key;
+                    if (key == .int and key.int >= gen.implicit_key) gen.implicit_key = key.int + 1;
+                    gen.ip = self.currentFrame().ip;
+                    gen.vars = self.currentFrame().vars;
+                    gen.state = .suspended;
+                    self.frame_count -= 1;
+                    return;
+                },
+
+                .generator_return => {
+                    const val = self.pop();
+                    const gen = self.currentFrame().generator orelse {
+                        self.push(val);
+                        if (self.frame_count > 1) {
+                            self.frame_count -= 1;
+                            self.frames[self.frame_count].vars.deinit(self.allocator);
+                        }
+                        continue;
+                    };
+                    gen.return_value = val;
+                    gen.state = .completed;
+                    gen.vars = self.currentFrame().vars;
+                    self.frame_count -= 1;
+                    return;
+                },
+
                 .set_static_prop => {
                     const class_idx = self.readU16();
                     const prop_idx = self.readU16();
@@ -1204,6 +1312,36 @@ pub const VM = struct {
         self.push(.{ .object = obj });
         self.currentFrame().ip = handler.catch_ip;
         return true;
+    }
+
+    fn resumeGenerator(self: *VM, gen: *Generator, sent_value: Value) RuntimeError!void {
+        if (gen.state == .completed) return;
+
+        gen.state = .running;
+        const saved_sp = self.sp;
+        const return_frame = self.frame_count;
+        self.frames[self.frame_count] = .{
+            .chunk = &gen.func.chunk,
+            .ip = gen.ip,
+            .vars = gen.vars,
+            .generator = gen,
+        };
+        self.frame_count += 1;
+
+        // if resuming from a yield, push the sent value as the yield expression result
+        if (gen.ip > 0) {
+            self.push(sent_value);
+        }
+
+        self.runUntilFrame(return_frame) catch |err| {
+            if (gen.state == .suspended or gen.state == .completed) return;
+            return err;
+        };
+        if (gen.state == .running) {
+            gen.state = .completed;
+        }
+        // restore stack to saved position (yield/return already saved their state)
+        self.sp = saved_sp;
     }
 
     fn writebackStatics(self: *VM) !void {
@@ -1429,8 +1567,15 @@ pub const VM = struct {
                     }
                 }
             }
-            self.frames[self.frame_count] = .{ .chunk = &func.chunk, .ip = 0, .vars = new_vars };
-            self.frame_count += 1;
+            if (func.is_generator) {
+                const gen = try self.allocator.create(Generator);
+                gen.* = .{ .func = func, .vars = new_vars };
+                try self.generators.append(self.allocator, gen);
+                self.push(.{ .generator = gen });
+            } else {
+                self.frames[self.frame_count] = .{ .chunk = &func.chunk, .ip = 0, .vars = new_vars };
+                self.frame_count += 1;
+            }
         } else return error.RuntimeError;
     }
 

@@ -115,7 +115,7 @@ fn encodeValue(buf: *std.ArrayListUnmanaged(u8), a: std.mem.Allocator, val: Valu
                 try buf.append(a, '}');
             }
         },
-        .object => try buf.appendSlice(a, "{}"),
+        .object, .generator => try buf.appendSlice(a, "{}"),
     }
 }
 
