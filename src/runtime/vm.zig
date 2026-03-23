@@ -1061,16 +1061,23 @@ pub const VM = struct {
                         self.sp -= ac;
                         self.sp -= 1; // pop generator
                         if (std.mem.eql(u8, method_name, "current")) {
+                            // auto-start if not yet started
+                            if (gen.state == .created) try self.resumeGenerator(gen, .null);
                             self.push(gen.current_value);
                         } else if (std.mem.eql(u8, method_name, "key")) {
+                            if (gen.state == .created) try self.resumeGenerator(gen, .null);
                             self.push(gen.current_key);
                         } else if (std.mem.eql(u8, method_name, "valid")) {
+                            if (gen.state == .created) try self.resumeGenerator(gen, .null);
                             self.push(.{ .bool = gen.state != .completed });
                         } else if (std.mem.eql(u8, method_name, "next")) {
+                            // next() always advances: if not started, start then advance
+                            if (gen.state == .created) try self.resumeGenerator(gen, .null);
                             try self.resumeGenerator(gen, .null);
                             self.push(.null);
                         } else if (std.mem.eql(u8, method_name, "send")) {
                             const sent = if (ac > 0) self.stack[self.sp + 1] else Value{ .null = {} };
+                            if (gen.state == .created) try self.resumeGenerator(gen, .null);
                             try self.resumeGenerator(gen, sent);
                             self.push(.null);
                         } else if (std.mem.eql(u8, method_name, "rewind")) {
@@ -1244,6 +1251,8 @@ pub const VM = struct {
                         continue;
                     };
                     gen.return_value = val;
+                    gen.current_value = .null;
+                    gen.current_key = .null;
                     gen.state = .completed;
                     gen.vars = self.currentFrame().vars;
                     self.frame_count -= 1;

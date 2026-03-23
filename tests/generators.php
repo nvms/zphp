@@ -71,13 +71,13 @@ function accumulator() {
     $sum = 0;
     while (true) {
         $val = yield $sum;
-        if ($val === null) break;
+        if ($val === null) return;
         $sum += $val;
     }
 }
 
 $acc = accumulator();
-$acc->next();
+$acc->current(); // start generator (run to first yield)
 $acc->send(10);
 $acc->send(20);
 $acc->send(30);
