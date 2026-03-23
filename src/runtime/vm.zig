@@ -63,7 +63,7 @@ pub const VM = struct {
 
     pub fn init(allocator: Allocator) RuntimeError!VM {
         var vm = VM{ .allocator = allocator };
-        try @import("stdlib.zig").register(&vm.native_fns, allocator);
+        try @import("../stdlib/registry.zig").register(&vm.native_fns, allocator);
         try initConstants(&vm.php_constants, allocator);
         return vm;
     }

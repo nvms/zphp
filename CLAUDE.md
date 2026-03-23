@@ -99,7 +99,7 @@ src/
     math.zig            - abs, ceil, floor, round, rand, etc.
     io.zig              - echo, print, file_get_contents, file_put_contents, etc.
     json.zig            - json_encode, json_decode
-    type.zig            - gettype, is_string, is_array, intval, strval, etc.
+    types.zig           - gettype, is_string, is_array, intval, strval, etc.
     pcre.zig            - preg_match, preg_replace
 
   tools/                - layer 4: standalone tools
@@ -257,7 +257,12 @@ phase 1 complete: full pipeline from source to execution. zphp can run real PHP 
 - `src/pipeline/compiler.zig` - single-pass AST -> bytecode compiler with jump patching, function compilation, numeric literal parsing, string interpolation
 - `src/runtime/value.zig` - PHP Value tagged union (null, bool, int, float, string) with arithmetic, truthiness, string-aware comparison, formatting (3 tests)
 - `src/runtime/vm.zig` - stack-based bytecode interpreter with per-frame variable scoping, function calls, closures with captures, arrays, foreach, switch/match, constants table, type casts, native function dispatch, output capture (84 integration tests)
-- `src/runtime/stdlib.zig` - 65+ native PHP functions: array (push/pop/shift/keys/values/merge/slice/reverse/unique/sort/rsort/search/in_array/key_exists/range/array_map/array_filter/usort), string (substr/strpos/str_replace/explode/implode/trim/ltrim/rtrim/strtolower/strtoupper/str_contains/str_starts_with/str_ends_with/str_repeat/str_pad/ucfirst/lcfirst), math (abs/floor/ceil/round/min/max/rand), type (gettype/is_array/is_null/is_int/is_float/is_string/is_bool/is_numeric/intval/floatval/strval/isset/empty/count/strlen), constants (define/defined/constant)
+- `src/stdlib/` - 65+ native PHP functions split by domain:
+  - `registry.zig` - central registration, imports all domain modules and registers their functions with the VM
+  - `strings.zig` - substr/strpos/str_replace/explode/implode/trim/ltrim/rtrim/strtolower/strtoupper/str_contains/str_starts_with/str_ends_with/str_repeat/str_pad/ucfirst/lcfirst
+  - `arrays.zig` - push/pop/shift/keys/values/merge/slice/reverse/unique/sort/rsort/search/in_array/key_exists/range/array_map/array_filter/usort
+  - `math.zig` - abs/floor/ceil/round/min/max/rand
+  - `types.zig` - gettype/is_array/is_null/is_int/is_float/is_string/is_bool/is_numeric/intval/floatval/strval/isset/empty/count/strlen/var_dump/print_r/define/defined/constant
 - `src/main.zig` - CLI entry point with `zphp run <file>`, imports all modules for test discovery
 - 181 unit tests total across all modules
 - 30 PHP compatibility test files in tests/ verified against PHP 8.3
@@ -393,7 +398,7 @@ two small language changes that fix silent breakage. constants: add a constants 
 switch compiles to two-phase layout: comparison chain (using temp var + loose equality) then sequential bodies (enables fallthrough). break patches to end. match compiles similarly but uses strict identity, each arm emits its result expression and jumps to end. no new opcodes except `dup` (added but switch/match use temp vars instead)
 
 **3. stdlib expansion pass 1 - fill the gaps that block real scripts**
-these are pure additions to stdlib.zig, no architecture changes needed:
+pure additions to the domain files in src/stdlib/, no architecture changes needed:
 - string: `strcmp`, `strncmp`, `str_word_count`, `str_split`, `substr_count`, `substr_replace`, `sprintf`, `printf`, `number_format`, `nl2br`, `wordwrap`, `str_getcsv`, `chunk_split`, `ord`, `chr`, `hex2bin`, `bin2hex`, `md5`, `sha1`, `base64_encode`, `base64_decode`, `urlencode`, `urldecode`, `rawurlencode`, `rawurldecode`, `html_entity_decode`, `htmlspecialchars`, `htmlspecialchars_decode`, `addslashes`, `stripslashes`, `quoted_printable_encode`, `quoted_printable_decode`, `strtolower`, `strtoupper`, `mb_strlen`, `mb_substr`, `mb_strtolower`, `mb_strtoupper`
 - array: `array_splice`, `array_combine`, `array_chunk`, `array_pad`, `array_flip`, `array_column`, `array_fill`, `array_fill_keys`, `array_intersect`, `array_diff`, `array_diff_key`, `array_count_values`, `array_sum`, `array_product`, `array_walk`, `compact`, `extract`, `ksort`, `krsort`, `asort`, `arsort`, `array_multisort`, `array_unshift`, `array_rand`, `shuffle`
 - math: `pow`, `sqrt`, `log`, `log2`, `log10`, `exp`, `pi`, `fmod`, `intdiv`, `base_convert`, `bindec`, `octdec`, `hexdec`, `decbin`, `decoct`, `dechex`
