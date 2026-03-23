@@ -81,17 +81,16 @@ src/
     lexer.zig           - source -> token stream
     ast.zig             - AST node definitions (layer 0 primitive)
     parser.zig          - token stream -> AST
+    parser_tests.zig    - parser unit tests with S-expression renderer
     compiler.zig        - AST -> bytecode chunks
     bytecode.zig        - opcode definitions and chunk format (layer 0 primitive)
 
+  integration_tests.zig   - end-to-end pipeline tests (source -> lex -> parse -> compile -> execute -> output)
+
   runtime/              - layer 2: execution engine and supporting types
-    vm.zig              - bytecode interpreter
-    value.zig           - PHP value representation (layer 0 primitive)
-    gc.zig              - reference counting + cycle collector
-    string.zig          - binary-safe string operations (copy-on-write)
-    array.zig           - ordered hashmap (integer + string keys)
-    object.zig          - class instances, property tables, method dispatch
-    scope.zig           - variable scoping and symbol tables
+    vm.zig              - bytecode interpreter (opcode dispatch, frame management, class/exception handling)
+    value.zig           - PHP value representation, PhpArray, PhpObject (layer 0 primitive)
+    builtins.zig        - built-in class definitions (Exception hierarchy, native methods)
 
   stdlib/               - layer 3: built-in function implementations
     registry.zig        - function registration interface
@@ -265,12 +264,15 @@ phase 1 complete: full pipeline from source to execution. zphp can run real PHP 
 ### what exists
 - `src/pipeline/token.zig` - 145 PHP 8.x token types, case-insensitive keyword lookup (42 tests in lexer)
 - `src/pipeline/lexer.zig` - full PHP lexer with HTML/PHP modal lexing
-- `src/pipeline/ast.zig` - flat array AST, 52 node tags (closure_expr, cast_expr, const_decl, switch_stmt/case/default, match_expr/arm, class_decl/method/property, new_expr, method_call, static_call)
-- `src/pipeline/parser.zig` - Pratt-based recursive descent parser with 2-token lookahead for cast detection, class declaration parsing with visibility modifier skipping, method call detection in property access (52 tests)
-- `src/pipeline/bytecode.zig` - ~64 opcodes (call_indirect, closure_bind, define_const, dup, cast_int/float/string/bool/array, class_decl, new_obj, get_prop, set_prop, method_call, static_call), Chunk struct, ObjFunction struct
-- `src/pipeline/compiler.zig` - single-pass AST -> bytecode compiler with jump patching, function compilation, numeric literal parsing, string interpolation
-- `src/runtime/value.zig` - PHP Value tagged union (null, bool, int, float, string, array, object) with arithmetic, truthiness, string-aware comparison, formatting. PhpObject struct with property hashmap (4 tests)
-- `src/runtime/vm.zig` - stack-based bytecode interpreter with per-frame variable scoping, function calls, closures with captures, arrays, foreach, switch/match, constants table, type casts, native function dispatch, class registry, object instantiation, property access, method dispatch with $this binding, output capture (93 integration tests)
+- `src/pipeline/ast.zig` - flat array AST, ~68 node tags (closure_expr, cast_expr, const_decl, switch/match, class_decl/method/property, new_expr, method_call, static_call, throw_expr, try_catch, catch_clause, array_spread, expr_list, global_stmt, static_var, splat_expr)
+- `src/pipeline/parser.zig` - Pratt-based recursive descent parser with 2-token lookahead for cast detection, class declarations, method calls, try/catch, throw, global/static vars, variadic params, array spread
+- `src/pipeline/parser_tests.zig` - parser unit tests with S-expression renderer (61 tests)
+- `src/pipeline/bytecode.zig` - ~74 opcodes (class_decl, new_obj, get_prop, set_prop, method_call, static_call, throw, push_handler, pop_handler, instance_check, get_global, get_static, set_static, array_spread, splat_call), Chunk struct, ObjFunction struct with default params and variadic support
+- `src/pipeline/compiler.zig` - single-pass AST -> bytecode compiler with jump patching, function compilation, numeric literal parsing, string interpolation, class compilation, exception handling
+- `src/runtime/value.zig` - PHP Value tagged union (null, bool, int, float, string, array, object) with arithmetic, truthiness, string-aware comparison, PHP-correct 14-digit float formatting. PhpObject struct with property hashmap (4 tests)
+- `src/runtime/vm.zig` - stack-based bytecode interpreter with per-frame variable scoping, function calls, closures with captures, arrays, foreach, switch/match, constants table, type casts, native function dispatch, class registry, object instantiation, property access, method dispatch with $this binding, exception handling with handler stack, global/static variable support
+- `src/runtime/builtins.zig` - built-in Exception class hierarchy with native method implementations (getMessage, getCode, __construct)
+- `src/integration_tests.zig` - end-to-end pipeline tests (111 tests)
 - `src/stdlib/` - 150+ native PHP functions split by domain:
   - `registry.zig` - central registration, imports all domain modules and registers their functions with the VM
   - `strings.zig` - substr/strpos/str_replace/explode/implode/trim/ltrim/rtrim/strtolower/strtoupper/str_contains/str_starts_with/str_ends_with/str_repeat/str_pad/ucfirst/lcfirst/strcmp/strncmp/ord/chr/str_split/substr_count/substr_replace/str_word_count/nl2br/wordwrap/chunk_split/number_format/sprintf/printf/addslashes/stripslashes/htmlspecialchars/htmlspecialchars_decode/html_entity_decode/hex2bin/bin2hex/mb_strlen/mb_substr/mb_strtolower/mb_strtoupper/str_getcsv/base64_encode/base64_decode/urlencode/urldecode/rawurlencode/rawurldecode/md5/sha1/strrev
@@ -281,8 +283,8 @@ phase 1 complete: full pipeline from source to execution. zphp can run real PHP 
   - `io.zig` - file_get_contents/file_put_contents/file_exists/is_file/is_dir/basename/dirname/pathinfo/realpath/time/microtime/date
   - `pcre.zig` - preg_match/preg_match_all/preg_replace/preg_split (FFI bindings to libpcre2)
 - `src/main.zig` - CLI entry point with `zphp run <file>`, imports all modules for test discovery
-- 215 unit tests total across all modules
-- 44 PHP compatibility test files in tests/ verified against PHP 8.3
+- 222 unit tests total across all modules
+- 54 PHP compatibility test files in tests/ verified against PHP 8.3
 
 ### lexer design decisions
 - tokens reference byte offsets into source (zero-copy, no allocations)
@@ -339,11 +341,12 @@ phase 1 complete: full pipeline from source to execution. zphp can run real PHP 
 - variables: assignment, compound assignment (+=, -=, etc.), pre/post increment/decrement
 - control flow: if/elseif/else, while, do-while, for, foreach, switch/case/default (with fallthrough), break, continue
 - match expression: strict comparison, multi-value arms, default, returns a value
-- functions: declaration, calls, return with/without value, nested calls, parameter passing
+- functions: declaration, calls, return with/without value, nested calls, default parameters, variadic params (...$args), splat/spread in calls
 - closures: anonymous functions, arrow functions (fn($x) => expr), assigned to variables, passed as arguments
 - callbacks: closures and named function strings as callbacks to array_map, array_filter, usort
-- arrays: literals with integer and string keys, access, assignment, mixed key types
+- arrays: literals with integer and string keys, access, assignment, mixed key types, spread operator [...$arr]
 - foreach: iterate arrays with value only or key => value
+- scoping: `global` keyword, `static` variables in functions, `break N` for nested loops
 - constants: 40+ predefined PHP constants, `define()`, `const NAME = value`, `defined()`, `constant()`
 - type casting: `(int)`, `(float)`, `(string)`, `(bool)`, `(array)`
 - native functions: 150+ stdlib functions across strings, arrays, math, types, json, io, pcre (see src/stdlib/ for complete list)
@@ -403,7 +406,7 @@ phase 1 complete: full pipeline from source to execution. zphp can run real PHP 
 - multi-value cases (`case 1: case 2:`) merged into one node with multiple values. comparison uses `jump_if_true` to short-circuit to body on first match
 - break compiles to `jump` with break_jumps patching, same mechanism as loops
 - match uses same temp var approach but with `identical` (strict comparison). each arm compiles result expression and jumps to end. no fallthrough. match is an expression (leaves result on stack)
-- match with no matching arm and no default returns null (PHP would throw UnhandledMatchError, but we don't have exceptions yet)
+- match with no matching arm and no default returns null (PHP throws UnhandledMatchError - could be updated now that exceptions exist)
 - `Value.equal` was fixed to do string comparison when both operands are strings (was converting to float, causing `"php" == "js"` to be true)
 
 ### class system architecture
@@ -428,6 +431,20 @@ phase 1 complete: full pipeline from source to execution. zphp can run real PHP 
 - built-in Exception class registered at VM init with native method implementations for __construct, getMessage, getCode. native methods get `$this` via a temporary frame pushed around the native call
 - built-in exception hierarchy: Exception, RuntimeException, InvalidArgumentException, LogicException, BadMethodCallException, OverflowException, TypeError
 - when throw fires inside a function/method, frame unwinding cleans up call frames back to the handler's level, correctly crossing function boundaries
+
+### scoping and variable features
+- `global $var` statement: `get_global` opcode copies variable from frame 0 (global scope) into current frame. allows functions to access global variables
+- `static $var = default` in functions: `get_static`/`set_static` opcodes persist variable values between function calls using `func_name::var_name` keyed storage in the VM. default value only set on first call
+- `break N` and `continue N`: nested loop control with integer depth argument
+
+### function parameter features
+- default parameter values: `ObjFunction` has `defaults` slice and `required_params` count. VM fills in defaults for missing arguments at call time
+- variadic parameters: `...$args` collected into a PhpArray. `ObjFunction.is_variadic` flag
+- splat/spread in calls: `func(...$arr)` expands array into positional arguments
+- array spread: `[...$arr, $extra]` spreads array elements into array literal
+
+### float display
+- PHP uses 14 significant digits for float formatting. `Value.format` computes digits before decimal point, derives precision as `14 - digits_before`, strips trailing zeros. uses a comptime dispatch table for precision (zig's `bufPrint` format must be comptime-known)
 
 ### dangling pointer gotcha in temp variable names
 switch/match compilation generates temp variable names like `__match_0` using `std.fmt.allocPrint` (heap allocated, tracked in string_allocs). originally used stack-allocated `bufPrint` which caused use-after-free when the constant pool held a pointer to the expired stack buffer. the bug was latent - only manifested when other changes shifted the stack layout enough to overwrite the buffer. rule: any string stored in the constant pool must be either a source slice or a heap allocation tracked by string_allocs
@@ -483,9 +500,9 @@ done (continued):
 - inherited property defaults (parent properties set first, child can override)
 
 remaining:
-- `static` methods/properties
+- `static` methods/properties (class-level, not function-level static vars which are done)
 - visibility enforcement (public/protected/private)
-- `instanceof` operator (currently mapped to identical, needs own opcode)
+- `instanceof` as binary operator (currently mapped to identical in compiler line 592 - needs to use instance_check opcode which already exists for catch clauses)
 - abstract classes, interfaces, traits (step 5)
 
 **5. classes (advanced)**
