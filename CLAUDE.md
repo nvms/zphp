@@ -256,10 +256,11 @@ phase 1 complete: full pipeline from source to execution. zphp can run real PHP 
 - `src/pipeline/bytecode.zig` - ~45 opcodes, Chunk struct, ObjFunction struct
 - `src/pipeline/compiler.zig` - single-pass AST -> bytecode compiler with jump patching, function compilation, numeric literal parsing
 - `src/runtime/value.zig` - PHP Value tagged union (null, bool, int, float, string) with arithmetic, truthiness, formatting (3 tests)
-- `src/runtime/vm.zig` - stack-based bytecode interpreter with per-frame variable scoping, function calls, arrays, foreach, native functions, output capture (40 integration tests)
+- `src/runtime/vm.zig` - stack-based bytecode interpreter with per-frame variable scoping, function calls, arrays, foreach, native function dispatch, output capture (40 integration tests)
+- `src/runtime/stdlib.zig` - 60+ native PHP functions: array (push/pop/shift/keys/values/merge/slice/reverse/unique/sort/rsort/search/in_array/key_exists/range), string (substr/strpos/str_replace/explode/implode/trim/ltrim/rtrim/strtolower/strtoupper/str_contains/str_starts_with/str_ends_with/str_repeat/str_pad/ucfirst/lcfirst), math (abs/floor/ceil/round/min/max/rand), type (gettype/is_array/is_null/is_int/is_float/is_string/is_bool/is_numeric/intval/floatval/strval/isset/empty/count/strlen)
 - `src/main.zig` - CLI entry point with `zphp run <file>`, imports all modules for test discovery
 - 139 unit tests total across all modules
-- 21 PHP compatibility test files in tests/ verified against PHP 8.3
+- 24 PHP compatibility test files in tests/ verified against PHP 8.3
 
 ### lexer design decisions
 - tokens reference byte offsets into source (zero-copy, no allocations)
@@ -342,14 +343,23 @@ phase 1 complete: full pipeline from source to execution. zphp can run real PHP 
 - double-quoted string escape sequences (\n, \r, \t, \\, \$, \", etc.) are processed at compile time. single-quoted strings only escape \\ and \'
 
 ### next up
-- more array functions: array_push, array_pop, array_merge, array_keys, array_values, in_array, array_map, array_filter, sort
+
+**closures and callback functions (required for array_map, array_filter, usort)**
+this is the highest-priority architecture change. two things need to happen:
+1. **functions as values**: currently the `call` opcode looks up functions by name from a table. closures are anonymous. solution: give anonymous functions generated internal names (e.g. `__closure_0`), store the name as a string Value in the variable. add a `call_indirect` opcode that pops a value from the stack, reads it as a function name string, and calls that function. this avoids adding a function variant to Value (which would create a circular dependency with Chunk)
+2. **native callback support**: `array_map` needs to invoke a PHP callback per element. the native function interface is `fn(*NativeContext, []const Value) RuntimeError!Value`. NativeContext needs a method like `callFunction(name: []const u8, args: []const Value) RuntimeError!Value` that re-enters the VM's execution loop. this means NativeContext needs a pointer to the VM
+once these two pieces are in place, array_map, array_filter, usort, and user-defined callbacks all work
+
+**PHP constants (STR_PAD_LEFT, PHP_INT_MAX, etc.)**
+PHP has predefined constants like `STR_PAD_LEFT` (0), `STR_PAD_RIGHT` (1), `PHP_INT_MAX`, `PHP_EOL`, `true`/`false`/`null` (already handled as keywords). currently we don't support named constants. the compiler treats unknown identifiers as get_var which returns null. solution: add a constants table (string -> Value) checked before variables. pre-populate with PHP's predefined constants. also support user-defined constants via `define('NAME', value)` and `const NAME = value`. once constants work, update test PHP files to use them (e.g. `STR_PAD_LEFT` instead of `0`)
+
+**other**
 - classes: declaration, instantiation, properties, methods, inheritance, $this
-- closures / anonymous functions
-- more string functions: substr, strpos, str_replace, explode, implode, trim, strtolower, strtoupper
 - string interpolation in double-quoted strings ("Hello $name")
 - type casting ((int), (string), etc.)
 - try/catch/throw
 - match expression
+- switch statement
 - package manager groundwork (composer.json parsing)
 
 ## self-improvement
