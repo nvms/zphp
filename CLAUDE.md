@@ -35,6 +35,7 @@ before making technology or architecture decisions, read `~/code/vigil/learnings
 - `zphp init` scaffolds a new project with composer.json
 - `zphp install` installs dependencies
 - `zphp repl` interactive PHP shell
+- `zphp serve` built-in HTTP server with persistent VM workers (no per-request bootstrap)
 - fast cold starts, small binary, low memory footprint
 
 ## what this project does NOT do
@@ -43,7 +44,7 @@ before making technology or architecture decisions, read `~/code/vigil/learnings
 - 100% Zend edge-case compatibility (the 95% that matters)
 - JIT compilation (interpreter first, JIT is a future consideration)
 - FFI support (not initially)
-- web server (not a replacement for nginx/apache - though `zphp serve` for dev is fine)
+- web server (not a replacement for nginx/apache - `zphp serve` is zphp's built-in HTTP server for both dev and production use)
 
 ## architecture
 
@@ -410,12 +411,7 @@ switch compiles to two-phase layout: comparison chain (using temp var + loose eq
 **3. stdlib expansion pass 1 - fill the gaps that block real scripts** (IN PROGRESS)
 pure additions to the domain files in src/stdlib/, no architecture changes needed.
 
-done:
-- string: `strcmp`, `strncmp`, `str_word_count`, `str_split`, `substr_count`, `substr_replace`, `sprintf`, `printf`, `number_format`, `nl2br`, `wordwrap`, `str_getcsv`, `chunk_split`, `ord`, `chr`, `hex2bin`, `bin2hex`, `htmlspecialchars`, `htmlspecialchars_decode`, `addslashes`, `stripslashes`, `mb_strlen`, `mb_strtolower`, `mb_strtoupper`
-- array: `array_splice`, `array_combine`, `array_chunk`, `array_pad`, `array_flip`, `array_column`, `array_fill`, `array_fill_keys`, `array_intersect`, `array_diff`, `array_diff_key`, `array_count_values`, `array_sum`, `array_product`, `array_walk`, `array_unshift`, `array_rand`, `shuffle`
-- math: `pow`, `sqrt`, `log`, `log2`, `log10`, `exp`, `pi`, `fmod`, `intdiv`, `base_convert`, `bindec`, `octdec`, `hexdec`, `decbin`, `decoct`, `dechex`
-- type/misc: `boolval`, `var_dump` (real impl), `print_r` (real impl)
-- json: `json_encode`, `json_decode`
+done (see src/stdlib/ for complete list - 150+ functions across strings, arrays, math, types, json, io, pcre modules)
 
 remaining:
 - string: `quoted_printable_encode`, `quoted_printable_decode`
