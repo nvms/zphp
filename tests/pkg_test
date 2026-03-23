@@ -1,0 +1,93 @@
+#!/bin/bash
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+ZPHP="${ZPHP:-$SCRIPT_DIR/../zig-out/bin/zphp}"
+
+passed=0
+failed=0
+errors=""
+
+check() {
+    local name="$1"
+    local expected="$2"
+    local actual="$3"
+    if [ "$expected" = "$actual" ]; then
+        passed=$((passed + 1))
+        echo "  pass  $name"
+    else
+        failed=$((failed + 1))
+        echo "  FAIL  $name"
+        errors="$errors\n--- $name ---\nexpected: $expected\ngot: $actual\n"
+    fi
+}
+
+check_exists() {
+    local name="$1"
+    local path="$2"
+    if [ -e "$path" ]; then
+        passed=$((passed + 1))
+        echo "  pass  $name"
+    else
+        failed=$((failed + 1))
+        echo "  FAIL  $name"
+        errors="$errors\n--- $name ---\nexpected $path to exist\n"
+    fi
+}
+
+check_contains() {
+    local name="$1"
+    local needle="$2"
+    local haystack="$3"
+    if echo "$haystack" | grep -q "$needle"; then
+        passed=$((passed + 1))
+        echo "  pass  $name"
+    else
+        failed=$((failed + 1))
+        echo "  FAIL  $name"
+        errors="$errors\n--- $name ---\nexpected to contain: $needle\ngot: $haystack\n"
+    fi
+}
+
+# work in a temp directory
+WORKDIR=$(mktemp -d)
+trap "rm -rf $WORKDIR" EXIT
+cd "$WORKDIR"
+
+# test: install from composer.json
+cat > composer.json << 'EOF'
+{
+    "require": {
+        "psr/log": "^3.0"
+    }
+}
+EOF
+
+"$ZPHP" install 2>/dev/null
+check_exists "vendor dir created" "vendor"
+check_exists "autoload.php created" "vendor/autoload.php"
+check_exists "zphp.lock created" "zphp.lock"
+check_exists "package downloaded" "vendor/psr/log"
+check_exists "psr/log src exists" "vendor/psr/log/src/LoggerInterface.php"
+
+# test: lock file content
+lock_content=$(cat zphp.lock)
+check_contains "lock has package name" '"psr/log"' "$lock_content"
+check_contains "lock has version" '"version"' "$lock_content"
+
+# test: autoloader content
+autoload_content=$(cat vendor/autoload.php)
+check_contains "autoloader has psr4 map" "Psr\\\\Log\\\\" "$autoload_content"
+check_contains "autoloader has spl_autoload" "spl_autoload_register" "$autoload_content"
+
+# test: packages command
+pkg_output=$("$ZPHP" packages 2>&1)
+check_contains "packages lists psr/log" "psr/log" "$pkg_output"
+
+echo ""
+echo "$passed passed, $failed failed"
+
+if [ $failed -gt 0 ]; then
+    echo -e "$errors"
+    exit 1
+fi
