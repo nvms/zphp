@@ -17,6 +17,11 @@ jobs:
       - uses: mlugg/setup-zig@v2
         with:
           version: 0.15.0
+      - name: install pcre2
+        run: |
+          if [ "$RUNNER_OS" = "Linux" ]; then
+            sudo apt-get update && sudo apt-get install -y libpcre2-dev
+          fi
       - run: zig build test
       - run: zig build
 
@@ -27,6 +32,8 @@ jobs:
       - uses: mlugg/setup-zig@v2
         with:
           version: 0.15.0
+      - name: install pcre2
+        run: sudo apt-get update && sudo apt-get install -y libpcre2-dev
       - uses: shivammathur/setup-php@v2
         with:
           php-version: '8.3'

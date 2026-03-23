@@ -10,6 +10,8 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
 
+    exe_mod.linkSystemLibrary("pcre2-8", .{});
+
     const exe = b.addExecutable(.{
         .name = "zphp",
         .root_module = exe_mod,
@@ -31,6 +33,8 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
+
+    test_mod.linkSystemLibrary("pcre2-8", .{});
 
     const unit_tests = b.addTest(.{
         .root_module = test_mod,

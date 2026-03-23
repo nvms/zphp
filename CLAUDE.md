@@ -243,6 +243,12 @@ do NOT use the GitHub MCP server for creating repos or any write operations. the
 - `@intCast` infers target type from context: `const x: u32 = @intCast(some_usize);`
 - `std.ArrayList(T)` is now the UNMANAGED version (no stored allocator). use `.{}` to init, pass allocator to `append(gpa, item)`, `writer(gpa)`, `deinit(gpa)`, `toOwnedSlice(gpa)`. the managed version with stored allocator is deprecated
 - `std.ArrayListUnmanaged(T)` is identical to `std.ArrayList(T)` in 0.15.1
+- `std.crypto.hash.Md5.hash` takes 3 args: `(data, &out_buf, .{})` - not 2
+- `PCRE2_UNSET` C macro can't be translated by zig's @cImport - use `std.math.maxInt(usize)` instead
+
+## external dependencies
+
+- **libpcre2** - linked via zig's system library support for regex (preg_* functions). install: `apt install libpcre2-dev` (ubuntu), `brew install pcre2` (macos). CI workflow installs it in the build step
 
 ## current status
 
@@ -265,9 +271,10 @@ phase 1 complete: full pipeline from source to execution. zphp can run real PHP 
   - `types.zig` - gettype/is_array/is_null/is_int/is_float/is_string/is_bool/is_numeric/intval/floatval/strval/boolval/isset/empty/count/strlen/var_dump/print_r/define/defined/constant
   - `json.zig` - json_encode/json_decode
   - `io.zig` - file_get_contents/file_put_contents/file_exists/is_file/is_dir/basename/dirname/pathinfo/realpath/time/microtime/date
+  - `pcre.zig` - preg_match/preg_match_all/preg_replace/preg_split (FFI bindings to libpcre2)
 - `src/main.zig` - CLI entry point with `zphp run <file>`, imports all modules for test discovery
 - 181 unit tests total across all modules
-- 40 PHP compatibility test files in tests/ verified against PHP 8.3
+- 41 PHP compatibility test files in tests/ verified against PHP 8.3
 
 ### lexer design decisions
 - tokens reference byte offsets into source (zero-copy, no allocations)
@@ -415,9 +422,8 @@ remaining:
 - type/misc: `settype`, `var_export`, `unset` (as function)
 - date/time: `strtotime`, `mktime`, `gmdate`
 - output: `ob_start`, `ob_get_clean`, `ob_end_clean`, `header` (no-op or warning in CLI)
-- pcre: `preg_match`, `preg_match_all`, `preg_replace`, `preg_split`
 
-note: `compact` and `extract` require access to the calling scope's variables, which native functions don't currently have. these may need a VM-level mechanism or special opcode treatment. pcre requires a regex engine - either a zig implementation or linking to libpcre
+note: `compact` and `extract` require access to the calling scope's variables, which native functions don't currently have. these may need a VM-level mechanism or special opcode treatment
 
 **4. classes (basic)**
 declaration, `new`, properties, methods, `$this`, `__construct`. enough to instantiate objects and call methods. this is the minimum viable OOP that unlocks simple class-based code
