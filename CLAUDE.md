@@ -251,13 +251,13 @@ phase 1 complete: full pipeline from source to execution. zphp can run real PHP 
 ### what exists
 - `src/pipeline/token.zig` - 145 PHP 8.x token types, case-insensitive keyword lookup (42 tests in lexer)
 - `src/pipeline/lexer.zig` - full PHP lexer with HTML/PHP modal lexing
-- `src/pipeline/ast.zig` - flat array AST, 36 node tags (includes closure_expr)
-- `src/pipeline/parser.zig` - Pratt-based recursive descent parser (52 tests)
-- `src/pipeline/bytecode.zig` - ~47 opcodes (includes call_indirect, closure_bind), Chunk struct, ObjFunction struct
+- `src/pipeline/ast.zig` - flat array AST, 43 node tags (closure_expr, cast_expr, const_decl, switch_stmt/case/default, match_expr/arm)
+- `src/pipeline/parser.zig` - Pratt-based recursive descent parser with 2-token lookahead for cast detection (52 tests)
+- `src/pipeline/bytecode.zig` - ~54 opcodes (call_indirect, closure_bind, define_const, dup, cast_int/float/string/bool/array), Chunk struct, ObjFunction struct
 - `src/pipeline/compiler.zig` - single-pass AST -> bytecode compiler with jump patching, function compilation, numeric literal parsing, string interpolation
 - `src/runtime/value.zig` - PHP Value tagged union (null, bool, int, float, string) with arithmetic, truthiness, string-aware comparison, formatting (3 tests)
-- `src/runtime/vm.zig` - stack-based bytecode interpreter with per-frame variable scoping, function calls, closures with captures, arrays, foreach, native function dispatch, output capture (61 integration tests)
-- `src/runtime/stdlib.zig` - 60+ native PHP functions: array (push/pop/shift/keys/values/merge/slice/reverse/unique/sort/rsort/search/in_array/key_exists/range/array_map/array_filter/usort), string (substr/strpos/str_replace/explode/implode/trim/ltrim/rtrim/strtolower/strtoupper/str_contains/str_starts_with/str_ends_with/str_repeat/str_pad/ucfirst/lcfirst), math (abs/floor/ceil/round/min/max/rand), type (gettype/is_array/is_null/is_int/is_float/is_string/is_bool/is_numeric/intval/floatval/strval/isset/empty/count/strlen)
+- `src/runtime/vm.zig` - stack-based bytecode interpreter with per-frame variable scoping, function calls, closures with captures, arrays, foreach, switch/match, constants table, type casts, native function dispatch, output capture (84 integration tests)
+- `src/runtime/stdlib.zig` - 65+ native PHP functions: array (push/pop/shift/keys/values/merge/slice/reverse/unique/sort/rsort/search/in_array/key_exists/range/array_map/array_filter/usort), string (substr/strpos/str_replace/explode/implode/trim/ltrim/rtrim/strtolower/strtoupper/str_contains/str_starts_with/str_ends_with/str_repeat/str_pad/ucfirst/lcfirst), math (abs/floor/ceil/round/min/max/rand), type (gettype/is_array/is_null/is_int/is_float/is_string/is_bool/is_numeric/intval/floatval/strval/isset/empty/count/strlen), constants (define/defined/constant)
 - `src/main.zig` - CLI entry point with `zphp run <file>`, imports all modules for test discovery
 - 181 unit tests total across all modules
 - 30 PHP compatibility test files in tests/ verified against PHP 8.3
@@ -286,7 +286,7 @@ phase 1 complete: full pipeline from source to execution. zphp can run real PHP 
 
 ### compiler design decisions
 - single-pass AST walk: compileNode() dispatches on node tag, emits bytecodes
-- ~45 opcodes: constants, variable get/set, arithmetic, comparison, logical, bitwise, jumps, call/return, echo, halt
+- ~54 opcodes: constants, variable get/set, arithmetic, comparison, logical, bitwise, jumps, call/return, call_indirect, echo, halt, dup, cast_int/float/string/bool/array, define_const, closure_bind
 - variables use `get_var`/`set_var` with string name constants (hash map lookup at runtime, not stack slots). simplifies scoping at the cost of performance
 - jump patching: emit placeholder u16, record offset, patch when target is known
 - control flow: `jump_if_false`/`jump_if_true` peek (don't pop) the condition. explicit `pop` on each path. this supports short-circuit `&&`/`||` cleanly
@@ -322,7 +322,9 @@ phase 1 complete: full pipeline from source to execution. zphp can run real PHP 
 - callbacks: closures and named function strings as callbacks to array_map, array_filter, usort
 - arrays: literals with integer and string keys, access, assignment, mixed key types
 - foreach: iterate arrays with value only or key => value
-- native functions: count(), strlen(), intval(), strval(), is_array(), is_null(), is_int(), is_string()
+- constants: 40+ predefined PHP constants, `define()`, `const NAME = value`, `defined()`, `constant()`
+- type casting: `(int)`, `(float)`, `(string)`, `(bool)`, `(array)`
+- native functions: count(), strlen(), intval(), strval(), is_array(), is_null(), is_int(), is_string(), define(), defined(), constant()
 - string interpolation: `"Hello $name"`, `"{$var}"`, `"$arr[0]"`, `"{$arr['key']}"`, escaped `\$`
 - echo: single and multi-expression
 - mixed HTML/PHP output
@@ -345,7 +347,7 @@ phase 1 complete: full pipeline from source to execution. zphp can run real PHP 
 - `tests/run` script runs each file through both `php` and `zphp run`, diffs output. any divergence fails
 - CI runs the comparison against PHP 8.3 via `shivammathur/setup-php`
 - rule: every new feature gets a test file added. the spec is PHP's behavior
-- currently 26 test files covering all supported features
+- currently 30 test files covering all supported features
 - double-quoted string escape sequences (\n, \r, \t, \\, \$, \", etc.) are processed at compile time. single-quoted strings only escape \\ and \'
 - string interpolation in double-quoted strings: `$var`, `{$var}`, `$arr[idx]`, `{$arr['key']}` - all handled at compile time by splitting into segments and emitting concat ops
 
@@ -361,6 +363,24 @@ phase 1 complete: full pipeline from source to execution. zphp can run real PHP 
 - `closure_bind` opcode: reads a variable from the current scope and stores it in the VM's captures table keyed by closure name
 - captures table is a flat list of (closure_name, var_name, value) entries, scanned at call time to pre-populate the frame's vars before params
 - string function names also work as callbacks: `array_map('trim', $arr)` passes the string through the same `callByName` path
+
+### constants and type casting
+- VM has a `php_constants` table (StringHashMap) pre-populated with 40+ PHP constants in `initConstants()`
+- `get_var` opcode checks frame vars first, then falls through to `php_constants`, then returns null
+- predefined constants: PHP_EOL, PHP_INT_MAX/MIN, PHP_INT_SIZE, PHP_VERSION, PHP_SAPI, PHP_OS, DIRECTORY_SEPARATOR, PATH_SEPARATOR, STR_PAD_LEFT/RIGHT/BOTH, SORT_REGULAR/NUMERIC/STRING/ASC/DESC, JSON_PRETTY_PRINT/UNESCAPED_SLASHES/UNESCAPED_UNICODE, E_ERROR/WARNING/NOTICE/ALL, PHP_FLOAT_MAX/MIN/EPSILON, M_PI/E/SQRT2/LN2/LN10, INF, NAN, TRUE/FALSE/NULL
+- `define('NAME', value)` native function writes to `php_constants`
+- `const NAME = value;` compiles to value expression + `define_const` opcode
+- `defined()` and `constant()` native functions for runtime constant queries
+- type casting: `(int)`, `(integer)`, `(float)`, `(double)`, `(real)`, `(string)`, `(bool)`, `(boolean)`, `(array)` parsed via 2-token lookahead in `parsePrimaryExpr`. disambiguates `(int)$x` from `($x + 1)` by checking if token after `(` is a known cast type and token after that is `)`. compiles to dedicated cast opcodes that use existing Value conversion methods
+
+### switch/match compilation
+- switch uses a hidden temp variable (`__switch_N`) to store the subject, avoiding stack management issues with fallthrough
+- two-phase layout: phase 1 emits comparison chain (get_var + case value + `equal` + jump-to-body), phase 2 emits all bodies sequentially (enables fallthrough - no break means execution flows into next body)
+- multi-value cases (`case 1: case 2:`) merged into one node with multiple values. comparison uses `jump_if_true` to short-circuit to body on first match
+- break compiles to `jump` with break_jumps patching, same mechanism as loops
+- match uses same temp var approach but with `identical` (strict comparison). each arm compiles result expression and jumps to end. no fallthrough. match is an expression (leaves result on stack)
+- match with no matching arm and no default returns null (PHP would throw UnhandledMatchError, but we don't have exceptions yet)
+- `Value.equal` was fixed to do string comparison when both operands are strings (was converting to float, causing `"php" == "js"` to be true)
 
 ### roadmap (in execution order)
 
