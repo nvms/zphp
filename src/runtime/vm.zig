@@ -116,6 +116,7 @@ pub const VM = struct {
     compile_results: std.ArrayListUnmanaged(*CompileResult) = .{},
     error_msg: ?[]const u8 = null,
     ob_stack: std.ArrayListUnmanaged(usize) = .{},
+    request_vars: std.StringHashMapUnmanaged(Value) = .{},
     exception_handlers: [32]ExceptionHandler = undefined,
     handler_count: usize = 0,
     allocator: Allocator,
@@ -237,13 +238,19 @@ pub const VM = struct {
         }
         self.compile_results.deinit(self.allocator);
         self.ob_stack.deinit(self.allocator);
+        self.request_vars.deinit(self.allocator);
     }
 
     pub fn interpret(self: *VM, result: *const CompileResult) RuntimeError!void {
         for (result.functions.items) |*func| {
             try self.registerFunction(func);
         }
-        self.frames[0] = .{ .chunk = &result.chunk, .ip = 0, .vars = .{} };
+        var vars: std.StringHashMapUnmanaged(Value) = .{};
+        var it = self.request_vars.iterator();
+        while (it.next()) |entry| {
+            try vars.put(self.allocator, entry.key_ptr.*, entry.value_ptr.*);
+        }
+        self.frames[0] = .{ .chunk = &result.chunk, .ip = 0, .vars = vars };
         self.frame_count = 1;
         try self.run();
     }

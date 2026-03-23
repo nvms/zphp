@@ -25,6 +25,23 @@ pub fn main() !void {
             std.process.exit(1);
         }
         try runFile(allocator, args[2]);
+    } else if (std.mem.eql(u8, cmd, "serve")) {
+        if (args.len < 3) {
+            try writeStderr("usage: zphp serve <file> [--port 8080] [--workers N]\n");
+            std.process.exit(1);
+        }
+        var config = @import("serve.zig").ServeConfig{ .file = args[2] };
+        var i: usize = 3;
+        while (i < args.len) : (i += 1) {
+            if (std.mem.eql(u8, args[i], "--port") and i + 1 < args.len) {
+                config.port = std.fmt.parseInt(u16, args[i + 1], 10) catch 8080;
+                i += 1;
+            } else if (std.mem.eql(u8, args[i], "--workers") and i + 1 < args.len) {
+                config.workers = std.fmt.parseInt(u16, args[i + 1], 10) catch 0;
+                i += 1;
+            }
+        }
+        try @import("serve.zig").serve(allocator, config);
     } else if (std.mem.eql(u8, cmd, "version") or std.mem.eql(u8, cmd, "--version")) {
         try writeStdout("zphp 0.1.0\n");
     } else {

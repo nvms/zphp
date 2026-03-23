@@ -23,6 +23,8 @@ pub const entries = .{
     .{ "ob_get_level", native_ob_get_level },
     .{ "mktime", native_mktime },
     .{ "strtotime", native_strtotime },
+    .{ "header", native_header },
+    .{ "http_response_code", native_http_response_code },
 };
 
 fn file_get_contents(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
@@ -140,6 +142,42 @@ fn native_microtime(ctx: *NativeContext, args: []const Value) RuntimeError!Value
     const result = try buf.toOwnedSlice(ctx.allocator);
     try ctx.strings.append(ctx.allocator, result);
     return .{ .string = result };
+}
+
+fn native_header(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len == 0 or args[0] != .string) return .null;
+    const hdr = args[0].string;
+
+    // check for Content-Type header specifically
+    if (io_startsWith(hdr, "Content-Type:") or io_startsWith(hdr, "content-type:")) {
+        if (std.mem.indexOf(u8, hdr, ": ")) |sep| {
+            try ctx.vm.currentFrame().vars.put(ctx.allocator, "__response_content_type", .{ .string = hdr[sep + 2 ..] });
+        }
+    }
+
+    // store all headers in a response headers array
+    const key = "__response_headers";
+    const existing = ctx.vm.currentFrame().vars.get(key);
+    if (existing != null and existing.? == .array) {
+        try existing.?.array.append(ctx.allocator, .{ .string = hdr });
+    } else {
+        const arr = try ctx.createArray();
+        try arr.append(ctx.allocator, .{ .string = hdr });
+        try ctx.vm.currentFrame().vars.put(ctx.allocator, key, .{ .array = arr });
+    }
+    return .null;
+}
+
+fn io_startsWith(s: []const u8, prefix: []const u8) bool {
+    return s.len >= prefix.len and std.ascii.eqlIgnoreCase(s[0..prefix.len], prefix);
+}
+
+fn native_http_response_code(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len >= 1 and args[0] == .int) {
+        try ctx.vm.currentFrame().vars.put(ctx.allocator, "__response_code", args[0]);
+    }
+    const code = ctx.vm.currentFrame().vars.get("__response_code") orelse Value{ .int = 200 };
+    return code;
 }
 
 fn native_ob_start(ctx: *NativeContext, _: []const Value) RuntimeError!Value {

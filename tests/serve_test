@@ -1,0 +1,103 @@
+#!/bin/bash
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+ZPHP="${ZPHP:-$SCRIPT_DIR/../zig-out/bin/zphp}"
+PORT=19876
+APP="$SCRIPT_DIR/serve/app.php"
+
+if [ ! -f "$ZPHP" ]; then
+    echo "zphp not found at $ZPHP"
+    exit 1
+fi
+
+passed=0
+failed=0
+errors=""
+
+# start server
+"$ZPHP" serve "$APP" --port $PORT --workers 2 &
+SERVER_PID=$!
+trap "kill $SERVER_PID 2>/dev/null; wait $SERVER_PID 2>/dev/null" EXIT
+
+# wait for server to start
+for i in $(seq 1 20); do
+    if curl -s -o /dev/null "http://localhost:$PORT/health" 2>/dev/null; then
+        break
+    fi
+    sleep 0.1
+done
+
+check() {
+    local name="$1"
+    local expected="$2"
+    local actual="$3"
+
+    if [ "$expected" = "$actual" ]; then
+        passed=$((passed + 1))
+        echo "  pass  $name"
+    else
+        failed=$((failed + 1))
+        echo "  FAIL  $name"
+        errors="$errors\n--- $name ---\nexpected: $expected\ngot: $actual\n"
+    fi
+}
+
+check_contains() {
+    local name="$1"
+    local needle="$2"
+    local haystack="$3"
+
+    if echo "$haystack" | grep -q "$needle"; then
+        passed=$((passed + 1))
+        echo "  pass  $name"
+    else
+        failed=$((failed + 1))
+        echo "  FAIL  $name"
+        errors="$errors\n--- $name ---\nexpected to contain: $needle\ngot: $haystack\n"
+    fi
+}
+
+# test: health endpoint returns 200 with json
+resp=$(curl -s http://localhost:$PORT/health)
+check "health body" '{"status":"ok"}' "$resp"
+
+# test: GET params
+resp=$(curl -s "http://localhost:$PORT/echo?name=alice&age=30")
+check_contains "get params name" '"name":"alice"' "$resp"
+check_contains "get params age" '"age":"30"' "$resp"
+check_contains "get method" '"method":"GET"' "$resp"
+
+# test: POST form data
+resp=$(curl -s -X POST -H "Content-Type: application/x-www-form-urlencoded" -d "key=val" "http://localhost:$PORT/echo")
+check_contains "post data" '"key":"val"' "$resp"
+check_contains "post method" '"method":"POST"' "$resp"
+
+# test: custom headers
+headers=$(curl -si http://localhost:$PORT/headers 2>&1)
+check_contains "custom header X-Custom" "X-Custom: hello" "$headers"
+check_contains "custom header X-Another" "X-Another: world" "$headers"
+
+# test: status code
+status=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:$PORT/status)
+check "status 201" "201" "$status"
+
+# test: 404
+status=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:$PORT/nonexistent)
+check "status 404" "404" "$status"
+
+# test: content-type html
+ct=$(curl -si http://localhost:$PORT/html 2>&1 | grep -i "Content-Type" | tr -d '\r')
+check_contains "html content-type" "text/html" "$ct"
+
+# test: request uri includes query string
+resp=$(curl -s "http://localhost:$PORT/echo?x=1")
+check_contains "request uri has query" '"/echo?x=1"' "$resp"
+
+echo ""
+echo "$passed passed, $failed failed"
+
+if [ $failed -gt 0 ]; then
+    echo -e "$errors"
+    exit 1
+fi

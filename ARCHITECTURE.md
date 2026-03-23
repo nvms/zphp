@@ -166,6 +166,30 @@ unique differentiators:
 - `zphp serve` with pre-loaded VM (no IPC/serialization overhead)
 - fresh memory model (zig allocators, tagged union values)
 
-## zphp serve architecture (future)
+## zphp serve
 
-two layers: zig HTTP layer (async, epoll/kqueue/io_uring) + PHP VM layer (synchronous per-request). compile once, spawn N worker threads sharing bytecode. each request gets clean scope. no re-parsing, no bootstrap cost. worker count configurable (default: CPU cores).
+`zphp serve <file> [--port 8080] [--workers N]`
+
+two layers: zig HTTP layer (TCP + raw HTTP parsing) + PHP VM layer (synchronous per-request).
+
+### how it works
+1. compile the PHP script once at startup (parse -> AST -> bytecode)
+2. bind TCP socket, spawn N worker threads (default: CPU core count)
+3. main thread accepts connections, pushes to bounded work queue (mutex + condition variable)
+4. worker threads pop connections, parse HTTP, create fresh VM, execute shared bytecode, write response
+
+### key design decisions
+- **shared bytecode**: all workers reference the same `CompileResult`. bytecode is read-only during execution, so sharing is safe with no synchronization
+- **fresh VM per request**: each request gets `VM.init()` + `vm.interpret(&result)` + `vm.deinit()`. request isolation is guaranteed - no state leaks between requests
+- **request_vars**: superglobals ($_SERVER, $_GET, $_POST, $_REQUEST, $_COOKIE) are populated into `vm.request_vars` before interpret. interpret copies them into frame 0
+- **response headers**: `header()` PHP function stores headers in frame vars under `__response_headers`. `http_response_code()` stores status in `__response_code`. serve reads these after execution
+- **work queue**: bounded ring buffer (capacity 1024) with mutex + condition. workers block on empty queue, main thread blocks on full queue
+
+### what's not yet implemented
+- connection keep-alive (currently Connection: close)
+- static file serving
+- graceful shutdown (SIGTERM handling)
+- VM pooling/reset (currently fresh VM per request, could reuse)
+- chunked transfer encoding
+- multipart form data parsing
+- websockets

@@ -37,6 +37,7 @@ at the end of every session:
 ```
 src/
   main.zig              - CLI dispatch, FileLoader for require/include
+  serve.zig             - HTTP server, worker pool, request/response handling
   integration_tests.zig - end-to-end pipeline tests
   pipeline/
     token.zig           - 145 token types, case-insensitive keyword lookup
@@ -57,7 +58,7 @@ src/
 
 ## scope
 
-covers ~95% of PHP 8.x: operators, control flow, functions (variadic, closures, spread, generators/yield), classes (inheritance, static, interfaces, traits, visibility), exceptions, namespaces, require/include, 160+ stdlib functions, mixed HTML/PHP. see ARCHITECTURE.md for details per subsystem.
+covers ~95% of PHP 8.x: operators, control flow, functions (variadic, closures, spread, generators/yield), classes (inheritance, static, interfaces, traits, visibility), exceptions, namespaces, require/include, 160+ stdlib functions, mixed HTML/PHP, HTTP server (`zphp serve`). see ARCHITECTURE.md for details per subsystem.
 
 ## known limitations
 
@@ -93,7 +94,7 @@ covers ~95% of PHP 8.x: operators, control flow, functions (variadic, closures, 
 
 ## CI
 
-GitHub Actions on push: `zig build test` (ubuntu + macos), PHP compat tests against PHP 8.3 (`tests/run` diffs output)
+GitHub Actions on push: `zig build test` (ubuntu + macos), PHP compat tests against PHP 8.3 (`tests/run`), serve integration tests (`tests/serve_test`)
 
 ## PHP compatibility tests
 
@@ -105,12 +106,12 @@ GitHub Actions on push: `zig build test` (ubuntu + macos), PHP compat tests agai
 ## roadmap
 
 next:
+- `zphp serve` improvements: keep-alive, static files, graceful shutdown, benchmarking
 - stdlib pass 2: remaining OOP types (`SplStack`, `ArrayObject`)
 - `yield from` delegation
 - package manager (composer.json, packagist, SAT solver, autoloader)
 - `zphp build` (bundle to binary)
 - `zphp test`, `zphp fmt`
-- `zphp serve` (pre-loaded VM pool, zig HTTP layer + synchronous PHP)
 - fibers (PHP 8.1)
 - async I/O hooks (optional, future)
 
