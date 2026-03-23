@@ -39,13 +39,11 @@ zig 0.15.x. `zig build test` must pass before pushing. short lowercase commits, 
 
 ## CI
 
-4 jobs: `zig build test` (ubuntu + macos), PHP compat (`tests/run`, 65 files), serve integration (`tests/serve_test`, 12 assertions)
+4 jobs: `zig build test` (ubuntu + macos), PHP compat (`tests/run`, 66 files), serve integration (`tests/serve_test`, 26 assertions)
 
 ## roadmap
 
-done: VM pooling (one VM per worker, reset between requests), HTTP/1.1 keep-alive with pipelined request support
-
-next: WebSocket support for serve (design toward event-loop-per-worker for long-lived connections - don't assume all connections are short-lived request/response), `yield from`, `SplStack`/`ArrayObject`, package manager, `zphp build`/`test`/`fmt`, fibers
+next: WebSocket support for serve (design toward event-loop-per-worker for long-lived connections), `SplStack`/`ArrayObject`, `zphp build`/`test`/`fmt`, fibers, gzip compression for static files
 
 ## distribution
 
