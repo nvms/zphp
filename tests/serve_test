@@ -18,7 +18,7 @@ errors=""
 # start server
 "$ZPHP" serve "$APP" --port $PORT --workers 2 &
 SERVER_PID=$!
-cleanup() { kill $SERVER_PID 2>/dev/null; wait $SERVER_PID 2>/dev/null; exit "${EXIT_CODE:-0}"; }
+cleanup() { kill $SERVER_PID 2>/dev/null || true; wait $SERVER_PID 2>/dev/null || true; exit "${EXIT_CODE:-0}"; }
 trap cleanup EXIT
 
 # wait for server to start
