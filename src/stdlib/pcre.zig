@@ -4,10 +4,75 @@ const PhpArray = @import("../runtime/value.zig").PhpArray;
 const NativeContext = @import("../runtime/vm.zig").NativeContext;
 const RuntimeError = error{ RuntimeError, OutOfMemory };
 
-const c = @cImport({
-    @cDefine("PCRE2_CODE_UNIT_WIDTH", "8");
-    @cInclude("pcre2.h");
-});
+const pcre2 = struct {
+    const Code = opaque {};
+    const MatchData = opaque {};
+
+    const CASELESS: u32 = 0x00000008;
+    const MULTILINE: u32 = 0x00000400;
+    const DOTALL: u32 = 0x00000020;
+    const EXTENDED: u32 = 0x00000080;
+    const UTF: u32 = 0x00080000;
+
+    const SUBSTITUTE_GLOBAL: u32 = 0x00000100;
+    const SUBSTITUTE_OVERFLOW_LENGTH: u32 = 0x00001000;
+
+    const INFO_CAPTURECOUNT: u32 = 4;
+    const ERROR_NOMEMORY: c_int = -48;
+    const UNSET: usize = std.math.maxInt(usize);
+
+    extern "pcre2-8" fn pcre2_compile_8(
+        pattern: [*]const u8,
+        length: usize,
+        options: u32,
+        errorcode: *c_int,
+        erroroffset: *usize,
+        ccontext: ?*anyopaque,
+    ) callconv(.c) ?*Code;
+
+    extern "pcre2-8" fn pcre2_code_free_8(code: ?*Code) callconv(.c) void;
+
+    extern "pcre2-8" fn pcre2_match_data_create_from_pattern_8(
+        code: *const Code,
+        gcontext: ?*anyopaque,
+    ) callconv(.c) ?*MatchData;
+
+    extern "pcre2-8" fn pcre2_match_data_free_8(match_data: ?*MatchData) callconv(.c) void;
+
+    extern "pcre2-8" fn pcre2_match_8(
+        code: *const Code,
+        subject: [*]const u8,
+        length: usize,
+        startoffset: usize,
+        options: u32,
+        match_data: *MatchData,
+        mcontext: ?*anyopaque,
+    ) callconv(.c) c_int;
+
+    extern "pcre2-8" fn pcre2_get_ovector_pointer_8(
+        match_data: *MatchData,
+    ) callconv(.c) [*]usize;
+
+    extern "pcre2-8" fn pcre2_pattern_info_8(
+        code: *const Code,
+        what: u32,
+        where: *anyopaque,
+    ) callconv(.c) c_int;
+
+    extern "pcre2-8" fn pcre2_substitute_8(
+        code: *const Code,
+        subject: [*]const u8,
+        length: usize,
+        startoffset: usize,
+        options: u32,
+        match_data: ?*MatchData,
+        mcontext: ?*anyopaque,
+        replacement: [*]const u8,
+        rlength: usize,
+        outputbuffer: ?[*]u8,
+        outlengthptr: *usize,
+    ) callconv(.c) c_int;
+};
 
 pub const entries = .{
     .{ "preg_match", preg_match },
@@ -19,7 +84,6 @@ pub const entries = .{
 const PatternInfo = struct {
     pattern: []const u8,
     flags: u32,
-    global: bool,
 };
 
 fn parsePattern(raw: []const u8) ?PatternInfo {
@@ -35,25 +99,23 @@ fn parsePattern(raw: []const u8) ?PatternInfo {
     const modifiers = raw[end + 1 ..];
 
     var flags: u32 = 0;
-    var global = false;
     for (modifiers) |m| {
         switch (m) {
-            'i' => flags |= c.PCRE2_CASELESS,
-            'm' => flags |= c.PCRE2_MULTILINE,
-            's' => flags |= c.PCRE2_DOTALL,
-            'x' => flags |= c.PCRE2_EXTENDED,
-            'u' => flags |= c.PCRE2_UTF,
-            'g' => global = true,
+            'i' => flags |= pcre2.CASELESS,
+            'm' => flags |= pcre2.MULTILINE,
+            's' => flags |= pcre2.DOTALL,
+            'x' => flags |= pcre2.EXTENDED,
+            'u' => flags |= pcre2.UTF,
             else => {},
         }
     }
-    return .{ .pattern = pattern, .flags = flags, .global = global };
+    return .{ .pattern = pattern, .flags = flags };
 }
 
-fn compilePattern(pattern: []const u8, flags: u32) ?*c.pcre2_code_8 {
+fn compilePattern(pattern: []const u8, flags: u32) ?*pcre2.Code {
     var err_code: c_int = 0;
     var err_offset: usize = 0;
-    const code = c.pcre2_compile_8(
+    return pcre2.pcre2_compile_8(
         pattern.ptr,
         pattern.len,
         flags,
@@ -61,7 +123,6 @@ fn compilePattern(pattern: []const u8, flags: u32) ?*c.pcre2_code_8 {
         &err_offset,
         null,
     );
-    return code;
 }
 
 fn preg_match(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
@@ -70,27 +131,26 @@ fn preg_match(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     const subject = args[1].string;
 
     const code = compilePattern(info.pattern, info.flags) orelse return Value{ .int = 0 };
-    defer c.pcre2_code_free_8(code);
+    defer pcre2.pcre2_code_free_8(code);
 
-    const match_data = c.pcre2_match_data_create_from_pattern_8(code, null) orelse return Value{ .int = 0 };
-    defer c.pcre2_match_data_free_8(match_data);
+    const match_data = pcre2.pcre2_match_data_create_from_pattern_8(code, null) orelse return Value{ .int = 0 };
+    defer pcre2.pcre2_match_data_free_8(match_data);
 
-    const rc = c.pcre2_match_8(code, subject.ptr, subject.len, 0, 0, match_data, null);
+    const rc = pcre2.pcre2_match_8(code, subject.ptr, subject.len, 0, 0, match_data, null);
     if (rc < 0) return .{ .int = 0 };
 
     if (args.len >= 3 and args[2] == .array) {
         const matches_arr = args[2].array;
-        const ovector = c.pcre2_get_ovector_pointer_8(match_data);
+        const ovector = pcre2.pcre2_get_ovector_pointer_8(match_data);
         const count: usize = @intCast(rc);
 
-        // clear existing entries
         matches_arr.entries.items.len = 0;
         matches_arr.next_int_key = 0;
 
         for (0..count) |i| {
             const start = ovector[i * 2];
             const end = ovector[i * 2 + 1];
-            if (start == std.math.maxInt(usize) or end == std.math.maxInt(usize)) {
+            if (start == pcre2.UNSET or end == pcre2.UNSET) {
                 try matches_arr.append(ctx.allocator, .{ .string = "" });
             } else {
                 try matches_arr.append(ctx.allocator, .{ .string = try ctx.createString(subject[start..end]) });
@@ -107,13 +167,13 @@ fn preg_match_all(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     const subject = args[1].string;
 
     const code = compilePattern(info.pattern, info.flags) orelse return Value{ .int = 0 };
-    defer c.pcre2_code_free_8(code);
+    defer pcre2.pcre2_code_free_8(code);
 
-    const match_data = c.pcre2_match_data_create_from_pattern_8(code, null) orelse return Value{ .int = 0 };
-    defer c.pcre2_match_data_free_8(match_data);
+    const match_data = pcre2.pcre2_match_data_create_from_pattern_8(code, null) orelse return Value{ .int = 0 };
+    defer pcre2.pcre2_match_data_free_8(match_data);
 
     var capture_count: u32 = 0;
-    _ = c.pcre2_pattern_info_8(code, c.PCRE2_INFO_CAPTURECOUNT, &capture_count);
+    _ = pcre2.pcre2_pattern_info_8(code, pcre2.INFO_CAPTURECOUNT, @ptrCast(&capture_count));
     const group_count: usize = capture_count + 1;
 
     var group_arrays = std.ArrayListUnmanaged(*PhpArray){};
@@ -127,17 +187,17 @@ fn preg_match_all(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     var offset: usize = 0;
 
     while (offset <= subject.len) {
-        const rc = c.pcre2_match_8(code, subject.ptr, subject.len, offset, 0, match_data, null);
+        const rc = pcre2.pcre2_match_8(code, subject.ptr, subject.len, offset, 0, match_data, null);
         if (rc < 0) break;
 
-        const ovector = c.pcre2_get_ovector_pointer_8(match_data);
+        const ovector = pcre2.pcre2_get_ovector_pointer_8(match_data);
         const count: usize = @intCast(rc);
 
         for (0..group_count) |i| {
             if (i < count) {
                 const start = ovector[i * 2];
                 const end = ovector[i * 2 + 1];
-                if (start == std.math.maxInt(usize) or end == std.math.maxInt(usize)) {
+                if (start == pcre2.UNSET or end == pcre2.UNSET) {
                     try group_arrays.items[i].append(ctx.allocator, .{ .string = "" });
                 } else {
                     try group_arrays.items[i].append(ctx.allocator, .{ .string = try ctx.createString(subject[start..end]) });
@@ -175,16 +235,15 @@ fn preg_replace(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     const subject = args[2].string;
 
     const code = compilePattern(info.pattern, info.flags) orelse return args[2];
-    defer c.pcre2_code_free_8(code);
+    defer pcre2.pcre2_code_free_8(code);
 
-    const match_data = c.pcre2_match_data_create_from_pattern_8(code, null) orelse return args[2];
-    defer c.pcre2_match_data_free_8(match_data);
+    const match_data = pcre2.pcre2_match_data_create_from_pattern_8(code, null) orelse return args[2];
+    defer pcre2.pcre2_match_data_free_8(match_data);
 
-    const sub_opts: u32 = c.PCRE2_SUBSTITUTE_OVERFLOW_LENGTH | c.PCRE2_SUBSTITUTE_GLOBAL;
+    const sub_opts: u32 = pcre2.SUBSTITUTE_OVERFLOW_LENGTH | pcre2.SUBSTITUTE_GLOBAL;
 
-    // first call to get required length
     var out_len: usize = 0;
-    var rc = c.pcre2_substitute_8(
+    var rc = pcre2.pcre2_substitute_8(
         code,
         subject.ptr,
         subject.len,
@@ -198,15 +257,11 @@ fn preg_replace(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
         &out_len,
     );
 
-    if (rc >= 0) {
-        // no matches, return original
-        return args[2];
-    }
-
-    if (rc != c.PCRE2_ERROR_NOMEMORY) return args[2];
+    if (rc >= 0) return args[2];
+    if (rc != pcre2.ERROR_NOMEMORY) return args[2];
 
     const buf = try ctx.allocator.alloc(u8, out_len);
-    rc = c.pcre2_substitute_8(
+    rc = pcre2.pcre2_substitute_8(
         code,
         subject.ptr,
         subject.len,
@@ -226,9 +281,6 @@ fn preg_replace(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     }
 
     const result = buf[0..out_len];
-    if (result.len < buf.len) {
-        // shrink - but we track the original allocation for cleanup
-    }
     try ctx.strings.append(ctx.allocator, buf);
     return .{ .string = result };
 }
@@ -239,19 +291,19 @@ fn preg_split(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     const subject = args[1].string;
 
     const code = compilePattern(info.pattern, info.flags) orelse return Value.null;
-    defer c.pcre2_code_free_8(code);
+    defer pcre2.pcre2_code_free_8(code);
 
-    const match_data = c.pcre2_match_data_create_from_pattern_8(code, null) orelse return Value.null;
-    defer c.pcre2_match_data_free_8(match_data);
+    const match_data = pcre2.pcre2_match_data_create_from_pattern_8(code, null) orelse return Value.null;
+    defer pcre2.pcre2_match_data_free_8(match_data);
 
     var result = try ctx.createArray();
     var offset: usize = 0;
 
     while (offset <= subject.len) {
-        const rc = c.pcre2_match_8(code, subject.ptr, subject.len, offset, 0, match_data, null);
+        const rc = pcre2.pcre2_match_8(code, subject.ptr, subject.len, offset, 0, match_data, null);
         if (rc < 0) break;
 
-        const ovector = c.pcre2_get_ovector_pointer_8(match_data);
+        const ovector = pcre2.pcre2_get_ovector_pointer_8(match_data);
         const match_start = ovector[0];
         const match_end = ovector[1];
 
