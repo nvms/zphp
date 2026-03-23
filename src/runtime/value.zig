@@ -120,6 +120,7 @@ pub const Value = union(enum) {
 
     pub fn equal(a: Value, b: Value) bool {
         if (a == .array or b == .array) return false;
+        if (a == .string and b == .string) return std.mem.eql(u8, a.string, b.string);
         return toFloat(a) == toFloat(b);
     }
 

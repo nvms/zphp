@@ -133,6 +133,7 @@ const Parser = struct {
             .kw_foreach => self.parseForeachStmt(),
             .kw_function => self.parseFunctionDecl(),
             .kw_const => self.parseConstDecl(),
+            .kw_switch => self.parseSwitchStmt(),
             .kw_return => self.parseReturnStmt(),
             .kw_break => self.parseSimpleStmt(.break_stmt),
             .kw_continue => self.parseSimpleStmt(.continue_stmt),
@@ -309,6 +310,129 @@ const Parser = struct {
         const value = try self.parseExpression();
         _ = try self.expect(.semicolon);
         return self.addNode(.{ .tag = .const_decl, .main_token = name_tok, .data = .{ .lhs = value } });
+    }
+
+    fn parseSwitchStmt(self: *Parser) Error!u32 {
+        const switch_tok = self.advance(); // switch
+        _ = try self.expect(.l_paren);
+        const cond = try self.parseExpression();
+        _ = try self.expect(.r_paren);
+        _ = try self.expect(.l_brace);
+
+        var cases = std.ArrayListUnmanaged(u32){};
+        defer cases.deinit(self.allocator);
+
+        while (self.peek() != .r_brace and self.peek() != .eof) {
+            if (self.peek() == .kw_case) {
+                try cases.append(self.allocator, try self.parseSwitchCase());
+            } else if (self.peek() == .kw_default) {
+                try cases.append(self.allocator, try self.parseSwitchDefault());
+            } else {
+                self.synchronize();
+            }
+        }
+        _ = try self.expect(.r_brace);
+
+        const extra = try self.addExtraList(cases.items);
+        return self.addNode(.{ .tag = .switch_stmt, .main_token = switch_tok, .data = .{ .lhs = cond, .rhs = extra } });
+    }
+
+    fn parseSwitchCase(self: *Parser) Error!u32 {
+        const case_tok = self.advance(); // case
+
+        var values = std.ArrayListUnmanaged(u32){};
+        defer values.deinit(self.allocator);
+
+        try values.append(self.allocator, try self.parseExpression());
+        _ = try self.expect(.colon);
+
+        // collect fallthrough cases: case 1: case 2: case 3: body
+        while (self.peek() == .kw_case) {
+            _ = self.advance();
+            try values.append(self.allocator, try self.parseExpression());
+            _ = try self.expect(.colon);
+        }
+
+        var stmts = std.ArrayListUnmanaged(u32){};
+        defer stmts.deinit(self.allocator);
+
+        while (self.peek() != .kw_case and self.peek() != .kw_default and self.peek() != .r_brace and self.peek() != .eof) {
+            const stmt = self.parseStatement() catch |err| switch (err) {
+                error.ParseError => { self.synchronize(); continue; },
+                error.OutOfMemory => return error.OutOfMemory,
+            };
+            try stmts.append(self.allocator, stmt);
+        }
+
+        const vals_extra = try self.addExtraList(values.items);
+        const body_extra = try self.addExtraList(stmts.items);
+        return self.addNode(.{ .tag = .switch_case, .main_token = case_tok, .data = .{ .lhs = vals_extra, .rhs = body_extra } });
+    }
+
+    fn parseSwitchDefault(self: *Parser) Error!u32 {
+        const def_tok = self.advance(); // default
+        _ = try self.expect(.colon);
+
+        var stmts = std.ArrayListUnmanaged(u32){};
+        defer stmts.deinit(self.allocator);
+
+        while (self.peek() != .kw_case and self.peek() != .kw_default and self.peek() != .r_brace and self.peek() != .eof) {
+            const stmt = self.parseStatement() catch |err| switch (err) {
+                error.ParseError => { self.synchronize(); continue; },
+                error.OutOfMemory => return error.OutOfMemory,
+            };
+            try stmts.append(self.allocator, stmt);
+        }
+
+        const body_extra = try self.addExtraList(stmts.items);
+        return self.addNode(.{ .tag = .switch_default, .main_token = def_tok, .data = .{ .lhs = body_extra } });
+    }
+
+    fn parseMatchExpr(self: *Parser) Error!u32 {
+        const match_tok = self.advance(); // match
+        _ = try self.expect(.l_paren);
+        const cond = try self.parseExpression();
+        _ = try self.expect(.r_paren);
+        _ = try self.expect(.l_brace);
+
+        var arms = std.ArrayListUnmanaged(u32){};
+        defer arms.deinit(self.allocator);
+
+        while (self.peek() != .r_brace and self.peek() != .eof) {
+            try arms.append(self.allocator, try self.parseMatchArm());
+            if (self.peek() == .comma) _ = self.advance();
+        }
+        _ = try self.expect(.r_brace);
+
+        const extra = try self.addExtraList(arms.items);
+        return self.addNode(.{ .tag = .match_expr, .main_token = match_tok, .data = .{ .lhs = cond, .rhs = extra } });
+    }
+
+    fn parseMatchArm(self: *Parser) Error!u32 {
+        if (self.peek() == .kw_default) {
+            _ = self.advance();
+            _ = try self.expect(.fat_arrow);
+            const result = try self.parseExpression();
+            const vals_extra = try self.addExtraList(&.{});
+            return self.addNode(.{ .tag = .match_arm, .main_token = 0, .data = .{ .lhs = vals_extra, .rhs = result } });
+        }
+
+        var values = std.ArrayListUnmanaged(u32){};
+        defer values.deinit(self.allocator);
+
+        try values.append(self.allocator, try self.parseExpression());
+        while (self.peek() == .comma) {
+            _ = self.advance();
+            if (self.peek() == .fat_arrow) break;
+            try values.append(self.allocator, try self.parseExpression());
+        }
+        if (self.peek() != .fat_arrow) {
+            _ = try self.expect(.fat_arrow);
+        }
+        _ = self.advance(); // consume =>
+        const result = try self.parseExpression();
+        const vals_extra = try self.addExtraList(values.items);
+        return self.addNode(.{ .tag = .match_arm, .main_token = 0, .data = .{ .lhs = vals_extra, .rhs = result } });
     }
 
     fn parseFunctionDecl(self: *Parser) Error!u32 {
@@ -531,6 +655,7 @@ const Parser = struct {
             .variable => self.addLiteral(.variable),
             .identifier => self.addLiteral(.identifier),
             .kw_isset, .kw_empty, .kw_unset, .kw_eval, .kw_exit, .kw_die => self.addLiteral(.identifier),
+            .kw_match => self.parseMatchExpr(),
             .kw_function => self.parseClosureExpr(),
             .kw_fn => self.parseArrowFunc(),
             .l_paren => if (self.isCastExpr()) self.parseCastExpr() else self.parseGroupedExpr(),
@@ -1024,6 +1149,49 @@ fn renderNode(ast: *const Ast, idx: u32, buf: *Buf) !void {
                 try renderNode(ast, param, buf);
             }
             try w.writeAll(") ");
+            try renderNode(ast, node.data.rhs, buf);
+            try w.writeByte(')');
+        },
+        .switch_stmt => {
+            try w.writeAll("(switch ");
+            try renderNode(ast, node.data.lhs, buf);
+            for (ast.extraSlice(node.data.rhs)) |c| {
+                try w.writeByte(' ');
+                try renderNode(ast, c, buf);
+            }
+            try w.writeByte(')');
+        },
+        .switch_case => {
+            try w.writeAll("(case");
+            for (ast.extraSlice(node.data.lhs)) |v| {
+                try w.writeByte(' ');
+                try renderNode(ast, v, buf);
+            }
+            try w.writeAll(": ...");
+            try w.writeByte(')');
+        },
+        .switch_default => try w.writeAll("(default: ...)"),
+        .match_expr => {
+            try w.writeAll("(match ");
+            try renderNode(ast, node.data.lhs, buf);
+            for (ast.extraSlice(node.data.rhs)) |a| {
+                try w.writeByte(' ');
+                try renderNode(ast, a, buf);
+            }
+            try w.writeByte(')');
+        },
+        .match_arm => {
+            const vals = ast.extraSlice(node.data.lhs);
+            if (vals.len == 0) {
+                try w.writeAll("(default => ");
+            } else {
+                try w.writeByte('(');
+                for (vals, 0..) |v, i| {
+                    if (i > 0) try w.writeAll(", ");
+                    try renderNode(ast, v, buf);
+                }
+                try w.writeAll(" => ");
+            }
             try renderNode(ast, node.data.rhs, buf);
             try w.writeByte(')');
         },

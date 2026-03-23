@@ -54,6 +54,11 @@ pub const Ast = struct {
             foreach_stmt, // lhs = extra index -> {iter, value, key_or_0}, rhs = body
             function_decl, // main_token = name, lhs = extra index -> {count, param...}, rhs = body
             const_decl, // main_token = identifier, lhs = value expression
+            switch_stmt, // main_token = switch, lhs = condition, rhs = extra index -> {count, case/default nodes...}
+            switch_case, // main_token = case, lhs = extra index -> {count, value_expr...}, rhs = extra index -> {count, stmt...}
+            switch_default, // main_token = default, lhs = extra index -> {count, stmt...}
+            match_expr, // main_token = match, lhs = condition, rhs = extra index -> {count, arm_nodes...}
+            match_arm, // lhs = extra index -> {count, value_expr...}, rhs = result expr. count=0 means default
             inline_html, // main_token = inline_html token
 
             // literals

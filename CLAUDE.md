@@ -259,8 +259,8 @@ phase 1 complete: full pipeline from source to execution. zphp can run real PHP 
 - `src/runtime/vm.zig` - stack-based bytecode interpreter with per-frame variable scoping, function calls, closures with captures, arrays, foreach, native function dispatch, output capture (61 integration tests)
 - `src/runtime/stdlib.zig` - 60+ native PHP functions: array (push/pop/shift/keys/values/merge/slice/reverse/unique/sort/rsort/search/in_array/key_exists/range/array_map/array_filter/usort), string (substr/strpos/str_replace/explode/implode/trim/ltrim/rtrim/strtolower/strtoupper/str_contains/str_starts_with/str_ends_with/str_repeat/str_pad/ucfirst/lcfirst), math (abs/floor/ceil/round/min/max/rand), type (gettype/is_array/is_null/is_int/is_float/is_string/is_bool/is_numeric/intval/floatval/strval/isset/empty/count/strlen)
 - `src/main.zig` - CLI entry point with `zphp run <file>`, imports all modules for test discovery
-- 171 unit tests total across all modules
-- 28 PHP compatibility test files in tests/ verified against PHP 8.3
+- 181 unit tests total across all modules
+- 30 PHP compatibility test files in tests/ verified against PHP 8.3
 
 ### lexer design decisions
 - tokens reference byte offsets into source (zero-copy, no allocations)
@@ -315,7 +315,8 @@ phase 1 complete: full pipeline from source to execution. zphp can run real PHP 
 - null coalesce: ??
 - ternary: ? : and short ternary ?:
 - variables: assignment, compound assignment (+=, -=, etc.), pre/post increment/decrement
-- control flow: if/elseif/else, while, do-while, for, foreach, break, continue
+- control flow: if/elseif/else, while, do-while, for, foreach, switch/case/default (with fallthrough), break, continue
+- match expression: strict comparison, multi-value arms, default, returns a value
 - functions: declaration, calls, return with/without value, nested calls, parameter passing
 - closures: anonymous functions, arrow functions (fn($x) => expr), assigned to variables, passed as arguments
 - callbacks: closures and named function strings as callbacks to array_map, array_filter, usort
@@ -365,11 +366,11 @@ phase 1 complete: full pipeline from source to execution. zphp can run real PHP 
 
 each step should unlock the maximum amount of real PHP code with the minimum architecture change. language features and stdlib gaps are interleaved so that each feature is immediately usable.
 
-**1. PHP constants + type casting**
+**1. PHP constants + type casting** (DONE)
 two small language changes that fix silent breakage. constants: add a constants table (string -> Value) checked before variables at compile time. pre-populate with PHP's predefined constants (STR_PAD_LEFT, PHP_INT_MAX, PHP_EOL, SORT_ASC, etc.). support `define('NAME', value)` and `const NAME = value`. type casting: `(int)`, `(string)`, `(array)`, `(bool)`, `(float)`. parser change (cast as prefix expression) + compiler emits conversion opcodes. most conversion logic already exists in Value
 
-**2. switch + match**
-switch: jump table over cases with fallthrough semantics and break/default. match: PHP 8 expression-based strict comparison, no fallthrough, returns a value. both very common in real PHP code
+**2. switch + match** (DONE)
+switch compiles to two-phase layout: comparison chain (using temp var + loose equality) then sequential bodies (enables fallthrough). break patches to end. match compiles similarly but uses strict identity, each arm emits its result expression and jumps to end. no new opcodes except `dup` (added but switch/match use temp vars instead)
 
 **3. stdlib expansion pass 1 - fill the gaps that block real scripts**
 these are pure additions to stdlib.zig, no architecture changes needed:

@@ -158,6 +158,7 @@ pub const VM = struct {
                 .op_true => self.push(.{ .bool = true }),
                 .op_false => self.push(.{ .bool = false }),
                 .pop => _ = self.pop(),
+                .dup => self.push(self.stack[self.sp - 1]),
 
                 .get_var => {
                     const idx = self.readU16();
@@ -973,4 +974,112 @@ test "cast bool" {
 
 test "cast array" {
     try expectOutput("<?php $a = (array)42; echo count($a); echo $a[0];", "142");
+}
+
+// switch
+
+test "switch basic" {
+    try expectOutput(
+        \\<?php
+        \\$x = 2;
+        \\switch ($x) {
+        \\    case 1: echo 'one'; break;
+        \\    case 2: echo 'two'; break;
+        \\    case 3: echo 'three'; break;
+        \\}
+    , "two");
+}
+
+test "switch default" {
+    try expectOutput(
+        \\<?php
+        \\$x = 99;
+        \\switch ($x) {
+        \\    case 1: echo 'one'; break;
+        \\    default: echo 'other'; break;
+        \\}
+    , "other");
+}
+
+test "switch fallthrough" {
+    try expectOutput(
+        \\<?php
+        \\$x = 2;
+        \\switch ($x) {
+        \\    case 1:
+        \\    case 2:
+        \\    case 3:
+        \\        echo 'low';
+        \\        break;
+        \\    default:
+        \\        echo 'high';
+        \\}
+    , "low");
+}
+
+test "switch fallthrough no break" {
+    try expectOutput(
+        \\<?php
+        \\$x = 1;
+        \\switch ($x) {
+        \\    case 1: echo 'a';
+        \\    case 2: echo 'b';
+        \\    case 3: echo 'c'; break;
+        \\}
+    , "abc");
+}
+
+test "switch no match no default" {
+    try expectOutput(
+        \\<?php
+        \\$x = 99;
+        \\switch ($x) {
+        \\    case 1: echo 'one'; break;
+        \\    case 2: echo 'two'; break;
+        \\}
+        \\echo 'done';
+    , "done");
+}
+
+// match
+
+test "match basic" {
+    try expectOutput(
+        \\<?php
+        \\$x = 2;
+        \\echo match($x) { 1 => 'one', 2 => 'two', 3 => 'three' };
+    , "two");
+}
+
+test "match default" {
+    try expectOutput(
+        \\<?php
+        \\$x = 99;
+        \\echo match($x) { 1 => 'one', default => 'other' };
+    , "other");
+}
+
+test "match multi value" {
+    try expectOutput(
+        \\<?php
+        \\$x = 2;
+        \\echo match($x) { 1, 2, 3 => 'low', 4, 5 => 'high', default => '?' };
+    , "low");
+}
+
+test "match no match returns null" {
+    try expectOutput(
+        \\<?php
+        \\$r = match(99) { 1 => 'one' };
+        \\echo $r === null ? 'null' : 'value';
+    , "null");
+}
+
+test "match assigned to variable" {
+    try expectOutput(
+        \\<?php
+        \\$x = 'b';
+        \\$result = match($x) { 'a' => 1, 'b' => 2, 'c' => 3 };
+        \\echo $result;
+    , "2");
 }

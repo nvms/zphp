@@ -121,6 +121,10 @@ const Compiler = struct {
                 try self.emitOp(.define_const);
                 try self.emitU16(name_idx);
             },
+            .switch_stmt => try self.compileSwitch(node),
+            .switch_case, .switch_default => {},
+            .match_expr => try self.compileMatch(node),
+            .match_arm => {},
             .closure_expr => try self.compileClosure(node),
             .cast_expr => try self.compileCast(node),
             .inline_html => {
@@ -784,6 +788,149 @@ const Compiler = struct {
         sub.functions.deinit(self.allocator);
         for (sub.string_allocs.items) |s| try self.string_allocs.append(self.allocator, s);
         sub.string_allocs.deinit(self.allocator);
+    }
+
+    fn compileSwitch(self: *Compiler, node: Ast.Node) Error!void {
+        const prev_start = self.loop_start;
+        const prev_breaks = self.break_jumps;
+        self.break_jumps = .{};
+        self.loop_start = null;
+
+        try self.compileNode(node.data.lhs);
+        var name_buf: [32]u8 = undefined;
+        const temp_name = std.fmt.bufPrint(&name_buf, "__switch_{d}", .{self.closure_count}) catch "__switch";
+        self.closure_count += 1;
+        const temp_idx = try self.addConstant(.{ .string = temp_name });
+        try self.emitOp(.set_var);
+        try self.emitU16(temp_idx);
+        try self.emitOp(.pop);
+
+        const case_nodes = self.ast.extraSlice(node.data.rhs);
+
+        // phase 1: emit comparison chain, collect jumps to bodies
+        var body_jumps = std.ArrayListUnmanaged(usize){};
+        defer body_jumps.deinit(self.allocator);
+        var default_jump: ?usize = null;
+
+        for (case_nodes) |case_idx| {
+            const case_node = self.ast.nodes[case_idx];
+            if (case_node.tag == .switch_default) {
+                try body_jumps.append(self.allocator, 0);
+                continue;
+            }
+
+            const values = self.ast.extraSlice(case_node.data.lhs);
+            var hit_jumps = std.ArrayListUnmanaged(usize){};
+            defer hit_jumps.deinit(self.allocator);
+
+            for (values, 0..) |val, vi| {
+                try self.emitOp(.get_var);
+                try self.emitU16(temp_idx);
+                try self.compileNode(val);
+                try self.emitOp(.equal);
+                if (vi < values.len - 1) {
+                    const hit = try self.emitJump(.jump_if_true);
+                    try hit_jumps.append(self.allocator, hit);
+                    try self.emitOp(.pop);
+                } else {
+                    const skip = try self.emitJump(.jump_if_false);
+                    // matched: patch all hit_jumps to here
+                    for (hit_jumps.items) |hj| self.patchJump(hj);
+                    try self.emitOp(.pop);
+                    const body_jmp = try self.emitJump(.jump);
+                    try body_jumps.append(self.allocator, body_jmp);
+                    self.patchJump(skip);
+                    try self.emitOp(.pop);
+                }
+            }
+        }
+
+        // jump to default or past all bodies
+        for (case_nodes, 0..) |case_idx, i| {
+            if (self.ast.nodes[case_idx].tag == .switch_default) {
+                default_jump = try self.emitJump(.jump);
+                body_jumps.items[i] = default_jump.?;
+                break;
+            }
+        }
+        const end_no_match = if (default_jump == null) try self.emitJump(.jump) else null;
+
+        // phase 2: emit bodies sequentially (enables fallthrough)
+        for (case_nodes, 0..) |case_idx, i| {
+            const case_node = self.ast.nodes[case_idx];
+            self.patchJump(body_jumps.items[i]);
+
+            const stmts = if (case_node.tag == .switch_default)
+                self.ast.extraSlice(case_node.data.lhs)
+            else
+                self.ast.extraSlice(case_node.data.rhs);
+
+            for (stmts) |stmt| try self.compileNode(stmt);
+        }
+
+        if (end_no_match) |j| self.patchJump(j);
+        for (self.break_jumps.items) |bj| self.patchJump(bj);
+        self.break_jumps.deinit(self.allocator);
+        self.break_jumps = prev_breaks;
+        self.loop_start = prev_start;
+    }
+
+    fn compileMatch(self: *Compiler, node: Ast.Node) Error!void {
+        try self.compileNode(node.data.lhs);
+        var name_buf: [32]u8 = undefined;
+        const temp_name = std.fmt.bufPrint(&name_buf, "__match_{d}", .{self.closure_count}) catch "__match";
+        self.closure_count += 1;
+        const temp_idx = try self.addConstant(.{ .string = temp_name });
+        try self.emitOp(.set_var);
+        try self.emitU16(temp_idx);
+        try self.emitOp(.pop);
+
+        const arm_nodes = self.ast.extraSlice(node.data.rhs);
+        var end_jumps = std.ArrayListUnmanaged(usize){};
+        defer end_jumps.deinit(self.allocator);
+        var default_arm: ?u32 = null;
+
+        for (arm_nodes) |arm_idx| {
+            const arm = self.ast.nodes[arm_idx];
+            const values = self.ast.extraSlice(arm.data.lhs);
+
+            if (values.len == 0) {
+                default_arm = arm_idx;
+                continue;
+            }
+
+            var hit_jumps = std.ArrayListUnmanaged(usize){};
+            defer hit_jumps.deinit(self.allocator);
+
+            for (values, 0..) |val, vi| {
+                try self.emitOp(.get_var);
+                try self.emitU16(temp_idx);
+                try self.compileNode(val);
+                try self.emitOp(.identical);
+                if (vi < values.len - 1) {
+                    const hit = try self.emitJump(.jump_if_true);
+                    try hit_jumps.append(self.allocator, hit);
+                    try self.emitOp(.pop);
+                } else {
+                    const skip = try self.emitJump(.jump_if_false);
+                    for (hit_jumps.items) |hj| self.patchJump(hj);
+                    try self.emitOp(.pop);
+                    try self.compileNode(arm.data.rhs);
+                    const end_j = try self.emitJump(.jump);
+                    try end_jumps.append(self.allocator, end_j);
+                    self.patchJump(skip);
+                    try self.emitOp(.pop);
+                }
+            }
+        }
+
+        if (default_arm) |da| {
+            try self.compileNode(self.ast.nodes[da].data.rhs);
+        } else {
+            try self.emitOp(.op_null);
+        }
+
+        for (end_jumps.items) |ej| self.patchJump(ej);
     }
 
     fn compileCast(self: *Compiler, node: Ast.Node) Error!void {
