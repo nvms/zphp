@@ -317,11 +317,29 @@ phase 1 complete: full pipeline from source to execution. zphp can run real PHP 
 - mixed HTML/PHP output
 - fizzbuzz works end-to-end
 
+### CLI
+- `zphp run <file>` executes a PHP file through the full pipeline
+- `zphp version` / `zphp --version` prints version
+- bare `zphp` prints version
+
+### PHP compatibility tests
+- `tests/` directory contains `.php` files that test specific language features
+- `tests/run` script runs each file through both `php` and `zphp run`, diffs output. any divergence fails
+- CI runs the comparison against PHP 8.3 via `shivammathur/setup-php`
+- rule: every new feature gets a test file added. the spec is PHP's behavior
+- currently 18 test files covering all supported features
+- double-quoted string escape sequences (\n, \r, \t, \\, \$, \", etc.) are processed at compile time. single-quoted strings only escape \\ and \'
+
 ### next up
-- `zphp run <file>` CLI command to execute PHP files
-- expand language support: classes, closures, arrays as runtime values
-- standard library functions (strlen, substr, array_map, etc.)
-- package manager groundwork
+- arrays as runtime values (PHP's ordered hashmap). this unlocks array functions, foreach, and most real-world PHP code
+- classes: declaration, instantiation, properties, methods, inheritance
+- closures / anonymous functions
+- standard library functions (strlen, substr, array_map, count, etc.)
+- string interpolation in double-quoted strings ("Hello $name")
+- type casting ((int), (string), etc.)
+- try/catch/throw
+- match expression
+- package manager groundwork (composer.json parsing)
 
 ## self-improvement
 
