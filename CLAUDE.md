@@ -62,7 +62,11 @@ zig 0.15.x. `zig build test` must pass before pushing. short lowercase commits, 
 
 ## roadmap
 
-next: PDO database support (PDO base class + pdo_sqlite + pdo_mysql), gzip compression for serve static files, WebSocket support for serve (design toward event-loop-per-worker for long-lived connections - don't assume all connections are short-lived request/response)
+next: pdo_mysql driver, gzip compression for serve static files, WebSocket support for serve (design toward event-loop-per-worker for long-lived connections - don't assume all connections are short-lived request/response)
+
+## PDO
+
+`src/stdlib/pdo.zig`. SQLite driver via C FFI (extern declarations for sqlite3 API, opaque types for db/stmt handles). PDO and PDOStatement classes registered in vm.init(). C pointers stored as i64 in hidden properties (`__db_ptr`, `__stmt_ptr`) via `@intFromPtr`/`@ptrFromInt`. PDO methods: `__construct(dsn)`, `exec(sql)`, `query(sql)`, `prepare(sql)`, `lastInsertId()`, `beginTransaction()`, `commit()`, `rollBack()`, `errorInfo()`. PDOStatement methods: `execute(params?)`, `fetch(mode?)`, `fetchAll(mode?)`, `fetchColumn(col?)`, `rowCount()`, `columnCount()`, `closeCursor()`. supports FETCH_ASSOC, FETCH_NUM, FETCH_BOTH (default). parameter binding: positional (`?`) and named (`:name`). `cleanupResources()` called from vm.reset()/deinit() - finalizes statements before closing databases. DSN format: `sqlite:/path` or `sqlite::memory:`. null-terminated strings for C API via `allocator.dupeZ` tracked in ctx.strings. PDO constants (FETCH_ASSOC, FETCH_NUM, etc.) registered as static props on ClassDef. errors throw PDOException.
 
 ## enums
 
