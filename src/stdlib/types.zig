@@ -383,10 +383,32 @@ fn property_exists(_: *NativeContext, args: []const Value) RuntimeError!Value {
 
 fn native_is_callable(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len == 0) return .{ .bool = false };
-    if (args[0] != .string) return .{ .bool = false };
-    const name = args[0].string;
-    if (ctx.vm.native_fns.contains(name)) return .{ .bool = true };
-    if (ctx.vm.functions.contains(name)) return .{ .bool = true };
+    const val = args[0];
+    if (val == .string) {
+        const name = val.string;
+        if (ctx.vm.native_fns.contains(name)) return .{ .bool = true };
+        if (ctx.vm.functions.contains(name)) return .{ .bool = true };
+        return .{ .bool = false };
+    }
+    if (val == .array) {
+        const arr = val.array;
+        if (arr.entries.items.len != 2) return .{ .bool = false };
+        const target = arr.entries.items[0].value;
+        const method_val = arr.entries.items[1].value;
+        if (method_val != .string) return .{ .bool = false };
+        const method = method_val.string;
+        const class_name = if (target == .object)
+            target.object.class_name
+        else if (target == .string)
+            target.string
+        else
+            return .{ .bool = false };
+        var buf: [256]u8 = undefined;
+        const full = std.fmt.bufPrint(&buf, "{s}::{s}", .{ class_name, method }) catch return .{ .bool = false };
+        if (ctx.vm.native_fns.contains(full)) return .{ .bool = true };
+        if (ctx.vm.functions.contains(full)) return .{ .bool = true };
+        return .{ .bool = false };
+    }
     return .{ .bool = false };
 }
 
@@ -418,19 +440,18 @@ fn native_settype(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
 }
 
 fn native_call_user_func(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len == 0 or args[0] != .string) return .null;
-    return ctx.callFunction(args[0].string, args[1..]);
+    if (args.len == 0) return .null;
+    return ctx.invokeCallable(args[0], args[1..]);
 }
 
 fn native_call_user_func_array(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len < 2 or args[0] != .string) return .null;
-    const name = args[0].string;
-    if (args[1] != .array) return ctx.callFunction(name, &.{});
+    if (args.len < 2) return .null;
+    if (args[1] != .array) return ctx.invokeCallable(args[0], &.{});
     const arr = args[1].array;
     var call_args: [16]Value = undefined;
     const count_val: usize = @min(16, arr.entries.items.len);
     for (0..count_val) |i| call_args[i] = arr.entries.items[i].value;
-    return ctx.callFunction(name, call_args[0..count_val]);
+    return ctx.invokeCallable(args[0], call_args[0..count_val]);
 }
 
 fn native_function_exists(ctx: *NativeContext, args: []const Value) RuntimeError!Value {

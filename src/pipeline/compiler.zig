@@ -211,6 +211,8 @@ const Compiler = struct {
             .interface_method => {},
             .trait_decl => try self.compileTraitDecl(node),
             .trait_use => {},
+            .enum_decl => try self.compileEnumDecl(node),
+            .enum_case => {},
             .new_expr => try self.compileNewExpr(node),
             .method_call => try self.compileMethodCall(node),
             .static_call => try self.compileStaticCall(node),
@@ -689,10 +691,20 @@ const Compiler = struct {
         const op_tag = self.ast.tokens[node.main_token].tag;
 
         if (op_tag == .plus_plus or op_tag == .minus_minus) {
+            const target = self.ast.nodes[node.data.lhs];
+            if (target.tag == .property_access) {
+                try self.compileNode(target.data.lhs);
+                try self.compileNode(node.data.lhs);
+                try self.emitConstant(try self.addConstant(.{ .int = 1 }));
+                try self.emitOp(if (op_tag == .plus_plus) .add else .subtract);
+                const prop_idx = try self.addConstant(.{ .string = self.propName(target) });
+                try self.emitOp(.set_prop);
+                try self.emitU16(prop_idx);
+                return;
+            }
             try self.compileNode(node.data.lhs);
             try self.emitConstant(try self.addConstant(.{ .int = 1 }));
             try self.emitOp(if (op_tag == .plus_plus) .add else .subtract);
-            const target = self.ast.nodes[node.data.lhs];
             if (target.tag == .variable) {
                 const name = self.ast.tokenSlice(target.main_token);
                 const idx = try self.addConstant(.{ .string = name });
@@ -714,6 +726,19 @@ const Compiler = struct {
     fn compilePostfixOp(self: *Compiler, node: Ast.Node) Error!void {
         const target = self.ast.nodes[node.data.lhs];
         const op_tag = self.ast.tokens[node.main_token].tag;
+
+        if (target.tag == .property_access) {
+            try self.compileNode(node.data.lhs);
+            try self.compileNode(target.data.lhs);
+            try self.compileNode(node.data.lhs);
+            try self.emitConstant(try self.addConstant(.{ .int = 1 }));
+            try self.emitOp(if (op_tag == .plus_plus) .add else .subtract);
+            const prop_idx = try self.addConstant(.{ .string = self.propName(target) });
+            try self.emitOp(.set_prop);
+            try self.emitU16(prop_idx);
+            try self.emitOp(.pop);
+            return;
+        }
 
         try self.compileNode(node.data.lhs);
         try self.compileNode(node.data.lhs);
@@ -1324,6 +1349,83 @@ const Compiler = struct {
         try self.emitU16(name_idx);
     }
 
+    fn compileEnumDecl(self: *Compiler, node: Ast.Node) Error!void {
+        const enum_name = self.ast.tokenSlice(node.main_token);
+        const members = self.ast.extraSlice(node.data.lhs);
+
+        const rhs_base = node.data.rhs;
+        const backed_type_token = self.ast.extra_data[rhs_base];
+        const impl_count = self.ast.extra_data[rhs_base + 1];
+
+        var backed_type: u8 = 0; // 0=none, 1=int, 2=string
+        if (backed_type_token != 0) {
+            const type_str = self.ast.tokenSlice(backed_type_token);
+            if (std.mem.eql(u8, type_str, "int")) {
+                backed_type = 1;
+            } else if (std.mem.eql(u8, type_str, "string")) {
+                backed_type = 2;
+            }
+        }
+
+        var method_count: u8 = 0;
+        for (members) |member_idx| {
+            const member = self.ast.nodes[member_idx];
+            if (member.tag == .class_method or member.tag == .static_class_method) {
+                try self.compileClassMethodBody(enum_name, member);
+                method_count += 1;
+            }
+        }
+
+        var case_count: u8 = 0;
+        for (members) |member_idx| {
+            const member = self.ast.nodes[member_idx];
+            if (member.tag == .enum_case) {
+                if (member.data.lhs != 0) {
+                    try self.compileNode(member.data.lhs);
+                }
+                case_count += 1;
+            }
+        }
+
+        const name_idx = try self.addConstant(.{ .string = enum_name });
+        try self.emitOp(.enum_decl);
+        try self.emitU16(name_idx);
+        try self.emitByte(backed_type);
+        try self.emitByte(case_count);
+
+        for (members) |member_idx| {
+            const member = self.ast.nodes[member_idx];
+            if (member.tag == .enum_case) {
+                const case_name = self.ast.tokenSlice(member.main_token);
+                const cname_idx = try self.addConstant(.{ .string = case_name });
+                try self.emitU16(cname_idx);
+                try self.emitByte(if (member.data.lhs != 0) @as(u8, 1) else @as(u8, 0));
+            }
+        }
+
+        try self.emitByte(method_count);
+        for (members) |member_idx| {
+            const member = self.ast.nodes[member_idx];
+            if (member.tag == .class_method or member.tag == .static_class_method) {
+                const method_name_str = self.ast.tokenSlice(member.main_token);
+                const mname_idx = try self.addConstant(.{ .string = method_name_str });
+                try self.emitU16(mname_idx);
+                const param_nodes = self.ast.extraSlice(member.data.lhs);
+                try self.emitByte(@intCast(param_nodes.len));
+                try self.emitByte(if (member.tag == .static_class_method) @as(u8, 1) else @as(u8, 0));
+                const vis: u8 = @intCast(member.data.rhs >> 30);
+                try self.emitByte(vis);
+            }
+        }
+
+        try self.emitByte(@intCast(impl_count));
+        for (0..impl_count) |i| {
+            const impl_node = self.ast.nodes[self.ast.extra_data[rhs_base + 2 + i]];
+            const iname_idx = try self.addConstant(.{ .string = self.ast.tokenSlice(impl_node.main_token) });
+            try self.emitU16(iname_idx);
+        }
+    }
+
     fn compileClassMethodBody(self: *Compiler, class_name: []const u8, member: Ast.Node) Error!void {
         const method_name = self.ast.tokenSlice(member.main_token);
         const full_name = try std.fmt.allocPrint(self.allocator, "{s}::{s}", .{ class_name, method_name });
@@ -1385,18 +1487,16 @@ const Compiler = struct {
         try self.emitByte(@intCast(args.len));
     }
 
-    fn compilePropertyAccess(self: *Compiler, node: Ast.Node) Error!void {
-        const target = self.ast.nodes[node.data.lhs];
-
-        // check if this is an assignment target (handled by compileAssign)
-        // here we just handle reads
-        try self.compileNode(node.data.lhs);
+    fn propName(self: *Compiler, node: Ast.Node) []const u8 {
         const prop_node = self.ast.nodes[node.data.rhs];
-        var prop_name = self.ast.tokenSlice(prop_node.main_token);
-        // strip $ if it's a variable token used as property name
-        if (prop_name.len > 0 and prop_name[0] == '$') prop_name = prop_name[1..];
-        _ = target;
-        const name_idx = try self.addConstant(.{ .string = prop_name });
+        var name = self.ast.tokenSlice(prop_node.main_token);
+        if (name.len > 0 and name[0] == '$') name = name[1..];
+        return name;
+    }
+
+    fn compilePropertyAccess(self: *Compiler, node: Ast.Node) Error!void {
+        try self.compileNode(node.data.lhs);
+        const name_idx = try self.addConstant(.{ .string = self.propName(node) });
         try self.emitOp(.get_prop);
         try self.emitU16(name_idx);
     }

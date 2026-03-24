@@ -17,6 +17,7 @@ pub const NativeContext = struct {
     arrays: *std.ArrayListUnmanaged(*PhpArray),
     strings: *std.ArrayListUnmanaged([]const u8),
     vm: *VM,
+    call_name: ?[]const u8 = null,
 
     pub fn createArray(self: *NativeContext) !*PhpArray {
         const arr = try self.allocator.create(PhpArray);
@@ -41,6 +42,28 @@ pub const NativeContext = struct {
     pub fn callFunction(self: *NativeContext, name: []const u8, args: []const Value) RuntimeError!Value {
         return self.vm.callByName(name, args);
     }
+
+    pub fn callMethod(self: *NativeContext, obj: *PhpObject, method: []const u8, args: []const Value) RuntimeError!Value {
+        return self.vm.callMethod(obj, method, args);
+    }
+
+    pub fn invokeCallable(self: *NativeContext, callable: Value, args: []const Value) RuntimeError!Value {
+        if (callable == .string) return self.vm.callByName(callable.string, args);
+        if (callable != .array) return error.RuntimeError;
+        const arr = callable.array;
+        if (arr.entries.items.len != 2) return error.RuntimeError;
+        const target = arr.entries.items[0].value;
+        const method_val = arr.entries.items[1].value;
+        if (method_val != .string) return error.RuntimeError;
+        const method = method_val.string;
+        if (target == .object) return self.vm.callMethod(target.object, method, args);
+        if (target == .string) {
+            var buf: [256]u8 = undefined;
+            const full = std.fmt.bufPrint(&buf, "{s}::{s}", .{ target.string, method }) catch return error.RuntimeError;
+            return self.vm.callByName(full, args);
+        }
+        return error.RuntimeError;
+    }
 };
 
 const NativeFn = *const fn (*NativeContext, []const Value) RuntimeError!Value;
@@ -58,6 +81,8 @@ pub const ClassDef = struct {
     static_props: std.StringHashMapUnmanaged(Value) = .{},
     parent: ?[]const u8 = null,
     interfaces: std.ArrayListUnmanaged([]const u8) = .{},
+    is_enum: bool = false,
+    backed_type: enum(u8) { none = 0, int_type = 1, string_type = 2 } = .none,
 
     pub const Visibility = enum(u8) { public = 0, protected = 1, private = 2 };
 
@@ -995,6 +1020,91 @@ pub const VM = struct {
                     try self.traits.put(self.allocator, trait_name, {});
                 },
 
+                .enum_decl => {
+                    const name_idx = self.readU16();
+                    const enum_name = self.currentChunk().constants.items[name_idx].string;
+                    const backed_type_byte = self.readByte();
+                    const case_count = self.readByte();
+
+                    var def = ClassDef{ .name = enum_name, .is_enum = true };
+                    def.backed_type = @enumFromInt(backed_type_byte);
+
+                    var case_names: [64][]const u8 = undefined;
+                    var case_has_value: [64]u8 = undefined;
+                    for (0..case_count) |ci| {
+                        const cname_idx = self.readU16();
+                        case_names[ci] = self.currentChunk().constants.items[cname_idx].string;
+                        case_has_value[ci] = self.readByte();
+                    }
+
+                    // pop case values (pushed in order, pop in reverse)
+                    var case_values: [64]Value = undefined;
+                    var value_count: usize = 0;
+                    for (0..case_count) |ci| {
+                        if (case_has_value[ci] == 1) value_count += 1;
+                    }
+                    var vi: usize = value_count;
+                    while (vi > 0) {
+                        vi -= 1;
+                        case_values[vi] = self.pop();
+                    }
+
+                    // create singleton objects for each case
+                    var vj: usize = 0;
+                    for (0..case_count) |ci| {
+                        const case_obj = try self.allocator.create(PhpObject);
+                        case_obj.* = .{ .class_name = enum_name };
+                        try self.objects.append(self.allocator, case_obj);
+                        try case_obj.set(self.allocator, "name", .{ .string = case_names[ci] });
+                        if (case_has_value[ci] == 1) {
+                            try case_obj.set(self.allocator, "value", case_values[vj]);
+                            vj += 1;
+                        }
+                        try def.static_props.put(self.allocator, case_names[ci], .{ .object = case_obj });
+                    }
+
+                    // read methods
+                    const method_count = self.readByte();
+                    for (0..method_count) |_| {
+                        const mname_idx = self.readU16();
+                        const method_name = self.currentChunk().constants.items[mname_idx].string;
+                        const arity = self.readByte();
+                        const is_static = self.readByte() == 1;
+                        const vis: ClassDef.Visibility = @enumFromInt(self.readByte());
+                        try def.methods.put(self.allocator, method_name, .{
+                            .name = method_name,
+                            .arity = arity,
+                            .is_static = is_static,
+                            .visibility = vis,
+                        });
+                    }
+
+                    // read implements
+                    const iface_count = self.readByte();
+                    for (0..iface_count) |_| {
+                        const iname_idx = self.readU16();
+                        const iface_name = self.currentChunk().constants.items[iname_idx].string;
+                        try def.interfaces.append(self.allocator, iface_name);
+                    }
+
+                    // register native methods: cases, from, tryFrom
+                    const cases_name = try std.fmt.allocPrint(self.allocator, "{s}::cases", .{enum_name});
+                    try self.strings.append(self.allocator, cases_name);
+                    try self.native_fns.put(self.allocator, cases_name, enumCases);
+
+                    if (backed_type_byte != 0) {
+                        const from_name = try std.fmt.allocPrint(self.allocator, "{s}::from", .{enum_name});
+                        try self.strings.append(self.allocator, from_name);
+                        try self.native_fns.put(self.allocator, from_name, enumFrom);
+
+                        const try_from_name = try std.fmt.allocPrint(self.allocator, "{s}::tryFrom", .{enum_name});
+                        try self.strings.append(self.allocator, try_from_name);
+                        try self.native_fns.put(self.allocator, try_from_name, enumTryFrom);
+                    }
+
+                    try self.classes.put(self.allocator, enum_name, def);
+                },
+
                 .new_obj => {
                     const name_idx = self.readU16();
                     const arg_count = self.readByte();
@@ -1663,6 +1773,7 @@ pub const VM = struct {
                 .arrays = &self.arrays,
                 .strings = &self.strings,
                 .vm = self,
+                .call_name = name,
             };
             self.push(try native(&ctx, args[0..ac]));
         } else if (self.functions.get(name)) |func| {
@@ -1719,6 +1830,50 @@ pub const VM = struct {
         } else return error.RuntimeError;
     }
 
+    pub fn callMethod(self: *VM, obj: *PhpObject, method_name: []const u8, args: []const Value) RuntimeError!Value {
+        const full_name = self.resolveMethod(obj.class_name, method_name) catch return error.RuntimeError;
+        if (self.native_fns.get(full_name)) |native| {
+            var tmp_vars: std.StringHashMapUnmanaged(Value) = .{};
+            try tmp_vars.put(self.allocator, "$this", .{ .object = obj });
+            self.frames[self.frame_count] = .{ .chunk = self.currentChunk(), .ip = self.currentFrame().ip, .vars = tmp_vars };
+            self.frame_count += 1;
+            var ctx = NativeContext{
+                .allocator = self.allocator,
+                .arrays = &self.arrays,
+                .strings = &self.strings,
+                .vm = self,
+            };
+            const result = try native(&ctx, args);
+            self.frame_count -= 1;
+            self.frames[self.frame_count].vars.deinit(self.allocator);
+            return result;
+        } else if (self.functions.get(full_name)) |func| {
+            if (args.len < func.required_params or args.len > func.arity) return error.RuntimeError;
+            var new_vars: std.StringHashMapUnmanaged(Value) = .{};
+            try new_vars.put(self.allocator, "$this", .{ .object = obj });
+            for (self.captures.items) |cap| {
+                if (std.mem.eql(u8, cap.closure_name, full_name)) {
+                    try new_vars.put(self.allocator, cap.var_name, cap.value);
+                }
+            }
+            for (0..args.len) |i| {
+                try new_vars.put(self.allocator, func.params[i], args[i]);
+            }
+            for (args.len..func.arity) |i| {
+                if (i < func.defaults.len) {
+                    try new_vars.put(self.allocator, func.params[i], func.defaults[i]);
+                } else {
+                    try new_vars.put(self.allocator, func.params[i], .null);
+                }
+            }
+            const base_frame = self.frame_count;
+            self.frames[self.frame_count] = .{ .chunk = &func.chunk, .ip = 0, .vars = new_vars };
+            self.frame_count += 1;
+            try self.runUntilFrame(base_frame);
+            return self.pop();
+        } else return error.RuntimeError;
+    }
+
     pub fn callByName(self: *VM, name: []const u8, args: []const Value) RuntimeError!Value {
         if (self.native_fns.get(name)) |native| {
             var ctx = NativeContext{
@@ -1754,6 +1909,55 @@ pub const VM = struct {
 
             return self.pop();
         } else return error.RuntimeError;
+    }
+
+    // ==================================================================
+    // enum native methods
+    // ==================================================================
+
+    fn enumClassFromCallName(ctx: *NativeContext) ?[]const u8 {
+        const name = ctx.call_name orelse return null;
+        if (std.mem.indexOf(u8, name, "::")) |sep| return name[0..sep];
+        return null;
+    }
+
+    fn enumCases(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+        const enum_name = enumClassFromCallName(ctx) orelse return error.RuntimeError;
+        const def = ctx.vm.classes.get(enum_name) orelse return error.RuntimeError;
+        var arr = try ctx.createArray();
+        var iter = def.static_props.iterator();
+        while (iter.next()) |entry| {
+            try arr.append(ctx.allocator, entry.value_ptr.*);
+        }
+        return .{ .array = arr };
+    }
+
+    fn enumFrom(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+        if (args.len == 0) return error.RuntimeError;
+        const enum_name = enumClassFromCallName(ctx) orelse return error.RuntimeError;
+        const def = ctx.vm.classes.get(enum_name) orelse return error.RuntimeError;
+        var iter = def.static_props.iterator();
+        while (iter.next()) |entry| {
+            if (entry.value_ptr.* == .object) {
+                const case_val = entry.value_ptr.*.object.get("value");
+                if (Value.identical(case_val, args[0])) return entry.value_ptr.*;
+            }
+        }
+        return error.RuntimeError;
+    }
+
+    fn enumTryFrom(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+        if (args.len == 0) return .null;
+        const enum_name = enumClassFromCallName(ctx) orelse return .null;
+        const def = ctx.vm.classes.get(enum_name) orelse return .null;
+        var iter = def.static_props.iterator();
+        while (iter.next()) |entry| {
+            if (entry.value_ptr.* == .object) {
+                const case_val = entry.value_ptr.*.object.get("value");
+                if (Value.identical(case_val, args[0])) return entry.value_ptr.*;
+            }
+        }
+        return .null;
     }
 
     // ==================================================================

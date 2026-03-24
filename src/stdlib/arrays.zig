@@ -235,11 +235,10 @@ fn array_map(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     const callback = args[0];
     if (args[1] != .array) return .null;
     const src = args[1].array;
-    const cb_name = if (callback == .string) callback.string else return Value.null;
 
     var result = try ctx.createArray();
     for (src.entries.items) |entry| {
-        const mapped = try ctx.callFunction(cb_name, &.{entry.value});
+        const mapped = try ctx.invokeCallable(callback, &.{entry.value});
         try result.append(ctx.allocator, mapped);
     }
     return .{ .array = result };
@@ -255,9 +254,8 @@ fn array_filter(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
             if (entry.value.isTruthy()) try result.set(ctx.allocator, entry.key, entry.value);
         }
     } else {
-        const cb_name = if (args[1] == .string) args[1].string else return Value.null;
         for (src.entries.items) |entry| {
-            const keep = try ctx.callFunction(cb_name, &.{entry.value});
+            const keep = try ctx.invokeCallable(args[1], &.{entry.value});
             if (keep.isTruthy()) try result.set(ctx.allocator, entry.key, entry.value);
         }
     }
@@ -267,14 +265,14 @@ fn array_filter(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
 fn native_usort(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len < 2 or args[0] != .array) return .{ .bool = false };
     const arr = args[0].array;
-    const cb_name = if (args[1] == .string) args[1].string else return Value{ .bool = false };
+    const callback = args[1];
 
     const items = arr.entries.items;
     var n = items.len;
     while (n > 1) {
         var swapped = false;
         for (0..n - 1) |i| {
-            const cmp = try ctx.callFunction(cb_name, &.{ items[i].value, items[i + 1].value });
+            const cmp = try ctx.invokeCallable(callback, &.{ items[i].value, items[i + 1].value });
             if (Value.toInt(cmp) > 0) {
                 const tmp = items[i];
                 items[i] = items[i + 1];
@@ -611,10 +609,9 @@ fn array_product(_: *NativeContext, args: []const Value) RuntimeError!Value {
 fn array_walk(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len < 2 or args[0] != .array) return .{ .bool = false };
     const arr = args[0].array;
-    const cb_name = if (args[1] == .string) args[1].string else return Value{ .bool = false };
 
     for (arr.entries.items) |entry| {
-        _ = try ctx.callFunction(cb_name, &.{entry.value});
+        _ = try ctx.invokeCallable(args[1], &.{entry.value});
     }
     return .{ .bool = true };
 }
@@ -737,10 +734,9 @@ fn native_arsort(_: *NativeContext, args: []const Value) RuntimeError!Value {
 fn array_reduce(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len < 2 or args[0] != .array) return .null;
     const arr = args[0].array;
-    const cb_name = if (args[1] == .string) args[1].string else return Value.null;
     var carry: Value = if (args.len >= 3) args[2] else .null;
     for (arr.entries.items) |entry| {
-        carry = try ctx.callFunction(cb_name, &.{ carry, entry.value });
+        carry = try ctx.invokeCallable(args[1], &.{ carry, entry.value });
     }
     return carry;
 }
@@ -768,13 +764,13 @@ fn array_key_last(_: *NativeContext, args: []const Value) RuntimeError!Value {
 fn native_uasort(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len < 2 or args[0] != .array) return .{ .bool = false };
     const arr = args[0].array;
-    const cb_name = if (args[1] == .string) args[1].string else return Value{ .bool = false };
+    const callback = args[1];
     const items = arr.entries.items;
     var n = items.len;
     while (n > 1) {
         var swapped = false;
         for (0..n - 1) |i| {
-            const cmp = try ctx.callFunction(cb_name, &.{ items[i].value, items[i + 1].value });
+            const cmp = try ctx.invokeCallable(callback, &.{ items[i].value, items[i + 1].value });
             if (Value.toInt(cmp) > 0) {
                 const tmp = items[i];
                 items[i] = items[i + 1];
@@ -791,7 +787,7 @@ fn native_uasort(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
 fn native_uksort(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len < 2 or args[0] != .array) return .{ .bool = false };
     const arr = args[0].array;
-    const cb_name = if (args[1] == .string) args[1].string else return Value{ .bool = false };
+    const callback = args[1];
     const items = arr.entries.items;
     var n = items.len;
     while (n > 1) {
@@ -805,7 +801,7 @@ fn native_uksort(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
                 .int => |ki| .{ .int = ki },
                 .string => |ks| .{ .string = ks },
             };
-            const cmp = try ctx.callFunction(cb_name, &.{ a_key, b_key });
+            const cmp = try ctx.invokeCallable(callback, &.{ a_key, b_key });
             if (Value.toInt(cmp) > 0) {
                 const tmp = items[i];
                 items[i] = items[i + 1];
@@ -837,9 +833,8 @@ fn array_replace(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
 fn array_find(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len < 2 or args[0] != .array) return .null;
     const arr = args[0].array;
-    const cb_name = if (args[1] == .string) args[1].string else return Value.null;
     for (arr.entries.items) |entry| {
-        const result = try ctx.callFunction(cb_name, &.{entry.value});
+        const result = try ctx.invokeCallable(args[1], &.{entry.value});
         if (result.isTruthy()) return entry.value;
     }
     return .null;
@@ -848,9 +843,8 @@ fn array_find(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
 fn array_find_key(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len < 2 or args[0] != .array) return .null;
     const arr = args[0].array;
-    const cb_name = if (args[1] == .string) args[1].string else return Value.null;
     for (arr.entries.items) |entry| {
-        const result = try ctx.callFunction(cb_name, &.{entry.value});
+        const result = try ctx.invokeCallable(args[1], &.{entry.value});
         if (result.isTruthy()) {
             return switch (entry.key) {
                 .int => |i| .{ .int = i },
@@ -864,9 +858,8 @@ fn array_find_key(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
 fn array_any(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len < 2 or args[0] != .array) return .{ .bool = false };
     const arr = args[0].array;
-    const cb_name = if (args[1] == .string) args[1].string else return Value{ .bool = false };
     for (arr.entries.items) |entry| {
-        const result = try ctx.callFunction(cb_name, &.{entry.value});
+        const result = try ctx.invokeCallable(args[1], &.{entry.value});
         if (result.isTruthy()) return .{ .bool = true };
     }
     return .{ .bool = false };
@@ -875,9 +868,8 @@ fn array_any(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
 fn array_all(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len < 2 or args[0] != .array) return .{ .bool = true };
     const arr = args[0].array;
-    const cb_name = if (args[1] == .string) args[1].string else return Value{ .bool = true };
     for (arr.entries.items) |entry| {
-        const result = try ctx.callFunction(cb_name, &.{entry.value});
+        const result = try ctx.invokeCallable(args[1], &.{entry.value});
         if (!result.isTruthy()) return .{ .bool = false };
     }
     return .{ .bool = true };
