@@ -671,6 +671,38 @@ test "class gettype" {
     , "object");
 }
 
+test "class constants" {
+    try expectOutput(
+        \\<?php
+        \\class Config {
+        \\    const VERSION = "1.0";
+        \\    const MAX = 10;
+        \\}
+        \\echo Config::VERSION . " " . Config::MAX;
+    , "1.0 10");
+}
+
+test "inherited class constants" {
+    try expectOutput(
+        \\<?php
+        \\class Base { const NAME = "base"; }
+        \\class Child extends Base { const CHILD = "child"; }
+        \\echo Child::NAME . " " . Child::CHILD;
+    , "base child");
+}
+
+test "class constants with static props" {
+    try expectOutput(
+        \\<?php
+        \\class Cfg {
+        \\    const TYPE = "cfg";
+        \\    public static $count = 0;
+        \\    public static function getType() { return self::TYPE; }
+        \\}
+        \\echo Cfg::TYPE . " " . Cfg::getType();
+    , "cfg cfg");
+}
+
 // ==========================================================================
 // inheritance
 // ==========================================================================

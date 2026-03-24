@@ -1476,10 +1476,11 @@ const Compiler = struct {
         }
 
         // compile static property defaults (push onto stack after instance props)
+        // class constants (const_decl) are treated as static props
         var static_prop_count: u8 = 0;
         for (members) |member_idx| {
             const member = self.ast.nodes[member_idx];
-            if (member.tag == .static_class_property) static_prop_count += 1;
+            if (member.tag == .static_class_property or member.tag == .const_decl) static_prop_count += 1;
         }
         for (members) |member_idx| {
             const member = self.ast.nodes[member_idx];
@@ -1487,6 +1488,8 @@ const Compiler = struct {
                 if (member.data.lhs != 0) {
                     try self.compileNode(member.data.lhs);
                 }
+            } else if (member.tag == .const_decl) {
+                try self.compileNode(member.data.lhs);
             }
         }
 
@@ -1546,6 +1549,12 @@ const Compiler = struct {
                 try self.emitU16(pname_idx);
                 try self.emitByte(if (member.data.lhs != 0) @as(u8, 1) else @as(u8, 0));
                 try self.emitByte(@intCast(member.data.rhs));
+            } else if (member.tag == .const_decl) {
+                const cname = self.ast.tokenSlice(member.main_token);
+                const cname_idx = try self.addConstant(.{ .string = cname });
+                try self.emitU16(cname_idx);
+                try self.emitByte(1); // always has a value
+                try self.emitByte(0); // public visibility
             }
         }
 
