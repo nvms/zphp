@@ -18,7 +18,7 @@ zig 0.15.x. `zig build test` must pass before pushing. short lowercase commits, 
 - arrays: reference semantics, not copy-on-write
 - `global $var`: write-back works for simple cases, but no true reference semantics (arrays modified in-place via reference won't propagate)
 - `require`: isolated scope (functions/classes global, variables don't leak)
-- type hints: parsed, not enforced
+- type hints: parsed, not enforced. heredoc/nowdoc: supported
 - `strtotime`: YYYY-MM-DD and relative only, UTC
 - trait conflict resolution (`insteadof`/`as`): not implemented
 - pass-by-reference: works for simple variable args only, not expressions or nested access. bytecode scan approach is best-effort
@@ -30,6 +30,8 @@ zig 0.15.x. `zig build test` must pass before pushing. short lowercase commits, 
 **runtime errors**: use `throwBuiltinException` + `continue` for catchable errors, NOT `return error.RuntimeError` (bypasses PHP exception handlers, causes hangs in try/catch). pattern: `if (try self.throwBuiltinException("Error", msg)) continue; return error.RuntimeError;`
 
 **generators**: yield/generator_return opcodes must `return` from runLoop, not `continue` (continue re-enters the loop instead of exiting to the caller)
+
+**fibers**: suspension uses `error.RuntimeError` + `fiber_suspend_pending` flag. the error propagates through all `try` calls in runLoop back to `executeFiber`. `handler_floor` prevents fiber exceptions from leaking into caller exception handlers. `Fiber.RefBinding` is the canonical definition - VM's `RefBinding` aliases it
 
 **catch clauses**: must use `parseQualifiedName()` for types - `\Exception` starts with backslash, not identifier
 
@@ -56,11 +58,11 @@ zig 0.15.x. `zig build test` must pass before pushing. short lowercase commits, 
 
 ## CI
 
-7 jobs: `zig build test` (ubuntu + macos), serve integration (`tests/serve_test`, 26 assertions), test runner (`tests/test_runner_test`, 15 assertions), packages (`tests/pkg_test`, 10 assertions), fmt (`tests/fmt_test`, 29 assertions), PHP compat (`tests/run`, 78 files, validated against PHP 8.4)
+7 jobs: `zig build test` (ubuntu + macos), serve integration (`tests/serve_test`, 26 assertions), test runner (`tests/test_runner_test`, 15 assertions), packages (`tests/pkg_test`, 10 assertions), fmt (`tests/fmt_test`, 29 assertions), PHP compat (`tests/run`, validated against PHP 8.4)
 
 ## roadmap
 
-next: PDO database support (PDO base class + pdo_sqlite + pdo_mysql), gzip compression for serve static files, fibers, WebSocket support for serve (design toward event-loop-per-worker for long-lived connections - don't assume all connections are short-lived request/response)
+next: PDO database support (PDO base class + pdo_sqlite + pdo_mysql), gzip compression for serve static files, WebSocket support for serve (design toward event-loop-per-worker for long-lived connections - don't assume all connections are short-lived request/response)
 
 ## enums
 
@@ -89,6 +91,10 @@ PHP 8.1+ enums implemented. pure enums and backed enums (int/string). cases are 
 ## pass-by-reference
 
 `function foo(&$x)` syntax. parser stores ref flag in param node `data.rhs` bit 1. `ObjFunction.ref_params` parallel bool array tracks which params are by-ref. on call, VM scans caller bytecode backwards to find `get_var` instructions and records caller variable names as `RefBinding` entries in the `CallFrame`. `writebackRefs()` on return copies modified values back to caller's frame. best-effort: only works when the arg is a simple variable (not expressions or nested access).
+
+## fibers
+
+PHP 8.1 fibers. `new Fiber(callable)`, `$fiber->start(...$args)`, `$fiber->resume($value)`, `$fiber->getReturn()`, `Fiber::suspend($value)` (static), `isStarted()`/`isRunning()`/`isSuspended()`/`isTerminated()`. Fiber struct in `value.zig` stores callable, state, and saved execution context (frames with chunk/ip/vars/ref_bindings, stack values, exception handlers as relative offsets). `.fiber` variant in Value union, intercepted in `new_obj` (construction), `method_call` (instance methods), `static_call` (Fiber::suspend). suspension works by returning `error.RuntimeError` with `fiber_suspend_pending` flag - error propagates through all `try` calls in runLoop to `executeFiber`, which saves frames/stack/handlers to Fiber struct. `handler_floor` isolates fiber exception handlers from caller context. supports deep suspension (suspend from arbitrarily nested function calls), multiple suspend/resume cycles, and nested fibers.
 
 ## constructor property promotion
 
