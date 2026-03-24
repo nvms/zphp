@@ -88,6 +88,49 @@ pub fn readFrame(stream: std.net.Stream, buf: []u8, max_size: usize) ReadError!F
     return .{ .fin = fin, .opcode = opcode, .payload = buf[0..len] };
 }
 
+pub const ParsedFrame = struct {
+    frame: Frame,
+    consumed: usize,
+};
+
+pub fn tryParseFrame(buf: []u8, max_size: usize) ?ParsedFrame {
+    if (buf.len < 2) return null;
+
+    const fin = buf[0] & 0x80 != 0;
+    const opcode: Opcode = @enumFromInt(@as(u4, @truncate(buf[0] & 0x0F)));
+    const masked = buf[1] & 0x80 != 0;
+    if (!masked) return null;
+
+    var payload_len: u64 = buf[1] & 0x7F;
+    var offset: usize = 2;
+
+    if (payload_len == 126) {
+        if (buf.len < 4) return null;
+        payload_len = std.mem.readInt(u16, buf[2..4], .big);
+        offset = 4;
+    } else if (payload_len == 127) {
+        if (buf.len < 10) return null;
+        payload_len = std.mem.readInt(u64, buf[2..10], .big);
+        offset = 10;
+    }
+
+    if (payload_len > max_size) return null;
+    const mask_offset = offset;
+    offset += 4;
+    const len: usize = @intCast(payload_len);
+    const total = offset + len;
+    if (buf.len < total) return null;
+
+    // unmask in place
+    const mask_key = buf[mask_offset..][0..4];
+    for (0..len) |i| buf[offset + i] ^= mask_key.*[i % 4];
+
+    return .{
+        .frame = .{ .fin = fin, .opcode = opcode, .payload = buf[offset..][0..len] },
+        .consumed = total,
+    };
+}
+
 pub fn writeFrame(stream: std.net.Stream, opcode: Opcode, payload: []const u8) !void {
     var hdr: [10]u8 = undefined;
     var hdr_len: usize = 2;
@@ -188,6 +231,28 @@ test "close frame encoding" {
     try std.testing.expectEqual(@as(usize, 2), frame.payload.len);
     const code = std.mem.readInt(u16, frame.payload[0..2], .big);
     try std.testing.expectEqual(@as(u16, 1000), code);
+}
+
+test "tryParseFrame from buffer" {
+    // build a masked text frame in a buffer
+    const msg = "hello";
+    const mask = [4]u8{ 0xAA, 0xBB, 0xCC, 0xDD };
+    var buf: [256]u8 = undefined;
+    buf[0] = 0x81; // FIN + text
+    buf[1] = 0x80 | msg.len; // masked + length
+    @memcpy(buf[2..6], &mask);
+    for (0..msg.len) |i| buf[6 + i] = msg[i] ^ mask[i % 4];
+    const total = 6 + msg.len;
+
+    // incomplete buffer returns null
+    try std.testing.expect(tryParseFrame(buf[0..3], 256) == null);
+
+    // complete buffer returns frame
+    const result = tryParseFrame(buf[0..total], 256).?;
+    try std.testing.expect(result.frame.fin);
+    try std.testing.expectEqual(Opcode.text, result.frame.opcode);
+    try std.testing.expectEqualStrings("hello", result.frame.payload);
+    try std.testing.expectEqual(total, result.consumed);
 }
 
 test "unmasked frame rejected" {
