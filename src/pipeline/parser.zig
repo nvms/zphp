@@ -1391,7 +1391,7 @@ const Parser = struct {
         return switch (self.peek()) {
             .integer => self.addLiteral(.integer_literal),
             .float => self.addLiteral(.float_literal),
-            .string => self.addLiteral(.string_literal),
+            .string, .heredoc, .nowdoc => self.addLiteral(.string_literal),
             .kw_true => self.addLiteral(.true_literal),
             .kw_false => self.addLiteral(.false_literal),
             .kw_null => self.addLiteral(.null_literal),

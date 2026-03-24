@@ -14,6 +14,8 @@ pub const Token = struct {
         integer,
         float,
         string,
+        heredoc,
+        nowdoc,
         identifier,
         variable,
 

@@ -18,7 +18,7 @@ zig 0.15.x. `zig build test` must pass before pushing. short lowercase commits, 
 - arrays: reference semantics, not copy-on-write
 - `global $var`: write-back works for simple cases, but no true reference semantics (arrays modified in-place via reference won't propagate)
 - `require`: isolated scope (functions/classes global, variables don't leak)
-- type hints: parsed, not enforced. heredoc/nowdoc: not supported
+- type hints: parsed, not enforced
 - `strtotime`: YYYY-MM-DD and relative only, UTC
 - trait conflict resolution (`insteadof`/`as`): not implemented
 - pass-by-reference: works for simple variable args only, not expressions or nested access. bytecode scan approach is best-effort
@@ -60,7 +60,7 @@ zig 0.15.x. `zig build test` must pass before pushing. short lowercase commits, 
 
 ## roadmap
 
-next: heredoc/nowdoc (lexer change - `<<<EOT` and `<<<'EOT'` multiline string literals, common in templates and SQL), PDO database support (PDO base class + pdo_sqlite + pdo_mysql), gzip compression for serve static files, fibers, WebSocket support for serve (design toward event-loop-per-worker for long-lived connections - don't assume all connections are short-lived request/response)
+next: PDO database support (PDO base class + pdo_sqlite + pdo_mysql), gzip compression for serve static files, fibers, WebSocket support for serve (design toward event-loop-per-worker for long-lived connections - don't assume all connections are short-lived request/response)
 
 ## enums
 
@@ -77,6 +77,10 @@ PHP 8.1+ enums implemented. pure enums and backed enums (int/string). cases are 
 ## array destructuring
 
 `list($a, $b) = [1, 2]` and `[$a, $b] = [1, 2]` both work. `list_destructure` AST node for `list()` syntax, `array_literal` on LHS of assignment detected in compiler. supports skipped slots (`list($a, , $c)`), nested destructuring, and keyed destructuring (`["x" => $a]`). `compileDestructure` emits dup/array_get/set_var/pop sequences.
+
+## heredoc/nowdoc
+
+`<<<EOT ... EOT` (heredoc, interpolating) and `<<<'EOT' ... EOT` (nowdoc, no interpolation). lexer produces `.heredoc`/`.nowdoc` token tags spanning `<<<` through closing label. parser maps both to `string_literal` AST nodes. compiler extracts body via `extractHeredocBody()` - parses label from lexeme, strips delimiter lines, handles PHP 7.3+ indented closing markers (strips leading whitespace from all body lines based on closing label indentation). heredoc routes through existing escape/interpolation pipeline. nowdoc emits body as-is. closing label recognized when followed by `;`, `)`, `,`, `]`, newline, or EOF.
 
 ## named arguments
 

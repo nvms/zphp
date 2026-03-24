@@ -265,6 +265,31 @@ const Compiler = struct {
     }
 
     fn compileString(self: *Compiler, node: Ast.Node) Error!void {
+        const tok_tag = self.ast.tokens[node.main_token].tag;
+
+        if (tok_tag == .heredoc or tok_tag == .nowdoc) {
+            const body = try self.extractHeredocBody(node.main_token);
+            if (tok_tag == .nowdoc) {
+                const idx = try self.addConstant(.{ .string = body });
+                try self.emitConstant(idx);
+                return;
+            }
+            if (std.mem.indexOf(u8, body, "$") == null) {
+                if (std.mem.indexOf(u8, body, "\\") == null) {
+                    const idx = try self.addConstant(.{ .string = body });
+                    try self.emitConstant(idx);
+                } else {
+                    const processed = try processEscapes(self.allocator, body);
+                    try self.string_allocs.append(self.allocator, processed);
+                    const idx = try self.addConstant(.{ .string = processed });
+                    try self.emitConstant(idx);
+                }
+            } else {
+                try self.compileInterpolatedString(body);
+            }
+            return;
+        }
+
         const lexeme = self.ast.tokenSlice(node.main_token);
         if (lexeme.len < 2) {
             const idx = try self.addConstant(.{ .string = lexeme });
@@ -301,6 +326,93 @@ const Compiler = struct {
         }
 
         try self.compileInterpolatedString(inner);
+    }
+
+    fn extractHeredocBody(self: *Compiler, token_idx: u32) Error![]const u8 {
+        const lexeme = self.ast.tokenSlice(token_idx);
+        // lexeme is <<<LABEL\n...\n  LABEL or <<<'LABEL'\n...\n  LABEL
+        var pos: usize = 3; // skip <<<
+        var is_nowdoc = false;
+        if (pos < lexeme.len and lexeme[pos] == '\'') {
+            is_nowdoc = true;
+            pos += 1;
+        }
+        const label_start = pos;
+        while (pos < lexeme.len and (std.ascii.isAlphanumeric(lexeme[pos]) or lexeme[pos] == '_')) pos += 1;
+        const label = lexeme[label_start..pos];
+        if (is_nowdoc and pos < lexeme.len and lexeme[pos] == '\'') pos += 1;
+
+        // skip to end of first line
+        while (pos < lexeme.len and lexeme[pos] != '\n') pos += 1;
+        if (pos < lexeme.len) pos += 1; // skip \n
+        const body_start = pos;
+
+        // find closing label from the end - scan backwards to find it
+        // the lexeme ends at or after the closing label
+        var end = lexeme.len;
+        // strip trailing newline/semicolon after label
+        if (end > 0 and lexeme[end - 1] == '\n') end -= 1;
+        if (end > 0 and lexeme[end - 1] == '\r') end -= 1;
+        if (end > 0 and lexeme[end - 1] == ';') end -= 1;
+        // end should now point past the label
+        const label_end = end;
+        if (label_end >= label.len and std.mem.eql(u8, lexeme[label_end - label.len .. label_end], label)) {
+            end = label_end - label.len;
+        }
+
+        // determine closing line indentation
+        var indent: usize = 0;
+        var scan = end;
+        while (scan > body_start and scan > 0 and lexeme[scan - 1] == ' ' or (scan > body_start and scan > 0 and lexeme[scan - 1] == '\t')) {
+            scan -= 1;
+            indent += 1;
+        }
+        // actually we need to find indent from the start of the closing line
+        // the closing label line starts right after the last \n before end
+        var closing_line_start = end;
+        while (closing_line_start > body_start and lexeme[closing_line_start - 1] != '\n') {
+            closing_line_start -= 1;
+        }
+        indent = end - closing_line_start;
+
+        // strip trailing \n before closing label line
+        var body_end = closing_line_start;
+        if (body_end > body_start and lexeme[body_end - 1] == '\n') body_end -= 1;
+        if (body_end > body_start and lexeme[body_end - 1] == '\r') body_end -= 1;
+
+        if (body_end <= body_start) {
+            const idx = try self.addConstant(.{ .string = "" });
+            _ = idx;
+            return "";
+        }
+
+        const raw_body = lexeme[body_start..body_end];
+
+        if (indent == 0) return raw_body;
+
+        // strip indentation from each line
+        var result = std.ArrayListUnmanaged(u8){};
+        var line_begin: usize = 0;
+        var line_idx: usize = 0;
+        while (line_begin <= raw_body.len) {
+            const line_end = std.mem.indexOfScalarPos(u8, raw_body, line_begin, '\n') orelse raw_body.len;
+            const line = raw_body[line_begin..line_end];
+
+            if (line_idx > 0) try result.append(self.allocator, '\n');
+
+            var stripped: usize = 0;
+            while (stripped < indent and stripped < line.len and (line[stripped] == ' ' or line[stripped] == '\t')) {
+                stripped += 1;
+            }
+            try result.appendSlice(self.allocator, line[stripped..]);
+
+            line_begin = line_end + 1;
+            line_idx += 1;
+        }
+
+        const owned = try result.toOwnedSlice(self.allocator);
+        try self.string_allocs.append(self.allocator, owned);
+        return owned;
     }
 
     fn compileInterpolatedString(self: *Compiler, s: []const u8) Error!void {
@@ -1144,6 +1256,11 @@ const Compiler = struct {
                 break :blk .{ .float = std.fmt.parseFloat(f64, text) catch 0.0 };
             },
             .string_literal => blk: {
+                const tok_tag = self.ast.tokens[n.main_token].tag;
+                if (tok_tag == .heredoc or tok_tag == .nowdoc) {
+                    const body = self.extractHeredocBody(n.main_token) catch "";
+                    break :blk .{ .string = body };
+                }
                 const raw = self.ast.tokenSlice(n.main_token);
                 if (raw.len >= 2) {
                     break :blk .{ .string = raw[1 .. raw.len - 1] };

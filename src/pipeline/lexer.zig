@@ -182,6 +182,7 @@ pub const Lexer = struct {
 
     fn lexLt(self: *Lexer, start: usize) Token {
         if (self.match('<')) {
+            if (self.match('<')) return self.lexHeredoc(start);
             if (self.match('=')) return self.makeToken(.lt_lt_equal, start);
             return self.makeToken(.lt_lt, start);
         }
@@ -191,6 +192,64 @@ pub const Lexer = struct {
         }
         if (self.match('>')) return self.makeToken(.lt_gt, start);
         return self.makeToken(.lt, start);
+    }
+
+    fn lexHeredoc(self: *Lexer, start: usize) Token {
+        var is_nowdoc = false;
+        if (self.pos < self.source.len and self.source[self.pos] == '\'') {
+            is_nowdoc = true;
+            self.pos += 1;
+        }
+
+        const label_start = self.pos;
+        while (self.pos < self.source.len and (std.ascii.isAlphanumeric(self.source[self.pos]) or self.source[self.pos] == '_')) {
+            self.pos += 1;
+        }
+        const label = self.source[label_start..self.pos];
+        if (label.len == 0) return self.makeToken(.invalid, start);
+
+        if (is_nowdoc) {
+            if (self.pos < self.source.len and self.source[self.pos] == '\'') {
+                self.pos += 1;
+            } else {
+                return self.makeToken(.invalid, start);
+            }
+        }
+
+        // skip to end of line
+        while (self.pos < self.source.len and self.source[self.pos] != '\n') self.pos += 1;
+        if (self.pos < self.source.len) self.pos += 1; // skip \n
+
+        // scan for closing label
+        while (self.pos <= self.source.len) {
+            const line_start = self.pos;
+
+            // skip leading whitespace
+            while (self.pos < self.source.len and (self.source[self.pos] == ' ' or self.source[self.pos] == '\t')) {
+                self.pos += 1;
+            }
+
+            // check if this line starts with the label
+            if (self.pos + label.len <= self.source.len and std.mem.eql(u8, self.source[self.pos .. self.pos + label.len], label)) {
+                const after_label = self.pos + label.len;
+                // closing label must be followed by ; or newline or EOF
+                const terminates = after_label >= self.source.len or switch (self.source[after_label]) {
+                    '\n', '\r', ';', ')', ',', ']' => true,
+                    else => false,
+                };
+                if (terminates) {
+                    self.pos = after_label;
+                    return self.makeToken(if (is_nowdoc) .nowdoc else .heredoc, start);
+                }
+            }
+
+            // skip to next line
+            _ = line_start;
+            while (self.pos < self.source.len and self.source[self.pos] != '\n') self.pos += 1;
+            if (self.pos < self.source.len) self.pos += 1;
+        }
+
+        return self.makeToken(.invalid, start);
     }
 
     fn lexGt(self: *Lexer, start: usize) Token {
