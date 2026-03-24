@@ -1275,3 +1275,61 @@ test "exit halts execution" {
         \\echo "c";
     , "ab");
 }
+
+// ==========================================================================
+// version_compare / misc
+// ==========================================================================
+
+test "version_compare numeric" {
+    try expectOutput(
+        \\<?php
+        \\echo version_compare("1.0.0", "1.0.1");
+        \\echo " ";
+        \\echo version_compare("2.0", "1.0", ">");
+    , "-1 1");
+}
+
+test "version_compare operator" {
+    try expectOutput(
+        \\<?php
+        \\echo version_compare("8.1.0", "8.0.0", ">=") ? "y" : "n";
+        \\echo version_compare("1.2.3", "1.2.3", "==") ? "y" : "n";
+    , "yy");
+}
+
+test "class_alias" {
+    try expectOutput(
+        \\<?php
+        \\class Original { public function hi() { return "hello"; } }
+        \\class_alias("Original", "Alias");
+        \\$a = new Alias();
+        \\echo $a->hi();
+    , "hello");
+}
+
+test "spl_autoload_register inline" {
+    try expectOutput(
+        \\<?php
+        \\$called = false;
+        \\spl_autoload_register(function($class) {
+        \\    global $called;
+        \\    $called = true;
+        \\});
+        \\echo $called ? "yes" : "no";
+    , "no");
+}
+
+test "php_sapi_name" {
+    try expectOutput(
+        \\<?php
+        \\echo php_sapi_name();
+    , "cli");
+}
+
+test "extension_loaded" {
+    try expectOutput(
+        \\<?php
+        \\echo extension_loaded("json") ? "y" : "n";
+        \\echo extension_loaded("fake") ? "y" : "n";
+    , "yn");
+}

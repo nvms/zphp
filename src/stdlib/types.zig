@@ -45,6 +45,27 @@ pub const entries = .{
     .{ "spl_object_id", native_spl_object_id },
     .{ "exit", native_exit },
     .{ "die", native_exit },
+    .{ "version_compare", native_version_compare },
+    .{ "php_sapi_name", native_php_sapi_name },
+    .{ "php_version", native_php_version },
+    .{ "phpversion", native_php_version },
+    .{ "ini_get", native_ini_get },
+    .{ "ini_set", native_ini_set },
+    .{ "extension_loaded", native_extension_loaded },
+    .{ "get_included_files", native_get_included_files },
+    .{ "get_required_files", native_get_included_files },
+    .{ "memory_get_usage", native_memory_get_usage },
+    .{ "memory_get_peak_usage", native_memory_get_usage },
+    .{ "set_error_handler", native_set_error_handler },
+    .{ "set_exception_handler", native_set_exception_handler },
+    .{ "restore_error_handler", native_noop_true },
+    .{ "restore_exception_handler", native_noop_true },
+    .{ "error_reporting", native_error_reporting },
+    .{ "trigger_error", native_trigger_error },
+    .{ "user_error", native_trigger_error },
+    .{ "class_alias", native_class_alias },
+    .{ "spl_autoload_register", native_spl_autoload_register },
+    .{ "spl_autoload_unregister", native_spl_autoload_unregister },
 };
 
 fn native_define(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
@@ -395,3 +416,200 @@ fn native_exit(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     return error.RuntimeError;
 }
 
+fn parseVersionPart(s: []const u8) i64 {
+    return std.fmt.parseInt(i64, s, 10) catch 0;
+}
+
+fn native_version_compare(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len < 2 or args[0] != .string or args[1] != .string) return .null;
+    const v1 = args[0].string;
+    const v2 = args[1].string;
+
+    var parts1: [8]i64 = .{ -1, -1, -1, -1, -1, -1, -1, -1 };
+    var parts2: [8]i64 = .{ -1, -1, -1, -1, -1, -1, -1, -1 };
+
+    var count1: usize = 0;
+    var iter1 = std.mem.splitScalar(u8, v1, '.');
+    while (iter1.next()) |part| {
+        if (count1 >= 8) break;
+        parts1[count1] = parseVersionPart(part);
+        count1 += 1;
+    }
+    var count2: usize = 0;
+    var iter2 = std.mem.splitScalar(u8, v2, '.');
+    while (iter2.next()) |part| {
+        if (count2 >= 8) break;
+        parts2[count2] = parseVersionPart(part);
+        count2 += 1;
+    }
+
+    const max_parts = @max(count1, count2);
+    var cmp: i64 = 0;
+    for (0..max_parts) |j| {
+        const a = if (j < count1) parts1[j] else @as(i64, -1);
+        const b = if (j < count2) parts2[j] else @as(i64, -1);
+        if (a < b) { cmp = -1; break; }
+        if (a > b) { cmp = 1; break; }
+    }
+
+    if (args.len >= 3 and args[2] == .string) {
+        const op = args[2].string;
+        const result = if (std.mem.eql(u8, op, "<") or std.mem.eql(u8, op, "lt"))
+            cmp < 0
+        else if (std.mem.eql(u8, op, "<=") or std.mem.eql(u8, op, "le"))
+            cmp <= 0
+        else if (std.mem.eql(u8, op, ">") or std.mem.eql(u8, op, "gt"))
+            cmp > 0
+        else if (std.mem.eql(u8, op, ">=") or std.mem.eql(u8, op, "ge"))
+            cmp >= 0
+        else if (std.mem.eql(u8, op, "==") or std.mem.eql(u8, op, "eq"))
+            cmp == 0
+        else if (std.mem.eql(u8, op, "!=") or std.mem.eql(u8, op, "ne") or std.mem.eql(u8, op, "<>"))
+            cmp != 0
+        else
+            false;
+        return .{ .bool = result };
+    }
+
+    _ = ctx;
+    return .{ .int = cmp };
+}
+
+fn native_php_sapi_name(_: *NativeContext, _: []const Value) RuntimeError!Value {
+    return .{ .string = "cli" };
+}
+
+fn native_php_version(_: *NativeContext, _: []const Value) RuntimeError!Value {
+    return .{ .string = "8.4.0" };
+}
+
+fn native_ini_get(_: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len == 0 or args[0] != .string) return Value{ .bool = false };
+    const name = args[0].string;
+    if (std.mem.eql(u8, name, "date.timezone")) return .{ .string = "UTC" };
+    if (std.mem.eql(u8, name, "memory_limit")) return .{ .string = "-1" };
+    if (std.mem.eql(u8, name, "max_execution_time")) return .{ .string = "0" };
+    if (std.mem.eql(u8, name, "display_errors")) return .{ .string = "1" };
+    if (std.mem.eql(u8, name, "error_reporting")) return .{ .string = "32767" };
+    return Value{ .bool = false };
+}
+
+fn native_ini_set(_: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len < 2 or args[0] != .string) return Value{ .bool = false };
+    // no-op, return the "old" value
+    return .{ .string = "" };
+}
+
+fn native_extension_loaded(_: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len == 0 or args[0] != .string) return .{ .bool = false };
+    const name = args[0].string;
+    if (std.mem.eql(u8, name, "json")) return .{ .bool = true };
+    if (std.mem.eql(u8, name, "pcre")) return .{ .bool = true };
+    if (std.mem.eql(u8, name, "pdo")) return .{ .bool = true };
+    if (std.mem.eql(u8, name, "pdo_sqlite")) return .{ .bool = true };
+    if (std.mem.eql(u8, name, "session")) return .{ .bool = true };
+    if (std.mem.eql(u8, name, "mbstring")) return .{ .bool = true };
+    return .{ .bool = false };
+}
+
+fn native_get_included_files(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    var arr = try ctx.createArray();
+    var iter = ctx.vm.loaded_files.iterator();
+    while (iter.next()) |entry| {
+        try arr.append(ctx.allocator, .{ .string = entry.key_ptr.* });
+    }
+    return .{ .array = arr };
+}
+
+fn native_memory_get_usage(_: *NativeContext, _: []const Value) RuntimeError!Value {
+    return .{ .int = 0 };
+}
+
+fn native_set_error_handler(_: *NativeContext, _: []const Value) RuntimeError!Value {
+    return .null;
+}
+
+fn native_set_exception_handler(_: *NativeContext, _: []const Value) RuntimeError!Value {
+    return .null;
+}
+
+fn native_noop_true(_: *NativeContext, _: []const Value) RuntimeError!Value {
+    return .{ .bool = true };
+}
+
+fn native_error_reporting(_: *NativeContext, args: []const Value) RuntimeError!Value {
+    _ = args;
+    return .{ .int = 32767 };
+}
+
+fn native_trigger_error(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len == 0 or args[0] != .string) return .{ .bool = false };
+    try ctx.vm.output.appendSlice(ctx.allocator, args[0].string);
+    return .{ .bool = true };
+}
+
+fn native_class_alias(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len < 2 or args[0] != .string or args[1] != .string) return .{ .bool = false };
+    const original = args[0].string;
+    const alias = args[1].string;
+    if (ctx.vm.classes.get(original)) |cls| {
+        // create an empty alias class that inherits everything from the original
+        const VM = @import("../runtime/vm.zig").VM;
+        _ = VM;
+        const ClassDef = @import("../runtime/vm.zig").ClassDef;
+        var alias_def = ClassDef{ .name = alias, .parent = original };
+        // copy interfaces
+        for (cls.interfaces.items) |iface| {
+            try alias_def.interfaces.append(ctx.allocator, iface);
+        }
+        try ctx.vm.classes.put(ctx.allocator, alias, alias_def);
+        // register aliased methods so ClassName::method lookups work
+        var method_iter = cls.methods.iterator();
+        while (method_iter.next()) |entry| {
+            const method_name = entry.key_ptr.*;
+            var orig_buf: [256]u8 = undefined;
+            const orig_full = std.fmt.bufPrint(&orig_buf, "{s}::{s}", .{ original, method_name }) catch continue;
+            if (ctx.vm.functions.get(orig_full)) |func| {
+                var alias_buf: [256]u8 = undefined;
+                const alias_full = std.fmt.bufPrint(&alias_buf, "{s}::{s}", .{ alias, method_name }) catch continue;
+                const key = try ctx.allocator.dupe(u8, alias_full);
+                try ctx.strings.append(ctx.allocator, key);
+                try ctx.vm.functions.put(ctx.allocator, key, func);
+            }
+            if (ctx.vm.native_fns.get(orig_full)) |native| {
+                var alias_buf: [256]u8 = undefined;
+                const alias_full = std.fmt.bufPrint(&alias_buf, "{s}::{s}", .{ alias, method_name }) catch continue;
+                const key = try ctx.allocator.dupe(u8, alias_full);
+                try ctx.strings.append(ctx.allocator, key);
+                try ctx.vm.native_fns.put(ctx.allocator, key, native);
+            }
+        }
+        return .{ .bool = true };
+    }
+    return .{ .bool = false };
+}
+
+fn native_spl_autoload_register(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len == 0) return .{ .bool = false };
+    try ctx.vm.autoload_callbacks.append(ctx.allocator, args[0]);
+    return .{ .bool = true };
+}
+
+fn native_spl_autoload_unregister(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len == 0) return .{ .bool = false };
+    const target = args[0];
+    var i: usize = 0;
+    while (i < ctx.vm.autoload_callbacks.items.len) {
+        const cb = ctx.vm.autoload_callbacks.items[i];
+        const match = if (cb == .string and target == .string)
+            std.mem.eql(u8, cb.string, target.string)
+        else
+            false;
+        if (match) {
+            _ = ctx.vm.autoload_callbacks.orderedRemove(i);
+        } else {
+            i += 1;
+        }
+    }
+    return .{ .bool = true };
+}

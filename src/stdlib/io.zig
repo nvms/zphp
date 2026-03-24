@@ -31,6 +31,9 @@ pub const entries = .{
     .{ "is_uploaded_file", native_is_uploaded_file },
     .{ "sys_get_temp_dir", native_sys_get_temp_dir },
     .{ "tempnam", native_tempnam },
+    .{ "setcookie", native_setcookie },
+    .{ "headers_sent", native_headers_sent },
+    .{ "headers_list", native_headers_list },
 };
 
 fn file_get_contents(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
@@ -300,4 +303,123 @@ fn native_tempnam(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     const result = try buf.toOwnedSlice(ctx.allocator);
     try ctx.strings.append(ctx.allocator, result);
     return .{ .string = result };
+}
+
+fn getResponseHeaders(ctx: *NativeContext) ?*@import("../runtime/value.zig").PhpArray {
+    const existing = ctx.vm.frames[0].vars.get("__response_headers");
+    if (existing != null and existing.? == .array) return existing.?.array;
+    return null;
+}
+
+fn appendResponseHeader(ctx: *NativeContext, hdr: []const u8) !void {
+    const key = "__response_headers";
+    if (getResponseHeaders(ctx)) |arr| {
+        try arr.append(ctx.allocator, .{ .string = hdr });
+    } else {
+        const arr = try ctx.createArray();
+        try arr.append(ctx.allocator, .{ .string = hdr });
+        try ctx.vm.frames[0].vars.put(ctx.allocator, key, .{ .array = arr });
+    }
+}
+
+fn native_setcookie(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len == 0 or args[0] != .string) return .{ .bool = false };
+    const name = args[0].string;
+    const value = if (args.len >= 2 and args[1] == .string) args[1].string else "";
+
+    var buf = std.ArrayListUnmanaged(u8){};
+    try buf.appendSlice(ctx.allocator, "Set-Cookie: ");
+    try buf.appendSlice(ctx.allocator, name);
+    try buf.append(ctx.allocator, '=');
+    try appendUrlEncoded(&buf, ctx.allocator, value);
+
+    // expires (arg 2) or options array (arg 2 as array)
+    if (args.len >= 3 and args[2] == .array) {
+        // PHP 7.3+ options array form
+        const opts = args[2].array;
+        const expires = opts.get(.{ .string = "expires" });
+        if (expires == .int and expires.int > 0) {
+            try buf.appendSlice(ctx.allocator, "; Max-Age=");
+            const now: i64 = @intCast(@divFloor(std.time.milliTimestamp(), 1000));
+            const max_age = expires.int - now;
+            var tmp: [20]u8 = undefined;
+            const s = std.fmt.bufPrint(&tmp, "{d}", .{max_age}) catch "0";
+            try buf.appendSlice(ctx.allocator, s);
+        }
+        const path = opts.get(.{ .string = "path" });
+        if (path == .string) {
+            try buf.appendSlice(ctx.allocator, "; Path=");
+            try buf.appendSlice(ctx.allocator, path.string);
+        }
+        const domain = opts.get(.{ .string = "domain" });
+        if (domain == .string) {
+            try buf.appendSlice(ctx.allocator, "; Domain=");
+            try buf.appendSlice(ctx.allocator, domain.string);
+        }
+        const secure = opts.get(.{ .string = "secure" });
+        if (secure == .bool and secure.bool) try buf.appendSlice(ctx.allocator, "; Secure");
+        const httponly = opts.get(.{ .string = "httponly" });
+        if (httponly == .bool and httponly.bool) try buf.appendSlice(ctx.allocator, "; HttpOnly");
+        const samesite = opts.get(.{ .string = "samesite" });
+        if (samesite == .string) {
+            try buf.appendSlice(ctx.allocator, "; SameSite=");
+            try buf.appendSlice(ctx.allocator, samesite.string);
+        }
+    } else {
+        // positional args: expires, path, domain, secure, httponly
+        if (args.len >= 3 and args[2] == .int and args[2].int > 0) {
+            try buf.appendSlice(ctx.allocator, "; Max-Age=");
+            const now: i64 = @intCast(@divFloor(std.time.milliTimestamp(), 1000));
+            const max_age = args[2].int - now;
+            var tmp: [20]u8 = undefined;
+            const s = std.fmt.bufPrint(&tmp, "{d}", .{max_age}) catch "0";
+            try buf.appendSlice(ctx.allocator, s);
+        }
+        if (args.len >= 4 and args[3] == .string) {
+            try buf.appendSlice(ctx.allocator, "; Path=");
+            try buf.appendSlice(ctx.allocator, args[3].string);
+        }
+        if (args.len >= 5 and args[4] == .string) {
+            try buf.appendSlice(ctx.allocator, "; Domain=");
+            try buf.appendSlice(ctx.allocator, args[4].string);
+        }
+        if (args.len >= 6 and args[5] == .bool and args[5].bool) try buf.appendSlice(ctx.allocator, "; Secure");
+        if (args.len >= 7 and args[6] == .bool and args[6].bool) try buf.appendSlice(ctx.allocator, "; HttpOnly");
+    }
+
+    const hdr = try buf.toOwnedSlice(ctx.allocator);
+    try ctx.strings.append(ctx.allocator, hdr);
+    try appendResponseHeader(ctx, hdr);
+    return .{ .bool = true };
+}
+
+fn appendUrlEncoded(buf: *std.ArrayListUnmanaged(u8), a: std.mem.Allocator, s: []const u8) !void {
+    for (s) |c| {
+        if (std.ascii.isAlphanumeric(c) or c == '-' or c == '_' or c == '.' or c == '~') {
+            try buf.append(a, c);
+        } else if (c == ' ') {
+            try buf.append(a, '+');
+        } else {
+            const hex = "0123456789ABCDEF";
+            try buf.append(a, '%');
+            try buf.append(a, hex[c >> 4]);
+            try buf.append(a, hex[c & 0xf]);
+        }
+    }
+}
+
+fn native_headers_sent(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    // in CLI mode, headers are never "sent" until the response is written
+    // in serve mode, this would check if output has been flushed
+    _ = ctx;
+    return .{ .bool = false };
+}
+
+fn native_headers_list(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    if (getResponseHeaders(ctx)) |arr| {
+        return .{ .array = arr };
+    }
+    var empty = try ctx.createArray();
+    _ = &empty;
+    return .{ .array = empty };
 }

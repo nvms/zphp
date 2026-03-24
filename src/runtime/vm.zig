@@ -149,6 +149,7 @@ pub const VM = struct {
     compile_results: std.ArrayListUnmanaged(*CompileResult) = .{},
     error_msg: ?[]const u8 = null,
     exit_requested: bool = false,
+    autoload_callbacks: std.ArrayListUnmanaged(Value) = .{},
     ob_stack: std.ArrayListUnmanaged(usize) = .{},
     request_vars: std.StringHashMapUnmanaged(Value) = .{},
     exception_handlers: [32]ExceptionHandler = undefined,
@@ -305,6 +306,7 @@ pub const VM = struct {
         self.compile_results.deinit(self.allocator);
         self.ob_stack.deinit(self.allocator);
         self.request_vars.deinit(self.allocator);
+        self.autoload_callbacks.deinit(self.allocator);
     }
 
     pub fn reset(self: *VM) void {
@@ -1279,6 +1281,11 @@ pub const VM = struct {
                         continue;
                     }
 
+                    // autoload if class not registered
+                    if (!self.classes.contains(class_name)) {
+                        try self.tryAutoload(class_name);
+                    }
+
                     const obj = try self.allocator.create(PhpObject);
                     obj.* = .{ .class_name = class_name };
                     try self.objects.append(self.allocator, obj);
@@ -1918,6 +1925,18 @@ pub const VM = struct {
             }
         }
         return null;
+    }
+
+    pub fn tryAutoload(self: *VM, class_name: []const u8) RuntimeError!void {
+        for (self.autoload_callbacks.items) |callback| {
+            if (callback == .string) {
+                _ = self.callByName(callback.string, &.{.{ .string = class_name }}) catch continue;
+            } else {
+                var ctx = self.makeContext(null);
+                _ = ctx.invokeCallable(callback, &.{.{ .string = class_name }}) catch continue;
+            }
+            if (self.classes.contains(class_name)) return;
+        }
     }
 
     pub fn isInstanceOf(self: *VM, obj_class: []const u8, target_class: []const u8) bool {
