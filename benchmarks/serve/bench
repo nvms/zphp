@@ -40,7 +40,7 @@ sleep 3
 
 # start zphp
 echo -e "${Y}starting zphp serve...${R}"
-$ZPHP serve "$SCRIPT_DIR/app.php" --port 8083 &
+$ZPHP serve "$SCRIPT_DIR/app.php" --port 9083 &
 ZPHP_HTTP_PID=$!
 sleep 1
 
@@ -51,9 +51,9 @@ sleep 3
 
 # verify all are running
 echo -e "${Y}verifying servers...${R}"
-curl -s http://localhost:8081/ > /dev/null && echo "  php-fpm: ok" || echo "  php-fpm: FAILED"
-curl -s http://localhost:8082/ > /dev/null && echo "  swoole: ok" || echo "  swoole: FAILED"
-curl -s http://localhost:8083/ > /dev/null && echo "  zphp: ok" || echo "  zphp: FAILED"
+curl -s http://localhost:9081/ > /dev/null && echo "  php-fpm: ok" || echo "  php-fpm: FAILED"
+curl -s http://localhost:9082/ > /dev/null && echo "  swoole: ok" || echo "  swoole: FAILED"
+curl -s http://localhost:9083/ > /dev/null && echo "  zphp: ok" || echo "  zphp: FAILED"
 echo ""
 
 # HTTP throughput test using python
@@ -77,12 +77,12 @@ echo ""
 # start swoole ws
 echo -e "${Y}starting swoole websocket...${R}"
 cd "$SCRIPT_DIR"
-docker compose run -d --name swoole_ws -p 8082:9501 swoole php /app/ws_server.php 2>/dev/null
+docker compose run -d --name swoole_ws -p 9082:9501 swoole php /app/ws_server.php 2>/dev/null
 sleep 3
 
 # start zphp ws
 echo -e "${Y}starting zphp websocket...${R}"
-$ZPHP serve "$SCRIPT_DIR/zphp_ws.php" --port 8083 &
+$ZPHP serve "$SCRIPT_DIR/zphp_ws.php" --port 9083 &
 ZPHP_WS_PID=$!
 sleep 1
 

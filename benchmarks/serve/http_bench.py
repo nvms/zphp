@@ -7,9 +7,9 @@ REQUESTS = 1000
 CONCURRENCY = 50
 
 targets = [
-    ("php-fpm", "http://localhost:8081/"),
-    ("swoole", "http://localhost:8082/"),
-    ("zphp", "http://localhost:8083/"),
+    ("php-fpm", "http://localhost:9081/"),
+    ("swoole", "http://localhost:9082/"),
+    ("zphp", "http://localhost:9083/"),
 ]
 
 def do_request(url):

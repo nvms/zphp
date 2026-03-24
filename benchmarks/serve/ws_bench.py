@@ -175,7 +175,7 @@ print()
 if zphp_pid:
     run_ws_bench(
         "zphp",
-        "127.0.0.1", 8083,
+        "127.0.0.1", 9083,
         lambda: get_process_memory(zphp_pid),
         CONNECTION_COUNTS
     )
@@ -185,7 +185,7 @@ else:
 # swoole
 run_ws_bench(
     "swoole",
-    "127.0.0.1", 8082,
+    "127.0.0.1", 9082,
     lambda: get_container_memory("swoole_ws"),
     CONNECTION_COUNTS
 )

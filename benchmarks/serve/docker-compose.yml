@@ -4,7 +4,7 @@ services:
       context: .
       dockerfile: Dockerfile.fpm
     ports:
-      - "8081:80"
+      - "9081:80"
     platform: linux/amd64
 
   swoole:
@@ -12,5 +12,5 @@ services:
       context: .
       dockerfile: Dockerfile.swoole
     ports:
-      - "8082:9501"
+      - "9082:9501"
     platform: linux/amd64
