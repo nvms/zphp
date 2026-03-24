@@ -94,6 +94,14 @@ fn count(_: *NativeContext, args: []const Value) RuntimeError!Value {
 
 fn intval(_: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len == 0) return .{ .int = 0 };
+    if (args.len >= 2 and args[1] == .int and args[1].int != 10 and args[0] == .string) {
+        const base: u8 = @intCast(@max(2, @min(36, args[1].int)));
+        var s = std.mem.trim(u8, args[0].string, " \t\n\r");
+        if (base == 16 and s.len >= 2 and s[0] == '0' and (s[1] == 'x' or s[1] == 'X')) s = s[2..];
+        if (base == 8 and s.len >= 1 and s[0] == '0') s = s[1..];
+        if (base == 2 and s.len >= 2 and s[0] == '0' and (s[1] == 'b' or s[1] == 'B')) s = s[2..];
+        return .{ .int = std.fmt.parseInt(i64, s, base) catch 0 };
+    }
     return .{ .int = Value.toInt(args[0]) };
 }
 

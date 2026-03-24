@@ -261,7 +261,7 @@ pub const Value = union(enum) {
             .bool => |b| if (b) @as(i64, 1) else 0,
             .int => |i| i,
             .float => |f| @intFromFloat(f),
-            .string => |s| std.fmt.parseInt(i64, s, 10) catch 0,
+            .string => |s| parseLeadingInt(s),
             .array, .object, .generator, .fiber => 0,
         };
     }
@@ -272,9 +272,45 @@ pub const Value = union(enum) {
             .bool => |b| if (b) 1.0 else 0.0,
             .int => |i| @floatFromInt(i),
             .float => |f| f,
-            .string => |s| std.fmt.parseFloat(f64, s) catch 0.0,
+            .string => |s| parseLeadingFloat(s),
             .array, .object, .generator, .fiber => 0.0,
         };
+    }
+
+    fn parseLeadingInt(s: []const u8) i64 {
+        var i: usize = 0;
+        while (i < s.len and (s[i] == ' ' or s[i] == '\t' or s[i] == '\n' or s[i] == '\r')) i += 1;
+        if (i >= s.len) return 0;
+        var neg = false;
+        if (s[i] == '-') { neg = true; i += 1; } else if (s[i] == '+') i += 1;
+        if (i >= s.len or s[i] < '0' or s[i] > '9') return 0;
+        var result: i64 = 0;
+        while (i < s.len and s[i] >= '0' and s[i] <= '9') {
+            result = result *% 10 +% @as(i64, s[i] - '0');
+            i += 1;
+        }
+        return if (neg) -result else result;
+    }
+
+    fn parseLeadingFloat(s: []const u8) f64 {
+        // find the longest prefix that parses as a float
+        var end: usize = 0;
+        while (end < s.len and (s[end] == ' ' or s[end] == '\t' or s[end] == '\n' or s[end] == '\r')) end += 1;
+        if (end >= s.len) return 0.0;
+        if (s[end] == '-' or s[end] == '+') end += 1;
+        var has_digit = false;
+        while (end < s.len and s[end] >= '0' and s[end] <= '9') { end += 1; has_digit = true; }
+        if (end < s.len and s[end] == '.') {
+            end += 1;
+            while (end < s.len and s[end] >= '0' and s[end] <= '9') { end += 1; has_digit = true; }
+        }
+        if (end < s.len and (s[end] == 'e' or s[end] == 'E')) {
+            end += 1;
+            if (end < s.len and (s[end] == '-' or s[end] == '+')) end += 1;
+            while (end < s.len and s[end] >= '0' and s[end] <= '9') end += 1;
+        }
+        if (!has_digit) return 0.0;
+        return std.fmt.parseFloat(f64, s[0..end]) catch 0.0;
     }
 
     pub fn toArrayKey(v: Value) PhpArray.Key {

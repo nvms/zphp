@@ -182,25 +182,27 @@ fn implode(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     return .{ .string = s };
 }
 
+const default_trim_chars = " \t\n\r\x0b\x00";
+
 fn trim(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len == 0) return .{ .string = "" };
     const s = if (args[0] == .string) args[0].string else return Value{ .string = "" };
-    const trimmed = std.mem.trim(u8, s, " \t\n\r\x0b\x00");
-    return .{ .string = try ctx.createString(trimmed) };
+    const chars = if (args.len >= 2 and args[1] == .string) args[1].string else default_trim_chars;
+    return .{ .string = try ctx.createString(std.mem.trim(u8, s, chars)) };
 }
 
 fn ltrim(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len == 0) return .{ .string = "" };
     const s = if (args[0] == .string) args[0].string else return Value{ .string = "" };
-    const trimmed = std.mem.trimLeft(u8, s, " \t\n\r\x0b\x00");
-    return .{ .string = try ctx.createString(trimmed) };
+    const chars = if (args.len >= 2 and args[1] == .string) args[1].string else default_trim_chars;
+    return .{ .string = try ctx.createString(std.mem.trimLeft(u8, s, chars)) };
 }
 
 fn rtrim(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len == 0) return .{ .string = "" };
     const s = if (args[0] == .string) args[0].string else return Value{ .string = "" };
-    const trimmed = std.mem.trimRight(u8, s, " \t\n\r\x0b\x00");
-    return .{ .string = try ctx.createString(trimmed) };
+    const chars = if (args.len >= 2 and args[1] == .string) args[1].string else default_trim_chars;
+    return .{ .string = try ctx.createString(std.mem.trimRight(u8, s, chars)) };
 }
 
 fn strtolower(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
@@ -293,6 +295,14 @@ fn str_pad(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
         var i: usize = 0;
         while (i < diff) : (i += 1) try buf.append(ctx.allocator, pad_str[i % pad_str.len]);
         try buf.appendSlice(ctx.allocator, s);
+    } else if (pad_type == 2) {
+        const left = diff / 2;
+        const right = diff - left;
+        var i: usize = 0;
+        while (i < left) : (i += 1) try buf.append(ctx.allocator, pad_str[i % pad_str.len]);
+        try buf.appendSlice(ctx.allocator, s);
+        i = 0;
+        while (i < right) : (i += 1) try buf.append(ctx.allocator, pad_str[i % pad_str.len]);
     } else {
         try buf.appendSlice(ctx.allocator, s);
         var i: usize = 0;
@@ -448,22 +458,39 @@ fn native_wordwrap(ctx: *NativeContext, args: []const Value) RuntimeError!Value 
     const s = if (args[0] == .string) args[0].string else return Value{ .string = "" };
     const width: usize = if (args.len >= 2) @intCast(@max(1, Value.toInt(args[1]))) else 75;
     const brk = if (args.len >= 3 and args[2] == .string) args[2].string else "\n";
+    const cut = args.len >= 4 and args[3].isTruthy();
 
     var buf = std.ArrayListUnmanaged(u8){};
-    var line_len: usize = 0;
-    for (s) |c| {
-        if (line_len >= width and c == ' ') {
-            try buf.appendSlice(ctx.allocator, brk);
-            line_len = 0;
-        } else {
-            try buf.append(ctx.allocator, c);
-            if (c == '\n') {
-                line_len = 0;
-            } else {
-                line_len += 1;
+    var line_start: usize = 0;
+    var last_space: ?usize = null;
+    var i: usize = 0;
+
+    while (i < s.len) {
+        if (s[i] == '\n') {
+            try buf.appendSlice(ctx.allocator, s[line_start .. i + 1]);
+            i += 1;
+            line_start = i;
+            last_space = null;
+            continue;
+        }
+        if (s[i] == ' ') last_space = i;
+        const line_len = i - line_start;
+        if (line_len >= width) {
+            if (last_space) |sp| {
+                try buf.appendSlice(ctx.allocator, s[line_start..sp]);
+                try buf.appendSlice(ctx.allocator, brk);
+                line_start = sp + 1;
+                last_space = null;
+            } else if (cut) {
+                try buf.appendSlice(ctx.allocator, s[line_start..i]);
+                try buf.appendSlice(ctx.allocator, brk);
+                line_start = i;
+                last_space = null;
             }
         }
+        i += 1;
     }
+    if (line_start < s.len) try buf.appendSlice(ctx.allocator, s[line_start..]);
     const result = try buf.toOwnedSlice(ctx.allocator);
     try ctx.strings.append(ctx.allocator, result);
     return .{ .string = result };
