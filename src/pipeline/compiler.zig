@@ -242,7 +242,12 @@ const Compiler = struct {
             .require_expr => try self.compileRequire(node),
             .namespace_decl => try self.compileNamespace(node),
             .use_stmt => try self.compileUse(node),
-            .qualified_name => {},
+            .qualified_name => {
+                const parts = self.ast.extraSlice(node.data.lhs);
+                const fqn = try self.buildQualifiedString(parts);
+                const ci = try self.addConstant(.{ .string = fqn });
+                try self.emitConstant(ci);
+            },
             .root => {},
         }
     }
@@ -1870,9 +1875,17 @@ const Compiler = struct {
         try self.emitByte(@intCast(args.len));
     }
 
+    fn resolveNodeClassName(self: *Compiler, class_node: Ast.Node) ![]const u8 {
+        if (class_node.tag == .qualified_name) {
+            const parts = self.ast.extraSlice(class_node.data.lhs);
+            return try self.buildQualifiedString(parts);
+        }
+        return self.resolveClassName(self.ast.tokenSlice(class_node.main_token));
+    }
+
     fn compileStaticCall(self: *Compiler, node: Ast.Node) Error!void {
         const class_node = self.ast.nodes[node.data.lhs];
-        const class_name = self.ast.tokenSlice(class_node.main_token);
+        const class_name = try self.resolveNodeClassName(class_node);
         const method_name = self.ast.tokenSlice(node.main_token);
         const args = self.ast.extraSlice(node.data.rhs);
         for (args) |arg| try self.compileNode(arg);
@@ -1886,7 +1899,7 @@ const Compiler = struct {
 
     fn compileStaticPropAccess(self: *Compiler, node: Ast.Node) Error!void {
         const class_node = self.ast.nodes[node.data.lhs];
-        const class_name = self.ast.tokenSlice(class_node.main_token);
+        const class_name = try self.resolveNodeClassName(class_node);
         var prop_name = self.ast.tokenSlice(node.main_token);
         if (prop_name.len > 0 and prop_name[0] == '$') prop_name = prop_name[1..];
         const class_idx = try self.addConstant(.{ .string = class_name });

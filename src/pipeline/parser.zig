@@ -1405,7 +1405,7 @@ const Parser = struct {
             .kw_false => self.addLiteral(.false_literal),
             .kw_null => self.addLiteral(.null_literal),
             .variable => self.addLiteral(.variable),
-            .identifier => self.addLiteral(.identifier),
+            .identifier => if (self.peekAt(1) == .backslash) self.parseQualifiedName() else self.addLiteral(.identifier),
             .kw_isset, .kw_empty, .kw_unset, .kw_eval, .kw_exit, .kw_die => self.addLiteral(.identifier),
             .kw_list => self.parseListDestructure(),
             .kw_match => self.parseMatchExpr(),
