@@ -1333,3 +1333,406 @@ test "extension_loaded" {
         \\echo extension_loaded("fake") ? "y" : "n";
     , "yn");
 }
+
+// ==========================================================================
+// edge case hardening
+// ==========================================================================
+
+test "array pointer on empty array" {
+    try expectOutput(
+        \\<?php
+        \\$a = [];
+        \\var_dump(current($a));
+        \\var_dump(key($a));
+        \\var_dump(next($a));
+        \\var_dump(reset($a));
+        \\var_dump(end($a));
+    , "bool(false)\nNULL\nbool(false)\nbool(false)\nbool(false)\n");
+}
+
+test "array pointer past end" {
+    try expectOutput(
+        \\<?php
+        \\$a = [1];
+        \\echo current($a) . "\n";
+        \\var_dump(next($a));
+        \\var_dump(current($a));
+    , "1\nbool(false)\nbool(false)\n");
+}
+
+test "prev at beginning" {
+    try expectOutput(
+        \\<?php
+        \\$a = [1, 2, 3];
+        \\var_dump(prev($a));
+    , "bool(false)\n");
+}
+
+test "version_compare unequal parts" {
+    try expectOutput(
+        \\<?php
+        \\echo version_compare("1.0", "1.0.0") . "\n";
+        \\echo version_compare("1.0.0", "1.0") . "\n";
+        \\echo version_compare("1", "1.0") . "\n";
+    , "-1\n1\n-1\n");
+}
+
+test "version_compare edge cases" {
+    try expectOutput(
+        \\<?php
+        \\echo version_compare("0.0.0", "0.0.0") . "\n";
+        \\echo version_compare("0", "0", "==") ? "y" : "n";
+        \\echo "\n";
+        \\echo version_compare("10.0", "9.99", ">") ? "y" : "n";
+        \\echo "\n";
+    , "0\ny\ny\n");
+}
+
+test "class_alias instanceof" {
+    try expectOutput(
+        \\<?php
+        \\class Base2 { public function f() { return "ok"; } }
+        \\class_alias("Base2", "Alias2");
+        \\$a = new Alias2();
+        \\echo ($a instanceof Base2) ? "y" : "n";
+        \\echo $a->f();
+    , "yok");
+}
+
+test "class_alias static methods" {
+    try expectOutput(
+        \\<?php
+        \\class Util {
+        \\    public static function greet() { return "hi"; }
+        \\}
+        \\class_alias("Util", "Helper");
+        \\echo Helper::greet();
+    , "hi");
+}
+
+test "exit with no args" {
+    try expectOutput(
+        \\<?php
+        \\echo "before";
+        \\exit();
+        \\echo "after";
+    , "before");
+}
+
+test "die alias" {
+    try expectOutput(
+        \\<?php
+        \\echo "a";
+        \\die("b");
+        \\echo "c";
+    , "ab");
+}
+
+test "serialize empty array" {
+    try expectOutput(
+        \\<?php
+        \\echo serialize([]);
+    , "a:0:{}");
+}
+
+test "serialize negative int" {
+    try expectOutput(
+        \\<?php
+        \\echo serialize(-42);
+    , "i:-42;");
+}
+
+test "serialize nested array" {
+    try expectOutput(
+        \\<?php
+        \\echo serialize(["a" => [1, 2]]);
+    , "a:1:{s:1:\"a\";a:2:{i:0;i:1;i:1;i:2;}}");
+}
+
+test "unserialize malformed returns false" {
+    try expectOutput(
+        \\<?php
+        \\var_dump(unserialize("garbage"));
+        \\var_dump(unserialize(""));
+    , "bool(false)\nbool(false)\n");
+}
+
+test "serialize bool false" {
+    try expectOutput(
+        \\<?php
+        \\echo serialize(false);
+    , "b:0;");
+}
+
+test "serialize float" {
+    try expectOutput(
+        \\<?php
+        \\echo serialize(3.14);
+    , "d:3.14;");
+}
+
+test "hash sha512" {
+    try expectOutput(
+        \\<?php
+        \\echo substr(hash("sha512", "test"), 0, 16);
+    , "ee26b0dd4af7e749");
+}
+
+test "hash_hmac md5" {
+    try expectOutput(
+        \\<?php
+        \\echo hash_hmac("md5", "message", "key");
+    , "4e4748e62b463521f6775fbf921234b5");
+}
+
+test "hash empty string" {
+    try expectOutput(
+        \\<?php
+        \\echo hash("md5", "");
+    , "d41d8cd98f00b204e9800998ecf8427e");
+}
+
+test "password_hash with custom cost" {
+    try expectOutput(
+        \\<?php
+        \\$h = password_hash("test", PASSWORD_BCRYPT, ["cost" => 4]);
+        \\echo substr($h, 0, 7);
+        \\echo " ";
+        \\echo password_verify("test", $h) ? "ok" : "fail";
+    , "$2b$04$ ok");
+}
+
+test "random_int equal bounds" {
+    try expectOutput(
+        \\<?php
+        \\echo random_int(42, 42);
+    , "42");
+}
+
+test "is_a with string class name" {
+    try expectOutput(
+        \\<?php
+        \\class P1 {} class C1 extends P1 {}
+        \\echo is_a("C1", "P1", true) ? "y" : "n";
+    , "y");
+}
+
+test "get_class_methods deduplicates" {
+    try expectOutput(
+        \\<?php
+        \\class G1 { public function f() {} }
+        \\class G2 extends G1 { public function f() {} public function g() {} }
+        \\$m = get_class_methods("G2");
+        \\sort($m);
+        \\echo implode(",", $m);
+    , "f,g");
+}
+
+test "strstr needle at start" {
+    try expectOutput(
+        \\<?php
+        \\echo strstr("hello world", "hello");
+    , "hello world");
+}
+
+test "strstr needle at end" {
+    try expectOutput(
+        \\<?php
+        \\echo strstr("hello world", "world");
+    , "world");
+}
+
+test "strstr before_needle at end" {
+    try expectOutput(
+        \\<?php
+        \\echo strstr("foo/bar/baz", "baz", true);
+    , "foo/bar/");
+}
+
+test "parse_url query only" {
+    try expectOutput(
+        \\<?php
+        \\$u = parse_url("?key=val&a=b");
+        \\echo $u["query"];
+    , "key=val&a=b");
+}
+
+test "parse_url no path" {
+    try expectOutput(
+        \\<?php
+        \\echo parse_url("https://example.com", PHP_URL_HOST);
+    , "example.com");
+}
+
+test "parse_url fragment only" {
+    try expectOutput(
+        \\<?php
+        \\$u = parse_url("#section");
+        \\echo $u["fragment"];
+    , "section");
+}
+
+test "password_verify rejects wrong password" {
+    try expectOutput(
+        \\<?php
+        \\$h = password_hash("correct", PASSWORD_BCRYPT, ["cost" => 4]);
+        \\echo password_verify("wrong", $h) ? "y" : "n";
+    , "n");
+}
+
+test "password_needs_rehash detects cost change" {
+    try expectOutput(
+        \\<?php
+        \\$h = password_hash("test", PASSWORD_BCRYPT, ["cost" => 4]);
+        \\echo password_needs_rehash($h, PASSWORD_BCRYPT, ["cost" => 4]) ? "y" : "n";
+        \\echo password_needs_rehash($h, PASSWORD_BCRYPT, ["cost" => 12]) ? "y" : "n";
+    , "ny");
+}
+
+test "random_int range" {
+    try expectOutput(
+        \\<?php
+        \\$r = random_int(1, 1000000);
+        \\echo ($r >= 1 && $r <= 1000000) ? "ok" : "fail";
+    , "ok");
+}
+
+test "hash unsupported algo returns false" {
+    try expectOutput(
+        \\<?php
+        \\var_dump(hash("nonexistent", "data"));
+    , "bool(false)\n");
+}
+
+test "hash_hmac sha512" {
+    try expectOutput(
+        \\<?php
+        \\echo substr(hash_hmac("sha512", "data", "key"), 0, 16);
+    , "3c5953a18f7303ec");
+}
+
+test "serialize string with quotes" {
+    try expectOutput(
+        \\<?php
+        \\$s = serialize("he said \"hello\"");
+        \\$back = unserialize($s);
+        \\echo $back;
+    , "he said \"hello\"");
+}
+
+test "unserialize integer zero" {
+    try expectOutput(
+        \\<?php
+        \\var_dump(unserialize("i:0;"));
+    , "int(0)\n");
+}
+
+test "array pointer with assoc after operations" {
+    try expectOutput(
+        \\<?php
+        \\$a = ["x" => 10, "y" => 20, "z" => 30];
+        \\end($a);
+        \\echo key($a) . "=" . current($a);
+        \\reset($a);
+        \\echo " " . key($a) . "=" . current($a);
+    , "z=30 x=10");
+}
+
+test "class_alias preserves properties" {
+    try expectOutput(
+        \\<?php
+        \\class Thing { public $val = "default"; }
+        \\class_alias("Thing", "Widget");
+        \\$w = new Widget();
+        \\echo $w->val;
+    , "default");
+}
+
+test "version_compare all operators" {
+    try expectOutput(
+        \\<?php
+        \\echo version_compare("1.0", "2.0", "lt") ? "1" : "0";
+        \\echo version_compare("2.0", "1.0", "gt") ? "1" : "0";
+        \\echo version_compare("1.0", "2.0", "le") ? "1" : "0";
+        \\echo version_compare("1.0", "1.0", "le") ? "1" : "0";
+        \\echo version_compare("2.0", "1.0", "ge") ? "1" : "0";
+        \\echo version_compare("1.0", "1.0", "ge") ? "1" : "0";
+        \\echo version_compare("1.0", "2.0", "ne") ? "1" : "0";
+        \\echo version_compare("1.0", "1.0", "ne") ? "1" : "0";
+    , "11111110");
+}
+
+test "ini_get known values" {
+    try expectOutput(
+        \\<?php
+        \\echo ini_get("date.timezone") . "\n";
+        \\echo ini_get("memory_limit") . "\n";
+        \\var_dump(ini_get("nonexistent"));
+    , "UTC\n-1\nbool(false)\n");
+}
+
+test "get_included_files empty" {
+    try expectOutput(
+        \\<?php
+        \\$f = get_included_files();
+        \\echo is_array($f) ? "array" : "not";
+    , "array");
+}
+
+test "trigger_error outputs message" {
+    try expectOutput(
+        \\<?php
+        \\trigger_error("something went wrong");
+    , "something went wrong");
+}
+
+test "spl_autoload_register defines class inline" {
+    try expectOutput(
+        \\<?php
+        \\spl_autoload_register(function($class) {
+        \\    if ($class === "DynClass") {
+        \\        eval('class DynClass { public function go() { return "dynamic"; } }');
+        \\    }
+        \\});
+        \\echo "registered";
+    , "registered");
+}
+
+test "parse_url user without password" {
+    try expectOutput(
+        \\<?php
+        \\$u = parse_url("https://admin@example.com/path");
+        \\echo $u["user"] . " ";
+        \\echo isset($u["pass"]) ? "has_pass" : "no_pass";
+    , "admin no_pass");
+}
+
+test "parse_url empty query" {
+    try expectOutput(
+        \\<?php
+        \\$u = parse_url("https://example.com/path?");
+        \\echo isset($u["query"]) ? "has" : "none";
+        \\echo " " . $u["query"];
+    , "has ");
+}
+
+test "strstr empty before_needle" {
+    try expectOutput(
+        \\<?php
+        \\var_dump(strstr("exact", "exact", true));
+    , "string(0) \"\"\n");
+}
+
+test "strstr first occurrence" {
+    try expectOutput(
+        \\<?php
+        \\echo strstr("abcabcabc", "abc");
+    , "abcabcabc");
+}
+
+test "hash raw output length" {
+    try expectOutput(
+        \\<?php
+        \\echo strlen(hash("sha256", "test", true));
+    , "32");
+}

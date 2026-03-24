@@ -11,6 +11,59 @@ pub const entries = .{
     .{ "json_last_error_msg", native_json_last_error_msg },
 };
 
+fn formatPhpFloat(buf: *std.ArrayListUnmanaged(u8), a: std.mem.Allocator, f: f64) !void {
+    if (f == 0.0) {
+        if (std.math.signbit(f)) {
+            try buf.appendSlice(a, "-0");
+        } else {
+            try buf.appendSlice(a, "0");
+        }
+        return;
+    }
+    // match PHP's %.14G: scientific notation for exp < -4 or exp >= 14 sig digits
+    // but PHP serializes integer-range floats as integers, so large whole numbers
+    // stay decimal up to ~1e18
+    const abs_f = @abs(f);
+    const exp = if (abs_f != 0) @floor(@log10(abs_f)) else 0;
+    const use_sci = exp < -4 or (exp >= 14 and (f != @trunc(f) or abs_f >= 1e19));
+    if (use_sci) {
+        // scientific notation like PHP: 1.0E-6, 1.0E+16
+        var tmp: [64]u8 = undefined;
+        const s = std.fmt.bufPrint(&tmp, "{e}", .{f}) catch return;
+        // zig outputs like 1e-6, PHP outputs like 1.0E-6
+        // need to transform: uppercase E, ensure decimal point, explicit +/- sign
+        for (s) |c| {
+            if (c == 'e') {
+                // ensure there's a decimal point before E
+                const written = buf.items.len;
+                var has_dot = false;
+                var search = written;
+                while (search > 0) : (search -= 1) {
+                    if (buf.items[search - 1] == '.') { has_dot = true; break; }
+                    if (buf.items[search - 1] == '-' or buf.items[search - 1] == '+') break;
+                }
+                if (!has_dot) try buf.appendSlice(a, ".0");
+                try buf.append(a, 'E');
+            } else if (c == '-' and buf.items.len > 0 and buf.items[buf.items.len - 1] == 'E') {
+                try buf.append(a, '-');
+            } else if (c == '+' and buf.items.len > 0 and buf.items[buf.items.len - 1] == 'E') {
+                try buf.append(a, '+');
+            } else {
+                try buf.append(a, c);
+            }
+        }
+        // if no sign after E, add +
+        if (buf.items.len > 0 and buf.items[buf.items.len - 1] == 'E') {
+            try buf.append(a, '+');
+            try buf.append(a, '0');
+        }
+    } else {
+        var tmp: [64]u8 = undefined;
+        const s = std.fmt.bufPrint(&tmp, "{d}", .{f}) catch return;
+        try buf.appendSlice(a, s);
+    }
+}
+
 fn native_serialize(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len == 0) return .{ .string = "" };
     var buf = std.ArrayListUnmanaged(u8){};
@@ -35,9 +88,7 @@ fn serializeValue(buf: *std.ArrayListUnmanaged(u8), a: std.mem.Allocator, val: V
         },
         .float => |f| {
             try buf.appendSlice(a, "d:");
-            var tmp: [64]u8 = undefined;
-            const s = std.fmt.bufPrint(&tmp, "{d}", .{f}) catch return;
-            try buf.appendSlice(a, s);
+            try formatPhpFloat(buf, a, f);
             try buf.append(a, ';');
         },
         .string => |str| {
