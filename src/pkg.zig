@@ -208,16 +208,21 @@ fn moveNestedDir(allocator: Allocator, vendor_dir: []const u8) !void {
     if (count == 1) {
         if (subdir_name) |sub| {
             defer allocator.free(sub);
-            var sub_dir = dir.openDir(sub, .{ .iterate = true }) catch return;
+            const src = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ vendor_dir, sub });
+            defer allocator.free(src);
+
+            var sub_dir = std.fs.cwd().openDir(src, .{ .iterate = true }) catch return error.RuntimeError;
             defer sub_dir.close();
 
             var sub_iter = sub_dir.iterate();
-            while (sub_iter.next() catch null) |file_entry| {
-                const name = allocator.dupe(u8, file_entry.name) catch continue;
-                defer allocator.free(name);
-                sub_dir.rename(name, dir, name) catch continue;
+            while (try sub_iter.next()) |file_entry| {
+                const old_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ src, file_entry.name });
+                defer allocator.free(old_path);
+                const new_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ vendor_dir, file_entry.name });
+                defer allocator.free(new_path);
+                std.fs.cwd().rename(old_path, new_path) catch continue;
             }
-            dir.deleteDir(sub) catch {};
+            std.fs.cwd().deleteDir(src) catch {};
         }
     }
 }
