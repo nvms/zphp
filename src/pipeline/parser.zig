@@ -1819,6 +1819,8 @@ const Parser = struct {
     }
 
     fn synchronize(self: *Parser) void {
+        // always skip at least one token to guarantee forward progress
+        if (self.peek() != .eof) _ = self.advance();
         while (self.peek() != .eof) {
             switch (self.peek()) {
                 .semicolon => {

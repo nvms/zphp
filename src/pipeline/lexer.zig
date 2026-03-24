@@ -221,7 +221,7 @@ pub const Lexer = struct {
         if (self.pos < self.source.len) self.pos += 1; // skip \n
 
         // scan for closing label
-        while (self.pos <= self.source.len) {
+        while (self.pos < self.source.len) {
             const line_start = self.pos;
 
             // skip leading whitespace
