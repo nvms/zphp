@@ -44,14 +44,28 @@ zig 0.15.x. `zig build test` must pass before pushing. short lowercase commits, 
 - `zphp install` - install packages from composer.json, write zphp.lock
 - `zphp add <pkg>` / `zphp remove <pkg>` - manage dependencies
 - `zphp packages` - list installed packages
+- `zphp fmt <file>...` - opinionated PHP formatter (4-space indent, K&R braces, consistent spacing). overwrites in place
+- `zphp fmt --check <file>...` - check formatting without modifying (exit 1 if changes needed)
+
+## fmt
+
+`src/fmt.zig`. parses PHP to AST using existing parser, walks AST to emit formatted output. extracts comments from source gaps between tokens (lexer strips trivia). opinionated, no configuration. style: 4-space indent, K&R brace placement, single space around operators, blank lines between declarations. preserves comments. idempotent.
 
 ## CI
 
-6 jobs: `zig build test` (ubuntu + macos), serve integration (`tests/serve_test`, 26 assertions), test runner (`tests/test_runner_test`, 15 assertions), packages (`tests/pkg_test`, 10 assertions), PHP compat (`tests/run`, 71 files)
+7 jobs: `zig build test` (ubuntu + macos), serve integration (`tests/serve_test`, 26 assertions), test runner (`tests/test_runner_test`, 15 assertions), packages (`tests/pkg_test`, 10 assertions), fmt (`tests/fmt_test`, 29 assertions), PHP compat (`tests/run`, 71 files)
 
 ## roadmap
 
-next: `zphp fmt`, gzip compression for serve static files, fibers, WebSocket support for serve (design toward event-loop-per-worker for long-lived connections - don't assume all connections are short-lived request/response), enums (PHP 8.1+ feature - frameworks and libraries increasingly depend on them, blocks real-world code adoption), `call_user_func`/`call_user_func_array` (dynamic dispatch is the backbone of PHP middleware, event systems, and DI containers - without it no real framework code runs)
+next: PDO database support (PDO base class + pdo_sqlite + pdo_mysql), gzip compression for serve static files, fibers, WebSocket support for serve (design toward event-loop-per-worker for long-lived connections - don't assume all connections are short-lived request/response)
+
+## enums
+
+PHP 8.1+ enums implemented. pure enums and backed enums (int/string). cases are singleton PhpObjects stored as static props on a ClassDef with `is_enum=true`. `->name`, `->value` (backed), `::cases()`, `::from()`, `::tryFrom()` all work. enum methods compile as `EnumName::methodName`. `instanceof`, match expressions, and identity comparison (`===`) all work. `NativeContext.call_name` field lets native methods introspect which enum they're called on.
+
+## callables
+
+`call_user_func`/`call_user_func_array` support all PHP callable forms: strings, `[$obj, "method"]`, `["ClassName", "staticMethod"]`, closures. `NativeContext.invokeCallable(callable, args)` is the universal dispatcher. all callback-accepting array functions (array_map, array_filter, usort, array_walk, array_reduce, uasort, uksort, array_find, array_find_key, array_any, array_all) accept all callable forms. `VM.callMethod(obj, method_name, args)` is the public API for calling methods on objects with `$this` binding.
 
 ## SPL classes
 

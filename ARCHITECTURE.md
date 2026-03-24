@@ -197,3 +197,30 @@ two layers: zig HTTP layer (TCP + raw HTTP parsing) + PHP VM layer (synchronous 
 - chunked transfer encoding
 - multipart form data parsing
 - WebSocket protocol upgrade and frame handling
+
+## formatter (src/fmt.zig)
+
+opinionated PHP code formatter. parse -> AST -> pretty-print. no configuration.
+
+### how it works
+1. parse PHP source using existing parser (reuses full lexer + parser pipeline)
+2. extract trivia (comments) from source gaps between tokens - the lexer strips whitespace and comments, so we recover them by scanning the byte ranges between consecutive token end/start positions
+3. walk the AST recursively, emitting formatted output with proper indentation and spacing
+4. insert preserved comments at their original structural positions
+
+### style rules (opinionated, no config)
+- 4 spaces indentation
+- K&R brace placement (opening brace on same line)
+- single space around binary/assignment operators
+- single space after commas
+- blank lines between top-level declarations (functions, classes)
+- blank lines between class methods
+- no trailing whitespace, single trailing newline
+- closures and arrow functions formatted inline
+
+### key design decisions
+- **trivia extraction**: builds a trivia array parallel to the token array. for each token index, stores any comments found in the source gap before it. line comments (`//`, `#`) and block comments (`/* */`) both preserved
+- **AST-driven formatting**: indentation determined by AST nesting depth, not original source. ensures consistent output regardless of input formatting
+- **type hint recovery**: scans backwards from variable tokens to find type hint tokens (the parser consumes type hints but doesn't store them as AST nodes). stops at delimiter tokens (comma, l_paren) to avoid false matches
+- **visibility from encoded bits**: class method visibility is packed into rhs high bits by the parser. formatter extracts and emits the correct keyword
+- **idempotent**: formatting already-formatted code produces identical output. verified across all test files
