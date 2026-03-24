@@ -945,7 +945,10 @@ pub const VM = struct {
                     }
 
                     const closure_name = self.peek().string;
-                    const val = self.currentFrame().vars.get(var_name) orelse .null;
+                    const val = if (self.currentFrame().ref_slots.get(var_name)) |cell|
+                        cell.*
+                    else
+                        self.currentFrame().vars.get(var_name) orelse .null;
                     try self.captures.append(self.allocator, .{
                         .closure_name = closure_name,
                         .var_name = var_name,
@@ -1029,11 +1032,14 @@ pub const VM = struct {
                 .get_global => {
                     const name_idx = self.readU16();
                     const name = self.currentChunk().constants.items[name_idx].string;
-                    const raw_val = if (self.frame_count > 1)
-                        self.frames[0].vars.get(name) orelse
-                            self.php_constants.get(name) orelse .null
-                    else
-                        self.currentFrame().vars.get(name) orelse .null;
+                    const raw_val = if (self.frame_count > 1) blk: {
+                        if (self.frames[0].ref_slots.get(name)) |cell| break :blk cell.*;
+                        break :blk self.frames[0].vars.get(name) orelse
+                            self.php_constants.get(name) orelse .null;
+                    } else blk: {
+                        if (self.currentFrame().ref_slots.get(name)) |cell| break :blk cell.*;
+                        break :blk self.currentFrame().vars.get(name) orelse .null;
+                    };
                     const global_val = try self.copyValue(raw_val);
                     try self.currentFrame().vars.put(self.allocator, name, global_val);
                     if (self.frame_count > 1) {
