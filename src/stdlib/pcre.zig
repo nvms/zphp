@@ -18,6 +18,9 @@ const pcre2 = struct {
     const SUBSTITUTE_OVERFLOW_LENGTH: u32 = 0x00001000;
 
     const INFO_CAPTURECOUNT: u32 = 4;
+    const INFO_NAMECOUNT: u32 = 17;
+    const INFO_NAMEENTRYSIZE: u32 = 18;
+    const INFO_NAMETABLE: u32 = 19;
     const ERROR_NOMEMORY: c_int = -48;
     const UNSET: usize = std.math.maxInt(usize);
 
@@ -156,12 +159,41 @@ fn preg_match(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
                 try matches_arr.append(ctx.allocator, .{ .string = try ctx.createString(subject[start..end]) });
             }
         }
+        try addNamedGroups(ctx, matches_arr, code, ovector, subject, count);
         if (args[2] != .array) {
             ctx.setCallerVar(2, args.len, .{ .array = matches_arr });
         }
     }
 
     return .{ .int = 1 };
+}
+
+fn addNamedGroups(ctx: *NativeContext, arr: *PhpArray, code: *pcre2.Code, ovector: [*]usize, subject: []const u8, count: usize) !void {
+    var name_count: u32 = 0;
+    _ = pcre2.pcre2_pattern_info_8(code, pcre2.INFO_NAMECOUNT, @ptrCast(&name_count));
+    if (name_count == 0) return;
+    var name_entry_size: u32 = 0;
+    _ = pcre2.pcre2_pattern_info_8(code, pcre2.INFO_NAMEENTRYSIZE, @ptrCast(&name_entry_size));
+    if (name_entry_size == 0) return;
+
+    var name_table: [*]const u8 = undefined;
+    _ = pcre2.pcre2_pattern_info_8(code, pcre2.INFO_NAMETABLE, @ptrCast(&name_table));
+
+    for (0..name_count) |i| {
+        const entry = name_table + i * name_entry_size;
+        const group_num = (@as(usize, entry[0]) << 8) | @as(usize, entry[1]);
+        const name_end = std.mem.indexOfScalar(u8, entry[2..name_entry_size], 0) orelse (name_entry_size - 2);
+        const name = entry[2 .. 2 + name_end];
+        if (group_num < count) {
+            const start = ovector[group_num * 2];
+            const end = ovector[group_num * 2 + 1];
+            const val: Value = if (start == pcre2.UNSET or end == pcre2.UNSET)
+                .{ .string = "" }
+            else
+                .{ .string = try ctx.createString(subject[start..end]) };
+            try arr.set(ctx.allocator, .{ .string = try ctx.createString(name) }, val);
+        }
+    }
 }
 
 fn preg_match_all(ctx: *NativeContext, args: []const Value) RuntimeError!Value {

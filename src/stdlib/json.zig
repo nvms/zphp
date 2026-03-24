@@ -11,8 +11,10 @@ pub const entries = .{
 
 fn json_encode(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len == 0) return .{ .bool = false };
+    const flags = if (args.len >= 2) Value.toInt(args[1]) else 0;
+    const pretty = (flags & 128) != 0;
     var buf = std.ArrayListUnmanaged(u8){};
-    encodeValue(&buf, ctx.allocator, args[0], 0, false) catch return Value{ .bool = false };
+    encodeValue(&buf, ctx.allocator, args[0], 0, pretty) catch return Value{ .bool = false };
     const result = buf.toOwnedSlice(ctx.allocator) catch return Value{ .bool = false };
     try ctx.strings.append(ctx.allocator, result);
     return .{ .string = result };
