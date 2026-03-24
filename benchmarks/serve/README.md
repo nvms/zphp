@@ -20,7 +20,9 @@ requires Docker for PHP-FPM and Swoole. zphp runs natively. first run builds Doc
 | swoole (4 workers) | 6,033 |
 | zphp (14 workers) | 5,193 |
 
-all servers running echo "hello". php-fpm and swoole in Docker (linux/amd64 emulation). zphp native.
+all servers running `echo "hello"`. php-fpm and swoole in Docker (linux/amd64 emulation on Apple Silicon). zphp native. load generated with Python `urllib` (50 threads) - this is a crude benchmark that measures the load generator as much as the server. results should be taken as directional, not absolute. a proper HTTP throughput comparison needs `wrk` or `hey`.
+
+swoole outperforming zphp despite running in Docker emulation is notable. swoole's HTTP server is a mature C extension with years of optimization. zphp's VM is an unoptimized interpreter (no JIT, hash-map variable lookup per frame). for a trivial echo endpoint, the overhead is dominated by VM dispatch, not I/O - which is where swoole's C-level fastpath wins. for real-world PHP with more computation, the gap would narrow since both runtimes spend most time in PHP execution.
 
 ### WebSocket concurrent connections
 
@@ -38,7 +40,9 @@ the comparison to PHP-FPM is more dramatic: FPM has no native WebSocket support 
 
 ### notes
 
-- php-fpm and swoole run in Docker with linux/amd64 emulation on Apple Silicon. native performance would be better for both.
-- zphp runs natively. this gives it an advantage on raw throughput but is representative of real deployment (zphp is a single native binary).
-- swoole's lower per-connection overhead at scale is expected: its C-level coroutine implementation is highly optimized for this workload.
+- php-fpm and swoole run in Docker with linux/amd64 emulation on Apple Silicon. native Linux performance would be better for both.
+- zphp runs natively. this is representative of real deployment (zphp is a single native binary, no container needed).
+- swoole's lower per-connection overhead at scale is expected: its C-level coroutine implementation is purpose-built and highly optimized for this workload.
+- zphp's 65 KB per-connection read buffer is the dominant per-connection cost. see PERFORMANCE.md for optimization avenues.
 - zphp's advantage is architectural: single binary, no Docker/nginx/FPM stack, 4.4x lower baseline memory, and the same event-loop concurrency model as Node.js.
+- PHP-FPM has no native WebSocket support. each concurrent HTTP connection requires a full PHP process (~20-40 MB). 1000 concurrent connections would need 20-40 GB of RAM.
