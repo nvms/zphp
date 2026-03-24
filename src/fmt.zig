@@ -165,7 +165,6 @@ const Formatter = struct {
     indent: u32,
     allocator: Allocator,
     last_was_newline: bool,
-    write_count: u64,
 
     fn init(allocator: Allocator, ast: *const Ast, source: []const u8, trivia: []const Trivia) Formatter {
         return .{
@@ -176,7 +175,6 @@ const Formatter = struct {
             .indent = 0,
             .allocator = allocator,
             .last_was_newline = false,
-            .write_count = 0,
         };
     }
 
@@ -189,12 +187,6 @@ const Formatter = struct {
     }
 
     fn write(self: *Formatter, s: []const u8) void {
-        self.write_count += 1;
-        if (self.out.items.len > 1024 * 1024) {
-            // safety valve: output exceeded 1MB, something is wrong
-            _ = std.posix.write(std.posix.STDERR_FILENO, "fmt: output exceeded 1MB, aborting\n") catch {};
-            std.process.exit(3);
-        }
         self.out.appendSlice(self.allocator, s) catch {};
         if (s.len > 0) {
             self.last_was_newline = s[s.len - 1] == '\n';

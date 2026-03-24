@@ -1108,11 +1108,13 @@ const Parser = struct {
             _ = self.advance();
             _ = try self.expect(.l_paren);
             if (self.peek() != .r_paren) {
+                if (self.peek() == .amp) _ = self.advance();
                 const tok = try self.expect(.variable);
                 try use_vars.append(self.allocator, try self.addNode(.{ .tag = .variable, .main_token = tok, .data = .{} }));
                 while (self.peek() == .comma) {
                     _ = self.advance();
                     if (self.peek() == .r_paren) break;
+                    if (self.peek() == .amp) _ = self.advance();
                     const vtok = try self.expect(.variable);
                     try use_vars.append(self.allocator, try self.addNode(.{ .tag = .variable, .main_token = vtok, .data = .{} }));
                 }

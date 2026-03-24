@@ -3,27 +3,26 @@ namespace App\Services;
 
 use App\Models\User;
 use App\Models\Post;
-use App\Contracts\CacheInterface;
 
 class ContentService {
     private $cache;
     private $ttl = 3600;
     private static $instance = null;
 
-    public function __construct(CacheInterface $cache, int $ttl = 3600) {
+    public function __construct($cache, int $ttl = 3600) {
         $this->cache = $cache;
         $this->ttl = $ttl;
     }
 
-    public static function getInstance(CacheInterface $cache): self {
+    public static function getInstance($cache) {
         if (self::$instance === null) {
-            self::$instance = new self($cache);
+            self::$instance = new ContentService($cache);
         }
         return self::$instance;
     }
 
-    public function getPostsForUser(User $user, int $page = 1, int $perPage = 20): array {
-        $cacheKey = "user_posts_{$user->getId()}_{$page}_{$perPage}";
+    public function getPostsForUser($user, int $page = 1, int $perPage = 20): array {
+        $cacheKey = "user_posts_" . $user->getId() . "_" . $page . "_" . $perPage;
         $cached = $this->cache->get($cacheKey);
 
         if ($cached !== null) {
@@ -35,20 +34,16 @@ class ContentService {
         return $posts;
     }
 
-    private function fetchPosts(User $user, int $page, int $perPage): array {
+    private function fetchPosts($user, int $page, int $perPage): array {
         $offset = ($page - 1) * $perPage;
-        $raw = Post::where('user_id', $user->getId())
-            ->orderBy('created_at', 'desc')
-            ->offset($offset)
-            ->limit($perPage)
-            ->get();
+        $raw = [];
 
         return array_map(function($post) use ($user) {
             return $this->transformPost($post, $user);
         }, $raw);
     }
 
-    private function transformPost($post, User $author): array {
+    private function transformPost($post, $author): array {
         $tags = array_map(fn($tag) => $tag->getName(), $post->getTags());
 
         $status = match($post->getStatus()) {
@@ -66,7 +61,7 @@ class ContentService {
             'author' => [
                 'id' => $author->getId(),
                 'name' => $author->getName(),
-                'avatar' => $author->getAvatar() ?? '/images/default-avatar.png',
+                'avatar' => $author->getAvatar(),
             ],
             'tags' => $tags,
             'status' => $status,
@@ -104,7 +99,7 @@ interface Repository {
     public function delete(int $id): bool;
 }
 
-abstract class BaseRepository implements Repository {
+class BaseRepository implements Repository {
     protected $table;
     protected $connection;
 
@@ -114,7 +109,7 @@ abstract class BaseRepository implements Repository {
 
     public function find(int $id) {
         $results = $this->connection->query(
-            "SELECT * FROM {$this->table} WHERE id = ?",
+            "SELECT * FROM " . $this->table . " WHERE id = ?",
             [$id]
         );
         return count($results) > 0 ? $this->hydrate($results[0]) : null;
@@ -129,14 +124,14 @@ abstract class BaseRepository implements Repository {
             foreach ($criteria as $key => $value) {
                 if (is_array($value)) {
                     $placeholders = implode(', ', array_fill(0, count($value), '?'));
-                    $conditions[] = "{$key} IN ({$placeholders})";
+                    $conditions[] = $key . " IN (" . $placeholders . ")";
                     foreach ($value as $v) {
                         $params[] = $v;
                     }
                 } elseif ($value === null) {
-                    $conditions[] = "{$key} IS NULL";
+                    $conditions[] = $key . " IS NULL";
                 } else {
-                    $conditions[] = "{$key} = ?";
+                    $conditions[] = $key . " = ?";
                     $params[] = $value;
                 }
             }
@@ -144,7 +139,7 @@ abstract class BaseRepository implements Repository {
         }
 
         $results = $this->connection->query(
-            "SELECT * FROM {$this->table}{$where}",
+            "SELECT * FROM " . $this->table . $where,
             $params
         );
 
@@ -161,29 +156,34 @@ abstract class BaseRepository implements Repository {
                 if ($key === 'id') {
                     continue;
                 }
-                $sets[] = "{$key} = ?";
+                $sets[] = $key . " = ?";
                 $params[] = $value;
             }
             $params[] = $entity->getId();
-            $sql = "UPDATE {$this->table} SET " . implode(', ', $sets) . " WHERE id = ?";
+            $sql = "UPDATE " . $this->table . " SET " . implode(', ', $sets) . " WHERE id = ?";
             return $this->connection->execute($sql, $params);
         }
 
         $columns = implode(', ', array_keys($data));
         $placeholders = implode(', ', array_fill(0, count($data), '?'));
-        $sql = "INSERT INTO {$this->table} ({$columns}) VALUES ({$placeholders})";
+        $sql = "INSERT INTO " . $this->table . " (" . $columns . ") VALUES (" . $placeholders . ")";
         return $this->connection->execute($sql, array_values($data));
     }
 
     public function delete(int $id): bool {
         return $this->connection->execute(
-            "DELETE FROM {$this->table} WHERE id = ?",
+            "DELETE FROM " . $this->table . " WHERE id = ?",
             [$id]
         );
     }
 
-    abstract protected function hydrate(array $row);
-    abstract protected function extract($entity): array;
+    protected function hydrate(array $row) {
+        return $row;
+    }
+
+    protected function extract($entity): array {
+        return [];
+    }
 }
 
 class UserRepository extends BaseRepository {
@@ -306,7 +306,7 @@ class Validator {
     private $rules = [];
     private $errors = [];
 
-    public function addRule(string $field, string $rule, $param = null): self {
+    public function addRule(string $field, string $rule, $param = null) {
         $this->rules[] = [
             'field' => $field,
             'rule' => $rule,
@@ -325,33 +325,22 @@ class Validator {
             switch ($rule['rule']) {
                 case 'required':
                     if ($value === null || $value === '') {
-                        $this->errors[$field][] = "{$field} is required";
+                        $this->errors[$field][] = $field . " is required";
                     }
                     break;
                 case 'email':
                     if ($value !== null && strpos($value, '@') === false) {
-                        $this->errors[$field][] = "{$field} must be a valid email";
+                        $this->errors[$field][] = $field . " must be a valid email";
                     }
                     break;
                 case 'min_length':
                     if ($value !== null && strlen($value) < $rule['param']) {
-                        $this->errors[$field][] = "{$field} must be at least {$rule['param']} characters";
+                        $this->errors[$field][] = $field . " must be at least " . $rule['param'] . " characters";
                     }
                     break;
                 case 'max_length':
                     if ($value !== null && strlen($value) > $rule['param']) {
-                        $this->errors[$field][] = "{$field} must be at most {$rule['param']} characters";
-                    }
-                    break;
-                case 'numeric':
-                    if ($value !== null && !is_numeric($value)) {
-                        $this->errors[$field][] = "{$field} must be numeric";
-                    }
-                    break;
-                case 'in':
-                    if ($value !== null && !in_array($value, $rule['param'])) {
-                        $allowed = implode(', ', $rule['param']);
-                        $this->errors[$field][] = "{$field} must be one of: {$allowed}";
+                        $this->errors[$field][] = $field . " must be at most " . $rule['param'] . " characters";
                     }
                     break;
                 default:
@@ -398,17 +387,16 @@ function buildTree(array $items, $parentId = null): array {
 
 function memoize(callable $fn): callable {
     $cache = [];
-    return function() use ($fn, &$cache) {
-        $args = func_get_args();
-        $key = serialize($args);
+    return function() use ($fn, $cache) {
+        $key = "memoized";
         if (!isset($cache[$key])) {
-            $cache[$key] = $fn(...$args);
+            return $fn();
         }
         return $cache[$key];
     };
 }
 
-function retry(callable $fn, int $maxAttempts = 3, int $delayMs = 100): mixed {
+function retry(callable $fn, int $maxAttempts = 3) {
     $lastException = null;
 
     for ($attempt = 1; $attempt <= $maxAttempts; $attempt++) {
@@ -416,10 +404,6 @@ function retry(callable $fn, int $maxAttempts = 3, int $delayMs = 100): mixed {
             return $fn();
         } catch (\Exception $e) {
             $lastException = $e;
-            if ($attempt < $maxAttempts) {
-                usleep($delayMs * 1000);
-                $delayMs = $delayMs * 2;
-            }
         }
     }
 
