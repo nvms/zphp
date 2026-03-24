@@ -646,8 +646,26 @@ pub const VM = struct {
                             }
                             for (0..count) |i| self.push(resolved[i]);
                             try self.callNamedFunction(name, @intCast(count));
+                        } else if (@import("../stdlib/native_params.zig").map.get(name)) |params| {
+                            var resolved: [16]Value = .{.null} ** 16;
+                            var pos: usize = 0;
+                            for (arr.entries.items) |entry| {
+                                if (entry.key == .string) {
+                                    for (params, 0..) |p, pi| {
+                                        if (std.mem.eql(u8, p[1..], entry.key.string) or std.mem.eql(u8, p, entry.key.string)) {
+                                            resolved[pi] = entry.value;
+                                            if (pi >= pos) pos = pi + 1;
+                                            break;
+                                        }
+                                    }
+                                } else {
+                                    resolved[pos] = entry.value;
+                                    pos += 1;
+                                }
+                            }
+                            for (0..pos) |i| self.push(resolved[i]);
+                            try self.callNamedFunction(name, @intCast(pos));
                         } else {
-                            // native function - fall back to positional
                             for (arr.entries.items) |entry| self.push(entry.value);
                             try self.callNamedFunction(name, @intCast(arr.entries.items.len));
                         }
