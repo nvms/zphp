@@ -1171,8 +1171,8 @@ const Parser = struct {
         const body = try self.addNode(.{ .tag = .block, .main_token = fn_tok, .data = .{ .lhs = block_extra } });
 
         const param_extra = try self.addExtraList(params.items);
-        // rhs = extra -> {body, 0} (no use vars for arrow functions)
-        const rhs_extra = try self.addExtra(&.{ body, 0 });
+        // rhs = extra -> {body, use_count}. 0xFFFFFFFF signals arrow fn (implicit capture)
+        const rhs_extra = try self.addExtra(&.{ body, 0xFFFFFFFF });
 
         return self.addNode(.{ .tag = .closure_expr, .main_token = fn_tok, .data = .{ .lhs = param_extra, .rhs = rhs_extra } });
     }
@@ -1535,6 +1535,14 @@ const Parser = struct {
 
     fn parseCallExpr(self: *Parser, callee: u32) Error!u32 {
         const paren_tok = self.advance(); // (
+
+        // first-class callable: foo(...)
+        if (self.peek() == .ellipsis and self.peekAt(1) == .r_paren) {
+            _ = self.advance(); // ...
+            _ = self.advance(); // )
+            return self.addNode(.{ .tag = .callable_ref, .main_token = paren_tok, .data = .{ .lhs = callee } });
+        }
+
         var args = std.ArrayListUnmanaged(u32){};
         defer args.deinit(self.allocator);
 

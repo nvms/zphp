@@ -201,6 +201,7 @@ const Compiler = struct {
             .null_coalesce => try self.compileNullCoalesce(node),
             .ternary => try self.compileTernary(node),
             .call => try self.compileCall(node),
+            .callable_ref => try self.compileCallableRef(node),
             .array_access => try self.compileArrayAccess(node),
             .array_push_target => {},
             .list_destructure => {},
@@ -1227,6 +1228,7 @@ const Compiler = struct {
             .break_jumps = .{},
             .continue_jumps = .{},
             .is_generator = gen,
+            .closure_count = self.closure_count,
         };
         errdefer {
             sub.chunk.deinit(self.allocator);
@@ -1240,6 +1242,8 @@ const Compiler = struct {
         try sub.emitOp(if (gen) .generator_return else .return_val);
         sub.break_jumps.deinit(self.allocator);
         sub.continue_jumps.deinit(self.allocator);
+
+        self.closure_count = sub.closure_count;
 
         try self.functions.append(self.allocator, .{
             .name = name,
@@ -2065,6 +2069,19 @@ const Compiler = struct {
         }
     }
 
+    fn compileCallableRef(self: *Compiler, node: Ast.Node) Error!void {
+        const callee = self.ast.nodes[node.data.lhs];
+        if (callee.tag == .identifier) {
+            const name = self.ast.tokenSlice(callee.main_token);
+            const idx = try self.addConstant(.{ .string = name });
+            try self.emitOp(.constant);
+            try self.emitU16(idx);
+        } else {
+            // fallback: compile the expression directly
+            try self.compileNode(node.data.lhs);
+        }
+    }
+
     fn compileClosure(self: *Compiler, node: Ast.Node) Error!void {
         const id = self.closure_count;
         self.closure_count += 1;
@@ -2081,8 +2098,11 @@ const Compiler = struct {
         }
 
         // rhs = extra -> {body, use_count, use_vars...}
+        // use_count 0xFFFFFFFF = arrow fn (implicit capture)
         const body_node = self.ast.extra_data[node.data.rhs];
-        const use_count = self.ast.extra_data[node.data.rhs + 1];
+        const raw_use_count = self.ast.extra_data[node.data.rhs + 1];
+        const is_arrow = raw_use_count == 0xFFFFFFFF;
+        const use_count: u32 = if (is_arrow) 0 else raw_use_count;
         const use_vars = self.ast.extra_data[node.data.rhs + 2 .. node.data.rhs + 2 + use_count];
 
         var sub = Compiler{
@@ -2111,12 +2131,15 @@ const Compiler = struct {
 
         self.closure_count = sub.closure_count;
 
-        try self.functions.append(self.allocator, .{
+        const func = ObjFunction{
             .name = owned_name,
             .arity = @intCast(param_nodes.len),
             .params = param_names[0..param_nodes.len],
             .chunk = sub.chunk,
-        });
+            .is_arrow = is_arrow,
+        };
+
+        try self.functions.append(self.allocator, func);
 
         for (sub.functions.items) |f| try self.functions.append(self.allocator, f);
         sub.functions.deinit(self.allocator);
@@ -2132,6 +2155,11 @@ const Compiler = struct {
             try self.emitOp(.closure_bind);
             try self.emitU16(var_idx);
         }
+
+        // bind $this for closures in method context
+        const this_idx = try self.addConstant(.{ .string = "$this" });
+        try self.emitOp(.closure_bind);
+        try self.emitU16(this_idx);
     }
 
     // ==================================================================

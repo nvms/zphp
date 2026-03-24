@@ -122,6 +122,11 @@ fn renderNode(ast: *const Ast, idx: u32, buf: *Buf) !void {
             }
             try w.writeByte(')');
         },
+        .callable_ref => {
+            try w.writeAll("(callable_ref ");
+            try renderNode(ast, node.data.lhs, buf);
+            try w.writeByte(')');
+        },
         .array_access => {
             try w.writeAll("(idx ");
             try renderNode(ast, node.data.lhs, buf);

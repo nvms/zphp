@@ -100,6 +100,10 @@ PHP 8.1+ enums implemented. pure enums and backed enums (int/string). cases are 
 
 `<<<EOT ... EOT` (heredoc, interpolating) and `<<<'EOT' ... EOT` (nowdoc, no interpolation). lexer produces `.heredoc`/`.nowdoc` token tags spanning `<<<` through closing label. parser maps both to `string_literal` AST nodes. compiler extracts body via `extractHeredocBody()` - parses label from lexeme, strips delimiter lines, handles PHP 7.3+ indented closing markers (strips leading whitespace from all body lines based on closing label indentation). heredoc routes through existing escape/interpolation pipeline. nowdoc emits body as-is. closing label recognized when followed by `;`, `)`, `,`, `]`, newline, or EOF.
 
+## first-class callable syntax
+
+`strlen(...)` creates a callable reference. parser detects `...` as the sole argument followed by `)` in `parseCallExpr`, produces `callable_ref` AST node. compiler emits the function name as a string constant - works with `call_indirect`, `call_user_func`, `array_map`, and all callback-accepting functions since they already accept string callable names.
+
 ## named arguments
 
 `foo(name: "value")` syntax. parser detects `identifier:` (and keyword names like `class:`) in call args, creates `named_arg` AST node. compiler builds associative array with string keys, routes through `call_spread`. VM resolves named args against `ObjFunction.params` at call time, matching `$param` names (strips leading `$`). works for user-defined functions only - native functions fall back to positional.

@@ -281,7 +281,7 @@ const Formatter = struct {
             .binary_op, .assign, .logical_and, .logical_or, .null_coalesce => self.findFirstToken(node.data.lhs),
             .property_access => self.findFirstToken(node.data.lhs),
             .method_call => self.findFirstToken(node.data.lhs),
-            .call => self.findFirstToken(node.data.lhs),
+            .call, .callable_ref => self.findFirstToken(node.data.lhs),
             .array_access, .array_push_target => self.findFirstToken(node.data.lhs),
             .list_destructure, .named_arg => node.main_token,
             .postfix_op => self.findFirstToken(node.data.lhs),
@@ -350,6 +350,10 @@ const Formatter = struct {
             .ternary => self.formatTernary(node),
 
             .call => self.formatCall(node),
+            .callable_ref => {
+                self.formatNode(node.data.lhs);
+                self.write("(...)");
+            },
             .array_access => self.formatArrayAccess(node),
             .array_push_target => self.formatArrayPushTarget(node),
             .list_destructure => self.formatListDestructure(node),

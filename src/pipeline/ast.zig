@@ -142,6 +142,9 @@ pub const Ast = struct {
             // variadic
             splat_expr, // lhs = expression to spread (used in function call args)
 
+            // first-class callable
+            callable_ref, // lhs = callee expression (function name identifier node)
+
             // file inclusion
             // main_token = require/require_once/include/include_once keyword
             // lhs = path expression
