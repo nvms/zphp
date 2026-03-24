@@ -67,6 +67,9 @@ pub fn readFrame(stream: std.net.Stream, buf: []u8, max_size: usize) ReadError!F
         payload_len = std.mem.readInt(u64, &ext, .big);
     }
 
+    // RFC 6455: client frames must be masked
+    if (!masked) return ReadError.ProtocolError;
+
     if (payload_len > max_size or payload_len > buf.len) return ReadError.MessageTooLarge;
     const len: usize = @intCast(payload_len);
 
@@ -133,12 +136,34 @@ fn makeSocketPair() ![2]std.net.Stream {
     };
 }
 
-test "frame write read roundtrip" {
+fn writeMaskedFrame(stream: std.net.Stream, opcode: Opcode, payload: []const u8) !void {
+    var hdr: [14]u8 = undefined;
+    var hdr_len: usize = 2;
+    hdr[0] = 0x80 | @as(u8, @intFromEnum(opcode));
+    if (payload.len < 126) {
+        hdr[1] = 0x80 | @as(u8, @intCast(payload.len));
+    } else {
+        hdr[1] = 0x80 | 126;
+        std.mem.writeInt(u16, hdr[2..4], @intCast(payload.len), .big);
+        hdr_len = 4;
+    }
+    // mask key
+    const mask = [4]u8{ 0x12, 0x34, 0x56, 0x78 };
+    @memcpy(hdr[hdr_len .. hdr_len + 4], &mask);
+    hdr_len += 4;
+    _ = try stream.write(hdr[0..hdr_len]);
+    // write masked payload
+    var masked: [256]u8 = undefined;
+    for (0..payload.len) |i| masked[i] = payload[i] ^ mask[i % 4];
+    if (payload.len > 0) _ = try stream.write(masked[0..payload.len]);
+}
+
+test "masked frame write read roundtrip" {
     const pair = try makeSocketPair();
     defer pair[0].close();
     defer pair[1].close();
 
-    try writeFrame(pair[0], .text, "hello");
+    try writeMaskedFrame(pair[0], .text, "hello");
 
     var buf: [256]u8 = undefined;
     const frame = try readFrame(pair[1], &buf, 256);
@@ -152,7 +177,10 @@ test "close frame encoding" {
     defer pair[0].close();
     defer pair[1].close();
 
-    try writeCloseFrame(pair[0], 1000);
+    // send masked close frame (as client would)
+    var close_payload: [2]u8 = undefined;
+    std.mem.writeInt(u16, &close_payload, 1000, .big);
+    try writeMaskedFrame(pair[0], .close, &close_payload);
 
     var buf: [256]u8 = undefined;
     const frame = try readFrame(pair[1], &buf, 256);
@@ -160,4 +188,17 @@ test "close frame encoding" {
     try std.testing.expectEqual(@as(usize, 2), frame.payload.len);
     const code = std.mem.readInt(u16, frame.payload[0..2], .big);
     try std.testing.expectEqual(@as(u16, 1000), code);
+}
+
+test "unmasked frame rejected" {
+    const pair = try makeSocketPair();
+    defer pair[0].close();
+    defer pair[1].close();
+
+    // write an unmasked frame (server-style)
+    try writeFrame(pair[0], .text, "bad");
+
+    var buf: [256]u8 = undefined;
+    const result = readFrame(pair[1], &buf, 256);
+    try std.testing.expectError(ReadError.ProtocolError, result);
 }

@@ -503,7 +503,14 @@ fn handleWebSocket(allocator: Allocator, result: *const CompileResult, vm: *VM, 
     defer allocator.free(msg_buf);
 
     while (true) {
-        const frame = ws.readFrame(stream, msg_buf, max_msg_size) catch break;
+        const frame = ws.readFrame(stream, msg_buf, max_msg_size) catch |err| {
+            if (err == ws.ReadError.MessageTooLarge) {
+                ws.writeCloseFrame(stream, 1009) catch {}; // 1009 = message too big
+            } else if (err == ws.ReadError.ProtocolError) {
+                ws.writeCloseFrame(stream, 1002) catch {}; // 1002 = protocol error
+            }
+            break;
+        };
 
         switch (frame.opcode) {
             .text, .binary => {
