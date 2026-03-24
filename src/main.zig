@@ -171,6 +171,9 @@ fn runFile(allocator: std.mem.Allocator, path: []const u8) !void {
         if (vm.output.items.len > 0) {
             try writeStdout(vm.output.items);
         }
+        if (vm.exit_requested) {
+            std.process.exit(0);
+        }
         if (vm.error_msg) |msg| {
             try writeStderr(msg);
         } else {

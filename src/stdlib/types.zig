@@ -36,6 +36,15 @@ pub const entries = .{
     .{ "call_user_func", native_call_user_func },
     .{ "call_user_func_array", native_call_user_func_array },
     .{ "function_exists", native_function_exists },
+    .{ "get_object_vars", native_get_object_vars },
+    .{ "get_class_methods", native_get_class_methods },
+    .{ "get_class_vars", native_get_class_vars },
+    .{ "get_parent_class", native_get_parent_class },
+    .{ "is_a", native_is_a },
+    .{ "is_subclass_of", native_is_subclass_of },
+    .{ "spl_object_id", native_spl_object_id },
+    .{ "exit", native_exit },
+    .{ "die", native_exit },
 };
 
 fn native_define(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
@@ -279,5 +288,110 @@ fn native_function_exists(ctx: *NativeContext, args: []const Value) RuntimeError
     if (ctx.vm.native_fns.contains(name)) return .{ .bool = true };
     if (ctx.vm.functions.contains(name)) return .{ .bool = true };
     return .{ .bool = false };
+}
+
+fn native_get_object_vars(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len == 0 or args[0] != .object) return Value{ .bool = false };
+    const obj = args[0].object;
+    var arr = try ctx.createArray();
+    var iter = obj.properties.iterator();
+    while (iter.next()) |entry| {
+        if (entry.key_ptr.*.len > 0 and entry.key_ptr.*[0] == '_' and entry.key_ptr.*.len > 1 and entry.key_ptr.*[1] == '_') continue;
+        try arr.set(ctx.allocator, .{ .string = entry.key_ptr.* }, entry.value_ptr.*);
+    }
+    return .{ .array = arr };
+}
+
+fn native_get_class_methods(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len == 0) return Value{ .bool = false };
+    const class_name = if (args[0] == .object)
+        args[0].object.class_name
+    else if (args[0] == .string)
+        args[0].string
+    else
+        return Value{ .bool = false };
+
+    var arr = try ctx.createArray();
+    var seen = std.StringHashMapUnmanaged(void){};
+    defer seen.deinit(ctx.allocator);
+    var current: ?[]const u8 = class_name;
+    while (current) |cn| {
+        if (ctx.vm.classes.get(cn)) |cls| {
+            var iter = cls.methods.iterator();
+            while (iter.next()) |entry| {
+                if (!seen.contains(entry.key_ptr.*)) {
+                    try seen.put(ctx.allocator, entry.key_ptr.*, {});
+                    try arr.append(ctx.allocator, .{ .string = entry.key_ptr.* });
+                }
+            }
+            current = cls.parent;
+        } else break;
+    }
+    return .{ .array = arr };
+}
+
+fn native_get_class_vars(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len == 0 or args[0] != .string) return Value{ .bool = false };
+    const class_name = args[0].string;
+    const cls = ctx.vm.classes.get(class_name) orelse return Value{ .bool = false };
+    var arr = try ctx.createArray();
+    for (cls.properties.items) |prop| {
+        try arr.set(ctx.allocator, .{ .string = prop.name }, prop.default);
+    }
+    return .{ .array = arr };
+}
+
+fn native_get_parent_class(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len == 0) return Value{ .bool = false };
+    const class_name = if (args[0] == .object)
+        args[0].object.class_name
+    else if (args[0] == .string)
+        args[0].string
+    else
+        return Value{ .bool = false };
+    const cls = ctx.vm.classes.get(class_name) orelse return Value{ .bool = false };
+    if (cls.parent) |p| return Value{ .string = p };
+    return Value{ .bool = false };
+}
+
+fn native_is_a(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len < 2 or args[1] != .string) return .{ .bool = false };
+    const class_name = if (args[0] == .object)
+        args[0].object.class_name
+    else if (args[0] == .string)
+        args[0].string
+    else
+        return Value{ .bool = false };
+    return .{ .bool = ctx.vm.isInstanceOf(class_name, args[1].string) };
+}
+
+fn native_is_subclass_of(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len < 2 or args[1] != .string) return .{ .bool = false };
+    const class_name = if (args[0] == .object)
+        args[0].object.class_name
+    else if (args[0] == .string)
+        args[0].string
+    else
+        return Value{ .bool = false };
+    // is_subclass_of returns false if same class, only true for actual subclasses
+    if (std.mem.eql(u8, class_name, args[1].string)) return .{ .bool = false };
+    return .{ .bool = ctx.vm.isInstanceOf(class_name, args[1].string) };
+}
+
+fn native_spl_object_id(_: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len == 0 or args[0] != .object) return Value{ .int = 0 };
+    return .{ .int = @intCast(@intFromPtr(args[0].object)) };
+}
+
+fn native_exit(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len > 0) {
+        if (args[0] == .string) {
+            try ctx.vm.output.appendSlice(ctx.allocator, args[0].string);
+        } else if (args[0] == .int) {
+            // integer exit code - don't output, just set
+        }
+    }
+    ctx.vm.exit_requested = true;
+    return error.RuntimeError;
 }
 

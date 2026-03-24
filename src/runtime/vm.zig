@@ -148,6 +148,7 @@ pub const VM = struct {
     loaded_files: std.StringHashMapUnmanaged(void) = .{},
     compile_results: std.ArrayListUnmanaged(*CompileResult) = .{},
     error_msg: ?[]const u8 = null,
+    exit_requested: bool = false,
     ob_stack: std.ArrayListUnmanaged(usize) = .{},
     request_vars: std.StringHashMapUnmanaged(Value) = .{},
     exception_handlers: [32]ExceptionHandler = undefined,
@@ -1919,7 +1920,7 @@ pub const VM = struct {
         return null;
     }
 
-    fn isInstanceOf(self: *VM, obj_class: []const u8, target_class: []const u8) bool {
+    pub fn isInstanceOf(self: *VM, obj_class: []const u8, target_class: []const u8) bool {
         var current = obj_class;
         while (true) {
             if (std.mem.eql(u8, current, target_class)) return true;

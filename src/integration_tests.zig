@@ -13,7 +13,9 @@ fn expectOutput(source: []const u8, expected: []const u8) !void {
 
     var vm = try VM.init(alloc);
     defer vm.deinit();
-    try vm.interpret(&result);
+    vm.interpret(&result) catch |err| {
+        if (!vm.exit_requested) return err;
+    };
 
     errdefer std.debug.print("\nexpected: \"{s}\"\n  actual: \"{s}\"\n", .{ expected, vm.output.items });
     try std.testing.expectEqualStrings(expected, vm.output.items);
@@ -1230,4 +1232,46 @@ test "sizeof alias for count" {
         \\<?php
         \\echo sizeof([1, 2, 3]);
     , "3");
+}
+
+// ==========================================================================
+// object introspection
+// ==========================================================================
+
+test "get_object_vars" {
+    try expectOutput(
+        \\<?php
+        \\class Pt { public $x; public $y; }
+        \\$p = new Pt(); $p->x = 1; $p->y = 2;
+        \\$v = get_object_vars($p);
+        \\echo $v["x"] . " " . $v["y"];
+    , "1 2");
+}
+
+test "get_parent_class" {
+    try expectOutput(
+        \\<?php
+        \\class A {} class B extends A {}
+        \\echo get_parent_class("B");
+    , "A");
+}
+
+test "is_a and is_subclass_of" {
+    try expectOutput(
+        \\<?php
+        \\class X {} class Y extends X {}
+        \\$y = new Y();
+        \\echo is_a($y, "X") ? "1" : "0";
+        \\echo is_subclass_of($y, "X") ? "1" : "0";
+        \\echo is_subclass_of($y, "Y") ? "1" : "0";
+    , "110");
+}
+
+test "exit halts execution" {
+    try expectOutput(
+        \\<?php
+        \\echo "a";
+        \\exit("b");
+        \\echo "c";
+    , "ab");
 }
