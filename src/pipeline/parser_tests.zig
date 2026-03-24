@@ -428,6 +428,20 @@ fn renderNode(ast: *const Ast, idx: u32, buf: *Buf) !void {
             }
             try w.writeByte(')');
         },
+        .enum_decl => {
+            try w.writeAll("(enum ");
+            try w.writeAll(ast.tokenSlice(node.main_token));
+            try w.writeByte(')');
+        },
+        .enum_case => {
+            try w.writeAll("(case ");
+            try w.writeAll(ast.tokenSlice(node.main_token));
+            if (node.data.lhs != 0) {
+                try w.writeAll(" = ");
+                try renderNode(ast, node.data.lhs, buf);
+            }
+            try w.writeByte(')');
+        },
         .qualified_name => {
             for (ast.extraSlice(node.data.lhs), 0..) |tok_idx, i| {
                 if (i > 0) try w.writeByte('\\');

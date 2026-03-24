@@ -140,6 +140,7 @@ const Parser = struct {
             .kw_class, .kw_abstract => self.parseClassDecl(),
             .kw_interface => self.parseInterfaceDecl(),
             .kw_trait => self.parseTraitDecl(),
+            .kw_enum => self.parseEnumDecl(),
             .kw_throw => self.parseThrowStmt(),
             .kw_try => self.parseTryCatch(),
             .kw_declare => self.skipDeclare(),
@@ -940,6 +941,87 @@ const Parser = struct {
         return self.addNode(.{ .tag = .trait_decl, .main_token = name_tok, .data = .{ .lhs = extra } });
     }
 
+    fn parseEnumDecl(self: *Parser) Error!u32 {
+        _ = self.advance(); // enum
+        const name_tok = try self.expect(.identifier);
+
+        var backed_type_token: u32 = 0;
+        if (self.peek() == .colon) {
+            _ = self.advance();
+            backed_type_token = self.advance();
+        }
+
+        var implements = std.ArrayListUnmanaged(u32){};
+        defer implements.deinit(self.allocator);
+        if (self.peek() == .kw_implements) {
+            _ = self.advance();
+            try implements.append(self.allocator, try self.parseQualifiedName());
+            while (self.peek() == .comma) {
+                _ = self.advance();
+                try implements.append(self.allocator, try self.parseQualifiedName());
+            }
+        }
+
+        _ = try self.expect(.l_brace);
+
+        var members = std.ArrayListUnmanaged(u32){};
+        defer members.deinit(self.allocator);
+
+        while (self.peek() != .r_brace and self.peek() != .eof) {
+            if (self.peek() == .kw_case) {
+                _ = self.advance();
+                const case_name = try self.expect(.identifier);
+                var value_expr: u32 = 0;
+                if (self.peek() == .equal) {
+                    _ = self.advance();
+                    value_expr = try self.parseExpression();
+                }
+                _ = try self.expect(.semicolon);
+                try members.append(self.allocator, try self.addNode(.{
+                    .tag = .enum_case,
+                    .main_token = case_name,
+                    .data = .{ .lhs = value_expr },
+                }));
+            } else if (self.peek() == .kw_const) {
+                try members.append(self.allocator, try self.parseConstDecl());
+            } else {
+                var is_static = false;
+                var visibility: u32 = 0;
+                while (self.peek() == .kw_public or self.peek() == .kw_protected or
+                    self.peek() == .kw_private or self.peek() == .kw_static)
+                {
+                    if (self.peek() == .kw_static) is_static = true;
+                    if (self.peek() == .kw_protected) visibility = 1;
+                    if (self.peek() == .kw_private) visibility = 2;
+                    _ = self.advance();
+                }
+                if (self.peek() == .kw_function) {
+                    const method = try self.parseClassMethod();
+                    if (is_static) {
+                        self.nodes.items[method].tag = .static_class_method;
+                    }
+                    self.nodes.items[method].data.rhs = self.nodes.items[method].data.rhs | (visibility << 30);
+                    try members.append(self.allocator, method);
+                } else {
+                    _ = self.advance();
+                }
+            }
+        }
+        _ = try self.expect(.r_brace);
+
+        const extra = try self.addExtraList(members.items);
+
+        var rhs_data = std.ArrayListUnmanaged(u32){};
+        defer rhs_data.deinit(self.allocator);
+        try rhs_data.append(self.allocator, backed_type_token);
+        try rhs_data.append(self.allocator, @intCast(implements.items.len));
+        for (implements.items) |impl| try rhs_data.append(self.allocator, impl);
+        const rhs_idx: u32 = @intCast(self.extra_data.items.len);
+        try self.extra_data.appendSlice(self.allocator, rhs_data.items);
+
+        return self.addNode(.{ .tag = .enum_decl, .main_token = name_tok, .data = .{ .lhs = extra, .rhs = rhs_idx } });
+    }
+
     fn parseTraitUse(self: *Parser) Error!u32 {
         const use_tok = self.advance(); // use
         var traits = std.ArrayListUnmanaged(u32){};
@@ -1491,9 +1573,8 @@ const Parser = struct {
             return self.addNode(.{ .tag = .static_call, .main_token = name_tok, .data = .{ .lhs = class_node, .rhs = extra } });
         }
 
-        // class constant access - treat as identifier for now
-        const prop = try self.addNode(.{ .tag = .identifier, .main_token = name_tok, .data = .{} });
-        return self.addNode(.{ .tag = .property_access, .main_token = name_tok, .data = .{ .lhs = class_node, .rhs = prop } });
+        // class constant / enum case access
+        return self.addNode(.{ .tag = .static_prop_access, .main_token = name_tok, .data = .{ .lhs = class_node } });
     }
 
     fn parseTernary(self: *Parser, cond: u32) Error!u32 {

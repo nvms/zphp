@@ -144,6 +144,10 @@ pub const Ast = struct {
             // lhs = path expression
             require_expr,
 
+            // enums
+            enum_decl, // main_token = enum name, lhs = extra index -> {count, member_nodes...}, rhs = extra index -> {backed_type_token_or_0, implements_count, impl_nodes...}
+            enum_case, // main_token = case name, lhs = backing value expression (0 = none)
+
             // namespaces
             namespace_decl, // main_token = namespace keyword, lhs = extra index -> {count, name_token_indices...}
             use_stmt, // main_token = use keyword, lhs = extra index -> {count, name_token_indices...}, rhs = alias token (0 = no alias)
