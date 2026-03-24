@@ -12,11 +12,12 @@ pub fn register(map: *std.StringHashMapUnmanaged(NativeFn), allocator: std.mem.A
         @import("strings.zig").entries,
         @import("arrays.zig").entries,
         @import("json.zig").entries,
-        @import("io.zig").entries,
+        @import("filesystem.zig").entries,
+        @import("http.zig").entries,
+        @import("system.zig").entries,
         @import("datetime.zig").entries,
         @import("pcre.zig").entries,
         @import("output.zig").entries,
-        @import("filesystem.zig").entries,
         @import("testing.zig").entries,
         @import("session.zig").entries,
         @import("crypto.zig").entries,
@@ -33,10 +34,11 @@ test {
     _ = @import("strings.zig");
     _ = @import("arrays.zig");
     _ = @import("json.zig");
-    _ = @import("io.zig");
+    _ = @import("filesystem.zig");
+    _ = @import("http.zig");
+    _ = @import("system.zig");
     _ = @import("pcre.zig");
     _ = @import("output.zig");
-    _ = @import("filesystem.zig");
     _ = @import("testing.zig");
     _ = @import("session.zig");
     _ = @import("crypto.zig");

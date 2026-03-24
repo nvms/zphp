@@ -49,6 +49,12 @@ const sqlite = struct {
     extern "sqlite3" fn sqlite3_errmsg(db: *Db) callconv(.c) [*:0]const u8;
 };
 
+pub fn getOpaquePtr(comptime T: type, obj: *PhpObject, prop: []const u8) ?*T {
+    const v = obj.get(prop);
+    if (v != .int or v.int == 0) return null;
+    return @ptrFromInt(@as(usize, @intCast(v.int)));
+}
+
 fn getThis(ctx: *NativeContext) ?*PhpObject {
     const v = ctx.vm.currentFrame().vars.get("$this") orelse return null;
     if (v != .object) return null;
@@ -56,15 +62,11 @@ fn getThis(ctx: *NativeContext) ?*PhpObject {
 }
 
 fn getDbPtr(obj: *PhpObject) ?*sqlite.Db {
-    const v = obj.get("__db_ptr");
-    if (v != .int or v.int == 0) return null;
-    return @ptrFromInt(@as(usize, @intCast(v.int)));
+    return getOpaquePtr(sqlite.Db, obj, "__db_ptr");
 }
 
 fn getStmtPtr(obj: *PhpObject) ?*sqlite.Stmt {
-    const v = obj.get("__stmt_ptr");
-    if (v != .int or v.int == 0) return null;
-    return @ptrFromInt(@as(usize, @intCast(v.int)));
+    return getOpaquePtr(sqlite.Stmt, obj, "__stmt_ptr");
 }
 
 pub fn throwPdo(ctx: *NativeContext, msg: []const u8) RuntimeError!Value {

@@ -32,15 +32,11 @@ const pg = struct {
 };
 
 fn getConn(obj: *PhpObject) ?*pg.PGconn {
-    const v = obj.get("__db_ptr");
-    if (v != .int or v.int == 0) return null;
-    return @ptrFromInt(@as(usize, @intCast(v.int)));
+    return pdo.getOpaquePtr(pg.PGconn, obj, "__db_ptr");
 }
 
 fn getRes(obj: *PhpObject) ?*pg.PGresult {
-    const v = obj.get("__res_ptr");
-    if (v != .int or v.int == 0) return null;
-    return @ptrFromInt(@as(usize, @intCast(v.int)));
+    return pdo.getOpaquePtr(pg.PGresult, obj, "__res_ptr");
 }
 
 pub fn connect(ctx: *NativeContext, obj: *PhpObject, rest: []const u8, args: []const Value) RuntimeError!Value {

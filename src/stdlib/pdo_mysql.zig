@@ -41,15 +41,11 @@ fn fieldName(field: *mysql.MYSQL_FIELD) [*:0]const u8 {
 }
 
 fn getConn(obj: *PhpObject) ?*mysql.MYSQL {
-    const v = obj.get("__db_ptr");
-    if (v != .int or v.int == 0) return null;
-    return @ptrFromInt(@as(usize, @intCast(v.int)));
+    return pdo.getOpaquePtr(mysql.MYSQL, obj, "__db_ptr");
 }
 
 fn getRes(obj: *PhpObject) ?*mysql.MYSQL_RES {
-    const v = obj.get("__res_ptr");
-    if (v != .int or v.int == 0) return null;
-    return @ptrFromInt(@as(usize, @intCast(v.int)));
+    return pdo.getOpaquePtr(mysql.MYSQL_RES, obj, "__res_ptr");
 }
 
 fn parseDsnParams(rest: []const u8) struct { host: ?[]const u8, port: u16, dbname: ?[]const u8, unix_socket: ?[]const u8 } {
