@@ -99,7 +99,7 @@ interface Repository {
     public function delete(int $id): bool;
 }
 
-class BaseRepository implements Repository {
+abstract class BaseRepository implements Repository {
     protected $table;
     protected $connection;
 
@@ -177,13 +177,8 @@ class BaseRepository implements Repository {
         );
     }
 
-    protected function hydrate(array $row) {
-        return $row;
-    }
-
-    protected function extract($entity): array {
-        return [];
-    }
+    abstract protected function hydrate(array $row);
+    abstract protected function extract($entity): array;
 }
 
 class UserRepository extends BaseRepository {

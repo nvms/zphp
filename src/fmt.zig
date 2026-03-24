@@ -847,17 +847,9 @@ const Formatter = struct {
 
     fn formatClassDecl(self: *Formatter, node: Ast.Node) void {
         const name_tok = node.main_token;
-        // scan back from class name over `class` keyword and any modifiers
-        if (name_tok >= 2) {
-            var i = name_tok - 2;
-            while (true) {
-                if (self.ast.tokens[i].tag == .kw_abstract) {
-                    self.write("abstract ");
-                    break;
-                }
-                if (i == 0) break;
-                i -= 1;
-            }
+        // token before name is `class`, token before that may be `abstract`
+        if (name_tok >= 2 and self.ast.tokens[name_tok - 2].tag == .kw_abstract) {
+            self.write("abstract ");
         }
         self.write("class ");
         self.write(self.ast.tokens[name_tok].lexeme(self.source));
@@ -1044,13 +1036,13 @@ const Formatter = struct {
 
     fn formatInterfaceMethod(self: *Formatter, node: Ast.Node) void {
         const mods = self.scanMethodModifiers(node.main_token);
+        if (mods.is_abstract) self.write("abstract ");
         if (mods.visibility) |v| {
             self.write(v);
             self.write(" ");
         } else {
             self.write("public ");
         }
-        if (mods.is_abstract) self.write("abstract ");
         if (mods.is_static) self.write("static ");
         self.write("function ");
         self.write(self.ast.tokens[node.main_token].lexeme(self.source));
