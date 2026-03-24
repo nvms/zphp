@@ -57,6 +57,14 @@ pub const entries = .{
     .{ "array_find_key", array_find_key },
     .{ "array_any", array_any },
     .{ "array_all", array_all },
+    .{ "current", native_current },
+    .{ "pos", native_current },
+    .{ "next", native_next },
+    .{ "prev", native_prev },
+    .{ "reset", native_reset },
+    .{ "end", native_end },
+    .{ "key", native_key },
+    .{ "sizeof", native_sizeof },
 };
 
 fn array_push(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
@@ -877,4 +885,58 @@ fn array_all(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
         if (!result.isTruthy()) return .{ .bool = false };
     }
     return .{ .bool = true };
+}
+
+fn native_current(_: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len == 0 or args[0] != .array) return Value{ .bool = false };
+    const arr = args[0].array;
+    if (arr.cursor >= arr.entries.items.len) return Value{ .bool = false };
+    return arr.entries.items[arr.cursor].value;
+}
+
+fn native_next(_: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len == 0 or args[0] != .array) return Value{ .bool = false };
+    const arr = args[0].array;
+    if (arr.cursor < arr.entries.items.len) arr.cursor += 1;
+    if (arr.cursor >= arr.entries.items.len) return Value{ .bool = false };
+    return arr.entries.items[arr.cursor].value;
+}
+
+fn native_prev(_: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len == 0 or args[0] != .array) return Value{ .bool = false };
+    const arr = args[0].array;
+    if (arr.cursor == 0) return Value{ .bool = false };
+    arr.cursor -= 1;
+    return arr.entries.items[arr.cursor].value;
+}
+
+fn native_reset(_: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len == 0 or args[0] != .array) return Value{ .bool = false };
+    const arr = args[0].array;
+    arr.cursor = 0;
+    if (arr.entries.items.len == 0) return Value{ .bool = false };
+    return arr.entries.items[0].value;
+}
+
+fn native_end(_: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len == 0 or args[0] != .array) return Value{ .bool = false };
+    const arr = args[0].array;
+    if (arr.entries.items.len == 0) return Value{ .bool = false };
+    arr.cursor = arr.entries.items.len - 1;
+    return arr.entries.items[arr.cursor].value;
+}
+
+fn native_key(_: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len == 0 or args[0] != .array) return .null;
+    const arr = args[0].array;
+    if (arr.cursor >= arr.entries.items.len) return .null;
+    return switch (arr.entries.items[arr.cursor].key) {
+        .int => |i| Value{ .int = i },
+        .string => |s| Value{ .string = s },
+    };
+}
+
+fn native_sizeof(_: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len == 0 or args[0] != .array) return .{ .int = 0 };
+    return .{ .int = args[0].array.length() };
 }

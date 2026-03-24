@@ -242,6 +242,10 @@ pub const VM = struct {
         try c.put(a, "PHP_URL_FRAGMENT", .{ .int = 7 });
         try c.put(a, "PASSWORD_DEFAULT", .{ .int = 1 });
         try c.put(a, "PASSWORD_BCRYPT", .{ .int = 1 });
+        try c.put(a, "LOCK_SH", .{ .int = 1 });
+        try c.put(a, "LOCK_EX", .{ .int = 2 });
+        try c.put(a, "LOCK_UN", .{ .int = 8 });
+        try c.put(a, "LOCK_NB", .{ .int = 4 });
     }
 
     pub fn deinit(self: *VM) void {

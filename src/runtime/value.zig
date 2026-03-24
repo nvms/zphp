@@ -3,6 +3,7 @@ const std = @import("std");
 pub const PhpArray = struct {
     entries: std.ArrayListUnmanaged(Entry) = .{},
     next_int_key: i64 = 0,
+    cursor: usize = 0,
 
     pub const Entry = struct {
         key: Key,

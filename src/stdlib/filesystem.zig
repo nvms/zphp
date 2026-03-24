@@ -37,6 +37,7 @@ pub const entries = .{
     .{ "rewind", native_rewind },
     .{ "fflush", native_fflush },
     .{ "ftruncate", native_ftruncate },
+    .{ "flock", native_flock },
 };
 
 // file handle management - store handles in PhpObjects with class "FileHandle"
@@ -412,5 +413,13 @@ fn native_ftruncate(_: *NativeContext, args: []const Value) RuntimeError!Value {
     const file = getFileHandle(args[0].object) orelse return Value{ .bool = false };
     const size: u64 = @intCast(@max(args[1].int, 0));
     file.setEndPos(size) catch return Value{ .bool = false };
+    return .{ .bool = true };
+}
+
+fn native_flock(_: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len < 2 or args[0] != .object or args[1] != .int) return .{ .bool = false };
+    const file = getFileHandle(args[0].object) orelse return Value{ .bool = false };
+    const op: i32 = @intCast(args[1].int & 0xff);
+    std.posix.flock(file.handle, op) catch return Value{ .bool = false };
     return .{ .bool = true };
 }

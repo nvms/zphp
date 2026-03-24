@@ -1171,3 +1171,63 @@ test "hash_algos returns array" {
         \\echo in_array("sha256", $a) ? "yes" : "no";
     , "yes");
 }
+
+// ==========================================================================
+// serialize / unserialize
+// ==========================================================================
+
+test "serialize scalars" {
+    try expectOutput(
+        \\<?php
+        \\echo serialize(null) . " " . serialize(42) . " " . serialize("hi");
+    , "N; i:42; s:2:\"hi\";");
+}
+
+test "serialize array round-trip" {
+    try expectOutput(
+        \\<?php
+        \\$a = ["x" => 1, "y" => 2];
+        \\$back = unserialize(serialize($a));
+        \\echo $back["x"] . " " . $back["y"];
+    , "1 2");
+}
+
+test "unserialize bool" {
+    try expectOutput(
+        \\<?php
+        \\echo unserialize("b:1;") ? "true" : "false";
+    , "true");
+}
+
+// ==========================================================================
+// array pointer functions
+// ==========================================================================
+
+test "current next prev reset end" {
+    try expectOutput(
+        \\<?php
+        \\$a = [10, 20, 30];
+        \\echo current($a) . " ";
+        \\echo next($a) . " ";
+        \\echo end($a) . " ";
+        \\echo prev($a) . " ";
+        \\echo reset($a);
+    , "10 20 30 20 10");
+}
+
+test "key returns current key" {
+    try expectOutput(
+        \\<?php
+        \\$a = ["a" => 1, "b" => 2];
+        \\echo key($a);
+        \\next($a);
+        \\echo " " . key($a);
+    , "a b");
+}
+
+test "sizeof alias for count" {
+    try expectOutput(
+        \\<?php
+        \\echo sizeof([1, 2, 3]);
+    , "3");
+}
