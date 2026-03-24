@@ -19,9 +19,3 @@ echo "\n";
 
 // sapi name
 echo php_sapi_name() . "\n";
-
-// extension_loaded
-echo extension_loaded("json") ? "yes" : "no";
-echo "\n";
-echo extension_loaded("imagick") ? "yes" : "no";
-echo "\n";
