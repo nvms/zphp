@@ -161,7 +161,7 @@ critical boundaries:
 
 ### SPL classes (src/stdlib/spl.zig)
 - `SplStack`: LIFO stack backed by PhpArray in hidden `__data` property. push/pop operate on end of array. iterator goes top-to-bottom (cursor starts at len-1, decrements). implements Countable
-- `ArrayObject`: object wrapper around PhpArray. stores data in `__data`, flags in `__flags`. implements Countable. offsetGet/offsetSet/offsetExists/offsetUnset for explicit access. getArrayCopy returns a shallow copy. bracket syntax (`$ao["key"]`) not yet supported (requires VM-level ArrayAccess dispatch)
+- `ArrayObject`: object wrapper around PhpArray. stores data in `__data`, flags in `__flags`. implements Countable. offsetGet/offsetSet/offsetExists/offsetUnset for explicit access. getArrayCopy returns a shallow copy. bracket syntax (`$ao["key"]`) dispatches to offsetGet/offsetSet via VM `array_get`/`array_set` opcodes
 - both registered during VM init alongside builtins and datetime
 
 ### PDO (src/stdlib/pdo.zig)

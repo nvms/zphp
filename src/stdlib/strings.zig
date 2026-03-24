@@ -70,6 +70,11 @@ pub const entries = .{
     .{ "mb_rtrim", native_mb_rtrim },
     .{ "mb_ucfirst", native_mb_ucfirst },
     .{ "mb_lcfirst", native_mb_lcfirst },
+    .{ "strip_tags", native_strip_tags },
+    .{ "http_build_query", native_http_build_query },
+    .{ "htmlentities", native_htmlspecialchars },
+    .{ "quoted_printable_encode", native_qp_encode },
+    .{ "quoted_printable_decode", native_qp_decode },
 };
 
 fn substr(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
@@ -1396,4 +1401,128 @@ fn native_mb_lcfirst(ctx: *NativeContext, args: []const Value) RuntimeError!Valu
     buf[0] = std.ascii.toLower(s[0]);
     try ctx.strings.append(ctx.allocator, buf);
     return .{ .string = buf };
+}
+
+fn native_strip_tags(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len == 0 or args[0] != .string) return .{ .string = "" };
+    const s = args[0].string;
+    var buf = std.ArrayListUnmanaged(u8){};
+    var in_tag = false;
+    var i: usize = 0;
+    while (i < s.len) : (i += 1) {
+        if (s[i] == '<') {
+            in_tag = true;
+        } else if (s[i] == '>' and in_tag) {
+            in_tag = false;
+        } else if (!in_tag) {
+            try buf.append(ctx.allocator, s[i]);
+        }
+    }
+    const result = try buf.toOwnedSlice(ctx.allocator);
+    try ctx.strings.append(ctx.allocator, result);
+    return .{ .string = result };
+}
+
+fn native_http_build_query(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len == 0 or args[0] != .array) return .{ .string = "" };
+    const arr = args[0].array;
+    var buf = std.ArrayListUnmanaged(u8){};
+    var first = true;
+    for (arr.entries.items) |entry| {
+        if (!first) try buf.append(ctx.allocator, '&');
+        first = false;
+
+        const key_str = switch (entry.key) {
+            .string => |s| s,
+            .int => |n| blk: {
+                var tmp: [20]u8 = undefined;
+                break :blk std.fmt.bufPrint(&tmp, "{d}", .{n}) catch "";
+            },
+        };
+        try appendUrlEncoded(&buf, ctx.allocator, key_str);
+        try buf.append(ctx.allocator, '=');
+
+        if (entry.value == .string) {
+            try appendUrlEncoded(&buf, ctx.allocator, entry.value.string);
+        } else {
+            var tmp = std.ArrayListUnmanaged(u8){};
+            try entry.value.format(&tmp, ctx.allocator);
+            const s = try tmp.toOwnedSlice(ctx.allocator);
+            defer ctx.allocator.free(s);
+            try appendUrlEncoded(&buf, ctx.allocator, s);
+        }
+    }
+    const result = try buf.toOwnedSlice(ctx.allocator);
+    try ctx.strings.append(ctx.allocator, result);
+    return .{ .string = result };
+}
+
+fn appendUrlEncoded(buf: *std.ArrayListUnmanaged(u8), a: std.mem.Allocator, s: []const u8) !void {
+    for (s) |c| {
+        if (std.ascii.isAlphanumeric(c) or c == '-' or c == '_' or c == '.' or c == '~') {
+            try buf.append(a, c);
+        } else if (c == ' ') {
+            try buf.append(a, '+');
+        } else {
+            try buf.append(a, '%');
+            const hex = "0123456789ABCDEF";
+            try buf.append(a, hex[c >> 4]);
+            try buf.append(a, hex[c & 0xf]);
+        }
+    }
+}
+
+fn native_qp_encode(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len == 0 or args[0] != .string) return .{ .string = "" };
+    const s = args[0].string;
+    var buf = std.ArrayListUnmanaged(u8){};
+    const hex = "0123456789ABCDEF";
+    for (s) |c| {
+        if (c >= 33 and c <= 126 and c != '=') {
+            try buf.append(ctx.allocator, c);
+        } else if (c == ' ' or c == '\t') {
+            try buf.append(ctx.allocator, c);
+        } else {
+            try buf.append(ctx.allocator, '=');
+            try buf.append(ctx.allocator, hex[c >> 4]);
+            try buf.append(ctx.allocator, hex[c & 0xf]);
+        }
+    }
+    const result = try buf.toOwnedSlice(ctx.allocator);
+    try ctx.strings.append(ctx.allocator, result);
+    return .{ .string = result };
+}
+
+fn native_qp_decode(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len == 0 or args[0] != .string) return .{ .string = "" };
+    const s = args[0].string;
+    var buf = std.ArrayListUnmanaged(u8){};
+    var i: usize = 0;
+    while (i < s.len) {
+        if (s[i] == '=' and i + 2 < s.len) {
+            if (s[i + 1] == '\r' or s[i + 1] == '\n') {
+                i += 2;
+                if (i < s.len and s[i] == '\n') i += 1;
+                continue;
+            }
+            const hi = std.fmt.charToDigit(s[i + 1], 16) catch {
+                try buf.append(ctx.allocator, s[i]);
+                i += 1;
+                continue;
+            };
+            const lo = std.fmt.charToDigit(s[i + 2], 16) catch {
+                try buf.append(ctx.allocator, s[i]);
+                i += 1;
+                continue;
+            };
+            try buf.append(ctx.allocator, hi * 16 + lo);
+            i += 3;
+        } else {
+            try buf.append(ctx.allocator, s[i]);
+            i += 1;
+        }
+    }
+    const result = try buf.toOwnedSlice(ctx.allocator);
+    try ctx.strings.append(ctx.allocator, result);
+    return .{ .string = result };
 }

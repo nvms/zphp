@@ -86,7 +86,7 @@ PHP 8.1+ enums implemented. pure enums and backed enums (int/string). cases are 
 
 ## SPL classes
 
-`SplStack` and `ArrayObject` implemented in `src/stdlib/spl.zig`, registered in `vm.zig` init. both implement `Countable` interface. internal data stored in hidden `__data` property as PhpArray. SplStack iterates LIFO (top to bottom). SplStack methods: push, pop, top, bottom, count, isEmpty, shift, unshift, rewind, current, key, next, valid, toArray. ArrayObject methods: offsetGet, offsetSet, offsetExists, offsetUnset, count, append, getArrayCopy, getIterator, setFlags, getFlags. ArrayAccess bracket syntax (`$ao["key"]`) not yet wired - requires VM-level dispatch for `[]` on objects.
+`SplStack` and `ArrayObject` implemented in `src/stdlib/spl.zig`, registered in `vm.zig` init. both implement `Countable` interface. internal data stored in hidden `__data` property as PhpArray. SplStack iterates LIFO (top to bottom). SplStack methods: push, pop, top, bottom, count, isEmpty, shift, unshift, rewind, current, key, next, valid, toArray. ArrayObject methods: offsetGet, offsetSet, offsetExists, offsetUnset, count, append, getArrayCopy, getIterator, setFlags, getFlags. ArrayAccess bracket syntax (`$ao["key"]`) works - `array_get`/`array_set` opcodes detect objects with `offsetGet`/`offsetSet` methods and dispatch to them. string indexing (`$s[0]`) also works via the same opcode.
 
 ## array destructuring
 

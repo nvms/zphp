@@ -672,13 +672,28 @@ pub const VM = struct {
                     const val = self.pop();
                     const key = self.pop();
                     const arr_val = self.peek();
-                    if (arr_val == .array) try arr_val.array.set(self.allocator, Value.toArrayKey(key), val);
+                    if (arr_val == .array) {
+                        try arr_val.array.set(self.allocator, Value.toArrayKey(key), val);
+                    } else if (arr_val == .object and self.hasMethod(arr_val.object.class_name, "offsetSet")) {
+                        _ = self.callMethod(arr_val.object, "offsetSet", &.{ key, val }) catch {};
+                    }
                 },
                 .array_get => {
                     const key = self.pop();
                     const arr_val = self.pop();
                     if (arr_val == .array) {
                         self.push(arr_val.array.get(Value.toArrayKey(key)));
+                    } else if (arr_val == .object and self.hasMethod(arr_val.object.class_name, "offsetGet")) {
+                        const result = self.callMethod(arr_val.object, "offsetGet", &.{key}) catch .null;
+                        self.push(result);
+                    } else if (arr_val == .string) {
+                        const s = arr_val.string;
+                        const idx = Value.toInt(key);
+                        if (idx >= 0 and @as(usize, @intCast(idx)) < s.len) {
+                            self.push(.{ .string = s[@intCast(idx)..][0..1] });
+                        } else {
+                            self.push(.null);
+                        }
                     } else {
                         self.push(.null);
                     }
@@ -687,7 +702,11 @@ pub const VM = struct {
                     const val = self.pop();
                     const key = self.pop();
                     const arr_val = self.pop();
-                    if (arr_val == .array) try arr_val.array.set(self.allocator, Value.toArrayKey(key), val);
+                    if (arr_val == .array) {
+                        try arr_val.array.set(self.allocator, Value.toArrayKey(key), val);
+                    } else if (arr_val == .object and self.hasMethod(arr_val.object.class_name, "offsetSet")) {
+                        _ = self.callMethod(arr_val.object, "offsetSet", &.{ key, val }) catch {};
+                    }
                     self.push(val);
                 },
 
@@ -1923,6 +1942,19 @@ pub const VM = struct {
             }
         }
         return null;
+    }
+
+    fn hasMethod(self: *VM, class_name: []const u8, method_name: []const u8) bool {
+        var current = class_name;
+        var buf: [256]u8 = undefined;
+        while (true) {
+            const full = std.fmt.bufPrint(&buf, "{s}::{s}", .{ current, method_name }) catch return false;
+            if (self.functions.get(full) != null or self.native_fns.get(full) != null) return true;
+            if (self.classes.get(current)) |cls| {
+                if (cls.parent) |p| { current = p; continue; }
+            }
+            return false;
+        }
     }
 
     fn resolveMethod(self: *VM, class_name: []const u8, method_name: []const u8) RuntimeError![]const u8 {
