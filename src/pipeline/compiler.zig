@@ -832,7 +832,7 @@ const Compiler = struct {
             .caret_equal => .bit_xor,
             .lt_lt_equal => .shift_left,
             .gt_gt_equal => .shift_right,
-            else => .add,
+            else => unreachable,
         });
     }
 
@@ -880,7 +880,7 @@ const Compiler = struct {
             .gt_gt => .shift_right,
             .lt_gt => .not_equal,
             .kw_xor => .bit_xor,
-            else => .add,
+            else => unreachable,
         });
     }
 
@@ -890,11 +890,14 @@ const Compiler = struct {
         if (op_tag == .plus_plus or op_tag == .minus_minus) {
             const target = self.ast.nodes[node.data.lhs];
             if (target.tag == .property_access) {
+                // stack: [obj] -> dup -> [obj, obj] -> get_prop -> [obj, val] -> +1 -> [obj, new_val] -> set_prop
                 try self.compileNode(target.data.lhs);
-                try self.compileNode(node.data.lhs);
+                try self.emitOp(.dup);
+                const prop_idx = try self.addConstant(.{ .string = self.propName(target) });
+                try self.emitOp(.get_prop);
+                try self.emitU16(prop_idx);
                 try self.emitConstant(try self.addConstant(.{ .int = 1 }));
                 try self.emitOp(if (op_tag == .plus_plus) .add else .subtract);
-                const prop_idx = try self.addConstant(.{ .string = self.propName(target) });
                 try self.emitOp(.set_prop);
                 try self.emitU16(prop_idx);
                 return;
@@ -911,12 +914,17 @@ const Compiler = struct {
             return;
         }
 
+        if (op_tag == .at or op_tag == .kw_clone) {
+            // @ suppresses errors (no-op in zphp), clone is shallow copy (not yet implemented, passes through)
+            try self.compileNode(node.data.lhs);
+            return;
+        }
         try self.compileNode(node.data.lhs);
         try self.emitOp(switch (op_tag) {
             .minus => .negate,
             .bang => .not,
             .tilde => .bit_not,
-            else => .negate,
+            else => unreachable,
         });
     }
 
@@ -925,15 +933,22 @@ const Compiler = struct {
         const op_tag = self.ast.tokens[node.main_token].tag;
 
         if (target.tag == .property_access) {
-            try self.compileNode(node.data.lhs);
+            const prop_idx = try self.addConstant(.{ .string = self.propName(target) });
+            // get old value (the postfix return value)
             try self.compileNode(target.data.lhs);
-            try self.compileNode(node.data.lhs);
+            try self.emitOp(.get_prop);
+            try self.emitU16(prop_idx);
+            // stack: [old_val]
+            // now set obj.prop = old_val +/- 1
+            try self.compileNode(target.data.lhs);
+            try self.compileNode(target.data.lhs);
+            try self.emitOp(.get_prop);
+            try self.emitU16(prop_idx);
             try self.emitConstant(try self.addConstant(.{ .int = 1 }));
             try self.emitOp(if (op_tag == .plus_plus) .add else .subtract);
-            const prop_idx = try self.addConstant(.{ .string = self.propName(target) });
             try self.emitOp(.set_prop);
             try self.emitU16(prop_idx);
-            try self.emitOp(.pop);
+            // stack: [old_val]
             return;
         }
 

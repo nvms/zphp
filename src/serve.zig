@@ -159,7 +159,7 @@ pub fn serve(allocator: Allocator, config: ServeConfig) !void {
     defer allocator.free(workers);
 
     for (workers) |*w| {
-        w.* = try std.Thread.spawn(.{}, workerLoop, .{ allocator, &result, doc_root });
+        w.* = try std.Thread.spawn(.{}, workerLoop, .{ allocator, &result, doc_root, config.port });
     }
 
     while (true) {
@@ -174,17 +174,17 @@ pub fn serve(allocator: Allocator, config: ServeConfig) !void {
     for (workers) |w| w.join();
 }
 
-fn workerLoop(allocator: Allocator, result: *const CompileResult, doc_root: []const u8) void {
+fn workerLoop(allocator: Allocator, result: *const CompileResult, doc_root: []const u8, port: u16) void {
     var vm = VM.init(allocator) catch return;
     defer vm.deinit();
 
     while (true) {
         const item = queue.pop() orelse return;
-        handleConnection(allocator, result, &vm, doc_root, item.conn);
+        handleConnection(allocator, result, &vm, doc_root, item.conn, port);
     }
 }
 
-fn handleConnection(allocator: Allocator, result: *const CompileResult, vm: *VM, doc_root: []const u8, conn: std.net.Server.Connection) void {
+fn handleConnection(allocator: Allocator, result: *const CompileResult, vm: *VM, doc_root: []const u8, conn: std.net.Server.Connection, port: u16) void {
     var buf: [65536]u8 = undefined;
     var buffered: usize = 0;
     var keep_alive = true;
@@ -223,7 +223,7 @@ fn handleConnection(allocator: Allocator, result: *const CompileResult, vm: *VM,
         }
 
         vm.reset();
-        populateSuperglobals(vm, &req, conn) catch break;
+        populateSuperglobals(vm, &req, conn, port) catch break;
 
         vm.interpret(result) catch {
             writeResponse(conn.stream, 500, "text/plain", null, "500 Internal Server Error", keep_alive) catch break;
@@ -313,7 +313,7 @@ fn parseRequest(raw: []const u8) Request {
     return req;
 }
 
-fn populateSuperglobals(vm: *VM, req: *const Request, conn: std.net.Server.Connection) !void {
+fn populateSuperglobals(vm: *VM, req: *const Request, conn: std.net.Server.Connection, port: u16) !void {
     const a = vm.allocator;
 
     // $_SERVER
@@ -325,7 +325,9 @@ fn populateSuperglobals(vm: *VM, req: *const Request, conn: std.net.Server.Conne
     try server_arr.set(a, .{ .string = "REQUEST_URI" }, .{ .string = req.uri });
     try server_arr.set(a, .{ .string = "QUERY_STRING" }, .{ .string = req.query_string });
     try server_arr.set(a, .{ .string = "SERVER_PROTOCOL" }, .{ .string = "HTTP/1.1" });
-    try server_arr.set(a, .{ .string = "SERVER_PORT" }, .{ .string = "8080" });
+    var port_buf: [8]u8 = undefined;
+    const port_str = std.fmt.bufPrint(&port_buf, "{d}", .{port}) catch "8080";
+    try server_arr.set(a, .{ .string = "SERVER_PORT" }, .{ .string = port_str });
     try server_arr.set(a, .{ .string = "SCRIPT_NAME" }, .{ .string = req.path });
     try server_arr.set(a, .{ .string = "PATH_INFO" }, .{ .string = req.path });
 
@@ -575,8 +577,9 @@ fn writeResponse(stream: std.net.Stream, code: i64, content_type: []const u8, ex
         for (hdrs.entries.items) |entry| {
             if (entry.value == .string) {
                 const hdr = entry.value.string;
-                // skip Content-Type since we already handle it
                 if (std.mem.startsWith(u8, hdr, "Content-Type:") or std.mem.startsWith(u8, hdr, "content-type:")) continue;
+                // reject headers containing \r or \n to prevent header injection
+                if (std.mem.indexOfScalar(u8, hdr, '\r') != null or std.mem.indexOfScalar(u8, hdr, '\n') != null) continue;
                 if (pos + hdr.len + 2 < hdr_buf.len) {
                     @memcpy(hdr_buf[pos .. pos + hdr.len], hdr);
                     pos += hdr.len;

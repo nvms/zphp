@@ -168,29 +168,26 @@ pub fn downloadPackage(allocator: Allocator, entry: *const LockEntry) !void {
     const vendor_dir = try std.fmt.allocPrint(allocator, "vendor/{s}", .{entry.name});
     defer allocator.free(vendor_dir);
 
-    // create vendor directory
-    std.fs.cwd().makePath(vendor_dir) catch {};
+    try std.fs.cwd().makePath(vendor_dir);
 
-    const zip_data = httpGet(allocator, entry.dist_url) catch return;
+    const zip_data = try httpGet(allocator, entry.dist_url);
     defer allocator.free(zip_data);
 
-    // write zip to temp file
-    const safe_name = std.mem.replaceOwned(u8, allocator, entry.name, "/", "--") catch return;
+    const safe_name = try std.mem.replaceOwned(u8, allocator, entry.name, "/", "--");
     defer allocator.free(safe_name);
     const zip_path = try std.fmt.allocPrint(allocator, "vendor/{s}.zip", .{safe_name});
     defer allocator.free(zip_path);
 
-    std.fs.cwd().writeFile(.{ .sub_path = zip_path, .data = zip_data }) catch return;
+    try std.fs.cwd().writeFile(.{ .sub_path = zip_path, .data = zip_data });
 
-    // extract using system unzip
     var child = std.process.Child.init(&.{ "unzip", "-o", "-q", zip_path, "-d", vendor_dir }, allocator);
-    _ = child.spawnAndWait() catch {};
+    const term = try child.spawnAndWait();
+    if (term.Exited != 0) return error.RuntimeError;
 
-    // clean up zip
+    // clean up zip (non-critical, ok to ignore)
     std.fs.cwd().deleteFile(zip_path) catch {};
 
-    // move files from the nested directory (packagist zips have a top-level dir)
-    moveNestedDir(allocator, vendor_dir) catch {};
+    try moveNestedDir(allocator, vendor_dir);
 }
 
 fn moveNestedDir(allocator: Allocator, vendor_dir: []const u8) !void {
@@ -211,17 +208,16 @@ fn moveNestedDir(allocator: Allocator, vendor_dir: []const u8) !void {
     if (count == 1) {
         if (subdir_name) |sub| {
             defer allocator.free(sub);
-            const src = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ vendor_dir, sub });
-            defer allocator.free(src);
+            var sub_dir = dir.openDir(sub, .{ .iterate = true }) catch return;
+            defer sub_dir.close();
 
-            // use system mv
-            const mv_cmd = try std.fmt.allocPrint(allocator, "{s}/*", .{src});
-            defer allocator.free(mv_cmd);
-
-            const cmd = try std.fmt.allocPrint(allocator, "mv {s}/* {s}/ 2>/dev/null; mv {s}/.* {s}/ 2>/dev/null; rmdir {s}", .{ src, vendor_dir, src, vendor_dir, src });
-            defer allocator.free(cmd);
-            var child = std.process.Child.init(&.{ "sh", "-c", cmd }, allocator);
-            _ = child.spawnAndWait() catch {};
+            var sub_iter = sub_dir.iterate();
+            while (sub_iter.next() catch null) |file_entry| {
+                const name = allocator.dupe(u8, file_entry.name) catch continue;
+                defer allocator.free(name);
+                sub_dir.rename(name, dir, name) catch continue;
+            }
+            dir.deleteDir(sub) catch {};
         }
     }
 }
