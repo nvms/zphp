@@ -25,6 +25,7 @@ zig 0.15.x. `zig build test` must pass before pushing. short lowercase commits, 
 - named arguments: works for user-defined functions and ~80 common native functions (see `src/stdlib/native_params.zig`). unlisted natives fall back to positional
 - constructor property promotion: works with readonly enforcement
 - nullsafe operator (`?->`): full support for property access and method calls, including chaining
+- spread in calls: `foo(...$args)`, `$obj->method(...$args)`, `Class::method(...$args)` all work. multiple spreads and mixed regular+spread args supported. `[...$a, ...$b]` array spread works
 
 ## stdlib modules
 
@@ -81,13 +82,12 @@ zig 0.15.x. `zig build test` must pass before pushing. short lowercase commits, 
 
 ## roadmap
 
-1. spread operator in function calls - `foo(...$args)` argument forwarding. ubiquitous in framework code
-2. first-class enum methods - enum cases calling methods on themselves (`Status::Active->label()`)
-3. union type enforcement - `int|string` runtime checking at function boundaries. currently parsed but ignored
-4. stdlib coverage gaps - run compat suite systematically, close missing/broken function gaps
-5. match expression exhaustiveness - `match` without default should throw `UnhandledMatchError`
-6. complex string interpolation - `"${expr}"` and `"{$obj->prop}"` edge cases
-7. performance baseline - benchmark against PHP 8.4 on compute-heavy tasks
+1. first-class enum methods - enum cases calling methods on themselves (`Status::Active->label()`)
+2. union type enforcement - `int|string` runtime checking at function boundaries. currently parsed but ignored
+3. stdlib coverage gaps - run compat suite systematically, close missing/broken function gaps
+4. match expression exhaustiveness - `match` without default should throw `UnhandledMatchError`
+5. complex string interpolation - `"${expr}"` and `"{$obj->prop}"` edge cases
+6. performance baseline - benchmark against PHP 8.4 on compute-heavy tasks
 
 ## websocket
 
