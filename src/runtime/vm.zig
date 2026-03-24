@@ -1142,10 +1142,42 @@ pub const VM = struct {
 
                     // read trait list and copy trait methods
                     const trait_count = self.readByte();
-                    for (0..trait_count) |_| {
+                    var trait_names: [16][]const u8 = undefined;
+                    for (0..trait_count) |ti| {
                         const tname_idx = self.readU16();
-                        const trait_name = self.currentChunk().constants.items[tname_idx].string;
+                        trait_names[ti] = self.currentChunk().constants.items[tname_idx].string;
+                    }
 
+                    // read conflict resolution rules
+                    const InsteadofRule = struct { method: []const u8, preferred: []const u8, excluded: [16][]const u8, excluded_count: u8 };
+                    const AliasRule = struct { method: []const u8, trait: []const u8, alias: []const u8 };
+                    var insteadof_rules: [32]InsteadofRule = undefined;
+                    var insteadof_count: usize = 0;
+                    var alias_rules: [32]AliasRule = undefined;
+                    var alias_count: usize = 0;
+                    const conflict_count = self.readByte();
+                    for (0..conflict_count) |_| {
+                        const method_idx = self.readU16();
+                        const method_name = self.currentChunk().constants.items[method_idx].string;
+                        const rule_trait_idx = self.readU16();
+                        const rule_trait = self.currentChunk().constants.items[rule_trait_idx].string;
+                        const rule_type = self.readByte();
+                        if (rule_type == 1) {
+                            var rule = InsteadofRule{ .method = method_name, .preferred = rule_trait, .excluded = undefined, .excluded_count = self.readByte() };
+                            for (0..rule.excluded_count) |ei| {
+                                const eidx = self.readU16();
+                                rule.excluded[ei] = self.currentChunk().constants.items[eidx].string;
+                            }
+                            insteadof_rules[insteadof_count] = rule;
+                            insteadof_count += 1;
+                        } else {
+                            const aidx = self.readU16();
+                            alias_rules[alias_count] = .{ .method = method_name, .trait = rule_trait, .alias = self.currentChunk().constants.items[aidx].string };
+                            alias_count += 1;
+                        }
+                    }
+
+                    for (trait_names[0..trait_count]) |trait_name| {
                         // collect trait methods first to avoid iterator invalidation
                         const TraitMethod = struct { name: []const u8, func: *const ObjFunction };
                         var pending: [64]TraitMethod = undefined;
@@ -1167,6 +1199,34 @@ pub const VM = struct {
                             }
                         }
                         for (pending[0..pending_count]) |tm| {
+                            // alias rules apply regardless of insteadof exclusion
+                            for (alias_rules[0..alias_count]) |rule| {
+                                if (std.mem.eql(u8, rule.method, tm.name) and std.mem.eql(u8, rule.trait, trait_name)) {
+                                    const alias_method = try std.fmt.allocPrint(self.allocator, "{s}::{s}", .{ class_name, rule.alias });
+                                    try self.strings.append(self.allocator, alias_method);
+                                    if (!self.functions.contains(alias_method)) {
+                                        try self.functions.put(self.allocator, alias_method, tm.func);
+                                        try def.methods.put(self.allocator, rule.alias, .{
+                                            .name = rule.alias,
+                                            .arity = tm.func.arity,
+                                        });
+                                    }
+                                }
+                            }
+
+                            // check insteadof rules: is this method excluded for this trait?
+                            var excluded = false;
+                            for (insteadof_rules[0..insteadof_count]) |rule| {
+                                if (std.mem.eql(u8, rule.method, tm.name)) {
+                                    if (std.mem.eql(u8, rule.preferred, trait_name)) break;
+                                    for (rule.excluded[0..rule.excluded_count]) |ex| {
+                                        if (std.mem.eql(u8, ex, trait_name)) { excluded = true; break; }
+                                    }
+                                    if (excluded) break;
+                                }
+                            }
+                            if (excluded) continue;
+
                             const class_method = try std.fmt.allocPrint(self.allocator, "{s}::{s}", .{ class_name, tm.name });
                             try self.strings.append(self.allocator, class_method);
                             if (!self.functions.contains(class_method)) {
@@ -2108,7 +2168,16 @@ pub const VM = struct {
     fn cloneArray(self: *VM, src: *PhpArray) RuntimeError!*PhpArray {
         const copy = self.allocator.create(PhpArray) catch return error.RuntimeError;
         copy.* = .{ .next_int_key = src.next_int_key, .cursor = src.cursor };
-        copy.entries.appendSlice(self.allocator, src.entries.items) catch return error.RuntimeError;
+        copy.entries.ensureTotalCapacity(self.allocator, src.entries.items.len) catch return error.RuntimeError;
+        for (src.entries.items) |entry| {
+            copy.entries.appendAssumeCapacity(.{
+                .key = entry.key,
+                .value = if (entry.value == .array)
+                    Value{ .array = try self.cloneArray(entry.value.array) }
+                else
+                    entry.value,
+            });
+        }
         self.arrays.append(self.allocator, copy) catch return error.RuntimeError;
         return copy;
     }

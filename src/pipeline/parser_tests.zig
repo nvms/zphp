@@ -382,6 +382,8 @@ fn renderNode(ast: *const Ast, idx: u32, buf: *Buf) !void {
             try w.writeByte(')');
         },
         .trait_use => try w.writeAll("(use-trait)"),
+        .trait_insteadof => try w.writeAll("(insteadof)"),
+        .trait_as => try w.writeAll("(as)"),
         .yield_expr => {
             try w.writeAll("(yield");
             if (node.data.lhs != 0) {

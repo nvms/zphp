@@ -219,7 +219,7 @@ const Compiler = struct {
             .interface_decl => try self.compileInterfaceDecl(node),
             .interface_method => {},
             .trait_decl => try self.compileTraitDecl(node),
-            .trait_use => {},
+            .trait_use, .trait_insteadof, .trait_as => {},
             .enum_decl => try self.compileEnumDecl(node),
             .enum_case => {},
             .new_expr => try self.compileNewExpr(node),
@@ -1631,6 +1631,43 @@ const Compiler = struct {
         for (all_traits.items) |tname| {
             const tname_idx = try self.addConstant(.{ .string = tname });
             try self.emitU16(tname_idx);
+        }
+
+        // collect conflict resolution rules from trait_use statements
+        const ConflictRule = struct { node: Ast.Node };
+        var all_conflicts = std.ArrayListUnmanaged(ConflictRule){};
+        defer all_conflicts.deinit(self.allocator);
+        for (members) |member_idx| {
+            const member = self.ast.nodes[member_idx];
+            if (member.tag == .trait_use and member.data.rhs != 0) {
+                for (self.ast.extraSlice(member.data.rhs)) |cn| {
+                    try all_conflicts.append(self.allocator, .{ .node = self.ast.nodes[cn] });
+                }
+            }
+        }
+        try self.emitByte(@intCast(all_conflicts.items.len));
+        for (all_conflicts.items) |cr| {
+            const method_name = self.ast.tokenSlice(cr.node.main_token);
+            const trait_name = self.ast.tokenSlice(self.ast.nodes[cr.node.data.lhs].main_token);
+            const method_idx = try self.addConstant(.{ .string = method_name });
+            const trait_idx = try self.addConstant(.{ .string = trait_name });
+            try self.emitU16(method_idx);
+            try self.emitU16(trait_idx);
+            if (cr.node.tag == .trait_insteadof) {
+                try self.emitByte(1);
+                const excluded = self.ast.extraSlice(cr.node.data.rhs);
+                try self.emitByte(@intCast(excluded.len));
+                for (excluded) |en| {
+                    const ename = self.ast.tokenSlice(self.ast.nodes[en].main_token);
+                    const eidx = try self.addConstant(.{ .string = ename });
+                    try self.emitU16(eidx);
+                }
+            } else {
+                try self.emitByte(2);
+                const alias = self.ast.tokenSlice(cr.node.data.rhs);
+                const aidx = try self.addConstant(.{ .string = alias });
+                try self.emitU16(aidx);
+            }
         }
     }
 

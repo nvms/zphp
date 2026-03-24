@@ -327,6 +327,7 @@ const Formatter = struct {
             .global_stmt => self.formatGlobalStmt(node),
             .static_var => self.formatStaticVar(node),
             .trait_use => self.formatTraitUse(node),
+            .trait_insteadof, .trait_as => {},
             .class_method, .static_class_method => self.formatClassMethod(node),
             .class_property, .static_class_property => self.formatClassProperty(node),
             .interface_method => self.formatInterfaceMethod(node),

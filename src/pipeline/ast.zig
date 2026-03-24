@@ -115,7 +115,9 @@ pub const Ast = struct {
             interface_decl, // main_token = interface name, lhs = extra index -> {count, method_nodes...}, rhs = parent interface node (0 = none)
             interface_method, // main_token = method name, lhs = extra index -> {count, param...}
             trait_decl, // main_token = trait name, lhs = extra index -> {count, member_nodes...}
-            trait_use, // main_token = use keyword, lhs = extra index -> {count, trait_name_nodes...}
+            trait_use, // main_token = use keyword, lhs = extra index -> {count, trait_name_nodes...}, rhs = extra index -> {count, conflict_nodes...} (0 = none)
+            trait_insteadof, // main_token = method name, lhs = trait name node, rhs = extra index -> {count, excluded_trait_nodes...}
+            trait_as, // main_token = method name, lhs = trait name node, rhs = alias token index (identifier or visibility keyword)
             new_expr, // main_token = class name, lhs = extra index -> {count, arg...}
             method_call, // main_token = method name, lhs = object, rhs = extra index -> {count, arg...}
             static_call, // main_token = method name, lhs = class name node, rhs = extra index -> {count, arg...}

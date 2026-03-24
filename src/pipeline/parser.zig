@@ -1057,17 +1057,53 @@ const Parser = struct {
             try traits.append(self.allocator, try self.parseQualifiedName());
         }
 
-        // skip conflict resolution block { ... } if present
+        var conflicts = std.ArrayListUnmanaged(u32){};
+        defer conflicts.deinit(self.allocator);
+
         if (self.peek() == .l_brace) {
             _ = self.advance();
-            while (self.peek() != .r_brace and self.peek() != .eof) _ = self.advance();
+            while (self.peek() != .r_brace and self.peek() != .eof) {
+                // TraitName::method insteadof OtherTrait;
+                // TraitName::method as alias;
+                // TraitName::method as public;
+                const trait_node = try self.parseQualifiedName();
+                _ = try self.expect(.colon_colon);
+                const method_tok = try self.expectFunctionName();
+
+                if (self.peek() == .kw_insteadof) {
+                    _ = self.advance();
+                    var excluded = std.ArrayListUnmanaged(u32){};
+                    defer excluded.deinit(self.allocator);
+                    try excluded.append(self.allocator, try self.parseQualifiedName());
+                    while (self.peek() == .comma) {
+                        _ = self.advance();
+                        try excluded.append(self.allocator, try self.parseQualifiedName());
+                    }
+                    const excluded_extra = try self.addExtraList(excluded.items);
+                    try conflicts.append(self.allocator, try self.addNode(.{
+                        .tag = .trait_insteadof,
+                        .main_token = method_tok,
+                        .data = .{ .lhs = trait_node, .rhs = excluded_extra },
+                    }));
+                } else if (self.peek() == .kw_as) {
+                    _ = self.advance();
+                    const alias_tok = self.advance();
+                    try conflicts.append(self.allocator, try self.addNode(.{
+                        .tag = .trait_as,
+                        .main_token = method_tok,
+                        .data = .{ .lhs = trait_node, .rhs = alias_tok },
+                    }));
+                }
+                _ = try self.expect(.semicolon);
+            }
             _ = try self.expect(.r_brace);
         } else {
             _ = try self.expect(.semicolon);
         }
 
-        const extra = try self.addExtraList(traits.items);
-        return self.addNode(.{ .tag = .trait_use, .main_token = use_tok, .data = .{ .lhs = extra } });
+        const trait_extra = try self.addExtraList(traits.items);
+        const conflict_extra: u32 = if (conflicts.items.len > 0) try self.addExtraList(conflicts.items) else 0;
+        return self.addNode(.{ .tag = .trait_use, .main_token = use_tok, .data = .{ .lhs = trait_extra, .rhs = conflict_extra } });
     }
 
     fn parseClassMethod(self: *Parser) Error!u32 {
