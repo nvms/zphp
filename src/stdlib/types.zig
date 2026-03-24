@@ -91,7 +91,7 @@ fn gettype(_: *NativeContext, args: []const Value) RuntimeError!Value {
         .float => "double",
         .string => "string",
         .array => "array",
-        .object, .generator => "object",
+        .object, .generator, .fiber => "object",
     } };
 }
 

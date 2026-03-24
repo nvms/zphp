@@ -88,9 +88,9 @@ fn varDumpValue(ctx: *NativeContext, val: Value, depth: usize) !void {
             try appendIndent(out, a, indent);
             try out.appendSlice(a, "}\n");
         },
-        .generator => {
+        .generator, .fiber => {
             try appendIndent(out, a, indent);
-            try out.appendSlice(a, "object(Generator)#1 (0) {\n");
+            try out.appendSlice(a, if (val == .generator) "object(Generator)#1 (0) {\n" else "object(Fiber)#1 (0) {\n");
             try appendIndent(out, a, indent);
             try out.appendSlice(a, "}\n");
         },
@@ -164,8 +164,8 @@ fn printRValue(a: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8), val: Valu
             try appendIndent(out, a, depth * 4);
             try out.appendSlice(a, ")\n");
         },
-        .generator => {
-            try out.appendSlice(a, "Generator Object\n");
+        .generator, .fiber => {
+            try out.appendSlice(a, if (val == .generator) "Generator Object\n" else "Fiber Object\n");
             try appendIndent(out, a, depth * 4);
             try out.appendSlice(a, "(\n");
             try appendIndent(out, a, depth * 4);
@@ -246,7 +246,7 @@ fn varExportValue(a: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8), val: V
             try out.append(a, ')');
         },
         .object => try out.appendSlice(a, "(object)"),
-        .generator => try out.appendSlice(a, "(object)"),
+        .generator, .fiber => try out.appendSlice(a, "(object)"),
     }
 }
 

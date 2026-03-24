@@ -3,6 +3,7 @@ const Value = @import("value.zig").Value;
 const PhpArray = @import("value.zig").PhpArray;
 const PhpObject = @import("value.zig").PhpObject;
 const Generator = @import("value.zig").Generator;
+const Fiber = @import("value.zig").Fiber;
 const Chunk = @import("../pipeline/bytecode.zig").Chunk;
 const OpCode = @import("../pipeline/bytecode.zig").OpCode;
 const ObjFunction = @import("../pipeline/bytecode.zig").ObjFunction;
@@ -130,6 +131,10 @@ pub const VM = struct {
     arrays: std.ArrayListUnmanaged(*PhpArray) = .{},
     objects: std.ArrayListUnmanaged(*PhpObject) = .{},
     generators: std.ArrayListUnmanaged(*Generator) = .{},
+    fibers: std.ArrayListUnmanaged(*Fiber) = .{},
+    current_fiber: ?*Fiber = null,
+    fiber_suspend_pending: bool = false,
+    fiber_suspend_value: Value = .null,
     captures: std.ArrayListUnmanaged(CaptureEntry) = .{},
     php_constants: std.StringHashMapUnmanaged(Value) = .{},
     classes: std.StringHashMapUnmanaged(ClassDef) = .{},
@@ -146,6 +151,7 @@ pub const VM = struct {
     request_vars: std.StringHashMapUnmanaged(Value) = .{},
     exception_handlers: [32]ExceptionHandler = undefined,
     handler_count: usize = 0,
+    handler_floor: usize = 0,
     allocator: Allocator,
 
     const StaticEntry = struct {
@@ -160,7 +166,7 @@ pub const VM = struct {
         chunk: *const Chunk, // chunk the handler belongs to
     };
 
-    const RefBinding = struct { caller_var: []const u8, param_name: []const u8 };
+    const RefBinding = Fiber.RefBinding;
     const CallFrame = struct {
         chunk: *const Chunk,
         ip: usize,
@@ -251,6 +257,11 @@ pub const VM = struct {
             self.allocator.destroy(g);
         }
         self.generators.deinit(self.allocator);
+        for (self.fibers.items) |f| {
+            f.deinit(self.allocator);
+            self.allocator.destroy(f);
+        }
+        self.fibers.deinit(self.allocator);
         var class_iter = self.classes.valueIterator();
         while (class_iter.next()) |c| c.deinit(self.allocator);
         self.classes.deinit(self.allocator);
@@ -302,6 +313,15 @@ pub const VM = struct {
             self.allocator.destroy(g);
         }
         self.generators.clearRetainingCapacity();
+        for (self.fibers.items) |f| {
+            f.deinit(self.allocator);
+            self.allocator.destroy(f);
+        }
+        self.fibers.clearRetainingCapacity();
+        self.current_fiber = null;
+        self.fiber_suspend_pending = false;
+        self.fiber_suspend_value = .null;
+        self.handler_floor = 0;
         self.captures.clearRetainingCapacity();
         self.ob_stack.clearRetainingCapacity();
         self.request_vars.clearRetainingCapacity();
@@ -775,7 +795,7 @@ pub const VM = struct {
 
                 .throw => {
                     const exception = self.pop();
-                    if (self.handler_count == 0) return error.RuntimeError;
+                    if (self.handler_count <= self.handler_floor) return error.RuntimeError;
 
                     const handler = self.exception_handlers[self.handler_count - 1];
                     self.handler_count -= 1;
@@ -1168,6 +1188,22 @@ pub const VM = struct {
                     const arg_count = self.readByte();
                     const class_name = self.currentChunk().constants.items[name_idx].string;
 
+                    if (std.mem.eql(u8, class_name, "Fiber")) {
+                        const ac: usize = arg_count;
+                        if (ac < 1) {
+                            self.sp -= ac;
+                            if (try self.throwBuiltinException("Error", "Fiber::__construct() expects a callable")) continue;
+                            return error.RuntimeError;
+                        }
+                        const callable = self.stack[self.sp - ac];
+                        self.sp -= ac;
+                        const fiber = try self.allocator.create(Fiber);
+                        fiber.* = .{ .callable = callable };
+                        try self.fibers.append(self.allocator, fiber);
+                        self.push(.{ .fiber = fiber });
+                        continue;
+                    }
+
                     const obj = try self.allocator.create(PhpObject);
                     obj.* = .{ .class_name = class_name };
                     try self.objects.append(self.allocator, obj);
@@ -1309,6 +1345,75 @@ pub const VM = struct {
                         continue;
                     }
 
+                    if (obj_val == .fiber) {
+                        const fiber = obj_val.fiber;
+                        // args are at stack[sp-ac..sp], fiber at stack[sp-ac-1]
+                        // save args before popping
+                        var args_buf: [16]Value = undefined;
+                        for (0..ac) |i| args_buf[i] = self.stack[self.sp - ac + i];
+                        self.sp -= ac;
+                        self.sp -= 1;
+
+                        if (std.mem.eql(u8, method_name, "start")) {
+                            if (fiber.state != .created) {
+                                if (try self.throwBuiltinException("FiberError", "Cannot start a fiber that is not in the created state")) continue;
+                                return error.RuntimeError;
+                            }
+                            fiber.state = .running;
+                            const fb = self.frame_count;
+                            const sb = self.sp;
+                            const hb = self.handler_count;
+
+                            for (0..ac) |i| self.push(args_buf[i]);
+                            if (fiber.callable == .string) {
+                                try self.callNamedFunction(fiber.callable.string, @intCast(ac));
+                            } else {
+                                var ctx = self.makeContext(null);
+                                _ = try ctx.invokeCallable(fiber.callable, args_buf[0..ac]);
+                                fiber.state = .terminated;
+                                self.push(.null);
+                                continue;
+                            }
+
+                            const result = try self.executeFiber(fiber, fb, sb, hb);
+                            self.push(result);
+                        } else if (std.mem.eql(u8, method_name, "resume")) {
+                            if (fiber.state != .suspended) {
+                                if (try self.throwBuiltinException("FiberError", "Cannot resume a fiber that is not suspended")) continue;
+                                return error.RuntimeError;
+                            }
+                            fiber.state = .running;
+                            const fb = self.frame_count;
+                            const sb = self.sp;
+                            const hb = self.handler_count;
+
+                            self.restoreFiberState(fiber, fb, sb);
+
+                            const resume_val = if (ac > 0) args_buf[0] else Value{ .null = {} };
+                            self.push(resume_val);
+
+                            const result = try self.executeFiber(fiber, fb, sb, hb);
+                            self.push(result);
+                        } else if (std.mem.eql(u8, method_name, "getReturn")) {
+                            if (fiber.state != .terminated) {
+                                if (try self.throwBuiltinException("FiberError", "Cannot get return value of a fiber that hasn't terminated")) continue;
+                                return error.RuntimeError;
+                            }
+                            self.push(fiber.return_value);
+                        } else if (std.mem.eql(u8, method_name, "isStarted")) {
+                            self.push(.{ .bool = fiber.state != .created });
+                        } else if (std.mem.eql(u8, method_name, "isRunning")) {
+                            self.push(.{ .bool = fiber.state == .running });
+                        } else if (std.mem.eql(u8, method_name, "isSuspended")) {
+                            self.push(.{ .bool = fiber.state == .suspended });
+                        } else if (std.mem.eql(u8, method_name, "isTerminated")) {
+                            self.push(.{ .bool = fiber.state == .terminated });
+                        } else {
+                            return error.RuntimeError;
+                        }
+                        continue;
+                    }
+
                     if (obj_val != .object) return error.RuntimeError;
                     const obj = obj_val.object;
 
@@ -1367,6 +1472,24 @@ pub const VM = struct {
                     const arg_count = self.readByte();
                     var class_name = self.currentChunk().constants.items[class_idx].string;
                     const method_name = self.currentChunk().constants.items[method_idx].string;
+
+                    if (std.mem.eql(u8, class_name, "Fiber") and std.mem.eql(u8, method_name, "suspend")) {
+                        const ac: usize = arg_count;
+                        const suspend_val = if (ac > 0) blk: {
+                            const v = self.stack[self.sp - 1];
+                            self.sp -= ac;
+                            break :blk v;
+                        } else .null;
+
+                        if (self.current_fiber == null) {
+                            if (try self.throwBuiltinException("FiberError", "Cannot call Fiber::suspend() when not in a Fiber")) continue;
+                            return error.RuntimeError;
+                        }
+
+                        self.fiber_suspend_pending = true;
+                        self.fiber_suspend_value = suspend_val;
+                        return error.RuntimeError;
+                    }
 
                     // resolve parent/self relative to the defining class, not $this
                     const this_val = self.currentFrame().vars.get("$this");
@@ -1560,7 +1683,7 @@ pub const VM = struct {
         try obj.set(self.allocator, "code", .{ .int = 0 });
         try self.objects.append(self.allocator, obj);
 
-        if (self.handler_count == 0) return false;
+        if (self.handler_count <= self.handler_floor) return false;
 
         const handler = self.exception_handlers[self.handler_count - 1];
         self.handler_count -= 1;
@@ -1989,6 +2112,123 @@ pub const VM = struct {
             try self.bindArgs(&new_vars, func, args);
             return self.executeFunction(func, new_vars);
         } else return error.RuntimeError;
+    }
+
+    // ==================================================================
+    // fibers
+    // ==================================================================
+
+    fn executeFiber(self: *VM, fiber: *Fiber, base_frame: usize, base_sp: usize, base_handler: usize) RuntimeError!Value {
+        const prev_fiber = self.current_fiber;
+        const prev_floor = self.handler_floor;
+        self.current_fiber = fiber;
+        self.handler_floor = base_handler;
+
+        self.runUntilFrame(base_frame) catch |err| {
+            self.current_fiber = prev_fiber;
+            self.handler_floor = prev_floor;
+            if (self.fiber_suspend_pending) {
+                self.fiber_suspend_pending = false;
+                try self.saveFiberState(fiber, base_frame, base_sp, base_handler);
+                fiber.state = .suspended;
+                const result = self.fiber_suspend_value;
+                self.fiber_suspend_value = .null;
+                return result;
+            }
+            fiber.state = .terminated;
+            // clean up any frames left on the stack
+            while (self.frame_count > base_frame) {
+                self.frame_count -= 1;
+                self.frames[self.frame_count].ref_bindings.deinit(self.allocator);
+                self.frames[self.frame_count].vars.deinit(self.allocator);
+            }
+            self.sp = base_sp;
+            self.handler_count = base_handler;
+            return err;
+        };
+
+        self.current_fiber = prev_fiber;
+        self.handler_floor = prev_floor;
+        fiber.state = .terminated;
+        if (self.sp > base_sp) {
+            fiber.return_value = self.pop();
+        }
+        self.sp = base_sp;
+        return .null;
+    }
+
+    fn saveFiberState(self: *VM, fiber: *Fiber, base_frame: usize, base_sp: usize, base_handler: usize) !void {
+        // clear previously saved state
+        for (fiber.saved_frames.items) |*f| {
+            f.vars.deinit(self.allocator);
+            f.ref_bindings.deinit(self.allocator);
+        }
+        fiber.saved_frames.clearRetainingCapacity();
+        fiber.saved_stack.clearRetainingCapacity();
+        fiber.saved_handlers.clearRetainingCapacity();
+
+        // save frames (move ownership of vars/ref_bindings to fiber)
+        for (self.frames[base_frame..self.frame_count]) |frame| {
+            try fiber.saved_frames.append(self.allocator, .{
+                .chunk = frame.chunk,
+                .ip = frame.ip,
+                .vars = frame.vars,
+                .generator = frame.generator,
+                .ref_bindings = frame.ref_bindings,
+            });
+        }
+        self.frame_count = base_frame;
+
+        // save stack values
+        for (self.stack[base_sp..self.sp]) |val| {
+            try fiber.saved_stack.append(self.allocator, val);
+        }
+        self.sp = base_sp;
+
+        // save exception handlers as relative offsets
+        for (self.exception_handlers[base_handler..self.handler_count]) |h| {
+            try fiber.saved_handlers.append(self.allocator, .{
+                .catch_ip = h.catch_ip,
+                .frame_count_offset = h.frame_count - base_frame,
+                .sp_offset = h.sp - base_sp,
+                .chunk = h.chunk,
+            });
+        }
+        self.handler_count = base_handler;
+    }
+
+    fn restoreFiberState(self: *VM, fiber: *Fiber, base_frame: usize, base_sp: usize) void {
+        // restore frames (move ownership back to VM)
+        for (fiber.saved_frames.items, 0..) |frame, i| {
+            self.frames[base_frame + i] = .{
+                .chunk = frame.chunk,
+                .ip = frame.ip,
+                .vars = frame.vars,
+                .generator = frame.generator,
+                .ref_bindings = frame.ref_bindings,
+            };
+        }
+        self.frame_count = base_frame + fiber.saved_frames.items.len;
+        fiber.saved_frames.clearRetainingCapacity();
+
+        // restore stack
+        for (fiber.saved_stack.items) |val| {
+            self.stack[self.sp] = val;
+            self.sp += 1;
+        }
+        fiber.saved_stack.clearRetainingCapacity();
+
+        // restore exception handlers with absolute values
+        for (fiber.saved_handlers.items) |h| {
+            self.exception_handlers[self.handler_count] = .{
+                .catch_ip = h.catch_ip,
+                .frame_count = base_frame + h.frame_count_offset,
+                .sp = base_sp + h.sp_offset,
+                .chunk = h.chunk,
+            };
+            self.handler_count += 1;
+        }
+        fiber.saved_handlers.clearRetainingCapacity();
     }
 
     // ==================================================================

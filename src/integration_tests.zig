@@ -899,6 +899,75 @@ test "throw in function caught by caller" {
     , "boom");
 }
 
+test "fiber basic start suspend resume" {
+    try expectOutput(
+        \\<?php
+        \\$fiber = new Fiber(function() {
+        \\    Fiber::suspend('first');
+        \\    return 'done';
+        \\});
+        \\echo $fiber->start();
+        \\echo " ";
+        \\$fiber->resume();
+        \\echo $fiber->getReturn();
+    , "first done");
+}
+
+test "fiber deep suspension" {
+    try expectOutput(
+        \\<?php
+        \\function inner() { Fiber::suspend('deep'); }
+        \\function middle() { inner(); }
+        \\$f = new Fiber(function() { middle(); return 'ok'; });
+        \\echo $f->start();
+        \\echo " ";
+        \\$f->resume();
+        \\echo $f->getReturn();
+    , "deep ok");
+}
+
+test "fiber resume value" {
+    try expectOutput(
+        \\<?php
+        \\$f = new Fiber(function() {
+        \\    $v = Fiber::suspend();
+        \\    echo $v;
+        \\});
+        \\$f->start();
+        \\$f->resume('hello');
+    , "hello");
+}
+
+test "fiber multiple cycles" {
+    try expectOutput(
+        \\<?php
+        \\$f = new Fiber(function() {
+        \\    $sum = 0;
+        \\    for ($i = 0; $i < 3; $i++) {
+        \\        $val = Fiber::suspend($sum);
+        \\        $sum += $val;
+        \\    }
+        \\    return $sum;
+        \\});
+        \\echo $f->start() . " ";
+        \\echo $f->resume(10) . " ";
+        \\echo $f->resume(20) . " ";
+        \\$f->resume(30);
+        \\echo $f->getReturn();
+    , "0 10 30 60");
+}
+
+test "fiber start with args" {
+    try expectOutput(
+        \\<?php
+        \\$f = new Fiber(function($a, $b) {
+        \\    return $a + $b;
+        \\});
+        \\$f->start(3, 4);
+        \\echo $f->getReturn();
+    , "7");
+}
+
 test "throw in method caught by caller" {
     try expectOutput(
         \\<?php

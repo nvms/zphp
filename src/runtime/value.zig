@@ -85,6 +85,47 @@ pub const Generator = struct {
     }
 };
 
+pub const Fiber = struct {
+    state: State = .created,
+    callable: Value = .null,
+
+    saved_frames: std.ArrayListUnmanaged(SavedFrame) = .{},
+    saved_stack: std.ArrayListUnmanaged(Value) = .{},
+    saved_handlers: std.ArrayListUnmanaged(SavedHandler) = .{},
+
+    suspend_value: Value = .null,
+    return_value: Value = .null,
+
+    pub const State = enum { created, running, suspended, terminated };
+
+    pub const SavedFrame = struct {
+        chunk: *const Chunk,
+        ip: usize,
+        vars: std.StringHashMapUnmanaged(Value),
+        generator: ?*Generator = null,
+        ref_bindings: std.ArrayListUnmanaged(RefBinding),
+    };
+
+    pub const RefBinding = struct { caller_var: []const u8, param_name: []const u8 };
+
+    pub const SavedHandler = struct {
+        catch_ip: usize,
+        frame_count_offset: usize,
+        sp_offset: usize,
+        chunk: *const Chunk,
+    };
+
+    pub fn deinit(self: *Fiber, allocator: std.mem.Allocator) void {
+        for (self.saved_frames.items) |*f| {
+            f.vars.deinit(allocator);
+            f.ref_bindings.deinit(allocator);
+        }
+        self.saved_frames.deinit(allocator);
+        self.saved_stack.deinit(allocator);
+        self.saved_handlers.deinit(allocator);
+    }
+};
+
 pub const PhpObject = struct {
     class_name: []const u8,
     properties: std.StringHashMapUnmanaged(Value) = .{},
@@ -111,6 +152,7 @@ pub const Value = union(enum) {
     array: *PhpArray,
     object: *PhpObject,
     generator: *Generator,
+    fiber: *Fiber,
 
     pub fn isTruthy(self: Value) bool {
         return switch (self) {
@@ -120,7 +162,7 @@ pub const Value = union(enum) {
             .float => |f| f != 0.0,
             .string => |s| s.len > 0 and !std.mem.eql(u8, s, "0"),
             .array => |a| a.entries.items.len > 0,
-            .object, .generator => true,
+            .object, .generator, .fiber => true,
         };
     }
 
@@ -168,7 +210,7 @@ pub const Value = union(enum) {
     }
 
     pub fn equal(a: Value, b: Value) bool {
-        if (a == .array or b == .array or a == .object or b == .object) return false;
+        if (a == .array or b == .array or a == .object or b == .object or a == .fiber or b == .fiber) return false;
         if (a == .string and b == .string) return std.mem.eql(u8, a.string, b.string);
         return toFloat(a) == toFloat(b);
     }
@@ -184,11 +226,12 @@ pub const Value = union(enum) {
             .array => |ap| ap == b.array,
             .object => |ao| ao == b.object,
             .generator => |ag| ag == b.generator,
+            .fiber => |af| af == b.fiber,
         };
     }
 
     pub fn lessThan(a: Value, b: Value) bool {
-        if (a == .object or b == .object or a == .generator or b == .generator) return false;
+        if (a == .object or b == .object or a == .generator or b == .generator or a == .fiber or b == .fiber) return false;
         if (a == .string and b == .string) {
             return std.mem.order(u8, a.string, b.string) == .lt;
         }
@@ -196,7 +239,7 @@ pub const Value = union(enum) {
     }
 
     pub fn compare(a: Value, b: Value) i64 {
-        if (a == .object or b == .object or a == .generator or b == .generator) return 0;
+        if (a == .object or b == .object or a == .generator or b == .generator or a == .fiber or b == .fiber) return 0;
         if (a == .string and b == .string) {
             return switch (std.mem.order(u8, a.string, b.string)) {
                 .lt => -1,
@@ -218,7 +261,7 @@ pub const Value = union(enum) {
             .int => |i| i,
             .float => |f| @intFromFloat(f),
             .string => |s| std.fmt.parseInt(i64, s, 10) catch 0,
-            .array, .object, .generator => 0,
+            .array, .object, .generator, .fiber => 0,
         };
     }
 
@@ -229,7 +272,7 @@ pub const Value = union(enum) {
             .int => |i| @floatFromInt(i),
             .float => |f| f,
             .string => |s| std.fmt.parseFloat(f64, s) catch 0.0,
-            .array, .object, .generator => 0.0,
+            .array, .object, .generator, .fiber => 0.0,
         };
     }
 
@@ -240,7 +283,7 @@ pub const Value = union(enum) {
             .bool => |b| .{ .int = if (b) 1 else 0 },
             .float => |f| .{ .int = @intFromFloat(f) },
             .null => .{ .int = 0 },
-            .array, .object, .generator => .{ .int = 0 },
+            .array, .object, .generator, .fiber => .{ .int = 0 },
         };
     }
 
@@ -283,6 +326,7 @@ pub const Value = union(enum) {
             .array => try buf.appendSlice(allocator, "Array"),
             .object => try buf.appendSlice(allocator, "Object"),
             .generator => try buf.appendSlice(allocator, ""),
+            .fiber => try buf.appendSlice(allocator, ""),
         }
     }
 

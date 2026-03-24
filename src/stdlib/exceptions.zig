@@ -40,6 +40,7 @@ pub fn register(vm: *VM, a: Allocator) !void {
         .{ "DivisionByZeroError", "ArithmeticError" },
         .{ "AssertionError", "Exception" },
         .{ "Error", "Exception" },
+        .{ "FiberError", "Error" },
     };
 
     inline for (subclasses) |entry| {
