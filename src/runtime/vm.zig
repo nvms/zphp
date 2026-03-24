@@ -501,8 +501,12 @@ pub const VM = struct {
                     const b = self.pop();
                     const a = self.pop();
                     var buf = std.ArrayListUnmanaged(u8){};
-                    try a.format(&buf, self.allocator);
-                    try b.format(&buf, self.allocator);
+                    if (a == .object) {
+                        try buf.appendSlice(self.allocator, try self.objectToString(a.object));
+                    } else try a.format(&buf, self.allocator);
+                    if (b == .object) {
+                        try buf.appendSlice(self.allocator, try self.objectToString(b.object));
+                    } else try b.format(&buf, self.allocator);
                     const owned = try buf.toOwnedSlice(self.allocator);
                     try self.strings.append(self.allocator, owned);
                     self.push(.{ .string = owned });
@@ -754,7 +758,12 @@ pub const VM = struct {
 
                 .echo => {
                     const v = self.pop();
-                    try v.format(&self.output, self.allocator);
+                    if (v == .object) {
+                        const s = try self.objectToString(v.object);
+                        try self.output.appendSlice(self.allocator, s);
+                    } else {
+                        try v.format(&self.output, self.allocator);
+                    }
                 },
                 .halt => return,
 
@@ -2263,6 +2272,25 @@ pub const VM = struct {
                 i += 1;
             }
         }
+    }
+
+    fn objectToString(self: *VM, obj: *PhpObject) RuntimeError![]const u8 {
+        const method_name = self.resolveMethod(obj.class_name, "__toString") catch return "Object";
+        if (self.functions.get(method_name)) |func| {
+            var new_vars: std.StringHashMapUnmanaged(Value) = .{};
+            try new_vars.put(self.allocator, "$this", .{ .object = obj });
+            self.frames[self.frame_count] = .{ .chunk = &func.chunk, .ip = 0, .vars = new_vars };
+            self.frame_count += 1;
+            try self.runLoop(self.frame_count - 1);
+            const result = self.pop();
+            if (result == .string) return result.string;
+            var buf = std.ArrayListUnmanaged(u8){};
+            try result.format(&buf, self.allocator);
+            const s = try buf.toOwnedSlice(self.allocator);
+            try self.strings.append(self.allocator, s);
+            return s;
+        }
+        return "Object";
     }
 
     fn writebackRefs(self: *VM) !void {
