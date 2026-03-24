@@ -543,7 +543,6 @@ const Compiler = struct {
     }
 
     fn emitInterpolationExpr(self: *Compiler, expr: []const u8) Error!void {
-        // handles: $var and $var[key]
         if (expr.len == 0 or expr[0] != '$') return;
 
         var j: usize = 1;
@@ -554,11 +553,46 @@ const Compiler = struct {
         try self.emitOp(.get_var);
         try self.emitU16(var_idx);
 
-        if (j < expr.len and expr[j] == '[') {
-            const bracket_end = std.mem.indexOfScalarPos(u8, expr, j, ']') orelse expr.len;
-            const key_str = expr[j + 1 .. bracket_end];
-            try self.emitArrayKeyAccess(key_str);
+        while (j < expr.len) {
+            if (expr[j] == '[') {
+                const bracket_end = findMatchingBracket(expr, j) orelse break;
+                const key_str = expr[j + 1 .. bracket_end];
+                try self.emitArrayKeyAccess(key_str);
+                j = bracket_end + 1;
+            } else if (j + 1 < expr.len and expr[j] == '-' and expr[j + 1] == '>') {
+                j += 2;
+                var k = j;
+                while (k < expr.len and isVarChar(expr[k])) k += 1;
+                if (k == j) break;
+                const prop_name = expr[j..k];
+                if (k < expr.len and expr[k] == '(') {
+                    const paren_end = std.mem.indexOfScalarPos(u8, expr, k, ')') orelse break;
+                    const name_idx = try self.addConstant(.{ .string = prop_name });
+                    try self.emitOp(.method_call);
+                    try self.emitU16(name_idx);
+                    try self.emitByte(0);
+                    j = paren_end + 1;
+                } else {
+                    const name_idx = try self.addConstant(.{ .string = prop_name });
+                    try self.emitOp(.get_prop);
+                    try self.emitU16(name_idx);
+                    j = k;
+                }
+            } else break;
         }
+    }
+
+    fn findMatchingBracket(s: []const u8, start: usize) ?usize {
+        var depth: usize = 0;
+        var i = start;
+        while (i < s.len) : (i += 1) {
+            if (s[i] == '[') depth += 1
+            else if (s[i] == ']') {
+                depth -= 1;
+                if (depth == 0) return i;
+            }
+        }
+        return null;
     }
 
     fn emitArrayKeyAccess(self: *Compiler, key: []const u8) Error!void {
