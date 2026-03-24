@@ -1716,6 +1716,23 @@ test "parse_url empty query" {
     , "has ");
 }
 
+test "parse_url empty string" {
+    try expectOutput(
+        \\<?php
+        \\$u = parse_url("");
+        \\echo $u["path"];
+        \\echo isset($u["scheme"]) ? "y" : "n";
+    , "n");
+}
+
+test "parse_url mailto scheme" {
+    try expectOutput(
+        \\<?php
+        \\$u = parse_url("mailto:user@example.com");
+        \\echo $u["scheme"] . " " . $u["path"];
+    , "mailto user@example.com");
+}
+
 test "strstr empty before_needle" {
     try expectOutput(
         \\<?php

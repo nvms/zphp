@@ -154,10 +154,11 @@ echo $url18["query"] . "\n";
 $url19 = parse_url("https://example.com/search?q=a%26b&lang=en");
 echo $url19["query"] . "\n";
 
-// empty string - PHP returns ["path" => ""], zphp returns []
-// test component extraction on empty string instead
-var_dump(parse_url("", PHP_URL_SCHEME));
-var_dump(parse_url("", PHP_URL_HOST));
+// empty string
+$url20 = parse_url("");
+echo $url20["path"] . "\n";
+var_dump(isset($url20["scheme"]));
+var_dump(isset($url20["host"]));
 
 // user without password
 $url21 = parse_url("https://user@example.com/path");
@@ -173,10 +174,11 @@ echo $url22["host"] . "\n";
 $url23 = parse_url("https://example.com/api?a=1&b=2&c=3");
 echo $url23["query"] . "\n";
 
-// scheme with path (no authority)
-$url24 = parse_url("http://example.com/test:8080");
-echo $url24["host"] . "\n";
+// mailto-style (scheme:path, no //)
+$url24 = parse_url("mailto:user@example.com");
+echo $url24["scheme"] . "\n";
 echo $url24["path"] . "\n";
+var_dump(isset($url24["host"]));
 
 // path with dots
 $url25 = parse_url("https://example.com/path/../other/./file");

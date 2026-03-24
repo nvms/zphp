@@ -1539,14 +1539,33 @@ fn native_parse_url(ctx: *NativeContext, args: []const Value) RuntimeError!Value
     var scheme_end: usize = 0;
     var scheme: ?[]const u8 = null;
     var authority_start: usize = 0;
+    var has_authority = false;
 
     if (std.mem.indexOf(u8, url, "://")) |pos| {
         scheme = url[0..pos];
         scheme_end = pos + 3;
         authority_start = scheme_end;
+        has_authority = true;
     } else if (url.len >= 2 and url[0] == '/' and url[1] == '/') {
         authority_start = 2;
         scheme_end = 2;
+        has_authority = true;
+    } else if (std.mem.indexOf(u8, url, ":")) |colon| {
+        // scheme:path (no //) - e.g. mailto:user@example.com
+        if (colon > 0) {
+            var valid_scheme = true;
+            for (url[0..colon]) |c| {
+                if (!std.ascii.isAlphabetic(c) and c != '+' and c != '-' and c != '.') {
+                    valid_scheme = false;
+                    break;
+                }
+            }
+            if (valid_scheme) {
+                scheme = url[0..colon];
+                scheme_end = colon + 1;
+                authority_start = scheme_end;
+            }
+        }
     }
 
     var rest = url[authority_start..];
@@ -1572,7 +1591,7 @@ fn native_parse_url(ctx: *NativeContext, args: []const Value) RuntimeError!Value
     var pass: ?[]const u8 = null;
     var path: ?[]const u8 = null;
 
-    if (scheme != null or (url.len >= 2 and url[0] == '/' and url[1] == '/')) {
+    if (has_authority) {
         var authority = rest;
         if (std.mem.indexOf(u8, rest, "/")) |pos| {
             authority = rest[0..pos];
@@ -1606,7 +1625,8 @@ fn native_parse_url(ctx: *NativeContext, args: []const Value) RuntimeError!Value
             host = authority;
         }
     } else {
-        if (rest.len > 0) path = rest;
+        // for non-authority URLs, set path if non-empty OR if the entire URL is empty
+        if (rest.len > 0 or url.len == 0) path = rest;
     }
 
     if (component) |c| {
