@@ -421,7 +421,8 @@ pub const VM = struct {
                 .set_var => {
                     const idx = self.readU16();
                     const name = self.currentChunk().constants.items[idx].string;
-                    try self.currentFrame().vars.put(self.allocator, name, self.peek());
+                    const val = try self.copyValue(self.peek());
+                    try self.currentFrame().vars.put(self.allocator, name, val);
                 },
 
                 .add => self.binaryOp(Value.add),
@@ -929,11 +930,12 @@ pub const VM = struct {
                 .get_global => {
                     const name_idx = self.readU16();
                     const name = self.currentChunk().constants.items[name_idx].string;
-                    const global_val = if (self.frame_count > 1)
+                    const raw_val = if (self.frame_count > 1)
                         self.frames[0].vars.get(name) orelse
                             self.php_constants.get(name) orelse .null
                     else
                         self.currentFrame().vars.get(name) orelse .null;
+                    const global_val = try self.copyValue(raw_val);
                     try self.currentFrame().vars.put(self.allocator, name, global_val);
                     if (self.frame_count > 1) {
                         try self.global_vars.append(self.allocator, .{
@@ -1397,7 +1399,7 @@ pub const VM = struct {
                 .set_prop => {
                     const name_idx = self.readU16();
                     const prop_name = self.currentChunk().constants.items[name_idx].string;
-                    const val = self.pop();
+                    const val = try self.copyValue(self.pop());
                     const obj_val = self.pop();
                     if (obj_val == .object) {
                         const vr = self.findPropertyVisibility(obj_val.object.class_name, prop_name);
@@ -1762,7 +1764,7 @@ pub const VM = struct {
 
                     class_name = self.resolveStaticClassName(class_name);
 
-                    const val = self.peek();
+                    const val = try self.copyValue(self.peek());
                     if (self.classes.getPtr(class_name)) |cls| {
                         try cls.static_props.put(self.allocator, prop_name, val);
                     }
@@ -1890,7 +1892,7 @@ pub const VM = struct {
         while (i < self.global_vars.items.len) {
             const entry = self.global_vars.items[i];
             if (entry.frame_depth == self.frame_count) {
-                const val = self.currentFrame().vars.get(entry.var_name) orelse .null;
+                const val = try self.copyValue(self.currentFrame().vars.get(entry.var_name) orelse .null);
                 try self.frames[0].vars.put(self.allocator, entry.var_name, val);
                 _ = self.global_vars.swapRemove(i);
             } else {
@@ -2098,17 +2100,22 @@ pub const VM = struct {
                 try self.initObjectProperties(obj, parent);
             }
             for (cls.properties.items) |prop| {
-                const val = if (prop.default == .array) blk: {
-                    const src = prop.default.array;
-                    const copy = try self.allocator.create(PhpArray);
-                    copy.* = .{ .next_int_key = src.next_int_key, .cursor = src.cursor };
-                    try copy.entries.appendSlice(self.allocator, src.entries.items);
-                    try self.arrays.append(self.allocator, copy);
-                    break :blk Value{ .array = copy };
-                } else prop.default;
-                try obj.set(self.allocator, prop.name, val);
+                try obj.set(self.allocator, prop.name, try self.copyValue(prop.default));
             }
         }
+    }
+
+    fn cloneArray(self: *VM, src: *PhpArray) RuntimeError!*PhpArray {
+        const copy = self.allocator.create(PhpArray) catch return error.RuntimeError;
+        copy.* = .{ .next_int_key = src.next_int_key, .cursor = src.cursor };
+        copy.entries.appendSlice(self.allocator, src.entries.items) catch return error.RuntimeError;
+        self.arrays.append(self.allocator, copy) catch return error.RuntimeError;
+        return copy;
+    }
+
+    fn copyValue(self: *VM, val: Value) RuntimeError!Value {
+        if (val != .array) return val;
+        return .{ .array = try self.cloneArray(val.array) };
     }
 
     pub fn makeContext(self: *VM, call_name: ?[]const u8) NativeContext {
@@ -2118,7 +2125,7 @@ pub const VM = struct {
     fn bindClosures(self: *VM, vars: *std.StringHashMapUnmanaged(Value), name: []const u8) !void {
         for (self.captures.items) |cap| {
             if (std.mem.eql(u8, cap.closure_name, name)) {
-                try vars.put(self.allocator, cap.var_name, cap.value);
+                try vars.put(self.allocator, cap.var_name, try self.copyValue(cap.value));
             }
         }
 
@@ -2131,7 +2138,7 @@ pub const VM = struct {
                     var it = parent.vars.iterator();
                     while (it.next()) |entry| {
                         if (!vars.contains(entry.key_ptr.*)) {
-                            try vars.put(self.allocator, entry.key_ptr.*, entry.value_ptr.*);
+                            try vars.put(self.allocator, entry.key_ptr.*, try self.copyValue(entry.value_ptr.*));
                         }
                     }
                 }
@@ -2152,7 +2159,7 @@ pub const VM = struct {
 
     fn bindArgs(self: *VM, vars: *std.StringHashMapUnmanaged(Value), func: *const ObjFunction, args: []const Value) !void {
         for (0..args.len) |i| {
-            try vars.put(self.allocator, func.params[i], args[i]);
+            try vars.put(self.allocator, func.params[i], try self.copyValue(args[i]));
         }
         try self.fillDefaults(vars, func, args.len);
     }
@@ -2194,7 +2201,7 @@ pub const VM = struct {
             if (func.is_variadic) {
                 const fixed: usize = func.arity - 1;
                 for (0..@min(ac, fixed)) |i| {
-                    try new_vars.put(self.allocator, func.params[i], self.stack[self.sp - ac + i]);
+                    try new_vars.put(self.allocator, func.params[i], try self.copyValue(self.stack[self.sp - ac + i]));
                 }
                 const rest_arr = try self.allocator.create(PhpArray);
                 rest_arr.* = .{};
@@ -2205,7 +2212,7 @@ pub const VM = struct {
                 try new_vars.put(self.allocator, func.params[fixed], .{ .array = rest_arr });
             } else {
                 for (0..ac) |i| {
-                    try new_vars.put(self.allocator, func.params[i], self.stack[self.sp - ac + i]);
+                    try new_vars.put(self.allocator, func.params[i], try self.copyValue(self.stack[self.sp - ac + i]));
                 }
             }
             self.sp -= ac;
