@@ -2048,6 +2048,7 @@ pub const VM = struct {
                     gen.implicit_key += 1;
                     gen.ip = self.currentFrame().ip;
                     gen.vars = self.currentFrame().vars;
+                    try self.saveGeneratorStack(gen);
                     gen.state = .suspended;
                     self.frame_count -= 1;
                     return;
@@ -2062,6 +2063,7 @@ pub const VM = struct {
                     if (key == .int and key.int >= gen.implicit_key) gen.implicit_key = key.int + 1;
                     gen.ip = self.currentFrame().ip;
                     gen.vars = self.currentFrame().vars;
+                    try self.saveGeneratorStack(gen);
                     gen.state = .suspended;
                     self.frame_count -= 1;
                     return;
@@ -2238,6 +2240,12 @@ pub const VM = struct {
         gen.state = .running;
         const saved_sp = self.sp;
         const return_frame = self.frame_count;
+
+        // restore saved stack from previous suspension
+        for (gen.stack.items) |v| self.push(v);
+        gen.stack.clearRetainingCapacity();
+        gen.base_sp = saved_sp;
+
         self.frames[self.frame_count] = .{
             .chunk = &gen.func.chunk,
             .ip = gen.ip,
@@ -2258,6 +2266,13 @@ pub const VM = struct {
             gen.state = .completed;
         }
         self.sp = saved_sp;
+    }
+
+    fn saveGeneratorStack(self: *VM, gen: *Generator) !void {
+        gen.stack.clearRetainingCapacity();
+        if (self.sp > gen.base_sp) {
+            try gen.stack.appendSlice(self.allocator, self.stack[gen.base_sp..self.sp]);
+        }
     }
 
     fn writebackGlobals(self: *VM) !void {

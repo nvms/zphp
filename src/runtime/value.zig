@@ -66,6 +66,7 @@ pub const Generator = struct {
     ip: usize = 0,
     vars: std.StringHashMapUnmanaged(Value) = .{},
     stack: std.ArrayListUnmanaged(Value) = .{},
+    base_sp: usize = 0,
     current_value: Value = .null,
     current_key: Value = .null,
     return_value: Value = .null,
