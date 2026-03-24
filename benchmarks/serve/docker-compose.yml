@@ -1,0 +1,16 @@
+services:
+  php-fpm:
+    build:
+      context: .
+      dockerfile: Dockerfile.fpm
+    ports:
+      - "8081:80"
+    platform: linux/amd64
+
+  swoole:
+    build:
+      context: .
+      dockerfile: Dockerfile.swoole
+    ports:
+      - "8082:9501"
+    platform: linux/amd64

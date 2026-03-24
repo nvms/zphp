@@ -156,7 +156,7 @@ critical boundaries:
 - loaded files execute in isolated scope (known limitation: variables don't leak to caller)
 
 ### scoping
-- `global $var`: `get_global` copies from frame 0. no write-back yet
+- `global $var`: `get_global` copies from frame 0. `writebackGlobals()` copies modified values back on frame exit. works for simple cases but no true reference semantics (arrays modified in-place via reference won't propagate)
 - `static $var = default`: `get_static`/`set_static` with `func_name::var_name` keyed storage. `writebackStatics()` on frame return
 
 ### SPL classes (src/stdlib/spl.zig)
@@ -190,6 +190,24 @@ unique differentiators:
 - minimal C dependencies (PCRE2 for regex, SQLite3 for PDO, zlib for gzip compression)
 - `zphp serve` with pre-loaded VM (no IPC/serialization overhead)
 - fresh memory model (zig allocators, tagged union values)
+
+### concurrency model comparison
+
+PHP-FPM: one OS process per concurrent request. each process carries the full Zend engine in memory (20-40MB). 100 concurrent connections = 100 processes = 2-4GB RAM. connection 101 waits in a queue. the ceiling is the number of FPM workers.
+
+Swoole/Workerman: coroutine-based, keep Zend processes alive between requests. better than FPM, but each coroutine carries Zend's per-request memory overhead. practical limit is a few thousand concurrent connections before memory pressure.
+
+zphp: event-loop-per-worker via poll(). N worker threads (default = CPU count), each multiplexing up to 1024 concurrent connections. an idle connection costs ~65KB (read buffer + pollfd entry) - no VM state, no coroutine stack, no Zend overhead. the VM only runs when data arrives, handles it, returns to the poll loop.
+
+the difference at scale: 14 workers x 1024 connections = 14K concurrent connections at ~900MB total (65KB per idle connection). PHP-FPM handling 14K connections would require 14K processes at ~20MB each = ~280GB. that's roughly a 300x difference in memory per connection.
+
+for WebSocket specifically: zphp's connections live in the poll set between messages at near-zero cost. PHP-FPM has no native WebSocket support. Swoole supports WebSocket but each connection carries Zend coroutine overhead. zphp's WebSocket handler is a direct fd-to-VM path - frame bytes go from kernel buffer to PHP handler with no serialization, no IPC, no adapter layer.
+
+### architectural layers eliminated
+
+traditional PHP deployment: client -> nginx -> fastcgi -> php-fpm worker -> zend engine -> opcache -> execution. six layers, two process boundaries, one serialization protocol.
+
+zphp: client -> TCP accept -> poll event -> parse -> VM execute -> write response. single process, single binary, zero IPC.
 
 ## zphp serve
 
@@ -237,7 +255,6 @@ two layers: zig HTTP layer (TCP + raw HTTP parsing) + PHP VM layer (synchronous 
 - graceful shutdown (SIGTERM handling)
 - chunked transfer encoding
 - multipart form data parsing
-- WebSocket protocol upgrade and frame handling
 
 ## formatter (src/fmt.zig)
 

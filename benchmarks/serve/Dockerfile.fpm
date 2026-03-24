@@ -1,0 +1,13 @@
+FROM php:8.4-fpm
+
+RUN apt-get update && apt-get install -y nginx && rm -rf /var/lib/apt/lists/*
+
+COPY nginx.conf /etc/nginx/sites-available/default
+COPY app.php /var/www/html/index.php
+
+# increase fpm workers for benchmark
+RUN sed -i 's/pm = dynamic/pm = static/' /usr/local/etc/php-fpm.d/www.conf && \
+    sed -i 's/pm.max_children = 5/pm.max_children = 128/' /usr/local/etc/php-fpm.d/www.conf
+
+EXPOSE 80
+CMD php-fpm -D && nginx -g "daemon off;"

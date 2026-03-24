@@ -1,0 +1,8 @@
+FROM phpswoole/swoole:php8.3
+
+COPY swoole_http.php /app/server.php
+COPY swoole_ws.php /app/ws_server.php
+
+WORKDIR /app
+EXPOSE 9501
+CMD ["php", "server.php"]
