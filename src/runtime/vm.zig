@@ -1724,6 +1724,72 @@ pub const VM = struct {
                     } else return error.RuntimeError;
                 },
 
+                .method_call_spread => {
+                    const name_idx = self.readU16();
+                    const method_name = self.currentChunk().constants.items[name_idx].string;
+                    const args_val = self.pop();
+                    if (args_val != .array) return error.RuntimeError;
+                    const arr = args_val.array;
+                    const ac = arr.entries.items.len;
+                    for (arr.entries.items) |entry| self.push(entry.value);
+                    // object is now below args on the stack (it was pushed before the args array)
+                    // reuse the method_call dispatch by setting up ip to re-read this instruction
+                    // actually, just inline the dispatch
+                    const obj_val = self.stack[self.sp - ac - 1];
+                    if (obj_val != .object) return error.RuntimeError;
+                    const obj = obj_val.object;
+                    const mvr = self.findMethodVisibility(obj.class_name, method_name);
+                    if (!self.checkVisibility(mvr.defining_class, mvr.visibility)) {
+                        self.sp -= ac + 1;
+                        return error.RuntimeError;
+                    }
+                    const full_name = try self.resolveMethod(obj.class_name, method_name);
+                    if (self.native_fns.get(full_name)) |native| {
+                        var args_buf: [16]Value = undefined;
+                        for (0..ac) |i| args_buf[i] = self.stack[self.sp - ac + i];
+                        self.sp -= ac;
+                        self.sp -= 1;
+                        var tmp_vars: std.StringHashMapUnmanaged(Value) = .{};
+                        try tmp_vars.put(self.allocator, "$this", .{ .object = obj });
+                        self.frames[self.frame_count] = .{ .chunk = self.currentChunk(), .ip = self.currentFrame().ip, .vars = tmp_vars };
+                        self.frame_count += 1;
+                        const saved_fc = self.frame_count;
+                        var ctx = self.makeContext(null);
+                        const result = try native(&ctx, args_buf[0..ac]);
+                        if (self.frame_count >= saved_fc) {
+                            self.frame_count -= 1;
+                            self.frames[self.frame_count].vars.deinit(self.allocator);
+                            self.push(result);
+                        } else continue;
+                    } else if (self.functions.get(full_name)) |func| {
+                        var new_vars: std.StringHashMapUnmanaged(Value) = .{};
+                        try new_vars.put(self.allocator, "$this", .{ .object = obj });
+                        try self.bindClosures(&new_vars, full_name);
+                        if (func.is_variadic) {
+                            const fixed: usize = func.arity - 1;
+                            for (0..@min(ac, fixed)) |i| {
+                                try new_vars.put(self.allocator, func.params[i], self.stack[self.sp - ac + i]);
+                            }
+                            const rest_arr = try self.allocator.create(PhpArray);
+                            rest_arr.* = .{};
+                            try self.arrays.append(self.allocator, rest_arr);
+                            for (fixed..ac) |i| try rest_arr.append(self.allocator, self.stack[self.sp - ac + i]);
+                            try new_vars.put(self.allocator, func.params[fixed], .{ .array = rest_arr });
+                        } else {
+                            for (0..@min(ac, func.arity)) |i| {
+                                try new_vars.put(self.allocator, func.params[i], self.stack[self.sp - ac + i]);
+                            }
+                            for (ac..func.arity) |i| {
+                                if (i < func.defaults.len) try new_vars.put(self.allocator, func.params[i], func.defaults[i]);
+                            }
+                        }
+                        self.sp -= ac;
+                        self.sp -= 1;
+                        self.frames[self.frame_count] = .{ .chunk = &func.chunk, .ip = 0, .vars = new_vars };
+                        self.frame_count += 1;
+                    } else return error.RuntimeError;
+                },
+
                 .static_call => {
                     const class_idx = self.readU16();
                     const method_idx = self.readU16();
@@ -1786,6 +1852,68 @@ pub const VM = struct {
                         }
                     } else {
                         try self.callNamedFunction(full_name, arg_count);
+                    }
+                },
+
+                .static_call_spread => {
+                    const class_idx = self.readU16();
+                    const method_idx = self.readU16();
+                    var class_name = self.currentChunk().constants.items[class_idx].string;
+                    const method_name = self.currentChunk().constants.items[method_idx].string;
+                    const args_val = self.pop();
+                    if (args_val != .array) return error.RuntimeError;
+                    const arr = args_val.array;
+                    const ac = arr.entries.items.len;
+
+                    const this_val = self.currentFrame().vars.get("$this");
+                    if (std.mem.eql(u8, class_name, "parent") or std.mem.eql(u8, class_name, "self")) {
+                        const defining_class = self.currentDefiningClass();
+                        if (std.mem.eql(u8, class_name, "parent")) {
+                            if (defining_class) |dc| {
+                                if (self.classes.get(dc)) |cls| {
+                                    if (cls.parent) |p| class_name = p;
+                                }
+                            }
+                        } else {
+                            if (defining_class) |dc| class_name = dc;
+                        }
+                    }
+
+                    const full_name = try self.resolveMethod(class_name, method_name);
+                    for (arr.entries.items) |entry| self.push(entry.value);
+
+                    if (this_val) |tv| {
+                        if (tv == .object) {
+                            if (self.functions.get(full_name)) |func| {
+                                var new_vars: std.StringHashMapUnmanaged(Value) = .{};
+                                try new_vars.put(self.allocator, "$this", tv);
+                                if (func.is_variadic) {
+                                    const fixed: usize = func.arity - 1;
+                                    for (0..@min(ac, fixed)) |i| {
+                                        try new_vars.put(self.allocator, func.params[i], self.stack[self.sp - ac + i]);
+                                    }
+                                    const rest_arr = try self.allocator.create(PhpArray);
+                                    rest_arr.* = .{};
+                                    try self.arrays.append(self.allocator, rest_arr);
+                                    for (fixed..ac) |i| try rest_arr.append(self.allocator, self.stack[self.sp - ac + i]);
+                                    try new_vars.put(self.allocator, func.params[fixed], .{ .array = rest_arr });
+                                } else {
+                                    for (0..@min(ac, func.arity)) |i| {
+                                        try new_vars.put(self.allocator, func.params[i], self.stack[self.sp - ac + i]);
+                                    }
+                                    for (ac..func.arity) |i| {
+                                        if (i < func.defaults.len) try new_vars.put(self.allocator, func.params[i], func.defaults[i]);
+                                    }
+                                }
+                                self.sp -= ac;
+                                self.frames[self.frame_count] = .{ .chunk = &func.chunk, .ip = 0, .vars = new_vars };
+                                self.frame_count += 1;
+                            } else return error.RuntimeError;
+                        } else {
+                            try self.callNamedFunction(full_name, @intCast(ac));
+                        }
+                    } else {
+                        try self.callNamedFunction(full_name, @intCast(ac));
                     }
                 },
 

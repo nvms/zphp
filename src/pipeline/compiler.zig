@@ -1961,12 +1961,19 @@ const Compiler = struct {
     fn compileMethodCall(self: *Compiler, node: Ast.Node) Error!void {
         try self.compileNode(node.data.lhs);
         const args = self.ast.extraSlice(node.data.rhs);
-        for (args) |arg| try self.compileNode(arg);
         const method_name = self.ast.tokenSlice(node.main_token);
         const name_idx = try self.addConstant(.{ .string = method_name });
-        try self.emitOp(.method_call);
-        try self.emitU16(name_idx);
-        try self.emitByte(@intCast(args.len));
+
+        if (hasSplatOrNamed(self.ast, args)) {
+            try self.emitSpreadArgs(args);
+            try self.emitOp(.method_call_spread);
+            try self.emitU16(name_idx);
+        } else {
+            for (args) |arg| try self.compileNode(arg);
+            try self.emitOp(.method_call);
+            try self.emitU16(name_idx);
+            try self.emitByte(@intCast(args.len));
+        }
     }
 
     fn compileNullsafePropertyAccess(self: *Compiler, node: Ast.Node) Error!void {
@@ -1986,12 +1993,19 @@ const Compiler = struct {
         const end_jump = try self.emitJump(.jump);
         self.patchJump(skip_jump);
         const args = self.ast.extraSlice(node.data.rhs);
-        for (args) |arg| try self.compileNode(arg);
         const method_name = self.ast.tokenSlice(node.main_token);
         const name_idx = try self.addConstant(.{ .string = method_name });
-        try self.emitOp(.method_call);
-        try self.emitU16(name_idx);
-        try self.emitByte(@intCast(args.len));
+
+        if (hasSplatOrNamed(self.ast, args)) {
+            try self.emitSpreadArgs(args);
+            try self.emitOp(.method_call_spread);
+            try self.emitU16(name_idx);
+        } else {
+            for (args) |arg| try self.compileNode(arg);
+            try self.emitOp(.method_call);
+            try self.emitU16(name_idx);
+            try self.emitByte(@intCast(args.len));
+        }
         self.patchJump(end_jump);
     }
 
@@ -2008,13 +2022,21 @@ const Compiler = struct {
         const class_name = try self.resolveNodeClassName(class_node);
         const method_name = self.ast.tokenSlice(node.main_token);
         const args = self.ast.extraSlice(node.data.rhs);
-        for (args) |arg| try self.compileNode(arg);
         const class_idx = try self.addConstant(.{ .string = class_name });
         const method_idx = try self.addConstant(.{ .string = method_name });
-        try self.emitOp(.static_call);
-        try self.emitU16(class_idx);
-        try self.emitU16(method_idx);
-        try self.emitByte(@intCast(args.len));
+
+        if (hasSplatOrNamed(self.ast, args)) {
+            try self.emitSpreadArgs(args);
+            try self.emitOp(.static_call_spread);
+            try self.emitU16(class_idx);
+            try self.emitU16(method_idx);
+        } else {
+            for (args) |arg| try self.compileNode(arg);
+            try self.emitOp(.static_call);
+            try self.emitU16(class_idx);
+            try self.emitU16(method_idx);
+            try self.emitByte(@intCast(args.len));
+        }
     }
 
     fn compileStaticPropAccess(self: *Compiler, node: Ast.Node) Error!void {
@@ -2353,38 +2375,41 @@ const Compiler = struct {
     // calls
     // ==================================================================
 
+    fn hasSplatOrNamed(ast: *const Ast, args: []const u32) bool {
+        for (args) |arg_idx| {
+            const tag = ast.nodes[arg_idx].tag;
+            if (tag == .splat_expr or tag == .named_arg) return true;
+        }
+        return false;
+    }
+
+    fn emitSpreadArgs(self: *Compiler, args: []const u32) Error!void {
+        try self.emitOp(.array_new);
+        for (args) |arg_idx| {
+            const arg_node = self.ast.nodes[arg_idx];
+            if (arg_node.tag == .splat_expr) {
+                try self.compileNode(arg_node.data.lhs);
+                try self.emitOp(.array_spread);
+            } else if (arg_node.tag == .named_arg) {
+                const name = self.ast.tokenSlice(arg_node.main_token);
+                const name_const = try self.addConstant(.{ .string = name });
+                try self.emitOp(.constant);
+                try self.emitU16(name_const);
+                try self.compileNode(arg_node.data.lhs);
+                try self.emitOp(.array_set_elem);
+            } else {
+                try self.compileNode(arg_idx);
+                try self.emitOp(.array_push);
+            }
+        }
+    }
+
     fn compileCall(self: *Compiler, node: Ast.Node) Error!void {
         const callee = self.ast.nodes[node.data.lhs];
         const args = self.ast.extraSlice(node.data.rhs);
 
-        // check if any arg is a splat or named arg
-        var has_splat = false;
-        var has_named = false;
-        for (args) |arg_idx| {
-            const tag = self.ast.nodes[arg_idx].tag;
-            if (tag == .splat_expr) has_splat = true;
-            if (tag == .named_arg) has_named = true;
-        }
-
-        if (has_splat or has_named) {
-            try self.emitOp(.array_new);
-            for (args) |arg_idx| {
-                const arg_node = self.ast.nodes[arg_idx];
-                if (arg_node.tag == .splat_expr) {
-                    try self.compileNode(arg_node.data.lhs);
-                    try self.emitOp(.array_spread);
-                } else if (arg_node.tag == .named_arg) {
-                    const name = self.ast.tokenSlice(arg_node.main_token);
-                    const name_const = try self.addConstant(.{ .string = name });
-                    try self.emitOp(.constant);
-                    try self.emitU16(name_const);
-                    try self.compileNode(arg_node.data.lhs);
-                    try self.emitOp(.array_set_elem);
-                } else {
-                    try self.compileNode(arg_idx);
-                    try self.emitOp(.array_push);
-                }
-            }
+        if (hasSplatOrNamed(self.ast, args)) {
+            try self.emitSpreadArgs(args);
             if (callee.tag == .identifier) {
                 const name = self.ast.tokenSlice(callee.main_token);
                 const idx = try self.addConstant(.{ .string = name });
