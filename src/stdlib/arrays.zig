@@ -224,6 +224,7 @@ fn native_sort(_: *NativeContext, args: []const Value) RuntimeError!Value {
             return Value.lessThan(a.value, b.value);
         }
     }.lessThan);
+    reindexArray(arr);
     return .{ .bool = true };
 }
 
@@ -235,7 +236,13 @@ fn native_rsort(_: *NativeContext, args: []const Value) RuntimeError!Value {
             return Value.lessThan(b.value, a.value);
         }
     }.lessThan);
+    reindexArray(arr);
     return .{ .bool = true };
+}
+
+fn reindexArray(arr: *PhpArray) void {
+    for (arr.entries.items, 0..) |*entry, i| entry.key = .{ .int = @intCast(i) };
+    arr.next_int_key = @intCast(arr.entries.items.len);
 }
 
 fn array_map(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
@@ -275,22 +282,24 @@ fn native_usort(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     const arr = args[0].array;
     const callback = args[1];
 
-    const items = arr.entries.items;
-    var n = items.len;
+    var n = arr.entries.items.len;
     while (n > 1) {
         var swapped = false;
         for (0..n - 1) |i| {
-            const cmp = try ctx.invokeCallable(callback, &.{ items[i].value, items[i + 1].value });
+            const a_val = arr.entries.items[i].value;
+            const b_val = arr.entries.items[i + 1].value;
+            const cmp = try ctx.invokeCallable(callback, &.{ a_val, b_val });
             if (Value.toInt(cmp) > 0) {
-                const tmp = items[i];
-                items[i] = items[i + 1];
-                items[i + 1] = tmp;
+                const tmp = arr.entries.items[i];
+                arr.entries.items[i] = arr.entries.items[i + 1];
+                arr.entries.items[i + 1] = tmp;
                 swapped = true;
             }
         }
         if (!swapped) break;
         n -= 1;
     }
+    reindexArray(arr);
     return .{ .bool = true };
 }
 
@@ -643,15 +652,15 @@ fn array_unshift(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
 fn native_shuffle(_: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len == 0 or args[0] != .array) return .{ .bool = false };
     const arr = args[0].array;
-    const items = arr.entries.items;
-    var i: usize = items.len;
+    var i: usize = arr.entries.items.len;
     while (i > 1) {
         i -= 1;
         const j = std.crypto.random.intRangeAtMost(usize, 0, i);
-        const tmp = items[i];
-        items[i] = items[j];
-        items[j] = tmp;
+        const tmp = arr.entries.items[i];
+        arr.entries.items[i] = arr.entries.items[j];
+        arr.entries.items[j] = tmp;
     }
+    reindexArray(arr);
     return .{ .bool = true };
 }
 

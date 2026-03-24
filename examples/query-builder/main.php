@@ -302,8 +302,8 @@ $grouped = $users->groupBy("role");
 echo "admin group: " . count($grouped["admin"]) . "\n";
 echo "user group: " . count($grouped["user"]) . "\n";
 
-// sortBy (using the query builder's orderBy which works correctly)
-$youngest = QueryBuilder::table("users")->orderBy("age")->first();
-echo "youngest: " . $youngest["name"] . "\n";
+// sortBy
+$sorted = $users->sortBy(function ($a, $b) { return $a["age"] <=> $b["age"]; });
+echo "youngest: " . $sorted->first()["name"] . "\n";
 
 echo "done\n";
