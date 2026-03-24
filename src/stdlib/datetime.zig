@@ -5,10 +5,16 @@ const vm_mod = @import("../runtime/vm.zig");
 const VM = vm_mod.VM;
 const NativeContext = vm_mod.NativeContext;
 const ClassDef = vm_mod.ClassDef;
-const io = @import("io.zig");
-
 const Allocator = std.mem.Allocator;
 const RuntimeError = error{ RuntimeError, OutOfMemory };
+
+pub const entries = .{
+    .{ "date", native_date },
+    .{ "mktime", native_mktime },
+    .{ "strtotime", native_strtotime },
+    .{ "time", native_time },
+    .{ "microtime", native_microtime },
+};
 
 pub fn register(vm: *VM, a: Allocator) !void {
     // DateTimeInterface
@@ -110,9 +116,9 @@ fn dtConstruct(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
                 min = std.fmt.parseInt(i64, s[14..16], 10) catch 0;
                 sec = std.fmt.parseInt(i64, s[17..19], 10) catch 0;
             }
-            ts = io.dateToTimestamp(year, month, day, hour, min, sec);
+            ts = dateToTimestamp(year, month, day, hour, min, sec);
         } else {
-            const result = io.parseRelativeTime(s, ts);
+            const result = parseRelativeTime(s, ts);
             if (result == .int) ts = result.int;
         }
     }
@@ -128,7 +134,7 @@ fn dtFormat(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     return formatTimestamp(ctx, ts, args[0].string);
 }
 
-fn formatTimestamp(ctx: *NativeContext, timestamp: i64, format: []const u8) RuntimeError!Value {
+pub fn formatTimestamp(ctx: *NativeContext, timestamp: i64, format: []const u8) RuntimeError!Value {
     const epoch_secs: u64 = @intCast(if (timestamp < 0) 0 else timestamp);
     const es = std.time.epoch.EpochSeconds{ .secs = epoch_secs };
     const day_seconds = es.getDaySeconds();
@@ -266,7 +272,7 @@ fn dtModify(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     const obj = getThis(ctx) orelse return .null;
     if (args.len == 0 or args[0] != .string) return .{ .object = obj };
     const ts = getTimestamp(obj);
-    const result = io.parseRelativeTime(args[0].string, ts);
+    const result = parseRelativeTime(args[0].string, ts);
     if (result == .int) try obj.set(ctx.allocator, "timestamp", result);
     return .{ .object = obj };
 }
@@ -275,7 +281,7 @@ fn dtiModify(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     const obj = getThis(ctx) orelse return .null;
     if (args.len == 0 or args[0] != .string) return .{ .object = obj };
     const ts = getTimestamp(obj);
-    const result = io.parseRelativeTime(args[0].string, ts);
+    const result = parseRelativeTime(args[0].string, ts);
     if (result != .int) return .{ .object = obj };
 
     // immutable: create a new DateTime object
@@ -319,7 +325,7 @@ fn dtSetDate(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     const h: i64 = day_seconds.getHoursIntoDay();
     const m: i64 = day_seconds.getMinutesIntoHour();
     const s: i64 = day_seconds.getSecondsIntoMinute();
-    const new_ts = io.dateToTimestamp(Value.toInt(args[0]), Value.toInt(args[1]), Value.toInt(args[2]), h, m, s);
+    const new_ts = dateToTimestamp(Value.toInt(args[0]), Value.toInt(args[1]), Value.toInt(args[2]), h, m, s);
     try obj.set(ctx.allocator, "timestamp", .{ .int = new_ts });
     return .{ .object = obj };
 }
@@ -334,7 +340,7 @@ fn dtSetTime(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     const year_day = epoch_day.calculateYearDay();
     const month_day = year_day.calculateMonthDay();
     const sec: i64 = if (args.len >= 3) Value.toInt(args[2]) else 0;
-    const new_ts = io.dateToTimestamp(@intCast(year_day.year), month_day.month.numeric(), month_day.day_index + 1, Value.toInt(args[0]), Value.toInt(args[1]), sec);
+    const new_ts = dateToTimestamp(@intCast(year_day.year), month_day.month.numeric(), month_day.day_index + 1, Value.toInt(args[0]), Value.toInt(args[1]), sec);
     try obj.set(ctx.allocator, "timestamp", .{ .int = new_ts });
     return .{ .object = obj };
 }
@@ -362,4 +368,128 @@ fn dtSetMicrosecond(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
     // no-op since we don't store microseconds, return $this
     const obj = getThis(ctx) orelse return .null;
     return .{ .object = obj };
+}
+
+// standalone PHP functions: date(), mktime(), strtotime(), time(), microtime()
+
+fn native_date(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len == 0 or args[0] != .string) return .{ .string = "" };
+    const format = args[0].string;
+    const timestamp: i64 = if (args.len >= 2) Value.toInt(args[1]) else std.time.timestamp();
+    return formatTimestamp(ctx, timestamp, format);
+}
+
+fn native_mktime(_: *NativeContext, args: []const Value) RuntimeError!Value {
+    const hour: i64 = if (args.len > 0) Value.toInt(args[0]) else 0;
+    const min: i64 = if (args.len > 1) Value.toInt(args[1]) else 0;
+    const sec: i64 = if (args.len > 2) Value.toInt(args[2]) else 0;
+    const month: i64 = if (args.len > 3) Value.toInt(args[3]) else 1;
+    const day: i64 = if (args.len > 4) Value.toInt(args[4]) else 1;
+    const year: i64 = if (args.len > 5) Value.toInt(args[5]) else 1970;
+    return .{ .int = dateToTimestamp(year, month, day, hour, min, sec) };
+}
+
+fn native_strtotime(_: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len == 0 or args[0] != .string) return .{ .bool = false };
+    const input = args[0].string;
+    const base: i64 = if (args.len >= 2) Value.toInt(args[1]) else std.time.timestamp();
+
+    if (input.len >= 10 and input[4] == '-' and input[7] == '-') {
+        const year = std.fmt.parseInt(i64, input[0..4], 10) catch return Value{ .bool = false };
+        const month = std.fmt.parseInt(i64, input[5..7], 10) catch return Value{ .bool = false };
+        const day = std.fmt.parseInt(i64, input[8..10], 10) catch return Value{ .bool = false };
+        var hour: i64 = 0;
+        var min: i64 = 0;
+        var sec: i64 = 0;
+        if (input.len >= 19 and input[10] == ' ' and input[13] == ':' and input[16] == ':') {
+            hour = std.fmt.parseInt(i64, input[11..13], 10) catch 0;
+            min = std.fmt.parseInt(i64, input[14..16], 10) catch 0;
+            sec = std.fmt.parseInt(i64, input[17..19], 10) catch 0;
+        }
+        return .{ .int = dateToTimestamp(year, month, day, hour, min, sec) };
+    }
+
+    return parseRelativeTime(input, base);
+}
+
+fn native_time(_: *NativeContext, _: []const Value) RuntimeError!Value {
+    return .{ .int = std.time.timestamp() };
+}
+
+fn native_microtime(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    const as_float = args.len >= 1 and args[0].isTruthy();
+    const ns = std.time.nanoTimestamp();
+    if (as_float) {
+        const secs: f64 = @as(f64, @floatFromInt(ns)) / 1_000_000_000.0;
+        return .{ .float = secs };
+    }
+    const ts: i64 = @intCast(@divTrunc(ns, 1_000_000_000));
+    const usec: i64 = @intCast(@divTrunc(@mod(ns, 1_000_000_000), 1_000));
+    var buf = std.ArrayListUnmanaged(u8){};
+    var tmp: [32]u8 = undefined;
+    try buf.appendSlice(ctx.allocator, "0.");
+    const usec_str = std.fmt.bufPrint(&tmp, "{d:0>6}", .{@as(u64, @intCast(if (usec < 0) -usec else usec))}) catch "000000";
+    try buf.appendSlice(ctx.allocator, usec_str);
+    try buf.appendSlice(ctx.allocator, " ");
+    const ts_str = std.fmt.bufPrint(&tmp, "{d}", .{ts}) catch "0";
+    try buf.appendSlice(ctx.allocator, ts_str);
+    const result = try buf.toOwnedSlice(ctx.allocator);
+    try ctx.strings.append(ctx.allocator, result);
+    return .{ .string = result };
+}
+
+// date/time utilities
+
+pub fn dateToTimestamp(year: i64, month: i64, day: i64, hour: i64, min: i64, sec: i64) i64 {
+    const m = if (month < 1) @as(i64, 1) else if (month > 12) @as(i64, 12) else month;
+    const y = year - @as(i64, if (m <= 2) 1 else 0);
+    const era: i64 = @divFloor(if (y >= 0) y else y - 399, 400);
+    const yoe: i64 = y - era * 400;
+    const mp: i64 = if (m > 2) m - 3 else m + 9;
+    const doy = @divFloor(153 * mp + 2, 5) + day - 1;
+    const doe = yoe * 365 + @divFloor(yoe, 4) - @divFloor(yoe, 100) + doy;
+    const days = era * 146097 + doe - 719468;
+    return days * 86400 + hour * 3600 + min * 60 + sec;
+}
+
+pub fn parseRelativeTime(input: []const u8, base: i64) Value {
+    var s = input;
+    var sign: i64 = 1;
+    if (s.len > 0 and s[0] == '-') {
+        sign = -1;
+        s = s[1..];
+    } else if (s.len > 0 and s[0] == '+') {
+        s = s[1..];
+    }
+    while (s.len > 0 and s[0] == ' ') s = s[1..];
+
+    var num_end: usize = 0;
+    while (num_end < s.len and s[num_end] >= '0' and s[num_end] <= '9') num_end += 1;
+    if (num_end == 0) return .{ .bool = false };
+    const num = std.fmt.parseInt(i64, s[0..num_end], 10) catch return Value{ .bool = false };
+    s = s[num_end..];
+    while (s.len > 0 and s[0] == ' ') s = s[1..];
+
+    const seconds: i64 = if (startsWith(s, "second"))
+        num * sign
+    else if (startsWith(s, "minute"))
+        num * sign * 60
+    else if (startsWith(s, "hour"))
+        num * sign * 3600
+    else if (startsWith(s, "day"))
+        num * sign * 86400
+    else if (startsWith(s, "week"))
+        num * sign * 604800
+    else if (startsWith(s, "month"))
+        num * sign * 2592000
+    else if (startsWith(s, "year"))
+        num * sign * 31536000
+    else
+        return .{ .bool = false };
+
+    return .{ .int = base + seconds };
+}
+
+fn startsWith(s: []const u8, prefix: []const u8) bool {
+    return s.len >= prefix.len and std.mem.eql(u8, s[0..prefix.len], prefix);
 }

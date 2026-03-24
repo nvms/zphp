@@ -13,6 +13,7 @@ pub fn register(map: *std.StringHashMapUnmanaged(NativeFn), allocator: std.mem.A
         @import("arrays.zig").entries,
         @import("json.zig").entries,
         @import("io.zig").entries,
+        @import("datetime.zig").entries,
         @import("pcre.zig").entries,
         @import("output.zig").entries,
         @import("testing.zig").entries,
