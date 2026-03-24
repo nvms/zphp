@@ -1242,6 +1242,7 @@ const Compiler = struct {
             .continue_jumps = .{},
             .is_generator = gen,
             .closure_count = self.closure_count,
+            .file_path = self.file_path,
         };
         errdefer {
             sub.chunk.deinit(self.allocator);
@@ -1821,6 +1822,7 @@ const Compiler = struct {
             .break_jumps = .{},
             .continue_jumps = .{},
             .closure_count = self.closure_count,
+            .file_path = self.file_path,
         };
         errdefer {
             sub.chunk.deinit(self.allocator);
@@ -2234,6 +2236,7 @@ const Compiler = struct {
             .break_jumps = .{},
             .continue_jumps = .{},
             .closure_count = self.closure_count,
+            .file_path = self.file_path,
         };
         errdefer {
             sub.chunk.deinit(self.allocator);
@@ -2473,8 +2476,10 @@ const Compiler = struct {
         const prev_start = self.loop_start;
         var prev_breaks = self.break_jumps;
         var prev_continues = self.continue_jumps;
+        const prev_use_cj = self.use_continue_jumps;
         self.break_jumps = .{};
         self.continue_jumps = .{};
+        self.use_continue_jumps = true;
         self.loop_depth += 1;
 
         try self.compileNode(iter_n);
@@ -2502,6 +2507,10 @@ const Compiler = struct {
         }
 
         try self.compileNode(node.data.rhs);
+
+        // continue lands here, before iter_advance (same pattern as for loop update)
+        try self.patchContinues(&prev_continues);
+
         try self.emitOp(.iter_advance);
         try self.emitLoop(loop_top);
 
@@ -2509,9 +2518,9 @@ const Compiler = struct {
         try self.emitOp(.iter_end);
 
         try self.patchBreaks(&prev_breaks);
-        try self.patchContinues(&prev_continues);
         self.break_jumps = prev_breaks;
         self.continue_jumps = prev_continues;
+        self.use_continue_jumps = prev_use_cj;
         self.loop_depth -= 1;
         self.loop_start = prev_start;
     }

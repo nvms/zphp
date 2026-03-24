@@ -583,7 +583,7 @@ const Parser = struct {
 
     fn parseFunctionDecl(self: *Parser) Error!u32 {
         _ = self.advance();
-        const name_tok = try self.expect(.identifier);
+        const name_tok = try self.expectFunctionName();
         _ = try self.expect(.l_paren);
 
         var params = std.ArrayListUnmanaged(u32){};
@@ -885,7 +885,7 @@ const Parser = struct {
 
     fn parseInterfaceMethod(self: *Parser) Error!u32 {
         _ = self.advance(); // function
-        const name_tok = try self.expect(.identifier);
+        const name_tok = try self.expectFunctionName();
         _ = try self.expect(.l_paren);
 
         var params = std.ArrayListUnmanaged(u32){};
@@ -1072,7 +1072,7 @@ const Parser = struct {
 
     fn parseClassMethod(self: *Parser) Error!u32 {
         _ = self.advance(); // function
-        const name_tok = try self.expect(.identifier);
+        const name_tok = try self.expectFunctionName();
         _ = try self.expect(.l_paren);
 
         var params = std.ArrayListUnmanaged(u32){};
@@ -1614,7 +1614,7 @@ const Parser = struct {
 
     fn parsePropExpr(self: *Parser, object: u32) Error!u32 {
         _ = self.advance(); // ->
-        if (self.peek() != .identifier and self.peek() != .variable) {
+        if (self.peek() != .identifier and self.peek() != .variable and !isSemiReserved(self.peek())) {
             try self.addError(.expected_identifier);
             return error.ParseError;
         }
@@ -1653,7 +1653,10 @@ const Parser = struct {
             return self.addNode(.{ .tag = .static_prop_access, .main_token = var_tok, .data = .{ .lhs = class_node } });
         }
 
-        const name_tok = try self.expect(.identifier);
+        const name_tok = if (self.peek() == .identifier or isSemiReserved(self.peek()))
+            self.advance()
+        else
+            try self.expect(.identifier);
 
         if (self.peek() == .l_paren) {
             _ = self.advance();
@@ -1774,6 +1777,21 @@ const Parser = struct {
     fn expectTag(self: *Parser, tag: Tag) Error!u32 {
         if (self.peek() == tag) return self.advance();
         try self.addError(expectedError(tag));
+        return error.ParseError;
+    }
+
+    fn isSemiReserved(tag: Token.Tag) bool {
+        return switch (tag) {
+            .kw_match, .kw_enum, .kw_readonly, .kw_self, .kw_parent,
+            .kw_true, .kw_false, .kw_null,
+            => true,
+            else => false,
+        };
+    }
+
+    fn expectFunctionName(self: *Parser) Error!u32 {
+        if (self.peek() == .identifier or isSemiReserved(self.peek())) return self.advance();
+        try self.addError(expectedError(.identifier));
         return error.ParseError;
     }
 

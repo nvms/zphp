@@ -577,14 +577,34 @@ pub const VM = struct {
                     const arg_count = self.readByte();
                     const ac: usize = arg_count;
                     const name_val = self.stack[self.sp - ac - 1];
-                    if (name_val != .string) return error.RuntimeError;
-                    const name = name_val.string;
-                    var i: usize = 0;
-                    while (i < ac) : (i += 1) {
-                        self.stack[self.sp - ac - 1 + i] = self.stack[self.sp - ac + i];
-                    }
-                    self.sp -= 1;
-                    try self.callNamedFunction(name, arg_count);
+                    if (name_val == .string) {
+                        const name = name_val.string;
+                        var i: usize = 0;
+                        while (i < ac) : (i += 1) {
+                            self.stack[self.sp - ac - 1 + i] = self.stack[self.sp - ac + i];
+                        }
+                        self.sp -= 1;
+                        try self.callNamedFunction(name, arg_count);
+                    } else if (name_val == .array) {
+                        const arr = name_val.array;
+                        if (arr.entries.items.len != 2) return error.RuntimeError;
+                        const target = arr.entries.items[0].value;
+                        const method_val = arr.entries.items[1].value;
+                        if (method_val != .string) return error.RuntimeError;
+                        const method = method_val.string;
+                        var args_buf: [16]Value = undefined;
+                        for (0..ac) |i| args_buf[i] = self.stack[self.sp - ac + i];
+                        self.sp -= ac + 1;
+                        var ctx = self.makeContext(null);
+                        const result = if (target == .object)
+                            try ctx.vm.callMethod(target.object, method, args_buf[0..ac])
+                        else if (target == .string) blk: {
+                            var buf: [256]u8 = undefined;
+                            const full = std.fmt.bufPrint(&buf, "{s}::{s}", .{ target.string, method }) catch return error.RuntimeError;
+                            break :blk try ctx.vm.callByName(full, args_buf[0..ac]);
+                        } else return error.RuntimeError;
+                        self.push(result);
+                    } else return error.RuntimeError;
                 },
                 .call_spread => {
                     const name_idx = self.readU16();
@@ -1124,24 +1144,35 @@ pub const VM = struct {
                         const tname_idx = self.readU16();
                         const trait_name = self.currentChunk().constants.items[tname_idx].string;
 
-                        // copy trait methods: TraitName::method -> ClassName::method
-                        var fn_iter = self.functions.iterator();
-                        while (fn_iter.next()) |entry| {
-                            const fn_name = entry.key_ptr.*;
-                            if (fn_name.len > trait_name.len + 2 and
-                                std.mem.eql(u8, fn_name[0..trait_name.len], trait_name) and
-                                std.mem.eql(u8, fn_name[trait_name.len .. trait_name.len + 2], "::"))
-                            {
-                                const method_name = fn_name[trait_name.len + 2 ..];
-                                const class_method = try std.fmt.allocPrint(self.allocator, "{s}::{s}", .{ class_name, method_name });
-                                try self.strings.append(self.allocator, class_method);
-                                if (!self.functions.contains(class_method)) {
-                                    try self.functions.put(self.allocator, class_method, entry.value_ptr.*);
-                                    try def.methods.put(self.allocator, method_name, .{
-                                        .name = method_name,
-                                        .arity = entry.value_ptr.*.arity,
-                                    });
+                        // collect trait methods first to avoid iterator invalidation
+                        const TraitMethod = struct { name: []const u8, func: *const ObjFunction };
+                        var pending: [64]TraitMethod = undefined;
+                        var pending_count: usize = 0;
+                        {
+                            var fn_iter = self.functions.iterator();
+                            while (fn_iter.next()) |entry| {
+                                const fn_name = entry.key_ptr.*;
+                                if (fn_name.len > trait_name.len + 2 and
+                                    std.mem.eql(u8, fn_name[0..trait_name.len], trait_name) and
+                                    std.mem.eql(u8, fn_name[trait_name.len .. trait_name.len + 2], "::"))
+                                {
+                                    pending[pending_count] = .{
+                                        .name = fn_name[trait_name.len + 2 ..],
+                                        .func = entry.value_ptr.*,
+                                    };
+                                    pending_count += 1;
                                 }
+                            }
+                        }
+                        for (pending[0..pending_count]) |tm| {
+                            const class_method = try std.fmt.allocPrint(self.allocator, "{s}::{s}", .{ class_name, tm.name });
+                            try self.strings.append(self.allocator, class_method);
+                            if (!self.functions.contains(class_method)) {
+                                try self.functions.put(self.allocator, class_method, tm.func);
+                                try def.methods.put(self.allocator, tm.name, .{
+                                    .name = tm.name,
+                                    .arity = tm.func.arity,
+                                });
                             }
                         }
                     }
@@ -2067,7 +2098,15 @@ pub const VM = struct {
                 try self.initObjectProperties(obj, parent);
             }
             for (cls.properties.items) |prop| {
-                try obj.set(self.allocator, prop.name, prop.default);
+                const val = if (prop.default == .array) blk: {
+                    const src = prop.default.array;
+                    const copy = try self.allocator.create(PhpArray);
+                    copy.* = .{ .next_int_key = src.next_int_key, .cursor = src.cursor };
+                    try copy.entries.appendSlice(self.allocator, src.entries.items);
+                    try self.arrays.append(self.allocator, copy);
+                    break :blk Value{ .array = copy };
+                } else prop.default;
+                try obj.set(self.allocator, prop.name, val);
             }
         }
     }
