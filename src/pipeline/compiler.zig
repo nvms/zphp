@@ -21,6 +21,7 @@ pub const CompileResult = struct {
             f.chunk.deinit(self.allocator);
             self.allocator.free(f.params);
             if (f.defaults.len > 0) self.allocator.free(f.defaults);
+            if (f.ref_params.len > 0) self.allocator.free(f.ref_params);
         }
         self.functions.deinit(self.allocator);
         for (self.string_allocs.items) |s| self.allocator.free(s);
@@ -201,6 +202,8 @@ const Compiler = struct {
             .ternary => try self.compileTernary(node),
             .call => try self.compileCall(node),
             .array_access => try self.compileArrayAccess(node),
+            .array_push_target => {},
+            .list_destructure => {},
             .property_access => try self.compilePropertyAccess(node),
             .throw_expr => try self.compileThrow(node),
             .try_catch => try self.compileTryCatch(node),
@@ -561,6 +564,19 @@ const Compiler = struct {
         const target = self.ast.nodes[node.data.lhs];
         const op_tag = self.ast.tokens[node.main_token].tag;
 
+        if (target.tag == .list_destructure or (target.tag == .array_literal and op_tag == .equal)) {
+            try self.compileNode(node.data.rhs);
+            try self.compileDestructure(target);
+            return;
+        }
+
+        if (target.tag == .array_push_target) {
+            try self.compileNode(target.data.lhs);
+            try self.compileNode(node.data.rhs);
+            try self.emitOp(.array_push);
+            return;
+        }
+
         if (target.tag == .array_access) {
             try self.compileNode(target.data.lhs);
             try self.compileNode(target.data.rhs);
@@ -603,6 +619,22 @@ const Compiler = struct {
             return;
         }
 
+        if (op_tag == .question_question_equal) {
+            // ??= : only assign if current value is null
+            try self.compileGetVar(target);
+            const skip_jump = try self.emitJump(.jump_if_not_null);
+            try self.emitOp(.pop);
+            try self.compileNode(node.data.rhs);
+            if (target.tag == .variable or target.tag == .identifier) {
+                const name = self.ast.tokenSlice(target.main_token);
+                const idx = try self.addConstant(.{ .string = name });
+                try self.emitOp(.set_var);
+                try self.emitU16(idx);
+            }
+            self.patchJump(skip_jump);
+            return;
+        }
+
         if (op_tag != .equal) {
             try self.compileGetVar(target);
         }
@@ -618,6 +650,58 @@ const Compiler = struct {
             const idx = try self.addConstant(.{ .string = name });
             try self.emitOp(.set_var);
             try self.emitU16(idx);
+        }
+    }
+
+    fn compileDestructure(self: *Compiler, target: Ast.Node) Error!void {
+        // array is on top of stack, we dup it for each slot then pop the extracted value after set_var
+        if (target.tag == .list_destructure) {
+            const slots = self.ast.extraSlice(target.data.lhs);
+            for (slots, 0..) |slot, i| {
+                if (slot == 0) continue;
+                const slot_node = self.ast.nodes[slot];
+                try self.emitOp(.dup);
+                const key_idx = try self.addConstant(.{ .int = @intCast(i) });
+                try self.emitOp(.constant);
+                try self.emitU16(key_idx);
+                try self.emitOp(.array_get);
+                if (slot_node.tag == .list_destructure) {
+                    try self.compileDestructure(slot_node);
+                    try self.emitOp(.pop);
+                } else {
+                    const name = self.ast.tokenSlice(slot_node.main_token);
+                    const name_idx = try self.addConstant(.{ .string = name });
+                    try self.emitOp(.set_var);
+                    try self.emitU16(name_idx);
+                    try self.emitOp(.pop);
+                }
+            }
+        } else if (target.tag == .array_literal) {
+            const elements = self.ast.extraSlice(target.data.lhs);
+            for (elements, 0..) |elem_idx, i| {
+                const elem = self.ast.nodes[elem_idx];
+                if (elem.tag != .array_element) continue;
+                const val_node = self.ast.nodes[elem.data.lhs];
+                try self.emitOp(.dup);
+                if (elem.data.rhs != 0) {
+                    try self.compileNode(elem.data.rhs);
+                } else {
+                    const key_idx = try self.addConstant(.{ .int = @intCast(i) });
+                    try self.emitOp(.constant);
+                    try self.emitU16(key_idx);
+                }
+                try self.emitOp(.array_get);
+                if (val_node.tag == .list_destructure or val_node.tag == .array_literal) {
+                    try self.compileDestructure(val_node);
+                    try self.emitOp(.pop);
+                } else {
+                    const name = self.ast.tokenSlice(val_node.main_token);
+                    const name_idx = try self.addConstant(.{ .string = name });
+                    try self.emitOp(.set_var);
+                    try self.emitU16(name_idx);
+                    try self.emitOp(.pop);
+                }
+            }
         }
     }
 
@@ -974,6 +1058,7 @@ const Compiler = struct {
         const param_nodes = self.ast.extraSlice(node.data.lhs);
 
         const param_names = try self.allocator.alloc([]const u8, param_nodes.len);
+        const ref_flags = try self.allocator.alloc(bool, param_nodes.len);
         var defaults = std.ArrayListUnmanaged(Value){};
         defer defaults.deinit(self.allocator);
         var required: u8 = 0;
@@ -983,7 +1068,8 @@ const Compiler = struct {
         for (param_nodes, 0..) |p, i| {
             const pnode = self.ast.nodes[p];
             param_names[i] = self.ast.tokenSlice(pnode.main_token);
-            if (pnode.data.rhs == 1) {
+            ref_flags[i] = (pnode.data.rhs & 2) != 0;
+            if ((pnode.data.rhs & 1) != 0) {
                 // variadic param - always last
                 is_variadic = true;
                 try defaults.append(self.allocator, .null);
@@ -1035,6 +1121,7 @@ const Compiler = struct {
             .is_generator = gen,
             .params = param_names[0..param_nodes.len],
             .defaults = defaults_owned,
+            .ref_params = ref_flags,
             .chunk = sub.chunk,
         });
 

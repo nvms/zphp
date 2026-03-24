@@ -149,5 +149,6 @@ pub const ObjFunction = struct {
     is_generator: bool = false,
     params: []const []const u8,
     defaults: []const Value = &.{},
+    ref_params: []const bool = &.{},
     chunk: Chunk = .{},
 };

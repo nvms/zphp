@@ -129,6 +129,23 @@ fn renderNode(ast: *const Ast, idx: u32, buf: *Buf) !void {
             try renderNode(ast, node.data.rhs, buf);
             try w.writeByte(')');
         },
+        .array_push_target => {
+            try w.writeAll("(push ");
+            try renderNode(ast, node.data.lhs, buf);
+            try w.writeByte(')');
+        },
+        .list_destructure => {
+            try w.writeAll("(list");
+            for (ast.extraSlice(node.data.lhs)) |slot| {
+                try w.writeByte(' ');
+                if (slot == 0) {
+                    try w.writeByte('_');
+                } else {
+                    try renderNode(ast, slot, buf);
+                }
+            }
+            try w.writeByte(')');
+        },
         .property_access => {
             try w.writeAll("(-> ");
             try renderNode(ast, node.data.lhs, buf);

@@ -90,6 +90,8 @@ pub const Ast = struct {
             // postfix expressions
             call, // lhs = callee, rhs = extra index -> {count, arg...}
             array_access, // lhs = array, rhs = index expr
+            array_push_target, // lhs = array ($arr[] push target)
+            list_destructure, // lhs = extra index -> {count, variable_nodes...} (0 = skip)
             property_access, // main_token = ->, lhs = object, rhs = property node
 
             // casts

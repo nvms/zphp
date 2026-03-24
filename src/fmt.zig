@@ -165,6 +165,7 @@ const Formatter = struct {
     indent: u32,
     allocator: Allocator,
     last_was_newline: bool,
+    write_count: u64,
 
     fn init(allocator: Allocator, ast: *const Ast, source: []const u8, trivia: []const Trivia) Formatter {
         return .{
@@ -175,6 +176,7 @@ const Formatter = struct {
             .indent = 0,
             .allocator = allocator,
             .last_was_newline = false,
+            .write_count = 0,
         };
     }
 
@@ -187,6 +189,12 @@ const Formatter = struct {
     }
 
     fn write(self: *Formatter, s: []const u8) void {
+        self.write_count += 1;
+        if (self.out.items.len > 1024 * 1024) {
+            // safety valve: output exceeded 1MB, something is wrong
+            _ = std.posix.write(std.posix.STDERR_FILENO, "fmt: output exceeded 1MB, aborting\n") catch {};
+            std.process.exit(3);
+        }
         self.out.appendSlice(self.allocator, s) catch {};
         if (s.len > 0) {
             self.last_was_newline = s[s.len - 1] == '\n';
@@ -282,7 +290,8 @@ const Formatter = struct {
             .property_access => self.findFirstToken(node.data.lhs),
             .method_call => self.findFirstToken(node.data.lhs),
             .call => self.findFirstToken(node.data.lhs),
-            .array_access => self.findFirstToken(node.data.lhs),
+            .array_access, .array_push_target => self.findFirstToken(node.data.lhs),
+            .list_destructure => node.main_token,
             .postfix_op => self.findFirstToken(node.data.lhs),
             .static_call => self.findFirstToken(node.data.lhs),
             .static_prop_access => self.findFirstToken(node.data.lhs),
@@ -350,6 +359,8 @@ const Formatter = struct {
 
             .call => self.formatCall(node),
             .array_access => self.formatArrayAccess(node),
+            .array_push_target => self.formatArrayPushTarget(node),
+            .list_destructure => self.formatListDestructure(node),
             .property_access => self.formatPropertyAccess(node),
             .method_call => self.formatMethodCall(node),
             .static_call => self.formatStaticCall(node),
@@ -451,7 +462,7 @@ const Formatter = struct {
                 self.writeIndent();
                 self.formatNode(stmt_idx);
             }
-            self.indent -= 1;
+            self.indent -|= 1;
             self.newline();
             self.writeIndent();
         }
@@ -465,7 +476,7 @@ const Formatter = struct {
             self.newline();
             self.writeIndent();
             self.formatNode(node_idx);
-            self.indent -= 1;
+            self.indent -|= 1;
             return;
         }
         self.write(" ");
@@ -711,7 +722,7 @@ const Formatter = struct {
                     self.indentedLine();
                     self.formatNode(stmt);
                 }
-                self.indent -= 1;
+                self.indent -|= 1;
             } else if (case_node.tag == .switch_default) {
                 self.write("default:");
                 const stmts = self.ast.extraSlice(case_node.data.lhs);
@@ -720,10 +731,10 @@ const Formatter = struct {
                     self.indentedLine();
                     self.formatNode(stmt);
                 }
-                self.indent -= 1;
+                self.indent -|= 1;
             }
         }
-        self.indent -= 1;
+        self.indent -|= 1;
         self.indentedLine();
         self.write("}");
     }
@@ -750,7 +761,7 @@ const Formatter = struct {
             self.formatNode(arm.data.rhs);
             if (ai < arms.len - 1) self.write(",");
         }
-        self.indent -= 1;
+        self.indent -|= 1;
         self.indentedLine();
         self.write("}");
     }
@@ -884,7 +895,7 @@ const Formatter = struct {
                 self.formatNode(member_idx);
                 prev_member_tag = member.tag;
             }
-            self.indent -= 1;
+            self.indent -|= 1;
             self.indentedLine();
         }
         self.write("}");
@@ -992,7 +1003,7 @@ const Formatter = struct {
                 self.formatNode(member_idx);
                 prev_member_tag = member.tag;
             }
-            self.indent -= 1;
+            self.indent -|= 1;
             self.indentedLine();
         }
         self.write("}");
@@ -1024,7 +1035,7 @@ const Formatter = struct {
                 self.writeIndent();
                 self.formatNode(m);
             }
-            self.indent -= 1;
+            self.indent -|= 1;
             self.indentedLine();
         }
         self.write("}");
@@ -1052,7 +1063,7 @@ const Formatter = struct {
                 self.writeIndent();
                 self.formatNode(m);
             }
-            self.indent -= 1;
+            self.indent -|= 1;
             self.indentedLine();
         }
         self.write("}");
@@ -1142,6 +1153,22 @@ const Formatter = struct {
         self.write("[");
         self.formatNode(node.data.rhs);
         self.write("]");
+    }
+
+    fn formatArrayPushTarget(self: *Formatter, node: Ast.Node) void {
+        self.formatNode(node.data.lhs);
+        self.write("[]");
+    }
+
+    fn formatListDestructure(self: *Formatter, node: Ast.Node) void {
+        self.write("list(");
+        const slots = self.ast.extraSlice(node.data.lhs);
+        for (slots, 0..) |slot, i| {
+            if (i > 0) self.write(", ");
+            if (slot == 0) continue;
+            self.formatNode(slot);
+        }
+        self.write(")");
     }
 
     fn formatPropertyAccess(self: *Formatter, node: Ast.Node) void {

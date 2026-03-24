@@ -1265,6 +1265,9 @@ const Parser = struct {
         if (self.isTypeName() or self.peek() == .question or self.peek() == .l_paren) {
             self.skipTypeHint();
         }
+        // reference: &$param
+        const is_ref = self.peek() == .amp;
+        if (is_ref) _ = self.advance();
         // variadic: ...$args
         const is_variadic = self.peek() == .ellipsis;
         if (is_variadic) _ = self.advance();
@@ -1275,8 +1278,11 @@ const Parser = struct {
             _ = self.advance();
             default = try self.parseExpression();
         }
-        // rhs = 1 means variadic
-        return self.addNode(.{ .tag = .variable, .main_token = tok, .data = .{ .lhs = default, .rhs = if (is_variadic) 1 else 0 } });
+        // rhs encoding: bit 0 = variadic, bit 1 = by-reference
+        var flags: u32 = 0;
+        if (is_variadic) flags |= 1;
+        if (is_ref) flags |= 2;
+        return self.addNode(.{ .tag = .variable, .main_token = tok, .data = .{ .lhs = default, .rhs = flags } });
     }
 
     // ======================================================================
@@ -1381,6 +1387,7 @@ const Parser = struct {
             .variable => self.addLiteral(.variable),
             .identifier => self.addLiteral(.identifier),
             .kw_isset, .kw_empty, .kw_unset, .kw_eval, .kw_exit, .kw_die => self.addLiteral(.identifier),
+            .kw_list => self.parseListDestructure(),
             .kw_match => self.parseMatchExpr(),
             .kw_function => self.parseClosureExpr(),
             .kw_fn => self.parseArrowFunc(),
@@ -1426,6 +1433,29 @@ const Parser = struct {
         const inner = try self.parseExpression();
         _ = try self.expect(.r_paren);
         return self.addNode(.{ .tag = .grouped_expr, .main_token = 0, .data = .{ .lhs = inner } });
+    }
+
+    fn parseListDestructure(self: *Parser) Error!u32 {
+        const list_tok = self.advance(); // list
+        _ = try self.expect(.l_paren);
+        var targets = std.ArrayListUnmanaged(u32){};
+        defer targets.deinit(self.allocator);
+        while (self.peek() != .r_paren) {
+            if (self.peek() == .comma) {
+                // skip slot (list(,$b) = ...)
+                try targets.append(self.allocator, 0);
+            } else if (self.peek() == .kw_list) {
+                try targets.append(self.allocator, try self.parseListDestructure());
+            } else {
+                try targets.append(self.allocator, try self.parseExpression());
+            }
+            if (self.peek() == .comma) {
+                _ = self.advance();
+            } else break;
+        }
+        _ = try self.expect(.r_paren);
+        const extra = try self.addExtraList(targets.items);
+        return self.addNode(.{ .tag = .list_destructure, .main_token = list_tok, .data = .{ .lhs = extra } });
     }
 
     fn parseArrayLiteral(self: *Parser) Error!u32 {
@@ -1506,6 +1536,11 @@ const Parser = struct {
 
     fn parseIndexExpr(self: *Parser, array: u32) Error!u32 {
         const bracket_tok = self.advance(); // [
+        if (self.peek() == .r_bracket) {
+            // $arr[] - array push syntax
+            _ = self.advance();
+            return self.addNode(.{ .tag = .array_push_target, .main_token = bracket_tok, .data = .{ .lhs = array } });
+        }
         const index = try self.parseExpression();
         _ = try self.expect(.r_bracket);
         return self.addNode(.{ .tag = .array_access, .main_token = bracket_tok, .data = .{ .lhs = array, .rhs = index } });

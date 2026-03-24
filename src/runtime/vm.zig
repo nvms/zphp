@@ -158,11 +158,13 @@ pub const VM = struct {
         chunk: *const Chunk, // chunk the handler belongs to
     };
 
+    const RefBinding = struct { caller_var: []const u8, param_name: []const u8 };
     const CallFrame = struct {
         chunk: *const Chunk,
         ip: usize,
         vars: std.StringHashMapUnmanaged(Value),
         generator: ?*Generator = null,
+        ref_bindings: std.ArrayListUnmanaged(RefBinding) = .{},
     };
 
     pub fn init(allocator: Allocator) RuntimeError!VM {
@@ -221,7 +223,10 @@ pub const VM = struct {
     }
 
     pub fn deinit(self: *VM) void {
-        for (0..self.frame_count) |i| self.frames[i].vars.deinit(self.allocator);
+        for (0..self.frame_count) |i| {
+            self.frames[i].ref_bindings.deinit(self.allocator);
+            self.frames[i].vars.deinit(self.allocator);
+        }
         self.functions.deinit(self.allocator);
         self.native_fns.deinit(self.allocator);
         self.output.deinit(self.allocator);
@@ -269,7 +274,10 @@ pub const VM = struct {
 
     pub fn reset(self: *VM) void {
         // clear per-request state, keep stdlib/builtins/constants/classes
-        for (0..self.frame_count) |i| self.frames[i].vars.deinit(self.allocator);
+        for (0..self.frame_count) |i| {
+            self.frames[i].ref_bindings.deinit(self.allocator);
+            self.frames[i].vars.deinit(self.allocator);
+        }
         self.frame_count = 0;
         self.sp = 0;
         self.handler_count = 0;
@@ -558,14 +566,18 @@ pub const VM = struct {
                 .return_val => {
                     const result = self.pop();
                     try self.writebackStatics();
+                    try self.writebackRefs();
                     self.frame_count -= 1;
+                    self.frames[self.frame_count].ref_bindings.deinit(self.allocator);
                     self.frames[self.frame_count].vars.deinit(self.allocator);
                     self.push(result);
                     if (self.frame_count <= base_frame) return;
                 },
                 .return_void => {
                     try self.writebackStatics();
+                    try self.writebackRefs();
                     self.frame_count -= 1;
+                    self.frames[self.frame_count].ref_bindings.deinit(self.allocator);
                     self.frames[self.frame_count].vars.deinit(self.allocator);
                     self.push(.null);
                     if (self.frame_count <= base_frame) return;
@@ -1594,6 +1606,17 @@ pub const VM = struct {
         self.sp = saved_sp;
     }
 
+    fn writebackRefs(self: *VM) !void {
+        const frame = self.currentFrame();
+        if (frame.ref_bindings.items.len == 0) return;
+        const caller = &self.frames[self.frame_count - 2];
+        for (frame.ref_bindings.items) |binding| {
+            if (frame.vars.get(binding.param_name)) |val| {
+                try caller.vars.put(self.allocator, binding.caller_var, val);
+            }
+        }
+    }
+
     fn writebackStatics(self: *VM) !void {
         var i: usize = 0;
         while (i < self.static_vars.items.len) {
@@ -1818,13 +1841,54 @@ pub const VM = struct {
                     }
                 }
             }
+            // set up ref param bindings
+            var ref_bindings = std.ArrayListUnmanaged(RefBinding){};
+            if (func.ref_params.len > 0) {
+                const caller_chunk = self.currentChunk();
+                const caller_ip = self.currentFrame().ip;
+                // scan backwards through caller bytecode to find get_var instructions for each arg
+                // call opcode: call(1) + name_idx(2) + arg_count(1) = 4 bytes before caller_ip
+                var scan_pos = caller_ip - 4;
+                var found: usize = 0;
+                var arg_vars: [16]?[]const u8 = .{null} ** 16;
+                // walk backwards to find get_var instructions for each arg
+                // each get_var is 3 bytes: opcode(1) + u16(2)
+                var scan_idx: usize = ac;
+                while (scan_idx > 0 and scan_pos >= 3) {
+                    scan_idx -= 1;
+                    // check if the instruction at scan_pos-3 is get_var
+                    if (caller_chunk.code.items[scan_pos - 3] == @intFromEnum(OpCode.get_var)) {
+                        const hi = caller_chunk.code.items[scan_pos - 2];
+                        const lo = caller_chunk.code.items[scan_pos - 1];
+                        const const_idx = (@as(u16, hi) << 8) | lo;
+                        if (const_idx < caller_chunk.constants.items.len) {
+                            arg_vars[scan_idx] = caller_chunk.constants.items[const_idx].string;
+                        }
+                        scan_pos -= 3;
+                        found += 1;
+                    } else {
+                        // non-variable arg, skip to find next one
+                        // this is best-effort - complex expressions won't be tracked
+                        break;
+                    }
+                }
+                for (0..@min(ac, func.ref_params.len)) |ri| {
+                    if (func.ref_params[ri]) {
+                        if (arg_vars[ri]) |caller_var| {
+                            try ref_bindings.append(self.allocator, .{ .caller_var = caller_var, .param_name = func.params[ri] });
+                        }
+                    }
+                }
+            }
+
             if (func.is_generator) {
+                ref_bindings.deinit(self.allocator);
                 const gen = try self.allocator.create(Generator);
                 gen.* = .{ .func = func, .vars = new_vars };
                 try self.generators.append(self.allocator, gen);
                 self.push(.{ .generator = gen });
             } else {
-                self.frames[self.frame_count] = .{ .chunk = &func.chunk, .ip = 0, .vars = new_vars };
+                self.frames[self.frame_count] = .{ .chunk = &func.chunk, .ip = 0, .vars = new_vars, .ref_bindings = ref_bindings };
                 self.frame_count += 1;
             }
         } else return error.RuntimeError;
