@@ -520,12 +520,16 @@ test "match multi value" {
     , "low");
 }
 
-test "match no match returns null" {
+test "match no match throws UnhandledMatchError" {
     try expectOutput(
         \\<?php
-        \\$r = match(99) { 1 => 'one' };
-        \\echo $r === null ? 'null' : 'value';
-    , "null");
+        \\try {
+        \\    $r = match(99) { 1 => 'one' };
+        \\    echo 'no error';
+        \\} catch (\UnhandledMatchError $e) {
+        \\    echo 'caught';
+        \\}
+    , "caught");
 }
 
 test "match assigned to variable" {
