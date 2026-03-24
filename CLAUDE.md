@@ -21,6 +21,9 @@ zig 0.15.x. `zig build test` must pass before pushing. short lowercase commits, 
 - type hints: parsed, not enforced. heredoc/nowdoc: not supported
 - `strtotime`: YYYY-MM-DD and relative only, UTC
 - trait conflict resolution (`insteadof`/`as`): not implemented
+- pass-by-reference: works for simple variable args only, not expressions or nested access. bytecode scan approach is best-effort
+- named arguments: not implemented
+- constructor property promotion: not implemented
 
 ## gotchas
 
