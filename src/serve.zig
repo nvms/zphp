@@ -691,7 +691,7 @@ fn populateSuperglobals(vm: *VM, req: *const Request, conn: std.net.Server.Conne
     const get_arr = try a.create(PhpArray);
     get_arr.* = .{};
     try vm.arrays.append(a, get_arr);
-    parseQueryString(a, get_arr, req.query_string) catch {};
+    parseQueryString(a, vm, get_arr, req.query_string) catch {};
     try vm.request_vars.put(a, "$_GET", .{ .array = get_arr });
 
     const post_arr = try a.create(PhpArray);
@@ -704,7 +704,7 @@ fn populateSuperglobals(vm: *VM, req: *const Request, conn: std.net.Server.Conne
 
     if (req.getHeader("Content-Type")) |ct| {
         if (std.mem.startsWith(u8, ct, "application/x-www-form-urlencoded")) {
-            parseQueryString(a, post_arr, req.body) catch {};
+            parseQueryString(a, vm, post_arr, req.body) catch {};
         } else if (std.mem.startsWith(u8, ct, "multipart/form-data")) {
             if (extractBoundary(ct)) |boundary| {
                 parseMultipart(a, vm, req.body, boundary, post_arr, files_arr) catch {};
@@ -724,32 +724,37 @@ fn populateSuperglobals(vm: *VM, req: *const Request, conn: std.net.Server.Conne
     const cookie_arr = try a.create(PhpArray);
     cookie_arr.* = .{};
     try vm.arrays.append(a, cookie_arr);
-    if (req.getHeader("Cookie")) |cookies| parseCookies(a, cookie_arr, cookies) catch {};
+    if (req.getHeader("Cookie")) |cookies| parseCookies(a, vm, cookie_arr, cookies) catch {};
     try vm.request_vars.put(a, "$_COOKIE", .{ .array = cookie_arr });
 }
 
-fn parseQueryString(a: Allocator, arr: *PhpArray, qs: []const u8) !void {
+fn parseQueryString(a: Allocator, vm: *VM, arr: *PhpArray, qs: []const u8) !void {
     if (qs.len == 0) return;
     var iter = std.mem.splitScalar(u8, qs, '&');
     while (iter.next()) |pair| {
         if (pair.len == 0) continue;
         if (std.mem.indexOf(u8, pair, "=")) |eq| {
             const key = try urlDecode(a, pair[0..eq]);
+            try vm.strings.append(a, key);
             const val = try urlDecode(a, pair[eq + 1 ..]);
+            try vm.strings.append(a, val);
             try arr.set(a, .{ .string = key }, .{ .string = val });
         } else {
             const key = try urlDecode(a, pair);
+            try vm.strings.append(a, key);
             try arr.set(a, .{ .string = key }, .{ .string = "" });
         }
     }
 }
 
-fn parseCookies(a: Allocator, arr: *PhpArray, cookies: []const u8) !void {
+fn parseCookies(a: Allocator, vm: *VM, arr: *PhpArray, cookies: []const u8) !void {
     var iter = std.mem.splitSequence(u8, cookies, "; ");
     while (iter.next()) |pair| {
         if (std.mem.indexOf(u8, pair, "=")) |eq| {
             const key = try a.dupe(u8, pair[0..eq]);
+            try vm.strings.append(a, key);
             const val = try a.dupe(u8, pair[eq + 1 ..]);
+            try vm.strings.append(a, val);
             try arr.set(a, .{ .string = key }, .{ .string = val });
         }
     }
