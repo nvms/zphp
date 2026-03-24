@@ -182,6 +182,7 @@ pub const VM = struct {
         try @import("../stdlib/exceptions.zig").register(&vm, allocator);
         try @import("../stdlib/datetime.zig").register(&vm, allocator);
         try @import("../stdlib/spl.zig").register(&vm, allocator);
+        try @import("../stdlib/pdo.zig").register(&vm, allocator);
         return vm;
     }
 
@@ -247,6 +248,7 @@ pub const VM = struct {
             self.allocator.destroy(a);
         }
         self.arrays.deinit(self.allocator);
+        @import("../stdlib/pdo.zig").cleanupResources(self.objects);
         for (self.objects.items) |o| {
             o.deinit(self.allocator);
             self.allocator.destroy(o);
@@ -303,6 +305,7 @@ pub const VM = struct {
             self.allocator.destroy(a);
         }
         self.arrays.clearRetainingCapacity();
+        @import("../stdlib/pdo.zig").cleanupResources(self.objects);
         for (self.objects.items) |o| {
             o.deinit(self.allocator);
             self.allocator.destroy(o);

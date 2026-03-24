@@ -17,10 +17,10 @@ jobs:
       - uses: mlugg/setup-zig@v2
         with:
           version: 0.15.0
-      - name: install pcre2
+      - name: install system libs
         run: |
           if [ "$RUNNER_OS" = "Linux" ]; then
-            sudo apt-get update && sudo apt-get install -y libpcre2-dev
+            sudo apt-get update && sudo apt-get install -y libpcre2-dev libsqlite3-dev
           fi
       - run: zig build test
       - run: zig build
@@ -32,8 +32,8 @@ jobs:
       - uses: mlugg/setup-zig@v2
         with:
           version: 0.15.0
-      - name: install pcre2
-        run: sudo apt-get update && sudo apt-get install -y libpcre2-dev
+      - name: install system libs
+        run: sudo apt-get update && sudo apt-get install -y libpcre2-dev libsqlite3-dev
       - run: zig build
       - run: ./tests/serve_test
 
@@ -44,8 +44,8 @@ jobs:
       - uses: mlugg/setup-zig@v2
         with:
           version: 0.15.0
-      - name: install pcre2
-        run: sudo apt-get update && sudo apt-get install -y libpcre2-dev
+      - name: install system libs
+        run: sudo apt-get update && sudo apt-get install -y libpcre2-dev libsqlite3-dev
       - run: zig build
       - run: ./tests/test_runner_test
 
@@ -56,8 +56,8 @@ jobs:
       - uses: mlugg/setup-zig@v2
         with:
           version: 0.15.0
-      - name: install pcre2
-        run: sudo apt-get update && sudo apt-get install -y libpcre2-dev
+      - name: install system libs
+        run: sudo apt-get update && sudo apt-get install -y libpcre2-dev libsqlite3-dev
       - run: zig build
       - run: ./tests/pkg_test
 
@@ -68,8 +68,8 @@ jobs:
       - uses: mlugg/setup-zig@v2
         with:
           version: 0.15.0
-      - name: install pcre2
-        run: sudo apt-get update && sudo apt-get install -y libpcre2-dev
+      - name: install system libs
+        run: sudo apt-get update && sudo apt-get install -y libpcre2-dev libsqlite3-dev
       - run: zig build
       - run: ./tests/fmt_test
 
@@ -80,8 +80,8 @@ jobs:
       - uses: mlugg/setup-zig@v2
         with:
           version: 0.15.0
-      - name: install pcre2
-        run: sudo apt-get update && sudo apt-get install -y libpcre2-dev
+      - name: install system libs
+        run: sudo apt-get update && sudo apt-get install -y libpcre2-dev libsqlite3-dev
       - uses: shivammathur/setup-php@v2
         with:
           php-version: '8.4'

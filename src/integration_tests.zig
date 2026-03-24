@@ -968,6 +968,46 @@ test "fiber start with args" {
     , "7");
 }
 
+test "pdo sqlite basic" {
+    try expectOutput(
+        \\<?php
+        \\$pdo = new PDO('sqlite::memory:');
+        \\$pdo->exec("CREATE TABLE t (id INTEGER PRIMARY KEY, val TEXT)");
+        \\$pdo->exec("INSERT INTO t (val) VALUES ('hello')");
+        \\$stmt = $pdo->query("SELECT val FROM t");
+        \\$row = $stmt->fetch(PDO::FETCH_ASSOC);
+        \\echo $row['val'];
+    , "hello");
+}
+
+test "pdo sqlite prepared params" {
+    try expectOutput(
+        \\<?php
+        \\$pdo = new PDO('sqlite::memory:');
+        \\$pdo->exec("CREATE TABLE t (id INTEGER PRIMARY KEY, name TEXT)");
+        \\$stmt = $pdo->prepare("INSERT INTO t (name) VALUES (?)");
+        \\$stmt->execute(['alice']);
+        \\$stmt->execute(['bob']);
+        \\$stmt = $pdo->query("SELECT name FROM t ORDER BY id");
+        \\$rows = $stmt->fetchAll(PDO::FETCH_ASSOC);
+        \\echo $rows[0]['name'] . " " . $rows[1]['name'];
+    , "alice bob");
+}
+
+test "pdo sqlite transactions" {
+    try expectOutput(
+        \\<?php
+        \\$pdo = new PDO('sqlite::memory:');
+        \\$pdo->exec("CREATE TABLE t (id INTEGER PRIMARY KEY, val TEXT)");
+        \\$pdo->exec("INSERT INTO t (val) VALUES ('keep')");
+        \\$pdo->beginTransaction();
+        \\$pdo->exec("DELETE FROM t");
+        \\$pdo->rollBack();
+        \\$stmt = $pdo->query("SELECT val FROM t");
+        \\echo $stmt->fetchColumn();
+    , "keep");
+}
+
 test "throw in method caught by caller" {
     try expectOutput(
         \\<?php
