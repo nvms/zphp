@@ -58,3 +58,16 @@ function process(int|string|null $val): string {
 }
 echo process(null) . "\n";
 echo process(99) . "\n";
+
+// callable type hint
+function apply(callable $fn, int $x): int {
+    return $fn($x);
+}
+echo apply(function($x) { return $x * 2; }, 5) . "\n";
+
+// callable in union
+function flexiCall(callable|string $fn): string {
+    if (is_callable($fn)) return "callable";
+    return "string";
+}
+echo flexiCall(function() {}) . "\n";
