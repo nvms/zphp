@@ -430,6 +430,8 @@ const Parser = struct {
         const iterable = try self.parseExpression();
         _ = try self.expect(.kw_as);
 
+        // skip & for foreach by-reference (zphp arrays are already reference semantics)
+        if (self.peek() == .amp) _ = self.advance();
         const first = try self.parseExpression();
         var value: u32 = first;
         var key: u32 = 0;
@@ -437,6 +439,7 @@ const Parser = struct {
         if (self.peek() == .fat_arrow) {
             _ = self.advance();
             key = first;
+            if (self.peek() == .amp) _ = self.advance();
             value = try self.parseExpression();
         }
 
@@ -644,16 +647,15 @@ const Parser = struct {
         _ = self.advance(); // catch
         _ = try self.expect(.l_paren);
 
-        // catch type: may be qualified name like \Exception or Foo\Bar
-        var type_node: u32 = 0;
-        if (self.peek() == .identifier or self.peek() == .backslash) {
-            type_node = try self.parseQualifiedName();
+        var types = std.ArrayListUnmanaged(u32){};
+        defer types.deinit(self.allocator);
 
-            // multi-catch: Exception | RuntimeException
+        if (self.peek() == .identifier or self.peek() == .backslash) {
+            try types.append(self.allocator, try self.parseQualifiedName());
+
             while (self.peek() == .pipe) {
                 _ = self.advance();
-                _ = try self.parseQualifiedName();
-                // for now, only use the first type
+                try types.append(self.allocator, try self.parseQualifiedName());
             }
         }
 
@@ -666,7 +668,14 @@ const Parser = struct {
         _ = try self.expect(.r_paren);
         const body = try self.parseBlock();
 
-        return self.addNode(.{ .tag = .catch_clause, .main_token = var_tok, .data = .{ .lhs = type_node, .rhs = body } });
+        // lhs = extra -> {type_count, type_nodes...}
+        var extra = std.ArrayListUnmanaged(u32){};
+        defer extra.deinit(self.allocator);
+        try extra.append(self.allocator, @intCast(types.items.len));
+        try extra.appendSlice(self.allocator, types.items);
+        const lhs = try self.addExtra(extra.items);
+
+        return self.addNode(.{ .tag = .catch_clause, .main_token = var_tok, .data = .{ .lhs = lhs, .rhs = body } });
     }
 
     fn parseNewExpr(self: *Parser) Error!u32 {

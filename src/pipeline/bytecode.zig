@@ -112,6 +112,9 @@ pub const OpCode = enum(u8) {
     yield_pair, // pop value, pop key, suspend generator
     generator_return, // pop value, mark generator completed
     yield_from, // pop iterable, delegate yield, push return value
+
+    // object
+    clone_obj, // shallow copy object on top of stack
 };
 
 
@@ -147,6 +150,7 @@ pub const ObjFunction = struct {
     required_params: u8 = 0,
     is_variadic: bool = false,
     is_generator: bool = false,
+    is_arrow: bool = false,
     params: []const []const u8,
     defaults: []const Value = &.{},
     ref_params: []const bool = &.{},

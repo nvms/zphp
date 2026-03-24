@@ -764,6 +764,23 @@ pub const VM = struct {
                     _ = self.pop();
                 },
 
+                .clone_obj => {
+                    const val = self.pop();
+                    if (val == .object) {
+                        const src = val.object;
+                        const copy = try self.allocator.create(PhpObject);
+                        copy.* = .{ .class_name = src.class_name };
+                        var it = src.properties.iterator();
+                        while (it.next()) |entry| {
+                            try copy.properties.put(self.allocator, entry.key_ptr.*, entry.value_ptr.*);
+                        }
+                        try self.objects.append(self.allocator, copy);
+                        self.push(.{ .object = copy });
+                    } else {
+                        self.push(val);
+                    }
+                },
+
                 .cast_int => {
                     const v = self.pop();
                     self.push(.{ .int = Value.toInt(v) });

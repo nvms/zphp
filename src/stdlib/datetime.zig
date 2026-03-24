@@ -470,24 +470,65 @@ pub fn parseRelativeTime(input: []const u8, base: i64) Value {
     s = s[num_end..];
     while (s.len > 0 and s[0] == ' ') s = s[1..];
 
-    const seconds: i64 = if (startsWith(s, "second"))
-        num * sign
-    else if (startsWith(s, "minute"))
-        num * sign * 60
-    else if (startsWith(s, "hour"))
-        num * sign * 3600
-    else if (startsWith(s, "day"))
-        num * sign * 86400
-    else if (startsWith(s, "week"))
-        num * sign * 604800
-    else if (startsWith(s, "month"))
-        num * sign * 2592000
-    else if (startsWith(s, "year"))
-        num * sign * 31536000
-    else
-        return .{ .bool = false };
+    if (startsWith(s, "second")) {
+        return .{ .int = base + num * sign };
+    } else if (startsWith(s, "minute")) {
+        return .{ .int = base + num * sign * 60 };
+    } else if (startsWith(s, "hour")) {
+        return .{ .int = base + num * sign * 3600 };
+    } else if (startsWith(s, "day")) {
+        return .{ .int = base + num * sign * 86400 };
+    } else if (startsWith(s, "week")) {
+        return .{ .int = base + num * sign * 604800 };
+    } else if (startsWith(s, "month") or startsWith(s, "year")) {
+        const is_year = startsWith(s, "year");
+        const epoch_secs: u64 = @intCast(if (base < 0) 0 else base);
+        const es = std.time.epoch.EpochSeconds{ .secs = epoch_secs };
+        const day_seconds = es.getDaySeconds();
+        const epoch_day = es.getEpochDay();
+        const year_day = epoch_day.calculateYearDay();
+        const month_day = year_day.calculateMonthDay();
 
-    return .{ .int = base + seconds };
+        var year: i64 = @intCast(year_day.year);
+        var month: i64 = @intCast(month_day.month.numeric());
+        const day: i64 = @intCast(month_day.day_index + 1);
+
+        if (is_year) {
+            year += num * sign;
+        } else {
+            month += num * sign;
+        }
+
+        // normalize month overflow/underflow
+        if (month > 12) {
+            year += @divFloor(month - 1, 12);
+            month = @mod(month - 1, 12) + 1;
+        } else if (month < 1) {
+            year += @divFloor(month - 12, 12);
+            month = @mod(month - 1, 12) + 1;
+        }
+
+        // PHP behavior: overflow days into next month (Jan 31 + 1 month = Mar 2)
+        const clamped_day = day;
+
+        const hour: i64 = @intCast(day_seconds.getHoursIntoDay());
+        const min: i64 = @intCast(day_seconds.getMinutesIntoHour());
+        const sec: i64 = @intCast(day_seconds.getSecondsIntoMinute());
+        return .{ .int = dateToTimestamp(year, month, clamped_day, hour, min, sec) };
+    } else {
+        return .{ .bool = false };
+    }
+}
+
+fn daysInMonth(month: i64, year: i64) i64 {
+    const days = [_]i64{ 31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31 };
+    const m: usize = @intCast(if (month < 1) 0 else if (month > 12) 11 else month - 1);
+    var d = days[m];
+    if (m == 1) {
+        const y = if (year < 0) -year else year;
+        if (@mod(y, 4) == 0 and (@mod(y, 100) != 0 or @mod(y, 400) == 0)) d = 29;
+    }
+    return d;
 }
 
 fn startsWith(s: []const u8, prefix: []const u8) bool {

@@ -915,9 +915,13 @@ const Compiler = struct {
             return;
         }
 
-        if (op_tag == .at or op_tag == .kw_clone) {
-            // @ suppresses errors (no-op in zphp), clone is shallow copy (not yet implemented, passes through)
+        if (op_tag == .at) {
             try self.compileNode(node.data.lhs);
+            return;
+        }
+        if (op_tag == .kw_clone) {
+            try self.compileNode(node.data.lhs);
+            try self.emitOp(.clone_obj);
             return;
         }
         try self.compileNode(node.data.lhs);
@@ -1337,19 +1341,36 @@ const Compiler = struct {
 
         for (catch_nodes, 0..) |catch_idx, ci| {
             const catch_node = self.ast.nodes[catch_idx];
-            const type_node_idx = catch_node.data.lhs;
+            const types_extra = catch_node.data.lhs;
             const body_idx = catch_node.data.rhs;
             _ = ci;
 
-            if (type_node_idx != 0) {
-                // typed catch: check instanceof, skip if no match
-                try self.emitOp(.dup);
-                const type_name = self.ast.tokenSlice(self.ast.nodes[type_node_idx].main_token);
-                const type_idx = try self.addConstant(.{ .string = type_name });
-                try self.emitConstant(type_idx);
-                try self.emitOp(.instance_check);
-                const skip = try self.emitJump(.jump_if_false);
-                try self.emitOp(.pop);
+            const type_count = self.ast.extra_data[types_extra];
+
+            if (type_count > 0) {
+                const type_nodes = self.ast.extra_data[types_extra + 1 .. types_extra + 1 + type_count];
+
+                // for each type: dup exc, check instanceof, if true jump to match
+                var match_jumps = std.ArrayListUnmanaged(usize){};
+                defer match_jumps.deinit(self.allocator);
+
+                for (type_nodes) |tn| {
+                    try self.emitOp(.dup); // [exc, exc]
+                    const type_name = self.ast.tokenSlice(self.ast.nodes[tn].main_token);
+                    const tidx = try self.addConstant(.{ .string = type_name });
+                    try self.emitConstant(tidx); // [exc, exc, type]
+                    try self.emitOp(.instance_check); // [exc, bool]
+                    const mj = try self.emitJump(.jump_if_true); // peek bool
+                    try match_jumps.append(self.allocator, mj);
+                    try self.emitOp(.pop); // [exc] (remove false bool)
+                }
+
+                // none matched, stack: [exc] - skip to next catch
+                const skip = try self.emitJump(.jump);
+
+                // match: stack: [exc, bool(true)]
+                for (match_jumps.items) |mj| self.patchJump(mj);
+                try self.emitOp(.pop); // remove bool -> [exc]
 
                 if (catch_node.main_token != 0) {
                     const var_name = self.ast.tokenSlice(catch_node.main_token);
@@ -1357,14 +1378,14 @@ const Compiler = struct {
                     try self.emitOp(.set_var);
                     try self.emitU16(var_idx);
                 }
-                try self.emitOp(.pop);
+                try self.emitOp(.pop); // remove exc
 
                 try self.compileNode(body_idx);
                 const ej = try self.emitJump(.jump);
                 try end_jumps.append(self.allocator, ej);
 
+                // skip lands here, stack: [exc] (preserved for next catch)
                 self.patchJump(skip);
-                try self.emitOp(.pop);
             } else {
                 // untyped catch-all
                 if (catch_node.main_token != 0) {
@@ -2047,7 +2068,14 @@ const Compiler = struct {
         if (default_arm) |da| {
             try self.compileNode(self.ast.nodes[da].data.rhs);
         } else {
-            try self.emitOp(.op_null);
+            // no default: throw UnhandledMatchError
+            const cls_idx = try self.addConstant(.{ .string = "UnhandledMatchError" });
+            const msg_idx = try self.addConstant(.{ .string = "Unhandled match case" });
+            try self.emitConstant(msg_idx);
+            try self.emitOp(.new_obj);
+            try self.emitU16(cls_idx);
+            try self.emitByte(1);
+            try self.emitOp(.throw);
         }
 
         for (end_jumps.items) |ej| self.patchJump(ej);

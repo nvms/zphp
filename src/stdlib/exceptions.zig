@@ -41,6 +41,8 @@ pub fn register(vm: *VM, a: Allocator) !void {
         .{ "AssertionError", "Exception" },
         .{ "Error", "Exception" },
         .{ "FiberError", "Error" },
+        .{ "ValueError", "Error" },
+        .{ "UnhandledMatchError", "Error" },
         .{ "PDOException", "RuntimeException" },
     };
 

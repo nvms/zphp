@@ -611,7 +611,11 @@ fn array_walk(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     const arr = args[0].array;
 
     for (arr.entries.items) |entry| {
-        _ = try ctx.invokeCallable(args[1], &.{entry.value});
+        const key_val: Value = switch (entry.key) {
+            .int => |k| .{ .int = k },
+            .string => |s| .{ .string = s },
+        };
+        _ = try ctx.invokeCallable(args[1], &.{ entry.value, key_val });
     }
     return .{ .bool = true };
 }
