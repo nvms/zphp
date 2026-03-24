@@ -64,6 +64,9 @@ pub fn compileWithPath(ast: *const Ast, allocator: Allocator, file_path: []const
 
     c.break_jumps.deinit(allocator);
     c.continue_jumps.deinit(allocator);
+    var tp_iter = c.trait_properties.valueIterator();
+    while (tp_iter.next()) |v| allocator.free(v.*);
+    c.trait_properties.deinit(allocator);
     return .{ .chunk = c.chunk, .functions = c.functions, .string_allocs = c.string_allocs, .allocator = allocator };
 }
 
@@ -84,6 +87,7 @@ const Compiler = struct {
     namespace: []const u8 = "",
     use_aliases: std.StringHashMapUnmanaged([]const u8) = .{},
     file_path: []const u8 = "",
+    trait_properties: std.StringHashMapUnmanaged([]const u32) = .{},
 
     const LoopJump = struct {
         offset: usize,
@@ -1457,12 +1461,28 @@ const Compiler = struct {
             }
         }
 
+        // collect trait property indices for this class
+        var trait_prop_members = std.ArrayListUnmanaged(u32){};
+        defer trait_prop_members.deinit(self.allocator);
+        for (members) |member_idx| {
+            const member = self.ast.nodes[member_idx];
+            if (member.tag == .trait_use) {
+                for (self.ast.extraSlice(member.data.lhs)) |tn| {
+                    const tname = self.ast.tokenSlice(self.ast.nodes[tn].main_token);
+                    if (self.trait_properties.get(tname)) |props| {
+                        for (props) |pi| try trait_prop_members.append(self.allocator, pi);
+                    }
+                }
+            }
+        }
+
         // compile instance property defaults (push onto stack)
         var prop_count: u8 = 0;
         for (members) |member_idx| {
             const member = self.ast.nodes[member_idx];
             if (member.tag == .class_property) prop_count += 1;
         }
+        prop_count += @intCast(trait_prop_members.items.len);
         prop_count += promoted_count;
         for (members) |member_idx| {
             const member = self.ast.nodes[member_idx];
@@ -1470,6 +1490,13 @@ const Compiler = struct {
                 if (member.data.lhs != 0) {
                     try self.compileNode(member.data.lhs);
                 }
+            }
+        }
+        // compile trait property defaults
+        for (trait_prop_members.items) |tpi| {
+            const tmember = self.ast.nodes[tpi];
+            if (tmember.data.lhs != 0) {
+                try self.compileNode(tmember.data.lhs);
             }
         }
         // promoted params get null defaults (actual values assigned in constructor body)
@@ -1528,6 +1555,16 @@ const Compiler = struct {
                 try self.emitByte(if (member.data.lhs != 0) @as(u8, 1) else @as(u8, 0));
                 try self.emitByte(@intCast(member.data.rhs));
             }
+        }
+        // trait properties
+        for (trait_prop_members.items) |tpi| {
+            const tmember = self.ast.nodes[tpi];
+            var tprop_name = self.ast.tokenSlice(tmember.main_token);
+            if (tprop_name.len > 0 and tprop_name[0] == '$') tprop_name = tprop_name[1..];
+            const tpname_idx = try self.addConstant(.{ .string = tprop_name });
+            try self.emitU16(tpname_idx);
+            try self.emitByte(if (tmember.data.lhs != 0) @as(u8, 1) else @as(u8, 0));
+            try self.emitByte(@intCast(tmember.data.rhs));
         }
         // promoted constructor params as properties
         for (constructor_params) |p| {
@@ -1638,6 +1675,21 @@ const Compiler = struct {
             if (member.tag == .class_method or member.tag == .static_class_method) {
                 try self.compileClassMethodBody(trait_name, member);
             }
+        }
+
+        // store property member indices for classes that use this trait
+        var prop_indices = std.ArrayListUnmanaged(u32){};
+        for (members) |member_idx| {
+            const member = self.ast.nodes[member_idx];
+            if (member.tag == .class_property) {
+                try prop_indices.append(self.allocator, member_idx);
+            }
+        }
+        if (prop_indices.items.len > 0) {
+            const owned = try prop_indices.toOwnedSlice(self.allocator);
+            try self.trait_properties.put(self.allocator, trait_name, owned);
+        } else {
+            prop_indices.deinit(self.allocator);
         }
 
         const name_idx = try self.addConstant(.{ .string = trait_name });

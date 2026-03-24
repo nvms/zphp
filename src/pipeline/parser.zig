@@ -940,6 +940,21 @@ const Parser = struct {
                     self.nodes.items[prop].tag = .static_class_property;
                 }
                 try members.append(self.allocator, prop);
+            } else if (self.isTypeName() or self.peek() == .question or self.peek() == .l_paren) {
+                self.skipTypeHint();
+                if (self.peek() == .variable) {
+                    const prop = try self.parseClassProperty();
+                    if (is_static) {
+                        self.nodes.items[prop].tag = .static_class_property;
+                    }
+                    try members.append(self.allocator, prop);
+                } else {
+                    _ = self.advance();
+                }
+            } else if (self.peek() == .kw_const) {
+                try members.append(self.allocator, try self.parseConstDecl());
+            } else if (self.peek() == .kw_use) {
+                try members.append(self.allocator, try self.parseTraitUse());
             } else {
                 _ = self.advance();
             }

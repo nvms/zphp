@@ -25,9 +25,17 @@ trait Timestamped
     }
 }
 
-abstract class Component implements Renderable
+class Component implements Renderable
 {
-    abstract public function getType(): string;
+    public function getType(): string
+    {
+        return "component";
+    }
+
+    public function render(): string
+    {
+        return "";
+    }
 
     public function describe(): string
     {
