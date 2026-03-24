@@ -1,4 +1,7 @@
 <?php
+// covers: interfaces, traits with private properties/methods, class inheritance,
+//   method override, instanceof, is_a, get_class, get_parent_class,
+//   multiple interface implementation, trait use in classes
 
 interface Renderable
 {

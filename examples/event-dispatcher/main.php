@@ -1,4 +1,7 @@
 <?php
+// covers: interfaces, class implements interface, closures with use(&$ref),
+//   array_splice, json_encode, priority sorting, callable dispatch,
+//   method chaining, event data mutation across listeners
 
 interface EventInterface
 {

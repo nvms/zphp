@@ -13,9 +13,10 @@ pub fn enumCases(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
     const enum_name = enumClassFromCallName(ctx) orelse return error.RuntimeError;
     const def = ctx.vm.classes.get(enum_name) orelse return error.RuntimeError;
     var arr = try ctx.createArray();
-    var iter = def.static_props.iterator();
-    while (iter.next()) |entry| {
-        try arr.append(ctx.allocator, entry.value_ptr.*);
+    for (def.case_order.items) |name| {
+        if (def.static_props.get(name)) |val| {
+            try arr.append(ctx.allocator, val);
+        }
     }
     return .{ .array = arr };
 }

@@ -1,4 +1,7 @@
 <?php
+// covers: closures with use binding, method chaining (return $this),
+//   callable dispatch, global variables, null coalescing (??),
+//   closure pipeline pattern, string interpolation
 
 class Request
 {

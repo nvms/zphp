@@ -1,4 +1,7 @@
 <?php
+// covers: dependency injection, closures as factories, singleton pattern,
+//   interface-based resolution, object identity (===), array_key_exists,
+//   callable invocation with container injection
 
 class Container
 {

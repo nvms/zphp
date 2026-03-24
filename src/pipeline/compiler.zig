@@ -948,6 +948,23 @@ const Compiler = struct {
                 try self.emitU16(prop_idx);
                 return;
             }
+            if (target.tag == .static_prop_access) {
+                const class_node = self.ast.nodes[target.data.lhs];
+                const class_name = self.ast.tokenSlice(class_node.main_token);
+                var prop_name = self.ast.tokenSlice(target.main_token);
+                if (prop_name.len > 0 and prop_name[0] == '$') prop_name = prop_name[1..];
+                const class_idx = try self.addConstant(.{ .string = class_name });
+                const sprop_idx = try self.addConstant(.{ .string = prop_name });
+                try self.emitOp(.get_static_prop);
+                try self.emitU16(class_idx);
+                try self.emitU16(sprop_idx);
+                try self.emitConstant(try self.addConstant(.{ .int = 1 }));
+                try self.emitOp(if (op_tag == .plus_plus) .add else .subtract);
+                try self.emitOp(.set_static_prop);
+                try self.emitU16(class_idx);
+                try self.emitU16(sprop_idx);
+                return;
+            }
             try self.compileNode(node.data.lhs);
             try self.emitConstant(try self.addConstant(.{ .int = 1 }));
             try self.emitOp(if (op_tag == .plus_plus) .add else .subtract);
@@ -999,6 +1016,31 @@ const Compiler = struct {
             try self.emitOp(.set_prop);
             try self.emitU16(prop_idx);
             // stack: [old_val]
+            return;
+        }
+
+        if (target.tag == .static_prop_access) {
+            const class_node = self.ast.nodes[target.data.lhs];
+            var class_name = self.ast.tokenSlice(class_node.main_token);
+            if (std.mem.eql(u8, class_name, "self") or std.mem.eql(u8, class_name, "static") or std.mem.eql(u8, class_name, "parent")) {} else {
+                class_name = self.ast.tokenSlice(class_node.main_token);
+            }
+            var prop_name = self.ast.tokenSlice(target.main_token);
+            if (prop_name.len > 0 and prop_name[0] == '$') prop_name = prop_name[1..];
+            const class_idx = try self.addConstant(.{ .string = class_name });
+            const sprop_idx = try self.addConstant(.{ .string = prop_name });
+            try self.emitOp(.get_static_prop);
+            try self.emitU16(class_idx);
+            try self.emitU16(sprop_idx);
+            try self.emitOp(.get_static_prop);
+            try self.emitU16(class_idx);
+            try self.emitU16(sprop_idx);
+            try self.emitConstant(try self.addConstant(.{ .int = 1 }));
+            try self.emitOp(if (op_tag == .plus_plus) .add else .subtract);
+            try self.emitOp(.set_static_prop);
+            try self.emitU16(class_idx);
+            try self.emitU16(sprop_idx);
+            try self.emitOp(.pop);
             return;
         }
 

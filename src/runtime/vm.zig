@@ -117,6 +117,7 @@ pub const ClassDef = struct {
     interfaces: std.ArrayListUnmanaged([]const u8) = .{},
     is_enum: bool = false,
     backed_type: enum(u8) { none = 0, int_type = 1, string_type = 2 } = .none,
+    case_order: std.ArrayListUnmanaged([]const u8) = .{},
 
     pub const Visibility = enum(u8) { public = 0, protected = 1, private = 2 };
 
@@ -139,6 +140,7 @@ pub const ClassDef = struct {
         self.properties.deinit(allocator);
         self.static_props.deinit(allocator);
         self.interfaces.deinit(allocator);
+        self.case_order.deinit(allocator);
     }
 };
 
@@ -1443,6 +1445,7 @@ pub const VM = struct {
                             vj += 1;
                         }
                         try def.static_props.put(self.allocator, case_names[ci], .{ .object = case_obj });
+                        try def.case_order.append(self.allocator, case_names[ci]);
                     }
 
                     // read methods

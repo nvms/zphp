@@ -1,4 +1,7 @@
 <?php
+// covers: PDO with sqlite :memory:, prepared statements (named and positional),
+//   FETCH_ASSOC, execute/fetch/fetchAll, transactions (begin/commit/rollback),
+//   exec for DDL, query for SELECT, lastInsertId, repository pattern
 
 class Database
 {

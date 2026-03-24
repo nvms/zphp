@@ -1,4 +1,8 @@
 <?php
+// covers: static methods and factory pattern, match expressions,
+//   spaceship operator (<=>), array_map/array_filter/array_column/array_slice,
+//   method chaining with self return, usort with callable comparator,
+//   fluent collection API, variadic params
 
 class Collection
 {

@@ -1,6 +1,8 @@
 <?php
-
-// lazy data pipeline using generators, closures, and chaining
+// covers: generators (yield, yield from, send, current), foreach on generators,
+//   closures with params, infinite generators, generator exception propagation,
+//   try/catch around generator foreach, chained generator transforms,
+//   str_getcsv, implode, count, array append, nested array access
 
 function fromArray(array $items): Generator
 {

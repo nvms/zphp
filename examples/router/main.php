@@ -1,6 +1,7 @@
 <?php
-
-// router example: URL pattern matching with callable dispatch
+// covers: array callables ([$obj, "method"], ["Class", "static"]),
+//   string function callables, closure callables, pattern matching,
+//   multi-level parameter extraction, string manipulation (explode, trim)
 
 class Router
 {

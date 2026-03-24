@@ -1,4 +1,8 @@
 <?php
+// covers: abstract classes, interface implementation, variadic params,
+//   callback rules (closures stored and invoked), __toString magic method,
+//   static factory methods, is_string/is_numeric/is_array/is_null type checks,
+//   preg_match, strlen, filter_var, in_array
 
 interface RuleInterface
 {
