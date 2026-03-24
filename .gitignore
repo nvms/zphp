@@ -2,4 +2,8 @@ zig-out/
 zig-cache/
 .zig-cache/
 test_compress
+ARCHITECTURE.md
+BUGS.md
+CLAUDE.md
+PERFORMANCE.md
 STDLIB_PARITY.md

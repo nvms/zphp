@@ -232,6 +232,14 @@ pub const VM = struct {
         try c.put(a, "M_LN10", .{ .float = @log(10.0) });
         try c.put(a, "INF", .{ .float = std.math.inf(f64) });
         try c.put(a, "NAN", .{ .float = std.math.nan(f64) });
+        try c.put(a, "PHP_URL_SCHEME", .{ .int = 0 });
+        try c.put(a, "PHP_URL_HOST", .{ .int = 1 });
+        try c.put(a, "PHP_URL_PORT", .{ .int = 2 });
+        try c.put(a, "PHP_URL_USER", .{ .int = 3 });
+        try c.put(a, "PHP_URL_PASS", .{ .int = 4 });
+        try c.put(a, "PHP_URL_PATH", .{ .int = 5 });
+        try c.put(a, "PHP_URL_QUERY", .{ .int = 6 });
+        try c.put(a, "PHP_URL_FRAGMENT", .{ .int = 7 });
     }
 
     pub fn deinit(self: *VM) void {

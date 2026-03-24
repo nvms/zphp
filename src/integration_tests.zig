@@ -1060,3 +1060,63 @@ test "throw in method caught by caller" {
         \\}
     , "fail");
 }
+
+// ==========================================================================
+// parse_url / parse_str / strstr
+// ==========================================================================
+
+test "parse_url full" {
+    try expectOutput(
+        \\<?php
+        \\$u = parse_url("https://user:pw@example.com:8080/p?q=1#f");
+        \\echo $u["scheme"] . " " . $u["host"] . " " . $u["port"] . " " . $u["user"] . " " . $u["pass"] . " " . $u["path"] . " " . $u["query"] . " " . $u["fragment"];
+    , "https example.com 8080 user pw /p q=1 f");
+}
+
+test "parse_url component" {
+    try expectOutput(
+        \\<?php
+        \\echo parse_url("https://example.com:443/path?q=1", PHP_URL_HOST);
+        \\echo " ";
+        \\echo parse_url("https://example.com:443/path?q=1", PHP_URL_PORT);
+    , "example.com 443");
+}
+
+test "parse_url path only" {
+    try expectOutput(
+        \\<?php
+        \\$u = parse_url("/path?q=1#sec");
+        \\echo $u["path"] . " " . $u["query"] . " " . $u["fragment"];
+    , "/path q=1 sec");
+}
+
+test "parse_str basic" {
+    try expectOutput(
+        \\<?php
+        \\$r = parse_str("a=1&b=hello+world&c=%2Fpath");
+        \\echo $r["a"] . " " . $r["b"] . " " . $r["c"];
+    , "1 hello world /path");
+}
+
+test "strstr basic" {
+    try expectOutput(
+        \\<?php
+        \\echo strstr("hello world", "world");
+        \\echo " ";
+        \\echo strstr("hello world", "o", true);
+    , "world hell");
+}
+
+test "strstr not found" {
+    try expectOutput(
+        \\<?php
+        \\var_dump(strstr("abc", "xyz"));
+    , "bool(false)\n");
+}
+
+test "strchr alias" {
+    try expectOutput(
+        \\<?php
+        \\echo strchr("foo@bar.com", "@");
+    , "@bar.com");
+}

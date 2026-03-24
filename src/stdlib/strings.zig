@@ -75,6 +75,10 @@ pub const entries = .{
     .{ "htmlentities", native_htmlspecialchars },
     .{ "quoted_printable_encode", native_qp_encode },
     .{ "quoted_printable_decode", native_qp_decode },
+    .{ "parse_url", native_parse_url },
+    .{ "parse_str", native_parse_str },
+    .{ "strstr", native_strstr },
+    .{ "strchr", native_strstr },
 };
 
 fn substr(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
@@ -1524,4 +1528,189 @@ fn native_qp_decode(ctx: *NativeContext, args: []const Value) RuntimeError!Value
     const result = try buf.toOwnedSlice(ctx.allocator);
     try ctx.strings.append(ctx.allocator, result);
     return .{ .string = result };
+}
+
+fn native_parse_url(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len == 0 or args[0] != .string) return Value{ .bool = false };
+    const url = args[0].string;
+
+    const component: ?i64 = if (args.len >= 2 and args[1] == .int) args[1].int else null;
+
+    var scheme_end: usize = 0;
+    var scheme: ?[]const u8 = null;
+    var authority_start: usize = 0;
+
+    if (std.mem.indexOf(u8, url, "://")) |pos| {
+        scheme = url[0..pos];
+        scheme_end = pos + 3;
+        authority_start = scheme_end;
+    } else if (url.len >= 2 and url[0] == '/' and url[1] == '/') {
+        authority_start = 2;
+        scheme_end = 2;
+    }
+
+    var rest = url[authority_start..];
+
+    // split off fragment
+    var fragment: ?[]const u8 = null;
+    if (std.mem.indexOf(u8, rest, "#")) |pos| {
+        fragment = rest[pos + 1 ..];
+        rest = rest[0..pos];
+    }
+
+    // split off query
+    var query: ?[]const u8 = null;
+    if (std.mem.indexOf(u8, rest, "?")) |pos| {
+        query = rest[pos + 1 ..];
+        rest = rest[0..pos];
+    }
+
+    // split authority from path
+    var host: ?[]const u8 = null;
+    var port: ?i64 = null;
+    var user: ?[]const u8 = null;
+    var pass: ?[]const u8 = null;
+    var path: ?[]const u8 = null;
+
+    if (scheme != null or (url.len >= 2 and url[0] == '/' and url[1] == '/')) {
+        var authority = rest;
+        if (std.mem.indexOf(u8, rest, "/")) |pos| {
+            authority = rest[0..pos];
+            path = rest[pos..];
+        }
+
+        if (std.mem.indexOf(u8, authority, "@")) |pos| {
+            const userinfo = authority[0..pos];
+            authority = authority[pos + 1 ..];
+            if (std.mem.indexOf(u8, userinfo, ":")) |cp| {
+                user = userinfo[0..cp];
+                pass = userinfo[cp + 1 ..];
+            } else {
+                user = userinfo;
+            }
+        }
+
+        if (authority.len > 0 and authority[0] == '[') {
+            if (std.mem.indexOf(u8, authority, "]")) |bracket| {
+                host = authority[0 .. bracket + 1];
+                if (bracket + 1 < authority.len and authority[bracket + 1] == ':') {
+                    port = std.fmt.parseInt(i64, authority[bracket + 2 ..], 10) catch null;
+                }
+            } else {
+                host = authority;
+            }
+        } else if (std.mem.lastIndexOf(u8, authority, ":")) |pos| {
+            host = authority[0..pos];
+            port = std.fmt.parseInt(i64, authority[pos + 1 ..], 10) catch null;
+        } else if (authority.len > 0) {
+            host = authority;
+        }
+    } else {
+        if (rest.len > 0) path = rest;
+    }
+
+    if (component) |c| {
+        return switch (c) {
+            0 => if (scheme) |s| Value{ .string = try ctx.createString(s) } else .null,
+            1 => if (host) |h| Value{ .string = try ctx.createString(h) } else .null,
+            2 => if (port) |p| Value{ .int = p } else .null,
+            3 => if (user) |u| Value{ .string = try ctx.createString(u) } else .null,
+            4 => if (pass) |p| Value{ .string = try ctx.createString(p) } else .null,
+            5 => if (path) |p| Value{ .string = try ctx.createString(p) } else .null,
+            6 => if (query) |q| Value{ .string = try ctx.createString(q) } else .null,
+            7 => if (fragment) |f| Value{ .string = try ctx.createString(f) } else .null,
+            else => Value{ .bool = false },
+        };
+    }
+
+    var arr = try ctx.createArray();
+    if (scheme) |s| try arr.set(ctx.allocator, .{ .string = "scheme" }, .{ .string = try ctx.createString(s) });
+    if (host) |h| try arr.set(ctx.allocator, .{ .string = "host" }, .{ .string = try ctx.createString(h) });
+    if (port) |p| try arr.set(ctx.allocator, .{ .string = "port" }, .{ .int = p });
+    if (user) |u| try arr.set(ctx.allocator, .{ .string = "user" }, .{ .string = try ctx.createString(u) });
+    if (pass) |p| try arr.set(ctx.allocator, .{ .string = "pass" }, .{ .string = try ctx.createString(p) });
+    if (path) |p| try arr.set(ctx.allocator, .{ .string = "path" }, .{ .string = try ctx.createString(p) });
+    if (query) |q| try arr.set(ctx.allocator, .{ .string = "query" }, .{ .string = try ctx.createString(q) });
+    if (fragment) |f| try arr.set(ctx.allocator, .{ .string = "fragment" }, .{ .string = try ctx.createString(f) });
+    return .{ .array = arr };
+}
+
+fn urlDecodeSlice(ctx: *NativeContext, s: []const u8) ![]const u8 {
+    var buf = std.ArrayListUnmanaged(u8){};
+    var i: usize = 0;
+    while (i < s.len) {
+        if (s[i] == '%' and i + 2 < s.len) {
+            const hi = hexVal(s[i + 1]) orelse {
+                try buf.append(ctx.allocator, s[i]);
+                i += 1;
+                continue;
+            };
+            const lo = hexVal(s[i + 2]) orelse {
+                try buf.append(ctx.allocator, s[i]);
+                i += 1;
+                continue;
+            };
+            try buf.append(ctx.allocator, (hi << 4) | lo);
+            i += 3;
+        } else if (s[i] == '+') {
+            try buf.append(ctx.allocator, ' ');
+            i += 1;
+        } else {
+            try buf.append(ctx.allocator, s[i]);
+            i += 1;
+        }
+    }
+    const result = try buf.toOwnedSlice(ctx.allocator);
+    try ctx.strings.append(ctx.allocator, result);
+    return result;
+}
+
+fn native_parse_str(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len == 0 or args[0] != .string) return .null;
+    const s = args[0].string;
+
+    var arr = try ctx.createArray();
+    var rest = s;
+    while (rest.len > 0) {
+        var pair: []const u8 = undefined;
+        if (std.mem.indexOf(u8, rest, "&")) |pos| {
+            pair = rest[0..pos];
+            rest = rest[pos + 1 ..];
+        } else {
+            pair = rest;
+            rest = rest[rest.len..];
+        }
+        if (pair.len == 0) continue;
+
+        var key: []const u8 = undefined;
+        var val: []const u8 = "";
+        if (std.mem.indexOf(u8, pair, "=")) |eq| {
+            key = pair[0..eq];
+            val = pair[eq + 1 ..];
+        } else {
+            key = pair;
+        }
+
+        const decoded_key = try urlDecodeSlice(ctx, key);
+        const decoded_val = try urlDecodeSlice(ctx, val);
+        try arr.set(ctx.allocator, .{ .string = decoded_key }, .{ .string = decoded_val });
+    }
+    return .{ .array = arr };
+}
+
+fn native_strstr(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len < 2) return Value{ .bool = false };
+    const haystack = if (args[0] == .string) args[0].string else return Value{ .bool = false };
+    const needle = if (args[1] == .string) args[1].string else return Value{ .bool = false };
+    if (needle.len == 0) return Value{ .bool = false };
+
+    const before_needle: bool = args.len >= 3 and args[2] == .bool and args[2].bool;
+
+    if (std.mem.indexOf(u8, haystack, needle)) |pos| {
+        if (before_needle) {
+            return .{ .string = try ctx.createString(haystack[0..pos]) };
+        }
+        return .{ .string = try ctx.createString(haystack[pos..]) };
+    }
+    return Value{ .bool = false };
 }
