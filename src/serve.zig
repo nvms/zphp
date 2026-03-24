@@ -8,6 +8,7 @@ const PhpArray = @import("runtime/value.zig").PhpArray;
 
 const Allocator = std.mem.Allocator;
 const posix = std.posix;
+const zlib = @cImport(@cInclude("zlib.h"));
 
 pub const ServeConfig = struct {
     port: u16 = 8080,
@@ -226,7 +227,7 @@ fn handleConnection(allocator: Allocator, result: *const CompileResult, vm: *VM,
         populateSuperglobals(vm, &req, conn, port) catch break;
 
         vm.interpret(result) catch {
-            writeResponse(conn.stream, 500, "text/plain", null, "500 Internal Server Error", keep_alive) catch break;
+            writeResponse(conn.stream, 500, "text/plain", null, "500 Internal Server Error", keep_alive, false, allocator) catch break;
             if (!keep_alive) break;
             continue;
         };
@@ -243,7 +244,7 @@ fn handleConnection(allocator: Allocator, result: *const CompileResult, vm: *VM,
         else
             null;
 
-        writeResponse(conn.stream, code, ct, extra_headers, vm.output.items, keep_alive) catch break;
+        writeResponse(conn.stream, code, ct, extra_headers, vm.output.items, keep_alive, acceptsGzip(&req), allocator) catch break;
 
         // shift remaining data to front of buffer
         if (consumed < buffered) {
@@ -497,13 +498,30 @@ fn tryServeStatic(allocator: Allocator, stream: std.net.Stream, doc_root: []cons
         }
     }
 
-    // write response headers
     const conn_val = if (keep_alive) "keep-alive" else "close";
+    const use_gzip = acceptsGzip(req) and isCompressible(mime) and size <= 1024 * 1024;
+
+    if (use_gzip) {
+        // read file into memory and compress
+        const raw = allocator.alloc(u8, size) catch return false;
+        defer allocator.free(raw);
+        const bytes_read = file.readAll(raw) catch return false;
+
+        if (gzipCompress(allocator, raw[0..bytes_read])) |compressed| {
+            defer allocator.free(compressed);
+            var hdr_buf: [512]u8 = undefined;
+            const hdr = std.fmt.bufPrint(&hdr_buf, "HTTP/1.1 200 OK\r\nContent-Type: {s}\r\nContent-Length: {d}\r\nContent-Encoding: gzip\r\nETag: {s}\r\nCache-Control: public, max-age=3600\r\nVary: Accept-Encoding\r\nConnection: {s}\r\n\r\n", .{ mime, compressed.len, etag, conn_val }) catch return false;
+            _ = stream.write(hdr) catch return false;
+            _ = stream.write(compressed) catch return true;
+            return true;
+        }
+        // compression didn't help, fall through to uncompressed
+    }
+
     var hdr_buf: [512]u8 = undefined;
     const hdr = std.fmt.bufPrint(&hdr_buf, "HTTP/1.1 200 OK\r\nContent-Type: {s}\r\nContent-Length: {d}\r\nETag: {s}\r\nCache-Control: public, max-age=3600\r\nConnection: {s}\r\n\r\n", .{ mime, size, etag, conn_val }) catch return false;
     _ = stream.write(hdr) catch return false;
 
-    // sendfile-style: read and write in chunks
     var fbuf: [32768]u8 = undefined;
     var remaining: u64 = size;
     while (remaining > 0) {
@@ -545,7 +563,7 @@ fn mimeType(path: []const u8) []const u8 {
     return "application/octet-stream";
 }
 
-fn writeResponse(stream: std.net.Stream, code: i64, content_type: []const u8, extra_headers: ?*PhpArray, body: []const u8, keep_alive: bool) !void {
+fn writeResponse(stream: std.net.Stream, code: i64, content_type: []const u8, extra_headers: ?*PhpArray, body: []const u8, keep_alive: bool, use_gzip: bool, allocator: Allocator) !void {
     const status_text = switch (code) {
         200 => "200 OK",
         201 => "201 Created",
@@ -562,16 +580,31 @@ fn writeResponse(stream: std.net.Stream, code: i64, content_type: []const u8, ex
         else => "200 OK",
     };
 
+    const compressed = if (use_gzip and body.len > 0 and isCompressible(content_type))
+        gzipCompress(allocator, body)
+    else
+        null;
+    defer if (compressed) |c| allocator.free(c);
+
+    const actual_body = if (compressed) |c| c else body;
     var hdr_buf: [4096]u8 = undefined;
     var pos: usize = 0;
     const conn_val = if (keep_alive) "keep-alive" else "close";
     const base = std.fmt.bufPrint(&hdr_buf, "HTTP/1.1 {s}\r\nContent-Type: {s}\r\nContent-Length: {d}\r\nConnection: {s}\r\n", .{
         status_text,
         content_type,
-        body.len,
+        actual_body.len,
         conn_val,
     }) catch return;
     pos = base.len;
+
+    if (compressed != null) {
+        const enc_hdr = "Content-Encoding: gzip\r\nVary: Accept-Encoding\r\n";
+        if (pos + enc_hdr.len < hdr_buf.len) {
+            @memcpy(hdr_buf[pos .. pos + enc_hdr.len], enc_hdr);
+            pos += enc_hdr.len;
+        }
+    }
 
     if (extra_headers) |hdrs| {
         for (hdrs.entries.items) |entry| {
@@ -598,9 +631,68 @@ fn writeResponse(stream: std.net.Stream, code: i64, content_type: []const u8, ex
     }
 
     _ = stream.write(hdr_buf[0..pos]) catch return;
-    if (body.len > 0) {
-        _ = stream.write(body) catch return;
+    if (actual_body.len > 0) {
+        _ = stream.write(actual_body) catch return;
     }
+}
+
+fn acceptsGzip(req: *const Request) bool {
+    const enc = req.getHeader("Accept-Encoding") orelse return false;
+    return std.mem.indexOf(u8, enc, "gzip") != null;
+}
+
+fn isCompressible(mime: []const u8) bool {
+    return std.mem.startsWith(u8, mime, "text/") or
+        std.mem.startsWith(u8, mime, "application/javascript") or
+        std.mem.startsWith(u8, mime, "application/json") or
+        std.mem.startsWith(u8, mime, "application/xml") or
+        std.mem.startsWith(u8, mime, "image/svg+xml");
+}
+
+fn gzipCompress(allocator: Allocator, input: []const u8) ?[]u8 {
+    if (input.len == 0) return null;
+
+    const bound = zlib.compressBound(input.len);
+    const out = allocator.alloc(u8, bound) catch return null;
+
+    var stream: zlib.z_stream = std.mem.zeroes(zlib.z_stream);
+    // 15 + 16 = gzip format
+    if (zlib.deflateInit2(&stream, zlib.Z_DEFAULT_COMPRESSION, zlib.Z_DEFLATED, 15 + 16, 8, zlib.Z_DEFAULT_STRATEGY) != zlib.Z_OK) {
+        allocator.free(out);
+        return null;
+    }
+
+    stream.next_in = @constCast(input.ptr);
+    stream.avail_in = @intCast(input.len);
+    stream.next_out = out.ptr;
+    stream.avail_out = @intCast(out.len);
+
+    const rc = zlib.deflate(&stream, zlib.Z_FINISH);
+    _ = zlib.deflateEnd(&stream);
+
+    if (rc != zlib.Z_STREAM_END) {
+        allocator.free(out);
+        return null;
+    }
+
+    const compressed_len = out.len - stream.avail_out;
+    if (compressed_len >= input.len) {
+        allocator.free(out);
+        return null;
+    }
+
+    // shrink to actual size so free matches alloc
+    if (allocator.resize(out, compressed_len)) {
+        return out[0..compressed_len];
+    }
+    // resize not supported, copy to exact-sized buffer
+    const exact = allocator.alloc(u8, compressed_len) catch {
+        allocator.free(out);
+        return null;
+    };
+    @memcpy(exact, out[0..compressed_len]);
+    allocator.free(out);
+    return exact;
 }
 
 fn writeStderr(msg: []const u8) !void {

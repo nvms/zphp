@@ -20,7 +20,7 @@ jobs:
       - name: install system libs
         run: |
           if [ "$RUNNER_OS" = "Linux" ]; then
-            sudo apt-get update && sudo apt-get install -y libpcre2-dev libsqlite3-dev
+            sudo apt-get update && sudo apt-get install -y libpcre2-dev libsqlite3-dev zlib1g-dev
           fi
       - run: zig build test
       - run: zig build
@@ -33,7 +33,7 @@ jobs:
         with:
           version: 0.15.0
       - name: install system libs
-        run: sudo apt-get update && sudo apt-get install -y libpcre2-dev libsqlite3-dev
+        run: sudo apt-get update && sudo apt-get install -y libpcre2-dev libsqlite3-dev zlib1g-dev
       - run: zig build
       - run: ./tests/serve_test
 
@@ -45,7 +45,7 @@ jobs:
         with:
           version: 0.15.0
       - name: install system libs
-        run: sudo apt-get update && sudo apt-get install -y libpcre2-dev libsqlite3-dev
+        run: sudo apt-get update && sudo apt-get install -y libpcre2-dev libsqlite3-dev zlib1g-dev
       - run: zig build
       - run: ./tests/test_runner_test
 
@@ -57,7 +57,7 @@ jobs:
         with:
           version: 0.15.0
       - name: install system libs
-        run: sudo apt-get update && sudo apt-get install -y libpcre2-dev libsqlite3-dev
+        run: sudo apt-get update && sudo apt-get install -y libpcre2-dev libsqlite3-dev zlib1g-dev
       - run: zig build
       - run: ./tests/pkg_test
 
@@ -69,7 +69,7 @@ jobs:
         with:
           version: 0.15.0
       - name: install system libs
-        run: sudo apt-get update && sudo apt-get install -y libpcre2-dev libsqlite3-dev
+        run: sudo apt-get update && sudo apt-get install -y libpcre2-dev libsqlite3-dev zlib1g-dev
       - run: zig build
       - run: ./tests/fmt_test
 
@@ -81,7 +81,7 @@ jobs:
         with:
           version: 0.15.0
       - name: install system libs
-        run: sudo apt-get update && sudo apt-get install -y libpcre2-dev libsqlite3-dev
+        run: sudo apt-get update && sudo apt-get install -y libpcre2-dev libsqlite3-dev zlib1g-dev
       - uses: shivammathur/setup-php@v2
         with:
           php-version: '8.4'
