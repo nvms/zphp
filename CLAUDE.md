@@ -90,6 +90,10 @@ PHP 8.1+ enums implemented. pure enums and backed enums (int/string). cases are 
 
 `__construct(public string $name, private int $age = 0)` syntax. parser stores visibility in param `data.rhs` bits 2-3 (0=none, 1=public, 2=protected, 3=private). `readonly` parsed but not enforced. compiler detects promoted params in `__construct`, emits `$this->prop = $prop` assignments before body, and adds them as class properties in the `class_decl` bytecode. constructor default params now properly filled when fewer args passed.
 
+## local php
+
+`./php` runs PHP 8.4 in a docker container (php:8.4-cli + php-cs-fixer). builds the image on first use. use for running php-compat tests locally and benchmarks. `./php php tests/arithmetic.php`, `./php php-cs-fixer fix file.php --rules=@PSR12 --dry-run`.
+
 ## distribution
 
 GitHub releases with prebuilt binaries. bump version in build.zig.zon, commit with version number, tag, push.
