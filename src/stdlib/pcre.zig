@@ -139,8 +139,8 @@ fn preg_match(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     const rc = pcre2.pcre2_match_8(code, subject.ptr, subject.len, 0, 0, match_data, null);
     if (rc < 0) return .{ .int = 0 };
 
-    if (args.len >= 3 and args[2] == .array) {
-        const matches_arr = args[2].array;
+    if (args.len >= 3) {
+        const matches_arr = if (args[2] == .array) args[2].array else try ctx.createArray();
         const ovector = pcre2.pcre2_get_ovector_pointer_8(match_data);
         const count: usize = @intCast(rc);
 
@@ -155,6 +155,9 @@ fn preg_match(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
             } else {
                 try matches_arr.append(ctx.allocator, .{ .string = try ctx.createString(subject[start..end]) });
             }
+        }
+        if (args[2] != .array) {
+            ctx.setCallerVar(2, args.len, .{ .array = matches_arr });
         }
     }
 
@@ -216,12 +219,15 @@ fn preg_match_all(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
         }
     }
 
-    if (args.len >= 3 and args[2] == .array) {
-        const out = args[2].array;
+    if (args.len >= 3) {
+        const out = if (args[2] == .array) args[2].array else try ctx.createArray();
         out.entries.items.len = 0;
         out.next_int_key = 0;
         for (group_arrays.items) |arr| {
             try out.append(ctx.allocator, .{ .array = arr });
+        }
+        if (args[2] != .array) {
+            ctx.setCallerVar(2, args.len, .{ .array = out });
         }
     }
 

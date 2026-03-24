@@ -49,6 +49,37 @@ pub const NativeContext = struct {
         return self.vm.callMethod(obj, method, args);
     }
 
+    // write a value back to the caller's variable at the given argument position.
+    // uses bytecode scan to find the variable name (best-effort, works for simple variable args)
+    pub fn setCallerVar(self: *NativeContext, arg_index: usize, arg_count: usize, value: Value) void {
+        const vm = self.vm;
+        if (vm.frame_count == 0) return;
+        const caller = &vm.frames[vm.frame_count - 1];
+        const chunk = caller.chunk;
+        // ip points past the call instruction (opcode + u16 name + u8 argc = 4 bytes)
+        if (caller.ip < 4) return;
+        var scan_pos = caller.ip - 4;
+        var arg_vars: [16]?[]const u8 = .{null} ** 16;
+        var scan_idx: usize = arg_count;
+        while (scan_idx > 0 and scan_pos >= 3) {
+            scan_idx -= 1;
+            if (chunk.code.items[scan_pos - 3] == @intFromEnum(OpCode.get_var)) {
+                const hi = chunk.code.items[scan_pos - 2];
+                const lo = chunk.code.items[scan_pos - 1];
+                const const_idx = (@as(u16, hi) << 8) | lo;
+                if (const_idx < chunk.constants.items.len) {
+                    arg_vars[scan_idx] = chunk.constants.items[const_idx].string;
+                }
+                scan_pos -= 3;
+            } else {
+                break;
+            }
+        }
+        if (arg_vars[arg_index]) |var_name| {
+            caller.vars.put(vm.allocator, var_name, value) catch return;
+        }
+    }
+
     pub fn invokeCallable(self: *NativeContext, callable: Value, args: []const Value) RuntimeError!Value {
         if (callable == .string) return self.vm.callByName(callable.string, args);
         if (callable != .array) return error.RuntimeError;
