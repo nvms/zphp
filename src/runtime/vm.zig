@@ -136,6 +136,7 @@ pub const VM = struct {
     traits: std.StringHashMapUnmanaged(void) = .{},
     statics: std.StringHashMapUnmanaged(Value) = .{},
     static_vars: std.ArrayListUnmanaged(StaticEntry) = .{},
+    global_vars: std.ArrayListUnmanaged(StaticEntry) = .{},
     file_loader: ?*const FileLoader = null,
     loaded_files: std.StringHashMapUnmanaged(void) = .{},
     compile_results: std.ArrayListUnmanaged(*CompileResult) = .{},
@@ -261,6 +262,7 @@ pub const VM = struct {
         while (statics_iter.next()) |k| self.allocator.free(k.*);
         self.statics.deinit(self.allocator);
         self.static_vars.deinit(self.allocator);
+        self.global_vars.deinit(self.allocator);
         self.loaded_files.deinit(self.allocator);
         for (self.compile_results.items) |r| {
             var result = r;
@@ -307,6 +309,7 @@ pub const VM = struct {
         while (statics_iter.next()) |k| self.allocator.free(k.*);
         self.statics.clearRetainingCapacity();
         self.static_vars.clearRetainingCapacity();
+        self.global_vars.clearRetainingCapacity();
         self.loaded_files.clearRetainingCapacity();
         for (self.compile_results.items) |r| {
             var result = r;
@@ -540,16 +543,51 @@ pub const VM = struct {
                 .call_spread => {
                     const name_idx = self.readU16();
                     const name = self.currentChunk().constants.items[name_idx].string;
-                    // args array is on top of stack
                     const args_val = self.pop();
                     if (args_val != .array) return error.RuntimeError;
                     const arr = args_val.array;
-                    // push each element onto the stack as individual args
+                    // check if any args are named (string keys)
+                    var has_named = false;
                     for (arr.entries.items) |entry| {
-                        self.push(entry.value);
+                        if (entry.key == .string) { has_named = true; break; }
                     }
-                    const ac: u8 = @intCast(arr.entries.items.len);
-                    try self.callNamedFunction(name, ac);
+                    if (has_named) {
+                        if (self.functions.get(name)) |func| {
+                            // resolve named args to positional
+                            var resolved: [16]Value = .{.null} ** 16;
+                            var pos: usize = 0;
+                            for (arr.entries.items) |entry| {
+                                if (entry.key == .string) {
+                                    for (func.params, 0..) |p, pi| {
+                                        if (std.mem.eql(u8, p[1..], entry.key.string) or std.mem.eql(u8, p, entry.key.string)) {
+                                            resolved[pi] = entry.value;
+                                            if (pi >= pos) pos = pi + 1;
+                                            break;
+                                        }
+                                    }
+                                } else {
+                                    resolved[pos] = entry.value;
+                                    pos += 1;
+                                }
+                            }
+                            // fill defaults
+                            const count = @max(pos, func.required_params);
+                            for (0..count) |i| {
+                                if (resolved[i] == .null and i < func.defaults.len) {
+                                    resolved[i] = func.defaults[i];
+                                }
+                            }
+                            for (0..count) |i| self.push(resolved[i]);
+                            try self.callNamedFunction(name, @intCast(count));
+                        } else {
+                            // native function - fall back to positional
+                            for (arr.entries.items) |entry| self.push(entry.value);
+                            try self.callNamedFunction(name, @intCast(arr.entries.items.len));
+                        }
+                    } else {
+                        for (arr.entries.items) |entry| self.push(entry.value);
+                        try self.callNamedFunction(name, @intCast(arr.entries.items.len));
+                    }
                 },
                 .call_indirect_spread => {
                     // stack: [... args_array, func_name]
@@ -566,6 +604,7 @@ pub const VM = struct {
                 .return_val => {
                     const result = self.pop();
                     try self.writebackStatics();
+                    try self.writebackGlobals();
                     try self.writebackRefs();
                     self.frame_count -= 1;
                     self.frames[self.frame_count].ref_bindings.deinit(self.allocator);
@@ -575,6 +614,7 @@ pub const VM = struct {
                 },
                 .return_void => {
                     try self.writebackStatics();
+                    try self.writebackGlobals();
                     try self.writebackRefs();
                     self.frame_count -= 1;
                     self.frames[self.frame_count].ref_bindings.deinit(self.allocator);
@@ -771,13 +811,18 @@ pub const VM = struct {
                 .get_global => {
                     const name_idx = self.readU16();
                     const name = self.currentChunk().constants.items[name_idx].string;
-                    // copy variable from frame 0 (global scope)
                     const global_val = if (self.frame_count > 1)
                         self.frames[0].vars.get(name) orelse
                             self.php_constants.get(name) orelse .null
                     else
                         self.currentFrame().vars.get(name) orelse .null;
                     try self.currentFrame().vars.put(self.allocator, name, global_val);
+                    if (self.frame_count > 1) {
+                        try self.global_vars.append(self.allocator, .{
+                            .var_name = name,
+                            .frame_depth = self.frame_count,
+                        });
+                    }
                 },
 
                 .get_static => {
@@ -1604,6 +1649,20 @@ pub const VM = struct {
             gen.state = .completed;
         }
         self.sp = saved_sp;
+    }
+
+    fn writebackGlobals(self: *VM) !void {
+        var i: usize = 0;
+        while (i < self.global_vars.items.len) {
+            const entry = self.global_vars.items[i];
+            if (entry.frame_depth == self.frame_count) {
+                const val = self.currentFrame().vars.get(entry.var_name) orelse .null;
+                try self.frames[0].vars.put(self.allocator, entry.var_name, val);
+                _ = self.global_vars.swapRemove(i);
+            } else {
+                i += 1;
+            }
+        }
     }
 
     fn writebackRefs(self: *VM) !void {

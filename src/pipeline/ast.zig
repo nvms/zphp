@@ -92,6 +92,7 @@ pub const Ast = struct {
             array_access, // lhs = array, rhs = index expr
             array_push_target, // lhs = array ($arr[] push target)
             list_destructure, // lhs = extra index -> {count, variable_nodes...} (0 = skip)
+            named_arg, // main_token = name identifier, lhs = value expression
             property_access, // main_token = ->, lhs = object, rhs = property node
 
             // casts

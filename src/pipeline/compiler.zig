@@ -204,6 +204,7 @@ const Compiler = struct {
             .array_access => try self.compileArrayAccess(node),
             .array_push_target => {},
             .list_destructure => {},
+            .named_arg => try self.compileNode(node.data.lhs),
             .property_access => try self.compilePropertyAccess(node),
             .throw_expr => try self.compileThrow(node),
             .try_catch => try self.compileTryCatch(node),
@@ -1921,23 +1922,29 @@ const Compiler = struct {
         const callee = self.ast.nodes[node.data.lhs];
         const args = self.ast.extraSlice(node.data.rhs);
 
-        // check if any arg is a splat expression
+        // check if any arg is a splat or named arg
         var has_splat = false;
+        var has_named = false;
         for (args) |arg_idx| {
-            if (self.ast.nodes[arg_idx].tag == .splat_expr) {
-                has_splat = true;
-                break;
-            }
+            const tag = self.ast.nodes[arg_idx].tag;
+            if (tag == .splat_expr) has_splat = true;
+            if (tag == .named_arg) has_named = true;
         }
 
-        if (has_splat) {
-            // build args array: array_new, then push/spread each arg
+        if (has_splat or has_named) {
             try self.emitOp(.array_new);
             for (args) |arg_idx| {
                 const arg_node = self.ast.nodes[arg_idx];
                 if (arg_node.tag == .splat_expr) {
                     try self.compileNode(arg_node.data.lhs);
                     try self.emitOp(.array_spread);
+                } else if (arg_node.tag == .named_arg) {
+                    const name = self.ast.tokenSlice(arg_node.main_token);
+                    const name_const = try self.addConstant(.{ .string = name });
+                    try self.emitOp(.constant);
+                    try self.emitU16(name_const);
+                    try self.compileNode(arg_node.data.lhs);
+                    try self.emitOp(.array_set_elem);
                 } else {
                     try self.compileNode(arg_idx);
                     try self.emitOp(.array_push);

@@ -1437,6 +1437,22 @@ const Parser = struct {
         return self.addNode(.{ .tag = .grouped_expr, .main_token = 0, .data = .{ .lhs = inner } });
     }
 
+    fn isNamedArgKeyword(self: *const Parser) bool {
+        return switch (self.peek()) {
+            .kw_class, .kw_match, .kw_array, .kw_list, .kw_static, .kw_self, .kw_parent,
+            .kw_true, .kw_false, .kw_null, .kw_fn, .kw_function, .kw_return, .kw_if,
+            .kw_else, .kw_for, .kw_foreach, .kw_while, .kw_do, .kw_switch, .kw_case,
+            .kw_default, .kw_break, .kw_continue, .kw_new, .kw_echo, .kw_throw,
+            .kw_try, .kw_catch, .kw_finally, .kw_interface, .kw_trait, .kw_enum,
+            .kw_abstract, .kw_final, .kw_readonly, .kw_global, .kw_const,
+            .kw_public, .kw_private, .kw_protected, .kw_extends, .kw_implements,
+            .kw_namespace, .kw_use, .kw_require, .kw_include, .kw_isset, .kw_empty,
+            .kw_unset, .kw_eval, .kw_exit, .kw_die,
+            => true,
+            else => false,
+        };
+    }
+
     fn parseListDestructure(self: *Parser) Error!u32 {
         const list_tok = self.advance(); // list
         _ = try self.expect(.l_paren);
@@ -1532,6 +1548,13 @@ const Parser = struct {
             _ = self.advance();
             const expr = try self.parseExpression();
             return self.addNode(.{ .tag = .splat_expr, .main_token = 0, .data = .{ .lhs = expr } });
+        }
+        // named argument: identifier (or keyword used as name) followed by colon
+        if (self.peekAt(1) == .colon and (self.peek() == .identifier or self.isNamedArgKeyword())) {
+            const name_tok = self.advance();
+            _ = self.advance(); // colon
+            const expr = try self.parseExpression();
+            return self.addNode(.{ .tag = .named_arg, .main_token = name_tok, .data = .{ .lhs = expr } });
         }
         return self.parseExpression();
     }

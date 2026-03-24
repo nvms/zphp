@@ -283,7 +283,7 @@ const Formatter = struct {
             .method_call => self.findFirstToken(node.data.lhs),
             .call => self.findFirstToken(node.data.lhs),
             .array_access, .array_push_target => self.findFirstToken(node.data.lhs),
-            .list_destructure => node.main_token,
+            .list_destructure, .named_arg => node.main_token,
             .postfix_op => self.findFirstToken(node.data.lhs),
             .static_call => self.findFirstToken(node.data.lhs),
             .static_prop_access => self.findFirstToken(node.data.lhs),
@@ -353,6 +353,7 @@ const Formatter = struct {
             .array_access => self.formatArrayAccess(node),
             .array_push_target => self.formatArrayPushTarget(node),
             .list_destructure => self.formatListDestructure(node),
+            .named_arg => self.formatNamedArg(node),
             .property_access => self.formatPropertyAccess(node),
             .method_call => self.formatMethodCall(node),
             .static_call => self.formatStaticCall(node),
@@ -845,10 +846,18 @@ const Formatter = struct {
     // classes
 
     fn formatClassDecl(self: *Formatter, node: Ast.Node) void {
-        // check if abstract - look at tokens before class keyword
         const name_tok = node.main_token;
-        if (name_tok >= 2 and self.ast.tokens[name_tok - 2].tag == .kw_abstract) {
-            self.write("abstract ");
+        // scan back from class name over `class` keyword and any modifiers
+        if (name_tok >= 2) {
+            var i = name_tok - 2;
+            while (true) {
+                if (self.ast.tokens[i].tag == .kw_abstract) {
+                    self.write("abstract ");
+                    break;
+                }
+                if (i == 0) break;
+                i -= 1;
+            }
         }
         self.write("class ");
         self.write(self.ast.tokens[name_tok].lexeme(self.source));
@@ -1034,13 +1043,51 @@ const Formatter = struct {
     }
 
     fn formatInterfaceMethod(self: *Formatter, node: Ast.Node) void {
-        self.write("public function ");
+        const mods = self.scanMethodModifiers(node.main_token);
+        if (mods.visibility) |v| {
+            self.write(v);
+            self.write(" ");
+        } else {
+            self.write("public ");
+        }
+        if (mods.is_abstract) self.write("abstract ");
+        if (mods.is_static) self.write("static ");
+        self.write("function ");
         self.write(self.ast.tokens[node.main_token].lexeme(self.source));
         self.write("(");
         self.formatParamList(node.data.lhs);
         self.write(")");
         self.formatReturnType(node.main_token);
         self.write(";");
+    }
+
+    const MethodModifiers = struct {
+        visibility: ?[]const u8,
+        is_abstract: bool,
+        is_static: bool,
+    };
+
+    fn scanMethodModifiers(self: *Formatter, name_tok: u32) MethodModifiers {
+        var result = MethodModifiers{ .visibility = null, .is_abstract = false, .is_static = false };
+        if (name_tok < 2) return result;
+        var i = name_tok - 2;
+        while (true) {
+            const tag = self.ast.tokens[i].tag;
+            if (tag == .kw_public) {
+                result.visibility = "public";
+            } else if (tag == .kw_protected) {
+                result.visibility = "protected";
+            } else if (tag == .kw_private) {
+                result.visibility = "private";
+            } else if (tag == .kw_abstract) {
+                result.is_abstract = true;
+            } else if (tag == .kw_static) {
+                result.is_static = true;
+            } else break;
+            if (i == 0) break;
+            i -= 1;
+        }
+        return result;
     }
 
     fn formatTraitDecl(self: *Formatter, node: Ast.Node) void {
@@ -1145,6 +1192,12 @@ const Formatter = struct {
         self.write("[");
         self.formatNode(node.data.rhs);
         self.write("]");
+    }
+
+    fn formatNamedArg(self: *Formatter, node: Ast.Node) void {
+        self.write(self.ast.tokenSlice(node.main_token));
+        self.write(": ");
+        self.formatNode(node.data.lhs);
     }
 
     fn formatArrayPushTarget(self: *Formatter, node: Ast.Node) void {
