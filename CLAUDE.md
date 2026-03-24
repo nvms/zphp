@@ -58,7 +58,7 @@ zig 0.15.x. `zig build test` must pass before pushing. short lowercase commits, 
 
 ## CI
 
-7 jobs: `zig build test` (ubuntu + macos), serve integration (`tests/serve_test`, 39 assertions), test runner (`tests/test_runner_test`, 15 assertions), packages (`tests/pkg_test`, 10 assertions), fmt (`tests/fmt_test`, 29 assertions), PHP compat (`tests/run`, validated against PHP 8.4)
+7 jobs: `zig build test` (ubuntu + macos), serve integration (`tests/serve_test`, 42 assertions), test runner (`tests/test_runner_test`, 15 assertions), packages (`tests/pkg_test`, 10 assertions), fmt (`tests/fmt_test`, 29 assertions), PHP compat (`tests/run`, validated against PHP 8.4)
 
 ## sessions
 

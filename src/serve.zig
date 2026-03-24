@@ -730,6 +730,13 @@ fn populateSuperglobals(vm: *VM, req: *const Request, conn: std.net.Server.Conne
     try vm.arrays.append(a, cookie_arr);
     if (req.getHeader("Cookie")) |cookies| parseCookies(a, vm, cookie_arr, cookies) catch {};
     try vm.request_vars.put(a, "$_COOKIE", .{ .array = cookie_arr });
+
+    // raw body for php://input
+    if (req.body.len > 0) {
+        const body_copy = try a.dupe(u8, req.body);
+        try vm.strings.append(a, body_copy);
+        try vm.request_vars.put(a, "__raw_body", .{ .string = body_copy });
+    }
 }
 
 fn parseQueryString(a: Allocator, vm: *VM, arr: *PhpArray, qs: []const u8) !void {

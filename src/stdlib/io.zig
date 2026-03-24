@@ -36,6 +36,14 @@ pub const entries = .{
 fn file_get_contents(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len == 0 or args[0] != .string) return .{ .bool = false };
     const path = args[0].string;
+    if (std.mem.eql(u8, path, "php://input")) {
+        const body_val = ctx.vm.request_vars.get("__raw_body") orelse return .{ .string = "" };
+        if (body_val == .string) return body_val;
+        return .{ .string = "" };
+    }
+    if (std.mem.eql(u8, path, "php://stdout") or std.mem.eql(u8, path, "php://output")) {
+        return .{ .string = "" };
+    }
     const content = std.fs.cwd().readFileAlloc(ctx.allocator, path, 1024 * 1024 * 64) catch return Value{ .bool = false };
     try ctx.strings.append(ctx.allocator, content);
     return .{ .string = content };

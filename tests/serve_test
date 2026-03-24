@@ -179,6 +179,12 @@ check_contains "file upload has_tmp" '"has_tmp":true' "$file_resp"
 check_contains "file upload error" '"error":0' "$file_resp"
 rm -f /tmp/zphp_test_upload.txt
 
+# test: php://input with JSON body
+json_resp=$(curl -s -X POST -H "Content-Type: application/json" -d '{"name":"alice","age":30}' "http://localhost:$PORT/json-api")
+check_contains "php://input raw length" '"raw_length":25' "$json_resp"
+check_contains "php://input parsed name" '"name":"alice"' "$json_resp"
+check_contains "php://input parsed age" '"age":30' "$json_resp"
+
 # test: sessions - set value and get cookie
 session_resp=$(curl -si "http://localhost:$PORT/session-set?user=alice" 2>&1)
 session_cookie=$(echo "$session_resp" | grep -i "Set-Cookie: PHPSESSID=" | sed 's/.*PHPSESSID=//;s/;.*//' | tr -d '\r')

@@ -38,6 +38,13 @@ if ($path === "/health") {
         "post" => $_POST,
         "files" => $file_info,
     ]);
+} elseif ($path === "/json-api") {
+    $raw = file_get_contents("php://input");
+    $data = json_decode($raw, true);
+    echo json_encode([
+        "raw_length" => strlen($raw),
+        "parsed" => $data,
+    ]);
 } elseif ($path === "/session-set") {
     session_start();
     $_SESSION["user"] = $_GET["user"] ?? "anonymous";
