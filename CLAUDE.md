@@ -62,11 +62,11 @@ zig 0.15.x. `zig build test` must pass before pushing. short lowercase commits, 
 
 ## roadmap
 
-next: pdo_mysql driver, event-loop-per-worker for serve (epoll/kqueue for scalable concurrent WebSocket connections)
+next: pdo_mysql driver
 
 ## websocket
 
-`src/websocket.zig` (protocol) + `src/stdlib/websocket.zig` (PHP class). convention-based: if compiled script defines `ws_onMessage`, WebSocket upgrade is enabled. PHP API: `ws_onOpen($ws)`, `ws_onMessage($ws, $data)`, `ws_onClose($ws)`. `$ws` is a `WebSocketConnection` object with `send($data)` and `close()` methods. VM persists across connection lifetime - state survives between messages without external storage. worker thread per connection model (N workers = N concurrent WS connections). protocol: RFC 6455 handshake (SHA-1 + base64 via zig std), frame codec (text/binary/ping/pong/close, client masking, variable-length payloads up to 1MB). message strings tracked in vm.strings for cleanup.
+`src/websocket.zig` (protocol) + `src/stdlib/websocket.zig` (PHP class). convention-based: if compiled script defines `ws_onMessage`, WebSocket upgrade is enabled. PHP API: `ws_onOpen($ws)`, `ws_onMessage($ws, $data)`, `ws_onClose($ws)`. `$ws` is a `WebSocketConnection` object with `send($data)` and `close()` methods. VM persists across connection lifetime - state survives between messages without external storage. poll-based event loop multiplexes many connections per worker (HTTP + WebSocket concurrently). all WS connections on a worker share one VM (Node.js model). `tryParseFrame()` provides buffer-based non-blocking frame parsing. protocol: RFC 6455 handshake (SHA-1 + base64 via zig std), frame codec (text/binary/ping/pong/close, client masking, variable-length payloads up to 1MB). message strings tracked in vm.strings for cleanup.
 
 ## gzip compression
 

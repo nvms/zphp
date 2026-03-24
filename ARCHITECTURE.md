@@ -200,16 +200,24 @@ two layers: zig HTTP layer (TCP + raw HTTP parsing) + PHP VM layer (synchronous 
 ### how it works
 1. compile the PHP script once at startup (parse -> AST -> bytecode)
 2. bind TCP socket, spawn N worker threads (default: CPU core count)
-3. main thread accepts connections, pushes to bounded work queue (mutex + condition variable)
-4. worker threads pop connections, parse HTTP, create fresh VM, execute shared bytecode, write response
+3. main thread accepts connections, pushes to shared work queue, wakes a worker via pipe
+4. each worker runs a `poll()`-based event loop multiplexing many connections (HTTP + WebSocket) on one thread
+5. non-blocking sockets: `O_NONBLOCK` via fcntl. reads return `WouldBlock` when no data, return to poll loop
+
+### connection state machine
+- `http_reading`: accumulate request data in per-connection 65KB buffer. when headers complete, dispatch (static file, PHP, or WS upgrade)
+- `ws_idle`: waiting for WebSocket frame data. `tryParseFrame` parses from buffer without blocking. on complete frame, dispatch to VM
+- `closing`: connection removed from poll set and fd closed on next compaction pass
 
 ### key design decisions
+- **event-loop-per-worker**: `poll()` multiplexes many connections per thread. HTTP requests complete quickly, WebSocket connections stay in the poll set between messages. N workers handle thousands of concurrent connections
 - **shared bytecode**: all workers reference the same `CompileResult`. bytecode is read-only during execution, safe with no synchronization
-- **VM pooling**: one VM per worker thread, created once at startup. `vm.reset()` between requests clears per-request state (output, strings, arrays, objects, generators, statics, frames) while preserving stdlib registrations, constants, class definitions
-- **keep-alive**: HTTP/1.1 persistent connections. buffer tracks consumed bytes across requests. proper Content-Length-based request boundary detection for pipelined requests
+- **VM per worker**: one VM per worker thread. HTTP: `vm.reset()` per request. WebSocket: VM initialized once per worker (shared across all WS connections on that worker, Node.js model)
+- **wake pipe**: main thread writes a byte to worker's pipe fd after pushing to queue. worker's poll set includes the pipe, wakes up, non-blocking `tryPop` from queue
+- **connection compaction**: closed connections swapped with last entry in poll_fds/conns arrays. O(1) removal
+- **keep-alive**: per-connection buffer tracks consumed bytes. HTTP pipelining via buffer shifting
 - **request_vars**: superglobals populated into `vm.request_vars` before interpret. interpret copies them into frame 0
 - **response headers**: `header()` stores in `__response_headers`, `http_response_code()` stores in `__response_code`
-- **work queue**: bounded ring buffer (1024) with mutex + condition
 
 ### static files
 - `tryServeStatic`: serves non-PHP files from document root. path traversal prevention (`..` check). ETag based on `{size_hex}-{mtime_hex}`, 304 Not Modified support. MIME type detection by extension
@@ -217,11 +225,11 @@ two layers: zig HTTP layer (TCP + raw HTTP parsing) + PHP VM layer (synchronous 
 - `gzipCompress()` allocates with `compressBound()`, resizes to actual size, skips if compressed >= original
 
 ### websocket (src/websocket.zig + src/stdlib/websocket.zig)
-- protocol layer in `src/websocket.zig`: frame codec (readFrame/writeFrame/writeCloseFrame), handshake (computeAcceptKey using `std.crypto.hash.Sha1` + `std.base64`, writeHandshakeResponse). no VM dependency - pure protocol
+- protocol layer in `src/websocket.zig`: frame codec (readFrame/writeFrame/writeCloseFrame, tryParseFrame for non-blocking buffer-based parsing), handshake (computeAcceptKey using `std.crypto.hash.Sha1` + `std.base64`, writeHandshakeResponse). no VM dependency - pure protocol
 - PHP class in `src/stdlib/websocket.zig`: `WebSocketConnection` with `send($data)` and `close()` native methods. stream fd stored as i64 in hidden `__ws_fd` property. `__ws_closed` flag prevents double-close
 - convention-based detection: after compile, scan `result.functions` for `ws_onMessage`. if found, enable upgrade handling
-- connection model: worker thread per WebSocket connection. on `Upgrade: websocket`, worker enters `handleWebSocket` frame loop instead of HTTP request/response path. dedicated until connection closes
-- VM lifecycle: `vm.interpret(result)` runs script once (registers functions, executes top-level code), then `ws_onOpen`/`ws_onMessage`/`ws_onClose` called via `vm.callByName`. VM NOT reset between messages - state persists across connection lifetime
+- connection model: poll-based event loop multiplexes HTTP and WebSocket on same worker. on `Upgrade: websocket`, connection state transitions to `ws_idle`. `tryParseFrame` reads frames from per-connection buffer without blocking
+- VM lifecycle: `vm.interpret(result)` runs once when first WS connection arrives on worker. all WS connections on same worker share the VM (Node.js model). `ws_onOpen`/`ws_onMessage`/`ws_onClose` called via `vm.callByName`. VM NOT reset between messages - state persists
 - message strings allocated via `allocator.dupe`, tracked in `vm.strings` for cleanup at connection end
 - frame loop handles: text/binary (dispatch to `ws_onMessage`), ping (auto-pong), close (echo close + break), pong/continuation (ignore)
 
