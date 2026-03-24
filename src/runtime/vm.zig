@@ -189,6 +189,7 @@ pub const VM = struct {
     exception_handlers: [32]ExceptionHandler = undefined,
     handler_count: usize = 0,
     handler_floor: usize = 0,
+    pending_exception: ?Value = null,
     allocator: Allocator,
 
     const StaticEntry = struct {
@@ -1004,7 +1005,10 @@ pub const VM = struct {
 
                 .throw => {
                     const exception = self.pop();
-                    if (self.handler_count <= self.handler_floor) return error.RuntimeError;
+                    if (self.handler_count <= self.handler_floor) {
+                        self.pending_exception = exception;
+                        return error.RuntimeError;
+                    }
 
                     const handler = self.exception_handlers[self.handler_count - 1];
                     self.handler_count -= 1;
@@ -2179,7 +2183,10 @@ pub const VM = struct {
         try obj.set(self.allocator, "code", .{ .int = 0 });
         try self.objects.append(self.allocator, obj);
 
-        if (self.handler_count <= self.handler_floor) return false;
+        if (self.handler_count <= self.handler_floor) {
+            self.pending_exception = .{ .object = obj };
+            return false;
+        }
 
         const handler = self.exception_handlers[self.handler_count - 1];
         self.handler_count -= 1;
@@ -2240,6 +2247,9 @@ pub const VM = struct {
         gen.state = .running;
         const saved_sp = self.sp;
         const return_frame = self.frame_count;
+        const saved_handler_count = self.handler_count;
+        const prev_floor = self.handler_floor;
+        self.handler_floor = self.handler_count;
 
         // restore saved stack from previous suspension
         for (gen.stack.items) |v| self.push(v);
@@ -2259,6 +2269,7 @@ pub const VM = struct {
         }
 
         self.runUntilFrame(return_frame) catch |err| {
+            self.handler_floor = prev_floor;
             if (gen.state == .suspended) {
                 self.sp = saved_sp;
                 return;
@@ -2267,8 +2278,33 @@ pub const VM = struct {
                 self.sp = saved_sp;
                 return;
             }
+            gen.state = .completed;
+            self.handler_count = saved_handler_count;
+            // unwind any leftover generator frames
+            while (self.frame_count > return_frame) {
+                self.frame_count -= 1;
+                self.frames[self.frame_count].vars.deinit(self.allocator);
+            }
+            self.sp = saved_sp;
+            if (self.pending_exception) |exc| {
+                self.pending_exception = null;
+                if (self.handler_count > self.handler_floor) {
+                    const handler = self.exception_handlers[self.handler_count - 1];
+                    self.handler_count -= 1;
+                    while (self.frame_count > handler.frame_count) {
+                        self.frame_count -= 1;
+                        self.frames[self.frame_count].vars.deinit(self.allocator);
+                    }
+                    self.sp = handler.sp;
+                    self.push(exc);
+                    self.currentFrame().ip = handler.catch_ip;
+                    return;
+                }
+                return error.RuntimeError;
+            }
             return err;
         };
+        self.handler_floor = prev_floor;
         if (gen.state == .running) {
             gen.state = .completed;
         }
@@ -2646,9 +2682,7 @@ pub const VM = struct {
             self.push(try native(&ctx, args[0..ac]));
         } else if (self.functions.get(name)) |func| {
             const ac: usize = arg_count;
-            if (!func.is_variadic and (ac < func.required_params or ac > func.arity))
-                return error.RuntimeError;
-            if (func.is_variadic and ac < func.required_params)
+            if (ac < func.required_params)
                 return error.RuntimeError;
             var new_vars: std.StringHashMapUnmanaged(Value) = .{};
             var closure_refs: std.StringHashMapUnmanaged(*Value) = .{};
@@ -2666,13 +2700,14 @@ pub const VM = struct {
                 try self.arrays.append(self.allocator, rest_arr);
                 try new_vars.put(self.allocator, func.params[fixed], .{ .array = rest_arr });
             } else {
-                for (0..ac) |i| {
+                const bind_count = @min(ac, func.arity);
+                for (0..bind_count) |i| {
                     try new_vars.put(self.allocator, func.params[i], try self.copyValue(self.stack[self.sp - ac + i]));
                 }
             }
             self.sp -= ac;
             if (!func.is_variadic) {
-                try self.fillDefaults(&new_vars, func, ac);
+                try self.fillDefaults(&new_vars, func, @min(ac, func.arity));
             }
             // set up shared ref cells for by-ref params
             // start with any closure ref captures
@@ -2724,11 +2759,11 @@ pub const VM = struct {
             self.frames[self.frame_count].vars.deinit(self.allocator);
             return result;
         } else if (self.functions.get(full_name)) |func| {
-            if (args.len < func.required_params or args.len > func.arity) return error.RuntimeError;
+            if (args.len < func.required_params) return error.RuntimeError;
             var new_vars: std.StringHashMapUnmanaged(Value) = .{};
             try new_vars.put(self.allocator, "$this", .{ .object = obj });
             try self.bindClosures(&new_vars, null, full_name);
-            try self.bindArgs(&new_vars, func, args);
+            try self.bindArgs(&new_vars, func, args[0..@min(args.len, func.arity)]);
             return self.executeFunction(func, new_vars);
         } else return error.RuntimeError;
     }
@@ -2738,10 +2773,10 @@ pub const VM = struct {
             var ctx = self.makeContext(null);
             return native(&ctx, args);
         } else if (self.functions.get(name)) |func| {
-            if (args.len < func.required_params or args.len > func.arity) return error.RuntimeError;
+            if (args.len < func.required_params) return error.RuntimeError;
             var new_vars: std.StringHashMapUnmanaged(Value) = .{};
             try self.bindClosures(&new_vars, null, name);
-            try self.bindArgs(&new_vars, func, args);
+            try self.bindArgs(&new_vars, func, args[0..@min(args.len, func.arity)]);
             return self.executeFunction(func, new_vars);
         } else return error.RuntimeError;
     }
