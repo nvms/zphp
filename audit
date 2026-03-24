@@ -44,10 +44,9 @@ if [ "$unpushed" -gt 0 ]; then
 fi
 
 if [ -f "build.zig" ]; then
-  build_check=$(zig build test 2>&1 || true)
-  if echo "$build_check" | grep -qi "error"; then
+  if ! make test >/dev/null 2>&1; then
     issues+=("${RED}build/test errors detected${RESET}")
-    fixes+=("${CYAN}zig build test 2>&1 | head -20${RESET}")
+    fixes+=("${CYAN}make test${RESET}")
     has_issues=1
   fi
 fi
