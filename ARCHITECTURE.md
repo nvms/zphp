@@ -251,10 +251,23 @@ two layers: zig HTTP layer (TCP + raw HTTP parsing) + PHP VM layer (synchronous 
 - message strings allocated via `allocator.dupe`, tracked in `vm.strings` for cleanup at connection end
 - frame loop handles: text/binary (dispatch to `ws_onMessage`), ping (auto-pong), close (echo close + break), pong/continuation (ignore)
 
-### what's not yet implemented
-- graceful shutdown (SIGTERM handling)
-- chunked transfer encoding
-- multipart form data parsing
+### graceful shutdown
+- SIGTERM/SIGINT handlers write to a signal pipe. main accept loop uses `poll()` on both the server socket and signal pipe
+- on signal: breaks accept loop, closes work queue, wakes all workers, joins threads, cleans up
+- workers drain in-flight connections naturally via `queue.shutdown` flag
+
+### chunked transfer encoding
+- `Transfer-Encoding: chunked` detected in `processHttpRead`. `decodeChunkedBody` strips chunk framing in-place
+- returns decoded body length and raw consumed length. waits for final `0\r\n\r\n` terminator before processing
+- body size limited by connection buffer (65KB)
+
+### multipart form data
+- `multipart/form-data; boundary=XXX` parsed in `populateSuperglobals`. boundary extracted from Content-Type
+- `parseMultipart` splits body on `--<boundary>`, parses Content-Disposition per part
+- fields (no filename) go to `$_POST`, file uploads go to `$_FILES`
+- `$_FILES` structure: `$_FILES["field"]["name"|"type"|"size"|"error"|"tmp_name"]`
+- file contents written to `/tmp/zphp_upload_XXXXXX` via mkstemp
+- `move_uploaded_file()`, `is_uploaded_file()`, `sys_get_temp_dir()`, `tempnam()` in stdlib
 
 ## formatter (src/fmt.zig)
 

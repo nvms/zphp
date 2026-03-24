@@ -44,7 +44,7 @@ zig 0.15.x. `zig build test` must pass before pushing. short lowercase commits, 
 ## CLI
 
 - `zphp run <file>` - execute PHP file
-- `zphp serve <file> [--port N] [--workers N]` - HTTP server with pre-compiled bytecode, VM pooling, keep-alive, static files, ETag/304, gzip, WebSocket
+- `zphp serve <file> [--port N] [--workers N]` - HTTP server with pre-compiled bytecode, VM pooling, keep-alive, static files, ETag/304, gzip, WebSocket, chunked transfer encoding, multipart form data/$_FILES, graceful SIGTERM/SIGINT shutdown
 - `zphp test [file]` - test runner with assertion functions, test discovery, TUI output
 - `zphp install` - install packages from composer.json, write zphp.lock
 - `zphp add <pkg>` / `zphp remove <pkg>` - manage dependencies
@@ -58,7 +58,7 @@ zig 0.15.x. `zig build test` must pass before pushing. short lowercase commits, 
 
 ## CI
 
-7 jobs: `zig build test` (ubuntu + macos), serve integration (`tests/serve_test`, 26 assertions), test runner (`tests/test_runner_test`, 15 assertions), packages (`tests/pkg_test`, 10 assertions), fmt (`tests/fmt_test`, 29 assertions), PHP compat (`tests/run`, validated against PHP 8.4)
+7 jobs: `zig build test` (ubuntu + macos), serve integration (`tests/serve_test`, 33 assertions), test runner (`tests/test_runner_test`, 15 assertions), packages (`tests/pkg_test`, 10 assertions), fmt (`tests/fmt_test`, 29 assertions), PHP compat (`tests/run`, validated against PHP 8.4)
 
 ## roadmap
 

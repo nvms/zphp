@@ -12,6 +12,12 @@ const posix = std.posix;
 const zlib = @cImport(@cInclude("zlib.h"));
 const ws_proto = @import("websocket.zig");
 
+var signal_pipe: [2]posix.fd_t = .{ -1, -1 };
+
+fn signalHandler(_: c_int) callconv(.c) void {
+    _ = posix.write(signal_pipe[1], &[_]u8{1}) catch {};
+}
+
 pub const ServeConfig = struct {
     port: u16 = 8080,
     workers: u16 = 0,
@@ -220,6 +226,20 @@ pub fn serve(allocator: Allocator, config: ServeConfig) !void {
         break :blk @max(cpus, 1);
     };
 
+    signal_pipe = try posix.pipe();
+    defer {
+        posix.close(signal_pipe[0]);
+        posix.close(signal_pipe[1]);
+    }
+
+    var sa: posix.Sigaction = .{
+        .handler = .{ .handler = signalHandler },
+        .mask = posix.sigemptyset(),
+        .flags = 0,
+    };
+    posix.sigaction(posix.SIG.INT, &sa, null);
+    posix.sigaction(posix.SIG.TERM, &sa, null);
+
     const addr = std.net.Address.parseIp4("0.0.0.0", config.port) catch unreachable;
     var server = try addr.listen(.{ .reuse_address = true });
     defer server.deinit();
@@ -257,19 +277,30 @@ pub fn serve(allocator: Allocator, config: ServeConfig) !void {
         t.* = try std.Thread.spawn(.{}, eventLoop, .{wd});
     }
 
+    setNonBlocking(server.stream.handle);
+    var main_poll: [2]posix.pollfd = .{
+        .{ .fd = server.stream.handle, .events = posix.POLL.IN, .revents = 0 },
+        .{ .fd = signal_pipe[0], .events = posix.POLL.IN, .revents = 0 },
+    };
+
     var robin: usize = 0;
     while (true) {
-        const conn = server.accept() catch |err| {
-            if (err == error.SocketNotListening) break;
-            continue;
-        };
-        queue.push(.{ .conn = conn });
-        _ = posix.write(workers_data[robin].wake_pipe[1], &[_]u8{1}) catch {};
-        robin = (robin + 1) % worker_count;
+        _ = posix.poll(&main_poll, -1) catch continue;
+
+        if (main_poll[1].revents & posix.POLL.IN != 0) {
+            try writeStderr("\nshutting down...\n");
+            break;
+        }
+
+        if (main_poll[0].revents & posix.POLL.IN != 0) {
+            const conn = server.accept() catch continue;
+            queue.push(.{ .conn = conn });
+            _ = posix.write(workers_data[robin].wake_pipe[1], &[_]u8{1}) catch {};
+            robin = (robin + 1) % worker_count;
+        }
     }
 
     queue.close();
-    // wake all workers so they see shutdown
     for (workers_data) |*wd| {
         _ = posix.write(wd.wake_pipe[1], &[_]u8{1}) catch {};
     }
@@ -367,6 +398,35 @@ fn shiftBuffer(c: *Connection, consumed: usize) void {
     }
 }
 
+const ChunkedResult = struct { body_len: usize, raw_len: usize };
+
+fn decodeChunkedBody(data: []u8) ?ChunkedResult {
+    var read_pos: usize = 0;
+    var write_pos: usize = 0;
+
+    while (read_pos < data.len) {
+        const size_end = std.mem.indexOfPos(u8, data, read_pos, "\r\n") orelse return null;
+        const size_str = data[read_pos..size_end];
+        const chunk_len = std.fmt.parseInt(usize, size_str, 16) catch return null;
+
+        if (chunk_len == 0) {
+            const final_end = size_end + 2;
+            if (final_end + 2 > data.len) return null;
+            return .{ .body_len = write_pos, .raw_len = final_end + 2 };
+        }
+
+        const chunk_start = size_end + 2;
+        const chunk_end = chunk_start + chunk_len;
+        if (chunk_end + 2 > data.len) return null;
+
+        std.mem.copyForwards(u8, data[write_pos .. write_pos + chunk_len], data[chunk_start..chunk_end]);
+        write_pos += chunk_len;
+        read_pos = chunk_end + 2;
+    }
+
+    return null;
+}
+
 // HTTP processing
 
 fn processHttpRead(w: *Worker, c: *Connection) void {
@@ -384,12 +444,27 @@ fn processHttpRead(w: *Worker, c: *Connection) void {
 
     var req = parseRequest(raw);
 
+    const is_chunked = blk: {
+        const te = req.getHeader("Transfer-Encoding") orelse break :blk false;
+        break :blk std.mem.indexOf(u8, te, "chunked") != null;
+    };
+
     var body_len: usize = 0;
-    if (req.getHeader("Content-Length")) |cl| {
-        body_len = std.fmt.parseInt(usize, cl, 10) catch 0;
+    var consumed: usize = undefined;
+
+    if (is_chunked) {
+        const body_start = raw[header_end..c.buffered];
+        const decoded_len = decodeChunkedBody(body_start) orelse return;
+        body_len = decoded_len.body_len;
+        consumed = header_end + decoded_len.raw_len;
+        req.body = raw[header_end .. header_end + body_len];
+    } else {
+        if (req.getHeader("Content-Length")) |cl| {
+            body_len = std.fmt.parseInt(usize, cl, 10) catch 0;
+        }
+        consumed = header_end + body_len;
+        if (c.buffered < consumed) return;
     }
-    const consumed = header_end + body_len;
-    if (c.buffered < consumed) return;
 
     const conn_hdr = req.getHeader("Connection");
     c.keep_alive = if (conn_hdr) |h| !std.ascii.eqlIgnoreCase(h, "close") else true;
@@ -622,12 +697,22 @@ fn populateSuperglobals(vm: *VM, req: *const Request, conn: std.net.Server.Conne
     const post_arr = try a.create(PhpArray);
     post_arr.* = .{};
     try vm.arrays.append(a, post_arr);
+
+    const files_arr = try a.create(PhpArray);
+    files_arr.* = .{};
+    try vm.arrays.append(a, files_arr);
+
     if (req.getHeader("Content-Type")) |ct| {
         if (std.mem.startsWith(u8, ct, "application/x-www-form-urlencoded")) {
             parseQueryString(a, post_arr, req.body) catch {};
+        } else if (std.mem.startsWith(u8, ct, "multipart/form-data")) {
+            if (extractBoundary(ct)) |boundary| {
+                parseMultipart(a, vm, req.body, boundary, post_arr, files_arr) catch {};
+            }
         }
     }
     try vm.request_vars.put(a, "$_POST", .{ .array = post_arr });
+    try vm.request_vars.put(a, "$_FILES", .{ .array = files_arr });
 
     const request_arr = try a.create(PhpArray);
     request_arr.* = .{};
@@ -668,6 +753,138 @@ fn parseCookies(a: Allocator, arr: *PhpArray, cookies: []const u8) !void {
             try arr.set(a, .{ .string = key }, .{ .string = val });
         }
     }
+}
+
+fn extractBoundary(ct: []const u8) ?[]const u8 {
+    const marker = "boundary=";
+    const pos = std.mem.indexOf(u8, ct, marker) orelse return null;
+    const start = pos + marker.len;
+    if (start >= ct.len) return null;
+    const rest = ct[start..];
+    if (rest.len > 0 and rest[0] == '"') {
+        const end = std.mem.indexOfPos(u8, rest, 1, "\"") orelse return null;
+        return rest[1..end];
+    }
+    if (std.mem.indexOfScalar(u8, rest, ';')) |end| return rest[0..end];
+    return std.mem.trimRight(u8, rest, " \t\r\n");
+}
+
+fn parseMultipart(a: Allocator, vm: *VM, body: []const u8, boundary: []const u8, post_arr: *PhpArray, files_arr: *PhpArray) !void {
+    const delim = try std.mem.concat(a, u8, &.{ "--", boundary });
+    defer a.free(delim);
+
+    var pos: usize = 0;
+    // skip preamble - find first boundary
+    pos = (std.mem.indexOf(u8, body, delim) orelse return) + delim.len;
+    if (pos + 2 <= body.len and body[pos] == '\r' and body[pos + 1] == '\n') pos += 2;
+
+    while (pos < body.len) {
+        const next = std.mem.indexOfPos(u8, body, pos, delim) orelse break;
+        // part data ends 2 bytes before boundary (the \r\n before delimiter)
+        const part_end = if (next >= 2) next - 2 else next;
+        const part = body[pos..part_end];
+
+        // parse part headers
+        const hdr_end_pos = std.mem.indexOf(u8, part, "\r\n\r\n") orelse {
+            pos = next + delim.len + 2;
+            continue;
+        };
+        const headers = part[0..hdr_end_pos];
+        const part_body = part[hdr_end_pos + 4 ..];
+
+        const disposition = findPartHeader(headers, "Content-Disposition") orelse {
+            pos = next + delim.len + 2;
+            continue;
+        };
+
+        const name = extractParam(disposition, "name") orelse {
+            pos = next + delim.len + 2;
+            continue;
+        };
+
+        const name_owned = try a.dupe(u8, name);
+        try vm.strings.append(a, name_owned);
+
+        if (extractParam(disposition, "filename")) |filename| {
+            const part_ct = findPartHeader(headers, "Content-Type") orelse "application/octet-stream";
+
+            const file_entry = try a.create(PhpArray);
+            file_entry.* = .{};
+            try vm.arrays.append(a, file_entry);
+
+            const fname = try a.dupe(u8, filename);
+            try vm.strings.append(a, fname);
+            try file_entry.set(a, .{ .string = "name" }, .{ .string = fname });
+
+            const mime = try a.dupe(u8, part_ct);
+            try vm.strings.append(a, mime);
+            try file_entry.set(a, .{ .string = "type" }, .{ .string = mime });
+
+            try file_entry.set(a, .{ .string = "size" }, .{ .int = @intCast(part_body.len) });
+            try file_entry.set(a, .{ .string = "error" }, .{ .int = 0 });
+
+            // write to temp file
+            const tmp_path = writeTempFile(a, part_body) catch blk: {
+                try file_entry.set(a, .{ .string = "error" }, .{ .int = 6 }); // UPLOAD_ERR_NO_TMP_DIR
+                break :blk try a.dupe(u8, "");
+            };
+            try vm.strings.append(a, tmp_path);
+            try file_entry.set(a, .{ .string = "tmp_name" }, .{ .string = tmp_path });
+
+            try files_arr.set(a, .{ .string = name_owned }, .{ .array = file_entry });
+        } else {
+            const val = try a.dupe(u8, part_body);
+            try vm.strings.append(a, val);
+            try post_arr.set(a, .{ .string = name_owned }, .{ .string = val });
+        }
+
+        // advance past delimiter
+        pos = next + delim.len;
+        if (pos + 2 <= body.len and body[pos] == '-' and body[pos + 1] == '-') break;
+        if (pos + 2 <= body.len and body[pos] == '\r' and body[pos + 1] == '\n') pos += 2;
+    }
+}
+
+fn findPartHeader(headers: []const u8, name: []const u8) ?[]const u8 {
+    var iter = std.mem.splitSequence(u8, headers, "\r\n");
+    while (iter.next()) |line| {
+        const sep = std.mem.indexOf(u8, line, ": ") orelse continue;
+        if (std.ascii.eqlIgnoreCase(line[0..sep], name)) return line[sep + 2 ..];
+    }
+    return null;
+}
+
+fn extractParam(header: []const u8, name: []const u8) ?[]const u8 {
+    // look for name="value" pattern
+    var search_buf: [64]u8 = undefined;
+    const needle = std.fmt.bufPrint(&search_buf, "{s}=\"", .{name}) catch return null;
+    const start = (std.mem.indexOf(u8, header, needle) orelse return null) + needle.len;
+    const end = std.mem.indexOfPos(u8, header, start, "\"") orelse return null;
+    return header[start..end];
+}
+
+const c_mkstemp = @cImport(@cInclude("stdlib.h"));
+
+fn writeTempFile(a: Allocator, data: []const u8) ![]const u8 {
+    const template = "/tmp/zphp_upload_XXXXXX";
+    const buf = try a.alloc(u8, template.len + 1);
+    @memcpy(buf[0..template.len], template);
+    buf[template.len] = 0;
+
+    const fd = c_mkstemp.mkstemp(buf.ptr);
+    if (fd < 0) { a.free(buf); return error.TempFileCreation; }
+    defer posix.close(fd);
+
+    var written: usize = 0;
+    while (written < data.len) {
+        const n = posix.write(fd, data[written..]) catch { a.free(buf); return error.TempFileWrite; };
+        written += n;
+    }
+
+    // return path without null terminator, but keep same allocation
+    const path = try a.dupe(u8, buf[0..template.len]);
+    a.free(buf);
+    return path;
 }
 
 fn urlDecode(a: Allocator, input: []const u8) ![]const u8 {

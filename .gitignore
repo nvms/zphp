@@ -2,3 +2,4 @@ zig-out/
 zig-cache/
 .zig-cache/
 test_compress
+STDLIB_PARITY.md

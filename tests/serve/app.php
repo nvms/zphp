@@ -23,6 +23,21 @@ if ($path === "/health") {
 } elseif ($path === "/html") {
     header("Content-Type: text/html");
     echo "<h1>Hello</h1>";
+} elseif ($path === "/upload") {
+    $file_info = [];
+    foreach ($_FILES as $key => $f) {
+        $file_info[$key] = [
+            "name" => $f["name"],
+            "type" => $f["type"],
+            "size" => $f["size"],
+            "error" => $f["error"],
+            "has_tmp" => strlen($f["tmp_name"]) > 0,
+        ];
+    }
+    echo json_encode([
+        "post" => $_POST,
+        "files" => $file_info,
+    ]);
 } else {
     http_response_code(404);
     echo json_encode(["error" => "not found", "path" => $path]);

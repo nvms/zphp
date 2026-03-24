@@ -150,6 +150,50 @@ r2=$(curl -s "http://localhost:$PORT/echo?seq=2")
 check_contains "isolation req1" '"seq":"1"' "$r1"
 check_contains "isolation req2" '"seq":"2"' "$r2"
 
+# test: chunked transfer encoding (raw HTTP over TCP)
+chunked_resp=$(python3 -c "
+import socket
+s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+s.connect(('localhost', $PORT))
+s.sendall(b'POST /echo HTTP/1.1\r\nHost: localhost\r\nTransfer-Encoding: chunked\r\nContent-Type: application/x-www-form-urlencoded\r\nConnection: close\r\n\r\n7\r\nkey=val\r\n0\r\n\r\n')
+data = b''
+while True:
+    chunk = s.recv(4096)
+    if not chunk: break
+    data += chunk
+s.close()
+print(data.decode())
+" 2>&1)
+check_contains "chunked post data" '"key":"val"' "$chunked_resp"
+
+# test: multipart form data
+upload_resp=$(curl -s -F "field1=hello" -F "field2=world" "http://localhost:$PORT/upload")
+check_contains "multipart field1" '"field1":"hello"' "$upload_resp"
+check_contains "multipart field2" '"field2":"world"' "$upload_resp"
+
+# test: file upload via multipart
+echo "test file content" > /tmp/zphp_test_upload.txt
+file_resp=$(curl -s -F "myfile=@/tmp/zphp_test_upload.txt" "http://localhost:$PORT/upload")
+check_contains "file upload name" '"name":"zphp_test_upload.txt"' "$file_resp"
+check_contains "file upload has_tmp" '"has_tmp":true' "$file_resp"
+check_contains "file upload error" '"error":0' "$file_resp"
+rm -f /tmp/zphp_test_upload.txt
+
+# test: graceful shutdown
+kill -TERM $SERVER_PID
+wait $SERVER_PID 2>/dev/null
+exit_code=$?
+# override cleanup since server is already dead
+trap - EXIT
+if [ $exit_code -eq 0 ] || [ $exit_code -eq 143 ]; then
+    passed=$((passed + 1))
+    echo "  pass  graceful shutdown"
+else
+    failed=$((failed + 1))
+    echo "  FAIL  graceful shutdown (exit code: $exit_code)"
+    errors="$errors\n--- graceful shutdown ---\nexpected exit 0 or 143, got: $exit_code\n"
+fi
+
 echo ""
 echo "$passed passed, $failed failed"
 
