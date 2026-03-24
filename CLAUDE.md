@@ -16,14 +16,14 @@ zig 0.15.x. `zig build test` must pass before pushing. short lowercase commits, 
 ## known limitations
 
 - arrays: reference semantics, not copy-on-write
-- `global $var`: copies from frame 0, no write-back
+- `global $var`: write-back works for simple cases, but no true reference semantics (arrays modified in-place via reference won't propagate)
 - `require`: isolated scope (functions/classes global, variables don't leak)
 - type hints: parsed, not enforced. heredoc/nowdoc: not supported
 - `strtotime`: YYYY-MM-DD and relative only, UTC
 - trait conflict resolution (`insteadof`/`as`): not implemented
 - pass-by-reference: works for simple variable args only, not expressions or nested access. bytecode scan approach is best-effort
-- named arguments: not implemented
-- constructor property promotion: not implemented
+- named arguments: works for user-defined functions, not native functions
+- constructor property promotion: works, but `readonly` keyword is parsed and ignored (not enforced)
 
 ## gotchas
 
@@ -56,7 +56,7 @@ zig 0.15.x. `zig build test` must pass before pushing. short lowercase commits, 
 
 ## CI
 
-7 jobs: `zig build test` (ubuntu + macos), serve integration (`tests/serve_test`, 26 assertions), test runner (`tests/test_runner_test`, 15 assertions), packages (`tests/pkg_test`, 10 assertions), fmt (`tests/fmt_test`, 29 assertions), PHP compat (`tests/run`, 71 files)
+7 jobs: `zig build test` (ubuntu + macos), serve integration (`tests/serve_test`, 26 assertions), test runner (`tests/test_runner_test`, 15 assertions), packages (`tests/pkg_test`, 10 assertions), fmt (`tests/fmt_test`, 29 assertions), PHP compat (`tests/run`, 78 files, validated against PHP 8.4)
 
 ## roadmap
 
@@ -73,6 +73,22 @@ PHP 8.1+ enums implemented. pure enums and backed enums (int/string). cases are 
 ## SPL classes
 
 `SplStack` and `ArrayObject` implemented in `src/stdlib/spl.zig`, registered in `vm.zig` init. both implement `Countable` interface. internal data stored in hidden `__data` property as PhpArray. SplStack iterates LIFO (top to bottom). SplStack methods: push, pop, top, bottom, count, isEmpty, shift, unshift, rewind, current, key, next, valid, toArray. ArrayObject methods: offsetGet, offsetSet, offsetExists, offsetUnset, count, append, getArrayCopy, getIterator, setFlags, getFlags. ArrayAccess bracket syntax (`$ao["key"]`) not yet wired - requires VM-level dispatch for `[]` on objects.
+
+## array destructuring
+
+`list($a, $b) = [1, 2]` and `[$a, $b] = [1, 2]` both work. `list_destructure` AST node for `list()` syntax, `array_literal` on LHS of assignment detected in compiler. supports skipped slots (`list($a, , $c)`), nested destructuring, and keyed destructuring (`["x" => $a]`). `compileDestructure` emits dup/array_get/set_var/pop sequences.
+
+## named arguments
+
+`foo(name: "value")` syntax. parser detects `identifier:` (and keyword names like `class:`) in call args, creates `named_arg` AST node. compiler builds associative array with string keys, routes through `call_spread`. VM resolves named args against `ObjFunction.params` at call time, matching `$param` names (strips leading `$`). works for user-defined functions only - native functions fall back to positional.
+
+## pass-by-reference
+
+`function foo(&$x)` syntax. parser stores ref flag in param node `data.rhs` bit 1. `ObjFunction.ref_params` parallel bool array tracks which params are by-ref. on call, VM scans caller bytecode backwards to find `get_var` instructions and records caller variable names as `RefBinding` entries in the `CallFrame`. `writebackRefs()` on return copies modified values back to caller's frame. best-effort: only works when the arg is a simple variable (not expressions or nested access).
+
+## constructor property promotion
+
+`__construct(public string $name, private int $age = 0)` syntax. parser stores visibility in param `data.rhs` bits 2-3 (0=none, 1=public, 2=protected, 3=private). `readonly` parsed but not enforced. compiler detects promoted params in `__construct`, emits `$this->prop = $prop` assignments before body, and adds them as class properties in the `class_decl` bytecode. constructor default params now properly filled when fewer args passed.
 
 ## distribution
 
