@@ -240,6 +240,8 @@ pub const VM = struct {
         try c.put(a, "PHP_URL_PATH", .{ .int = 5 });
         try c.put(a, "PHP_URL_QUERY", .{ .int = 6 });
         try c.put(a, "PHP_URL_FRAGMENT", .{ .int = 7 });
+        try c.put(a, "PASSWORD_DEFAULT", .{ .int = 1 });
+        try c.put(a, "PASSWORD_BCRYPT", .{ .int = 1 });
     }
 
     pub fn deinit(self: *VM) void {

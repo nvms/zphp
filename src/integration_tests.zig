@@ -1120,3 +1120,54 @@ test "strchr alias" {
         \\echo strchr("foo@bar.com", "@");
     , "@bar.com");
 }
+
+// ==========================================================================
+// crypto / security
+// ==========================================================================
+
+test "hash sha256" {
+    try expectOutput(
+        \\<?php
+        \\echo hash("sha256", "hello");
+    , "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824");
+}
+
+test "hash_hmac sha256" {
+    try expectOutput(
+        \\<?php
+        \\echo hash_hmac("sha256", "hello", "secret");
+    , "88aab3ede8d3adf94d26ab90d3bafd4a2083070c3bcce9c014ee04a443847c0b");
+}
+
+test "password_hash and verify" {
+    try expectOutput(
+        \\<?php
+        \\$h = password_hash("test", PASSWORD_BCRYPT);
+        \\echo password_verify("test", $h) ? "ok" : "fail";
+        \\echo " ";
+        \\echo password_verify("wrong", $h) ? "ok" : "fail";
+    , "ok fail");
+}
+
+test "random_int in range" {
+    try expectOutput(
+        \\<?php
+        \\$r = random_int(5, 5);
+        \\echo $r;
+    , "5");
+}
+
+test "random_bytes length" {
+    try expectOutput(
+        \\<?php
+        \\echo strlen(random_bytes(32));
+    , "32");
+}
+
+test "hash_algos returns array" {
+    try expectOutput(
+        \\<?php
+        \\$a = hash_algos();
+        \\echo in_array("sha256", $a) ? "yes" : "no";
+    , "yes");
+}
