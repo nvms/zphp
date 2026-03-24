@@ -216,6 +216,15 @@ two layers: zig HTTP layer (TCP + raw HTTP parsing) + PHP VM layer (synchronous 
 - gzip compression via zlib C FFI (`deflateInit2` with windowBits 15+16 for gzip format). compresses text-based MIME types (text/*, JS, JSON, XML, SVG) when client sends `Accept-Encoding: gzip`. static files up to 1MB compressed in-memory; larger files served uncompressed via 32KB streaming chunks. adds `Content-Encoding: gzip` and `Vary: Accept-Encoding`. PHP output also compressed when client accepts gzip
 - `gzipCompress()` allocates with `compressBound()`, resizes to actual size, skips if compressed >= original
 
+### websocket (src/websocket.zig + src/stdlib/websocket.zig)
+- protocol layer in `src/websocket.zig`: frame codec (readFrame/writeFrame/writeCloseFrame), handshake (computeAcceptKey using `std.crypto.hash.Sha1` + `std.base64`, writeHandshakeResponse). no VM dependency - pure protocol
+- PHP class in `src/stdlib/websocket.zig`: `WebSocketConnection` with `send($data)` and `close()` native methods. stream fd stored as i64 in hidden `__ws_fd` property. `__ws_closed` flag prevents double-close
+- convention-based detection: after compile, scan `result.functions` for `ws_onMessage`. if found, enable upgrade handling
+- connection model: worker thread per WebSocket connection. on `Upgrade: websocket`, worker enters `handleWebSocket` frame loop instead of HTTP request/response path. dedicated until connection closes
+- VM lifecycle: `vm.interpret(result)` runs script once (registers functions, executes top-level code), then `ws_onOpen`/`ws_onMessage`/`ws_onClose` called via `vm.callByName`. VM NOT reset between messages - state persists across connection lifetime
+- message strings allocated via `allocator.dupe`, tracked in `vm.strings` for cleanup at connection end
+- frame loop handles: text/binary (dispatch to `ws_onMessage`), ping (auto-pong), close (echo close + break), pong/continuation (ignore)
+
 ### what's not yet implemented
 - graceful shutdown (SIGTERM handling)
 - chunked transfer encoding

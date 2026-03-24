@@ -44,7 +44,7 @@ zig 0.15.x. `zig build test` must pass before pushing. short lowercase commits, 
 ## CLI
 
 - `zphp run <file>` - execute PHP file
-- `zphp serve <file> [--port N] [--workers N]` - HTTP server with pre-compiled bytecode, VM pooling, keep-alive, static files, ETag/304, gzip
+- `zphp serve <file> [--port N] [--workers N]` - HTTP server with pre-compiled bytecode, VM pooling, keep-alive, static files, ETag/304, gzip, WebSocket
 - `zphp test [file]` - test runner with assertion functions, test discovery, TUI output
 - `zphp install` - install packages from composer.json, write zphp.lock
 - `zphp add <pkg>` / `zphp remove <pkg>` - manage dependencies
@@ -62,7 +62,11 @@ zig 0.15.x. `zig build test` must pass before pushing. short lowercase commits, 
 
 ## roadmap
 
-next: pdo_mysql driver, WebSocket support for serve (design toward event-loop-per-worker for long-lived connections - don't assume all connections are short-lived request/response)
+next: pdo_mysql driver, event-loop-per-worker for serve (epoll/kqueue for scalable concurrent WebSocket connections)
+
+## websocket
+
+`src/websocket.zig` (protocol) + `src/stdlib/websocket.zig` (PHP class). convention-based: if compiled script defines `ws_onMessage`, WebSocket upgrade is enabled. PHP API: `ws_onOpen($ws)`, `ws_onMessage($ws, $data)`, `ws_onClose($ws)`. `$ws` is a `WebSocketConnection` object with `send($data)` and `close()` methods. VM persists across connection lifetime - state survives between messages without external storage. worker thread per connection model (N workers = N concurrent WS connections). protocol: RFC 6455 handshake (SHA-1 + base64 via zig std), frame codec (text/binary/ping/pong/close, client masking, variable-length payloads up to 1MB). message strings tracked in vm.strings for cleanup.
 
 ## gzip compression
 
