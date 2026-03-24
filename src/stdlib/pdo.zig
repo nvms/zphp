@@ -67,12 +67,12 @@ fn getStmtPtr(obj: *PhpObject) ?*sqlite.Stmt {
     return @ptrFromInt(@as(usize, @intCast(v.int)));
 }
 
-fn throwPdo(ctx: *NativeContext, msg: []const u8) RuntimeError!Value {
+pub fn throwPdo(ctx: *NativeContext, msg: []const u8) RuntimeError!Value {
     if (try ctx.vm.throwBuiltinException("PDOException", msg)) return .null;
     return error.RuntimeError;
 }
 
-fn dupeZ(ctx: *NativeContext, s: []const u8) ![:0]u8 {
+pub fn dupeZ(ctx: *NativeContext, s: []const u8) ![:0]u8 {
     const z = try ctx.allocator.alloc(u8, s.len + 1);
     @memcpy(z[0..s.len], s);
     z[s.len] = 0;
@@ -137,17 +137,31 @@ pub fn cleanupResources(objects: std.ArrayListUnmanaged(*PhpObject)) void {
     // finalize statements first, then close databases
     for (objects.items) |obj| {
         if (std.mem.eql(u8, obj.class_name, "PDOStatement")) {
-            if (getStmtPtr(obj)) |stmt| {
-                _ = sqlite.sqlite3_finalize(stmt);
-                obj.properties.put(std.heap.page_allocator, "__stmt_ptr", .{ .int = 0 }) catch {};
+            const drv = getDriver(obj);
+            if (std.mem.eql(u8, drv, "mysql")) {
+                pdo_mysql.cleanupStatement(obj);
+            } else if (std.mem.eql(u8, drv, "pgsql")) {
+                pdo_pgsql.cleanupStatement(obj);
+            } else {
+                if (getStmtPtr(obj)) |stmt| {
+                    _ = sqlite.sqlite3_finalize(stmt);
+                    obj.properties.put(std.heap.page_allocator, "__stmt_ptr", .{ .int = 0 }) catch {};
+                }
             }
         }
     }
     for (objects.items) |obj| {
         if (std.mem.eql(u8, obj.class_name, "PDO")) {
-            if (getDbPtr(obj)) |db| {
-                _ = sqlite.sqlite3_close_v2(db);
-                obj.properties.put(std.heap.page_allocator, "__db_ptr", .{ .int = 0 }) catch {};
+            const drv = getDriver(obj);
+            if (std.mem.eql(u8, drv, "mysql")) {
+                pdo_mysql.cleanupConnection(obj);
+            } else if (std.mem.eql(u8, drv, "pgsql")) {
+                pdo_pgsql.cleanupConnection(obj);
+            } else {
+                if (getDbPtr(obj)) |db| {
+                    _ = sqlite.sqlite3_close_v2(db);
+                    obj.properties.put(std.heap.page_allocator, "__db_ptr", .{ .int = 0 }) catch {};
+                }
             }
         }
     }
@@ -155,33 +169,48 @@ pub fn cleanupResources(objects: std.ArrayListUnmanaged(*PhpObject)) void {
 
 // PDO methods
 
+const pdo_mysql = @import("pdo_mysql.zig");
+const pdo_pgsql = @import("pdo_pgsql.zig");
+
+fn getDriver(obj: *PhpObject) []const u8 {
+    const v = obj.get("__driver");
+    if (v == .string) return v.string;
+    return "sqlite";
+}
+
 fn pdoConstruct(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     const obj = getThis(ctx) orelse return .null;
     if (args.len < 1 or args[0] != .string) return throwPdo(ctx, "PDO::__construct() expects a DSN string");
 
     const dsn = args[0].string;
-    // parse driver from DSN
     const colon = std.mem.indexOf(u8, dsn, ":") orelse return throwPdo(ctx, "Invalid DSN: missing driver prefix");
     const driver = dsn[0..colon];
-    const path = dsn[colon + 1 ..];
+    const rest = dsn[colon + 1 ..];
 
-    if (!std.mem.eql(u8, driver, "sqlite")) return throwPdo(ctx, "Unsupported PDO driver (only sqlite is supported)");
+    try obj.set(ctx.allocator, "__driver", .{ .string = driver });
 
-    const path_z = try dupeZ(ctx, path);
+    if (std.mem.eql(u8, driver, "sqlite")) {
+        const path_z = try dupeZ(ctx, rest);
+        var db: ?*sqlite.Db = null;
+        const rc = sqlite.sqlite3_open(path_z, &db);
+        if (rc != sqlite.OK or db == null) return throwPdo(ctx, "Failed to open database");
+        try obj.set(ctx.allocator, "__db_ptr", .{ .int = @intCast(@intFromPtr(db.?)) });
+        return .null;
+    }
 
-    var db: ?*sqlite.Db = null;
-    const rc = sqlite.sqlite3_open(path_z, &db);
-    if (rc != sqlite.OK or db == null) return throwPdo(ctx, "Failed to open database");
+    if (std.mem.eql(u8, driver, "mysql")) return pdo_mysql.connect(ctx, obj, rest, args);
+    if (std.mem.eql(u8, driver, "pgsql")) return pdo_pgsql.connect(ctx, obj, rest, args);
 
-    try obj.set(ctx.allocator, "__db_ptr", .{ .int = @intCast(@intFromPtr(db.?)) });
-    return .null;
+    return throwPdo(ctx, "Unsupported PDO driver");
 }
 
 fn pdoExec(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     const obj = getThis(ctx) orelse return .null;
-    const db = getDbPtr(obj) orelse return throwPdo(ctx, "Database not connected");
     if (args.len < 1 or args[0] != .string) return throwPdo(ctx, "PDO::exec() expects a SQL string");
-
+    const drv = getDriver(obj);
+    if (std.mem.eql(u8, drv, "mysql")) return pdo_mysql.exec(ctx, obj, args[0].string);
+    if (std.mem.eql(u8, drv, "pgsql")) return pdo_pgsql.exec(ctx, obj, args[0].string);
+    const db = getDbPtr(obj) orelse return throwPdo(ctx, "Database not connected");
     const sql_z = try dupeZ(ctx, args[0].string);
     var errmsg: ?[*:0]u8 = null;
     const rc = sqlite.sqlite3_exec(db, sql_z, null, null, @ptrCast(&errmsg));
@@ -194,8 +223,11 @@ fn pdoExec(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
 
 fn pdoQuery(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     const obj = getThis(ctx) orelse return .null;
-    const db = getDbPtr(obj) orelse return throwPdo(ctx, "Database not connected");
     if (args.len < 1 or args[0] != .string) return throwPdo(ctx, "PDO::query() expects a SQL string");
+    const drv = getDriver(obj);
+    if (std.mem.eql(u8, drv, "mysql")) return pdo_mysql.query(ctx, obj, args[0].string);
+    if (std.mem.eql(u8, drv, "pgsql")) return pdo_pgsql.query(ctx, obj, args[0].string);
+    const db = getDbPtr(obj) orelse return throwPdo(ctx, "Database not connected");
 
     const sql_z = try dupeZ(ctx, args[0].string);
     var stmt_ptr: ?*sqlite.Stmt = null;
@@ -218,8 +250,11 @@ fn pdoQuery(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
 
 fn pdoPrepare(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     const obj = getThis(ctx) orelse return .null;
-    const db = getDbPtr(obj) orelse return throwPdo(ctx, "Database not connected");
     if (args.len < 1 or args[0] != .string) return throwPdo(ctx, "PDO::prepare() expects a SQL string");
+    const drv = getDriver(obj);
+    if (std.mem.eql(u8, drv, "mysql")) return pdo_mysql.prepare(ctx, obj, args[0].string);
+    if (std.mem.eql(u8, drv, "pgsql")) return pdo_pgsql.prepare(ctx, obj, args[0].string);
+    const db = getDbPtr(obj) orelse return throwPdo(ctx, "Database not connected");
 
     const sql_z = try dupeZ(ctx, args[0].string);
     var stmt_ptr: ?*sqlite.Stmt = null;
@@ -240,6 +275,9 @@ fn pdoPrepare(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
 
 fn pdoLastInsertId(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
     const obj = getThis(ctx) orelse return .null;
+    const drv = getDriver(obj);
+    if (std.mem.eql(u8, drv, "mysql")) return pdo_mysql.lastInsertId(ctx, obj);
+    if (std.mem.eql(u8, drv, "pgsql")) return pdo_pgsql.lastInsertId(ctx, obj);
     const db = getDbPtr(obj) orelse return .{ .string = "0" };
     const id = sqlite.sqlite3_last_insert_rowid(db);
     var buf: [32]u8 = undefined;
@@ -249,6 +287,9 @@ fn pdoLastInsertId(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
 
 fn pdoBeginTransaction(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
     const obj = getThis(ctx) orelse return .null;
+    const drv = getDriver(obj);
+    if (std.mem.eql(u8, drv, "mysql")) return pdo_mysql.beginTransaction(ctx, obj);
+    if (std.mem.eql(u8, drv, "pgsql")) return pdo_pgsql.beginTransaction(ctx, obj);
     const db = getDbPtr(obj) orelse return .{ .bool = false };
     const rc = sqlite.sqlite3_exec(db, "BEGIN", null, null, null);
     return .{ .bool = rc == sqlite.OK };
@@ -256,6 +297,9 @@ fn pdoBeginTransaction(ctx: *NativeContext, _: []const Value) RuntimeError!Value
 
 fn pdoCommit(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
     const obj = getThis(ctx) orelse return .null;
+    const drv = getDriver(obj);
+    if (std.mem.eql(u8, drv, "mysql")) return pdo_mysql.commit(ctx, obj);
+    if (std.mem.eql(u8, drv, "pgsql")) return pdo_pgsql.commit(ctx, obj);
     const db = getDbPtr(obj) orelse return .{ .bool = false };
     const rc = sqlite.sqlite3_exec(db, "COMMIT", null, null, null);
     return .{ .bool = rc == sqlite.OK };
@@ -263,6 +307,9 @@ fn pdoCommit(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
 
 fn pdoRollBack(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
     const obj = getThis(ctx) orelse return .null;
+    const drv = getDriver(obj);
+    if (std.mem.eql(u8, drv, "mysql")) return pdo_mysql.rollBack(ctx, obj);
+    if (std.mem.eql(u8, drv, "pgsql")) return pdo_pgsql.rollBack(ctx, obj);
     const db = getDbPtr(obj) orelse return .{ .bool = false };
     const rc = sqlite.sqlite3_exec(db, "ROLLBACK", null, null, null);
     return .{ .bool = rc == sqlite.OK };
@@ -270,6 +317,9 @@ fn pdoRollBack(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
 
 fn pdoErrorInfo(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
     const obj = getThis(ctx) orelse return .null;
+    const drv = getDriver(obj);
+    if (std.mem.eql(u8, drv, "mysql")) return pdo_mysql.errorInfo(ctx, obj);
+    if (std.mem.eql(u8, drv, "pgsql")) return pdo_pgsql.errorInfo(ctx, obj);
     const db = getDbPtr(obj) orelse return .null;
     var arr = try ctx.createArray();
     const msg = std.mem.span(sqlite.sqlite3_errmsg(db));
@@ -283,6 +333,9 @@ fn pdoErrorInfo(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
 
 fn stmtExecute(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     const obj = getThis(ctx) orelse return .null;
+    const drv = getDriver(obj);
+    if (std.mem.eql(u8, drv, "mysql")) return pdo_mysql.stmtExecute(ctx, obj, args);
+    if (std.mem.eql(u8, drv, "pgsql")) return pdo_pgsql.stmtExecute(ctx, obj, args);
     const stmt = getStmtPtr(obj) orelse return .{ .bool = false };
 
     _ = sqlite.sqlite3_reset(stmt);
@@ -318,6 +371,9 @@ fn stmtExecute(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
 
 fn stmtFetch(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     const obj = getThis(ctx) orelse return .null;
+    const drv = getDriver(obj);
+    if (std.mem.eql(u8, drv, "mysql")) return pdo_mysql.stmtFetch(ctx, obj, args);
+    if (std.mem.eql(u8, drv, "pgsql")) return pdo_pgsql.stmtFetch(ctx, obj, args);
     const stmt = getStmtPtr(obj) orelse return .{ .bool = false };
 
     const has_row = obj.get("__has_row");
@@ -346,6 +402,9 @@ fn stmtFetch(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
 
 fn stmtFetchAll(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     const obj = getThis(ctx) orelse return .null;
+    const drv = getDriver(obj);
+    if (std.mem.eql(u8, drv, "mysql")) return pdo_mysql.stmtFetchAll(ctx, obj, args);
+    if (std.mem.eql(u8, drv, "pgsql")) return pdo_pgsql.stmtFetchAll(ctx, obj, args);
     const stmt = getStmtPtr(obj) orelse return .{ .bool = false };
 
     const mode: i64 = if (args.len >= 1 and args[0] == .int) args[0].int else 4;
@@ -383,6 +442,9 @@ fn stmtFetchAll(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
 
 fn stmtFetchColumn(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     const obj = getThis(ctx) orelse return .null;
+    const drv = getDriver(obj);
+    if (std.mem.eql(u8, drv, "mysql")) return pdo_mysql.stmtFetchColumn(ctx, obj, args);
+    if (std.mem.eql(u8, drv, "pgsql")) return pdo_pgsql.stmtFetchColumn(ctx, obj, args);
     const stmt = getStmtPtr(obj) orelse return .{ .bool = false };
 
     const col: c_int = if (args.len >= 1 and args[0] == .int) @intCast(args[0].int) else 0;
@@ -408,6 +470,7 @@ fn stmtFetchColumn(ctx: *NativeContext, args: []const Value) RuntimeError!Value 
 
 fn stmtRowCount(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
     const obj = getThis(ctx) orelse return .null;
+    _ = getDriver(obj);
     const rc = obj.get("__row_count");
     if (rc == .int) return rc;
     // for SELECT statements, SQLite doesn't provide row count before fetching
@@ -416,12 +479,18 @@ fn stmtRowCount(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
 
 fn stmtColumnCount(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
     const obj = getThis(ctx) orelse return .null;
+    const drv = getDriver(obj);
+    if (std.mem.eql(u8, drv, "mysql")) return pdo_mysql.stmtColumnCount(obj);
+    if (std.mem.eql(u8, drv, "pgsql")) return pdo_pgsql.stmtColumnCount(obj);
     const stmt = getStmtPtr(obj) orelse return .{ .int = 0 };
     return .{ .int = sqlite.sqlite3_column_count(stmt) };
 }
 
 fn stmtCloseCursor(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
     const obj = getThis(ctx) orelse return .null;
+    const drv = getDriver(obj);
+    if (std.mem.eql(u8, drv, "mysql")) return pdo_mysql.stmtCloseCursor(ctx, obj);
+    if (std.mem.eql(u8, drv, "pgsql")) return pdo_pgsql.stmtCloseCursor(ctx, obj);
     const stmt = getStmtPtr(obj) orelse return .{ .bool = true };
     _ = sqlite.sqlite3_reset(stmt);
     try obj.set(ctx.allocator, "__has_row", .{ .bool = false });

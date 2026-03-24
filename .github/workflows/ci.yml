@@ -20,7 +20,10 @@ jobs:
       - name: install system libs
         run: |
           if [ "$RUNNER_OS" = "Linux" ]; then
-            sudo apt-get update && sudo apt-get install -y libpcre2-dev libsqlite3-dev zlib1g-dev
+            sudo apt-get update && sudo apt-get install -y libpcre2-dev libsqlite3-dev zlib1g-dev libmysqlclient-dev libpq-dev
+          else
+            brew install mysql-client libpq
+            echo "PKG_CONFIG_PATH=/opt/homebrew/opt/mysql-client/lib/pkgconfig:/opt/homebrew/opt/libpq/lib/pkgconfig:$PKG_CONFIG_PATH" >> $GITHUB_ENV
           fi
       - run: zig build test
       - run: zig build
@@ -33,7 +36,7 @@ jobs:
         with:
           version: 0.15.1
       - name: install system libs
-        run: sudo apt-get update && sudo apt-get install -y libpcre2-dev libsqlite3-dev zlib1g-dev
+        run: sudo apt-get update && sudo apt-get install -y libpcre2-dev libsqlite3-dev zlib1g-dev libmysqlclient-dev libpq-dev
       - run: zig build
       - run: ./tests/serve_test
 
@@ -45,7 +48,7 @@ jobs:
         with:
           version: 0.15.1
       - name: install system libs
-        run: sudo apt-get update && sudo apt-get install -y libpcre2-dev libsqlite3-dev zlib1g-dev
+        run: sudo apt-get update && sudo apt-get install -y libpcre2-dev libsqlite3-dev zlib1g-dev libmysqlclient-dev libpq-dev
       - run: zig build
       - run: ./tests/test_runner_test
 
@@ -57,7 +60,7 @@ jobs:
         with:
           version: 0.15.1
       - name: install system libs
-        run: sudo apt-get update && sudo apt-get install -y libpcre2-dev libsqlite3-dev zlib1g-dev
+        run: sudo apt-get update && sudo apt-get install -y libpcre2-dev libsqlite3-dev zlib1g-dev libmysqlclient-dev libpq-dev
       - run: zig build
       - run: ./tests/pkg_test
 
@@ -69,7 +72,7 @@ jobs:
         with:
           version: 0.15.1
       - name: install system libs
-        run: sudo apt-get update && sudo apt-get install -y libpcre2-dev libsqlite3-dev zlib1g-dev
+        run: sudo apt-get update && sudo apt-get install -y libpcre2-dev libsqlite3-dev zlib1g-dev libmysqlclient-dev libpq-dev
       - run: zig build
       - run: ./tests/fmt_test
 
@@ -81,10 +84,39 @@ jobs:
         with:
           version: 0.15.1
       - name: install system libs
-        run: sudo apt-get update && sudo apt-get install -y libpcre2-dev libsqlite3-dev zlib1g-dev
+        run: sudo apt-get update && sudo apt-get install -y libpcre2-dev libsqlite3-dev zlib1g-dev libmysqlclient-dev libpq-dev
       - uses: shivammathur/setup-php@v2
         with:
           php-version: '8.4'
       - run: zig build
       - run: php --version
       - run: ./tests/run
+
+  pdo:
+    runs-on: ubuntu-latest
+    services:
+      mysql:
+        image: mysql:8.0
+        env:
+          MYSQL_ROOT_PASSWORD: test
+          MYSQL_DATABASE: test
+        ports:
+          - 3306:3306
+        options: --health-cmd="mysqladmin ping" --health-interval=10s --health-timeout=5s --health-retries=3
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: test
+          POSTGRES_DB: test
+        ports:
+          - 5432:5432
+        options: --health-cmd pg_isready --health-interval 10s --health-timeout 5s --health-retries 3
+    steps:
+      - uses: actions/checkout@v4
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.15.1
+      - name: install system libs
+        run: sudo apt-get update && sudo apt-get install -y libpcre2-dev libsqlite3-dev zlib1g-dev libmysqlclient-dev libpq-dev
+      - run: zig build
+      - run: ./tests/pdo_test

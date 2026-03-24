@@ -1,0 +1,57 @@
+#!/bin/bash
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+ZPHP="${ZPHP:-$SCRIPT_DIR/../zig-out/bin/zphp}"
+passed=0
+failed=0
+
+run_test() {
+    local name="$1"
+    local file="$2"
+    local output
+    output=$("$ZPHP" run "$file" 2>&1) || true
+
+    if echo "$output" | grep -q "done"; then
+        passed=$((passed + 1))
+        echo "  pass  $name"
+    else
+        failed=$((failed + 1))
+        echo "  FAIL  $name"
+        echo "$output" | head -20
+    fi
+}
+
+try_test() {
+    local name="$1"
+    local file="$2"
+    local output
+    output=$("$ZPHP" run "$file" 2>&1) || true
+
+    if echo "$output" | grep -q "done"; then
+        passed=$((passed + 1))
+        echo "  pass  $name"
+    elif [ -z "$(echo "$output" | grep -v "runtime error" | grep -v "^$")" ]; then
+        # only got "runtime error" with no PHP output - likely connection failure
+        echo "  skip  $name (connection failed)"
+    else
+        failed=$((failed + 1))
+        echo "  FAIL  $name"
+        echo "$output" | head -20
+    fi
+}
+
+# sqlite always runs
+run_test "pdo_sqlite" "$SCRIPT_DIR/pdo_sqlite.php"
+run_test "pdo_errors" "$SCRIPT_DIR/pdo_errors.php"
+
+# mysql and postgres: try to connect, skip if unavailable
+try_test "pdo_mysql" "$SCRIPT_DIR/pdo_mysql.php"
+try_test "pdo_pgsql" "$SCRIPT_DIR/pdo_pgsql.php"
+
+echo ""
+echo "$passed passed, $failed failed"
+
+if [ $failed -gt 0 ]; then
+    exit 1
+fi

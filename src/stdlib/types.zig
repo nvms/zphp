@@ -507,6 +507,8 @@ fn native_extension_loaded(_: *NativeContext, args: []const Value) RuntimeError!
     if (std.mem.eql(u8, name, "pcre")) return .{ .bool = true };
     if (std.mem.eql(u8, name, "pdo")) return .{ .bool = true };
     if (std.mem.eql(u8, name, "pdo_sqlite")) return .{ .bool = true };
+    if (std.mem.eql(u8, name, "pdo_mysql")) return .{ .bool = true };
+    if (std.mem.eql(u8, name, "pdo_pgsql")) return .{ .bool = true };
     if (std.mem.eql(u8, name, "session")) return .{ .bool = true };
     if (std.mem.eql(u8, name, "mbstring")) return .{ .bool = true };
     return .{ .bool = false };

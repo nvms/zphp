@@ -13,6 +13,8 @@ pub fn build(b: *std.Build) void {
     exe_mod.linkSystemLibrary("pcre2-8", .{});
     exe_mod.linkSystemLibrary("sqlite3", .{});
     exe_mod.linkSystemLibrary("z", .{});
+    exe_mod.linkSystemLibrary("mysqlclient", .{});
+    exe_mod.linkSystemLibrary("pq", .{});
     exe_mod.link_libc = true;
 
     const exe = b.addExecutable(.{
@@ -40,6 +42,8 @@ pub fn build(b: *std.Build) void {
     test_mod.linkSystemLibrary("pcre2-8", .{});
     test_mod.linkSystemLibrary("sqlite3", .{});
     test_mod.linkSystemLibrary("z", .{});
+    test_mod.linkSystemLibrary("mysqlclient", .{});
+    test_mod.linkSystemLibrary("pq", .{});
     test_mod.link_libc = true;
 
     const unit_tests = b.addTest(.{
