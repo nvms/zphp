@@ -1,0 +1,41 @@
+#!/bin/bash
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+EXAMPLES_DIR="$SCRIPT_DIR/../examples"
+ZPHP="${ZPHP:-$SCRIPT_DIR/../zig-out/bin/zphp}"
+
+if ! command -v php &>/dev/null; then
+    echo "php not found in PATH"
+    exit 1
+fi
+
+passed=0
+failed=0
+errors=""
+
+for dir in "$EXAMPLES_DIR"/*/; do
+    name="$(basename "$dir")"
+    main="$dir/main.php"
+    if [ ! -f "$main" ]; then continue; fi
+
+    php_out="$(php "$main" 2>&1)" || true
+    zphp_out="$("$ZPHP" run "$main" 2>&1)" || true
+
+    if [ "$php_out" = "$zphp_out" ]; then
+        passed=$((passed + 1))
+        echo "  pass  $name"
+    else
+        failed=$((failed + 1))
+        echo "  FAIL  $name"
+        errors="$errors\n--- $name ---\nexpected (php):\n$php_out\ngot (zphp):\n$zphp_out\n"
+    fi
+done
+
+echo ""
+echo "$passed passed, $failed failed"
+
+if [ $failed -gt 0 ]; then
+    echo -e "$errors"
+    exit 1
+fi

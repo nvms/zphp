@@ -1415,7 +1415,7 @@ const Compiler = struct {
     }
 
     fn compileClassDecl(self: *Compiler, node: Ast.Node) Error!void {
-        const class_name = self.ast.tokenSlice(node.main_token);
+        const class_name = self.resolveClassName(self.ast.tokenSlice(node.main_token));
         const members = self.ast.extraSlice(node.data.lhs);
 
         // decode rhs: {parent_node, implements_count, impl_nodes...}
@@ -1820,13 +1820,29 @@ const Compiler = struct {
     }
 
     fn compileNewExpr(self: *Compiler, node: Ast.Node) Error!void {
-        const class_name = self.ast.tokenSlice(node.main_token);
+        const raw_name = try self.resolveQualifiedNewName(node);
+        const class_name = if (std.mem.indexOf(u8, raw_name, "\\") != null) raw_name else self.resolveClassName(raw_name);
         const args = self.ast.extraSlice(node.data.lhs);
         for (args) |arg| try self.compileNode(arg);
         const name_idx = try self.addConstant(.{ .string = class_name });
         try self.emitOp(.new_obj);
         try self.emitU16(name_idx);
         try self.emitByte(@intCast(args.len));
+    }
+
+    fn resolveQualifiedNewName(self: *Compiler, node: Ast.Node) ![]const u8 {
+        const first = self.ast.tokenSlice(node.main_token);
+        if (node.data.rhs == 0) return first;
+        const parts = self.ast.extraSlice(node.data.rhs);
+        var buf = std.ArrayListUnmanaged(u8){};
+        try buf.appendSlice(self.allocator, first);
+        for (parts[1..]) |part_tok| {
+            try buf.append(self.allocator, '\\');
+            try buf.appendSlice(self.allocator, self.ast.tokenSlice(part_tok));
+        }
+        const owned = try buf.toOwnedSlice(self.allocator);
+        try self.string_allocs.append(self.allocator, owned);
+        return owned;
     }
 
     fn propName(self: *Compiler, node: Ast.Node) []const u8 {
