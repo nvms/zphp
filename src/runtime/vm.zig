@@ -1223,16 +1223,27 @@ pub const VM = struct {
                         }
                         for (pending[0..pending_count]) |tm| {
                             // alias rules apply regardless of insteadof exclusion
+                            var vis_override: ?ClassDef.Visibility = null;
                             for (alias_rules[0..alias_count]) |rule| {
                                 if (std.mem.eql(u8, rule.method, tm.name) and std.mem.eql(u8, rule.trait, trait_name)) {
-                                    const alias_method = try std.fmt.allocPrint(self.allocator, "{s}::{s}", .{ class_name, rule.alias });
-                                    try self.strings.append(self.allocator, alias_method);
-                                    if (!self.functions.contains(alias_method)) {
-                                        try self.functions.put(self.allocator, alias_method, tm.func);
-                                        try def.methods.put(self.allocator, rule.alias, .{
-                                            .name = rule.alias,
-                                            .arity = tm.func.arity,
-                                        });
+                                    // visibility-only change
+                                    if (std.mem.eql(u8, rule.alias, "public")) {
+                                        vis_override = .public;
+                                    } else if (std.mem.eql(u8, rule.alias, "protected")) {
+                                        vis_override = .protected;
+                                    } else if (std.mem.eql(u8, rule.alias, "private")) {
+                                        vis_override = .private;
+                                    } else {
+                                        // name alias
+                                        const alias_method = try std.fmt.allocPrint(self.allocator, "{s}::{s}", .{ class_name, rule.alias });
+                                        try self.strings.append(self.allocator, alias_method);
+                                        if (!self.functions.contains(alias_method)) {
+                                            try self.functions.put(self.allocator, alias_method, tm.func);
+                                            try def.methods.put(self.allocator, rule.alias, .{
+                                                .name = rule.alias,
+                                                .arity = tm.func.arity,
+                                            });
+                                        }
                                     }
                                 }
                             }
@@ -1257,6 +1268,7 @@ pub const VM = struct {
                                 try def.methods.put(self.allocator, tm.name, .{
                                     .name = tm.name,
                                     .arity = tm.func.arity,
+                                    .visibility = vis_override orelse .public,
                                 });
                             }
                         }

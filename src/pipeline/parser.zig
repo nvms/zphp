@@ -593,6 +593,7 @@ const Parser = struct {
             try params.append(self.allocator, try self.parseParam());
             while (self.peek() == .comma) {
                 _ = self.advance();
+                if (self.peek() == .r_paren) break;
                 try params.append(self.allocator, try self.parseParam());
             }
         }
@@ -897,6 +898,7 @@ const Parser = struct {
             try params.append(self.allocator, try self.parseParam());
             while (self.peek() == .comma) {
                 _ = self.advance();
+                if (self.peek() == .r_paren) break;
                 try params.append(self.allocator, try self.parseParam());
             }
         }
@@ -1120,6 +1122,7 @@ const Parser = struct {
             try params.append(self.allocator, try self.parseParam());
             while (self.peek() == .comma) {
                 _ = self.advance();
+                if (self.peek() == .r_paren) break;
                 try params.append(self.allocator, try self.parseParam());
             }
         }
@@ -1464,7 +1467,7 @@ const Parser = struct {
             .identifier => if (self.peekAt(1) == .backslash) self.parseQualifiedName() else self.addLiteral(.identifier),
             .kw_isset, .kw_empty, .kw_unset, .kw_eval, .kw_exit, .kw_die => self.addLiteral(.identifier),
             .kw_list => self.parseListDestructure(),
-            .kw_match => self.parseMatchExpr(),
+            .kw_match => if (self.isMatchExpr()) self.parseMatchExpr() else self.addLiteral(.identifier),
             .kw_function => self.parseClosureExpr(),
             .kw_fn => self.parseArrowFunc(),
             .l_paren => if (self.isCastExpr()) self.parseCastExpr() else self.parseGroupedExpr(),
@@ -1797,6 +1800,23 @@ const Parser = struct {
         const i = self.pos + offset;
         if (i >= self.tokens.len) return .eof;
         return self.tokens[i].tag;
+    }
+
+    // match(expr) { ... } is a match expression. match(args) is a function call
+    fn isMatchExpr(self: *const Parser) bool {
+        if (self.peekAt(1) != .l_paren) return false;
+        var depth: u32 = 0;
+        var i: u32 = 1;
+        while (true) {
+            const t = self.peekAt(i);
+            if (t == .eof) return false;
+            if (t == .l_paren) depth += 1;
+            if (t == .r_paren) {
+                depth -= 1;
+                if (depth == 0) return self.peekAt(i + 1) == .l_brace;
+            }
+            i += 1;
+        }
     }
 
     fn lexemeAt(self: *const Parser, offset: u32) []const u8 {
