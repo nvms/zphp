@@ -2109,21 +2109,55 @@ const Compiler = struct {
         if (idx == 0 or idx >= self.ast.nodes.len) return false;
         const n = self.ast.nodes[idx];
         if (n.tag == .yield_expr or n.tag == .yield_pair_expr or n.tag == .yield_from_expr) return true;
+
+        // boundaries: don't descend into nested functions/classes
         if (n.tag == .function_decl or n.tag == .closure_expr) return false;
         if (n.tag == .class_decl or n.tag == .interface_decl or n.tag == .trait_decl) return false;
+        if (n.tag == .enum_decl) return false;
 
-        // nodes with extra_data lists in lhs
-        if (n.tag == .block or n.tag == .root or n.tag == .echo_stmt) {
+        // lhs = extra_data list of children
+        if (n.tag == .block or n.tag == .root or n.tag == .echo_stmt or
+            n.tag == .array_literal or n.tag == .global_stmt or
+            n.tag == .list_destructure or n.tag == .expr_list)
+        {
             for (self.ast.extraSlice(n.data.lhs)) |child| {
                 if (self.containsYield(child)) return true;
             }
             return false;
         }
+
+        // lhs = extra_data list of children, rhs = extra_data list of children
+        if (n.tag == .switch_case) {
+            for (self.ast.extraSlice(n.data.lhs)) |child| {
+                if (self.containsYield(child)) return true;
+            }
+            for (self.ast.extraSlice(n.data.rhs)) |child| {
+                if (self.containsYield(child)) return true;
+            }
+            return false;
+        }
+        if (n.tag == .switch_default) {
+            for (self.ast.extraSlice(n.data.lhs)) |child| {
+                if (self.containsYield(child)) return true;
+            }
+            return false;
+        }
+
+        // lhs = condition (node), rhs = extra {then, else}
         if (n.tag == .if_else) {
             if (self.containsYield(n.data.lhs)) return true;
             const extra = self.ast.extra_data[n.data.rhs .. n.data.rhs + 2];
             return self.containsYield(extra[0]) or self.containsYield(extra[1]);
         }
+        // lhs = condition (node), rhs = extra {then, else} (or 0)
+        if (n.tag == .ternary) {
+            if (self.containsYield(n.data.lhs)) return true;
+            const extra = self.ast.extra_data[n.data.rhs .. n.data.rhs + 2];
+            if (self.containsYield(extra[0])) return true;
+            return self.containsYield(extra[1]);
+        }
+
+        // lhs = extra {init, cond, update}, rhs = body (node)
         if (n.tag == .for_stmt) {
             const parts = self.ast.extra_data[n.data.lhs .. n.data.lhs + 3];
             for (parts) |child| {
@@ -2131,7 +2165,47 @@ const Compiler = struct {
             }
             return self.containsYield(n.data.rhs);
         }
-        if (n.tag == .call) {
+        // lhs = extra {iter, val, key}, rhs = body (node)
+        if (n.tag == .foreach_stmt) {
+            const iter_n = self.ast.extra_data[n.data.lhs];
+            if (self.containsYield(iter_n)) return true;
+            return self.containsYield(n.data.rhs);
+        }
+
+        // lhs = callee (node), rhs = extra args
+        if (n.tag == .call or n.tag == .method_call or n.tag == .static_call or n.tag == .nullsafe_method_call) {
+            if (self.containsYield(n.data.lhs)) return true;
+            for (self.ast.extraSlice(n.data.rhs)) |child| {
+                if (self.containsYield(child)) return true;
+            }
+            return false;
+        }
+        // lhs = extra args
+        if (n.tag == .new_expr) {
+            for (self.ast.extraSlice(n.data.lhs)) |child| {
+                if (self.containsYield(child)) return true;
+            }
+            return false;
+        }
+
+        // lhs = condition (node), rhs = extra cases
+        if (n.tag == .switch_stmt or n.tag == .match_expr) {
+            if (self.containsYield(n.data.lhs)) return true;
+            for (self.ast.extraSlice(n.data.rhs)) |child| {
+                if (self.containsYield(child)) return true;
+            }
+            return false;
+        }
+        // match_arm: lhs = extra values, rhs = result (node)
+        if (n.tag == .match_arm) {
+            for (self.ast.extraSlice(n.data.lhs)) |child| {
+                if (self.containsYield(child)) return true;
+            }
+            return self.containsYield(n.data.rhs);
+        }
+
+        // lhs = try body (node), rhs = extra {catch_count, catches..., finally_or_0}
+        if (n.tag == .try_catch) {
             if (self.containsYield(n.data.lhs)) return true;
             for (self.ast.extraSlice(n.data.rhs)) |child| {
                 if (self.containsYield(child)) return true;
@@ -2139,10 +2213,24 @@ const Compiler = struct {
             return false;
         }
 
-        // default: recurse into lhs/rhs as node indices
-        if (n.data.lhs != 0 and n.data.lhs < self.ast.nodes.len and self.containsYield(n.data.lhs)) return true;
-        if (n.data.rhs != 0 and n.data.rhs < self.ast.nodes.len and self.containsYield(n.data.rhs)) return true;
-        return false;
+        // tags where both lhs and rhs are node indices (safe to recurse)
+        switch (n.tag) {
+            .expression_stmt, .return_stmt, .assign, .binary_op,
+            .prefix_op, .postfix_op, .logical_and, .logical_or,
+            .null_coalesce, .if_simple, .while_stmt, .do_while,
+            .array_access, .array_push_target, .array_element,
+            .array_spread, .grouped_expr, .throw_expr, .catch_clause,
+            .cast_expr, .property_access, .nullsafe_property_access,
+            .static_prop_access, .splat_expr, .require_expr,
+            .yield_expr, .yield_pair_expr, .yield_from_expr,
+            .callable_ref, .named_arg,
+            => {
+                if (n.data.lhs != 0 and n.data.lhs < self.ast.nodes.len and self.containsYield(n.data.lhs)) return true;
+                if (n.data.rhs != 0 and n.data.rhs < self.ast.nodes.len and self.containsYield(n.data.rhs)) return true;
+                return false;
+            },
+            else => return false,
+        }
     }
 
     fn compileSwitch(self: *Compiler, node: Ast.Node) Error!void {
