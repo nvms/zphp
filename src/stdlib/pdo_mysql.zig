@@ -9,28 +9,9 @@ const pdo = @import("pdo.zig");
 const mysql = struct {
     const MYSQL = opaque {};
     const MYSQL_RES = opaque {};
-    const MYSQL_FIELD = extern struct {
-        name: [*:0]const u8,
-        org_name: [*:0]const u8,
-        table: [*:0]const u8,
-        org_table: [*:0]const u8,
-        db: [*:0]const u8,
-        catalog: [*:0]const u8,
-        def: [*:0]const u8,
-        length: c_ulong,
-        max_length: c_ulong,
-        name_length: c_uint,
-        org_name_length: c_uint,
-        table_length: c_uint,
-        org_table_length: c_uint,
-        db_length: c_uint,
-        catalog_length: c_uint,
-        def_length: c_uint,
-        flags: c_uint,
-        decimals: c_uint,
-        charsetnr: c_uint,
-        type_val: c_uint,
-    };
+    // MYSQL_FIELD struct layout varies across platforms/versions
+    // only access the name pointer at offset 0 which is stable
+    const MYSQL_FIELD = opaque {};
 
     extern "mysqlclient" fn mysql_init(m: ?*MYSQL) callconv(.c) ?*MYSQL;
     extern "mysqlclient" fn mysql_real_connect(m: *MYSQL, host: ?[*:0]const u8, user: ?[*:0]const u8, passwd: ?[*:0]const u8, db: ?[*:0]const u8, port: c_uint, socket: ?[*:0]const u8, flags: c_ulong) callconv(.c) ?*MYSQL;
@@ -41,7 +22,8 @@ const mysql = struct {
     extern "mysqlclient" fn mysql_affected_rows(m: *MYSQL) callconv(.c) u64;
     extern "mysqlclient" fn mysql_insert_id(m: *MYSQL) callconv(.c) u64;
     extern "mysqlclient" fn mysql_num_fields(res: *MYSQL_RES) callconv(.c) c_uint;
-    extern "mysqlclient" fn mysql_fetch_fields(res: *MYSQL_RES) callconv(.c) ?[*]MYSQL_FIELD;
+    extern "mysqlclient" fn mysql_field_seek(res: *MYSQL_RES, offset: c_uint) callconv(.c) c_uint;
+    extern "mysqlclient" fn mysql_fetch_field(res: *MYSQL_RES) callconv(.c) ?*MYSQL_FIELD;
     extern "mysqlclient" fn mysql_fetch_row(res: *MYSQL_RES) callconv(.c) ?[*]?[*:0]const u8;
     extern "mysqlclient" fn mysql_fetch_lengths(res: *MYSQL_RES) callconv(.c) ?[*]c_ulong;
     extern "mysqlclient" fn mysql_free_result(res: *MYSQL_RES) callconv(.c) void;
@@ -51,6 +33,12 @@ const mysql = struct {
     extern "mysqlclient" fn mysql_commit(m: *MYSQL) callconv(.c) u8;
     extern "mysqlclient" fn mysql_rollback(m: *MYSQL) callconv(.c) u8;
 };
+
+fn fieldName(field: *mysql.MYSQL_FIELD) [*:0]const u8 {
+    // name is the first member of MYSQL_FIELD on all platforms (char*)
+    const ptr: *const [*:0]const u8 = @ptrCast(@alignCast(field));
+    return ptr.*;
+}
 
 fn getConn(obj: *PhpObject) ?*mysql.MYSQL {
     const v = obj.get("__db_ptr");
@@ -304,10 +292,23 @@ pub fn stmtFetch(ctx: *NativeContext, obj: *PhpObject, args: []const Value) Runt
     const row_ptrs = mysql.mysql_fetch_row(res) orelse return .{ .bool = false };
     const lengths = mysql.mysql_fetch_lengths(res) orelse return .{ .bool = false };
     const num_fields = mysql.mysql_num_fields(res);
-    const fields = mysql.mysql_fetch_fields(res) orelse return .{ .bool = false };
 
     const mode: i64 = if (args.len >= 1 and args[0] == .int) args[0].int else 4;
     var row = try ctx.createArray();
+
+    // collect field names if needed for FETCH_ASSOC or FETCH_BOTH
+    var field_names: [64][]const u8 = undefined;
+    if (mode == 2 or mode == 4) {
+        _ = mysql.mysql_field_seek(res, 0);
+        var fi: usize = 0;
+        while (fi < num_fields and fi < 64) : (fi += 1) {
+            if (mysql.mysql_fetch_field(res)) |field| {
+                field_names[fi] = std.mem.span(fieldName(field));
+            } else {
+                field_names[fi] = "";
+            }
+        }
+    }
 
     var col: usize = 0;
     while (col < num_fields) : (col += 1) {
@@ -319,8 +320,7 @@ pub fn stmtFetch(ctx: *NativeContext, obj: *PhpObject, args: []const Value) Runt
 
         if (mode == 3 or mode == 4) try row.append(ctx.allocator, val);
         if (mode == 2 or mode == 4) {
-            const name = std.mem.span(fields[col].name);
-            try row.set(ctx.allocator, .{ .string = try ctx.createString(name) }, val);
+            try row.set(ctx.allocator, .{ .string = try ctx.createString(field_names[col]) }, val);
         }
     }
 

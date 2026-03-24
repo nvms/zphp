@@ -20,6 +20,8 @@ errors=""
 
 for f in "$SCRIPT_DIR"/*.php; do
     name="$(basename "$f")"
+    # skip tests that require external database servers
+    case "$name" in pdo_mysql.php|pdo_pgsql.php) continue ;; esac
     php_out="$(php "$f" 2>&1)" || true
     zphp_out="$("$ZPHP" run "$f" 2>&1)" || true
 
