@@ -2359,9 +2359,11 @@ const Compiler = struct {
         try self.emitConstant(idx);
 
         for (use_vars) |use_var_node| {
-            const var_name = self.ast.tokenSlice(self.ast.nodes[use_var_node].main_token);
+            const use_node = self.ast.nodes[use_var_node];
+            const var_name = self.ast.tokenSlice(use_node.main_token);
             const var_idx = try self.addConstant(.{ .string = var_name });
-            try self.emitOp(.closure_bind);
+            const is_ref = use_node.data.rhs != 0;
+            try self.emitOp(if (is_ref) .closure_bind_ref else .closure_bind);
             try self.emitU16(var_idx);
         }
 

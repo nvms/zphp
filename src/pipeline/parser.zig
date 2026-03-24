@@ -1173,15 +1173,17 @@ const Parser = struct {
             _ = self.advance();
             _ = try self.expect(.l_paren);
             if (self.peek() != .r_paren) {
-                if (self.peek() == .amp) _ = self.advance();
+                var is_ref: u32 = 0;
+                if (self.peek() == .amp) { _ = self.advance(); is_ref = 1; }
                 const tok = try self.expect(.variable);
-                try use_vars.append(self.allocator, try self.addNode(.{ .tag = .variable, .main_token = tok, .data = .{} }));
+                try use_vars.append(self.allocator, try self.addNode(.{ .tag = .variable, .main_token = tok, .data = .{ .rhs = is_ref } }));
                 while (self.peek() == .comma) {
                     _ = self.advance();
                     if (self.peek() == .r_paren) break;
-                    if (self.peek() == .amp) _ = self.advance();
+                    is_ref = 0;
+                    if (self.peek() == .amp) { _ = self.advance(); is_ref = 1; }
                     const vtok = try self.expect(.variable);
-                    try use_vars.append(self.allocator, try self.addNode(.{ .tag = .variable, .main_token = vtok, .data = .{} }));
+                    try use_vars.append(self.allocator, try self.addNode(.{ .tag = .variable, .main_token = vtok, .data = .{ .rhs = is_ref } }));
                 }
             }
             _ = try self.expect(.r_paren);

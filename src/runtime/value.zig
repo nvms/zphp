@@ -104,10 +104,8 @@ pub const Fiber = struct {
         ip: usize,
         vars: std.StringHashMapUnmanaged(Value),
         generator: ?*Generator = null,
-        ref_bindings: std.ArrayListUnmanaged(RefBinding),
+        ref_slots: std.StringHashMapUnmanaged(*Value),
     };
-
-    pub const RefBinding = struct { caller_var: []const u8, param_name: []const u8 };
 
     pub const SavedHandler = struct {
         catch_ip: usize,
@@ -119,7 +117,7 @@ pub const Fiber = struct {
     pub fn deinit(self: *Fiber, allocator: std.mem.Allocator) void {
         for (self.saved_frames.items) |*f| {
             f.vars.deinit(allocator);
-            f.ref_bindings.deinit(allocator);
+            f.ref_slots.deinit(allocator);
         }
         self.saved_frames.deinit(allocator);
         self.saved_stack.deinit(allocator);

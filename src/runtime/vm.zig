@@ -105,6 +105,7 @@ const CaptureEntry = struct {
     closure_name: []const u8,
     var_name: []const u8,
     value: Value,
+    ref_cell: ?*Value = null,
 };
 
 pub const ClassDef = struct {
@@ -164,6 +165,7 @@ pub const VM = struct {
     objects: std.ArrayListUnmanaged(*PhpObject) = .{},
     generators: std.ArrayListUnmanaged(*Generator) = .{},
     fibers: std.ArrayListUnmanaged(*Fiber) = .{},
+    ref_cells: std.ArrayListUnmanaged(*Value) = .{},
     current_fiber: ?*Fiber = null,
     fiber_suspend_pending: bool = false,
     fiber_suspend_value: Value = .null,
@@ -201,13 +203,12 @@ pub const VM = struct {
         chunk: *const Chunk, // chunk the handler belongs to
     };
 
-    const RefBinding = Fiber.RefBinding;
     const CallFrame = struct {
         chunk: *const Chunk,
         ip: usize,
         vars: std.StringHashMapUnmanaged(Value),
         generator: ?*Generator = null,
-        ref_bindings: std.ArrayListUnmanaged(RefBinding) = .{},
+        ref_slots: std.StringHashMapUnmanaged(*Value) = .{},
     };
 
     pub fn init(allocator: Allocator) RuntimeError!VM {
@@ -284,7 +285,7 @@ pub const VM = struct {
 
     pub fn deinit(self: *VM) void {
         for (0..self.frame_count) |i| {
-            self.frames[i].ref_bindings.deinit(self.allocator);
+            self.frames[i].ref_slots.deinit(self.allocator);
             self.frames[i].vars.deinit(self.allocator);
         }
         self.functions.deinit(self.allocator);
@@ -316,6 +317,8 @@ pub const VM = struct {
             self.allocator.destroy(f);
         }
         self.fibers.deinit(self.allocator);
+        for (self.ref_cells.items) |c| self.allocator.destroy(c);
+        self.ref_cells.deinit(self.allocator);
         var class_iter = self.classes.valueIterator();
         while (class_iter.next()) |c| c.deinit(self.allocator);
         self.classes.deinit(self.allocator);
@@ -344,7 +347,7 @@ pub const VM = struct {
     pub fn reset(self: *VM) void {
         // clear per-request state, keep stdlib/builtins/constants/classes
         for (0..self.frame_count) |i| {
-            self.frames[i].ref_bindings.deinit(self.allocator);
+            self.frames[i].ref_slots.deinit(self.allocator);
             self.frames[i].vars.deinit(self.allocator);
         }
         self.frame_count = 0;
@@ -375,6 +378,8 @@ pub const VM = struct {
             self.allocator.destroy(f);
         }
         self.fibers.clearRetainingCapacity();
+        for (self.ref_cells.items) |c| self.allocator.destroy(c);
+        self.ref_cells.clearRetainingCapacity();
         self.current_fiber = null;
         self.fiber_suspend_pending = false;
         self.fiber_suspend_value = .null;
@@ -446,15 +451,22 @@ pub const VM = struct {
                 .get_var => {
                     const idx = self.readU16();
                     const name = self.currentChunk().constants.items[idx].string;
-                    const val = self.currentFrame().vars.get(name) orelse
-                        self.php_constants.get(name) orelse .null;
-                    self.push(val);
+                    if (self.currentFrame().ref_slots.get(name)) |cell| {
+                        self.push(cell.*);
+                    } else {
+                        self.push(self.currentFrame().vars.get(name) orelse
+                            self.php_constants.get(name) orelse .null);
+                    }
                 },
                 .set_var => {
                     const idx = self.readU16();
                     const name = self.currentChunk().constants.items[idx].string;
                     const val = try self.copyValue(self.peek());
-                    try self.currentFrame().vars.put(self.allocator, name, val);
+                    if (self.currentFrame().ref_slots.get(name)) |cell| {
+                        cell.* = val;
+                    } else {
+                        try self.currentFrame().vars.put(self.allocator, name, val);
+                    }
                 },
 
                 .add => self.binaryOp(Value.add),
@@ -724,7 +736,7 @@ pub const VM = struct {
                     try self.writebackGlobals();
                     try self.writebackRefs();
                     self.frame_count -= 1;
-                    self.frames[self.frame_count].ref_bindings.deinit(self.allocator);
+                    self.frames[self.frame_count].ref_slots.deinit(self.allocator);
                     self.frames[self.frame_count].vars.deinit(self.allocator);
                     self.push(result);
                     if (self.frame_count <= base_frame) return;
@@ -734,7 +746,7 @@ pub const VM = struct {
                     try self.writebackGlobals();
                     try self.writebackRefs();
                     self.frame_count -= 1;
-                    self.frames[self.frame_count].ref_bindings.deinit(self.allocator);
+                    self.frames[self.frame_count].ref_slots.deinit(self.allocator);
                     self.frames[self.frame_count].vars.deinit(self.allocator);
                     self.push(.null);
                     if (self.frame_count <= base_frame) return;
@@ -938,6 +950,43 @@ pub const VM = struct {
                         .closure_name = closure_name,
                         .var_name = var_name,
                         .value = val,
+                    });
+                },
+
+                .closure_bind_ref => {
+                    const var_idx = self.readU16();
+                    const var_name = self.currentChunk().constants.items[var_idx].string;
+                    const compile_name = self.peek().string;
+
+                    if (std.mem.startsWith(u8, compile_name, "__closure_") and
+                        !std.mem.containsAtLeast(u8, compile_name["__closure_".len..], 1, "_"))
+                    {
+                        const id = self.closure_instance_count;
+                        self.closure_instance_count += 1;
+                        const inst_name = try std.fmt.allocPrint(self.allocator, "{s}_{d}", .{ compile_name, id });
+                        try self.strings.append(self.allocator, inst_name);
+                        if (self.functions.get(compile_name)) |func| {
+                            try self.functions.put(self.allocator, inst_name, func);
+                        }
+                        self.stack[self.sp - 1] = .{ .string = inst_name };
+                    }
+
+                    const closure_name = self.peek().string;
+                    // get or create a ref cell for this variable
+                    const cell = if (self.currentFrame().ref_slots.get(var_name)) |existing|
+                        existing
+                    else blk: {
+                        const c = try self.allocator.create(Value);
+                        c.* = self.currentFrame().vars.get(var_name) orelse .null;
+                        try self.ref_cells.append(self.allocator, c);
+                        try self.currentFrame().ref_slots.put(self.allocator, var_name, c);
+                        break :blk c;
+                    };
+                    try self.captures.append(self.allocator, .{
+                        .closure_name = closure_name,
+                        .var_name = var_name,
+                        .value = .null,
+                        .ref_cell = cell,
                     });
                 },
 
@@ -1712,14 +1761,36 @@ pub const VM = struct {
                         var new_vars: std.StringHashMapUnmanaged(Value) = .{};
                         try new_vars.put(self.allocator, "$this", .{ .object = obj });
 
-                        try self.bindClosures(&new_vars, full_name);
+                        try self.bindClosures(&new_vars, null, full_name);
 
                         for (0..ac) |i| {
                             try new_vars.put(self.allocator, func.params[i], self.stack[self.sp - ac + i]);
                         }
+                        // set up ref cells for by-ref params
+                        var method_refs: std.StringHashMapUnmanaged(*Value) = .{};
+                        if (func.ref_params.len > 0) {
+                            // method_call opcode is 4 bytes: opcode(1) + name(2) + argc(1)
+                            const arg_vars = self.scanCallerVarNames(ac);
+                            for (0..@min(ac, func.ref_params.len)) |ri| {
+                                if (func.ref_params[ri]) {
+                                    if (arg_vars[ri]) |caller_var| {
+                                        if (self.currentFrame().ref_slots.get(caller_var)) |existing_cell| {
+                                            existing_cell.* = new_vars.get(func.params[ri]) orelse .null;
+                                            try method_refs.put(self.allocator, func.params[ri], existing_cell);
+                                        } else {
+                                            const cell = try self.allocator.create(Value);
+                                            cell.* = new_vars.get(func.params[ri]) orelse .null;
+                                            try self.ref_cells.append(self.allocator, cell);
+                                            try self.currentFrame().ref_slots.put(self.allocator, caller_var, cell);
+                                            try method_refs.put(self.allocator, func.params[ri], cell);
+                                        }
+                                    }
+                                }
+                            }
+                        }
                         self.sp -= ac;
                         self.sp -= 1;
-                        self.frames[self.frame_count] = .{ .chunk = &func.chunk, .ip = 0, .vars = new_vars };
+                        self.frames[self.frame_count] = .{ .chunk = &func.chunk, .ip = 0, .vars = new_vars, .ref_slots = method_refs };
                         self.frame_count += 1;
                     } else return error.RuntimeError;
                 },
@@ -1764,7 +1835,7 @@ pub const VM = struct {
                     } else if (self.functions.get(full_name)) |func| {
                         var new_vars: std.StringHashMapUnmanaged(Value) = .{};
                         try new_vars.put(self.allocator, "$this", .{ .object = obj });
-                        try self.bindClosures(&new_vars, full_name);
+                        try self.bindClosures(&new_vars, null, full_name);
                         if (func.is_variadic) {
                             const fixed: usize = func.arity - 1;
                             for (0..@min(ac, fixed)) |i| {
@@ -2167,14 +2238,41 @@ pub const VM = struct {
     }
 
     fn writebackRefs(self: *VM) !void {
-        const frame = self.currentFrame();
-        if (frame.ref_bindings.items.len == 0) return;
-        const caller = &self.frames[self.frame_count - 2];
-        for (frame.ref_bindings.items) |binding| {
-            if (frame.vars.get(binding.param_name)) |val| {
-                try caller.vars.put(self.allocator, binding.caller_var, val);
+        _ = self;
+    }
+
+    fn scanCallerVarNames(self: *VM, ac: usize) [16]?[]const u8 {
+        var arg_vars: [16]?[]const u8 = .{null} ** 16;
+        const chunk = self.currentChunk();
+        const ip = self.currentFrame().ip;
+        if (ip < 4) return arg_vars;
+        // scan backwards from just before the call instruction
+        // each arg is a single value-producing instruction
+        var scan_end = ip - 4; // points to call opcode
+        var idx: usize = ac;
+        while (idx > 0 and scan_end >= 3) {
+            idx -= 1;
+            const op = chunk.code.items[scan_end - 3];
+            if (op == @intFromEnum(OpCode.get_var)) {
+                const hi = chunk.code.items[scan_end - 2];
+                const lo = chunk.code.items[scan_end - 1];
+                const ci = (@as(u16, hi) << 8) | lo;
+                if (ci < chunk.constants.items.len) {
+                    arg_vars[idx] = chunk.constants.items[ci].string;
+                }
+                scan_end -= 3;
+            } else if (op == @intFromEnum(OpCode.constant)) {
+                scan_end -= 3;
+            } else if (scan_end >= 1 and (chunk.code.items[scan_end - 1] == @intFromEnum(OpCode.op_null) or
+                chunk.code.items[scan_end - 1] == @intFromEnum(OpCode.op_true) or
+                chunk.code.items[scan_end - 1] == @intFromEnum(OpCode.op_false)))
+            {
+                scan_end -= 1;
+            } else {
+                break;
             }
         }
+        return arg_vars;
     }
 
     fn writebackStatics(self: *VM) !void {
@@ -2396,10 +2494,14 @@ pub const VM = struct {
         return .{ .allocator = self.allocator, .arrays = &self.arrays, .strings = &self.strings, .vm = self, .call_name = call_name };
     }
 
-    fn bindClosures(self: *VM, vars: *std.StringHashMapUnmanaged(Value), name: []const u8) !void {
+    fn bindClosures(self: *VM, vars: *std.StringHashMapUnmanaged(Value), ref_slots: ?*std.StringHashMapUnmanaged(*Value), name: []const u8) !void {
         for (self.captures.items) |cap| {
             if (std.mem.eql(u8, cap.closure_name, name)) {
-                try vars.put(self.allocator, cap.var_name, try self.copyValue(cap.value));
+                if (cap.ref_cell) |cell| {
+                    if (ref_slots) |rs| try rs.put(self.allocator, cap.var_name, cell);
+                } else {
+                    try vars.put(self.allocator, cap.var_name, try self.copyValue(cap.value));
+                }
             }
         }
 
@@ -2471,7 +2573,8 @@ pub const VM = struct {
             if (func.is_variadic and ac < func.required_params)
                 return error.RuntimeError;
             var new_vars: std.StringHashMapUnmanaged(Value) = .{};
-            try self.bindClosures(&new_vars, name);
+            var closure_refs: std.StringHashMapUnmanaged(*Value) = .{};
+            try self.bindClosures(&new_vars, &closure_refs, name);
             if (func.is_variadic) {
                 const fixed: usize = func.arity - 1;
                 for (0..@min(ac, fixed)) |i| {
@@ -2493,47 +2596,38 @@ pub const VM = struct {
             if (!func.is_variadic) {
                 try self.fillDefaults(&new_vars, func, ac);
             }
-            // set up ref param bindings
-            var ref_bindings = std.ArrayListUnmanaged(RefBinding){};
+            // set up shared ref cells for by-ref params
+            // start with any closure ref captures
+            var callee_refs = closure_refs;
             if (func.ref_params.len > 0) {
-                const caller_chunk = self.currentChunk();
-                const caller_ip = self.currentFrame().ip;
-                var scan_pos = caller_ip - 4;
-                var found: usize = 0;
-                var arg_vars: [16]?[]const u8 = .{null} ** 16;
-                var scan_idx: usize = ac;
-                while (scan_idx > 0 and scan_pos >= 3) {
-                    scan_idx -= 1;
-                    if (caller_chunk.code.items[scan_pos - 3] == @intFromEnum(OpCode.get_var)) {
-                        const hi = caller_chunk.code.items[scan_pos - 2];
-                        const lo = caller_chunk.code.items[scan_pos - 1];
-                        const const_idx = (@as(u16, hi) << 8) | lo;
-                        if (const_idx < caller_chunk.constants.items.len) {
-                            arg_vars[scan_idx] = caller_chunk.constants.items[const_idx].string;
-                        }
-                        scan_pos -= 3;
-                        found += 1;
-                    } else {
-                        break;
-                    }
-                }
+                const arg_vars = self.scanCallerVarNames(ac);
                 for (0..@min(ac, func.ref_params.len)) |ri| {
                     if (func.ref_params[ri]) {
                         if (arg_vars[ri]) |caller_var| {
-                            try ref_bindings.append(self.allocator, .{ .caller_var = caller_var, .param_name = func.params[ri] });
+                            // check if caller already has a ref cell for this var
+                            if (self.currentFrame().ref_slots.get(caller_var)) |existing_cell| {
+                                existing_cell.* = new_vars.get(func.params[ri]) orelse .null;
+                                try callee_refs.put(self.allocator, func.params[ri], existing_cell);
+                            } else {
+                                const cell = try self.allocator.create(Value);
+                                cell.* = new_vars.get(func.params[ri]) orelse .null;
+                                try self.ref_cells.append(self.allocator, cell);
+                                try self.currentFrame().ref_slots.put(self.allocator, caller_var, cell);
+                                try callee_refs.put(self.allocator, func.params[ri], cell);
+                            }
                         }
                     }
                 }
             }
 
             if (func.is_generator) {
-                ref_bindings.deinit(self.allocator);
+                callee_refs.deinit(self.allocator);
                 const gen = try self.allocator.create(Generator);
                 gen.* = .{ .func = func, .vars = new_vars };
                 try self.generators.append(self.allocator, gen);
                 self.push(.{ .generator = gen });
             } else {
-                self.frames[self.frame_count] = .{ .chunk = &func.chunk, .ip = 0, .vars = new_vars, .ref_bindings = ref_bindings };
+                self.frames[self.frame_count] = .{ .chunk = &func.chunk, .ip = 0, .vars = new_vars, .ref_slots = callee_refs };
                 self.frame_count += 1;
             }
         } else return error.RuntimeError;
@@ -2555,7 +2649,7 @@ pub const VM = struct {
             if (args.len < func.required_params or args.len > func.arity) return error.RuntimeError;
             var new_vars: std.StringHashMapUnmanaged(Value) = .{};
             try new_vars.put(self.allocator, "$this", .{ .object = obj });
-            try self.bindClosures(&new_vars, full_name);
+            try self.bindClosures(&new_vars, null, full_name);
             try self.bindArgs(&new_vars, func, args);
             return self.executeFunction(func, new_vars);
         } else return error.RuntimeError;
@@ -2568,7 +2662,7 @@ pub const VM = struct {
         } else if (self.functions.get(name)) |func| {
             if (args.len < func.required_params or args.len > func.arity) return error.RuntimeError;
             var new_vars: std.StringHashMapUnmanaged(Value) = .{};
-            try self.bindClosures(&new_vars, name);
+            try self.bindClosures(&new_vars, null, name);
             try self.bindArgs(&new_vars, func, args);
             return self.executeFunction(func, new_vars);
         } else return error.RuntimeError;
@@ -2599,7 +2693,7 @@ pub const VM = struct {
             // clean up any frames left on the stack
             while (self.frame_count > base_frame) {
                 self.frame_count -= 1;
-                self.frames[self.frame_count].ref_bindings.deinit(self.allocator);
+                self.frames[self.frame_count].ref_slots.deinit(self.allocator);
                 self.frames[self.frame_count].vars.deinit(self.allocator);
             }
             self.sp = base_sp;
@@ -2621,7 +2715,7 @@ pub const VM = struct {
         // clear previously saved state
         for (fiber.saved_frames.items) |*f| {
             f.vars.deinit(self.allocator);
-            f.ref_bindings.deinit(self.allocator);
+            f.ref_slots.deinit(self.allocator);
         }
         fiber.saved_frames.clearRetainingCapacity();
         fiber.saved_stack.clearRetainingCapacity();
@@ -2634,7 +2728,7 @@ pub const VM = struct {
                 .ip = frame.ip,
                 .vars = frame.vars,
                 .generator = frame.generator,
-                .ref_bindings = frame.ref_bindings,
+                .ref_slots = frame.ref_slots,
             });
         }
         self.frame_count = base_frame;
@@ -2665,7 +2759,7 @@ pub const VM = struct {
                 .ip = frame.ip,
                 .vars = frame.vars,
                 .generator = frame.generator,
-                .ref_bindings = frame.ref_bindings,
+                .ref_slots = frame.ref_slots,
             };
         }
         self.frame_count = base_frame + fiber.saved_frames.items.len;
