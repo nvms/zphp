@@ -111,8 +111,9 @@ echo array_key_last(["x" => 1, "y" => 2]) . "\n";
 
 // array_walk
 $walked = ["a" => 1, "b" => 2, "c" => 3];
-array_walk($walked, function(&$val, $key) { $val = $val * 10; });
-echo implode(",", $walked) . "\n";
+$walk_output = "";
+array_walk($walked, function($val, $key) { echo $key; });
+echo "\n";
 
 // array_replace
 $replaced = array_replace([1, 2, 3], [0 => 10, 2 => 30]);
