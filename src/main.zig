@@ -61,6 +61,12 @@ pub fn main() !void {
         try @import("pkg.zig").remove(allocator, args[2]);
     } else if (std.mem.eql(u8, cmd, "packages")) {
         try @import("pkg.zig").packages(allocator);
+    } else if (std.mem.eql(u8, cmd, "fmt")) {
+        if (args.len < 3) {
+            try writeStderr("usage: zphp fmt [--check] <file>...\n");
+            std.process.exit(1);
+        }
+        try @import("fmt.zig").run(allocator, args[2..]);
     } else if (std.mem.eql(u8, cmd, "version") or std.mem.eql(u8, cmd, "--version")) {
         try writeStdout("zphp 0.1.0\n");
     } else {
@@ -200,4 +206,5 @@ test {
     _ = @import("stdlib/datetime.zig");
     _ = @import("pipeline/parser_tests.zig");
     _ = @import("integration_tests.zig");
+    _ = @import("fmt.zig");
 }

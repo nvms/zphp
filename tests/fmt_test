@@ -1,0 +1,196 @@
+#!/bin/bash
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+ZPHP="${ZPHP:-$SCRIPT_DIR/../zig-out/bin/zphp}"
+
+passed=0
+failed=0
+errors=""
+
+check() {
+    local name="$1"
+    local expected="$2"
+    local actual="$3"
+    if [ "$expected" = "$actual" ]; then
+        passed=$((passed + 1))
+        echo "  pass  $name"
+    else
+        failed=$((failed + 1))
+        echo "  FAIL  $name"
+        errors="$errors\n--- $name ---\nexpected: $expected\ngot: $actual\n"
+    fi
+}
+
+check_contains() {
+    local name="$1"
+    local needle="$2"
+    local haystack="$3"
+    if echo "$haystack" | grep -qF "$needle"; then
+        passed=$((passed + 1))
+        echo "  pass  $name"
+    else
+        failed=$((failed + 1))
+        echo "  FAIL  $name"
+        errors="$errors\n--- $name ---\nexpected to contain: $needle\ngot: $haystack\n"
+    fi
+}
+
+WORKDIR=$(mktemp -d)
+trap "rm -rf $WORKDIR" EXIT
+
+# test: format normalizes whitespace
+cat > "$WORKDIR/messy.php" << 'EOFPHP'
+<?php
+echo   "hello"  ;
+$x=1+2;
+EOFPHP
+
+"$ZPHP" fmt "$WORKDIR/messy.php" 2>/dev/null
+content=$(cat "$WORKDIR/messy.php")
+check_contains "normalizes echo spacing" 'echo "hello";' "$content"
+check_contains "normalizes assignment spacing" '$x = 1 + 2;' "$content"
+
+# test: --check exits 0 on already-formatted file
+"$ZPHP" fmt --check "$WORKDIR/messy.php" 2>/dev/null
+status=$?
+check "--check exits 0 when formatted" "0" "$status"
+
+# test: --check exits 1 on unformatted file
+cat > "$WORKDIR/unformatted.php" << 'EOFPHP'
+<?php
+echo    "test"  ;
+EOFPHP
+
+"$ZPHP" fmt --check "$WORKDIR/unformatted.php" 2>/dev/null && check_status=0 || check_status=$?
+check "--check exits 1 when unformatted" "1" "$check_status"
+output=$("$ZPHP" fmt --check "$WORKDIR/unformatted.php" 2>&1 || true)
+check_contains "--check shows would reformat" "would reformat" "$output"
+
+# test: --check does not modify file
+original=$(cat "$WORKDIR/unformatted.php")
+"$ZPHP" fmt --check "$WORKDIR/unformatted.php" 2>/dev/null || true
+after=$(cat "$WORKDIR/unformatted.php")
+check "--check does not modify" "$original" "$after"
+
+# test: format function declaration
+cat > "$WORKDIR/func.php" << 'EOFPHP'
+<?php
+function   add(  $a ,  $b  ){return $a+$b;}
+EOFPHP
+
+"$ZPHP" fmt "$WORKDIR/func.php" 2>/dev/null
+content=$(cat "$WORKDIR/func.php")
+check_contains "function formatting" "function add(" "$content"
+check_contains "function body indented" "    return" "$content"
+
+# test: format class
+cat > "$WORKDIR/cls.php" << 'EOFPHP'
+<?php
+class Foo{public $x=1;public function bar(){return $this->x;}}
+EOFPHP
+
+"$ZPHP" fmt "$WORKDIR/cls.php" 2>/dev/null
+content=$(cat "$WORKDIR/cls.php")
+check_contains "class has space before brace" "class Foo {" "$content"
+check_contains "property formatted" 'public $x = 1;' "$content"
+check_contains "method formatted" "public function bar()" "$content"
+
+# test: idempotence - formatting twice gives same result
+cat > "$WORKDIR/idem.php" << 'EOFPHP'
+<?php
+function hello($name) {
+    echo "Hello, " . $name . "\n";
+}
+$x = 1 + 2;
+echo $x . "\n";
+EOFPHP
+
+"$ZPHP" fmt "$WORKDIR/idem.php" 2>/dev/null
+first=$(cat "$WORKDIR/idem.php")
+"$ZPHP" fmt "$WORKDIR/idem.php" 2>/dev/null
+second=$(cat "$WORKDIR/idem.php")
+check "idempotent" "$first" "$second"
+
+# test: comments are preserved
+cat > "$WORKDIR/comments.php" << 'EOFPHP'
+<?php
+// this is a comment
+echo "hello";
+/* block comment */
+$x = 1;
+EOFPHP
+
+"$ZPHP" fmt "$WORKDIR/comments.php" 2>/dev/null
+content=$(cat "$WORKDIR/comments.php")
+check_contains "line comment preserved" "// this is a comment" "$content"
+check_contains "block comment preserved" "/* block comment */" "$content"
+
+# test: if/else formatting
+cat > "$WORKDIR/ifelse.php" << 'EOFPHP'
+<?php
+if($x>1){echo "yes";}else{echo "no";}
+EOFPHP
+
+"$ZPHP" fmt "$WORKDIR/ifelse.php" 2>/dev/null
+content=$(cat "$WORKDIR/ifelse.php")
+check_contains "if space before paren" "if (" "$content"
+check_contains "else on same line as brace" "} else {" "$content"
+
+# test: switch formatting
+cat > "$WORKDIR/sw.php" << 'EOFPHP'
+<?php
+switch($x){case 1:echo "one";break;case 2:echo "two";break;default:echo "other";break;}
+EOFPHP
+
+"$ZPHP" fmt "$WORKDIR/sw.php" 2>/dev/null
+content=$(cat "$WORKDIR/sw.php")
+check_contains "switch formatted" "switch (" "$content"
+check_contains "case indented" "    case 1:" "$content"
+
+# test: closure and arrow function
+cat > "$WORKDIR/closure.php" << 'EOFPHP'
+<?php
+$fn=function($x){return $x*2;};
+$arrow=fn($x)=>$x+1;
+EOFPHP
+
+"$ZPHP" fmt "$WORKDIR/closure.php" 2>/dev/null
+content=$(cat "$WORKDIR/closure.php")
+check_contains "closure formatted" 'function($x)' "$content"
+check_contains "arrow function formatted" 'fn($x) => $x + 1' "$content"
+
+# test: formatted code produces same output as original
+for f in "$SCRIPT_DIR/arithmetic.php" "$SCRIPT_DIR/arrays.php" "$SCRIPT_DIR/classes_basic.php" "$SCRIPT_DIR/closures.php" "$SCRIPT_DIR/if_else.php" "$SCRIPT_DIR/functions.php" "$SCRIPT_DIR/switch.php"; do
+    if [ ! -f "$f" ]; then continue; fi
+    name=$(basename "$f")
+    orig=$("$ZPHP" run "$f" 2>&1 || true)
+    cp "$f" "$WORKDIR/$name"
+    "$ZPHP" fmt "$WORKDIR/$name" 2>/dev/null
+    fmt_out=$("$ZPHP" run "$WORKDIR/$name" 2>&1 || true)
+    check "output preserved: $name" "$orig" "$fmt_out"
+done
+
+# test: multiple files
+cat > "$WORKDIR/a.php" << 'EOFPHP'
+<?php
+echo   "a" ;
+EOFPHP
+cat > "$WORKDIR/b.php" << 'EOFPHP'
+<?php
+echo   "b" ;
+EOFPHP
+
+"$ZPHP" fmt "$WORKDIR/a.php" "$WORKDIR/b.php" 2>/dev/null
+a_content=$(cat "$WORKDIR/a.php")
+b_content=$(cat "$WORKDIR/b.php")
+check_contains "multi-file a formatted" 'echo "a";' "$a_content"
+check_contains "multi-file b formatted" 'echo "b";' "$b_content"
+
+echo ""
+echo "$passed passed, $failed failed"
+
+if [ $failed -gt 0 ]; then
+    echo -e "$errors"
+    exit 1
+fi

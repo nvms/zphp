@@ -1,0 +1,69 @@
+#!/bin/bash
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+ZPHP="${ZPHP:-$SCRIPT_DIR/../zig-out/bin/zphp}"
+SAMPLE="$SCRIPT_DIR/sample.php"
+RUNS=10
+
+if [ ! -f "$ZPHP" ]; then
+    echo "build zphp first: zig build"
+    exit 1
+fi
+
+WORKDIR=$(mktemp -d)
+trap "rm -rf $WORKDIR" EXIT
+
+lines=$(wc -l < "$SAMPLE")
+echo "file: sample.php ($(echo $lines | tr -d ' ') lines)"
+echo "runs: $RUNS (best of)"
+echo ""
+
+bench() {
+    local label="$1"
+    shift
+    local best=999999
+    for i in $(seq 1 $RUNS); do
+        cp "$SAMPLE" "$WORKDIR/bench.php"
+        local start=$(date +%s%N)
+        eval "$@" > /dev/null 2>&1 || true
+        local end=$(date +%s%N)
+        local elapsed=$(( (end - start) / 1000000 ))
+        if [ "$elapsed" -lt "$best" ]; then
+            best=$elapsed
+        fi
+    done
+    printf "  %-28s %6s ms\n" "$label" "$best"
+}
+
+# zphp fmt
+bench "zphp fmt" "'$ZPHP' fmt '$WORKDIR/bench.php'"
+
+# prettier with php plugin
+if command -v npx &> /dev/null; then
+    echo "  installing prettier..." >&2
+    (cd "$WORKDIR" && npm init -y > /dev/null 2>&1 && npm install --save-dev prettier @prettier/plugin-php > /dev/null 2>&1) || true
+    if [ -f "$WORKDIR/node_modules/.bin/prettier" ]; then
+        PRETTIER="$WORKDIR/node_modules/.bin/prettier"
+        bench "prettier @prettier/plugin-php" "cd '$WORKDIR' && '$PRETTIER' --write --plugin @prettier/plugin-php bench.php"
+    else
+        printf "  %-28s %6s\n" "prettier @prettier/plugin-php" "skipped (install failed)"
+    fi
+else
+    printf "  %-28s %6s\n" "prettier @prettier/plugin-php" "skipped (no npx)"
+fi
+
+# php-cs-fixer
+if command -v php &> /dev/null; then
+    echo "  downloading php-cs-fixer..." >&2
+    curl -sL https://cs.symfony.com/download/php-cs-fixer-v3.phar -o "$WORKDIR/php-cs-fixer" 2>/dev/null && chmod +x "$WORKDIR/php-cs-fixer" || true
+    if [ -f "$WORKDIR/php-cs-fixer" ]; then
+        bench "php-cs-fixer (PSR-12)" "php '$WORKDIR/php-cs-fixer' fix '$WORKDIR/bench.php' --rules=@PSR12 --using-cache=no --quiet"
+    else
+        printf "  %-28s %6s\n" "php-cs-fixer" "skipped (download failed)"
+    fi
+else
+    printf "  %-28s %6s\n" "php-cs-fixer" "skipped (no php)"
+fi
+
+echo ""
