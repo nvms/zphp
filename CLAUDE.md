@@ -51,6 +51,10 @@ zig 0.15.x. `zig build test` must pass before pushing. short lowercase commits, 
 
 **foreach continue**: `compileForeach` must set `use_continue_jumps = true` and patch continues before `iter_advance` - otherwise continue jumps to `iter_check`, skipping the advance and causing infinite loops
 
+**containsYield**: the compiler's `containsYield` function walks the AST to decide if a function is a generator. many AST node types use `data.lhs`/`data.rhs` as extra_data indices, not node indices. the default fallback must NOT blindly recurse into lhs/rhs - each node type needs explicit handling based on its actual data layout. a bad index can coincidentally match a yield node from a different function, causing non-generator functions to be compiled as generators (they return Generator objects instead of executing)
+
+**extra args**: PHP silently ignores extra arguments passed to functions. `callNamedFunction`, `callMethod`, and `callByName` must allow `ac > func.arity` - bind only `min(ac, arity)` params, still pop all args from stack
+
 **zig 0.15.x**: no `std.io.getStdOut()` (use `std.posix.write`). `std.ArrayList(T)` is unmanaged. `const` in structs after all fields. `link_libc = true` required for C libs. `std.http.Client` uses vtable-based Writer in 0.15 - use curl via `std.process.Child.run` for HTTP instead.
 
 ## CLI
@@ -174,7 +178,7 @@ PHP 8.1 fibers. `new Fiber(callable)`, `$fiber->start(...$args)`, `$fiber->resum
 
 ## examples
 
-`examples/` directory. each subdirectory is a self-contained mini PHP application with a `main.php` entry point. `tests/examples_test` runs each against both zphp and PHP 8.4, diffs output. currently: autoloader (spl_autoload_register with __DIR__-based class loading), middleware (closure pipeline with auth/logging), oop-composition (interfaces, traits, inheritance, method chaining), pdo-models (CRUD with sqlite, repository pattern, transactions), router (URL pattern matching with array callable dispatch), service-container (DI container, singletons, bindings).
+`examples/` directory. each subdirectory is a self-contained mini PHP application with a `main.php` entry point. `tests/examples_test` runs each against both zphp and PHP 8.4, diffs output. currently: autoloader (spl_autoload_register with __DIR__-based class loading), data-pipeline (lazy generator pipelines, chained generators, yield from, send, exception handling in generators), middleware (closure pipeline with auth/logging), oop-composition (interfaces, traits, inheritance, method chaining), pdo-models (CRUD with sqlite, repository pattern, transactions), router (URL pattern matching with array callable dispatch), service-container (DI container, singletons, bindings).
 
 ## local php
 
