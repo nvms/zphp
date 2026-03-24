@@ -121,9 +121,16 @@ pub fn tryParseFrame(buf: []u8, max_size: usize) ?ParsedFrame {
     const total = offset + len;
     if (buf.len < total) return null;
 
-    // unmask in place
+    // unmask in place (4 bytes at a time where possible)
     const mask_key = buf[mask_offset..][0..4];
-    for (0..len) |i| buf[offset + i] ^= mask_key.*[i % 4];
+    const payload_ptr = buf[offset..];
+    const mask32: u32 = @bitCast(mask_key.*);
+    var i: usize = 0;
+    while (i + 4 <= len) : (i += 4) {
+        const chunk: *align(1) u32 = @ptrCast(payload_ptr[i..][0..4]);
+        chunk.* ^= mask32;
+    }
+    while (i < len) : (i += 1) payload_ptr[i] ^= mask_key[i % 4];
 
     return .{
         .frame = .{ .fin = fin, .opcode = opcode, .payload = buf[offset..][0..len] },
@@ -132,6 +139,7 @@ pub fn tryParseFrame(buf: []u8, max_size: usize) ?ParsedFrame {
 }
 
 pub fn writeFrame(stream: std.net.Stream, opcode: Opcode, payload: []const u8) !void {
+    // coalesce header + payload into single write to avoid two syscalls
     var hdr: [10]u8 = undefined;
     var hdr_len: usize = 2;
 
@@ -149,9 +157,14 @@ pub fn writeFrame(stream: std.net.Stream, opcode: Opcode, payload: []const u8) !
         hdr_len = 10;
     }
 
-    _ = try stream.write(hdr[0..hdr_len]);
-    if (payload.len > 0) {
-        _ = try stream.write(payload);
+    if (payload.len > 0 and hdr_len + payload.len <= 4096) {
+        var buf: [4096]u8 = undefined;
+        @memcpy(buf[0..hdr_len], hdr[0..hdr_len]);
+        @memcpy(buf[hdr_len .. hdr_len + payload.len], payload);
+        _ = try stream.write(buf[0 .. hdr_len + payload.len]);
+    } else {
+        _ = try stream.write(hdr[0..hdr_len]);
+        if (payload.len > 0) _ = try stream.write(payload);
     }
 }
 

@@ -281,7 +281,7 @@ pub fn serve(allocator: Allocator, config: ServeConfig) !void {
 
 fn eventLoop(w: *Worker) void {
     while (!queue.shutdown) {
-        _ = posix.poll(w.poll_fds[0..w.n_fds], 100) catch continue;
+        _ = posix.poll(w.poll_fds[0..w.n_fds], 1000) catch continue;
 
         // check wake pipe
         if (w.poll_fds[0].revents & posix.POLL.IN != 0) {
@@ -504,8 +504,11 @@ fn processWsRead(w: *Worker, c: *Connection) void {
     if (n == 0) { c.state = .closing; return; }
     c.buffered += n;
 
+    // parse all complete frames from buffer, defer shift to end
+    var consumed_total: usize = 0;
     while (true) {
-        const parsed = ws_proto.tryParseFrame(c.buf[0..c.buffered], max_msg_size) orelse break;
+        const remaining = c.buf[consumed_total..c.buffered];
+        const parsed = ws_proto.tryParseFrame(remaining, max_msg_size) orelse break;
 
         switch (parsed.frame.opcode) {
             .text, .binary => {
@@ -535,8 +538,10 @@ fn processWsRead(w: *Worker, c: *Connection) void {
             },
         }
 
-        shiftBuffer(c, parsed.consumed);
+        consumed_total += parsed.consumed;
     }
+
+    if (consumed_total > 0) shiftBuffer(c, consumed_total);
 }
 
 // unchanged helper functions below
