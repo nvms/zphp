@@ -136,6 +136,7 @@ pub const VM = struct {
     fiber_suspend_pending: bool = false,
     fiber_suspend_value: Value = .null,
     captures: std.ArrayListUnmanaged(CaptureEntry) = .{},
+    closure_instance_count: u32 = 0,
     php_constants: std.StringHashMapUnmanaged(Value) = .{},
     classes: std.StringHashMapUnmanaged(ClassDef) = .{},
     interfaces: std.StringHashMapUnmanaged(InterfaceDef) = .{},
@@ -810,6 +811,22 @@ pub const VM = struct {
                 .closure_bind => {
                     const var_idx = self.readU16();
                     const var_name = self.currentChunk().constants.items[var_idx].string;
+                    const compile_name = self.peek().string;
+
+                    // if stack still holds the compile-time name, create a unique runtime instance
+                    if (std.mem.startsWith(u8, compile_name, "__closure_") and
+                        !std.mem.containsAtLeast(u8, compile_name["__closure_".len..], 1, "_"))
+                    {
+                        const id = self.closure_instance_count;
+                        self.closure_instance_count += 1;
+                        const inst_name = try std.fmt.allocPrint(self.allocator, "{s}_{d}", .{ compile_name, id });
+                        try self.strings.append(self.allocator, inst_name);
+                        if (self.functions.get(compile_name)) |func| {
+                            try self.functions.put(self.allocator, inst_name, func);
+                        }
+                        self.stack[self.sp - 1] = .{ .string = inst_name };
+                    }
+
                     const closure_name = self.peek().string;
                     const val = self.currentFrame().vars.get(var_name) orelse .null;
                     try self.captures.append(self.allocator, .{
@@ -1469,13 +1486,19 @@ pub const VM = struct {
                         try tmp_vars.put(self.allocator, "$this", .{ .object = obj });
                         self.frames[self.frame_count] = .{ .chunk = self.currentChunk(), .ip = self.currentFrame().ip, .vars = tmp_vars };
                         self.frame_count += 1;
+                        const saved_fc = self.frame_count;
 
                         var ctx = self.makeContext(null);
                         const result = try native(&ctx, args_buf[0..ac]);
 
-                        self.frame_count -= 1;
-                        self.frames[self.frame_count].vars.deinit(self.allocator);
-                        self.push(result);
+                        // if throwBuiltinException unwound frames, skip cleanup
+                        if (self.frame_count >= saved_fc) {
+                            self.frame_count -= 1;
+                            self.frames[self.frame_count].vars.deinit(self.allocator);
+                            self.push(result);
+                        } else {
+                            continue;
+                        }
                     } else if (self.functions.get(full_name)) |func| {
                         var new_vars: std.StringHashMapUnmanaged(Value) = .{};
                         try new_vars.put(self.allocator, "$this", .{ .object = obj });
@@ -1998,7 +2021,7 @@ pub const VM = struct {
         }
     }
 
-    fn makeContext(self: *VM, call_name: ?[]const u8) NativeContext {
+    pub fn makeContext(self: *VM, call_name: ?[]const u8) NativeContext {
         return .{ .allocator = self.allocator, .arrays = &self.arrays, .strings = &self.strings, .vm = self, .call_name = call_name };
     }
 
@@ -2008,6 +2031,33 @@ pub const VM = struct {
                 try vars.put(self.allocator, cap.var_name, cap.value);
             }
         }
+
+        // arrow functions inherit parent scope
+        if (self.frame_count > 0) {
+            const orig_name = self.getOrigClosureName(name);
+            if (self.functions.get(orig_name)) |func| {
+                if (func.is_arrow) {
+                    const parent = &self.frames[self.frame_count - 1];
+                    var it = parent.vars.iterator();
+                    while (it.next()) |entry| {
+                        if (!vars.contains(entry.key_ptr.*)) {
+                            try vars.put(self.allocator, entry.key_ptr.*, entry.value_ptr.*);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    fn getOrigClosureName(self: *VM, name: []const u8) []const u8 {
+        _ = self;
+        if (!std.mem.startsWith(u8, name, "__closure_")) return name;
+        // runtime instance names have format __closure_N_M, compile name is __closure_N
+        const after_prefix = name["__closure_".len..];
+        if (std.mem.lastIndexOf(u8, after_prefix, "_")) |last_us| {
+            return name[0 .. "__closure_".len + last_us];
+        }
+        return name;
     }
 
     fn bindArgs(self: *VM, vars: *std.StringHashMapUnmanaged(Value), func: *const ObjFunction, args: []const Value) !void {

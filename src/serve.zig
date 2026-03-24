@@ -508,6 +508,10 @@ fn processHttpRead(w: *Worker, c: *Connection) void {
         return;
     };
 
+    // persist session data if session was started
+    var session_ctx = w.vm.makeContext(null);
+    @import("stdlib/session.zig").finalizeSession(&session_ctx);
+
     const frame_vars = &w.vm.frames[0].vars;
     const ct_val = frame_vars.get("__response_content_type") orelse Value{ .string = "text/html" };
     const ct = if (ct_val == .string) ct_val.string else "text/html";

@@ -38,6 +38,26 @@ if ($path === "/health") {
         "post" => $_POST,
         "files" => $file_info,
     ]);
+} elseif ($path === "/session-set") {
+    session_start();
+    $_SESSION["user"] = $_GET["user"] ?? "anonymous";
+    $_SESSION["count"] = ($_SESSION["count"] ?? 0) + 1;
+    echo json_encode([
+        "id" => session_id(),
+        "user" => $_SESSION["user"],
+        "count" => $_SESSION["count"],
+    ]);
+} elseif ($path === "/session-get") {
+    session_start();
+    echo json_encode([
+        "id" => session_id(),
+        "user" => $_SESSION["user"] ?? null,
+        "count" => $_SESSION["count"] ?? 0,
+    ]);
+} elseif ($path === "/session-destroy") {
+    session_start();
+    session_destroy();
+    echo json_encode(["destroyed" => true]);
 } else {
     http_response_code(404);
     echo json_encode(["error" => "not found", "path" => $path]);

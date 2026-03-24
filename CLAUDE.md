@@ -58,7 +58,11 @@ zig 0.15.x. `zig build test` must pass before pushing. short lowercase commits, 
 
 ## CI
 
-7 jobs: `zig build test` (ubuntu + macos), serve integration (`tests/serve_test`, 33 assertions), test runner (`tests/test_runner_test`, 15 assertions), packages (`tests/pkg_test`, 10 assertions), fmt (`tests/fmt_test`, 29 assertions), PHP compat (`tests/run`, validated against PHP 8.4)
+7 jobs: `zig build test` (ubuntu + macos), serve integration (`tests/serve_test`, 39 assertions), test runner (`tests/test_runner_test`, 15 assertions), packages (`tests/pkg_test`, 10 assertions), fmt (`tests/fmt_test`, 29 assertions), PHP compat (`tests/run`, validated against PHP 8.4)
+
+## sessions
+
+`src/stdlib/session.zig`. file-based sessions in `/tmp/sess_<id>`. `session_start()` reads PHPSESSID cookie, loads session file, populates `$_SESSION` in frame 0 vars. `finalizeSession()` called from serve after PHP execution to persist `$_SESSION` back to file. simple null-delimited key/value serialization format. `session_id()`, `session_destroy()`, `session_regenerate_id()`, `session_name()`, `session_status()`, `session_write_close()`, `session_unset()` all implemented. Set-Cookie header emitted for new sessions via `__response_headers` pattern.
 
 ## roadmap
 

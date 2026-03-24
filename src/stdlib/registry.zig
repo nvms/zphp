@@ -18,6 +18,7 @@ pub fn register(map: *std.StringHashMapUnmanaged(NativeFn), allocator: std.mem.A
         @import("output.zig").entries,
         @import("filesystem.zig").entries,
         @import("testing.zig").entries,
+        @import("session.zig").entries,
     };
     inline for (modules) |entries| {
         inline for (entries) |f| try map.put(allocator, f[0], f[1]);
@@ -35,4 +36,5 @@ test {
     _ = @import("output.zig");
     _ = @import("filesystem.zig");
     _ = @import("testing.zig");
+    _ = @import("session.zig");
 }

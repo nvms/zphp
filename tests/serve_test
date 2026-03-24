@@ -179,6 +179,36 @@ check_contains "file upload has_tmp" '"has_tmp":true' "$file_resp"
 check_contains "file upload error" '"error":0' "$file_resp"
 rm -f /tmp/zphp_test_upload.txt
 
+# test: sessions - set value and get cookie
+session_resp=$(curl -si "http://localhost:$PORT/session-set?user=alice" 2>&1)
+session_cookie=$(echo "$session_resp" | grep -i "Set-Cookie: PHPSESSID=" | sed 's/.*PHPSESSID=//;s/;.*//' | tr -d '\r')
+check_contains "session set user" '"user":"alice"' "$session_resp"
+check_contains "session set count" '"count":1' "$session_resp"
+
+if [ -n "$session_cookie" ]; then
+    # test: session persistence across requests
+    get_resp=$(curl -s -b "PHPSESSID=$session_cookie" "http://localhost:$PORT/session-get")
+    check_contains "session persist user" '"user":"alice"' "$get_resp"
+
+    # test: session counter increments
+    inc_resp=$(curl -s -b "PHPSESSID=$session_cookie" "http://localhost:$PORT/session-set?user=alice")
+    check_contains "session count increment" '"count":2' "$inc_resp"
+
+    # test: session destroy
+    destroy_resp=$(curl -s -b "PHPSESSID=$session_cookie" "http://localhost:$PORT/session-destroy")
+    check_contains "session destroy" '"destroyed":true' "$destroy_resp"
+
+    # test: after destroy, session data is gone
+    after_resp=$(curl -s -b "PHPSESSID=$session_cookie" "http://localhost:$PORT/session-get")
+    check_contains "session after destroy" '"count":0' "$after_resp"
+
+    # cleanup session files
+    rm -f /tmp/sess_${session_cookie}
+else
+    echo "  FAIL  session cookie not set"
+    failed=$((failed + 5))
+fi
+
 # test: graceful shutdown
 kill -TERM $SERVER_PID
 wait $SERVER_PID 2>/dev/null
