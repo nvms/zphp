@@ -2259,7 +2259,14 @@ pub const VM = struct {
         }
 
         self.runUntilFrame(return_frame) catch |err| {
-            if (gen.state == .suspended or gen.state == .completed) return;
+            if (gen.state == .suspended) {
+                self.sp = saved_sp;
+                return;
+            }
+            if (gen.state == .completed) {
+                self.sp = saved_sp;
+                return;
+            }
             return err;
         };
         if (gen.state == .running) {
