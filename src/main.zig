@@ -201,7 +201,7 @@ test {
     _ = @import("pipeline/compiler.zig");
     _ = @import("runtime/value.zig");
     _ = @import("runtime/vm.zig");
-    _ = @import("runtime/builtins.zig");
+    _ = @import("stdlib/exceptions.zig");
     _ = @import("stdlib/registry.zig");
     _ = @import("stdlib/datetime.zig");
     _ = @import("pipeline/parser_tests.zig");

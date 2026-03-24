@@ -1,7 +1,7 @@
 const std = @import("std");
-const Value = @import("value.zig").Value;
-const PhpObject = @import("value.zig").PhpObject;
-const vm_mod = @import("vm.zig");
+const Value = @import("../runtime/value.zig").Value;
+const PhpObject = @import("../runtime/value.zig").PhpObject;
+const vm_mod = @import("../runtime/vm.zig");
 const VM = vm_mod.VM;
 const NativeContext = vm_mod.NativeContext;
 const ClassDef = vm_mod.ClassDef;
@@ -10,7 +10,6 @@ const Allocator = std.mem.Allocator;
 const RuntimeError = error{ RuntimeError, OutOfMemory };
 
 pub fn register(vm: *VM, a: Allocator) !void {
-    // Exception base class
     var exc_def = ClassDef{ .name = "Exception" };
     try exc_def.properties.append(a, .{ .name = "message", .default = .{ .string = "" } });
     try exc_def.properties.append(a, .{ .name = "code", .default = .{ .int = 0 } });
@@ -23,7 +22,6 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try vm.native_fns.put(a, "Exception::getMessage", exceptionGetMessage);
     try vm.native_fns.put(a, "Exception::getCode", exceptionGetCode);
 
-    // standard exception subclasses
     const subclasses = .{
         .{ "RuntimeException", "Exception" },
         .{ "InvalidArgumentException", "Exception" },

@@ -7,6 +7,7 @@ const Chunk = @import("../pipeline/bytecode.zig").Chunk;
 const OpCode = @import("../pipeline/bytecode.zig").OpCode;
 const ObjFunction = @import("../pipeline/bytecode.zig").ObjFunction;
 const CompileResult = @import("../pipeline/compiler.zig").CompileResult;
+const enums = @import("../stdlib/enums.zig");
 
 const Allocator = std.mem.Allocator;
 const RuntimeError = error{ RuntimeError, OutOfMemory };
@@ -172,7 +173,7 @@ pub const VM = struct {
         var vm = VM{ .allocator = allocator };
         try @import("../stdlib/registry.zig").register(&vm.native_fns, allocator);
         try initConstants(&vm.php_constants, allocator);
-        try @import("builtins.zig").register(&vm, allocator);
+        try @import("../stdlib/exceptions.zig").register(&vm, allocator);
         try @import("../stdlib/datetime.zig").register(&vm, allocator);
         try @import("../stdlib/spl.zig").register(&vm, allocator);
         return vm;
@@ -1147,16 +1148,16 @@ pub const VM = struct {
                     // register native methods: cases, from, tryFrom
                     const cases_name = try std.fmt.allocPrint(self.allocator, "{s}::cases", .{enum_name});
                     try self.strings.append(self.allocator, cases_name);
-                    try self.native_fns.put(self.allocator, cases_name, enumCases);
+                    try self.native_fns.put(self.allocator, cases_name, enums.enumCases);
 
                     if (backed_type_byte != 0) {
                         const from_name = try std.fmt.allocPrint(self.allocator, "{s}::from", .{enum_name});
                         try self.strings.append(self.allocator, from_name);
-                        try self.native_fns.put(self.allocator, from_name, enumFrom);
+                        try self.native_fns.put(self.allocator, from_name, enums.enumFrom);
 
                         const try_from_name = try std.fmt.allocPrint(self.allocator, "{s}::tryFrom", .{enum_name});
                         try self.strings.append(self.allocator, try_from_name);
-                        try self.native_fns.put(self.allocator, try_from_name, enumTryFrom);
+                        try self.native_fns.put(self.allocator, try_from_name, enums.enumTryFrom);
                     }
 
                     try self.classes.put(self.allocator, enum_name, def);
@@ -1190,12 +1191,7 @@ pub const VM = struct {
                             self.frames[self.frame_count] = .{ .chunk = self.currentChunk(), .ip = self.currentFrame().ip, .vars = tmp_vars };
                             self.frame_count += 1;
 
-                            var ctx = NativeContext{
-                                .allocator = self.allocator,
-                                .arrays = &self.arrays,
-                                .strings = &self.strings,
-                                .vm = self,
-                            };
+                            var ctx = self.makeContext(null);
                             _ = try native(&ctx, args_buf[0..ac]);
 
                             self.frame_count -= 1;
@@ -1343,12 +1339,7 @@ pub const VM = struct {
                         self.frames[self.frame_count] = .{ .chunk = self.currentChunk(), .ip = self.currentFrame().ip, .vars = tmp_vars };
                         self.frame_count += 1;
 
-                        var ctx = NativeContext{
-                            .allocator = self.allocator,
-                            .arrays = &self.arrays,
-                            .strings = &self.strings,
-                            .vm = self,
-                        };
+                        var ctx = self.makeContext(null);
                         const result = try native(&ctx, args_buf[0..ac]);
 
                         self.frame_count -= 1;
@@ -1358,11 +1349,7 @@ pub const VM = struct {
                         var new_vars: std.StringHashMapUnmanaged(Value) = .{};
                         try new_vars.put(self.allocator, "$this", .{ .object = obj });
 
-                        for (self.captures.items) |cap| {
-                            if (std.mem.eql(u8, cap.closure_name, full_name)) {
-                                try new_vars.put(self.allocator, cap.var_name, cap.value);
-                            }
-                        }
+                        try self.bindClosures(&new_vars, full_name);
 
                         for (0..ac) |i| {
                             try new_vars.put(self.allocator, func.params[i], self.stack[self.sp - ac + i]);
@@ -1849,19 +1836,50 @@ pub const VM = struct {
         }
     }
 
+    fn makeContext(self: *VM, call_name: ?[]const u8) NativeContext {
+        return .{ .allocator = self.allocator, .arrays = &self.arrays, .strings = &self.strings, .vm = self, .call_name = call_name };
+    }
+
+    fn bindClosures(self: *VM, vars: *std.StringHashMapUnmanaged(Value), name: []const u8) !void {
+        for (self.captures.items) |cap| {
+            if (std.mem.eql(u8, cap.closure_name, name)) {
+                try vars.put(self.allocator, cap.var_name, cap.value);
+            }
+        }
+    }
+
+    fn bindArgs(self: *VM, vars: *std.StringHashMapUnmanaged(Value), func: *const ObjFunction, args: []const Value) !void {
+        for (0..args.len) |i| {
+            try vars.put(self.allocator, func.params[i], args[i]);
+        }
+        try self.fillDefaults(vars, func, args.len);
+    }
+
+    fn fillDefaults(self: *VM, vars: *std.StringHashMapUnmanaged(Value), func: *const ObjFunction, arg_count: usize) !void {
+        for (arg_count..func.arity) |i| {
+            if (i < func.defaults.len) {
+                try vars.put(self.allocator, func.params[i], func.defaults[i]);
+            } else {
+                try vars.put(self.allocator, func.params[i], .null);
+            }
+        }
+    }
+
+    fn executeFunction(self: *VM, func: *const ObjFunction, vars: std.StringHashMapUnmanaged(Value)) RuntimeError!Value {
+        const base_frame = self.frame_count;
+        self.frames[self.frame_count] = .{ .chunk = &func.chunk, .ip = 0, .vars = vars };
+        self.frame_count += 1;
+        try self.runUntilFrame(base_frame);
+        return self.pop();
+    }
+
     fn callNamedFunction(self: *VM, name: []const u8, arg_count: u8) RuntimeError!void {
         if (self.native_fns.get(name)) |native| {
             var args: [16]Value = undefined;
             const ac: usize = arg_count;
             for (0..ac) |i| args[i] = self.stack[self.sp - ac + i];
             self.sp -= ac;
-            var ctx = NativeContext{
-                .allocator = self.allocator,
-                .arrays = &self.arrays,
-                .strings = &self.strings,
-                .vm = self,
-                .call_name = name,
-            };
+            var ctx = self.makeContext(name);
             self.push(try native(&ctx, args[0..ac]));
         } else if (self.functions.get(name)) |func| {
             const ac: usize = arg_count;
@@ -1870,18 +1888,12 @@ pub const VM = struct {
             if (func.is_variadic and ac < func.required_params)
                 return error.RuntimeError;
             var new_vars: std.StringHashMapUnmanaged(Value) = .{};
-            for (self.captures.items) |cap| {
-                if (std.mem.eql(u8, cap.closure_name, name)) {
-                    try new_vars.put(self.allocator, cap.var_name, cap.value);
-                }
-            }
+            try self.bindClosures(&new_vars, name);
             if (func.is_variadic) {
-                // bind non-variadic params normally
                 const fixed: usize = func.arity - 1;
                 for (0..@min(ac, fixed)) |i| {
                     try new_vars.put(self.allocator, func.params[i], self.stack[self.sp - ac + i]);
                 }
-                // collect remaining args into an array for the variadic param
                 const rest_arr = try self.allocator.create(PhpArray);
                 rest_arr.* = .{};
                 for (fixed..ac) |i| {
@@ -1895,32 +1907,20 @@ pub const VM = struct {
                 }
             }
             self.sp -= ac;
-            // fill missing non-variadic params with defaults
             if (!func.is_variadic) {
-                for (ac..func.arity) |i| {
-                    if (i < func.defaults.len) {
-                        try new_vars.put(self.allocator, func.params[i], func.defaults[i]);
-                    } else {
-                        try new_vars.put(self.allocator, func.params[i], .null);
-                    }
-                }
+                try self.fillDefaults(&new_vars, func, ac);
             }
             // set up ref param bindings
             var ref_bindings = std.ArrayListUnmanaged(RefBinding){};
             if (func.ref_params.len > 0) {
                 const caller_chunk = self.currentChunk();
                 const caller_ip = self.currentFrame().ip;
-                // scan backwards through caller bytecode to find get_var instructions for each arg
-                // call opcode: call(1) + name_idx(2) + arg_count(1) = 4 bytes before caller_ip
                 var scan_pos = caller_ip - 4;
                 var found: usize = 0;
                 var arg_vars: [16]?[]const u8 = .{null} ** 16;
-                // walk backwards to find get_var instructions for each arg
-                // each get_var is 3 bytes: opcode(1) + u16(2)
                 var scan_idx: usize = ac;
                 while (scan_idx > 0 and scan_pos >= 3) {
                     scan_idx -= 1;
-                    // check if the instruction at scan_pos-3 is get_var
                     if (caller_chunk.code.items[scan_pos - 3] == @intFromEnum(OpCode.get_var)) {
                         const hi = caller_chunk.code.items[scan_pos - 2];
                         const lo = caller_chunk.code.items[scan_pos - 1];
@@ -1931,8 +1931,6 @@ pub const VM = struct {
                         scan_pos -= 3;
                         found += 1;
                     } else {
-                        // non-variable arg, skip to find next one
-                        // this is best-effort - complex expressions won't be tracked
                         break;
                     }
                 }
@@ -1965,12 +1963,7 @@ pub const VM = struct {
             try tmp_vars.put(self.allocator, "$this", .{ .object = obj });
             self.frames[self.frame_count] = .{ .chunk = self.currentChunk(), .ip = self.currentFrame().ip, .vars = tmp_vars };
             self.frame_count += 1;
-            var ctx = NativeContext{
-                .allocator = self.allocator,
-                .arrays = &self.arrays,
-                .strings = &self.strings,
-                .vm = self,
-            };
+            var ctx = self.makeContext(null);
             const result = try native(&ctx, args);
             self.frame_count -= 1;
             self.frames[self.frame_count].vars.deinit(self.allocator);
@@ -1979,113 +1972,23 @@ pub const VM = struct {
             if (args.len < func.required_params or args.len > func.arity) return error.RuntimeError;
             var new_vars: std.StringHashMapUnmanaged(Value) = .{};
             try new_vars.put(self.allocator, "$this", .{ .object = obj });
-            for (self.captures.items) |cap| {
-                if (std.mem.eql(u8, cap.closure_name, full_name)) {
-                    try new_vars.put(self.allocator, cap.var_name, cap.value);
-                }
-            }
-            for (0..args.len) |i| {
-                try new_vars.put(self.allocator, func.params[i], args[i]);
-            }
-            for (args.len..func.arity) |i| {
-                if (i < func.defaults.len) {
-                    try new_vars.put(self.allocator, func.params[i], func.defaults[i]);
-                } else {
-                    try new_vars.put(self.allocator, func.params[i], .null);
-                }
-            }
-            const base_frame = self.frame_count;
-            self.frames[self.frame_count] = .{ .chunk = &func.chunk, .ip = 0, .vars = new_vars };
-            self.frame_count += 1;
-            try self.runUntilFrame(base_frame);
-            return self.pop();
+            try self.bindClosures(&new_vars, full_name);
+            try self.bindArgs(&new_vars, func, args);
+            return self.executeFunction(func, new_vars);
         } else return error.RuntimeError;
     }
 
     pub fn callByName(self: *VM, name: []const u8, args: []const Value) RuntimeError!Value {
         if (self.native_fns.get(name)) |native| {
-            var ctx = NativeContext{
-                .allocator = self.allocator,
-                .arrays = &self.arrays,
-                .strings = &self.strings,
-                .vm = self,
-            };
+            var ctx = self.makeContext(null);
             return native(&ctx, args);
         } else if (self.functions.get(name)) |func| {
             if (args.len < func.required_params or args.len > func.arity) return error.RuntimeError;
             var new_vars: std.StringHashMapUnmanaged(Value) = .{};
-            for (self.captures.items) |cap| {
-                if (std.mem.eql(u8, cap.closure_name, name)) {
-                    try new_vars.put(self.allocator, cap.var_name, cap.value);
-                }
-            }
-            for (0..args.len) |i| {
-                try new_vars.put(self.allocator, func.params[i], args[i]);
-            }
-            for (args.len..func.arity) |i| {
-                if (i < func.defaults.len) {
-                    try new_vars.put(self.allocator, func.params[i], func.defaults[i]);
-                } else {
-                    try new_vars.put(self.allocator, func.params[i], .null);
-                }
-            }
-            const base_frame = self.frame_count;
-            self.frames[self.frame_count] = .{ .chunk = &func.chunk, .ip = 0, .vars = new_vars };
-            self.frame_count += 1;
-
-            try self.runUntilFrame(base_frame);
-
-            return self.pop();
+            try self.bindClosures(&new_vars, name);
+            try self.bindArgs(&new_vars, func, args);
+            return self.executeFunction(func, new_vars);
         } else return error.RuntimeError;
-    }
-
-    // ==================================================================
-    // enum native methods
-    // ==================================================================
-
-    fn enumClassFromCallName(ctx: *NativeContext) ?[]const u8 {
-        const name = ctx.call_name orelse return null;
-        if (std.mem.indexOf(u8, name, "::")) |sep| return name[0..sep];
-        return null;
-    }
-
-    fn enumCases(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-        const enum_name = enumClassFromCallName(ctx) orelse return error.RuntimeError;
-        const def = ctx.vm.classes.get(enum_name) orelse return error.RuntimeError;
-        var arr = try ctx.createArray();
-        var iter = def.static_props.iterator();
-        while (iter.next()) |entry| {
-            try arr.append(ctx.allocator, entry.value_ptr.*);
-        }
-        return .{ .array = arr };
-    }
-
-    fn enumFrom(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-        if (args.len == 0) return error.RuntimeError;
-        const enum_name = enumClassFromCallName(ctx) orelse return error.RuntimeError;
-        const def = ctx.vm.classes.get(enum_name) orelse return error.RuntimeError;
-        var iter = def.static_props.iterator();
-        while (iter.next()) |entry| {
-            if (entry.value_ptr.* == .object) {
-                const case_val = entry.value_ptr.*.object.get("value");
-                if (Value.identical(case_val, args[0])) return entry.value_ptr.*;
-            }
-        }
-        return error.RuntimeError;
-    }
-
-    fn enumTryFrom(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-        if (args.len == 0) return .null;
-        const enum_name = enumClassFromCallName(ctx) orelse return .null;
-        const def = ctx.vm.classes.get(enum_name) orelse return .null;
-        var iter = def.static_props.iterator();
-        while (iter.next()) |entry| {
-            if (entry.value_ptr.* == .object) {
-                const case_val = entry.value_ptr.*.object.get("value");
-                if (Value.identical(case_val, args[0])) return entry.value_ptr.*;
-            }
-        }
-        return .null;
     }
 
     // ==================================================================

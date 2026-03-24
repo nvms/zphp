@@ -14,6 +14,7 @@ pub fn register(map: *std.StringHashMapUnmanaged(NativeFn), allocator: std.mem.A
         @import("json.zig").entries,
         @import("io.zig").entries,
         @import("pcre.zig").entries,
+        @import("output.zig").entries,
         @import("testing.zig").entries,
     };
     inline for (modules) |entries| {
@@ -29,5 +30,6 @@ test {
     _ = @import("json.zig");
     _ = @import("io.zig");
     _ = @import("pcre.zig");
+    _ = @import("output.zig");
     _ = @import("testing.zig");
 }
