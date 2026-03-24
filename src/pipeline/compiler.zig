@@ -1577,8 +1577,9 @@ const Compiler = struct {
                 const pname_idx = try self.addConstant(.{ .string = param_name });
                 try self.emitU16(pname_idx);
                 try self.emitByte(1); // has default (null placeholder)
-                // visibility: 0=public, 1=protected, 2=private
-                try self.emitByte(@intCast(promotion - 1));
+                // bits 0-1: visibility, bit 2: readonly
+                const is_ro: u8 = if ((pnode.data.rhs & 16) != 0) 4 else 0;
+                try self.emitByte(@as(u8, @intCast(promotion - 1)) | is_ro);
             }
         }
 

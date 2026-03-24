@@ -778,6 +778,7 @@ const Parser = struct {
         while (self.peek() != .r_brace and self.peek() != .eof) {
             var is_static = false;
             var is_abstract = false;
+            var is_readonly = false;
             var visibility: u32 = 0; // 0=public, 1=protected, 2=private
             while (self.peek() == .kw_public or self.peek() == .kw_protected or
                 self.peek() == .kw_private or self.peek() == .kw_static or
@@ -785,6 +786,7 @@ const Parser = struct {
             {
                 if (self.peek() == .kw_static) is_static = true;
                 if (self.peek() == .kw_abstract) is_abstract = true;
+                if (self.peek() == .kw_readonly) is_readonly = true;
                 if (self.peek() == .kw_protected) visibility = 1;
                 if (self.peek() == .kw_private) visibility = 2;
                 _ = self.advance();
@@ -810,8 +812,8 @@ const Parser = struct {
                 if (is_static) {
                     self.nodes.items[prop].tag = .static_class_property;
                 }
-                // class_property rhs is unused, store visibility there
-                self.nodes.items[prop].data.rhs = visibility;
+                // bits 0-1: visibility, bit 2: readonly
+                self.nodes.items[prop].data.rhs = visibility | (if (is_readonly) @as(u32, 4) else 0);
                 try members.append(self.allocator, prop);
             } else if (self.peek() == .kw_const) {
                 try members.append(self.allocator, try self.parseConstDecl());
@@ -822,7 +824,7 @@ const Parser = struct {
                     if (is_static) {
                         self.nodes.items[prop].tag = .static_class_property;
                     }
-                    self.nodes.items[prop].data.rhs = visibility;
+                    self.nodes.items[prop].data.rhs = visibility | (if (is_readonly) @as(u32, 4) else 0);
                     try members.append(self.allocator, prop);
                 } else {
                     _ = self.advance();
@@ -1327,11 +1329,13 @@ const Parser = struct {
         // constructor property promotion: visibility keyword before param
         // 0 = none, 1 = public, 2 = protected, 3 = private
         var promotion: u32 = 0;
+        var param_readonly = false;
+        // handle readonly and visibility in any order
+        if (self.peek() == .kw_readonly) { param_readonly = true; _ = self.advance(); }
         if (self.peek() == .kw_public) { promotion = 1; _ = self.advance(); }
         else if (self.peek() == .kw_protected) { promotion = 2; _ = self.advance(); }
         else if (self.peek() == .kw_private) { promotion = 3; _ = self.advance(); }
-        // skip readonly
-        if (self.peek() == .kw_readonly) _ = self.advance();
+        if (self.peek() == .kw_readonly) { param_readonly = true; _ = self.advance(); }
         if (self.isTypeName() or self.peek() == .question or self.peek() == .l_paren) {
             self.skipTypeHint();
         }
@@ -1348,11 +1352,12 @@ const Parser = struct {
             _ = self.advance();
             default = try self.parseExpression();
         }
-        // rhs encoding: bits 0 = variadic, bit 1 = by-reference, bits 2-3 = promotion visibility
+        // rhs encoding: bit 0 = variadic, bit 1 = by-reference, bits 2-3 = promotion visibility, bit 4 = readonly
         var flags: u32 = 0;
         if (is_variadic) flags |= 1;
         if (is_ref) flags |= 2;
         flags |= (promotion << 2);
+        if (param_readonly) flags |= 16;
         return self.addNode(.{ .tag = .variable, .main_token = tok, .data = .{ .lhs = default, .rhs = flags } });
     }
 

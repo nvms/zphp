@@ -99,6 +99,7 @@ pub const ClassDef = struct {
         name: []const u8,
         default: Value,
         visibility: Visibility = .public,
+        is_readonly: bool = false,
     };
 
     fn deinit(self: *ClassDef, allocator: Allocator) void {
@@ -1080,11 +1081,14 @@ pub const VM = struct {
                     var prop_names: [32][]const u8 = undefined;
                     var prop_has_default: [32]u8 = undefined;
                     var prop_vis: [32]ClassDef.Visibility = undefined;
+                    var prop_readonly: [32]bool = .{false} ** 32;
                     for (0..prop_count) |pi| {
                         const pname_idx = self.readU16();
                         prop_names[pi] = self.currentChunk().constants.items[pname_idx].string;
                         prop_has_default[pi] = self.readByte();
-                        prop_vis[pi] = @enumFromInt(self.readByte());
+                        const vis_byte = self.readByte();
+                        prop_vis[pi] = @enumFromInt(vis_byte & 0x03);
+                        prop_readonly[pi] = (vis_byte & 0x04) != 0;
                     }
 
                     const static_prop_count = self.readByte();
@@ -1132,6 +1136,7 @@ pub const VM = struct {
                             .name = prop_names[pi],
                             .default = default_val,
                             .visibility = prop_vis[pi],
+                            .is_readonly = prop_readonly[pi],
                         });
                     }
 
@@ -1488,6 +1493,17 @@ pub const VM = struct {
                             try self.strings.append(self.allocator, msg);
                             if (try self.throwBuiltinException("Error", msg)) continue;
                             return error.RuntimeError;
+                        }
+                        if (vr.is_readonly) {
+                            const existing = obj_val.object.get(prop_name);
+                            if (existing != .null) {
+                                const msg = try std.fmt.allocPrint(self.allocator, "Cannot modify readonly property {s}::${s}", .{
+                                    vr.defining_class, prop_name,
+                                });
+                                try self.strings.append(self.allocator, msg);
+                                if (try self.throwBuiltinException("Error", msg)) continue;
+                                return error.RuntimeError;
+                            }
                         }
                         try obj_val.object.set(self.allocator, prop_name, val);
                     }
@@ -2076,14 +2092,14 @@ pub const VM = struct {
         return self.isInstanceOf(caller_class, target_class) or self.isInstanceOf(target_class, caller_class);
     }
 
-    const VisResult = struct { visibility: ClassDef.Visibility, defining_class: []const u8 };
+    const VisResult = struct { visibility: ClassDef.Visibility, defining_class: []const u8, is_readonly: bool = false };
 
     fn findPropertyVisibility(self: *VM, class_name: []const u8, prop_name: []const u8) VisResult {
         var current: ?[]const u8 = class_name;
         while (current) |cn| {
             if (self.classes.get(cn)) |cls| {
                 for (cls.properties.items) |prop| {
-                    if (std.mem.eql(u8, prop.name, prop_name)) return .{ .visibility = prop.visibility, .defining_class = cn };
+                    if (std.mem.eql(u8, prop.name, prop_name)) return .{ .visibility = prop.visibility, .defining_class = cn, .is_readonly = prop.is_readonly };
                 }
                 current = cls.parent;
             } else break;
