@@ -47,7 +47,7 @@ critical boundaries:
 - tokens reference byte offsets into source (zero-copy, no allocations)
 - PHP keywords are case-insensitive (lowercased before lookup)
 - strings are lexed as single tokens (interpolation handled later by compiler)
-- heredocs/nowdocs not yet supported (will produce invalid token)
+- heredoc (`<<<EOT`) and nowdoc (`<<<'EOT'`) supported. lexer produces `.heredoc`/`.nowdoc` token tags spanning full delimiter block
 - the lexer never errors - invalid input produces `.invalid` tokens
 - HTML mode scans for `<?php` (with trailing whitespace) and `<?=` only, no short open tags
 
@@ -131,12 +131,22 @@ critical boundaries:
 - method_call dispatches generator methods (current, key, valid, next, send, rewind, getReturn) before the object check
 - foreach iter_begin/iter_check/iter_advance detect generators via sentinel index value (-1)
 
+### fibers
+- PHP 8.1 fibers. `Fiber` struct in value.zig with state, callable, saved execution context (frames, stack, exception handlers)
+- `.fiber` variant in Value union, intercepted in `new_obj`, `method_call`, `static_call`
+- suspension: `Fiber::suspend()` sets `fiber_suspend_pending` flag, returns `error.RuntimeError`. error propagates through all `try` in runLoop to `executeFiber`
+- `executeFiber` catches error, checks flag, calls `saveFiberState` (copies frames/stack/handlers to Fiber struct with relative offsets)
+- `restoreFiberState` copies saved data back to VM, adjusts handler offsets to absolute positions
+- `handler_floor` field prevents fiber exceptions from leaking into caller exception handlers
+- supports deep suspension (from nested calls), multiple suspend/resume cycles, nested fibers
+
 ### exception handling
 - handler stack of 32 `ExceptionHandler` structs (catch_ip, frame_count, sp, chunk)
-- `throw`: unwinds frames, restores sp, pushes exception, jumps to catch_ip
+- `handler_floor`: prevents fiber/nested exception handlers from leaking across boundaries
+- `throw`: unwinds frames to handler, restores sp, pushes exception, jumps to catch_ip
 - catch uses `instance_check` which walks parent chain
 - `throwBuiltinException(class_name, message)` helper creates and throws from opcode handlers
-- exception hierarchy: Exception, RuntimeException, InvalidArgumentException, LogicException, BadMethodCallException, OverflowException, TypeError, ArithmeticError, DivisionByZeroError, and more
+- exception hierarchy: Exception, RuntimeException, InvalidArgumentException, LogicException, BadMethodCallException, OverflowException, TypeError, ArithmeticError, DivisionByZeroError, FiberError, PDOException, and more
 
 ### file loading (require/include)
 - `FileLoader` function pointer on VM: `fn(path, allocator) ?*CompileResult`
@@ -154,6 +164,16 @@ critical boundaries:
 - `ArrayObject`: object wrapper around PhpArray. stores data in `__data`, flags in `__flags`. implements Countable. offsetGet/offsetSet/offsetExists/offsetUnset for explicit access. getArrayCopy returns a shallow copy. bracket syntax (`$ao["key"]`) not yet supported (requires VM-level ArrayAccess dispatch)
 - both registered during VM init alongside builtins and datetime
 
+### PDO (src/stdlib/pdo.zig)
+- SQLite driver via C FFI (opaque types for `sqlite3*` and `sqlite3_stmt*`, extern declarations for ~20 sqlite3 functions)
+- PDO and PDOStatement classes registered in vm.init(). C pointers stored as i64 in hidden properties (`__db_ptr`, `__stmt_ptr`) via `@intFromPtr`/`@ptrFromInt`
+- null-terminated strings for C API via `allocator.dupeZ` tracked in ctx.strings
+- parameter binding: positional (`?`, 1-indexed in SQLite) and named (`:name`). int keys map to position+1, string keys resolved via `sqlite3_bind_parameter_index`
+- column type mapping: per-cell via `sqlite3_column_type`. TEXT/BLOB copied immediately via `ctx.createString` (C strings only valid until next step/finalize)
+- fetch modes: FETCH_BOTH (default, both numeric and string keys), FETCH_ASSOC, FETCH_NUM. mode parameter on fetch/fetchAll
+- `cleanupResources()` called from vm.reset()/deinit() - finalizes all statements before closing databases (order matters)
+- PDO constants registered as static properties on ClassDef
+
 ## gotchas
 
 - **dangling pointers in constant pool**: any string stored in the constant pool must be either a source slice or a heap allocation tracked by string_allocs. stack-allocated bufPrint strings cause use-after-free
@@ -167,7 +187,7 @@ every existing PHP performance project (PHP-FPM, Swoole, Workerman, FrankenPHP, 
 unique differentiators:
 - toolchain unification (run/install/test/fmt/build/serve in one binary)
 - compile to standalone binary (`zphp build`)
-- minimal C dependencies (PCRE2 for regex, with more as stdlib grows - SQLite, libcurl, etc.)
+- minimal C dependencies (PCRE2 for regex, SQLite3 for PDO, zlib for gzip compression)
 - `zphp serve` with pre-loaded VM (no IPC/serialization overhead)
 - fresh memory model (zig allocators, tagged union values)
 
@@ -191,8 +211,12 @@ two layers: zig HTTP layer (TCP + raw HTTP parsing) + PHP VM layer (synchronous 
 - **response headers**: `header()` stores in `__response_headers`, `http_response_code()` stores in `__response_code`
 - **work queue**: bounded ring buffer (1024) with mutex + condition
 
+### static files
+- `tryServeStatic`: serves non-PHP files from document root. path traversal prevention (`..` check). ETag based on `{size_hex}-{mtime_hex}`, 304 Not Modified support. MIME type detection by extension
+- gzip compression via zlib C FFI (`deflateInit2` with windowBits 15+16 for gzip format). compresses text-based MIME types (text/*, JS, JSON, XML, SVG) when client sends `Accept-Encoding: gzip`. static files up to 1MB compressed in-memory; larger files served uncompressed via 32KB streaming chunks. adds `Content-Encoding: gzip` and `Vary: Accept-Encoding`. PHP output also compressed when client accepts gzip
+- `gzipCompress()` allocates with `compressBound()`, resizes to actual size, skips if compressed >= original
+
 ### what's not yet implemented
-- static file serving
 - graceful shutdown (SIGTERM handling)
 - chunked transfer encoding
 - multipart form data parsing

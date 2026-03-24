@@ -44,7 +44,7 @@ zig 0.15.x. `zig build test` must pass before pushing. short lowercase commits, 
 ## CLI
 
 - `zphp run <file>` - execute PHP file
-- `zphp serve <file> [--port N] [--workers N]` - HTTP server with pre-compiled bytecode, VM pooling, keep-alive, static files, ETag/304
+- `zphp serve <file> [--port N] [--workers N]` - HTTP server with pre-compiled bytecode, VM pooling, keep-alive, static files, ETag/304, gzip
 - `zphp test [file]` - test runner with assertion functions, test discovery, TUI output
 - `zphp install` - install packages from composer.json, write zphp.lock
 - `zphp add <pkg>` / `zphp remove <pkg>` - manage dependencies
@@ -62,7 +62,11 @@ zig 0.15.x. `zig build test` must pass before pushing. short lowercase commits, 
 
 ## roadmap
 
-next: pdo_mysql driver, gzip compression for serve static files, WebSocket support for serve (design toward event-loop-per-worker for long-lived connections - don't assume all connections are short-lived request/response)
+next: pdo_mysql driver, WebSocket support for serve (design toward event-loop-per-worker for long-lived connections - don't assume all connections are short-lived request/response)
+
+## gzip compression
+
+`src/serve.zig`. uses zlib C FFI (`@cImport(@cInclude("zlib.h"))`) with `deflateInit2` in gzip mode (windowBits 15+16). compresses both static files and PHP output when client sends `Accept-Encoding: gzip`. only compresses text-based MIME types (text/*, application/javascript, application/json, application/xml, image/svg+xml). static files capped at 1MB for in-memory compression - larger files served uncompressed via streaming. adds `Content-Encoding: gzip` and `Vary: Accept-Encoding` headers. skips compression when result would be larger than original. `gzipCompress()` allocates with `compressBound`, resizes to actual compressed size before returning.
 
 ## PDO
 
