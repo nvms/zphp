@@ -884,7 +884,7 @@ pub const VM = struct {
                         copy.* = .{ .class_name = src.class_name };
                         var it = src.properties.iterator();
                         while (it.next()) |entry| {
-                            try copy.properties.put(self.allocator, entry.key_ptr.*, entry.value_ptr.*);
+                            try copy.properties.put(self.allocator, entry.key_ptr.*, try self.copyValue(entry.value_ptr.*));
                         }
                         try self.objects.append(self.allocator, copy);
                         self.push(.{ .object = copy });
@@ -1133,13 +1133,16 @@ pub const VM = struct {
                 },
 
                 .array_spread => {
-                    // pop source array, spread its elements into the array on top of stack
                     const src = self.pop();
                     if (src == .array) {
                         const target = self.peek();
                         if (target == .array) {
                             for (src.array.entries.items) |entry| {
-                                try target.array.append(self.allocator, entry.value);
+                                if (entry.key == .string) {
+                                    try target.array.set(self.allocator, entry.key, entry.value);
+                                } else {
+                                    try target.array.append(self.allocator, entry.value);
+                                }
                             }
                         }
                     }

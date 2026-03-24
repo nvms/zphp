@@ -737,6 +737,17 @@ const Compiler = struct {
         }
 
         if (target.tag == .array_access) {
+            if (op_tag == .question_question_equal) {
+                try self.compileNode(node.data.lhs);
+                const skip_jump = try self.emitJump(.jump_if_not_null);
+                try self.emitOp(.pop);
+                try self.compileNode(target.data.lhs);
+                try self.compileNode(target.data.rhs);
+                try self.compileNode(node.data.rhs);
+                try self.emitOp(.array_set);
+                self.patchJump(skip_jump);
+                return;
+            }
             try self.compileNode(target.data.lhs);
             try self.compileNode(target.data.rhs);
             try self.compileNode(node.data.rhs);
@@ -779,18 +790,19 @@ const Compiler = struct {
         }
 
         if (op_tag == .question_question_equal) {
-            // ??= : only assign if current value is null
-            try self.compileGetVar(target);
-            const skip_jump = try self.emitJump(.jump_if_not_null);
-            try self.emitOp(.pop);
-            try self.compileNode(node.data.rhs);
-            if (target.tag == .variable or target.tag == .identifier) {
-                const name = self.ast.tokenSlice(target.main_token);
-                const idx = try self.addConstant(.{ .string = name });
-                try self.emitOp(.set_var);
-                try self.emitU16(idx);
+            {
+                try self.compileGetVar(target);
+                const skip_jump = try self.emitJump(.jump_if_not_null);
+                try self.emitOp(.pop);
+                try self.compileNode(node.data.rhs);
+                if (target.tag == .variable or target.tag == .identifier) {
+                    const name = self.ast.tokenSlice(target.main_token);
+                    const idx = try self.addConstant(.{ .string = name });
+                    try self.emitOp(.set_var);
+                    try self.emitU16(idx);
+                }
+                self.patchJump(skip_jump);
             }
-            self.patchJump(skip_jump);
             return;
         }
 

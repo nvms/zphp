@@ -81,6 +81,7 @@ pub const entries = .{
     .{ "preg_match", preg_match },
     .{ "preg_match_all", preg_match_all },
     .{ "preg_replace", preg_replace },
+    .{ "preg_replace_callback", preg_replace_callback },
     .{ "preg_split", preg_split },
 };
 
@@ -321,6 +322,78 @@ fn preg_replace(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     const result = buf[0..out_len];
     try ctx.strings.append(ctx.allocator, buf);
     return .{ .string = result };
+}
+
+fn preg_replace_callback(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len < 3 or args[0] != .string or args[2] != .string) return if (args.len >= 3) args[2] else Value.null;
+    const info = parsePattern(args[0].string) orelse return args[2];
+    const callback = args[1];
+    const subject = args[2].string;
+
+    const code = compilePattern(info.pattern, info.flags) orelse return args[2];
+    defer pcre2.pcre2_code_free_8(code);
+
+    const match_data = pcre2.pcre2_match_data_create_from_pattern_8(code, null) orelse return args[2];
+    defer pcre2.pcre2_match_data_free_8(match_data);
+
+    var capture_count: u32 = 0;
+    _ = pcre2.pcre2_pattern_info_8(code, pcre2.INFO_CAPTURECOUNT, @ptrCast(&capture_count));
+    const group_count: usize = capture_count + 1;
+
+    var result = std.ArrayListUnmanaged(u8){};
+    var offset: usize = 0;
+
+    while (offset <= subject.len) {
+        const rc = pcre2.pcre2_match_8(code, subject.ptr, subject.len, offset, 0, match_data, null);
+        if (rc < 0) break;
+
+        const ovector = pcre2.pcre2_get_ovector_pointer_8(match_data);
+        const match_start = ovector[0];
+        const match_end = ovector[1];
+
+        try result.appendSlice(ctx.allocator, subject[offset..match_start]);
+
+        const matches_arr = try ctx.allocator.create(PhpArray);
+        matches_arr.* = .{};
+        try ctx.arrays.append(ctx.allocator, matches_arr);
+        for (0..group_count) |gi| {
+            const gs = ovector[gi * 2];
+            const ge = ovector[gi * 2 + 1];
+            if (gs == pcre2.UNSET or ge == pcre2.UNSET or gs > subject.len or ge > subject.len) {
+                try matches_arr.append(ctx.allocator, .{ .string = "" });
+            } else {
+                try matches_arr.append(ctx.allocator, .{ .string = subject[gs..ge] });
+            }
+        }
+
+        const cb_result = try ctx.invokeCallable(callback, &.{.{ .array = matches_arr }});
+        if (cb_result == .string) {
+            try result.appendSlice(ctx.allocator, cb_result.string);
+        } else {
+            var buf = std.ArrayListUnmanaged(u8){};
+            try cb_result.format(&buf, ctx.allocator);
+            const s = try buf.toOwnedSlice(ctx.allocator);
+            try ctx.strings.append(ctx.allocator, s);
+            try result.appendSlice(ctx.allocator, s);
+        }
+
+        if (match_end == offset) {
+            if (offset < subject.len) {
+                try result.append(ctx.allocator, subject[offset]);
+            }
+            offset += 1;
+        } else {
+            offset = match_end;
+        }
+    }
+
+    if (offset < subject.len) {
+        try result.appendSlice(ctx.allocator, subject[offset..]);
+    }
+
+    const s = try result.toOwnedSlice(ctx.allocator);
+    try ctx.strings.append(ctx.allocator, s);
+    return .{ .string = s };
 }
 
 fn preg_split(ctx: *NativeContext, args: []const Value) RuntimeError!Value {

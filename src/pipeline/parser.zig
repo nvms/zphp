@@ -1326,6 +1326,7 @@ const Parser = struct {
                 }
             }
         } else if (self.peek() == .amp) {
+            if (self.peekAt(1) == .variable or self.peekAt(1) == .ellipsis) return;
             while (self.peek() == .amp) {
                 _ = self.advance();
                 if (self.isTypeName()) _ = self.advance();
