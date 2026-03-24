@@ -681,8 +681,11 @@ const Parser = struct {
 
     fn parseNewExpr(self: *Parser) Error!u32 {
         _ = self.advance(); // new
-        if (self.peek() == .backslash) _ = self.advance(); // leading backslash
-        const name_tok = try self.expect(.identifier);
+        if (self.peek() == .backslash) _ = self.advance();
+        const name_tok = if (self.peek() == .kw_self or self.peek() == .kw_static or self.peek() == .kw_parent)
+            self.advance()
+        else
+            try self.expect(.identifier);
 
         // consume qualified name parts: \Identifier\Identifier...
         var name_parts = std.ArrayListUnmanaged(u32){};

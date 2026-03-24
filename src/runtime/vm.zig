@@ -1477,7 +1477,16 @@ pub const VM = struct {
                 .new_obj => {
                     const name_idx = self.readU16();
                     const arg_count = self.readByte();
-                    const class_name = self.currentChunk().constants.items[name_idx].string;
+                    var class_name = self.currentChunk().constants.items[name_idx].string;
+                    if (std.mem.eql(u8, class_name, "self") or std.mem.eql(u8, class_name, "static")) {
+                        if (self.currentDefiningClass()) |dc| class_name = dc;
+                    } else if (std.mem.eql(u8, class_name, "parent")) {
+                        if (self.currentDefiningClass()) |dc| {
+                            if (self.classes.get(dc)) |cls| {
+                                if (cls.parent) |p| class_name = p;
+                            }
+                        }
+                    }
 
                     if (std.mem.eql(u8, class_name, "Fiber")) {
                         const ac: usize = arg_count;
@@ -1769,8 +1778,21 @@ pub const VM = struct {
 
                         try self.bindClosures(&new_vars, null, full_name);
 
-                        for (0..ac) |i| {
-                            try new_vars.put(self.allocator, func.params[i], self.stack[self.sp - ac + i]);
+                        if (func.is_variadic) {
+                            const fixed: usize = func.arity - 1;
+                            for (0..@min(ac, fixed)) |i| {
+                                try new_vars.put(self.allocator, func.params[i], self.stack[self.sp - ac + i]);
+                            }
+                            const rest_arr = try self.allocator.create(PhpArray);
+                            rest_arr.* = .{};
+                            try self.arrays.append(self.allocator, rest_arr);
+                            for (fixed..ac) |i| try rest_arr.append(self.allocator, self.stack[self.sp - ac + i]);
+                            try new_vars.put(self.allocator, func.params[fixed], .{ .array = rest_arr });
+                        } else {
+                            for (0..@min(ac, func.arity)) |i| {
+                                try new_vars.put(self.allocator, func.params[i], self.stack[self.sp - ac + i]);
+                            }
+                            try self.fillDefaults(&new_vars, func, ac);
                         }
                         // set up ref cells for by-ref params
                         var method_refs: std.StringHashMapUnmanaged(*Value) = .{};
