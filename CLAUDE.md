@@ -21,7 +21,7 @@ zig 0.15.x. `zig build test` must pass before pushing. short lowercase commits, 
 - type hints: parsed, not enforced. heredoc/nowdoc: supported
 - `strtotime`: YYYY-MM-DD and relative only, UTC
 - trait conflict resolution (`insteadof`/`as`): fully implemented including visibility changes
-- pass-by-reference: works for simple variable args in user-defined and native functions (preg_match $matches, sort, etc.). bytecode scan approach is best-effort - expressions and nested access not supported
+- pass-by-reference: shared ref cells for function params (`function foo(&$x)`) and closure captures (`use (&$var)`). bytecode scan identifies caller variable names for simple args (variables and constants). expressions and nested access as ref args not supported. method ref params also work
 - named arguments: works for user-defined functions and ~80 common native functions (see `src/stdlib/native_params.zig`). unlisted natives fall back to positional
 - constructor property promotion: works with readonly enforcement
 - nullsafe operator (`?->`): full support for property access and method calls, including chaining
