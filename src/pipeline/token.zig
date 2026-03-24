@@ -140,6 +140,7 @@ pub const Token = struct {
         amp_amp,
         pipe_pipe,
         question_question,
+        question_arrow,
         arrow,
         fat_arrow,
         colon_colon,

@@ -158,8 +158,8 @@ fn renderNode(ast: *const Ast, idx: u32, buf: *Buf) !void {
             try renderNode(ast, node.data.lhs, buf);
             try w.writeByte(')');
         },
-        .property_access => {
-            try w.writeAll("(-> ");
+        .property_access, .nullsafe_property_access => {
+            try w.writeAll(if (node.tag == .nullsafe_property_access) "(?-> " else "(-> ");
             try renderNode(ast, node.data.lhs, buf);
             try w.writeByte(' ');
             try renderNode(ast, node.data.rhs, buf);
@@ -337,8 +337,8 @@ fn renderNode(ast: *const Ast, idx: u32, buf: *Buf) !void {
             }
             try w.writeByte(')');
         },
-        .method_call => {
-            try w.writeAll("(-> ");
+        .method_call, .nullsafe_method_call => {
+            try w.writeAll(if (node.tag == .nullsafe_method_call) "(?-> " else "(-> ");
             try renderNode(ast, node.data.lhs, buf);
             try w.writeByte(' ');
             try w.writeAll(ast.tokenSlice(node.main_token));

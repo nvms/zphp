@@ -94,6 +94,8 @@ pub const Ast = struct {
             list_destructure, // lhs = extra index -> {count, variable_nodes...} (0 = skip)
             named_arg, // main_token = name identifier, lhs = value expression
             property_access, // main_token = ->, lhs = object, rhs = property node
+            nullsafe_property_access, // main_token = ?->, lhs = object, rhs = property node
+            nullsafe_method_call, // main_token = method name, lhs = object, rhs = extra index -> {count, arg...}
 
             // casts
             cast_expr, // main_token = type identifier (int/string/etc), lhs = operand

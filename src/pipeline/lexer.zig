@@ -274,6 +274,12 @@ pub const Lexer = struct {
     }
 
     fn lexQuestion(self: *Lexer, start: usize) Token {
+        if (self.pos < self.source.len and self.source[self.pos] == '-' and
+            self.pos + 1 < self.source.len and self.source[self.pos + 1] == '>')
+        {
+            self.pos += 2;
+            return self.makeToken(.question_arrow, start);
+        }
         if (self.match('>')) {
             self.state = .html;
             return self.makeToken(.close_tag, start);

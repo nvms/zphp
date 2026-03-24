@@ -211,6 +211,8 @@ const Compiler = struct {
             .list_destructure => {},
             .named_arg => try self.compileNode(node.data.lhs),
             .property_access => try self.compilePropertyAccess(node),
+            .nullsafe_property_access => try self.compileNullsafePropertyAccess(node),
+            .nullsafe_method_call => try self.compileNullsafeMethodCall(node),
             .throw_expr => try self.compileThrow(node),
             .try_catch => try self.compileTryCatch(node),
             .catch_clause => {},
@@ -1965,6 +1967,32 @@ const Compiler = struct {
         try self.emitOp(.method_call);
         try self.emitU16(name_idx);
         try self.emitByte(@intCast(args.len));
+    }
+
+    fn compileNullsafePropertyAccess(self: *Compiler, node: Ast.Node) Error!void {
+        try self.compileNode(node.data.lhs);
+        const skip_jump = try self.emitJump(.jump_if_not_null);
+        const end_jump = try self.emitJump(.jump);
+        self.patchJump(skip_jump);
+        const name_idx = try self.addConstant(.{ .string = self.propName(node) });
+        try self.emitOp(.get_prop);
+        try self.emitU16(name_idx);
+        self.patchJump(end_jump);
+    }
+
+    fn compileNullsafeMethodCall(self: *Compiler, node: Ast.Node) Error!void {
+        try self.compileNode(node.data.lhs);
+        const skip_jump = try self.emitJump(.jump_if_not_null);
+        const end_jump = try self.emitJump(.jump);
+        self.patchJump(skip_jump);
+        const args = self.ast.extraSlice(node.data.rhs);
+        for (args) |arg| try self.compileNode(arg);
+        const method_name = self.ast.tokenSlice(node.main_token);
+        const name_idx = try self.addConstant(.{ .string = method_name });
+        try self.emitOp(.method_call);
+        try self.emitU16(name_idx);
+        try self.emitByte(@intCast(args.len));
+        self.patchJump(end_jump);
     }
 
     fn resolveNodeClassName(self: *Compiler, class_node: Ast.Node) ![]const u8 {

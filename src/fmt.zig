@@ -279,8 +279,8 @@ const Formatter = struct {
             .expression_stmt => self.findFirstToken(node.data.lhs),
             .grouped_expr => self.findFirstToken(node.data.lhs),
             .binary_op, .assign, .logical_and, .logical_or, .null_coalesce => self.findFirstToken(node.data.lhs),
-            .property_access => self.findFirstToken(node.data.lhs),
-            .method_call => self.findFirstToken(node.data.lhs),
+            .property_access, .nullsafe_property_access => self.findFirstToken(node.data.lhs),
+            .method_call, .nullsafe_method_call => self.findFirstToken(node.data.lhs),
             .call, .callable_ref => self.findFirstToken(node.data.lhs),
             .array_access, .array_push_target => self.findFirstToken(node.data.lhs),
             .list_destructure, .named_arg => node.main_token,
@@ -359,8 +359,10 @@ const Formatter = struct {
             .array_push_target => self.formatArrayPushTarget(node),
             .list_destructure => self.formatListDestructure(node),
             .named_arg => self.formatNamedArg(node),
-            .property_access => self.formatPropertyAccess(node),
-            .method_call => self.formatMethodCall(node),
+            .property_access => self.formatPropertyAccess(node, false),
+            .nullsafe_property_access => self.formatPropertyAccess(node, true),
+            .method_call => self.formatMethodCall(node, false),
+            .nullsafe_method_call => self.formatMethodCall(node, true),
             .static_call => self.formatStaticCall(node),
             .static_prop_access => self.formatStaticPropAccess(node),
             .new_expr => self.formatNewExpr(node),
@@ -1213,19 +1215,19 @@ const Formatter = struct {
         self.write(")");
     }
 
-    fn formatPropertyAccess(self: *Formatter, node: Ast.Node) void {
+    fn formatPropertyAccess(self: *Formatter, node: Ast.Node, nullsafe: bool) void {
         self.formatNode(node.data.lhs);
         if (self.ast.tokens[node.main_token].tag == .colon_colon) {
             self.write("::");
         } else {
-            self.write("->");
+            self.write(if (nullsafe) "?->" else "->");
         }
         self.formatNode(node.data.rhs);
     }
 
-    fn formatMethodCall(self: *Formatter, node: Ast.Node) void {
+    fn formatMethodCall(self: *Formatter, node: Ast.Node, nullsafe: bool) void {
         self.formatNode(node.data.lhs);
-        self.write("->");
+        self.write(if (nullsafe) "?->" else "->");
         self.write(self.ast.tokens[node.main_token].lexeme(self.source));
         self.write("(");
         const args = self.ast.extraSlice(node.data.rhs);

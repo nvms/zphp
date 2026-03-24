@@ -1387,7 +1387,11 @@ const Parser = struct {
                     continue;
                 },
                 .arrow => {
-                    left = try self.parsePropExpr(left);
+                    left = try self.parsePropExpr(left, false);
+                    continue;
+                },
+                .question_arrow => {
+                    left = try self.parsePropExpr(left, true);
                     continue;
                 },
                 .colon_colon => {
@@ -1656,15 +1660,15 @@ const Parser = struct {
         return self.addNode(.{ .tag = .array_access, .main_token = bracket_tok, .data = .{ .lhs = array, .rhs = index } });
     }
 
-    fn parsePropExpr(self: *Parser, object: u32) Error!u32 {
-        _ = self.advance(); // ->
+    fn parsePropExpr(self: *Parser, object: u32, nullsafe: bool) Error!u32 {
+        _ = self.advance(); // -> or ?->
         if (self.peek() != .identifier and self.peek() != .variable and !isSemiReserved(self.peek())) {
             try self.addError(.expected_identifier);
             return error.ParseError;
         }
         const name_tok = self.advance();
 
-        // method call: $obj->method(...)
+        // method call: $obj->method(...) or $obj?->method(...)
         if (self.peek() == .l_paren) {
             _ = self.advance(); // (
             var args = std.ArrayListUnmanaged(u32){};
@@ -1681,12 +1685,14 @@ const Parser = struct {
             _ = try self.expect(.r_paren);
 
             const extra = try self.addExtraList(args.items);
-            return self.addNode(.{ .tag = .method_call, .main_token = name_tok, .data = .{ .lhs = object, .rhs = extra } });
+            const tag: Ast.Node.Tag = if (nullsafe) .nullsafe_method_call else .method_call;
+            return self.addNode(.{ .tag = tag, .main_token = name_tok, .data = .{ .lhs = object, .rhs = extra } });
         }
 
-        // property access: $obj->prop
+        // property access: $obj->prop or $obj?->prop
         const prop = try self.addNode(.{ .tag = .identifier, .main_token = name_tok, .data = .{} });
-        return self.addNode(.{ .tag = .property_access, .main_token = name_tok, .data = .{ .lhs = object, .rhs = prop } });
+        const tag: Ast.Node.Tag = if (nullsafe) .nullsafe_property_access else .property_access;
+        return self.addNode(.{ .tag = tag, .main_token = name_tok, .data = .{ .lhs = object, .rhs = prop } });
     }
 
     fn parseStaticAccess(self: *Parser, class_node: u32) Error!u32 {
