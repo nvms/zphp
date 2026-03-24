@@ -183,6 +183,7 @@ pub const VM = struct {
         try @import("../stdlib/datetime.zig").register(&vm, allocator);
         try @import("../stdlib/spl.zig").register(&vm, allocator);
         try @import("../stdlib/pdo.zig").register(&vm, allocator);
+        try @import("../stdlib/websocket.zig").register(&vm, allocator);
         return vm;
     }
 

@@ -207,4 +207,5 @@ test {
     _ = @import("pipeline/parser_tests.zig");
     _ = @import("integration_tests.zig");
     _ = @import("fmt.zig");
+    _ = @import("websocket.zig");
 }

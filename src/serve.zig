@@ -5,6 +5,7 @@ const CompileResult = compiler.CompileResult;
 const VM = @import("runtime/vm.zig").VM;
 const Value = @import("runtime/value.zig").Value;
 const PhpArray = @import("runtime/value.zig").PhpArray;
+const PhpObject = @import("runtime/value.zig").PhpObject;
 
 const Allocator = std.mem.Allocator;
 const posix = std.posix;
@@ -122,6 +123,13 @@ pub fn serve(allocator: Allocator, config: ServeConfig) !void {
     };
     defer result.deinit();
 
+    const ws_enabled = blk: {
+        for (result.functions.items) |*f| {
+            if (std.mem.eql(u8, f.name, "ws_onMessage")) break :blk true;
+        }
+        break :blk false;
+    };
+
     const worker_count: usize = if (config.workers > 0)
         config.workers
     else blk: {
@@ -160,7 +168,7 @@ pub fn serve(allocator: Allocator, config: ServeConfig) !void {
     defer allocator.free(workers);
 
     for (workers) |*w| {
-        w.* = try std.Thread.spawn(.{}, workerLoop, .{ allocator, &result, doc_root, config.port });
+        w.* = try std.Thread.spawn(.{}, workerLoop, .{ allocator, &result, doc_root, config.port, ws_enabled });
     }
 
     while (true) {
@@ -175,17 +183,17 @@ pub fn serve(allocator: Allocator, config: ServeConfig) !void {
     for (workers) |w| w.join();
 }
 
-fn workerLoop(allocator: Allocator, result: *const CompileResult, doc_root: []const u8, port: u16) void {
+fn workerLoop(allocator: Allocator, result: *const CompileResult, doc_root: []const u8, port: u16, ws_enabled: bool) void {
     var vm = VM.init(allocator) catch return;
     defer vm.deinit();
 
     while (true) {
         const item = queue.pop() orelse return;
-        handleConnection(allocator, result, &vm, doc_root, item.conn, port);
+        handleConnection(allocator, result, &vm, doc_root, item.conn, port, ws_enabled);
     }
 }
 
-fn handleConnection(allocator: Allocator, result: *const CompileResult, vm: *VM, doc_root: []const u8, conn: std.net.Server.Connection, port: u16) void {
+fn handleConnection(allocator: Allocator, result: *const CompileResult, vm: *VM, doc_root: []const u8, conn: std.net.Server.Connection, port: u16, ws_enabled: bool) void {
     var buf: [65536]u8 = undefined;
     var buffered: usize = 0;
     var keep_alive = true;
@@ -210,6 +218,16 @@ fn handleConnection(allocator: Allocator, result: *const CompileResult, vm: *VM,
             body_len = std.fmt.parseInt(usize, cl, 10) catch 0;
         }
         const consumed = header_end + body_len;
+
+        // websocket upgrade
+        if (ws_enabled) {
+            const upgrade_hdr = req.getHeader("Upgrade");
+            if (upgrade_hdr != null and std.ascii.eqlIgnoreCase(upgrade_hdr.?, "websocket")) {
+                const ws_key = req.getHeader("Sec-WebSocket-Key") orelse break;
+                handleWebSocket(allocator, result, vm, conn.stream, ws_key);
+                return;
+            }
+        }
 
         // try static file first (skip for PHP files)
         if (tryServeStatic(allocator, conn.stream, doc_root, &req, keep_alive)) {
@@ -452,6 +470,68 @@ fn urlDecode(a: Allocator, input: []const u8) ![]const u8 {
         }
     }
     return buf.toOwnedSlice(a);
+}
+
+fn handleWebSocket(allocator: Allocator, result: *const CompileResult, vm: *VM, stream: std.net.Stream, ws_key: []const u8) void {
+    const ws = @import("websocket.zig");
+    const max_msg_size: usize = 1024 * 1024;
+
+    // handshake
+    var accept_buf: [28]u8 = undefined;
+    const accept = ws.computeAcceptKey(ws_key, &accept_buf);
+    ws.writeHandshakeResponse(stream, accept) catch return;
+
+    // run script once to register functions
+    vm.reset();
+    vm.interpret(result) catch return;
+
+    // create $ws object
+    const ws_obj = allocator.create(PhpObject) catch return;
+    ws_obj.* = .{ .class_name = "WebSocketConnection" };
+    ws_obj.set(allocator, "__ws_fd", .{ .int = @intCast(stream.handle) }) catch return;
+    ws_obj.set(allocator, "__ws_closed", .{ .bool = false }) catch return;
+    vm.objects.append(allocator, ws_obj) catch return;
+    const ws_val = Value{ .object = ws_obj };
+
+    // call ws_onOpen
+    if (vm.functions.contains("ws_onOpen")) {
+        _ = vm.callByName("ws_onOpen", &.{ws_val}) catch {};
+    }
+
+    // frame loop
+    const msg_buf = allocator.alloc(u8, max_msg_size) catch return;
+    defer allocator.free(msg_buf);
+
+    while (true) {
+        const frame = ws.readFrame(stream, msg_buf, max_msg_size) catch break;
+
+        switch (frame.opcode) {
+            .text, .binary => {
+                const data = allocator.dupe(u8, frame.payload) catch break;
+                vm.strings.append(allocator, data) catch {
+                    allocator.free(data);
+                    break;
+                };
+                _ = vm.callByName("ws_onMessage", &.{ ws_val, Value{ .string = data } }) catch {};
+            },
+            .ping => {
+                ws.writeFrame(stream, .pong, frame.payload) catch break;
+            },
+            .close => {
+                ws.writeCloseFrame(stream, 1000) catch {};
+                break;
+            },
+            .pong, .continuation => {},
+            _ => break,
+        }
+    }
+
+    // call ws_onClose
+    if (vm.functions.contains("ws_onClose")) {
+        _ = vm.callByName("ws_onClose", &.{ws_val}) catch {};
+    }
+
+    stream.close();
 }
 
 fn tryServeStatic(allocator: Allocator, stream: std.net.Stream, doc_root: []const u8, req: *const Request, keep_alive: bool) bool {
