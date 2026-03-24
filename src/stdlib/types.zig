@@ -66,6 +66,20 @@ pub const entries = .{
     .{ "class_alias", native_class_alias },
     .{ "spl_autoload_register", native_spl_autoload_register },
     .{ "spl_autoload_unregister", native_spl_autoload_unregister },
+    .{ "is_scalar", is_scalar },
+    .{ "is_iterable", is_iterable },
+    .{ "is_countable", is_countable },
+    .{ "ctype_alpha", ctype_alpha },
+    .{ "ctype_digit", ctype_digit },
+    .{ "ctype_alnum", ctype_alnum },
+    .{ "ctype_space", ctype_space },
+    .{ "ctype_upper", ctype_upper },
+    .{ "ctype_lower", ctype_lower },
+    .{ "ctype_xdigit", ctype_xdigit },
+    .{ "ctype_print", ctype_print },
+    .{ "ctype_punct", ctype_punct },
+    .{ "ctype_cntrl", ctype_cntrl },
+    .{ "ctype_graph", ctype_graph },
 };
 
 fn native_define(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
@@ -192,6 +206,79 @@ fn boolval(_: *NativeContext, args: []const Value) RuntimeError!Value {
 
 fn is_object(_: *NativeContext, args: []const Value) RuntimeError!Value {
     return .{ .bool = args.len > 0 and args[0] == .object };
+}
+
+fn is_scalar(_: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len == 0) return .{ .bool = false };
+    return .{ .bool = switch (args[0]) {
+        .int, .float, .string, .bool => true,
+        else => false,
+    } };
+}
+
+fn is_iterable(_: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len == 0) return .{ .bool = false };
+    return .{ .bool = switch (args[0]) {
+        .array, .generator => true,
+        else => false,
+    } };
+}
+
+fn is_countable(_: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len == 0) return .{ .bool = false };
+    return .{ .bool = args[0] == .array };
+}
+
+fn ctypeCheck(args: []const Value, comptime pred: fn (u8) bool) Value {
+    if (args.len == 0) return .{ .bool = false };
+    if (args[0] != .string) return .{ .bool = false };
+    const s = args[0].string;
+    if (s.len == 0) return .{ .bool = false };
+    for (s) |c| {
+        if (!pred(c)) return .{ .bool = false };
+    }
+    return .{ .bool = true };
+}
+
+fn ctype_alpha(_: *NativeContext, args: []const Value) RuntimeError!Value {
+    return ctypeCheck(args, std.ascii.isAlphabetic);
+}
+fn ctype_digit(_: *NativeContext, args: []const Value) RuntimeError!Value {
+    return ctypeCheck(args, std.ascii.isDigit);
+}
+fn ctype_alnum(_: *NativeContext, args: []const Value) RuntimeError!Value {
+    return ctypeCheck(args, std.ascii.isAlphanumeric);
+}
+fn ctype_space(_: *NativeContext, args: []const Value) RuntimeError!Value {
+    return ctypeCheck(args, std.ascii.isWhitespace);
+}
+fn ctype_upper(_: *NativeContext, args: []const Value) RuntimeError!Value {
+    return ctypeCheck(args, std.ascii.isUpper);
+}
+fn ctype_lower(_: *NativeContext, args: []const Value) RuntimeError!Value {
+    return ctypeCheck(args, std.ascii.isLower);
+}
+fn ctype_xdigit(_: *NativeContext, args: []const Value) RuntimeError!Value {
+    return ctypeCheck(args, std.ascii.isHex);
+}
+fn ctype_print(_: *NativeContext, args: []const Value) RuntimeError!Value {
+    return ctypeCheck(args, std.ascii.isPrint);
+}
+fn ctype_punct(_: *NativeContext, args: []const Value) RuntimeError!Value {
+    return ctypeCheck(args, isPunct);
+}
+fn ctype_cntrl(_: *NativeContext, args: []const Value) RuntimeError!Value {
+    return ctypeCheck(args, std.ascii.isControl);
+}
+fn ctype_graph(_: *NativeContext, args: []const Value) RuntimeError!Value {
+    return ctypeCheck(args, isGraph);
+}
+
+fn isPunct(c: u8) bool {
+    return std.ascii.isPrint(c) and !std.ascii.isAlphanumeric(c) and c != ' ';
+}
+fn isGraph(c: u8) bool {
+    return std.ascii.isPrint(c) and c != ' ';
 }
 
 fn get_class(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
