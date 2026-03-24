@@ -184,6 +184,7 @@ pub const VM = struct {
         try @import("../stdlib/spl.zig").register(&vm, allocator);
         try @import("../stdlib/pdo.zig").register(&vm, allocator);
         try @import("../stdlib/websocket.zig").register(&vm, allocator);
+        try @import("../stdlib/filesystem.zig").register(&vm, allocator);
         return vm;
     }
 
@@ -250,6 +251,7 @@ pub const VM = struct {
         }
         self.arrays.deinit(self.allocator);
         @import("../stdlib/pdo.zig").cleanupResources(self.objects);
+        @import("../stdlib/filesystem.zig").cleanupHandles(self.objects);
         for (self.objects.items) |o| {
             o.deinit(self.allocator);
             self.allocator.destroy(o);
@@ -307,6 +309,7 @@ pub const VM = struct {
         }
         self.arrays.clearRetainingCapacity();
         @import("../stdlib/pdo.zig").cleanupResources(self.objects);
+        @import("../stdlib/filesystem.zig").cleanupHandles(self.objects);
         for (self.objects.items) |o| {
             o.deinit(self.allocator);
             self.allocator.destroy(o);
