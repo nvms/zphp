@@ -1,9 +1,9 @@
 <?php
 echo strcmp("abc", "abc");
 echo "\n";
-echo strcmp("abc", "def");
+echo strcmp("abc", "def") < 0 ? "neg" : "pos";
 echo "\n";
-echo strcmp("def", "abc");
+echo strcmp("def", "abc") > 0 ? "pos" : "neg";
 echo "\n";
 
 echo ord("A");

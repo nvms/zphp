@@ -305,11 +305,9 @@ fn native_strcmp(_: *NativeContext, args: []const Value) RuntimeError!Value {
     const b = if (args[1] == .string) args[1].string else "";
     const min_len = @min(a.len, b.len);
     for (0..min_len) |i| {
-        if (a[i] < b[i]) return .{ .int = -1 };
-        if (a[i] > b[i]) return .{ .int = 1 };
+        if (a[i] != b[i]) return .{ .int = @as(i64, a[i]) - @as(i64, b[i]) };
     }
-    if (a.len < b.len) return .{ .int = -1 };
-    if (a.len > b.len) return .{ .int = 1 };
+    if (a.len != b.len) return .{ .int = @as(i64, @intCast(a.len)) - @as(i64, @intCast(b.len)) };
     return .{ .int = 0 };
 }
 
