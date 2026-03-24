@@ -60,7 +60,7 @@ zig 0.15.x. `zig build test` must pass before pushing. short lowercase commits, 
 
 ## roadmap
 
-next: PDO database support (PDO base class + pdo_sqlite + pdo_mysql), gzip compression for serve static files, fibers, WebSocket support for serve (design toward event-loop-per-worker for long-lived connections - don't assume all connections are short-lived request/response)
+next: heredoc/nowdoc (lexer change - `<<<EOT` and `<<<'EOT'` multiline string literals, common in templates and SQL), PDO database support (PDO base class + pdo_sqlite + pdo_mysql), gzip compression for serve static files, fibers, WebSocket support for serve (design toward event-loop-per-worker for long-lived connections - don't assume all connections are short-lived request/response)
 
 ## enums
 

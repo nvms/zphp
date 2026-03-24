@@ -1207,6 +1207,11 @@ pub const VM = struct {
                                 try new_vars.put(self.allocator, func.params[i], self.stack[self.sp - ac + i]);
                             }
                             self.sp -= ac;
+                            // fill missing params with defaults
+                            for (ac..func.arity) |i| {
+                                const default = if (i < func.defaults.len) func.defaults[i] else Value.null;
+                                try new_vars.put(self.allocator, func.params[i], default);
+                            }
                             self.frames[self.frame_count] = .{ .chunk = &func.chunk, .ip = 0, .vars = new_vars };
                             self.frame_count += 1;
 

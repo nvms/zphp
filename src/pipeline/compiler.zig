@@ -1280,18 +1280,41 @@ const Compiler = struct {
             }
         }
 
+        // count promoted constructor params
+        var promoted_count: u8 = 0;
+        var constructor_params: []const u32 = &.{};
+        for (members) |member_idx| {
+            const member = self.ast.nodes[member_idx];
+            if (member.tag == .class_method and std.mem.eql(u8, self.ast.tokenSlice(member.main_token), "__construct")) {
+                constructor_params = self.ast.extraSlice(member.data.lhs);
+                for (constructor_params) |p| {
+                    const pnode = self.ast.nodes[p];
+                    if ((pnode.data.rhs >> 2) & 3 > 0) promoted_count += 1;
+                }
+                break;
+            }
+        }
+
         // compile instance property defaults (push onto stack)
         var prop_count: u8 = 0;
         for (members) |member_idx| {
             const member = self.ast.nodes[member_idx];
             if (member.tag == .class_property) prop_count += 1;
         }
+        prop_count += promoted_count;
         for (members) |member_idx| {
             const member = self.ast.nodes[member_idx];
             if (member.tag == .class_property) {
                 if (member.data.lhs != 0) {
                     try self.compileNode(member.data.lhs);
                 }
+            }
+        }
+        // promoted params get null defaults (actual values assigned in constructor body)
+        for (constructor_params) |p| {
+            const pnode = self.ast.nodes[p];
+            if ((pnode.data.rhs >> 2) & 3 > 0) {
+                try self.emitOp(.op_null);
             }
         }
 
@@ -1339,6 +1362,20 @@ const Compiler = struct {
                 try self.emitU16(pname_idx);
                 try self.emitByte(if (member.data.lhs != 0) @as(u8, 1) else @as(u8, 0));
                 try self.emitByte(@intCast(member.data.rhs));
+            }
+        }
+        // promoted constructor params as properties
+        for (constructor_params) |p| {
+            const pnode = self.ast.nodes[p];
+            const promotion = (pnode.data.rhs >> 2) & 3;
+            if (promotion > 0) {
+                var param_name = self.ast.tokenSlice(pnode.main_token);
+                if (param_name.len > 0 and param_name[0] == '$') param_name = param_name[1..];
+                const pname_idx = try self.addConstant(.{ .string = param_name });
+                try self.emitU16(pname_idx);
+                try self.emitByte(1); // has default (null placeholder)
+                // visibility: 0=public, 1=protected, 2=private
+                try self.emitByte(@intCast(promotion - 1));
             }
         }
 
@@ -1521,9 +1558,34 @@ const Compiler = struct {
 
         const param_nodes = self.ast.extraSlice(member.data.lhs);
         const param_names = try self.allocator.alloc([]const u8, param_nodes.len);
+        const ref_flags = try self.allocator.alloc(bool, param_nodes.len);
         for (param_nodes, 0..) |p, i| {
-            param_names[i] = self.ast.tokenSlice(self.ast.nodes[p].main_token);
+            const pnode = self.ast.nodes[p];
+            param_names[i] = self.ast.tokenSlice(pnode.main_token);
+            ref_flags[i] = (pnode.data.rhs & 2) != 0;
         }
+
+        var defaults = std.ArrayListUnmanaged(Value){};
+        defer defaults.deinit(self.allocator);
+        var required: u8 = 0;
+        var seen_default = false;
+        var is_variadic = false;
+        for (param_nodes) |p| {
+            const pnode = self.ast.nodes[p];
+            if ((pnode.data.rhs & 1) != 0) {
+                is_variadic = true;
+                try defaults.append(self.allocator, .null);
+            } else if (pnode.data.lhs != 0) {
+                seen_default = true;
+                try defaults.append(self.allocator, self.evalConstExpr(pnode.data.lhs));
+            } else {
+                if (!seen_default) required += 1;
+                try defaults.append(self.allocator, .null);
+            }
+        }
+        if (!seen_default and !is_variadic) required = @intCast(param_nodes.len);
+        const defaults_owned = try self.allocator.alloc(Value, defaults.items.len);
+        @memcpy(defaults_owned, defaults.items);
 
         var sub = Compiler{
             .ast = self.ast,
@@ -1544,6 +1606,28 @@ const Compiler = struct {
             sub.string_allocs.deinit(self.allocator);
         }
 
+        // constructor property promotion: emit $this->prop = $prop for each promoted param
+        if (std.mem.eql(u8, method_name, "__construct")) {
+            for (param_nodes) |p| {
+                const pnode = self.ast.nodes[p];
+                const promotion = (pnode.data.rhs >> 2) & 3;
+                if (promotion > 0) {
+                    var param_name = self.ast.tokenSlice(pnode.main_token);
+                    const this_idx = try sub.addConstant(.{ .string = "$this" });
+                    const var_idx = try sub.addConstant(.{ .string = param_name });
+                    try sub.emitOp(.get_var);
+                    try sub.emitU16(this_idx);
+                    try sub.emitOp(.get_var);
+                    try sub.emitU16(var_idx);
+                    if (param_name.len > 0 and param_name[0] == '$') param_name = param_name[1..];
+                    const prop_idx = try sub.addConstant(.{ .string = param_name });
+                    try sub.emitOp(.set_prop);
+                    try sub.emitU16(prop_idx);
+                    try sub.emitOp(.pop);
+                }
+            }
+        }
+
         const body_idx = member.data.rhs & 0x3FFFFFFF;
         try sub.compileNode(body_idx);
         try sub.emitOp(.op_null);
@@ -1555,7 +1639,11 @@ const Compiler = struct {
         try self.functions.append(self.allocator, .{
             .name = full_name,
             .arity = @intCast(param_nodes.len),
+            .required_params = required,
+            .is_variadic = is_variadic,
             .params = param_names[0..param_nodes.len],
+            .defaults = defaults_owned,
+            .ref_params = ref_flags,
             .chunk = sub.chunk,
         });
 

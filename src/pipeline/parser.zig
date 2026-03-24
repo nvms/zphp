@@ -1264,6 +1264,14 @@ const Parser = struct {
     }
 
     fn parseParam(self: *Parser) Error!u32 {
+        // constructor property promotion: visibility keyword before param
+        // 0 = none, 1 = public, 2 = protected, 3 = private
+        var promotion: u32 = 0;
+        if (self.peek() == .kw_public) { promotion = 1; _ = self.advance(); }
+        else if (self.peek() == .kw_protected) { promotion = 2; _ = self.advance(); }
+        else if (self.peek() == .kw_private) { promotion = 3; _ = self.advance(); }
+        // skip readonly
+        if (self.peek() == .kw_readonly) _ = self.advance();
         if (self.isTypeName() or self.peek() == .question or self.peek() == .l_paren) {
             self.skipTypeHint();
         }
@@ -1280,10 +1288,11 @@ const Parser = struct {
             _ = self.advance();
             default = try self.parseExpression();
         }
-        // rhs encoding: bit 0 = variadic, bit 1 = by-reference
+        // rhs encoding: bits 0 = variadic, bit 1 = by-reference, bits 2-3 = promotion visibility
         var flags: u32 = 0;
         if (is_variadic) flags |= 1;
         if (is_ref) flags |= 2;
+        flags |= (promotion << 2);
         return self.addNode(.{ .tag = .variable, .main_token = tok, .data = .{ .lhs = default, .rhs = flags } });
     }
 
