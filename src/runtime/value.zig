@@ -55,6 +55,17 @@ pub const PhpArray = struct {
     pub fn length(self: *const PhpArray) i64 {
         return @intCast(self.entries.items.len);
     }
+
+    pub fn remove(self: *PhpArray, key: Key) void {
+        var i: usize = 0;
+        while (i < self.entries.items.len) {
+            if (self.entries.items[i].key.eql(key)) {
+                _ = self.entries.orderedRemove(i);
+                return;
+            }
+            i += 1;
+        }
+    }
 };
 
 const Chunk = @import("../pipeline/bytecode.zig").Chunk;

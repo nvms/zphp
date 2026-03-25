@@ -1709,6 +1709,12 @@ const Parser = struct {
             return self.addNode(.{ .tag = .static_prop_access, .main_token = var_tok, .data = .{ .lhs = class_node } });
         }
 
+        // ::class is a special class name resolution constant
+        if (self.peek() == .kw_class) {
+            const class_tok = self.advance();
+            return self.addNode(.{ .tag = .static_prop_access, .main_token = class_tok, .data = .{ .lhs = class_node } });
+        }
+
         const name_tok = if (self.peek() == .identifier or isSemiReserved(self.peek()))
             self.advance()
         else

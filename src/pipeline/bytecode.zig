@@ -118,6 +118,11 @@ pub const OpCode = enum(u8) {
 
     // object
     clone_obj, // shallow copy object on top of stack
+
+    // unset
+    unset_var, // u16: name constant index - remove variable from current scope
+    unset_prop, // u16: prop name - pop object, remove property
+    unset_array_elem, // pop key, pop array, remove element
 };
 
 

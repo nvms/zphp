@@ -2582,9 +2582,39 @@ const Compiler = struct {
         }
     }
 
+    fn compileUnset(self: *Compiler, args: []const u32) Error!void {
+        for (args) |arg_idx| {
+            const arg = self.ast.nodes[arg_idx];
+            if (arg.tag == .variable) {
+                const name = self.ast.tokenSlice(arg.main_token);
+                const idx = try self.addConstant(.{ .string = name });
+                try self.emitOp(.unset_var);
+                try self.emitU16(idx);
+            } else if (arg.tag == .property_access) {
+                try self.compileNode(arg.data.lhs);
+                const prop_node = self.ast.nodes[arg.data.rhs];
+                var prop_name = self.ast.tokenSlice(prop_node.main_token);
+                if (prop_name.len > 0 and prop_name[0] == '$') prop_name = prop_name[1..];
+                const prop_idx = try self.addConstant(.{ .string = prop_name });
+                try self.emitOp(.unset_prop);
+                try self.emitU16(prop_idx);
+            } else if (arg.tag == .array_access) {
+                try self.compileNode(arg.data.lhs);
+                try self.compileNode(arg.data.rhs);
+                try self.emitOp(.unset_array_elem);
+            }
+        }
+        try self.emitOp(.op_null);
+    }
+
     fn compileCall(self: *Compiler, node: Ast.Node) Error!void {
         const callee = self.ast.nodes[node.data.lhs];
         const args = self.ast.extraSlice(node.data.rhs);
+
+        if (callee.tag == .identifier and std.mem.eql(u8, self.ast.tokenSlice(callee.main_token), "unset")) {
+            try self.compileUnset(args);
+            return;
+        }
 
         if (hasSplatOrNamed(self.ast, args)) {
             try self.emitSpreadArgs(args);

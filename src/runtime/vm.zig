@@ -212,6 +212,7 @@ pub const VM = struct {
         vars: std.StringHashMapUnmanaged(Value),
         generator: ?*Generator = null,
         ref_slots: std.StringHashMapUnmanaged(*Value) = .{},
+        called_class: ?[]const u8 = null,
     };
 
     pub fn init(allocator: Allocator) RuntimeError!VM {
@@ -637,6 +638,12 @@ pub const VM = struct {
                         }
                         self.sp -= 1;
                         try self.callNamedFunction(name, arg_count);
+                    } else if (name_val == .object) {
+                        var args_buf: [16]Value = undefined;
+                        for (0..ac) |i| args_buf[i] = self.stack[self.sp - ac + i];
+                        self.sp -= ac + 1;
+                        const result = try self.callMethod(name_val.object, "__invoke", args_buf[0..ac]);
+                        self.push(result);
                     } else if (name_val == .array) {
                         const arr = name_val.array;
                         if (arr.entries.items.len != 2) return error.RuntimeError;
@@ -876,6 +883,31 @@ pub const VM = struct {
                     _ = self.pop();
                 },
 
+                .unset_var => {
+                    const idx = self.readU16();
+                    const name = self.currentChunk().constants.items[idx].string;
+                    _ = self.currentFrame().vars.remove(name);
+                },
+                .unset_prop => {
+                    const name_idx = self.readU16();
+                    const prop_name = self.currentChunk().constants.items[name_idx].string;
+                    const obj_val = self.pop();
+                    if (obj_val == .object) {
+                        const obj = obj_val.object;
+                        if (self.hasMethod(obj.class_name, "__unset")) {
+                            _ = self.callMethod(obj, "__unset", &.{.{ .string = prop_name }}) catch {};
+                        } else {
+                            _ = obj.properties.remove(prop_name);
+                        }
+                    }
+                },
+                .unset_array_elem => {
+                    const key = self.pop();
+                    const arr_val = self.pop();
+                    if (arr_val == .array) {
+                        arr_val.array.remove(Value.toArrayKey(key));
+                    }
+                },
                 .clone_obj => {
                     const val = self.pop();
                     if (val == .object) {
@@ -1497,7 +1529,9 @@ pub const VM = struct {
                     const name_idx = self.readU16();
                     const arg_count = self.readByte();
                     var class_name = self.currentChunk().constants.items[name_idx].string;
-                    if (std.mem.eql(u8, class_name, "self") or std.mem.eql(u8, class_name, "static")) {
+                    if (std.mem.eql(u8, class_name, "static")) {
+                        class_name = self.resolveStaticClassName(class_name);
+                    } else if (std.mem.eql(u8, class_name, "self")) {
                         if (self.currentDefiningClass()) |dc| class_name = dc;
                     } else if (std.mem.eql(u8, class_name, "parent")) {
                         if (self.currentDefiningClass()) |dc| {
@@ -1590,16 +1624,25 @@ pub const VM = struct {
                     const prop_name = self.currentChunk().constants.items[name_idx].string;
                     const obj_val = self.pop();
                     if (obj_val == .object) {
-                        const vr = self.findPropertyVisibility(obj_val.object.class_name, prop_name);
-                        if (!self.checkVisibility(vr.defining_class, vr.visibility)) {
-                            const msg = try std.fmt.allocPrint(self.allocator, "Cannot access {s} property {s}::${s}", .{
-                                @tagName(vr.visibility), vr.defining_class, prop_name,
-                            });
-                            try self.strings.append(self.allocator, msg);
-                            if (try self.throwBuiltinException("Error", msg)) continue;
-                            return error.RuntimeError;
+                        const obj = obj_val.object;
+                        const val = obj.get(prop_name);
+                        if (val != .null or obj.properties.contains(prop_name)) {
+                            const vr = self.findPropertyVisibility(obj.class_name, prop_name);
+                            if (!self.checkVisibility(vr.defining_class, vr.visibility)) {
+                                const msg = try std.fmt.allocPrint(self.allocator, "Cannot access {s} property {s}::${s}", .{
+                                    @tagName(vr.visibility), vr.defining_class, prop_name,
+                                });
+                                try self.strings.append(self.allocator, msg);
+                                if (try self.throwBuiltinException("Error", msg)) continue;
+                                return error.RuntimeError;
+                            }
+                            self.push(val);
+                        } else if (self.hasMethod(obj.class_name, "__get")) {
+                            const result = self.callMethod(obj, "__get", &.{.{ .string = prop_name }}) catch .null;
+                            self.push(result);
+                        } else {
+                            self.push(.null);
                         }
-                        self.push(obj_val.object.get(prop_name));
                     } else {
                         self.push(.null);
                     }
@@ -1611,27 +1654,32 @@ pub const VM = struct {
                     const val = try self.copyValue(self.pop());
                     const obj_val = self.pop();
                     if (obj_val == .object) {
-                        const vr = self.findPropertyVisibility(obj_val.object.class_name, prop_name);
-                        if (!self.checkVisibility(vr.defining_class, vr.visibility)) {
-                            const msg = try std.fmt.allocPrint(self.allocator, "Cannot access {s} property {s}::${s}", .{
-                                @tagName(vr.visibility), vr.defining_class, prop_name,
-                            });
-                            try self.strings.append(self.allocator, msg);
-                            if (try self.throwBuiltinException("Error", msg)) continue;
-                            return error.RuntimeError;
-                        }
-                        if (vr.is_readonly) {
-                            const existing = obj_val.object.get(prop_name);
-                            if (existing != .null) {
-                                const msg = try std.fmt.allocPrint(self.allocator, "Cannot modify readonly property {s}::${s}", .{
-                                    vr.defining_class, prop_name,
+                        const obj = obj_val.object;
+                        if (!obj.properties.contains(prop_name) and self.hasMethod(obj.class_name, "__set")) {
+                            _ = self.callMethod(obj, "__set", &.{ .{ .string = prop_name }, val }) catch {};
+                        } else {
+                            const vr = self.findPropertyVisibility(obj.class_name, prop_name);
+                            if (!self.checkVisibility(vr.defining_class, vr.visibility)) {
+                                const msg = try std.fmt.allocPrint(self.allocator, "Cannot access {s} property {s}::${s}", .{
+                                    @tagName(vr.visibility), vr.defining_class, prop_name,
                                 });
                                 try self.strings.append(self.allocator, msg);
                                 if (try self.throwBuiltinException("Error", msg)) continue;
                                 return error.RuntimeError;
                             }
+                            if (vr.is_readonly) {
+                                const existing = obj.get(prop_name);
+                                if (existing != .null) {
+                                    const msg = try std.fmt.allocPrint(self.allocator, "Cannot modify readonly property {s}::${s}", .{
+                                        vr.defining_class, prop_name,
+                                    });
+                                    try self.strings.append(self.allocator, msg);
+                                    if (try self.throwBuiltinException("Error", msg)) continue;
+                                    return error.RuntimeError;
+                                }
+                            }
+                            try obj.set(self.allocator, prop_name, val);
                         }
-                        try obj_val.object.set(self.allocator, prop_name, val);
                     }
                     self.push(val);
                 },
@@ -1962,14 +2010,16 @@ pub const VM = struct {
                                     try new_vars.put(self.allocator, func.params[i], self.stack[self.sp - ac + i]);
                                 }
                                 self.sp -= ac;
-                                self.frames[self.frame_count] = .{ .chunk = &func.chunk, .ip = 0, .vars = new_vars };
+                                self.frames[self.frame_count] = .{ .chunk = &func.chunk, .ip = 0, .vars = new_vars, .called_class = class_name };
                                 self.frame_count += 1;
                             } else return error.RuntimeError;
                         } else {
                             try self.callNamedFunction(full_name, arg_count);
+                            self.frames[self.frame_count - 1].called_class = class_name;
                         }
                     } else {
                         try self.callNamedFunction(full_name, arg_count);
+                        self.frames[self.frame_count - 1].called_class = class_name;
                     }
                 },
 
@@ -2043,7 +2093,9 @@ pub const VM = struct {
 
                     class_name = self.resolveStaticClassName(class_name);
 
-                    if (self.getStaticProp(class_name, prop_name)) |val| {
+                    if (std.mem.eql(u8, prop_name, "class")) {
+                        self.push(.{ .string = class_name });
+                    } else if (self.getStaticProp(class_name, prop_name)) |val| {
                         self.push(val);
                     } else {
                         self.push(.null);
@@ -2159,7 +2211,13 @@ pub const VM = struct {
     }
 
     fn resolveStaticClassName(self: *VM, name: []const u8) []const u8 {
-        if (std.mem.eql(u8, name, "self") or std.mem.eql(u8, name, "static")) {
+        if (std.mem.eql(u8, name, "static")) {
+            if (self.currentFrame().vars.get("$this")) |this_val| {
+                if (this_val == .object) return this_val.object.class_name;
+            }
+            if (self.currentFrame().called_class) |cc| return cc;
+            if (self.currentDefiningClass()) |dc| return dc;
+        } else if (std.mem.eql(u8, name, "self")) {
             if (self.currentDefiningClass()) |dc| return dc;
         } else if (std.mem.eql(u8, name, "parent")) {
             if (self.currentDefiningClass()) |dc| {
