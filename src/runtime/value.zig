@@ -221,9 +221,42 @@ pub const Value = union(enum) {
     }
 
     pub fn equal(a: Value, b: Value) bool {
-        if (a == .array or b == .array or a == .object or b == .object or a == .fiber or b == .fiber) return false;
+        if (a == .object or b == .object or a == .fiber or b == .fiber) return false;
+        if (a == .array and b == .array) return a.array == b.array;
+        if (a == .array or b == .array) return a.isTruthy() == b.isTruthy();
+        if (a == .null and b == .null) return true;
+        if (a == .null) return !b.isTruthy();
+        if (b == .null) return !a.isTruthy();
         if (a == .string and b == .string) return std.mem.eql(u8, a.string, b.string);
+        // php 8: int/float vs non-numeric string is always false
+        if ((a == .int or a == .float) and b == .string) {
+            if (!isNumericString(b.string)) return false;
+        }
+        if ((b == .int or b == .float) and a == .string) {
+            if (!isNumericString(a.string)) return false;
+        }
         return toFloat(a) == toFloat(b);
+    }
+
+    fn isNumericString(s: []const u8) bool {
+        var i: usize = 0;
+        while (i < s.len and (s[i] == ' ' or s[i] == '\t' or s[i] == '\n' or s[i] == '\r')) i += 1;
+        if (i >= s.len) return false;
+        if (s[i] == '-' or s[i] == '+') i += 1;
+        if (i >= s.len) return false;
+        var has_digit = false;
+        while (i < s.len and s[i] >= '0' and s[i] <= '9') { i += 1; has_digit = true; }
+        if (i < s.len and s[i] == '.') {
+            i += 1;
+            while (i < s.len and s[i] >= '0' and s[i] <= '9') { i += 1; has_digit = true; }
+        }
+        if (i < s.len and (s[i] == 'e' or s[i] == 'E')) {
+            i += 1;
+            if (i < s.len and (s[i] == '-' or s[i] == '+')) i += 1;
+            while (i < s.len and s[i] >= '0' and s[i] <= '9') i += 1;
+        }
+        while (i < s.len and (s[i] == ' ' or s[i] == '\t' or s[i] == '\n' or s[i] == '\r')) i += 1;
+        return has_digit and i == s.len;
     }
 
     pub fn identical(a: Value, b: Value) bool {
@@ -303,10 +336,10 @@ pub const Value = union(enum) {
     }
 
     fn parseLeadingFloat(s: []const u8) f64 {
-        // find the longest prefix that parses as a float
-        var end: usize = 0;
-        while (end < s.len and (s[end] == ' ' or s[end] == '\t' or s[end] == '\n' or s[end] == '\r')) end += 1;
-        if (end >= s.len) return 0.0;
+        var start: usize = 0;
+        while (start < s.len and (s[start] == ' ' or s[start] == '\t' or s[start] == '\n' or s[start] == '\r')) start += 1;
+        if (start >= s.len) return 0.0;
+        var end = start;
         if (s[end] == '-' or s[end] == '+') end += 1;
         var has_digit = false;
         while (end < s.len and s[end] >= '0' and s[end] <= '9') { end += 1; has_digit = true; }
@@ -320,7 +353,7 @@ pub const Value = union(enum) {
             while (end < s.len and s[end] >= '0' and s[end] <= '9') end += 1;
         }
         if (!has_digit) return 0.0;
-        return std.fmt.parseFloat(f64, s[0..end]) catch 0.0;
+        return std.fmt.parseFloat(f64, s[start..end]) catch 0.0;
     }
 
     pub fn toArrayKey(v: Value) PhpArray.Key {

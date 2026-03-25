@@ -1453,7 +1453,19 @@ pub const VM = struct {
                     }
 
                     // look up method in class hierarchy
-                    const full_name = try self.resolveMethod(obj.class_name, method_name);
+                    const full_name = self.resolveMethod(obj.class_name, method_name) catch {
+                        if (self.hasMethod(obj.class_name, "__call")) {
+                            var args_arr = try self.allocator.create(PhpArray);
+                            args_arr.* = .{};
+                            try self.arrays.append(self.allocator, args_arr);
+                            for (0..ac) |i| try args_arr.append(self.allocator, self.stack[self.sp - ac + i]);
+                            self.sp -= ac + 1;
+                            const result = try self.callMethod(obj, "__call", &.{ .{ .string = method_name }, .{ .array = args_arr } });
+                            self.push(result);
+                            continue;
+                        }
+                        return error.RuntimeError;
+                    };
                     if (self.native_fns.get(full_name)) |native| {
                         // native method - call with $this in a temporary frame
                         var args_buf: [16]Value = undefined;
