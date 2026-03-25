@@ -987,12 +987,22 @@ pub const VM = struct {
                 .get_local => {
                     const slot = self.readU16();
                     const frame = self.currentFrame();
-                    const sn = if (frame.func) |func| func.slot_names else self.global_slot_names;
-                    if (slot < sn.len and sn[slot].len > 0) {
-                        if (frame.ref_slots.count() > 0) {
-                            if (frame.ref_slots.get(sn[slot])) |cell| {
+                    if (frame.func) |func| {
+                        // function scope: original fast path
+                        if (slot < func.slot_names.len and func.slot_names[slot].len > 0) {
+                            if (frame.ref_slots.get(func.slot_names[slot])) |cell| {
                                 self.push(cell.*);
                                 continue;
+                            }
+                        }
+                    } else {
+                        // global scope: check ref_slots if any exist
+                        if (slot < self.global_slot_names.len and self.global_slot_names[slot].len > 0) {
+                            if (frame.ref_slots.count() > 0) {
+                                if (frame.ref_slots.get(self.global_slot_names[slot])) |cell| {
+                                    self.push(cell.*);
+                                    continue;
+                                }
                             }
                         }
                     }
@@ -1000,9 +1010,8 @@ pub const VM = struct {
                         const val = frame.locals[slot];
                         if (val != .null or frame.func != null) {
                             self.push(val);
-                        } else if (slot < sn.len and sn[slot].len > 0) {
-                            // global scope fallback: check vars for dynamically set variables
-                            if (frame.vars.get(sn[slot])) |v| {
+                        } else if (slot < self.global_slot_names.len and self.global_slot_names[slot].len > 0) {
+                            if (frame.vars.get(self.global_slot_names[slot])) |v| {
                                 frame.locals[slot] = v;
                                 self.push(v);
                             } else self.push(.null);
