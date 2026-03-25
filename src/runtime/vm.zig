@@ -163,6 +163,11 @@ pub const ClassDef = struct {
         self.static_props.deinit(allocator);
         self.interfaces.deinit(allocator);
         self.case_order.deinit(allocator);
+        if (self.slot_layout) |layout| {
+            allocator.free(layout.names);
+            allocator.free(layout.defaults);
+            allocator.destroy(layout);
+        }
     }
 };
 
