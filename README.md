@@ -58,6 +58,18 @@ zphp build --compile server.php   # produces ./server (4-5MB)
 ./server                           # run - no zphp needed
 ```
 
+## Use cases
+
+**CLI tools as single binaries** - write a data migration script, a log parser, a CI/CD utility in PHP. Compile it with `zphp build --compile`. Distribute one file. No "install PHP" step for the person running it. PHP is good at string manipulation, file processing, and data transformation - now you can ship that as a binary.
+
+**Edge and embedded** - the full runtime with HTTP, WebSocket, SQLite, and a scripting language in under 5MB. Runs on a Raspberry Pi, a $5 VPS, a minimal container. Places where nginx + php-fpm + extensions won't fit or aren't worth the complexity.
+
+**Microservices** - one process, one port, one file. `zphp serve` with worker pooling and pre-compiled bytecode. No orchestration layer between your code and the network. Standalone binaries make container images trivial - `FROM scratch`, `COPY`, `ENTRYPOINT`.
+
+**WebSocket servers** - VM state persists across messages without external storage. No Redis for session state, no polling workarounds. The same connection-level persistence model that makes Node.js natural for real-time - chat, live dashboards, multiplayer - but in PHP.
+
+**Prototyping** - zero-install PHP. Download one binary, write code, run it. Formatter, test runner, and package manager included. No homebrew, no apt, no Docker, no XAMPP.
+
 ## Installation
 
 Prebuilt binaries for Linux and macOS will be available via GitHub releases.
