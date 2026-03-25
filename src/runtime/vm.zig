@@ -485,16 +485,27 @@ pub const VM = struct {
                 .concat => {
                     const b = self.pop();
                     const a = self.pop();
-                    var buf = std.ArrayListUnmanaged(u8){};
-                    if (a == .object) {
-                        try buf.appendSlice(self.allocator, try self.objectToString(a.object));
-                    } else try a.format(&buf, self.allocator);
-                    if (b == .object) {
-                        try buf.appendSlice(self.allocator, try self.objectToString(b.object));
-                    } else try b.format(&buf, self.allocator);
-                    const owned = try buf.toOwnedSlice(self.allocator);
-                    try self.strings.append(self.allocator, owned);
-                    self.push(.{ .string = owned });
+                    // fast path: both strings
+                    if (a == .string and b == .string) {
+                        const as = a.string;
+                        const bs = b.string;
+                        const owned = try self.allocator.alloc(u8, as.len + bs.len);
+                        @memcpy(owned[0..as.len], as);
+                        @memcpy(owned[as.len..], bs);
+                        try self.strings.append(self.allocator, owned);
+                        self.push(.{ .string = owned });
+                    } else {
+                        var buf = std.ArrayListUnmanaged(u8){};
+                        if (a == .object) {
+                            try buf.appendSlice(self.allocator, try self.objectToString(a.object));
+                        } else try a.format(&buf, self.allocator);
+                        if (b == .object) {
+                            try buf.appendSlice(self.allocator, try self.objectToString(b.object));
+                        } else try b.format(&buf, self.allocator);
+                        const owned = try buf.toOwnedSlice(self.allocator);
+                        try self.strings.append(self.allocator, owned);
+                        self.push(.{ .string = owned });
+                    }
                 },
 
                 .bit_and => {

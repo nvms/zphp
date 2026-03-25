@@ -33,6 +33,20 @@ pub const PhpArray = struct {
     }
 
     pub fn set(self: *PhpArray, allocator: std.mem.Allocator, key: Key, value: Value) !void {
+        if (key == .int) {
+            const idx = key.int;
+            if (idx >= 0) {
+                const uidx: usize = @intCast(idx);
+                if (uidx < self.entries.items.len) {
+                    const entry = &self.entries.items[uidx];
+                    if (entry.key == .int and entry.key.int == idx) {
+                        entry.value = value;
+                        if (idx >= self.next_int_key) self.next_int_key = idx + 1;
+                        return;
+                    }
+                }
+            }
+        }
         for (self.entries.items) |*entry| {
             if (entry.key.eql(key)) {
                 entry.value = value;
@@ -46,6 +60,16 @@ pub const PhpArray = struct {
     }
 
     pub fn get(self: *const PhpArray, key: Key) Value {
+        if (key == .int) {
+            const idx = key.int;
+            if (idx >= 0) {
+                const uidx: usize = @intCast(idx);
+                if (uidx < self.entries.items.len) {
+                    const entry = &self.entries.items[uidx];
+                    if (entry.key == .int and entry.key.int == idx) return entry.value;
+                }
+            }
+        }
         for (self.entries.items) |entry| {
             if (entry.key.eql(key)) return entry.value;
         }

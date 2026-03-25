@@ -2,11 +2,12 @@
 // string operations - tests concatenation, manipulation, searching
 $n = 20000;
 
-// build a long string via concatenation
-$s = "";
+// build via array + implode (avoids O(n^2) concat)
+$parts = [];
 for ($i = 0; $i < $n; $i++) {
-    $s .= "item" . $i . ",";
+    $parts[] = "item" . $i;
 }
+$s = implode(",", $parts);
 
 // count occurrences
 $count = substr_count($s, "item1");
@@ -15,10 +16,10 @@ $count = substr_count($s, "item1");
 $replaced = str_replace("item", "elem", $s);
 
 // split and rejoin
-$parts = explode(",", $s);
-$joined = implode(";", $parts);
+$split = explode(",", $s);
+$joined = implode(";", $split);
 
 echo strlen($s) . "\n";
 echo $count . "\n";
 echo strlen($replaced) . "\n";
-echo count($parts) . "\n";
+echo count($split) . "\n";
