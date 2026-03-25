@@ -28,7 +28,7 @@ trait HasTimestamps
 
     public function touch(): void
     {
-        $this->updatedAt = date("Y-m-d H:i:s");
+        $this->updatedAt = date("Y-m-d");
     }
 
     public function getInfo(): string
