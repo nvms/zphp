@@ -2984,13 +2984,27 @@ const Compiler = struct {
     }
 
     fn needsVarSync(chunk: *const Chunk) bool {
-        for (chunk.code.items) |byte| {
-            if (byte == @intFromEnum(OpCode.concat_assign) or
-                byte == @intFromEnum(OpCode.get_global) or
-                byte == @intFromEnum(OpCode.get_static) or
-                byte == @intFromEnum(OpCode.closure_bind) or
-                byte == @intFromEnum(OpCode.closure_bind_ref))
+        var i: usize = 0;
+        const code = chunk.code.items;
+        while (i < code.len) {
+            if (i >= code.len) break;
+            const b = code[i];
+            if (b == @intFromEnum(OpCode.concat_assign) or b == @intFromEnum(OpCode.get_global) or b == @intFromEnum(OpCode.get_static) or b == @intFromEnum(OpCode.closure_bind) or b == @intFromEnum(OpCode.closure_bind_ref))
                 return true;
+            // skip operands based on opcode
+            const op: OpCode = @enumFromInt(b);
+            i += switch (op) {
+                .constant, .get_var, .set_var, .jump, .jump_back, .jump_if_false, .jump_if_true,
+                .jump_if_not_null, .push_handler, .get_prop, .set_prop, .get_local, .set_local,
+                .get_global, .concat_assign, .unset_var, .unset_prop, .isset_prop,
+                .closure_bind, .closure_bind_ref, .define_const, .get_static_prop, .set_static_prop,
+                => 3,
+                .call, .call_spread, .new_obj, .method_call, .method_call_spread => 4,
+                .static_call => 6,
+                .static_call_spread, .get_static, .set_static => 5,
+                .require, .call_indirect, .call_indirect_spread => 2,
+                else => 1,
+            };
         }
         return false;
     }

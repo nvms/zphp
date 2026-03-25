@@ -219,6 +219,35 @@ pub const VM = struct {
     method_cache_class: []const u8 = "",
     method_cache_method: []const u8 = "",
     method_cache_result: []const u8 = "",
+    ic: ?*InlineCache = null,
+
+    const InlineCache = struct {
+        // property access: keyed by (chunk_ptr ^ ip), stores class_ptr for visibility skip
+        prop: [128]PropIC = @splat(.{}),
+        // method call: keyed by (chunk_ptr ^ ip), stores class_ptr + resolved func
+        method: [128]MethodIC = @splat(.{}),
+
+        const PropIC = struct {
+            key: usize = 0,
+            class_ptr: usize = 0,
+        };
+
+        const MethodIC = struct {
+            key: usize = 0,
+            class_ptr: usize = 0,
+            func: ?*const ObjFunction = null,
+            native: ?NativeFn = null,
+            full_name: []const u8 = "",
+        };
+
+        fn propIndex(chunk_ptr: usize, ip: usize) u7 {
+            return @truncate((chunk_ptr ^ ip) *% 0x517CC1B727220A95);
+        }
+
+        fn methodIndex(chunk_ptr: usize, ip: usize) u7 {
+            return @truncate((chunk_ptr ^ ip) *% 0x517CC1B727220A95);
+        }
+    };
 
     const StaticEntry = struct {
         var_name: []const u8,
@@ -253,6 +282,8 @@ pub const VM = struct {
         try @import("../stdlib/pdo.zig").register(&vm, allocator);
         try @import("../stdlib/websocket.zig").register(&vm, allocator);
         try @import("../stdlib/filesystem.zig").register(&vm, allocator);
+        vm.ic = try allocator.create(InlineCache);
+        vm.ic.?.* = .{};
         return vm;
     }
 
@@ -359,6 +390,7 @@ pub const VM = struct {
     pub fn deinit(self: *VM) void {
         self.releaseFrames();
         self.freeHeapItems();
+        if (self.ic) |ic_ptr| self.allocator.destroy(ic_ptr);
         self.functions.deinit(self.allocator);
         self.native_fns.deinit(self.allocator);
         self.output.deinit(self.allocator);
@@ -1464,11 +1496,23 @@ pub const VM = struct {
                 },
 
                 .get_prop => {
+                    const gp_ip = self.currentFrame().ip;
                     const name_idx = self.readU16();
                     const prop_name = self.currentChunk().constants.items[name_idx].string;
                     const obj_val = self.pop();
                     if (obj_val == .object) {
                         const obj = obj_val.object;
+
+                        // IC: skip visibility on cache hit
+                        if (self.ic) |ic| {
+                            const gp_idx = InlineCache.propIndex(@intFromPtr(self.currentChunk()), gp_ip);
+                            const gp_entry = &ic.prop[gp_idx];
+                            if (gp_entry.key == gp_ip and gp_entry.class_ptr == @intFromPtr(obj.class_name.ptr)) {
+                                self.push(obj.get(prop_name));
+                                continue;
+                            }
+                        }
+
                         const val = obj.get(prop_name);
                         if (val != .null or obj.properties.contains(prop_name)) {
                             const vr = self.findPropertyVisibility(obj.class_name, prop_name);
@@ -1479,6 +1523,13 @@ pub const VM = struct {
                                 try self.strings.append(self.allocator, msg);
                                 if (try self.throwBuiltinException("Error", msg)) continue;
                                 return error.RuntimeError;
+                            }
+                            // populate IC
+                            if (self.ic) |ic| {
+                                if (vr.visibility == .public) {
+                                    const gp_idx = InlineCache.propIndex(@intFromPtr(self.currentChunk()), gp_ip);
+                                    ic.prop[gp_idx] = .{ .key = gp_ip, .class_ptr = @intFromPtr(obj.class_name.ptr) };
+                                }
                             }
                             self.push(val);
                         } else if (self.hasMethod(obj.class_name, "__get")) {
@@ -1644,6 +1695,52 @@ pub const VM = struct {
                     if (obj_val != .object) return error.RuntimeError;
                     const obj = obj_val.object;
 
+                    // IC: skip visibility + resolve on cache hit
+                    if (self.ic) |ic| {
+                        const mc_ip = self.currentFrame().ip - 4;
+                        const mc_idx = InlineCache.methodIndex(@intFromPtr(self.currentChunk()), mc_ip);
+                        const mc_entry = &ic.method[mc_idx];
+                        if (mc_entry.key == mc_ip and mc_entry.class_ptr == @intFromPtr(obj.class_name.ptr)) {
+                            if (mc_entry.func) |func| {
+                                if (func.locals_only and self.captures.items.len == 0) {
+                                    const mc_locals = try self.allocator.alloc(Value, func.local_count);
+                                    @memset(mc_locals, .null);
+                                    for (0..@min(ac, func.arity)) |i| {
+                                        mc_locals[i] = try self.copyValue(self.stack[self.sp - ac + i]);
+                                    }
+                                    for (@min(ac, func.arity)..func.arity) |i| {
+                                        if (i < func.defaults.len) mc_locals[i] = func.defaults[i];
+                                    }
+                                    self.sp -= ac + 1;
+                                    var this_vars: std.StringHashMapUnmanaged(Value) = .{};
+                                    try this_vars.put(self.allocator, "$this", .{ .object = obj });
+                                    self.frames[self.frame_count] = .{ .chunk = &func.chunk, .ip = 0, .vars = this_vars, .locals = mc_locals, .func = func };
+                                    self.frame_count += 1;
+                                    continue;
+                                }
+                            } else if (mc_entry.native) |native| {
+                                var args_buf: [16]Value = undefined;
+                                for (0..ac) |i| args_buf[i] = self.stack[self.sp - ac + i];
+                                self.sp -= ac + 1;
+                                var tmp_vars: std.StringHashMapUnmanaged(Value) = .{};
+                                try tmp_vars.put(self.allocator, "$this", .{ .object = obj });
+                                self.frames[self.frame_count] = .{ .chunk = self.currentChunk(), .ip = self.currentFrame().ip, .vars = tmp_vars };
+                                self.frame_count += 1;
+                                const saved_fc = self.frame_count;
+                                var ctx = self.makeContext(null);
+                                const result = try native(&ctx, args_buf[0..ac]);
+                                if (self.frame_count >= saved_fc) {
+                                    self.frame_count -= 1;
+                                    self.frames[self.frame_count].vars.deinit(self.allocator);
+                                    self.push(result);
+                                } else {
+                                    continue;
+                                }
+                                continue;
+                            }
+                        }
+                    }
+
                     // check visibility
                     const mvr = self.findMethodVisibility(obj.class_name, method_name);
                     if (!self.checkVisibility(mvr.defining_class, mvr.visibility)) {
@@ -1671,7 +1768,14 @@ pub const VM = struct {
                         return error.RuntimeError;
                     };
                     if (self.native_fns.get(full_name)) |native| {
-                        // native method - call with $this in a temporary frame
+                        // populate IC
+                        if (self.ic) |ic| {
+                            const mc_ip2 = self.currentFrame().ip - 4;
+                            const mc_idx2 = InlineCache.methodIndex(@intFromPtr(self.currentChunk()), mc_ip2);
+                            if (mvr.visibility == .public) {
+                                ic.method[mc_idx2] = .{ .key = mc_ip2, .class_ptr = @intFromPtr(obj.class_name.ptr), .native = native, .full_name = full_name };
+                            }
+                        }
                         var args_buf: [16]Value = undefined;
                         for (0..ac) |i| args_buf[i] = self.stack[self.sp - ac + i];
                         self.sp -= ac;
@@ -1696,6 +1800,14 @@ pub const VM = struct {
                             continue;
                         }
                     } else if (self.functions.get(full_name)) |func| {
+                        // populate IC
+                        if (self.ic) |ic| {
+                            const mc_ip2 = self.currentFrame().ip - 4;
+                            const mc_idx2 = InlineCache.methodIndex(@intFromPtr(self.currentChunk()), mc_ip2);
+                            if (mvr.visibility == .public) {
+                                ic.method[mc_idx2] = .{ .key = mc_ip2, .class_ptr = @intFromPtr(obj.class_name.ptr), .func = func, .full_name = full_name };
+                            }
+                        }
                         var new_vars: std.StringHashMapUnmanaged(Value) = .{};
                         try new_vars.put(self.allocator, "$this", .{ .object = obj });
 
