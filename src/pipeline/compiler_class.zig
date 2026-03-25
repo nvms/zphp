@@ -1,0 +1,777 @@
+const std = @import("std");
+const Compiler = @import("compiler.zig").Compiler;
+const Ast = @import("ast.zig").Ast;
+const Token = @import("token.zig").Token;
+const Chunk = @import("bytecode.zig").Chunk;
+const OpCode = @import("bytecode.zig").OpCode;
+const ObjFunction = @import("bytecode.zig").ObjFunction;
+const Value = @import("../runtime/value.zig").Value;
+const Allocator = std.mem.Allocator;
+const Error = Allocator.Error || error{CompileError};
+
+pub fn compileFunction(self: *Compiler, node: Ast.Node) Error!void {
+    const name_tok = node.main_token;
+    const name = self.ast.tokenSlice(name_tok);
+    const param_nodes = self.ast.extraSlice(node.data.lhs);
+
+    const param_names = try self.allocator.alloc([]const u8, param_nodes.len);
+    const ref_flags = try self.allocator.alloc(bool, param_nodes.len);
+    var defaults = std.ArrayListUnmanaged(Value){};
+    defer defaults.deinit(self.allocator);
+    var required: u8 = 0;
+    var seen_default = false;
+    var is_variadic = false;
+
+    for (param_nodes, 0..) |p, i| {
+        const pnode = self.ast.nodes[p];
+        param_names[i] = self.ast.tokenSlice(pnode.main_token);
+        ref_flags[i] = (pnode.data.rhs & 2) != 0;
+        if ((pnode.data.rhs & 1) != 0) {
+            // variadic param - always last
+            is_variadic = true;
+            try defaults.append(self.allocator, .null);
+        } else if (pnode.data.lhs != 0) {
+            seen_default = true;
+            try defaults.append(self.allocator, self.evalConstExpr(pnode.data.lhs));
+        } else {
+            if (!seen_default) required += 1;
+            try defaults.append(self.allocator, .null);
+        }
+    }
+    if (!seen_default and !is_variadic) required = @intCast(param_nodes.len);
+
+    const defaults_owned = try self.allocator.alloc(Value, defaults.items.len);
+    @memcpy(defaults_owned, defaults.items);
+
+    const gen = self.containsYield(node.data.rhs);
+
+    var sub = Compiler{
+        .ast = self.ast,
+        .chunk = .{},
+        .functions = .{},
+        .string_allocs = .{},
+        .allocator = self.allocator,
+        .scope_depth = self.scope_depth + 1,
+        .loop_start = null,
+        .break_jumps = .{},
+        .continue_jumps = .{},
+        .is_generator = gen,
+        .closure_count = self.closure_count,
+        .file_path = self.file_path,
+    };
+    errdefer {
+        sub.chunk.deinit(self.allocator);
+        sub.break_jumps.deinit(self.allocator);
+        sub.continue_jumps.deinit(self.allocator);
+        sub.string_allocs.deinit(self.allocator);
+        sub.local_slots.deinit(self.allocator);
+    }
+
+    for (param_nodes, 0..) |_, i| {
+        if (i < ref_flags.len and ref_flags[i]) continue;
+        _ = sub.getOrCreateSlot(param_names[i]);
+    }
+
+    try sub.compileNode(node.data.rhs);
+    try sub.emitOp(.op_null);
+    try sub.emitOp(if (gen) .generator_return else .return_val);
+    sub.break_jumps.deinit(self.allocator);
+    sub.continue_jumps.deinit(self.allocator);
+
+    self.closure_count = sub.closure_count;
+    const slot_names = try sub.buildSlotNames();
+    const local_count = sub.next_slot;
+    sub.local_slots.deinit(self.allocator);
+
+    const is_closure = std.mem.startsWith(u8, name, "__closure_");
+    const lo = !is_closure and !gen and !is_variadic and !hasRefParams(ref_flags) and !needsVarSync(&sub.chunk) and sub.closure_count == 0;
+
+    try self.functions.append(self.allocator, .{
+        .name = name,
+        .arity = @intCast(param_nodes.len),
+        .required_params = required,
+        .is_variadic = is_variadic,
+        .is_generator = gen,
+        .locals_only = lo,
+        .params = param_names[0..param_nodes.len],
+        .defaults = defaults_owned,
+        .ref_params = ref_flags,
+        .chunk = sub.chunk,
+        .local_count = local_count,
+        .slot_names = slot_names,
+    });
+
+    for (sub.functions.items) |f| try self.functions.append(self.allocator, f);
+    sub.functions.deinit(self.allocator);
+    for (sub.string_allocs.items) |s| try self.string_allocs.append(self.allocator, s);
+    sub.string_allocs.deinit(self.allocator);
+}
+
+pub fn compileClosure(self: *Compiler, node: Ast.Node) Error!void {
+    const id = self.closure_count;
+    self.closure_count += 1;
+
+    var name_buf: [32]u8 = undefined;
+    const name = std.fmt.bufPrint(&name_buf, "__closure_{d}", .{id}) catch "__closure";
+    const owned_name = try self.allocator.dupe(u8, name);
+    try self.string_allocs.append(self.allocator, owned_name);
+
+    const param_nodes = self.ast.extraSlice(node.data.lhs);
+    const param_names = try self.allocator.alloc([]const u8, param_nodes.len);
+    var ref_flags_buf: [16]bool = .{false} ** 16;
+    var has_any_ref = false;
+    for (param_nodes, 0..) |p, i| {
+        param_names[i] = self.ast.tokenSlice(self.ast.nodes[p].main_token);
+        if (i < 16 and (self.ast.nodes[p].data.rhs & 2) != 0) {
+            ref_flags_buf[i] = true;
+            has_any_ref = true;
+        }
+    }
+
+    // rhs = extra -> {body, use_count, use_vars...}
+    // use_count 0xFFFFFFFF = arrow fn (implicit capture)
+    const body_node = self.ast.extra_data[node.data.rhs];
+    const raw_use_count = self.ast.extra_data[node.data.rhs + 1];
+    const is_arrow = raw_use_count == 0xFFFFFFFF;
+    const use_count: u32 = if (is_arrow) 0 else raw_use_count;
+    const use_vars = self.ast.extra_data[node.data.rhs + 2 .. node.data.rhs + 2 + use_count];
+
+    var sub = Compiler{
+        .ast = self.ast,
+        .chunk = .{},
+        .functions = .{},
+        .string_allocs = .{},
+        .allocator = self.allocator,
+        .scope_depth = self.scope_depth + 1,
+        .loop_start = null,
+        .break_jumps = .{},
+        .continue_jumps = .{},
+        .closure_count = self.closure_count,
+        .file_path = self.file_path,
+    };
+    errdefer {
+        sub.chunk.deinit(self.allocator);
+        sub.break_jumps.deinit(self.allocator);
+        sub.continue_jumps.deinit(self.allocator);
+        sub.string_allocs.deinit(self.allocator);
+        sub.local_slots.deinit(self.allocator);
+    }
+
+    for (param_nodes, 0..) |_, i| {
+        if (i < 16 and ref_flags_buf[i]) continue;
+        _ = sub.getOrCreateSlot(param_names[i]);
+    }
+
+    // assign slots to captured variables so they use get_local instead of get_var
+    for (use_vars) |use_var_node| {
+        const use_node = self.ast.nodes[use_var_node];
+        const is_ref = use_node.data.rhs != 0;
+        if (!is_ref) {
+            const var_name = self.ast.tokenSlice(use_node.main_token);
+            _ = sub.getOrCreateSlot(var_name);
+        }
+    }
+    // $this is always bound via closure_bind - give it a slot so the body uses get_local
+    _ = sub.getOrCreateSlot("$this");
+
+    try sub.compileNode(body_node);
+    try sub.emitOp(.op_null);
+    try sub.emitOp(.return_val);
+    sub.break_jumps.deinit(self.allocator);
+
+    self.closure_count = sub.closure_count;
+
+    const ref_params = if (has_any_ref) blk: {
+        const rp = try self.allocator.alloc(bool, param_nodes.len);
+        for (0..param_nodes.len) |i| rp[i] = if (i < 16) ref_flags_buf[i] else false;
+        break :blk rp;
+    } else &[_]bool{};
+
+    // check for ref captures
+    var has_ref_capture = false;
+    for (use_vars) |use_var_node| {
+        if (self.ast.nodes[use_var_node].data.rhs != 0) {
+            has_ref_capture = true;
+            break;
+        }
+    }
+
+    const slot_names = try sub.buildSlotNames();
+    const local_count = sub.next_slot;
+    sub.local_slots.deinit(self.allocator);
+
+    const closure_lo = !is_arrow and !has_any_ref and !has_ref_capture and !needsVarSync(&sub.chunk);
+
+    const func = ObjFunction{
+        .name = owned_name,
+        .arity = @intCast(param_nodes.len),
+        .params = param_names[0..param_nodes.len],
+        .chunk = sub.chunk,
+        .is_arrow = is_arrow,
+        .locals_only = closure_lo,
+        .ref_params = ref_params,
+        .local_count = local_count,
+        .slot_names = slot_names,
+    };
+
+    try self.functions.append(self.allocator, func);
+
+    for (sub.functions.items) |f| try self.functions.append(self.allocator, f);
+    sub.functions.deinit(self.allocator);
+    for (sub.string_allocs.items) |s| try self.string_allocs.append(self.allocator, s);
+    sub.string_allocs.deinit(self.allocator);
+
+    const idx = try self.addConstant(.{ .string = owned_name });
+    try self.emitConstant(idx);
+
+    for (use_vars) |use_var_node| {
+        const use_node = self.ast.nodes[use_var_node];
+        const var_name = self.ast.tokenSlice(use_node.main_token);
+        const var_idx = try self.addConstant(.{ .string = var_name });
+        const is_ref = use_node.data.rhs != 0;
+        try self.emitOp(if (is_ref) .closure_bind_ref else .closure_bind);
+        try self.emitU16(var_idx);
+    }
+
+    // bind $this for closures in method context
+    const this_idx = try self.addConstant(.{ .string = "$this" });
+    try self.emitOp(.closure_bind);
+    try self.emitU16(this_idx);
+}
+
+pub fn compileClassDecl(self: *Compiler, node: Ast.Node) Error!void {
+    const class_name = self.resolveClassName(self.ast.tokenSlice(node.main_token));
+    const members = self.ast.extraSlice(node.data.lhs);
+
+    // decode rhs: {parent_node, implements_count, impl_nodes...}
+    const rhs_base = node.data.rhs;
+    const parent_node = self.ast.extra_data[rhs_base];
+    const impl_count = self.ast.extra_data[rhs_base + 1];
+    var impl_names: [16][]const u8 = undefined;
+    for (0..impl_count) |i| {
+        const impl_node = self.ast.nodes[self.ast.extra_data[rhs_base + 2 + i]];
+        impl_names[i] = self.ast.tokenSlice(impl_node.main_token);
+    }
+
+    var method_count: u8 = 0;
+    for (members) |member_idx| {
+        const member = self.ast.nodes[member_idx];
+        if (member.tag == .class_method or member.tag == .static_class_method) {
+            try compileClassMethodBody(self, class_name, member);
+            method_count += 1;
+        }
+    }
+
+    // count promoted constructor params
+    var promoted_count: u8 = 0;
+    var constructor_params: []const u32 = &.{};
+    for (members) |member_idx| {
+        const member = self.ast.nodes[member_idx];
+        if (member.tag == .class_method and std.mem.eql(u8, self.ast.tokenSlice(member.main_token), "__construct")) {
+            constructor_params = self.ast.extraSlice(member.data.lhs);
+            for (constructor_params) |p| {
+                const pnode = self.ast.nodes[p];
+                if ((pnode.data.rhs >> 2) & 3 > 0) promoted_count += 1;
+            }
+            break;
+        }
+    }
+
+    // collect trait property indices for this class
+    var trait_prop_members = std.ArrayListUnmanaged(u32){};
+    defer trait_prop_members.deinit(self.allocator);
+    for (members) |member_idx| {
+        const member = self.ast.nodes[member_idx];
+        if (member.tag == .trait_use) {
+            for (self.ast.extraSlice(member.data.lhs)) |tn| {
+                const tname = self.ast.tokenSlice(self.ast.nodes[tn].main_token);
+                if (self.trait_properties.get(tname)) |props| {
+                    for (props) |pi| try trait_prop_members.append(self.allocator, pi);
+                }
+            }
+        }
+    }
+
+    // compile instance property defaults (push onto stack)
+    var prop_count: u8 = 0;
+    for (members) |member_idx| {
+        const member = self.ast.nodes[member_idx];
+        if (member.tag == .class_property) prop_count += 1;
+    }
+    prop_count += @intCast(trait_prop_members.items.len);
+    prop_count += promoted_count;
+    for (members) |member_idx| {
+        const member = self.ast.nodes[member_idx];
+        if (member.tag == .class_property) {
+            if (member.data.lhs != 0) {
+                try self.compileNode(member.data.lhs);
+            }
+        }
+    }
+    // compile trait property defaults
+    for (trait_prop_members.items) |tpi| {
+        const tmember = self.ast.nodes[tpi];
+        if (tmember.data.lhs != 0) {
+            try self.compileNode(tmember.data.lhs);
+        }
+    }
+    // promoted params get null defaults (actual values assigned in constructor body)
+    for (constructor_params) |p| {
+        const pnode = self.ast.nodes[p];
+        if ((pnode.data.rhs >> 2) & 3 > 0) {
+            try self.emitOp(.op_null);
+        }
+    }
+
+    // compile static property defaults (push onto stack after instance props)
+    // class constants (const_decl) are treated as static props
+    var static_prop_count: u8 = 0;
+    for (members) |member_idx| {
+        const member = self.ast.nodes[member_idx];
+        if (member.tag == .static_class_property or member.tag == .const_decl) static_prop_count += 1;
+    }
+    for (members) |member_idx| {
+        const member = self.ast.nodes[member_idx];
+        if (member.tag == .static_class_property) {
+            if (member.data.lhs != 0) {
+                try self.compileNode(member.data.lhs);
+            }
+        } else if (member.tag == .const_decl) {
+            try self.compileNode(member.data.lhs);
+        }
+    }
+
+    const name_idx = try self.addConstant(.{ .string = class_name });
+    try self.emitOp(.class_decl);
+    try self.emitU16(name_idx);
+    try self.emitByte(method_count);
+
+    for (members) |member_idx| {
+        const member = self.ast.nodes[member_idx];
+        if (member.tag == .class_method or member.tag == .static_class_method) {
+            const method_name_str = self.ast.tokenSlice(member.main_token);
+            const mname_idx = try self.addConstant(.{ .string = method_name_str });
+            try self.emitU16(mname_idx);
+            const param_nodes = self.ast.extraSlice(member.data.lhs);
+            try self.emitByte(@intCast(param_nodes.len));
+            try self.emitByte(if (member.tag == .static_class_method) @as(u8, 1) else @as(u8, 0));
+            const vis: u8 = @intCast(member.data.rhs >> 30);
+            try self.emitByte(vis);
+        }
+    }
+
+    try self.emitByte(prop_count);
+    for (members) |member_idx| {
+        const member = self.ast.nodes[member_idx];
+        if (member.tag == .class_property) {
+            var prop_name = self.ast.tokenSlice(member.main_token);
+            if (prop_name.len > 0 and prop_name[0] == '$') prop_name = prop_name[1..];
+            const pname_idx = try self.addConstant(.{ .string = prop_name });
+            try self.emitU16(pname_idx);
+            try self.emitByte(if (member.data.lhs != 0) @as(u8, 1) else @as(u8, 0));
+            try self.emitByte(@intCast(member.data.rhs));
+        }
+    }
+    // trait properties
+    for (trait_prop_members.items) |tpi| {
+        const tmember = self.ast.nodes[tpi];
+        var tprop_name = self.ast.tokenSlice(tmember.main_token);
+        if (tprop_name.len > 0 and tprop_name[0] == '$') tprop_name = tprop_name[1..];
+        const tpname_idx = try self.addConstant(.{ .string = tprop_name });
+        try self.emitU16(tpname_idx);
+        try self.emitByte(if (tmember.data.lhs != 0) @as(u8, 1) else @as(u8, 0));
+        try self.emitByte(@intCast(tmember.data.rhs));
+    }
+    // promoted constructor params as properties
+    for (constructor_params) |p| {
+        const pnode = self.ast.nodes[p];
+        const promotion = (pnode.data.rhs >> 2) & 3;
+        if (promotion > 0) {
+            var param_name = self.ast.tokenSlice(pnode.main_token);
+            if (param_name.len > 0 and param_name[0] == '$') param_name = param_name[1..];
+            const pname_idx = try self.addConstant(.{ .string = param_name });
+            try self.emitU16(pname_idx);
+            try self.emitByte(1); // has default (null placeholder)
+            // bits 0-1: visibility, bit 2: readonly
+            const is_ro: u8 = if ((pnode.data.rhs & 16) != 0) 4 else 0;
+            try self.emitByte(@as(u8, @intCast(promotion - 1)) | is_ro);
+        }
+    }
+
+    try self.emitByte(static_prop_count);
+    for (members) |member_idx| {
+        const member = self.ast.nodes[member_idx];
+        if (member.tag == .static_class_property) {
+            var prop_name = self.ast.tokenSlice(member.main_token);
+            if (prop_name.len > 0 and prop_name[0] == '$') prop_name = prop_name[1..];
+            const pname_idx = try self.addConstant(.{ .string = prop_name });
+            try self.emitU16(pname_idx);
+            try self.emitByte(if (member.data.lhs != 0) @as(u8, 1) else @as(u8, 0));
+            try self.emitByte(@intCast(member.data.rhs));
+        } else if (member.tag == .const_decl) {
+            const cname = self.ast.tokenSlice(member.main_token);
+            const cname_idx = try self.addConstant(.{ .string = cname });
+            try self.emitU16(cname_idx);
+            try self.emitByte(1); // always has a value
+            try self.emitByte(0); // public visibility
+        }
+    }
+
+    if (parent_node != 0) {
+        const parent_name = self.ast.tokenSlice(self.ast.nodes[parent_node].main_token);
+        const parent_idx = try self.addConstant(.{ .string = parent_name });
+        try self.emitU16(parent_idx);
+    } else {
+        try self.emitU16(0xffff);
+    }
+
+    // emit implements count and names
+    try self.emitByte(@intCast(impl_count));
+    for (0..impl_count) |i| {
+        const iname_idx = try self.addConstant(.{ .string = impl_names[i] });
+        try self.emitU16(iname_idx);
+    }
+
+    // collect all trait names from trait_use statements
+    var all_traits = std.ArrayListUnmanaged([]const u8){};
+    defer all_traits.deinit(self.allocator);
+    for (members) |member_idx| {
+        const member = self.ast.nodes[member_idx];
+        if (member.tag == .trait_use) {
+            for (self.ast.extraSlice(member.data.lhs)) |tn| {
+                try all_traits.append(self.allocator, self.ast.tokenSlice(self.ast.nodes[tn].main_token));
+            }
+        }
+    }
+    try self.emitByte(@intCast(all_traits.items.len));
+    for (all_traits.items) |tname| {
+        const tname_idx = try self.addConstant(.{ .string = tname });
+        try self.emitU16(tname_idx);
+    }
+
+    // collect conflict resolution rules from trait_use statements
+    const ConflictRule = struct { node: Ast.Node };
+    var all_conflicts = std.ArrayListUnmanaged(ConflictRule){};
+    defer all_conflicts.deinit(self.allocator);
+    for (members) |member_idx| {
+        const member = self.ast.nodes[member_idx];
+        if (member.tag == .trait_use and member.data.rhs != 0) {
+            for (self.ast.extraSlice(member.data.rhs)) |cn| {
+                try all_conflicts.append(self.allocator, .{ .node = self.ast.nodes[cn] });
+            }
+        }
+    }
+    try self.emitByte(@intCast(all_conflicts.items.len));
+    for (all_conflicts.items) |cr| {
+        const method_name = self.ast.tokenSlice(cr.node.main_token);
+        const trait_name = self.ast.tokenSlice(self.ast.nodes[cr.node.data.lhs].main_token);
+        const method_idx = try self.addConstant(.{ .string = method_name });
+        const trait_idx = try self.addConstant(.{ .string = trait_name });
+        try self.emitU16(method_idx);
+        try self.emitU16(trait_idx);
+        if (cr.node.tag == .trait_insteadof) {
+            try self.emitByte(1);
+            const excluded = self.ast.extraSlice(cr.node.data.rhs);
+            try self.emitByte(@intCast(excluded.len));
+            for (excluded) |en| {
+                const ename = self.ast.tokenSlice(self.ast.nodes[en].main_token);
+                const eidx = try self.addConstant(.{ .string = ename });
+                try self.emitU16(eidx);
+            }
+        } else {
+            try self.emitByte(2);
+            const alias = self.ast.tokenSlice(cr.node.data.rhs);
+            const aidx = try self.addConstant(.{ .string = alias });
+            try self.emitU16(aidx);
+        }
+    }
+}
+
+pub fn compileInterfaceDecl(self: *Compiler, node: Ast.Node) Error!void {
+    const iface_name = self.ast.tokenSlice(node.main_token);
+    const members = self.ast.extraSlice(node.data.lhs);
+
+    var method_count: u8 = 0;
+    for (members) |m| {
+        if (self.ast.nodes[m].tag == .interface_method) method_count += 1;
+    }
+
+    const name_idx = try self.addConstant(.{ .string = iface_name });
+    try self.emitOp(.interface_decl);
+    try self.emitU16(name_idx);
+    try self.emitByte(method_count);
+
+    for (members) |m| {
+        const member = self.ast.nodes[m];
+        if (member.tag == .interface_method) {
+            const mname = self.ast.tokenSlice(member.main_token);
+            const mname_idx = try self.addConstant(.{ .string = mname });
+            try self.emitU16(mname_idx);
+        }
+    }
+
+    if (node.data.rhs != 0) {
+        const parent_name = self.ast.tokenSlice(self.ast.nodes[node.data.rhs].main_token);
+        const pidx = try self.addConstant(.{ .string = parent_name });
+        try self.emitU16(pidx);
+    } else {
+        try self.emitU16(0xffff);
+    }
+}
+
+pub fn compileTraitDecl(self: *Compiler, node: Ast.Node) Error!void {
+    const trait_name = self.ast.tokenSlice(node.main_token);
+    const members = self.ast.extraSlice(node.data.lhs);
+
+    // compile trait methods as TraitName::methodName functions
+    for (members) |member_idx| {
+        const member = self.ast.nodes[member_idx];
+        if (member.tag == .class_method or member.tag == .static_class_method) {
+            try compileClassMethodBody(self, trait_name, member);
+        }
+    }
+
+    // store property member indices for classes that use this trait
+    var prop_indices = std.ArrayListUnmanaged(u32){};
+    for (members) |member_idx| {
+        const member = self.ast.nodes[member_idx];
+        if (member.tag == .class_property) {
+            try prop_indices.append(self.allocator, member_idx);
+        }
+    }
+    if (prop_indices.items.len > 0) {
+        const owned = try prop_indices.toOwnedSlice(self.allocator);
+        try self.trait_properties.put(self.allocator, trait_name, owned);
+    } else {
+        prop_indices.deinit(self.allocator);
+    }
+
+    const name_idx = try self.addConstant(.{ .string = trait_name });
+    try self.emitOp(.trait_decl);
+    try self.emitU16(name_idx);
+}
+
+pub fn compileEnumDecl(self: *Compiler, node: Ast.Node) Error!void {
+    const enum_name = self.ast.tokenSlice(node.main_token);
+    const members = self.ast.extraSlice(node.data.lhs);
+
+    const rhs_base = node.data.rhs;
+    const backed_type_token = self.ast.extra_data[rhs_base];
+    const impl_count = self.ast.extra_data[rhs_base + 1];
+
+    var backed_type: u8 = 0; // 0=none, 1=int, 2=string
+    if (backed_type_token != 0) {
+        const type_str = self.ast.tokenSlice(backed_type_token);
+        if (std.mem.eql(u8, type_str, "int")) {
+            backed_type = 1;
+        } else if (std.mem.eql(u8, type_str, "string")) {
+            backed_type = 2;
+        }
+    }
+
+    var method_count: u8 = 0;
+    for (members) |member_idx| {
+        const member = self.ast.nodes[member_idx];
+        if (member.tag == .class_method or member.tag == .static_class_method) {
+            try compileClassMethodBody(self, enum_name, member);
+            method_count += 1;
+        }
+    }
+
+    var case_count: u8 = 0;
+    for (members) |member_idx| {
+        const member = self.ast.nodes[member_idx];
+        if (member.tag == .enum_case) {
+            if (member.data.lhs != 0) {
+                try self.compileNode(member.data.lhs);
+            }
+            case_count += 1;
+        }
+    }
+
+    const name_idx = try self.addConstant(.{ .string = enum_name });
+    try self.emitOp(.enum_decl);
+    try self.emitU16(name_idx);
+    try self.emitByte(backed_type);
+    try self.emitByte(case_count);
+
+    for (members) |member_idx| {
+        const member = self.ast.nodes[member_idx];
+        if (member.tag == .enum_case) {
+            const case_name = self.ast.tokenSlice(member.main_token);
+            const cname_idx = try self.addConstant(.{ .string = case_name });
+            try self.emitU16(cname_idx);
+            try self.emitByte(if (member.data.lhs != 0) @as(u8, 1) else @as(u8, 0));
+        }
+    }
+
+    try self.emitByte(method_count);
+    for (members) |member_idx| {
+        const member = self.ast.nodes[member_idx];
+        if (member.tag == .class_method or member.tag == .static_class_method) {
+            const method_name_str = self.ast.tokenSlice(member.main_token);
+            const mname_idx = try self.addConstant(.{ .string = method_name_str });
+            try self.emitU16(mname_idx);
+            const param_nodes = self.ast.extraSlice(member.data.lhs);
+            try self.emitByte(@intCast(param_nodes.len));
+            try self.emitByte(if (member.tag == .static_class_method) @as(u8, 1) else @as(u8, 0));
+            const vis: u8 = @intCast(member.data.rhs >> 30);
+            try self.emitByte(vis);
+        }
+    }
+
+    try self.emitByte(@intCast(impl_count));
+    for (0..impl_count) |i| {
+        const impl_node = self.ast.nodes[self.ast.extra_data[rhs_base + 2 + i]];
+        const iname_idx = try self.addConstant(.{ .string = self.ast.tokenSlice(impl_node.main_token) });
+        try self.emitU16(iname_idx);
+    }
+}
+
+fn compileClassMethodBody(self: *Compiler, class_name: []const u8, member: Ast.Node) Error!void {
+    const method_name = self.ast.tokenSlice(member.main_token);
+    const full_name = try std.fmt.allocPrint(self.allocator, "{s}::{s}", .{ class_name, method_name });
+    try self.string_allocs.append(self.allocator, full_name);
+
+    const param_nodes = self.ast.extraSlice(member.data.lhs);
+    const param_names = try self.allocator.alloc([]const u8, param_nodes.len);
+    const ref_flags = try self.allocator.alloc(bool, param_nodes.len);
+    for (param_nodes, 0..) |p, i| {
+        const pnode = self.ast.nodes[p];
+        param_names[i] = self.ast.tokenSlice(pnode.main_token);
+        ref_flags[i] = (pnode.data.rhs & 2) != 0;
+    }
+
+    var defaults = std.ArrayListUnmanaged(Value){};
+    defer defaults.deinit(self.allocator);
+    var required: u8 = 0;
+    var seen_default = false;
+    var is_variadic = false;
+    for (param_nodes) |p| {
+        const pnode = self.ast.nodes[p];
+        if ((pnode.data.rhs & 1) != 0) {
+            is_variadic = true;
+            try defaults.append(self.allocator, .null);
+        } else if (pnode.data.lhs != 0) {
+            seen_default = true;
+            try defaults.append(self.allocator, self.evalConstExpr(pnode.data.lhs));
+        } else {
+            if (!seen_default) required += 1;
+            try defaults.append(self.allocator, .null);
+        }
+    }
+    if (!seen_default and !is_variadic) required = @intCast(param_nodes.len);
+    const defaults_owned = try self.allocator.alloc(Value, defaults.items.len);
+    @memcpy(defaults_owned, defaults.items);
+
+    var sub = Compiler{
+        .ast = self.ast,
+        .chunk = .{},
+        .functions = .{},
+        .string_allocs = .{},
+        .allocator = self.allocator,
+        .scope_depth = self.scope_depth + 1,
+        .loop_start = null,
+        .break_jumps = .{},
+        .continue_jumps = .{},
+        .closure_count = self.closure_count,
+        .file_path = self.file_path,
+    };
+    errdefer {
+        sub.chunk.deinit(self.allocator);
+        sub.break_jumps.deinit(self.allocator);
+        sub.continue_jumps.deinit(self.allocator);
+        sub.string_allocs.deinit(self.allocator);
+        sub.local_slots.deinit(self.allocator);
+    }
+
+    // slot 0 = $this for instance methods
+    if (member.tag != .static_class_method) {
+        _ = sub.getOrCreateSlot("$this");
+    }
+    for (param_nodes, 0..) |_, i| {
+        if (ref_flags[i]) continue;
+        _ = sub.getOrCreateSlot(param_names[i]);
+    }
+
+    // constructor property promotion: emit $this->prop = $prop for each promoted param
+    if (std.mem.eql(u8, method_name, "__construct")) {
+        for (param_nodes) |p| {
+            const pnode = self.ast.nodes[p];
+            const promotion = (pnode.data.rhs >> 2) & 3;
+            if (promotion > 0) {
+                var param_name = self.ast.tokenSlice(pnode.main_token);
+                try sub.emitGetVar("$this");
+                try sub.emitGetVar(param_name);
+                if (param_name.len > 0 and param_name[0] == '$') param_name = param_name[1..];
+                const prop_idx = try sub.addConstant(.{ .string = param_name });
+                try sub.emitOp(.set_prop);
+                try sub.emitU16(prop_idx);
+                try sub.emitOp(.pop);
+            }
+        }
+    }
+
+    const body_idx = member.data.rhs & 0x3FFFFFFF;
+    try sub.compileNode(body_idx);
+    try sub.emitOp(.op_null);
+    try sub.emitOp(.return_val);
+    sub.break_jumps.deinit(self.allocator);
+
+    self.closure_count = sub.closure_count;
+    const slot_names = try sub.buildSlotNames();
+    const local_count = sub.next_slot;
+    sub.local_slots.deinit(self.allocator);
+
+    const method_lo = !is_variadic and !hasRefParams(ref_flags) and !needsVarSync(&sub.chunk) and sub.closure_count == 0;
+
+    try self.functions.append(self.allocator, .{
+        .name = full_name,
+        .arity = @intCast(param_nodes.len),
+        .required_params = required,
+        .is_variadic = is_variadic,
+        .locals_only = method_lo,
+        .params = param_names[0..param_nodes.len],
+        .defaults = defaults_owned,
+        .ref_params = ref_flags,
+        .chunk = sub.chunk,
+        .local_count = local_count,
+        .slot_names = slot_names,
+    });
+
+    for (sub.functions.items) |f| try self.functions.append(self.allocator, f);
+    sub.functions.deinit(self.allocator);
+    for (sub.string_allocs.items) |s| try self.string_allocs.append(self.allocator, s);
+    sub.string_allocs.deinit(self.allocator);
+}
+
+fn hasRefParams(ref_flags: []const bool) bool {
+    for (ref_flags) |r| if (r) return true;
+    return false;
+}
+
+fn needsVarSync(chunk: *const Chunk) bool {
+    var i: usize = 0;
+    const code = chunk.code.items;
+    while (i < code.len) {
+        if (i >= code.len) break;
+        const b = code[i];
+        if (b == @intFromEnum(OpCode.concat_assign) or b == @intFromEnum(OpCode.get_global) or b == @intFromEnum(OpCode.get_static) or b == @intFromEnum(OpCode.closure_bind) or b == @intFromEnum(OpCode.closure_bind_ref))
+            return true;
+        // skip operands based on opcode
+        const op: OpCode = @enumFromInt(b);
+        i += switch (op) {
+            .constant, .get_var, .set_var, .jump, .jump_back, .jump_if_false, .jump_if_true,
+            .jump_if_not_null, .push_handler, .get_prop, .set_prop, .get_local, .set_local,
+            .get_global, .concat_assign, .unset_var, .unset_prop, .isset_prop,
+            .closure_bind, .closure_bind_ref, .define_const, .get_static_prop, .set_static_prop,
+            => 3,
+            .call, .call_spread, .new_obj, .method_call, .method_call_spread => 4,
+            .static_call => 6,
+            .static_call_spread, .get_static, .set_static => 5,
+            .require, .call_indirect, .call_indirect_spread => 2,
+            else => 1,
+        };
+    }
+    return false;
+}
