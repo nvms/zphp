@@ -204,7 +204,6 @@ fn strlen(_: *NativeContext, args: []const Value) RuntimeError!Value {
     };
 }
 
-
 fn boolval(_: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len == 0) return .{ .bool = false };
     return .{ .bool = args[0].isTruthy() };

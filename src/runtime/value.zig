@@ -378,23 +378,10 @@ pub const Value = union(enum) {
     }
 
     fn formatFloat(buf: *[64]u8, f: f64, precision: usize) []const u8 {
-        return switch (precision) {
-            0 => std.fmt.bufPrint(buf, "{d:.0}", .{f}) catch "0",
-            1 => std.fmt.bufPrint(buf, "{d:.1}", .{f}) catch "0",
-            2 => std.fmt.bufPrint(buf, "{d:.2}", .{f}) catch "0",
-            3 => std.fmt.bufPrint(buf, "{d:.3}", .{f}) catch "0",
-            4 => std.fmt.bufPrint(buf, "{d:.4}", .{f}) catch "0",
-            5 => std.fmt.bufPrint(buf, "{d:.5}", .{f}) catch "0",
-            6 => std.fmt.bufPrint(buf, "{d:.6}", .{f}) catch "0",
-            7 => std.fmt.bufPrint(buf, "{d:.7}", .{f}) catch "0",
-            8 => std.fmt.bufPrint(buf, "{d:.8}", .{f}) catch "0",
-            9 => std.fmt.bufPrint(buf, "{d:.9}", .{f}) catch "0",
-            10 => std.fmt.bufPrint(buf, "{d:.10}", .{f}) catch "0",
-            11 => std.fmt.bufPrint(buf, "{d:.11}", .{f}) catch "0",
-            12 => std.fmt.bufPrint(buf, "{d:.12}", .{f}) catch "0",
-            13 => std.fmt.bufPrint(buf, "{d:.13}", .{f}) catch "0",
-            else => std.fmt.bufPrint(buf, "{d:.14}", .{f}) catch "0",
-        };
+        const p: u4 = @intCast(@min(precision, 15));
+        switch (p) {
+            inline 0...15 => |cp| return std.fmt.bufPrint(buf, "{d:." ++ std.fmt.comptimePrint("{d}", .{@min(cp, 14)}) ++ "}", .{f}) catch "0",
+        }
     }
 
     const BinOp = enum { add, sub, mul };

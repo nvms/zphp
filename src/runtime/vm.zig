@@ -11,7 +11,7 @@ const CompileResult = @import("../pipeline/compiler.zig").CompileResult;
 const enums = @import("../stdlib/enums.zig");
 
 const Allocator = std.mem.Allocator;
-const RuntimeError = error{ RuntimeError, OutOfMemory };
+pub const RuntimeError = error{ RuntimeError, OutOfMemory };
 
 pub const FileLoader = fn (path: []const u8, allocator: Allocator) ?*CompileResult;
 pub const NativeContext = struct {
@@ -287,41 +287,56 @@ pub const VM = struct {
         try c.put(a, "LOCK_NB", .{ .int = 4 });
     }
 
-    pub fn deinit(self: *VM) void {
-        for (0..self.frame_count) |i| {
-            self.frames[i].ref_slots.deinit(self.allocator);
-            self.frames[i].vars.deinit(self.allocator);
-        }
-        self.functions.deinit(self.allocator);
-        self.native_fns.deinit(self.allocator);
-        self.output.deinit(self.allocator);
+    fn freeHeapItems(self: *VM) void {
         for (self.strings.items) |s| self.allocator.free(s);
-        self.strings.deinit(self.allocator);
-        self.captures.deinit(self.allocator);
-        self.php_constants.deinit(self.allocator);
         for (self.arrays.items) |a| {
             a.deinit(self.allocator);
             self.allocator.destroy(a);
         }
-        self.arrays.deinit(self.allocator);
         @import("../stdlib/pdo.zig").cleanupResources(self.objects);
         @import("../stdlib/filesystem.zig").cleanupHandles(self.objects);
         for (self.objects.items) |o| {
             o.deinit(self.allocator);
             self.allocator.destroy(o);
         }
-        self.objects.deinit(self.allocator);
         for (self.generators.items) |g| {
             g.deinit(self.allocator);
             self.allocator.destroy(g);
         }
-        self.generators.deinit(self.allocator);
         for (self.fibers.items) |f| {
             f.deinit(self.allocator);
             self.allocator.destroy(f);
         }
-        self.fibers.deinit(self.allocator);
         for (self.ref_cells.items) |c| self.allocator.destroy(c);
+        var statics_iter = self.statics.keyIterator();
+        while (statics_iter.next()) |k| self.allocator.free(k.*);
+        for (self.compile_results.items) |r| {
+            var result = r;
+            result.deinit();
+            self.allocator.destroy(result);
+        }
+    }
+
+    fn releaseFrames(self: *VM) void {
+        for (0..self.frame_count) |i| {
+            self.frames[i].ref_slots.deinit(self.allocator);
+            self.frames[i].vars.deinit(self.allocator);
+        }
+    }
+
+    pub fn deinit(self: *VM) void {
+        self.releaseFrames();
+        self.freeHeapItems();
+        self.functions.deinit(self.allocator);
+        self.native_fns.deinit(self.allocator);
+        self.output.deinit(self.allocator);
+        self.strings.deinit(self.allocator);
+        self.captures.deinit(self.allocator);
+        self.php_constants.deinit(self.allocator);
+        self.arrays.deinit(self.allocator);
+        self.objects.deinit(self.allocator);
+        self.generators.deinit(self.allocator);
+        self.fibers.deinit(self.allocator);
         self.ref_cells.deinit(self.allocator);
         var class_iter = self.classes.valueIterator();
         while (class_iter.next()) |c| c.deinit(self.allocator);
@@ -330,18 +345,10 @@ pub const VM = struct {
         while (iface_iter.next()) |i| i.deinit(self.allocator);
         self.interfaces.deinit(self.allocator);
         self.traits.deinit(self.allocator);
-        // free statics keys (heap allocated)
-        var statics_iter = self.statics.keyIterator();
-        while (statics_iter.next()) |k| self.allocator.free(k.*);
         self.statics.deinit(self.allocator);
         self.static_vars.deinit(self.allocator);
         self.global_vars.deinit(self.allocator);
         self.loaded_files.deinit(self.allocator);
-        for (self.compile_results.items) |r| {
-            var result = r;
-            result.deinit();
-            self.allocator.destroy(result);
-        }
         self.compile_results.deinit(self.allocator);
         self.ob_stack.deinit(self.allocator);
         self.request_vars.deinit(self.allocator);
@@ -349,62 +356,31 @@ pub const VM = struct {
     }
 
     pub fn reset(self: *VM) void {
-        // clear per-request state, keep stdlib/builtins/constants/classes
-        for (0..self.frame_count) |i| {
-            self.frames[i].ref_slots.deinit(self.allocator);
-            self.frames[i].vars.deinit(self.allocator);
-        }
+        self.releaseFrames();
+        self.freeHeapItems();
         self.frame_count = 0;
         self.sp = 0;
         self.handler_count = 0;
-        self.output.clearRetainingCapacity();
-        for (self.strings.items) |s| self.allocator.free(s);
-        self.strings.clearRetainingCapacity();
-        for (self.arrays.items) |a| {
-            a.deinit(self.allocator);
-            self.allocator.destroy(a);
-        }
-        self.arrays.clearRetainingCapacity();
-        @import("../stdlib/pdo.zig").cleanupResources(self.objects);
-        @import("../stdlib/filesystem.zig").cleanupHandles(self.objects);
-        for (self.objects.items) |o| {
-            o.deinit(self.allocator);
-            self.allocator.destroy(o);
-        }
-        self.objects.clearRetainingCapacity();
-        for (self.generators.items) |g| {
-            g.deinit(self.allocator);
-            self.allocator.destroy(g);
-        }
-        self.generators.clearRetainingCapacity();
-        for (self.fibers.items) |f| {
-            f.deinit(self.allocator);
-            self.allocator.destroy(f);
-        }
-        self.fibers.clearRetainingCapacity();
-        for (self.ref_cells.items) |c| self.allocator.destroy(c);
-        self.ref_cells.clearRetainingCapacity();
+        self.handler_floor = 0;
         self.current_fiber = null;
         self.fiber_suspend_pending = false;
         self.fiber_suspend_value = .null;
-        self.handler_floor = 0;
+        self.error_msg = null;
+        self.output.clearRetainingCapacity();
+        self.strings.clearRetainingCapacity();
+        self.arrays.clearRetainingCapacity();
+        self.objects.clearRetainingCapacity();
+        self.generators.clearRetainingCapacity();
+        self.fibers.clearRetainingCapacity();
+        self.ref_cells.clearRetainingCapacity();
         self.captures.clearRetainingCapacity();
         self.ob_stack.clearRetainingCapacity();
         self.request_vars.clearRetainingCapacity();
-        // clear user-defined static vars but keep the statics table
-        var statics_iter = self.statics.keyIterator();
-        while (statics_iter.next()) |k| self.allocator.free(k.*);
         self.statics.clearRetainingCapacity();
         self.static_vars.clearRetainingCapacity();
         self.global_vars.clearRetainingCapacity();
         self.loaded_files.clearRetainingCapacity();
-        for (self.compile_results.items) |r| {
-            var result = r;
-            result.deinit();
-            self.allocator.destroy(result);
-        }
         self.compile_results.clearRetainingCapacity();
-        self.error_msg = null;
     }
 
     pub fn interpret(self: *VM, result: *const CompileResult) RuntimeError!void {
@@ -746,22 +722,12 @@ pub const VM = struct {
                 },
                 .return_val => {
                     const result = self.pop();
-                    try self.writebackStatics();
-                    try self.writebackGlobals();
-                    try self.writebackRefs();
-                    self.frame_count -= 1;
-                    self.frames[self.frame_count].ref_slots.deinit(self.allocator);
-                    self.frames[self.frame_count].vars.deinit(self.allocator);
+                    try self.popFrame();
                     self.push(result);
                     if (self.frame_count <= base_frame) return;
                 },
                 .return_void => {
-                    try self.writebackStatics();
-                    try self.writebackGlobals();
-                    try self.writebackRefs();
-                    self.frame_count -= 1;
-                    self.frames[self.frame_count].ref_slots.deinit(self.allocator);
-                    self.frames[self.frame_count].vars.deinit(self.allocator);
+                    try self.popFrame();
                     self.push(.null);
                     if (self.frame_count <= base_frame) return;
                 },
@@ -976,22 +942,7 @@ pub const VM = struct {
                 .closure_bind => {
                     const var_idx = self.readU16();
                     const var_name = self.currentChunk().constants.items[var_idx].string;
-                    const compile_name = self.peek().string;
-
-                    // if stack still holds the compile-time name, create a unique runtime instance
-                    if (std.mem.startsWith(u8, compile_name, "__closure_") and
-                        !std.mem.containsAtLeast(u8, compile_name["__closure_".len..], 1, "_"))
-                    {
-                        const id = self.closure_instance_count;
-                        self.closure_instance_count += 1;
-                        const inst_name = try std.fmt.allocPrint(self.allocator, "{s}_{d}", .{ compile_name, id });
-                        try self.strings.append(self.allocator, inst_name);
-                        if (self.functions.get(compile_name)) |func| {
-                            try self.functions.put(self.allocator, inst_name, func);
-                        }
-                        self.stack[self.sp - 1] = .{ .string = inst_name };
-                    }
-
+                    try self.ensureClosureInstance();
                     const closure_name = self.peek().string;
                     const val = if (self.currentFrame().ref_slots.get(var_name)) |cell|
                         cell.*
@@ -1007,21 +958,7 @@ pub const VM = struct {
                 .closure_bind_ref => {
                     const var_idx = self.readU16();
                     const var_name = self.currentChunk().constants.items[var_idx].string;
-                    const compile_name = self.peek().string;
-
-                    if (std.mem.startsWith(u8, compile_name, "__closure_") and
-                        !std.mem.containsAtLeast(u8, compile_name["__closure_".len..], 1, "_"))
-                    {
-                        const id = self.closure_instance_count;
-                        self.closure_instance_count += 1;
-                        const inst_name = try std.fmt.allocPrint(self.allocator, "{s}_{d}", .{ compile_name, id });
-                        try self.strings.append(self.allocator, inst_name);
-                        if (self.functions.get(compile_name)) |func| {
-                            try self.functions.put(self.allocator, inst_name, func);
-                        }
-                        self.stack[self.sp - 1] = .{ .string = inst_name };
-                    }
-
+                    try self.ensureClosureInstance();
                     const closure_name = self.peek().string;
                     // get or create a ref cell for this variable
                     const cell = if (self.currentFrame().ref_slots.get(var_name)) |existing|
@@ -1195,227 +1132,7 @@ pub const VM = struct {
                     }
                 },
 
-                .class_decl => {
-                    const name_idx = self.readU16();
-                    const class_name = self.currentChunk().constants.items[name_idx].string;
-                    const method_count = self.readByte();
-
-                    var def = ClassDef{ .name = class_name };
-
-                    for (0..method_count) |_| {
-                        const mname_idx = self.readU16();
-                        const method_name = self.currentChunk().constants.items[mname_idx].string;
-                        const arity = self.readByte();
-                        const is_static = self.readByte() == 1;
-                        const vis: ClassDef.Visibility = @enumFromInt(self.readByte());
-                        try def.methods.put(self.allocator, method_name, .{
-                            .name = method_name,
-                            .arity = arity,
-                            .is_static = is_static,
-                            .visibility = vis,
-                        });
-                    }
-
-                    const prop_count = self.readByte();
-
-                    var prop_names: [32][]const u8 = undefined;
-                    var prop_has_default: [32]u8 = undefined;
-                    var prop_vis: [32]ClassDef.Visibility = undefined;
-                    var prop_readonly: [32]bool = .{false} ** 32;
-                    for (0..prop_count) |pi| {
-                        const pname_idx = self.readU16();
-                        prop_names[pi] = self.currentChunk().constants.items[pname_idx].string;
-                        prop_has_default[pi] = self.readByte();
-                        const vis_byte = self.readByte();
-                        prop_vis[pi] = @enumFromInt(vis_byte & 0x03);
-                        prop_readonly[pi] = (vis_byte & 0x04) != 0;
-                    }
-
-                    const static_prop_count = self.readByte();
-                    var sprop_names: [32][]const u8 = undefined;
-                    var sprop_has_default: [32]u8 = undefined;
-                    for (0..static_prop_count) |pi| {
-                        const pname_idx = self.readU16();
-                        sprop_names[pi] = self.currentChunk().constants.items[pname_idx].string;
-                        sprop_has_default[pi] = self.readByte();
-                        _ = self.readByte(); // visibility (stored but not enforced for static props yet)
-                    }
-
-                    // pop static property defaults (on top of stack, pushed last)
-                    var sdefaults: [32]Value = undefined;
-                    var sdefault_count: usize = 0;
-                    for (0..static_prop_count) |pi| {
-                        if (sprop_has_default[pi] == 1) sdefault_count += 1;
-                    }
-                    var si: usize = sdefault_count;
-                    while (si > 0) {
-                        si -= 1;
-                        sdefaults[si] = self.pop();
-                    }
-
-                    // pop instance property defaults
-                    var defaults: [32]Value = undefined;
-                    var default_count: usize = 0;
-                    for (0..prop_count) |pi| {
-                        if (prop_has_default[pi] == 1) default_count += 1;
-                    }
-                    var di: usize = default_count;
-                    while (di > 0) {
-                        di -= 1;
-                        defaults[di] = self.pop();
-                    }
-
-                    var dj: usize = 0;
-                    for (0..prop_count) |pi| {
-                        const default_val = if (prop_has_default[pi] == 1) blk: {
-                            const v = defaults[dj];
-                            dj += 1;
-                            break :blk v;
-                        } else Value{ .null = {} };
-                        try def.properties.append(self.allocator, .{
-                            .name = prop_names[pi],
-                            .default = default_val,
-                            .visibility = prop_vis[pi],
-                            .is_readonly = prop_readonly[pi],
-                        });
-                    }
-
-                    var sj: usize = 0;
-                    for (0..static_prop_count) |pi| {
-                        const default_val = if (sprop_has_default[pi] == 1) blk: {
-                            const v = sdefaults[sj];
-                            sj += 1;
-                            break :blk v;
-                        } else Value{ .null = {} };
-                        try def.static_props.put(self.allocator, sprop_names[pi], default_val);
-                    }
-
-                    const parent_idx = self.readU16();
-                    if (parent_idx != 0xffff) {
-                        def.parent = self.currentChunk().constants.items[parent_idx].string;
-                    }
-
-                    // read implements list
-                    const iface_count = self.readByte();
-                    for (0..iface_count) |_| {
-                        const iname_idx = self.readU16();
-                        const iface_name = self.currentChunk().constants.items[iname_idx].string;
-                        try def.interfaces.append(self.allocator, iface_name);
-                    }
-
-                    // read trait list and copy trait methods
-                    const trait_count = self.readByte();
-                    var trait_names: [16][]const u8 = undefined;
-                    for (0..trait_count) |ti| {
-                        const tname_idx = self.readU16();
-                        trait_names[ti] = self.currentChunk().constants.items[tname_idx].string;
-                    }
-
-                    // read conflict resolution rules
-                    const InsteadofRule = struct { method: []const u8, preferred: []const u8, excluded: [16][]const u8, excluded_count: u8 };
-                    const AliasRule = struct { method: []const u8, trait: []const u8, alias: []const u8 };
-                    var insteadof_rules: [32]InsteadofRule = undefined;
-                    var insteadof_count: usize = 0;
-                    var alias_rules: [32]AliasRule = undefined;
-                    var alias_count: usize = 0;
-                    const conflict_count = self.readByte();
-                    for (0..conflict_count) |_| {
-                        const method_idx = self.readU16();
-                        const method_name = self.currentChunk().constants.items[method_idx].string;
-                        const rule_trait_idx = self.readU16();
-                        const rule_trait = self.currentChunk().constants.items[rule_trait_idx].string;
-                        const rule_type = self.readByte();
-                        if (rule_type == 1) {
-                            var rule = InsteadofRule{ .method = method_name, .preferred = rule_trait, .excluded = undefined, .excluded_count = self.readByte() };
-                            for (0..rule.excluded_count) |ei| {
-                                const eidx = self.readU16();
-                                rule.excluded[ei] = self.currentChunk().constants.items[eidx].string;
-                            }
-                            insteadof_rules[insteadof_count] = rule;
-                            insteadof_count += 1;
-                        } else {
-                            const aidx = self.readU16();
-                            alias_rules[alias_count] = .{ .method = method_name, .trait = rule_trait, .alias = self.currentChunk().constants.items[aidx].string };
-                            alias_count += 1;
-                        }
-                    }
-
-                    for (trait_names[0..trait_count]) |trait_name| {
-                        // collect trait methods first to avoid iterator invalidation
-                        const TraitMethod = struct { name: []const u8, func: *const ObjFunction };
-                        var pending: [64]TraitMethod = undefined;
-                        var pending_count: usize = 0;
-                        {
-                            var fn_iter = self.functions.iterator();
-                            while (fn_iter.next()) |entry| {
-                                const fn_name = entry.key_ptr.*;
-                                if (fn_name.len > trait_name.len + 2 and
-                                    std.mem.eql(u8, fn_name[0..trait_name.len], trait_name) and
-                                    std.mem.eql(u8, fn_name[trait_name.len .. trait_name.len + 2], "::"))
-                                {
-                                    pending[pending_count] = .{
-                                        .name = fn_name[trait_name.len + 2 ..],
-                                        .func = entry.value_ptr.*,
-                                    };
-                                    pending_count += 1;
-                                }
-                            }
-                        }
-                        for (pending[0..pending_count]) |tm| {
-                            // alias rules apply regardless of insteadof exclusion
-                            var vis_override: ?ClassDef.Visibility = null;
-                            for (alias_rules[0..alias_count]) |rule| {
-                                if (std.mem.eql(u8, rule.method, tm.name) and std.mem.eql(u8, rule.trait, trait_name)) {
-                                    // visibility-only change
-                                    if (std.mem.eql(u8, rule.alias, "public")) {
-                                        vis_override = .public;
-                                    } else if (std.mem.eql(u8, rule.alias, "protected")) {
-                                        vis_override = .protected;
-                                    } else if (std.mem.eql(u8, rule.alias, "private")) {
-                                        vis_override = .private;
-                                    } else {
-                                        // name alias
-                                        const alias_method = try std.fmt.allocPrint(self.allocator, "{s}::{s}", .{ class_name, rule.alias });
-                                        try self.strings.append(self.allocator, alias_method);
-                                        if (!self.functions.contains(alias_method)) {
-                                            try self.functions.put(self.allocator, alias_method, tm.func);
-                                            try def.methods.put(self.allocator, rule.alias, .{
-                                                .name = rule.alias,
-                                                .arity = tm.func.arity,
-                                            });
-                                        }
-                                    }
-                                }
-                            }
-
-                            // check insteadof rules: is this method excluded for this trait?
-                            var excluded = false;
-                            for (insteadof_rules[0..insteadof_count]) |rule| {
-                                if (std.mem.eql(u8, rule.method, tm.name)) {
-                                    if (std.mem.eql(u8, rule.preferred, trait_name)) break;
-                                    for (rule.excluded[0..rule.excluded_count]) |ex| {
-                                        if (std.mem.eql(u8, ex, trait_name)) { excluded = true; break; }
-                                    }
-                                    if (excluded) break;
-                                }
-                            }
-                            if (excluded) continue;
-
-                            const class_method = try std.fmt.allocPrint(self.allocator, "{s}::{s}", .{ class_name, tm.name });
-                            try self.strings.append(self.allocator, class_method);
-                            if (!self.functions.contains(class_method)) {
-                                try self.functions.put(self.allocator, class_method, tm.func);
-                                try def.methods.put(self.allocator, tm.name, .{
-                                    .name = tm.name,
-                                    .arity = tm.func.arity,
-                                    .visibility = vis_override orelse .public,
-                                });
-                            }
-                        }
-                    }
-
-                    try self.classes.put(self.allocator, class_name, def);
-                },
+                .class_decl => try self.handleClassDecl(),
 
                 .interface_decl => {
                     const name_idx = self.readU16();
@@ -1443,91 +1160,7 @@ pub const VM = struct {
                     try self.traits.put(self.allocator, trait_name, {});
                 },
 
-                .enum_decl => {
-                    const name_idx = self.readU16();
-                    const enum_name = self.currentChunk().constants.items[name_idx].string;
-                    const backed_type_byte = self.readByte();
-                    const case_count = self.readByte();
-
-                    var def = ClassDef{ .name = enum_name, .is_enum = true };
-                    def.backed_type = @enumFromInt(backed_type_byte);
-
-                    var case_names: [64][]const u8 = undefined;
-                    var case_has_value: [64]u8 = undefined;
-                    for (0..case_count) |ci| {
-                        const cname_idx = self.readU16();
-                        case_names[ci] = self.currentChunk().constants.items[cname_idx].string;
-                        case_has_value[ci] = self.readByte();
-                    }
-
-                    // pop case values (pushed in order, pop in reverse)
-                    var case_values: [64]Value = undefined;
-                    var value_count: usize = 0;
-                    for (0..case_count) |ci| {
-                        if (case_has_value[ci] == 1) value_count += 1;
-                    }
-                    var vi: usize = value_count;
-                    while (vi > 0) {
-                        vi -= 1;
-                        case_values[vi] = self.pop();
-                    }
-
-                    // create singleton objects for each case
-                    var vj: usize = 0;
-                    for (0..case_count) |ci| {
-                        const case_obj = try self.allocator.create(PhpObject);
-                        case_obj.* = .{ .class_name = enum_name };
-                        try self.objects.append(self.allocator, case_obj);
-                        try case_obj.set(self.allocator, "name", .{ .string = case_names[ci] });
-                        if (case_has_value[ci] == 1) {
-                            try case_obj.set(self.allocator, "value", case_values[vj]);
-                            vj += 1;
-                        }
-                        try def.static_props.put(self.allocator, case_names[ci], .{ .object = case_obj });
-                        try def.case_order.append(self.allocator, case_names[ci]);
-                    }
-
-                    // read methods
-                    const method_count = self.readByte();
-                    for (0..method_count) |_| {
-                        const mname_idx = self.readU16();
-                        const method_name = self.currentChunk().constants.items[mname_idx].string;
-                        const arity = self.readByte();
-                        const is_static = self.readByte() == 1;
-                        const vis: ClassDef.Visibility = @enumFromInt(self.readByte());
-                        try def.methods.put(self.allocator, method_name, .{
-                            .name = method_name,
-                            .arity = arity,
-                            .is_static = is_static,
-                            .visibility = vis,
-                        });
-                    }
-
-                    // read implements
-                    const iface_count = self.readByte();
-                    for (0..iface_count) |_| {
-                        const iname_idx = self.readU16();
-                        const iface_name = self.currentChunk().constants.items[iname_idx].string;
-                        try def.interfaces.append(self.allocator, iface_name);
-                    }
-
-                    // register native methods: cases, from, tryFrom
-                    const cases_name = try std.fmt.allocPrint(self.allocator, "{s}::cases", .{enum_name});
-                    try self.strings.append(self.allocator, cases_name);
-                    try self.native_fns.put(self.allocator, cases_name, enums.enumCases);
-
-                    if (backed_type_byte != 0) {
-                        const from_name = try std.fmt.allocPrint(self.allocator, "{s}::from", .{enum_name});
-                        try self.strings.append(self.allocator, from_name);
-                        try self.native_fns.put(self.allocator, from_name, enums.enumFrom);
-
-                        const try_from_name = try std.fmt.allocPrint(self.allocator, "{s}::tryFrom", .{enum_name});
-                        try self.strings.append(self.allocator, try_from_name);
-                        try self.native_fns.put(self.allocator, try_from_name, enums.enumTryFrom);
-                    }
-
-                    try self.classes.put(self.allocator, enum_name, def);
-                },
+                .enum_decl => try self.handleEnumDecl(),
 
                 .new_obj => {
                     const name_idx = self.readU16();
@@ -2433,6 +2066,302 @@ pub const VM = struct {
         return "Object";
     }
 
+    // ==================================================================
+    // opcode handlers (extracted from runLoop for readability)
+    // ==================================================================
+
+    fn handleClassDecl(self: *VM) RuntimeError!void {
+        const name_idx = self.readU16();
+        const class_name = self.currentChunk().constants.items[name_idx].string;
+        const method_count = self.readByte();
+
+        var def = ClassDef{ .name = class_name };
+
+        for (0..method_count) |_| {
+            const mi = self.readMethodInfo();
+            try def.methods.put(self.allocator, mi[0], mi[1]);
+        }
+
+        const prop_count = self.readByte();
+        var prop_names: [32][]const u8 = undefined;
+        var prop_has_default: [32]u8 = undefined;
+        var prop_vis: [32]ClassDef.Visibility = undefined;
+        var prop_readonly: [32]bool = .{false} ** 32;
+        for (0..prop_count) |pi| {
+            const pname_idx = self.readU16();
+            prop_names[pi] = self.currentChunk().constants.items[pname_idx].string;
+            prop_has_default[pi] = self.readByte();
+            const vis_byte = self.readByte();
+            prop_vis[pi] = @enumFromInt(vis_byte & 0x03);
+            prop_readonly[pi] = (vis_byte & 0x04) != 0;
+        }
+
+        const static_prop_count = self.readByte();
+        var sprop_names: [32][]const u8 = undefined;
+        var sprop_has_default: [32]u8 = undefined;
+        for (0..static_prop_count) |pi| {
+            const pname_idx = self.readU16();
+            sprop_names[pi] = self.currentChunk().constants.items[pname_idx].string;
+            sprop_has_default[pi] = self.readByte();
+            _ = self.readByte();
+        }
+
+        const sdefaults = self.popDefaults(32, sprop_has_default[0..static_prop_count]);
+        const defaults = self.popDefaults(32, prop_has_default[0..prop_count]);
+
+        var dj: usize = 0;
+        for (0..prop_count) |pi| {
+            const default_val = if (prop_has_default[pi] == 1) blk: {
+                const v = defaults[dj];
+                dj += 1;
+                break :blk v;
+            } else Value{ .null = {} };
+            try def.properties.append(self.allocator, .{
+                .name = prop_names[pi],
+                .default = default_val,
+                .visibility = prop_vis[pi],
+                .is_readonly = prop_readonly[pi],
+            });
+        }
+
+        var sj: usize = 0;
+        for (0..static_prop_count) |pi| {
+            const default_val = if (sprop_has_default[pi] == 1) blk: {
+                const v = sdefaults[sj];
+                sj += 1;
+                break :blk v;
+            } else Value{ .null = {} };
+            try def.static_props.put(self.allocator, sprop_names[pi], default_val);
+        }
+
+        const parent_idx = self.readU16();
+        if (parent_idx != 0xffff) {
+            def.parent = self.currentChunk().constants.items[parent_idx].string;
+        }
+
+        const iface_count = self.readByte();
+        for (0..iface_count) |_| {
+            const iname_idx = self.readU16();
+            try def.interfaces.append(self.allocator, self.currentChunk().constants.items[iname_idx].string);
+        }
+
+        const trait_count = self.readByte();
+        var trait_names: [16][]const u8 = undefined;
+        for (0..trait_count) |ti| {
+            trait_names[ti] = self.currentChunk().constants.items[self.readU16()].string;
+        }
+
+        var insteadof_rules: [32]InsteadofRule = undefined;
+        var insteadof_count: usize = 0;
+        var alias_rules: [32]AliasRule = undefined;
+        var alias_count: usize = 0;
+        const conflict_count = self.readByte();
+        for (0..conflict_count) |_| {
+            const method_name = self.currentChunk().constants.items[self.readU16()].string;
+            const rule_trait = self.currentChunk().constants.items[self.readU16()].string;
+            const rule_type = self.readByte();
+            if (rule_type == 1) {
+                var rule = InsteadofRule{ .method = method_name, .preferred = rule_trait, .excluded = undefined, .excluded_count = self.readByte() };
+                for (0..rule.excluded_count) |ei| {
+                    rule.excluded[ei] = self.currentChunk().constants.items[self.readU16()].string;
+                }
+                insteadof_rules[insteadof_count] = rule;
+                insteadof_count += 1;
+            } else {
+                alias_rules[alias_count] = .{ .method = method_name, .trait = rule_trait, .alias = self.currentChunk().constants.items[self.readU16()].string };
+                alias_count += 1;
+            }
+        }
+
+        for (trait_names[0..trait_count]) |trait_name| {
+            try self.applyTrait(&def, class_name, trait_name, alias_rules[0..alias_count], insteadof_rules[0..insteadof_count]);
+        }
+
+        try self.classes.put(self.allocator, class_name, def);
+    }
+
+    fn handleEnumDecl(self: *VM) RuntimeError!void {
+        const name_idx = self.readU16();
+        const enum_name = self.currentChunk().constants.items[name_idx].string;
+        const backed_type_byte = self.readByte();
+        const case_count = self.readByte();
+
+        var def = ClassDef{ .name = enum_name, .is_enum = true };
+        def.backed_type = @enumFromInt(backed_type_byte);
+
+        var case_names: [64][]const u8 = undefined;
+        var case_has_value: [64]u8 = undefined;
+        for (0..case_count) |ci| {
+            case_names[ci] = self.currentChunk().constants.items[self.readU16()].string;
+            case_has_value[ci] = self.readByte();
+        }
+
+        const case_values = self.popDefaults(64, case_has_value[0..case_count]);
+
+        var vj: usize = 0;
+        for (0..case_count) |ci| {
+            const case_obj = try self.allocator.create(PhpObject);
+            case_obj.* = .{ .class_name = enum_name };
+            try self.objects.append(self.allocator, case_obj);
+            try case_obj.set(self.allocator, "name", .{ .string = case_names[ci] });
+            if (case_has_value[ci] == 1) {
+                try case_obj.set(self.allocator, "value", case_values[vj]);
+                vj += 1;
+            }
+            try def.static_props.put(self.allocator, case_names[ci], .{ .object = case_obj });
+            try def.case_order.append(self.allocator, case_names[ci]);
+        }
+
+        const method_count = self.readByte();
+        for (0..method_count) |_| {
+            const mi = self.readMethodInfo();
+            try def.methods.put(self.allocator, mi[0], mi[1]);
+        }
+
+        const iface_count = self.readByte();
+        for (0..iface_count) |_| {
+            try def.interfaces.append(self.allocator, self.currentChunk().constants.items[self.readU16()].string);
+        }
+
+        try self.registerEnumMethods(enum_name, backed_type_byte);
+        try self.classes.put(self.allocator, enum_name, def);
+    }
+
+    fn readMethodInfo(self: *VM) struct { []const u8, ClassDef.MethodInfo } {
+        const mname_idx = self.readU16();
+        const method_name = self.currentChunk().constants.items[mname_idx].string;
+        const arity = self.readByte();
+        const is_static = self.readByte() == 1;
+        const vis: ClassDef.Visibility = @enumFromInt(self.readByte());
+        return .{ method_name, .{ .name = method_name, .arity = arity, .is_static = is_static, .visibility = vis } };
+    }
+
+    fn popDefaults(self: *VM, comptime max: usize, has_default: []const u8) [max]Value {
+        var values: [max]Value = undefined;
+        var count: usize = 0;
+        for (has_default) |hd| {
+            if (hd == 1) count += 1;
+        }
+        var i: usize = count;
+        while (i > 0) {
+            i -= 1;
+            values[i] = self.pop();
+        }
+        return values;
+    }
+
+    fn registerEnumMethods(self: *VM, enum_name: []const u8, backed_type_byte: u8) !void {
+        const cases_name = try std.fmt.allocPrint(self.allocator, "{s}::cases", .{enum_name});
+        try self.strings.append(self.allocator, cases_name);
+        try self.native_fns.put(self.allocator, cases_name, enums.enumCases);
+
+        if (backed_type_byte != 0) {
+            const from_name = try std.fmt.allocPrint(self.allocator, "{s}::from", .{enum_name});
+            try self.strings.append(self.allocator, from_name);
+            try self.native_fns.put(self.allocator, from_name, enums.enumFrom);
+
+            const try_from_name = try std.fmt.allocPrint(self.allocator, "{s}::tryFrom", .{enum_name});
+            try self.strings.append(self.allocator, try_from_name);
+            try self.native_fns.put(self.allocator, try_from_name, enums.enumTryFrom);
+        }
+    }
+
+    const InsteadofRule = struct { method: []const u8, preferred: []const u8, excluded: [16][]const u8, excluded_count: u8 };
+    const AliasRule = struct { method: []const u8, trait: []const u8, alias: []const u8 };
+
+    fn applyTrait(self: *VM, def: *ClassDef, class_name: []const u8, trait_name: []const u8, alias_rules: []const AliasRule, insteadof_rules: []const InsteadofRule) !void {
+        const TraitMethod = struct { name: []const u8, func: *const ObjFunction };
+        var pending: [64]TraitMethod = undefined;
+        var pending_count: usize = 0;
+        {
+            var fn_iter = self.functions.iterator();
+            while (fn_iter.next()) |entry| {
+                const fn_name = entry.key_ptr.*;
+                if (fn_name.len > trait_name.len + 2 and
+                    std.mem.eql(u8, fn_name[0..trait_name.len], trait_name) and
+                    std.mem.eql(u8, fn_name[trait_name.len .. trait_name.len + 2], "::"))
+                {
+                    pending[pending_count] = .{ .name = fn_name[trait_name.len + 2 ..], .func = entry.value_ptr.* };
+                    pending_count += 1;
+                }
+            }
+        }
+
+        for (pending[0..pending_count]) |tm| {
+            var vis_override: ?ClassDef.Visibility = null;
+            for (alias_rules) |rule| {
+                if (std.mem.eql(u8, rule.method, tm.name) and std.mem.eql(u8, rule.trait, trait_name)) {
+                    if (std.mem.eql(u8, rule.alias, "public")) {
+                        vis_override = .public;
+                    } else if (std.mem.eql(u8, rule.alias, "protected")) {
+                        vis_override = .protected;
+                    } else if (std.mem.eql(u8, rule.alias, "private")) {
+                        vis_override = .private;
+                    } else {
+                        const alias_method = try std.fmt.allocPrint(self.allocator, "{s}::{s}", .{ class_name, rule.alias });
+                        try self.strings.append(self.allocator, alias_method);
+                        if (!self.functions.contains(alias_method)) {
+                            try self.functions.put(self.allocator, alias_method, tm.func);
+                            try def.methods.put(self.allocator, rule.alias, .{ .name = rule.alias, .arity = tm.func.arity });
+                        }
+                    }
+                }
+            }
+
+            var excluded = false;
+            for (insteadof_rules) |rule| {
+                if (std.mem.eql(u8, rule.method, tm.name)) {
+                    if (std.mem.eql(u8, rule.preferred, trait_name)) break;
+                    for (rule.excluded[0..rule.excluded_count]) |ex| {
+                        if (std.mem.eql(u8, ex, trait_name)) { excluded = true; break; }
+                    }
+                    if (excluded) break;
+                }
+            }
+            if (excluded) continue;
+
+            const class_method = try std.fmt.allocPrint(self.allocator, "{s}::{s}", .{ class_name, tm.name });
+            try self.strings.append(self.allocator, class_method);
+            if (!self.functions.contains(class_method)) {
+                try self.functions.put(self.allocator, class_method, tm.func);
+                try def.methods.put(self.allocator, tm.name, .{
+                    .name = tm.name,
+                    .arity = tm.func.arity,
+                    .visibility = vis_override orelse .public,
+                });
+            }
+        }
+    }
+
+    // ==================================================================
+    // closure and frame helpers
+    // ==================================================================
+
+    fn ensureClosureInstance(self: *VM) !void {
+        const compile_name = self.peek().string;
+        if (std.mem.startsWith(u8, compile_name, "__closure_") and
+            !std.mem.containsAtLeast(u8, compile_name["__closure_".len..], 1, "_"))
+        {
+            const id = self.closure_instance_count;
+            self.closure_instance_count += 1;
+            const inst_name = try std.fmt.allocPrint(self.allocator, "{s}_{d}", .{ compile_name, id });
+            try self.strings.append(self.allocator, inst_name);
+            if (self.functions.get(compile_name)) |func| {
+                try self.functions.put(self.allocator, inst_name, func);
+            }
+            self.stack[self.sp - 1] = .{ .string = inst_name };
+        }
+    }
+
+    fn popFrame(self: *VM) !void {
+        try self.writebackStatics();
+        try self.writebackGlobals();
+        try self.writebackRefs();
+        self.frame_count -= 1;
+        self.frames[self.frame_count].ref_slots.deinit(self.allocator);
+        self.frames[self.frame_count].vars.deinit(self.allocator);
+    }
+
     fn writebackRefs(self: *VM) !void {
         _ = self;
     }
@@ -2628,20 +2557,8 @@ pub const VM = struct {
         var buf: [256]u8 = undefined;
         while (true) {
             const full = std.fmt.bufPrint(&buf, "{s}::{s}", .{ current, method_name }) catch return error.RuntimeError;
-            // check compiled functions
-            if (self.functions.get(full)) |_| {
-                var iter = self.functions.keyIterator();
-                while (iter.next()) |k| {
-                    if (std.mem.eql(u8, k.*, full)) return k.*;
-                }
-            }
-            // check native functions
-            if (self.native_fns.get(full)) |_| {
-                var iter = self.native_fns.keyIterator();
-                while (iter.next()) |k| {
-                    if (std.mem.eql(u8, k.*, full)) return k.*;
-                }
-            }
+            if (self.functions.getEntry(full)) |entry| return entry.key_ptr.*;
+            if (self.native_fns.getEntry(full)) |entry| return entry.key_ptr.*;
             if (self.classes.get(current)) |cls| {
                 if (cls.parent) |p| {
                     current = p;
