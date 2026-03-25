@@ -21,6 +21,11 @@ pdo: build ## Run PDO driver tests
 examples: build ## Run example project tests (requires PHP 8.4)
 	./tests/examples_test
 
+.PHONY: bench
+bench: ## Run runtime benchmarks (ReleaseFast)
+	zig build -Doptimize=ReleaseFast
+	./benchmarks/runtime/run
+
 .PHONY: all-tests
 all-tests: test compat pdo examples ## Run all tests
 
