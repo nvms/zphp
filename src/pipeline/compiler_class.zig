@@ -43,7 +43,7 @@ pub fn compileFunction(self: *Compiler, node: Ast.Node) Error!void {
     const defaults_owned = try self.allocator.alloc(Value, defaults.items.len);
     @memcpy(defaults_owned, defaults.items);
 
-    const gen = self.containsYield(node.data.rhs);
+    const gen = (node.data.rhs & (1 << 31)) != 0;
 
     var sub = Compiler{
         .ast = self.ast,
@@ -72,7 +72,8 @@ pub fn compileFunction(self: *Compiler, node: Ast.Node) Error!void {
         _ = sub.getOrCreateSlot(param_names[i]);
     }
 
-    try sub.compileNode(node.data.rhs);
+    const body_idx = node.data.rhs & 0x7FFFFFFF;
+    try sub.compileNode(body_idx);
     try sub.emitOp(.op_null);
     try sub.emitOp(if (gen) .generator_return else .return_val);
     sub.break_jumps.deinit(self.allocator);
@@ -128,9 +129,11 @@ pub fn compileClosure(self: *Compiler, node: Ast.Node) Error!void {
         }
     }
 
-    // rhs = extra -> {body, use_count, use_vars...}
+    // rhs = extra -> {body (bit 31 = generator), use_count, use_vars...}
     // use_count 0xFFFFFFFF = arrow fn (implicit capture)
-    const body_node = self.ast.extra_data[node.data.rhs];
+    const raw_body = self.ast.extra_data[node.data.rhs];
+    const body_node = raw_body & 0x7FFFFFFF;
+    const gen = (raw_body & (1 << 31)) != 0;
     const raw_use_count = self.ast.extra_data[node.data.rhs + 1];
     const is_arrow = raw_use_count == 0xFFFFFFFF;
     const use_count: u32 = if (is_arrow) 0 else raw_use_count;
@@ -146,6 +149,7 @@ pub fn compileClosure(self: *Compiler, node: Ast.Node) Error!void {
         .loop_start = null,
         .break_jumps = .{},
         .continue_jumps = .{},
+        .is_generator = gen,
         .closure_count = self.closure_count,
         .file_path = self.file_path,
     };
@@ -162,7 +166,6 @@ pub fn compileClosure(self: *Compiler, node: Ast.Node) Error!void {
         _ = sub.getOrCreateSlot(param_names[i]);
     }
 
-    // assign slots to captured variables so they use get_local instead of get_var
     for (use_vars) |use_var_node| {
         const use_node = self.ast.nodes[use_var_node];
         const is_ref = use_node.data.rhs != 0;
@@ -171,12 +174,11 @@ pub fn compileClosure(self: *Compiler, node: Ast.Node) Error!void {
             _ = sub.getOrCreateSlot(var_name);
         }
     }
-    // $this is always bound via closure_bind - give it a slot so the body uses get_local
     _ = sub.getOrCreateSlot("$this");
 
     try sub.compileNode(body_node);
     try sub.emitOp(.op_null);
-    try sub.emitOp(.return_val);
+    try sub.emitOp(if (gen) .generator_return else .return_val);
     sub.break_jumps.deinit(self.allocator);
 
     self.closure_count = sub.closure_count;
@@ -200,7 +202,7 @@ pub fn compileClosure(self: *Compiler, node: Ast.Node) Error!void {
     const local_count = sub.next_slot;
     sub.local_slots.deinit(self.allocator);
 
-    const closure_lo = !is_arrow and !has_any_ref and !has_ref_capture and !needsVarSync(&sub.chunk);
+    const closure_lo = !is_arrow and !gen and !has_any_ref and !has_ref_capture and !needsVarSync(&sub.chunk);
 
     const func = ObjFunction{
         .name = owned_name,
@@ -208,6 +210,7 @@ pub fn compileClosure(self: *Compiler, node: Ast.Node) Error!void {
         .params = param_names[0..param_nodes.len],
         .chunk = sub.chunk,
         .is_arrow = is_arrow,
+        .is_generator = gen,
         .locals_only = closure_lo,
         .ref_params = ref_params,
         .local_count = local_count,
@@ -664,6 +667,9 @@ fn compileClassMethodBody(self: *Compiler, class_name: []const u8, member: Ast.N
     const defaults_owned = try self.allocator.alloc(Value, defaults.items.len);
     @memcpy(defaults_owned, defaults.items);
 
+    // bit 29 = generator flag (bits 30-31 = visibility)
+    const method_gen = (member.data.rhs & (1 << 29)) != 0;
+
     var sub = Compiler{
         .ast = self.ast,
         .chunk = .{},
@@ -674,6 +680,7 @@ fn compileClassMethodBody(self: *Compiler, class_name: []const u8, member: Ast.N
         .loop_start = null,
         .break_jumps = .{},
         .continue_jumps = .{},
+        .is_generator = method_gen,
         .closure_count = self.closure_count,
         .file_path = self.file_path,
     };
@@ -712,10 +719,11 @@ fn compileClassMethodBody(self: *Compiler, class_name: []const u8, member: Ast.N
         }
     }
 
-    const body_idx = member.data.rhs & 0x3FFFFFFF;
+    // mask out visibility (bits 30-31) and generator flag (bit 29)
+    const body_idx = member.data.rhs & 0x1FFFFFFF;
     try sub.compileNode(body_idx);
     try sub.emitOp(.op_null);
-    try sub.emitOp(.return_val);
+    try sub.emitOp(if (method_gen) .generator_return else .return_val);
     sub.break_jumps.deinit(self.allocator);
 
     self.closure_count = sub.closure_count;
@@ -723,13 +731,14 @@ fn compileClassMethodBody(self: *Compiler, class_name: []const u8, member: Ast.N
     const local_count = sub.next_slot;
     sub.local_slots.deinit(self.allocator);
 
-    const method_lo = !is_variadic and !hasRefParams(ref_flags) and !needsVarSync(&sub.chunk) and sub.closure_count == 0;
+    const method_lo = !method_gen and !is_variadic and !hasRefParams(ref_flags) and !needsVarSync(&sub.chunk) and sub.closure_count == 0;
 
     try self.functions.append(self.allocator, .{
         .name = full_name,
         .arity = @intCast(param_nodes.len),
         .required_params = required,
         .is_variadic = is_variadic,
+        .is_generator = method_gen,
         .locals_only = method_lo,
         .params = param_names[0..param_nodes.len],
         .defaults = defaults_owned,

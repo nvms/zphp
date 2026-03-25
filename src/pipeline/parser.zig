@@ -65,6 +65,7 @@ const Parser = struct {
     extra_data: std.ArrayListUnmanaged(u32),
     errors: std.ArrayListUnmanaged(Ast.Error),
     allocator: Allocator,
+    found_yield: bool = false,
 
     // ======================================================================
     // root
@@ -605,9 +606,15 @@ const Parser = struct {
             self.skipTypeHint();
         }
 
+        const prev_yield = self.found_yield;
+        self.found_yield = false;
         const body = try self.parseBlock();
+        const is_gen = self.found_yield;
+        self.found_yield = prev_yield;
+
         const extra = try self.addExtraList(params.items);
-        return self.addNode(.{ .tag = .function_decl, .main_token = name_tok, .data = .{ .lhs = extra, .rhs = body } });
+        const rhs = body | (if (is_gen) @as(u32, 1) << 31 else 0);
+        return self.addNode(.{ .tag = .function_decl, .main_token = name_tok, .data = .{ .lhs = extra, .rhs = rhs } });
     }
 
     fn parseThrowStmt(self: *Parser) Error!u32 {
@@ -722,6 +729,7 @@ const Parser = struct {
     }
 
     fn parseYieldExpr(self: *Parser) Error!u32 {
+        self.found_yield = true;
         const tok = self.advance(); // yield
 
         // yield from $expr
@@ -1137,9 +1145,16 @@ const Parser = struct {
             self.skipTypeHint();
         }
 
+        const prev_yield = self.found_yield;
+        self.found_yield = false;
         const body = try self.parseBlock();
+        const is_gen = self.found_yield;
+        self.found_yield = prev_yield;
+
         const extra = try self.addExtraList(params.items);
-        return self.addNode(.{ .tag = .class_method, .main_token = name_tok, .data = .{ .lhs = extra, .rhs = body } });
+        // bits 30-31 reserved for visibility (set by class/enum parser), bit 29 = generator
+        const rhs = body | (if (is_gen) @as(u32, 1) << 29 else 0);
+        return self.addNode(.{ .tag = .class_method, .main_token = name_tok, .data = .{ .lhs = extra, .rhs = rhs } });
     }
 
     fn parseClassProperty(self: *Parser) Error!u32 {
@@ -1198,13 +1213,18 @@ const Parser = struct {
             self.skipTypeHint();
         }
 
+        const prev_yield = self.found_yield;
+        self.found_yield = false;
         const body = try self.parseBlock();
+        const is_gen = self.found_yield;
+        self.found_yield = prev_yield;
+
         const param_extra = try self.addExtraList(params.items);
 
-        // rhs = extra -> {body, use_count, use_vars...}
+        // rhs = extra -> {body (bit 31 = generator), use_count, use_vars...}
         var rhs_data = std.ArrayListUnmanaged(u32){};
         defer rhs_data.deinit(self.allocator);
-        try rhs_data.append(self.allocator, body);
+        try rhs_data.append(self.allocator, body | (if (is_gen) @as(u32, 1) << 31 else 0));
         try rhs_data.append(self.allocator, @intCast(use_vars.items.len));
         try rhs_data.appendSlice(self.allocator, use_vars.items);
         const rhs_extra = try self.addExtra(rhs_data.items);

@@ -82,3 +82,26 @@ $acc->send(10);
 $acc->send(20);
 $acc->send(30);
 echo $acc->current() . "\n";
+
+// generator closure
+$gen = function() {
+    yield 10;
+    yield 20;
+    yield 30;
+};
+
+$total = 0;
+foreach ($gen() as $v) {
+    $total += $v;
+}
+echo $total . "\n";
+
+// generator closure with keys
+$pairs = function() {
+    yield "x" => 1;
+    yield "y" => 2;
+};
+
+foreach ($pairs() as $k => $v) {
+    echo $k . "=" . $v . "\n";
+}
