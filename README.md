@@ -55,8 +55,7 @@ zphp build --compile app.php
 
 ```sh
 zphp build --compile server.php   # produces ./server (4-5MB)
-scp server prod:/usr/local/bin/   # deploy
-ssh prod server                    # run
+./server                           # run - no zphp needed
 ```
 
 ## Installation
