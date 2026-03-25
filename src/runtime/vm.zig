@@ -139,6 +139,7 @@ pub const ClassDef = struct {
     is_enum: bool = false,
     backed_type: enum(u8) { none = 0, int_type = 1, string_type = 2 } = .none,
     case_order: std.ArrayListUnmanaged([]const u8) = .{},
+    slot_layout: ?*PhpObject.SlotLayout = null,
 
     pub const Visibility = enum(u8) { public = 0, protected = 1, private = 2 };
 
@@ -239,6 +240,7 @@ pub const VM = struct {
         const PropIC = struct {
             key: usize = 0,
             class_ptr: usize = 0,
+            slot_index: u16 = 0xFFFF,
         };
 
         const MethodIC = struct {
@@ -1002,7 +1004,15 @@ pub const VM = struct {
                         if (self.hasMethod(obj.class_name, "__unset")) {
                             _ = self.callMethod(obj, "__unset", &.{.{ .string = prop_name }}) catch {};
                         } else {
-                            _ = obj.properties.remove(prop_name);
+                            if (obj.slots) |s| {
+                                if (obj.getSlotIndex(prop_name)) |idx| {
+                                    s[idx] = .null;
+                                } else {
+                                    _ = obj.properties.remove(prop_name);
+                                }
+                            } else {
+                                _ = obj.properties.remove(prop_name);
+                            }
                         }
                     }
                 },
@@ -1107,7 +1117,7 @@ pub const VM = struct {
                     const obj_val = self.pop();
                     if (obj_val == .object) {
                         const obj = obj_val.object;
-                        if (obj.properties.contains(prop_name)) {
+                        if (obj.properties.contains(prop_name) or (obj.slots != null and obj.getSlotIndex(prop_name) != null)) {
                             self.push(.{ .bool = obj.get(prop_name) != .null });
                         } else if (self.hasMethod(obj.class_name, "__isset")) {
                             const result = self.callMethod(obj, "__isset", &.{.{ .string = prop_name }}) catch Value{ .bool = false };
@@ -1125,6 +1135,14 @@ pub const VM = struct {
                         const src = val.object;
                         const copy = try self.allocator.create(PhpObject);
                         copy.* = .{ .class_name = src.class_name };
+                        if (src.slots) |src_slots| {
+                            const new_slots = try self.allocator.alloc(Value, src_slots.len);
+                            for (src_slots, 0..) |sv, i| {
+                                new_slots[i] = try self.copyValue(sv);
+                            }
+                            copy.slots = new_slots;
+                            copy.slot_layout = src.slot_layout;
+                        }
                         var it = src.properties.iterator();
                         while (it.next()) |entry| {
                             try copy.properties.put(self.allocator, entry.key_ptr.*, try self.copyValue(entry.value_ptr.*));
@@ -1485,24 +1503,55 @@ pub const VM = struct {
                             self.frame_count -= 1;
                             self.frames[self.frame_count].vars.deinit(self.allocator);
                         } else if (self.functions.get(cn)) |func| {
-                            var new_vars: std.StringHashMapUnmanaged(Value) = .{};
-                            try new_vars.put(self.allocator, "$this", .{ .object = obj });
-                            for (0..ac) |i| {
-                                try new_vars.put(self.allocator, func.params[i], self.stack[self.sp - ac + i]);
+                            if (func.locals_only and self.ic != null) {
+                                const ctor_ic = self.ic.?;
+                                const ctor_lc: usize = func.local_count;
+                                const ctor_lbase = ctor_ic.locals_sp;
+                                const ctor_locals = if (ctor_lbase + ctor_lc <= ctor_ic.locals_cap) blk: {
+                                    const s = ctor_ic.locals_buf[ctor_lbase..ctor_lbase + ctor_lc];
+                                    @memset(s, .null);
+                                    ctor_ic.locals_sp = ctor_lbase + ctor_lc;
+                                    break :blk s;
+                                } else blk: {
+                                    const s = try self.allocator.alloc(Value, ctor_lc);
+                                    @memset(s, .null);
+                                    break :blk s;
+                                };
+                                ctor_locals[0] = .{ .object = obj };
+                                for (0..@min(ac, func.arity)) |i| {
+                                    ctor_locals[i + 1] = self.stack[self.sp - ac + i];
+                                }
+                                for (@min(ac, func.arity)..func.arity) |i| {
+                                    if (i < func.defaults.len) ctor_locals[i + 1] = func.defaults[i];
+                                }
+                                self.sp -= ac;
+                                self.frames[self.frame_count] = .{ .chunk = &func.chunk, .ip = 0, .vars = .{}, .locals = ctor_locals, .func = func };
+                                self.frame_count += 1;
+                                try self.fastLoop();
+                                const ctor_frame = &self.frames[self.frame_count - 1];
+                                if (ctor_frame.chunk == &func.chunk) {
+                                    // fastLoop bailed, finish in runLoop
+                                    const ctor_base = self.frame_count - 1;
+                                    try self.runUntilFrame(ctor_base);
+                                }
+                                _ = self.pop();
+                            } else {
+                                var new_vars: std.StringHashMapUnmanaged(Value) = .{};
+                                try new_vars.put(self.allocator, "$this", .{ .object = obj });
+                                for (0..ac) |i| {
+                                    try new_vars.put(self.allocator, func.params[i], self.stack[self.sp - ac + i]);
+                                }
+                                self.sp -= ac;
+                                for (ac..func.arity) |i| {
+                                    const default = if (i < func.defaults.len) func.defaults[i] else Value.null;
+                                    try new_vars.put(self.allocator, func.params[i], default);
+                                }
+                                self.frames[self.frame_count] = .{ .chunk = &func.chunk, .ip = 0, .vars = new_vars, .locals = try self.allocLocals(func, &new_vars), .func = func };
+                                self.frame_count += 1;
+                                const ctor_base = self.frame_count - 1;
+                                try self.runUntilFrame(ctor_base);
+                                _ = self.pop();
                             }
-                            self.sp -= ac;
-                            // fill missing params with defaults
-                            for (ac..func.arity) |i| {
-                                const default = if (i < func.defaults.len) func.defaults[i] else Value.null;
-                                try new_vars.put(self.allocator, func.params[i], default);
-                            }
-                            self.frames[self.frame_count] = .{ .chunk = &func.chunk, .ip = 0, .vars = new_vars, .locals = try self.allocLocals(func, &new_vars), .func = func };
-                            self.frame_count += 1;
-
-                            const ctor_base = self.frame_count - 1;
-                            try self.runUntilFrame(ctor_base);
-
-                            _ = self.pop();
                         } else {
                             self.sp -= ac;
                         }
@@ -1521,18 +1570,24 @@ pub const VM = struct {
                     if (obj_val == .object) {
                         const obj = obj_val.object;
 
-                        // IC: skip visibility on cache hit
+                        // IC: slot-indexed fast path
                         if (self.ic) |ic| {
                             const gp_idx = InlineCache.propIndex(@intFromPtr(self.currentChunk()), gp_ip);
                             const gp_entry = &ic.prop[gp_idx];
                             if (gp_entry.key == gp_ip and gp_entry.class_ptr == @intFromPtr(obj.class_name.ptr)) {
+                                if (gp_entry.slot_index != 0xFFFF) {
+                                    if (obj.slots) |s| {
+                                        self.push(s[gp_entry.slot_index]);
+                                        continue;
+                                    }
+                                }
                                 self.push(obj.get(prop_name));
                                 continue;
                             }
                         }
 
                         const val = obj.get(prop_name);
-                        if (val != .null or obj.properties.contains(prop_name)) {
+                        if (val != .null or obj.properties.contains(prop_name) or (obj.slots != null and obj.getSlotIndex(prop_name) != null)) {
                             const vr = self.findPropertyVisibility(obj.class_name, prop_name);
                             if (!self.checkVisibility(vr.defining_class, vr.visibility)) {
                                 const msg = try std.fmt.allocPrint(self.allocator, "Cannot access {s} property {s}::${s}", .{
@@ -1542,11 +1597,11 @@ pub const VM = struct {
                                 if (try self.throwBuiltinException("Error", msg)) continue;
                                 return error.RuntimeError;
                             }
-                            // populate IC
                             if (self.ic) |ic| {
                                 if (vr.visibility == .public) {
                                     const gp_idx = InlineCache.propIndex(@intFromPtr(self.currentChunk()), gp_ip);
-                                    ic.prop[gp_idx] = .{ .key = gp_ip, .class_ptr = @intFromPtr(obj.class_name.ptr) };
+                                    const si = if (obj.slot_layout != null) obj.getSlotIndex(prop_name) orelse @as(u16, 0xFFFF) else @as(u16, 0xFFFF);
+                                    ic.prop[gp_idx] = .{ .key = gp_ip, .class_ptr = @intFromPtr(obj.class_name.ptr), .slot_index = si };
                                 }
                             }
                             self.push(val);
@@ -1562,13 +1617,29 @@ pub const VM = struct {
                 },
 
                 .set_prop => {
+                    const sp_ip = self.currentFrame().ip;
                     const name_idx = self.readU16();
                     const prop_name = self.currentChunk().constants.items[name_idx].string;
                     const val = try self.copyValue(self.pop());
                     const obj_val = self.pop();
                     if (obj_val == .object) {
                         const obj = obj_val.object;
-                        if (!obj.properties.contains(prop_name) and self.hasMethod(obj.class_name, "__set")) {
+
+                        // IC: slot-indexed fast path
+                        if (self.ic) |ic| {
+                            const sp_idx = InlineCache.propIndex(@intFromPtr(self.currentChunk()), sp_ip);
+                            const sp_entry = &ic.prop[sp_idx];
+                            if (sp_entry.key == sp_ip and sp_entry.class_ptr == @intFromPtr(obj.class_name.ptr) and sp_entry.slot_index != 0xFFFF) {
+                                if (obj.slots) |s| {
+                                    s[sp_entry.slot_index] = val;
+                                    self.push(val);
+                                    continue;
+                                }
+                            }
+                        }
+
+                        const has_prop = obj.properties.contains(prop_name) or (obj.slots != null and obj.getSlotIndex(prop_name) != null);
+                        if (!has_prop and self.hasMethod(obj.class_name, "__set")) {
                             _ = self.callMethod(obj, "__set", &.{ .{ .string = prop_name }, val }) catch {};
                         } else {
                             const vr = self.findPropertyVisibility(obj.class_name, prop_name);
@@ -1592,6 +1663,14 @@ pub const VM = struct {
                                 }
                             }
                             try obj.set(self.allocator, prop_name, val);
+                            // populate IC for slot-indexed writes
+                            if (self.ic) |ic| {
+                                if (vr.visibility == .public) {
+                                    const sp_idx = InlineCache.propIndex(@intFromPtr(self.currentChunk()), sp_ip);
+                                    const si = if (obj.slot_layout != null) obj.getSlotIndex(prop_name) orelse @as(u16, 0xFFFF) else @as(u16, 0xFFFF);
+                                    ic.prop[sp_idx] = .{ .key = sp_ip, .class_ptr = @intFromPtr(obj.class_name.ptr), .slot_index = si };
+                                }
+                            }
                         }
                     }
                     self.push(val);
@@ -1733,9 +1812,7 @@ pub const VM = struct {
                                         @memset(s, .null);
                                         break :blk s;
                                     };
-                                    // slot 0 = $this for instance methods
                                     mc_locals[0] = .{ .object = obj };
-                                    // params start at slot 1
                                     for (0..@min(ac, func.arity)) |i| {
                                         mc_locals[i + 1] = try self.copyValue(self.stack[self.sp - ac + i]);
                                     }
@@ -1745,6 +1822,8 @@ pub const VM = struct {
                                     self.sp -= ac + 1;
                                     self.frames[self.frame_count] = .{ .chunk = &func.chunk, .ip = 0, .vars = .{}, .locals = mc_locals, .func = func };
                                     self.frame_count += 1;
+                                    // enter fastLoop for the method body
+                                    try self.fastLoop();
                                     continue;
                                 }
                             } else if (mc_entry.native) |native| {
@@ -1979,7 +2058,16 @@ pub const VM = struct {
                     }
 
                     // resolve parent/self relative to the defining class, not $this
-                    const this_val = self.currentFrame().vars.get("$this");
+                    const this_val = self.currentFrame().vars.get("$this") orelse blk: {
+                        const f = self.currentFrame();
+                        if (f.func) |fn_info| {
+                            if (fn_info.locals_only and f.locals.len > 0) {
+                                const slot0 = f.locals[0];
+                                if (slot0 == .object) break :blk slot0;
+                            }
+                        }
+                        break :blk null;
+                    };
                     if (std.mem.eql(u8, class_name, "parent") or std.mem.eql(u8, class_name, "self")) {
                         // find the defining class from the current function name (ClassName::method)
                         const defining_class = self.currentDefiningClass();
@@ -2606,6 +2694,7 @@ pub const VM = struct {
             try self.applyTrait(&def, class_name, trait_name, alias_rules[0..alias_count], insteadof_rules[0..insteadof_count]);
         }
 
+        def.slot_layout = try self.buildSlotLayout(&def);
         try self.classes.put(self.allocator, class_name, def);
     }
 
@@ -2834,9 +2923,11 @@ pub const VM = struct {
 
         // bind captures directly to locals using slot_names
         for (self.captures.items) |cap| {
-            if (std.mem.eql(u8, cap.closure_name, name)) {
+            if (cap.closure_name.ptr == name.ptr or
+                (cap.closure_name.len == name.len and std.mem.eql(u8, cap.closure_name, name)))
+            {
                 for (func.slot_names, 0..) |sn, si| {
-                    if (std.mem.eql(u8, sn, cap.var_name)) {
+                    if (sn.len == cap.var_name.len and std.mem.eql(u8, sn, cap.var_name)) {
                         locals[si] = try self.copyValue(cap.value);
                         break;
                     }
@@ -2921,25 +3012,25 @@ pub const VM = struct {
                     const b = self.stack[sp - 1];
                     const a = self.stack[sp - 2];
                     sp -= 2;
-                    self.stack[sp] = if (a == .int and b == .int) .{ .int = a.int +% b.int } else Value.add(a, b);
+                    self.stack[sp] = if (a == .int and b == .int) .{ .int = a.int +% b.int } else if (a == .float and b == .float) .{ .float = a.float + b.float } else Value.add(a, b);
                     sp += 1;
                 } else if (byte == @intFromEnum(OpCode.subtract)) {
                     const b = self.stack[sp - 1];
                     const a = self.stack[sp - 2];
                     sp -= 2;
-                    self.stack[sp] = if (a == .int and b == .int) .{ .int = a.int -% b.int } else Value.subtract(a, b);
+                    self.stack[sp] = if (a == .int and b == .int) .{ .int = a.int -% b.int } else if (a == .float and b == .float) .{ .float = a.float - b.float } else Value.subtract(a, b);
                     sp += 1;
                 } else if (byte == @intFromEnum(OpCode.multiply)) {
                     const b = self.stack[sp - 1];
                     const a = self.stack[sp - 2];
                     sp -= 2;
-                    self.stack[sp] = if (a == .int and b == .int) .{ .int = a.int *% b.int } else Value.multiply(a, b);
+                    self.stack[sp] = if (a == .int and b == .int) .{ .int = a.int *% b.int } else if (a == .float and b == .float) .{ .float = a.float * b.float } else Value.multiply(a, b);
                     sp += 1;
                 } else if (byte == @intFromEnum(OpCode.less)) {
                     const b = self.stack[sp - 1];
                     const a = self.stack[sp - 2];
                     sp -= 2;
-                    self.stack[sp] = .{ .bool = if (a == .int and b == .int) a.int < b.int else Value.lessThan(a, b) };
+                    self.stack[sp] = .{ .bool = if (a == .int and b == .int) a.int < b.int else if (a == .float and b == .float) a.float < b.float else Value.lessThan(a, b) };
                     sp += 1;
                 } else if (byte == @intFromEnum(OpCode.less_equal)) {
                     const b = self.stack[sp - 1];
@@ -3013,6 +3104,309 @@ pub const VM = struct {
                     sp += 1;
                 } else if (byte == @intFromEnum(OpCode.cast_int)) {
                     self.stack[sp - 1] = .{ .int = Value.toInt(self.stack[sp - 1]) };
+                } else if (byte == @intFromEnum(OpCode.array_get)) {
+                    const ag_key = self.stack[sp - 1];
+                    const ag_arr = self.stack[sp - 2];
+                    sp -= 2;
+                    if (ag_arr == .array) {
+                        self.stack[sp] = ag_arr.array.get(Value.toArrayKey(ag_key));
+                        sp += 1;
+                    } else {
+                        frame.ip = ip - 1;
+                        self.sp = sp + 2;
+                        return;
+                    }
+                } else if (byte == @intFromEnum(OpCode.call_indirect)) {
+                    const ci_ac = code[ip];
+                    ip += 1;
+                    const ci_acn: usize = ci_ac;
+                    const ci_name_val = self.stack[sp - ci_acn - 1];
+                    if (ci_name_val == .string) {
+                        const ci_name = ci_name_val.string;
+                        // shift args down to overwrite the callable
+                        for (0..ci_acn) |i| {
+                            self.stack[sp - ci_acn - 1 + i] = self.stack[sp - ci_acn + i];
+                        }
+                        sp -= 1;
+                        self.sp = sp;
+                        frame.ip = ip;
+                        // look up function
+                        const ci_func = self.functions.get(ci_name) orelse {
+                            // native or unknown - bail
+                            frame.ip = ip - 2;
+                            self.sp = sp + 1;
+                            return;
+                        };
+                        if (ci_func.locals_only and (self.captures.items.len == 0 or !self.hasCaptures(ci_name))) {
+                            // plain locals-only function (or closure with no captures)
+                            const ci_lc: usize = ci_func.local_count;
+                            const ci_lbase = ic.locals_sp;
+                            if (ci_lbase + ci_lc > ic.locals_cap) {
+                                frame.ip = ip - 2;
+                                self.sp = sp;
+                                return;
+                            }
+                            const ci_locals = ic.locals_buf[ci_lbase .. ci_lbase + ci_lc];
+                            @memset(ci_locals, .null);
+                            ic.locals_sp = ci_lbase + ci_lc;
+                            const ci_bind = @min(ci_acn, ci_func.arity);
+                            for (0..ci_bind) |i| ci_locals[i] = self.stack[sp - ci_acn + i];
+                            for (ci_bind..ci_func.arity) |i| {
+                                if (i < ci_func.defaults.len) ci_locals[i] = ci_func.defaults[i];
+                            }
+                            sp -= ci_acn;
+                            ic.sp_save[self.frame_count - 1] = sp;
+                            self.sp = sp;
+                            self.frames[self.frame_count] = .{
+                                .chunk = &ci_func.chunk,
+                                .ip = 0,
+                                .vars = .{},
+                                .locals = ci_locals,
+                                .func = ci_func,
+                            };
+                            self.frame_count += 1;
+                            continue :reenter;
+                        } else if (ci_func.locals_only and std.mem.startsWith(u8, ci_name, "__closure_")) {
+                            // closure locals-only
+                            const ci_lc: usize = ci_func.local_count;
+                            const ci_lbase = ic.locals_sp;
+                            if (ci_lbase + ci_lc > ic.locals_cap) {
+                                frame.ip = ip - 2;
+                                self.sp = sp;
+                                return;
+                            }
+                            const ci_locals = ic.locals_buf[ci_lbase .. ci_lbase + ci_lc];
+                            @memset(ci_locals, .null);
+                            ic.locals_sp = ci_lbase + ci_lc;
+                            const ci_bind = @min(ci_acn, ci_func.arity);
+                            for (0..ci_bind) |i| ci_locals[i] = self.stack[sp - ci_acn + i];
+                            for (ci_bind..ci_func.arity) |i| {
+                                if (i < ci_func.defaults.len) ci_locals[i] = ci_func.defaults[i];
+                            }
+                            sp -= ci_acn;
+                            // bind captures to locals (pointer compare fast-reject)
+                            for (self.captures.items) |cap| {
+                                if (cap.closure_name.ptr == ci_name.ptr or
+                                    (cap.closure_name.len == ci_name.len and std.mem.eql(u8, cap.closure_name, ci_name)))
+                                {
+                                    for (ci_func.slot_names, 0..) |sn, si| {
+                                        if (sn.len == cap.var_name.len and std.mem.eql(u8, sn, cap.var_name)) {
+                                            ci_locals[si] = cap.value;
+                                            break;
+                                        }
+                                    }
+                                }
+                            }
+                            ic.sp_save[self.frame_count - 1] = sp;
+                            self.sp = sp;
+                            self.frames[self.frame_count] = .{
+                                .chunk = &ci_func.chunk,
+                                .ip = 0,
+                                .vars = .{},
+                                .locals = ci_locals,
+                                .func = ci_func,
+                            };
+                            self.frame_count += 1;
+                            continue :reenter;
+                        }
+                        // non-locals-only closure/function - bail
+                        frame.ip = ip - 2;
+                        self.sp = sp + 1;
+                        return;
+                    }
+                    // non-string callable - bail
+                    frame.ip = ip - 2;
+                    self.sp = sp;
+                    return;
+                } else if (byte == @intFromEnum(OpCode.get_prop)) {
+                    const gp_ip = ip;
+                    ip += 2;
+                    const gp_obj_val = self.stack[sp - 1];
+                    if (gp_obj_val == .object) {
+                        const gp_obj = gp_obj_val.object;
+                        const gp_idx = InlineCache.propIndex(@intFromPtr(frame.chunk), gp_ip);
+                        const gp_entry = &ic.prop[gp_idx];
+                        if (gp_entry.key == gp_ip and gp_entry.class_ptr == @intFromPtr(gp_obj.class_name.ptr) and gp_entry.slot_index != 0xFFFF) {
+                            if (gp_obj.slots) |s| {
+                                self.stack[sp - 1] = s[gp_entry.slot_index];
+                                continue;
+                            }
+                        }
+                    }
+                    // bail to runLoop for IC miss or non-object
+                    frame.ip = ip - 3;
+                    self.sp = sp;
+                    return;
+                } else if (byte == @intFromEnum(OpCode.set_prop)) {
+                    const sp_ip = ip;
+                    ip += 2;
+                    const sp_val = self.stack[sp - 1];
+                    const sp_obj_val = self.stack[sp - 2];
+                    if (sp_obj_val == .object) {
+                        const sp_obj = sp_obj_val.object;
+                        const sp_idx = InlineCache.propIndex(@intFromPtr(frame.chunk), sp_ip);
+                        const sp_entry = &ic.prop[sp_idx];
+                        if (sp_entry.key == sp_ip and sp_entry.class_ptr == @intFromPtr(sp_obj.class_name.ptr) and sp_entry.slot_index != 0xFFFF) {
+                            if (sp_obj.slots) |s| {
+                                const copied = if (sp_val == .array) try self.copyValue(sp_val) else sp_val;
+                                s[sp_entry.slot_index] = copied;
+                                sp -= 1;
+                                self.stack[sp - 1] = copied;
+                                continue;
+                            }
+                        }
+                    }
+                    frame.ip = ip - 3;
+                    self.sp = sp;
+                    return;
+                } else if (byte == @intFromEnum(OpCode.method_call)) {
+                    const mc_arg_count = code[ip + 2];
+                    ip += 3;
+                    const mc_ac: usize = mc_arg_count;
+                    const mc_obj_val = self.stack[sp - mc_ac - 1];
+                    if (mc_obj_val != .object) {
+                        frame.ip = ip - 4;
+                        self.sp = sp;
+                        return;
+                    }
+                    const mc_obj = mc_obj_val.object;
+                    const mc_ip = ip - 4;
+                    const mc_idx = InlineCache.methodIndex(@intFromPtr(frame.chunk), mc_ip);
+                    const mc_entry = &ic.method[mc_idx];
+                    if (mc_entry.key == mc_ip and mc_entry.class_ptr == @intFromPtr(mc_obj.class_name.ptr)) {
+                        if (mc_entry.func) |mc_func| {
+                            if (mc_func.locals_only and self.captures.items.len == 0) {
+                                const mc_lc: usize = mc_func.local_count;
+                                const mc_lbase = ic.locals_sp;
+                                if (mc_lbase + mc_lc > ic.locals_cap) {
+                                    frame.ip = ip - 4;
+                                    self.sp = sp;
+                                    return;
+                                }
+                                const mc_locals = ic.locals_buf[mc_lbase .. mc_lbase + mc_lc];
+                                @memset(mc_locals, .null);
+                                ic.locals_sp = mc_lbase + mc_lc;
+                                mc_locals[0] = .{ .object = mc_obj };
+                                for (0..@min(mc_ac, mc_func.arity)) |i| {
+                                    mc_locals[i + 1] = self.stack[sp - mc_ac + i];
+                                }
+                                for (@min(mc_ac, mc_func.arity)..mc_func.arity) |i| {
+                                    if (i < mc_func.defaults.len) mc_locals[i + 1] = mc_func.defaults[i];
+                                }
+                                sp -= mc_ac + 1;
+                                frame.ip = ip;
+                                ic.sp_save[self.frame_count - 1] = sp;
+                                self.sp = sp;
+                                self.frames[self.frame_count] = .{
+                                    .chunk = &mc_func.chunk,
+                                    .ip = 0,
+                                    .vars = .{},
+                                    .locals = mc_locals,
+                                    .func = mc_func,
+                                };
+                                self.frame_count += 1;
+                                continue :reenter;
+                            }
+                        }
+                    }
+                    // bail for IC miss, native method, or non-locals-only
+                    frame.ip = ip - 4;
+                    self.sp = sp;
+                    return;
+                } else if (byte == @intFromEnum(OpCode.new_obj)) {
+                    // fast path for new_obj: slot-based initialization
+                    const no_name_idx = (@as(u16, code[ip]) << 8) | code[ip + 1];
+                    const no_arg_count = code[ip + 2];
+                    ip += 3;
+                    const no_class_name = consts[no_name_idx].string;
+                    const cls = self.classes.get(no_class_name) orelse {
+                        frame.ip = ip - 4;
+                        self.sp = sp;
+                        return;
+                    };
+                    if (std.mem.eql(u8, no_class_name, "static") or std.mem.eql(u8, no_class_name, "self") or std.mem.eql(u8, no_class_name, "parent") or std.mem.eql(u8, no_class_name, "Fiber")) {
+                        frame.ip = ip - 4;
+                        self.sp = sp;
+                        return;
+                    }
+                    const no_obj = self.allocator.create(PhpObject) catch {
+                        frame.ip = ip - 4;
+                        self.sp = sp;
+                        return;
+                    };
+                    no_obj.* = .{ .class_name = no_class_name };
+                    self.objects.append(self.allocator, no_obj) catch {
+                        frame.ip = ip - 4;
+                        self.sp = sp;
+                        return;
+                    };
+                    // slot-based init
+                    if (cls.slot_layout) |layout| {
+                        const no_slots = self.allocator.alloc(Value, layout.names.len) catch {
+                            frame.ip = ip - 4;
+                            self.sp = sp;
+                            return;
+                        };
+                        @memcpy(no_slots, layout.defaults);
+                        no_obj.slots = no_slots;
+                        no_obj.slot_layout = layout;
+                    }
+                    // constructor
+                    const no_ac: usize = no_arg_count;
+                    const ctor_name = self.resolveMethod(no_class_name, "__construct") catch null;
+                    if (ctor_name) |cn| {
+                        if (self.functions.get(cn)) |ctor_func| {
+                            if (ctor_func.locals_only and self.captures.items.len == 0) {
+                                const ctor_lc: usize = ctor_func.local_count;
+                                const ctor_lbase = ic.locals_sp;
+                                if (ctor_lbase + ctor_lc <= ic.locals_cap) {
+                                    const ctor_locals = ic.locals_buf[ctor_lbase .. ctor_lbase + ctor_lc];
+                                    @memset(ctor_locals, .null);
+                                    ic.locals_sp = ctor_lbase + ctor_lc;
+                                    ctor_locals[0] = .{ .object = no_obj };
+                                    for (0..@min(no_ac, ctor_func.arity)) |i| {
+                                        ctor_locals[i + 1] = self.stack[sp - no_ac + i];
+                                    }
+                                    for (@min(no_ac, ctor_func.arity)..ctor_func.arity) |i| {
+                                        if (i < ctor_func.defaults.len) ctor_locals[i + 1] = ctor_func.defaults[i];
+                                    }
+                                    sp -= no_ac;
+                                    self.sp = sp;
+                                    // run constructor inline
+                                    self.frames[self.frame_count] = .{
+                                        .chunk = &ctor_func.chunk,
+                                        .ip = 0,
+                                        .vars = .{},
+                                        .locals = ctor_locals,
+                                        .func = ctor_func,
+                                    };
+                                    self.frame_count += 1;
+                                    const ctor_base = self.frame_count - 1;
+                                    frame.ip = ip;
+                                    self.runUntilFrame(ctor_base) catch {
+                                        frame.ip = ip;
+                                        self.sp = sp;
+                                        return;
+                                    };
+                                    sp = self.sp;
+                                    _ = self.stack[sp - 1]; // pop the null from constructor return
+                                    sp -= 1;
+                                    self.stack[sp] = .{ .object = no_obj };
+                                    sp += 1;
+                                    continue;
+                                }
+                            }
+                        }
+                    } else {
+                        // no constructor
+                        sp -= no_ac;
+                        self.stack[sp] = .{ .object = no_obj };
+                        sp += 1;
+                        continue;
+                    }
+                    frame.ip = ip - 4;
+                    self.sp = sp;
+                    return;
                 } else if (byte == @intFromEnum(OpCode.call)) {
                     const name_idx = (@as(u16, code[ip]) << 8) | code[ip + 1];
                     const arg_count = code[ip + 2];
@@ -3417,9 +3811,67 @@ pub const VM = struct {
         }
     }
 
+    fn buildSlotLayout(self: *VM, def: *const ClassDef) RuntimeError!?*PhpObject.SlotLayout {
+        // collect all properties walking parent chain (parent first)
+        var all_names: [64][]const u8 = undefined;
+        var all_defaults: [64]Value = undefined;
+        var count: usize = 0;
+
+        var walk_name = def.parent;
+        while (walk_name) |pname| {
+            const pcls = self.classes.get(pname) orelse break;
+            // parent's slot layout already has the full parent chain flattened
+            if (pcls.slot_layout) |pl| {
+                for (0..pl.names.len) |i| {
+                    all_names[count] = pl.names[i];
+                    all_defaults[count] = pl.defaults[i];
+                    count += 1;
+                }
+                break;
+            }
+            walk_name = pcls.parent;
+        }
+
+        for (def.properties.items) |prop| {
+            // check if parent already defined this slot
+            var found = false;
+            for (all_names[0..count], 0..) |n, i| {
+                if (std.mem.eql(u8, n, prop.name)) {
+                    all_defaults[i] = prop.default;
+                    found = true;
+                    break;
+                }
+            }
+            if (!found) {
+                all_names[count] = prop.name;
+                all_defaults[count] = prop.default;
+                count += 1;
+            }
+        }
+
+        if (count == 0) return null;
+
+        const layout = self.allocator.create(PhpObject.SlotLayout) catch return error.RuntimeError;
+        const names = self.allocator.alloc([]const u8, count) catch return error.RuntimeError;
+        const defaults = self.allocator.alloc(Value, count) catch return error.RuntimeError;
+        @memcpy(names, all_names[0..count]);
+        @memcpy(defaults, all_defaults[0..count]);
+        layout.* = .{ .names = names, .defaults = defaults };
+        return layout;
+    }
+
     fn initObjectProperties(self: *VM, obj: *PhpObject, class_name: []const u8) RuntimeError!void {
-        // walk parent chain first (parent properties set first, child overrides)
         if (self.classes.get(class_name)) |cls| {
+            if (cls.slot_layout) |layout| {
+                const slots = self.allocator.alloc(Value, layout.names.len) catch return error.RuntimeError;
+                for (layout.defaults, 0..) |def_val, i| {
+                    slots[i] = try self.copyValue(def_val);
+                }
+                obj.slots = slots;
+                obj.slot_layout = layout;
+                return;
+            }
+            // fallback for classes without slot layout
             if (cls.parent) |parent| {
                 try self.initObjectProperties(obj, parent);
             }
@@ -3540,7 +3992,7 @@ pub const VM = struct {
             if (ac < func.required_params)
                 return error.RuntimeError;
             if (func.locals_only) {
-                if (self.captures.items.len == 0)
+                if (self.captures.items.len == 0 or !self.hasCaptures(name))
                     return self.callLocalsOnly(func, arg_count);
                 if (std.mem.startsWith(u8, name, "__closure_"))
                     return self.callClosureLocalsOnly(func, name, arg_count);
@@ -3635,13 +4087,78 @@ pub const VM = struct {
             return native(&ctx, args);
         } else if (self.functions.get(name)) |func| {
             if (args.len < func.required_params) return error.RuntimeError;
-            if (func.locals_only and self.captures.items.len == 0)
-                return self.executeFunctionLocalsOnly(func, args);
+            if (func.locals_only) {
+                if (self.captures.items.len == 0)
+                    return self.executeFunctionLocalsOnly(func, args);
+                if (std.mem.startsWith(u8, name, "__closure_")) {
+                    if (!self.hasCaptures(name))
+                        return self.executeFunctionLocalsOnly(func, args);
+                    return self.executeClosureLocalsOnly(func, name, args);
+                }
+                if (!self.hasCaptures(name))
+                    return self.executeFunctionLocalsOnly(func, args);
+            }
             var new_vars: std.StringHashMapUnmanaged(Value) = .{};
             try self.bindClosures(&new_vars, null, name);
             try self.bindArgs(&new_vars, func, args[0..@min(args.len, func.arity)]);
             return self.executeFunction(func, new_vars);
         } else return error.RuntimeError;
+    }
+
+    fn hasCaptures(self: *VM, name: []const u8) bool {
+        for (self.captures.items) |cap| {
+            if (cap.closure_name.ptr == name.ptr or
+                (cap.closure_name.len == name.len and std.mem.eql(u8, cap.closure_name, name)))
+                return true;
+        }
+        return false;
+    }
+
+    fn executeClosureLocalsOnly(self: *VM, func: *const ObjFunction, name: []const u8, args: []const Value) RuntimeError!Value {
+        const base_frame = self.frame_count;
+        const lc: usize = func.local_count;
+        const ic = self.ic.?;
+        const lbase = ic.locals_sp;
+
+        const locals = if (lbase + lc <= ic.locals_cap) blk: {
+            const s = ic.locals_buf[lbase..lbase + lc];
+            @memset(s, .null);
+            ic.locals_sp = lbase + lc;
+            break :blk s;
+        } else blk: {
+            const s = try self.allocator.alloc(Value, lc);
+            @memset(s, .null);
+            break :blk s;
+        };
+
+        const bind_count = @min(args.len, func.arity);
+        for (0..bind_count) |i| {
+            locals[i] = try self.copyValue(args[i]);
+        }
+        for (bind_count..func.arity) |i| {
+            if (i < func.defaults.len) locals[i] = func.defaults[i];
+        }
+        // bind captures
+        for (self.captures.items) |cap| {
+            if (cap.closure_name.ptr == name.ptr or
+                (cap.closure_name.len == name.len and std.mem.eql(u8, cap.closure_name, name)))
+            {
+                for (func.slot_names, 0..) |sn, si| {
+                    if (sn.len == cap.var_name.len and std.mem.eql(u8, sn, cap.var_name)) {
+                        locals[si] = try self.copyValue(cap.value);
+                        break;
+                    }
+                }
+            }
+        }
+        self.frames[self.frame_count] = .{ .chunk = &func.chunk, .ip = 0, .vars = .{}, .locals = locals, .func = func };
+        self.frame_count += 1;
+        try self.fastLoop();
+        const fl_frame = &self.frames[self.frame_count - 1];
+        if (fl_frame.chunk == &func.chunk) {
+            try self.runUntilFrame(base_frame);
+        }
+        return self.pop();
     }
 
     pub fn callByNameRef(self: *VM, name: []const u8, args: []Value) RuntimeError!Value {

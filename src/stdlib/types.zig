@@ -420,6 +420,14 @@ fn native_get_object_vars(ctx: *NativeContext, args: []const Value) RuntimeError
     if (args.len == 0 or args[0] != .object) return Value{ .bool = false };
     const obj = args[0].object;
     var arr = try ctx.createArray();
+    if (obj.slot_layout) |layout| {
+        if (obj.slots) |slots| {
+            for (layout.names, 0..) |name, i| {
+                if (name.len > 1 and name[0] == '_' and name[1] == '_') continue;
+                try arr.set(ctx.allocator, .{ .string = name }, slots[i]);
+            }
+        }
+    }
     var iter = obj.properties.iterator();
     while (iter.next()) |entry| {
         if (entry.key_ptr.*.len > 0 and entry.key_ptr.*[0] == '_' and entry.key_ptr.*.len > 1 and entry.key_ptr.*[1] == '_') continue;
