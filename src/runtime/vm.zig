@@ -2586,6 +2586,136 @@ pub const VM = struct {
         self.sp -= ac;
         self.frames[self.frame_count] = .{ .chunk = &func.chunk, .ip = 0, .vars = .{}, .locals = locals, .func = func };
         self.frame_count += 1;
+        // run as much as possible in the fast inner loop before falling back to runLoop
+        try self.fastLoop();
+    }
+
+    // tight inner interpreter with local ip/sp for hot loops in locals-only functions.
+    // handles common opcodes without pointer-chasing through self.currentFrame().
+    // returns to runLoop for anything complex (calls, returns, exceptions, property access).
+    fn fastLoop(self: *VM) RuntimeError!void {
+        const frame = &self.frames[self.frame_count - 1];
+        const code = frame.chunk.code.items;
+        const locals = frame.locals;
+        const consts = frame.chunk.constants.items;
+        var ip = frame.ip;
+        var sp = self.sp;
+
+        while (true) {
+            const byte = code[ip];
+            ip += 1;
+
+            if (byte == @intFromEnum(OpCode.get_local)) {
+                const slot = (@as(u16, code[ip]) << 8) | code[ip + 1];
+                ip += 2;
+                self.stack[sp] = locals[slot];
+                sp += 1;
+            } else if (byte == @intFromEnum(OpCode.set_local)) {
+                const slot = (@as(u16, code[ip]) << 8) | code[ip + 1];
+                ip += 2;
+                const val = self.stack[sp - 1];
+                if (val == .array) {
+                    locals[slot] = try self.copyValue(val);
+                } else {
+                    locals[slot] = val;
+                }
+            } else if (byte == @intFromEnum(OpCode.add)) {
+                const b = self.stack[sp - 1];
+                const a = self.stack[sp - 2];
+                sp -= 2;
+                self.stack[sp] = if (a == .int and b == .int) .{ .int = a.int +% b.int } else Value.add(a, b);
+                sp += 1;
+            } else if (byte == @intFromEnum(OpCode.subtract)) {
+                const b = self.stack[sp - 1];
+                const a = self.stack[sp - 2];
+                sp -= 2;
+                self.stack[sp] = if (a == .int and b == .int) .{ .int = a.int -% b.int } else Value.subtract(a, b);
+                sp += 1;
+            } else if (byte == @intFromEnum(OpCode.multiply)) {
+                const b = self.stack[sp - 1];
+                const a = self.stack[sp - 2];
+                sp -= 2;
+                self.stack[sp] = if (a == .int and b == .int) .{ .int = a.int *% b.int } else Value.multiply(a, b);
+                sp += 1;
+            } else if (byte == @intFromEnum(OpCode.less)) {
+                const b = self.stack[sp - 1];
+                const a = self.stack[sp - 2];
+                sp -= 2;
+                self.stack[sp] = .{ .bool = if (a == .int and b == .int) a.int < b.int else Value.lessThan(a, b) };
+                sp += 1;
+            } else if (byte == @intFromEnum(OpCode.less_equal)) {
+                const b = self.stack[sp - 1];
+                const a = self.stack[sp - 2];
+                sp -= 2;
+                self.stack[sp] = .{ .bool = if (a == .int and b == .int) a.int <= b.int else !Value.lessThan(b, a) };
+                sp += 1;
+            } else if (byte == @intFromEnum(OpCode.greater)) {
+                const b = self.stack[sp - 1];
+                const a = self.stack[sp - 2];
+                sp -= 2;
+                self.stack[sp] = .{ .bool = if (a == .int and b == .int) a.int > b.int else Value.lessThan(b, a) };
+                sp += 1;
+            } else if (byte == @intFromEnum(OpCode.identical)) {
+                const b_id = self.stack[sp - 1];
+                const a_id = self.stack[sp - 2];
+                sp -= 2;
+                self.stack[sp] = .{ .bool = Value.identical(a_id, b_id) };
+                sp += 1;
+            } else if (byte == @intFromEnum(OpCode.not_identical)) {
+                const b_ni = self.stack[sp - 1];
+                const a_ni = self.stack[sp - 2];
+                sp -= 2;
+                self.stack[sp] = .{ .bool = !Value.identical(a_ni, b_ni) };
+                sp += 1;
+            } else if (byte == @intFromEnum(OpCode.modulo)) {
+                const b_mod = self.stack[sp - 1];
+                const a_mod = self.stack[sp - 2];
+                sp -= 2;
+                self.stack[sp] = Value.modulo(a_mod, b_mod);
+                sp += 1;
+            } else if (byte == @intFromEnum(OpCode.negate)) {
+                self.stack[sp - 1] = self.stack[sp - 1].negate();
+            } else if (byte == @intFromEnum(OpCode.not)) {
+                self.stack[sp - 1] = .{ .bool = !self.stack[sp - 1].isTruthy() };
+            } else if (byte == @intFromEnum(OpCode.jump_back)) {
+                const offset = (@as(u16, code[ip]) << 8) | code[ip + 1];
+                ip += 2;
+                ip -= offset;
+            } else if (byte == @intFromEnum(OpCode.constant)) {
+                const idx = (@as(u16, code[ip]) << 8) | code[ip + 1];
+                ip += 2;
+                self.stack[sp] = consts[idx];
+                sp += 1;
+            } else if (byte == @intFromEnum(OpCode.jump_if_false)) {
+                const offset = (@as(u16, code[ip]) << 8) | code[ip + 1];
+                ip += 2;
+                if (!self.stack[sp - 1].isTruthy()) ip += offset;
+            } else if (byte == @intFromEnum(OpCode.jump)) {
+                const offset = (@as(u16, code[ip]) << 8) | code[ip + 1];
+                ip += 2;
+                ip += offset;
+            } else if (byte == @intFromEnum(OpCode.pop)) {
+                sp -= 1;
+            } else if (byte == @intFromEnum(OpCode.dup)) {
+                self.stack[sp] = self.stack[sp - 1];
+                sp += 1;
+            } else if (byte == @intFromEnum(OpCode.op_null)) {
+                self.stack[sp] = .null;
+                sp += 1;
+            } else if (byte == @intFromEnum(OpCode.op_true)) {
+                self.stack[sp] = .{ .bool = true };
+                sp += 1;
+            } else if (byte == @intFromEnum(OpCode.op_false)) {
+                self.stack[sp] = .{ .bool = false };
+                sp += 1;
+            } else if (byte == @intFromEnum(OpCode.cast_int)) {
+                self.stack[sp - 1] = .{ .int = Value.toInt(self.stack[sp - 1]) };
+            } else {
+                frame.ip = ip - 1;
+                self.sp = sp;
+                return;
+            }
+        }
     }
 
     fn executeFunctionLocalsOnly(self: *VM, func: *const ObjFunction, args: []const Value) RuntimeError!Value {
