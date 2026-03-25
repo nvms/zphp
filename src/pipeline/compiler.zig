@@ -14,6 +14,8 @@ pub const CompileResult = struct {
     functions: std.ArrayListUnmanaged(ObjFunction),
     string_allocs: std.ArrayListUnmanaged([]const u8),
     allocator: Allocator,
+    local_count: u16 = 0,
+    slot_names: []const []const u8 = &.{},
 
     pub fn deinit(self: *CompileResult) void {
         self.chunk.deinit(self.allocator);
@@ -27,6 +29,7 @@ pub const CompileResult = struct {
         self.functions.deinit(self.allocator);
         for (self.string_allocs.items) |s| self.allocator.free(s);
         self.string_allocs.deinit(self.allocator);
+        if (self.slot_names.len > 0) self.allocator.free(self.slot_names);
     }
 };
 
@@ -68,7 +71,10 @@ pub fn compileWithPath(ast: *const Ast, allocator: Allocator, file_path: []const
     var tp_iter = c.trait_properties.valueIterator();
     while (tp_iter.next()) |v| allocator.free(v.*);
     c.trait_properties.deinit(allocator);
-    return .{ .chunk = c.chunk, .functions = c.functions, .string_allocs = c.string_allocs, .allocator = allocator };
+    const slot_names = try c.buildSlotNames();
+    const local_count = c.next_slot;
+    c.local_slots.deinit(allocator);
+    return .{ .chunk = c.chunk, .functions = c.functions, .string_allocs = c.string_allocs, .allocator = allocator, .local_count = local_count, .slot_names = slot_names };
 }
 
 const Compiler = struct {
@@ -3002,12 +3008,16 @@ const Compiler = struct {
     }
 
     fn emitGetVar(self: *Compiler, name: []const u8) Error!void {
-        if (self.inFunctionScope()) {
-            if (self.local_slots.get(name)) |slot| {
-                try self.emitOp(.get_local);
-                try self.emitU16(slot);
-                return;
-            }
+        if (self.local_slots.get(name)) |slot| {
+            try self.emitOp(.get_local);
+            try self.emitU16(slot);
+            return;
+        }
+        if (!self.inFunctionScope() and name.len > 0 and name[0] == '$') {
+            const slot = self.getOrCreateSlot(name);
+            try self.emitOp(.get_local);
+            try self.emitU16(slot);
+            return;
         }
         const idx = try self.addConstant(.{ .string = name });
         try self.emitOp(.get_var);
@@ -3015,7 +3025,7 @@ const Compiler = struct {
     }
 
     fn emitSetVar(self: *Compiler, name: []const u8) Error!void {
-        if (self.inFunctionScope()) {
+        if (self.inFunctionScope() or (name.len > 0 and name[0] == '$')) {
             const slot = self.getOrCreateSlot(name);
             try self.emitOp(.set_local);
             try self.emitU16(slot);

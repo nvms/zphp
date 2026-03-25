@@ -75,10 +75,9 @@ pub const NativeContext = struct {
                 const hi = chunk.code.items[scan_pos - 2];
                 const lo = chunk.code.items[scan_pos - 1];
                 const slot = (@as(u16, hi) << 8) | lo;
-                if (caller.func) |func| {
-                    if (slot < func.slot_names.len) {
-                        arg_vars[scan_idx] = func.slot_names[slot];
-                    }
+                const sn = if (caller.func) |func| func.slot_names else vm.global_slot_names;
+                if (slot < sn.len) {
+                    arg_vars[scan_idx] = sn[slot];
                 }
                 scan_pos -= 3;
             } else {
@@ -87,13 +86,11 @@ pub const NativeContext = struct {
         }
         if (arg_vars[arg_index]) |var_name| {
             caller.vars.put(vm.allocator, var_name, value) catch return;
-            // also update locals if this var has a slot
-            if (caller.func) |func| {
-                for (func.slot_names, 0..) |sn, si| {
-                    if (std.mem.eql(u8, sn, var_name)) {
-                        if (si < caller.locals.len) caller.locals[si] = value;
-                        break;
-                    }
+            const sn2 = if (caller.func) |func| func.slot_names else vm.global_slot_names;
+            for (sn2, 0..) |sn_name, si| {
+                if (std.mem.eql(u8, sn_name, var_name)) {
+                    if (si < caller.locals.len) caller.locals[si] = value;
+                    break;
                 }
             }
         }
@@ -217,6 +214,7 @@ pub const VM = struct {
     handler_floor: usize = 0,
     pending_exception: ?Value = null,
     allocator: Allocator,
+    global_slot_names: []const []const u8 = &.{},
 
     const StaticEntry = struct {
         var_name: []const u8,
@@ -347,6 +345,10 @@ pub const VM = struct {
         for (0..self.frame_count) |i| {
             self.frames[i].ref_slots.deinit(self.allocator);
             self.frames[i].vars.deinit(self.allocator);
+            if (self.frames[i].locals.len > 0) {
+                self.allocator.free(self.frames[i].locals);
+                self.frames[i].locals = &.{};
+            }
         }
     }
 
@@ -418,7 +420,18 @@ pub const VM = struct {
         while (it.next()) |entry| {
             try vars.put(self.allocator, entry.key_ptr.*, entry.value_ptr.*);
         }
-        self.frames[0] = .{ .chunk = &result.chunk, .ip = 0, .vars = vars };
+        var locals: []Value = &.{};
+        if (result.local_count > 0) {
+            locals = try self.allocator.alloc(Value, result.local_count);
+            @memset(locals, .null);
+            for (result.slot_names, 0..) |sn, i| {
+                if (sn.len > 0) {
+                    if (vars.get(sn)) |val| locals[i] = val;
+                }
+            }
+        }
+        self.global_slot_names = result.slot_names;
+        self.frames[0] = .{ .chunk = &result.chunk, .ip = 0, .vars = vars, .locals = locals };
         self.frame_count = 1;
         try self.run();
     }
@@ -476,13 +489,11 @@ pub const VM = struct {
                     } else {
                         try self.currentFrame().vars.put(self.allocator, name, val);
                     }
-                    // sync locals for vars that also have a slot
-                    if (self.currentFrame().func) |func| {
-                        for (func.slot_names, 0..) |sn, si| {
-                            if (std.mem.eql(u8, sn, name)) {
-                                if (si < self.currentFrame().locals.len) self.currentFrame().locals[si] = val;
-                                break;
-                            }
+                    const sv_sn = if (self.currentFrame().func) |func| func.slot_names else self.global_slot_names;
+                    for (sv_sn, 0..) |sn, si| {
+                        if (std.mem.eql(u8, sn, name)) {
+                            if (si < self.currentFrame().locals.len) self.currentFrame().locals[si] = val;
+                            break;
                         }
                     }
                 },
@@ -964,12 +975,11 @@ pub const VM = struct {
                         cell.* = result_val;
                     }
                     try self.currentFrame().vars.put(self.allocator, name, result_val);
-                    if (self.currentFrame().func) |func| {
-                        for (func.slot_names, 0..) |sn, si| {
-                            if (std.mem.eql(u8, sn, name)) {
-                                if (si < self.currentFrame().locals.len) self.currentFrame().locals[si] = result_val;
-                                break;
-                            }
+                    const ca_sn = if (self.currentFrame().func) |func| func.slot_names else self.global_slot_names;
+                    for (ca_sn, 0..) |sn, si| {
+                        if (std.mem.eql(u8, sn, name)) {
+                            if (si < self.currentFrame().locals.len) self.currentFrame().locals[si] = result_val;
+                            break;
                         }
                     }
                     self.push(result_val);
@@ -977,17 +987,26 @@ pub const VM = struct {
                 .get_local => {
                     const slot = self.readU16();
                     const frame = self.currentFrame();
-                    // check ref_slots first - ref bindings take priority
-                    if (frame.func) |func| {
-                        if (slot < func.slot_names.len and func.slot_names[slot].len > 0) {
-                            if (frame.ref_slots.get(func.slot_names[slot])) |cell| {
+                    const sn = if (frame.func) |func| func.slot_names else self.global_slot_names;
+                    if (slot < sn.len and sn[slot].len > 0) {
+                        if (frame.ref_slots.count() > 0) {
+                            if (frame.ref_slots.get(sn[slot])) |cell| {
                                 self.push(cell.*);
                                 continue;
                             }
                         }
                     }
                     if (slot < frame.locals.len) {
-                        self.push(frame.locals[slot]);
+                        const val = frame.locals[slot];
+                        if (val != .null or frame.func != null) {
+                            self.push(val);
+                        } else if (slot < sn.len and sn[slot].len > 0) {
+                            // global scope fallback: check vars for dynamically set variables
+                            if (frame.vars.get(sn[slot])) |v| {
+                                frame.locals[slot] = v;
+                                self.push(v);
+                            } else self.push(.null);
+                        } else self.push(.null);
                     } else {
                         self.push(.null);
                     }
@@ -1000,15 +1019,16 @@ pub const VM = struct {
                         frame.locals[slot] = val;
                     }
                     // dual-write to HashMap for statics writeback, globals writeback, ref_slots
-                    if (frame.func) |func| {
-                        if (slot < func.slot_names.len) {
-                            const name = func.slot_names[slot];
-                            if (name.len > 0) {
+                    const sn = if (frame.func) |func| func.slot_names else self.global_slot_names;
+                    if (slot < sn.len) {
+                        const name = sn[slot];
+                        if (name.len > 0) {
+                            if (frame.ref_slots.count() > 0) {
                                 if (frame.ref_slots.get(name)) |cell| {
                                     cell.* = val;
                                 }
-                                try frame.vars.put(self.allocator, name, val);
                             }
+                            try frame.vars.put(self.allocator, name, val);
                         }
                     }
                 },
@@ -2236,6 +2256,12 @@ pub const VM = struct {
             if (entry.frame_depth == self.frame_count) {
                 const val = try self.copyValue(self.currentFrame().vars.get(entry.var_name) orelse .null);
                 try self.frames[0].vars.put(self.allocator, entry.var_name, val);
+                for (self.global_slot_names, 0..) |sn, si| {
+                    if (std.mem.eql(u8, sn, entry.var_name)) {
+                        if (si < self.frames[0].locals.len) self.frames[0].locals[si] = val;
+                        break;
+                    }
+                }
                 _ = self.global_vars.swapRemove(i);
             } else {
                 i += 1;
@@ -2790,10 +2816,9 @@ pub const VM = struct {
                 const hi = chunk.code.items[scan_end - 2];
                 const lo = chunk.code.items[scan_end - 1];
                 const slot = (@as(u16, hi) << 8) | lo;
-                if (self.currentFrame().func) |func| {
-                    if (slot < func.slot_names.len) {
-                        arg_vars[idx] = func.slot_names[slot];
-                    }
+                const sn = if (self.currentFrame().func) |func| func.slot_names else self.global_slot_names;
+                if (slot < sn.len) {
+                    arg_vars[idx] = sn[slot];
                 }
                 scan_end -= 3;
             } else if (op == @intFromEnum(OpCode.constant)) {
