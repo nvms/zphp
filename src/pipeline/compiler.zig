@@ -496,9 +496,7 @@ const Compiler = struct {
                 const full_name = name_buf[0 .. 1 + var_name_raw.len];
                 const owned = try self.allocator.dupe(u8, full_name);
                 try self.string_allocs.append(self.allocator, owned);
-                const var_idx = try self.addConstant(.{ .string = owned });
-                try self.emitOp(.get_var);
-                try self.emitU16(var_idx);
+                try self.emitGetVar(owned);
                 if (segment_count > 0) try self.emitOp(.concat);
                 segment_count += 1;
                 i = if (end < s.len) end + 1 else end;
@@ -519,9 +517,7 @@ const Compiler = struct {
                 // check for simple array access: $var[...]
                 if (j < s.len and s[j] == '[') {
                     const var_name = s[i..j];
-                    const var_idx = try self.addConstant(.{ .string = var_name });
-                    try self.emitOp(.get_var);
-                    try self.emitU16(var_idx);
+                    try self.emitGetVar(var_name);
 
                     const bracket_end = std.mem.indexOfScalarPos(u8, s, j, ']') orelse s.len;
                     const key_str = s[j + 1 .. bracket_end];
@@ -531,9 +527,7 @@ const Compiler = struct {
                     i = if (bracket_end < s.len) bracket_end + 1 else bracket_end;
                 } else {
                     const var_name = s[i..j];
-                    const var_idx = try self.addConstant(.{ .string = var_name });
-                    try self.emitOp(.get_var);
-                    try self.emitU16(var_idx);
+                    try self.emitGetVar(var_name);
                     if (segment_count > 0) try self.emitOp(.concat);
                     segment_count += 1;
                     i = j;
@@ -577,9 +571,7 @@ const Compiler = struct {
         while (j < expr.len and isVarChar(expr[j])) j += 1;
 
         const var_name = expr[0..j];
-        const var_idx = try self.addConstant(.{ .string = var_name });
-        try self.emitOp(.get_var);
-        try self.emitU16(var_idx);
+        try self.emitGetVar(var_name);
 
         while (j < expr.len) {
             if (expr[j] == '[') {
@@ -625,9 +617,7 @@ const Compiler = struct {
 
     fn emitArrayKeyAccess(self: *Compiler, key: []const u8) Error!void {
         if (key.len > 0 and key[0] == '$') {
-            const key_idx = try self.addConstant(.{ .string = key });
-            try self.emitOp(.get_var);
-            try self.emitU16(key_idx);
+            try self.emitGetVar(key);
         } else if (key.len > 0 and (key[0] >= '0' and key[0] <= '9')) {
             const int_val = parsePhpInt(key);
             const idx = try self.addConstant(.{ .int = int_val });
@@ -729,9 +719,7 @@ const Compiler = struct {
             return;
         }
 
-        const idx = try self.addConstant(.{ .string = name });
-        try self.emitOp(.get_var);
-        try self.emitU16(idx);
+        try self.emitGetVar(name);
     }
 
     fn getFileDir(self: *Compiler) []const u8 {
@@ -825,9 +813,7 @@ const Compiler = struct {
                 try self.compileNode(node.data.rhs);
                 if (target.tag == .variable or target.tag == .identifier) {
                     const name = self.ast.tokenSlice(target.main_token);
-                    const idx = try self.addConstant(.{ .string = name });
-                    try self.emitOp(.set_var);
-                    try self.emitU16(idx);
+                    try self.emitSetVar(name);
                 }
                 self.patchJump(skip_jump);
             }
@@ -856,9 +842,7 @@ const Compiler = struct {
 
         if (target.tag == .variable or target.tag == .identifier) {
             const name = self.ast.tokenSlice(target.main_token);
-            const idx = try self.addConstant(.{ .string = name });
-            try self.emitOp(.set_var);
-            try self.emitU16(idx);
+            try self.emitSetVar(name);
         }
     }
 
@@ -879,9 +863,7 @@ const Compiler = struct {
                     try self.emitOp(.pop);
                 } else {
                     const name = self.ast.tokenSlice(slot_node.main_token);
-                    const name_idx = try self.addConstant(.{ .string = name });
-                    try self.emitOp(.set_var);
-                    try self.emitU16(name_idx);
+                    try self.emitSetVar(name);
                     try self.emitOp(.pop);
                 }
             }
@@ -905,9 +887,7 @@ const Compiler = struct {
                     try self.emitOp(.pop);
                 } else {
                     const name = self.ast.tokenSlice(val_node.main_token);
-                    const name_idx = try self.addConstant(.{ .string = name });
-                    try self.emitOp(.set_var);
-                    try self.emitU16(name_idx);
+                    try self.emitSetVar(name);
                     try self.emitOp(.pop);
                 }
             }
@@ -1020,9 +1000,7 @@ const Compiler = struct {
             try self.emitOp(if (op_tag == .plus_plus) .add else .subtract);
             if (target.tag == .variable) {
                 const name = self.ast.tokenSlice(target.main_token);
-                const idx = try self.addConstant(.{ .string = name });
-                try self.emitOp(.set_var);
-                try self.emitU16(idx);
+                try self.emitSetVar(name);
             }
             return;
         }
@@ -1101,9 +1079,7 @@ const Compiler = struct {
 
         if (target.tag == .variable) {
             const name = self.ast.tokenSlice(target.main_token);
-            const idx = try self.addConstant(.{ .string = name });
-            try self.emitOp(.set_var);
-            try self.emitU16(idx);
+            try self.emitSetVar(name);
             try self.emitOp(.pop);
         }
     }
@@ -1377,6 +1353,12 @@ const Compiler = struct {
             sub.break_jumps.deinit(self.allocator);
             sub.continue_jumps.deinit(self.allocator);
             sub.string_allocs.deinit(self.allocator);
+            sub.local_slots.deinit(self.allocator);
+        }
+
+        for (param_nodes, 0..) |_, i| {
+            if (i < ref_flags.len and ref_flags[i]) continue;
+            _ = sub.getOrCreateSlot(param_names[i]);
         }
 
         try sub.compileNode(node.data.rhs);
@@ -1386,6 +1368,9 @@ const Compiler = struct {
         sub.continue_jumps.deinit(self.allocator);
 
         self.closure_count = sub.closure_count;
+        const slot_names = try sub.buildSlotNames();
+        const local_count = sub.next_slot;
+        sub.local_slots.deinit(self.allocator);
 
         try self.functions.append(self.allocator, .{
             .name = name,
@@ -1397,6 +1382,8 @@ const Compiler = struct {
             .defaults = defaults_owned,
             .ref_params = ref_flags,
             .chunk = sub.chunk,
+            .local_count = local_count,
+            .slot_names = slot_names,
         });
 
         for (sub.functions.items) |f| try self.functions.append(self.allocator, f);
@@ -1512,9 +1499,7 @@ const Compiler = struct {
 
                 if (catch_node.main_token != 0) {
                     const var_name = self.ast.tokenSlice(catch_node.main_token);
-                    const var_idx = try self.addConstant(.{ .string = var_name });
-                    try self.emitOp(.set_var);
-                    try self.emitU16(var_idx);
+                    try self.emitSetVar(var_name);
                 }
                 try self.emitOp(.pop); // remove exc
 
@@ -1528,9 +1513,7 @@ const Compiler = struct {
                 // untyped catch-all
                 if (catch_node.main_token != 0) {
                     const var_name = self.ast.tokenSlice(catch_node.main_token);
-                    const var_idx = try self.addConstant(.{ .string = var_name });
-                    try self.emitOp(.set_var);
-                    try self.emitU16(var_idx);
+                    try self.emitSetVar(var_name);
                 }
                 try self.emitOp(.pop);
 
@@ -1995,6 +1978,16 @@ const Compiler = struct {
             sub.break_jumps.deinit(self.allocator);
             sub.continue_jumps.deinit(self.allocator);
             sub.string_allocs.deinit(self.allocator);
+            sub.local_slots.deinit(self.allocator);
+        }
+
+        // slot 0 = $this for instance methods
+        if (member.tag != .static_class_method) {
+            _ = sub.getOrCreateSlot("$this");
+        }
+        for (param_nodes, 0..) |_, i| {
+            if (ref_flags[i]) continue;
+            _ = sub.getOrCreateSlot(param_names[i]);
         }
 
         // constructor property promotion: emit $this->prop = $prop for each promoted param
@@ -2004,12 +1997,8 @@ const Compiler = struct {
                 const promotion = (pnode.data.rhs >> 2) & 3;
                 if (promotion > 0) {
                     var param_name = self.ast.tokenSlice(pnode.main_token);
-                    const this_idx = try sub.addConstant(.{ .string = "$this" });
-                    const var_idx = try sub.addConstant(.{ .string = param_name });
-                    try sub.emitOp(.get_var);
-                    try sub.emitU16(this_idx);
-                    try sub.emitOp(.get_var);
-                    try sub.emitU16(var_idx);
+                    try sub.emitGetVar("$this");
+                    try sub.emitGetVar(param_name);
                     if (param_name.len > 0 and param_name[0] == '$') param_name = param_name[1..];
                     const prop_idx = try sub.addConstant(.{ .string = param_name });
                     try sub.emitOp(.set_prop);
@@ -2026,6 +2015,9 @@ const Compiler = struct {
         sub.break_jumps.deinit(self.allocator);
 
         self.closure_count = sub.closure_count;
+        const slot_names = try sub.buildSlotNames();
+        const local_count = sub.next_slot;
+        sub.local_slots.deinit(self.allocator);
 
         try self.functions.append(self.allocator, .{
             .name = full_name,
@@ -2036,6 +2028,8 @@ const Compiler = struct {
             .defaults = defaults_owned,
             .ref_params = ref_flags,
             .chunk = sub.chunk,
+            .local_count = local_count,
+            .slot_names = slot_names,
         });
 
         for (sub.functions.items) |f| try self.functions.append(self.allocator, f);
@@ -2335,9 +2329,7 @@ const Compiler = struct {
         const temp_name = try std.fmt.allocPrint(self.allocator, "__switch_{d}", .{self.closure_count});
         try self.string_allocs.append(self.allocator, temp_name);
         self.closure_count += 1;
-        const temp_idx = try self.addConstant(.{ .string = temp_name });
-        try self.emitOp(.set_var);
-        try self.emitU16(temp_idx);
+        try self.emitSetVar(temp_name);
         try self.emitOp(.pop);
 
         const case_nodes = self.ast.extraSlice(node.data.rhs);
@@ -2359,8 +2351,7 @@ const Compiler = struct {
             defer hit_jumps.deinit(self.allocator);
 
             for (values, 0..) |val, vi| {
-                try self.emitOp(.get_var);
-                try self.emitU16(temp_idx);
+                try self.emitGetVar(temp_name);
                 try self.compileNode(val);
                 try self.emitOp(.equal);
                 if (vi < values.len - 1) {
@@ -2415,9 +2406,7 @@ const Compiler = struct {
         const temp_name = try std.fmt.allocPrint(self.allocator, "__match_{d}", .{self.closure_count});
         try self.string_allocs.append(self.allocator, temp_name);
         self.closure_count += 1;
-        const temp_idx = try self.addConstant(.{ .string = temp_name });
-        try self.emitOp(.set_var);
-        try self.emitU16(temp_idx);
+        try self.emitSetVar(temp_name);
         try self.emitOp(.pop);
 
         const arm_nodes = self.ast.extraSlice(node.data.rhs);
@@ -2438,8 +2427,7 @@ const Compiler = struct {
             defer hit_jumps.deinit(self.allocator);
 
             for (values, 0..) |val, vi| {
-                try self.emitOp(.get_var);
-                try self.emitU16(temp_idx);
+                try self.emitGetVar(temp_name);
                 try self.compileNode(val);
                 try self.emitOp(.identical);
                 if (vi < values.len - 1) {
@@ -2551,6 +2539,12 @@ const Compiler = struct {
             sub.break_jumps.deinit(self.allocator);
             sub.continue_jumps.deinit(self.allocator);
             sub.string_allocs.deinit(self.allocator);
+            sub.local_slots.deinit(self.allocator);
+        }
+
+        for (param_nodes, 0..) |_, i| {
+            if (i < 16 and ref_flags_buf[i]) continue;
+            _ = sub.getOrCreateSlot(param_names[i]);
         }
 
         try sub.compileNode(body_node);
@@ -2566,6 +2560,10 @@ const Compiler = struct {
             break :blk rp;
         } else &[_]bool{};
 
+        const slot_names = try sub.buildSlotNames();
+        const local_count = sub.next_slot;
+        sub.local_slots.deinit(self.allocator);
+
         const func = ObjFunction{
             .name = owned_name,
             .arity = @intCast(param_nodes.len),
@@ -2573,6 +2571,8 @@ const Compiler = struct {
             .chunk = sub.chunk,
             .is_arrow = is_arrow,
             .ref_params = ref_params,
+            .local_count = local_count,
+            .slot_names = slot_names,
         };
 
         try self.functions.append(self.allocator, func);
@@ -2669,18 +2669,15 @@ const Compiler = struct {
             return;
         }
         const var_name = self.ast.tokenSlice(target.main_token);
-        const var_idx = try self.addConstant(.{ .string = var_name });
 
         // settype returns the converted value, we store it back and push true
-        try self.emitOp(.get_var);
-        try self.emitU16(var_idx);
+        try self.emitGetVar(var_name);
         try self.compileNode(args[1]);
         const fn_idx = try self.addConstant(.{ .string = "settype" });
         try self.emitOp(.call);
         try self.emitU16(fn_idx);
         try self.emitByte(2);
-        try self.emitOp(.set_var);
-        try self.emitU16(var_idx);
+        try self.emitSetVar(var_name);
         try self.emitOp(.pop);
         try self.emitOp(.op_true);
     }
@@ -2898,20 +2895,28 @@ const Compiler = struct {
             try self.emitOp(.pop);
         } else {
             const val_name = self.ast.tokenSlice(val_node.main_token);
-            const val_idx = try self.addConstant(.{ .string = val_name });
-            try self.emitOp(.set_var);
-            try self.emitU16(val_idx);
+            if (val_by_ref) {
+                const val_idx = try self.addConstant(.{ .string = val_name });
+                try self.emitOp(.set_var);
+                try self.emitU16(val_idx);
+                ref_val_idx = val_idx;
+            } else {
+                try self.emitSetVar(val_name);
+            }
             try self.emitOp(.pop);
-            if (val_by_ref) ref_val_idx = val_idx;
         }
 
         if (key_n != 0) {
             const key_name = self.ast.tokenSlice(self.ast.nodes[key_n].main_token);
-            const key_idx = try self.addConstant(.{ .string = key_name });
-            try self.emitOp(.set_var);
-            try self.emitU16(key_idx);
+            if (val_by_ref) {
+                const key_idx = try self.addConstant(.{ .string = key_name });
+                try self.emitOp(.set_var);
+                try self.emitU16(key_idx);
+                ref_key_idx = key_idx;
+            } else {
+                try self.emitSetVar(key_name);
+            }
             try self.emitOp(.pop);
-            if (val_by_ref) ref_key_idx = key_idx;
         } else {
             if (val_by_ref) {
                 // need a synthetic key variable for writeback

@@ -49,6 +49,7 @@ pub fn serialize(allocator: Allocator, result: *const CompileResult) ![]u8 {
     for (result.functions.items) |*func| {
         _ = try strtab.intern(allocator, func.name);
         for (func.params) |p| _ = try strtab.intern(allocator, p);
+        for (func.slot_names) |sn| _ = try strtab.intern(allocator, sn);
         try internChunkStrings(allocator, &strtab, &func.chunk);
     }
 
@@ -123,6 +124,12 @@ fn serializeFunction(buf: *std.ArrayListUnmanaged(u8), allocator: Allocator, str
     try buf.append(allocator, @intCast(func.ref_params.len));
     for (func.ref_params) |r| {
         try buf.append(allocator, if (r) @as(u8, 1) else @as(u8, 0));
+    }
+
+    try writeU16(buf, allocator, func.local_count);
+    try writeU16(buf, allocator, @intCast(func.slot_names.len));
+    for (func.slot_names) |sn| {
+        try writeU32(buf, allocator, try strtab.intern(allocator, sn));
     }
 
     try serializeChunk(buf, allocator, strtab, &func.chunk);
@@ -261,6 +268,7 @@ pub fn deserialize(allocator: Allocator, data: []const u8) DeserializeError!Comp
             allocator.free(f.params);
             if (f.defaults.len > 0) allocator.free(f.defaults);
             if (f.ref_params.len > 0) allocator.free(f.ref_params);
+            if (f.slot_names.len > 0) allocator.free(f.slot_names);
         }
         functions.deinit(allocator);
     }
@@ -326,6 +334,14 @@ fn deserializeFunction(r: *Reader, allocator: Allocator, strings: []const []cons
         ref_params[i] = (try r.readByte()) != 0;
     }
 
+    const local_count = try r.readU16();
+    const slot_name_count = try r.readU16();
+    const slot_names = try allocator.alloc([]const u8, slot_name_count);
+    for (0..slot_name_count) |i| {
+        const sidx = try r.readU32();
+        slot_names[i] = strings[sidx];
+    }
+
     const chunk = try deserializeChunk(r, allocator, strings);
 
     return .{
@@ -339,6 +355,8 @@ fn deserializeFunction(r: *Reader, allocator: Allocator, strings: []const []cons
         .defaults = defaults,
         .ref_params = ref_params,
         .chunk = chunk,
+        .local_count = local_count,
+        .slot_names = slot_names,
     };
 }
 

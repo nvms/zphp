@@ -71,12 +71,31 @@ pub const NativeContext = struct {
                     arg_vars[scan_idx] = chunk.constants.items[const_idx].string;
                 }
                 scan_pos -= 3;
+            } else if (chunk.code.items[scan_pos - 3] == @intFromEnum(OpCode.get_local)) {
+                const hi = chunk.code.items[scan_pos - 2];
+                const lo = chunk.code.items[scan_pos - 1];
+                const slot = (@as(u16, hi) << 8) | lo;
+                if (caller.func) |func| {
+                    if (slot < func.slot_names.len) {
+                        arg_vars[scan_idx] = func.slot_names[slot];
+                    }
+                }
+                scan_pos -= 3;
             } else {
                 break;
             }
         }
         if (arg_vars[arg_index]) |var_name| {
             caller.vars.put(vm.allocator, var_name, value) catch return;
+            // also update locals if this var has a slot
+            if (caller.func) |func| {
+                for (func.slot_names, 0..) |sn, si| {
+                    if (std.mem.eql(u8, sn, var_name)) {
+                        if (si < caller.locals.len) caller.locals[si] = value;
+                        break;
+                    }
+                }
+            }
         }
     }
 
@@ -215,6 +234,8 @@ pub const VM = struct {
         chunk: *const Chunk,
         ip: usize,
         vars: std.StringHashMapUnmanaged(Value),
+        locals: []Value = &.{},
+        func: ?*const ObjFunction = null,
         generator: ?*Generator = null,
         ref_slots: std.StringHashMapUnmanaged(*Value) = .{},
         called_class: ?[]const u8 = null,
@@ -438,9 +459,12 @@ pub const VM = struct {
                     const name = self.currentChunk().constants.items[idx].string;
                     if (self.currentFrame().ref_slots.get(name)) |cell| {
                         self.push(cell.*);
+                    } else if (self.currentFrame().vars.get(name)) |val| {
+                        self.push(val);
+                    } else if (self.php_constants.get(name)) |val| {
+                        self.push(val);
                     } else {
-                        self.push(self.currentFrame().vars.get(name) orelse
-                            self.php_constants.get(name) orelse .null);
+                        self.push(.null);
                     }
                 },
                 .set_var => {
@@ -451,6 +475,15 @@ pub const VM = struct {
                         cell.* = val;
                     } else {
                         try self.currentFrame().vars.put(self.allocator, name, val);
+                    }
+                    // sync locals for vars that also have a slot
+                    if (self.currentFrame().func) |func| {
+                        for (func.slot_names, 0..) |sn, si| {
+                            if (std.mem.eql(u8, sn, name)) {
+                                if (si < self.currentFrame().locals.len) self.currentFrame().locals[si] = val;
+                                break;
+                            }
+                        }
                     }
                 },
 
@@ -931,11 +964,53 @@ pub const VM = struct {
                         cell.* = result_val;
                     }
                     try self.currentFrame().vars.put(self.allocator, name, result_val);
+                    if (self.currentFrame().func) |func| {
+                        for (func.slot_names, 0..) |sn, si| {
+                            if (std.mem.eql(u8, sn, name)) {
+                                if (si < self.currentFrame().locals.len) self.currentFrame().locals[si] = result_val;
+                                break;
+                            }
+                        }
+                    }
                     self.push(result_val);
                 },
-                .get_local, .set_local => {
-                    // reserved for variable slots optimization - not yet implemented
-                    _ = self.readU16();
+                .get_local => {
+                    const slot = self.readU16();
+                    const frame = self.currentFrame();
+                    // check ref_slots first - ref bindings take priority
+                    if (frame.func) |func| {
+                        if (slot < func.slot_names.len and func.slot_names[slot].len > 0) {
+                            if (frame.ref_slots.get(func.slot_names[slot])) |cell| {
+                                self.push(cell.*);
+                                continue;
+                            }
+                        }
+                    }
+                    if (slot < frame.locals.len) {
+                        self.push(frame.locals[slot]);
+                    } else {
+                        self.push(.null);
+                    }
+                },
+                .set_local => {
+                    const slot = self.readU16();
+                    const frame = self.currentFrame();
+                    const val = try self.copyValue(self.peek());
+                    if (slot < frame.locals.len) {
+                        frame.locals[slot] = val;
+                    }
+                    // dual-write to HashMap for statics writeback, globals writeback, ref_slots
+                    if (frame.func) |func| {
+                        if (slot < func.slot_names.len) {
+                            const name = func.slot_names[slot];
+                            if (name.len > 0) {
+                                if (frame.ref_slots.get(name)) |cell| {
+                                    cell.* = val;
+                                }
+                                try frame.vars.put(self.allocator, name, val);
+                            }
+                        }
+                    }
                 },
                 .isset_prop => {
                     const name_idx = self.readU16();
@@ -1026,8 +1101,10 @@ pub const VM = struct {
                     const closure_name = self.peek().string;
                     const val = if (self.currentFrame().ref_slots.get(var_name)) |cell|
                         cell.*
+                    else if (self.currentFrame().vars.get(var_name)) |v|
+                        v
                     else
-                        self.currentFrame().vars.get(var_name) orelse .null;
+                        self.getLocalByName(var_name);
                     try self.captures.append(self.allocator, .{
                         .closure_name = closure_name,
                         .var_name = var_name,
@@ -1045,7 +1122,7 @@ pub const VM = struct {
                         existing
                     else blk: {
                         const c = try self.allocator.create(Value);
-                        c.* = self.currentFrame().vars.get(var_name) orelse .null;
+                        c.* = self.currentFrame().vars.get(var_name) orelse self.getLocalByName(var_name);
                         try self.ref_cells.append(self.allocator, c);
                         try self.currentFrame().ref_slots.put(self.allocator, var_name, c);
                         break :blk c;
@@ -1072,6 +1149,10 @@ pub const VM = struct {
                     while (self.frame_count > handler.frame_count) {
                         self.frame_count -= 1;
                         self.frames[self.frame_count].vars.deinit(self.allocator);
+                        if (self.frames[self.frame_count].locals.len > 0) {
+                            self.allocator.free(self.frames[self.frame_count].locals);
+                            self.frames[self.frame_count].locals = &.{};
+                        }
                     }
 
                     // restore stack and push exception
@@ -1171,6 +1252,10 @@ pub const VM = struct {
                                     while (self.frame_count > return_frame) {
                                         self.frame_count -= 1;
                                         self.frames[self.frame_count].vars.deinit(self.allocator);
+                                        if (self.frames[self.frame_count].locals.len > 0) {
+                                            self.allocator.free(self.frames[self.frame_count].locals);
+                                            self.frames[self.frame_count].locals = &.{};
+                                        }
                                     }
                                     self.push(.{ .bool = true });
                                 } else {
@@ -1319,7 +1404,7 @@ pub const VM = struct {
                                 const default = if (i < func.defaults.len) func.defaults[i] else Value.null;
                                 try new_vars.put(self.allocator, func.params[i], default);
                             }
-                            self.frames[self.frame_count] = .{ .chunk = &func.chunk, .ip = 0, .vars = new_vars };
+                            self.frames[self.frame_count] = .{ .chunk = &func.chunk, .ip = 0, .vars = new_vars, .locals = try self.allocLocals(func, &new_vars), .func = func };
                             self.frame_count += 1;
 
                             const ctor_base = self.frame_count - 1;
@@ -1614,7 +1699,7 @@ pub const VM = struct {
                         }
                         self.sp -= ac;
                         self.sp -= 1;
-                        self.frames[self.frame_count] = .{ .chunk = &func.chunk, .ip = 0, .vars = new_vars, .ref_slots = method_refs };
+                        self.frames[self.frame_count] = .{ .chunk = &func.chunk, .ip = 0, .vars = new_vars, .locals = try self.allocLocals(func, &new_vars), .func = func, .ref_slots = method_refs };
                         self.frame_count += 1;
                     } else return error.RuntimeError;
                 },
@@ -1680,7 +1765,7 @@ pub const VM = struct {
                         }
                         self.sp -= ac;
                         self.sp -= 1;
-                        self.frames[self.frame_count] = .{ .chunk = &func.chunk, .ip = 0, .vars = new_vars };
+                        self.frames[self.frame_count] = .{ .chunk = &func.chunk, .ip = 0, .vars = new_vars, .locals = try self.allocLocals(func, &new_vars), .func = func };
                         self.frame_count += 1;
                     } else return error.RuntimeError;
                 },
@@ -1739,7 +1824,7 @@ pub const VM = struct {
                                     try new_vars.put(self.allocator, func.params[i], self.stack[self.sp - ac + i]);
                                 }
                                 self.sp -= ac;
-                                self.frames[self.frame_count] = .{ .chunk = &func.chunk, .ip = 0, .vars = new_vars, .called_class = class_name };
+                                self.frames[self.frame_count] = .{ .chunk = &func.chunk, .ip = 0, .vars = new_vars, .locals = try self.allocLocals(func, &new_vars), .func = func, .called_class = class_name };
                                 self.frame_count += 1;
                             } else if (self.native_fns.get(full_name)) |native| {
                                 const ac: usize = arg_count;
@@ -1817,7 +1902,7 @@ pub const VM = struct {
                                     }
                                 }
                                 self.sp -= ac;
-                                self.frames[self.frame_count] = .{ .chunk = &func.chunk, .ip = 0, .vars = new_vars };
+                                self.frames[self.frame_count] = .{ .chunk = &func.chunk, .ip = 0, .vars = new_vars, .locals = try self.allocLocals(func, &new_vars), .func = func };
                                 self.frame_count += 1;
                             } else return error.RuntimeError;
                         } else {
@@ -1853,6 +1938,7 @@ pub const VM = struct {
                     gen.implicit_key += 1;
                     gen.ip = self.currentFrame().ip;
                     gen.vars = self.currentFrame().vars;
+                    self.saveFrameLocalsToGenerator(gen);
                     try self.saveGeneratorStack(gen);
                     gen.state = .suspended;
                     self.frame_count -= 1;
@@ -1868,6 +1954,7 @@ pub const VM = struct {
                     if (key == .int and key.int >= gen.implicit_key) gen.implicit_key = key.int + 1;
                     gen.ip = self.currentFrame().ip;
                     gen.vars = self.currentFrame().vars;
+                    self.saveFrameLocalsToGenerator(gen);
                     try self.saveGeneratorStack(gen);
                     gen.state = .suspended;
                     self.frame_count -= 1;
@@ -1889,6 +1976,7 @@ pub const VM = struct {
                             // save ip past the yield_from opcode so we resume here
                             outer_gen.ip = self.currentFrame().ip;
                             outer_gen.vars = self.currentFrame().vars;
+                            self.saveFrameLocalsToGenerator(outer_gen);
                             outer_gen.state = .suspended;
                             self.frame_count -= 1;
                             return;
@@ -1907,6 +1995,7 @@ pub const VM = struct {
                             outer_gen.current_value = entry.value;
                             outer_gen.ip = self.currentFrame().ip;
                             outer_gen.vars = self.currentFrame().vars;
+                            self.saveFrameLocalsToGenerator(outer_gen);
                             outer_gen.state = .suspended;
                             self.frame_count -= 1;
                             return;
@@ -1924,6 +2013,10 @@ pub const VM = struct {
                         if (self.frame_count > 1) {
                             self.frame_count -= 1;
                             self.frames[self.frame_count].vars.deinit(self.allocator);
+                            if (self.frames[self.frame_count].locals.len > 0) {
+                                self.allocator.free(self.frames[self.frame_count].locals);
+                                self.frames[self.frame_count].locals = &.{};
+                            }
                         }
                         continue;
                     };
@@ -1932,6 +2025,7 @@ pub const VM = struct {
                     gen.current_key = .null;
                     gen.state = .completed;
                     gen.vars = self.currentFrame().vars;
+                    self.saveFrameLocalsToGenerator(gen);
                     self.frame_count -= 1;
                     return;
                 },
@@ -2063,10 +2157,20 @@ pub const VM = struct {
         gen.stack.clearRetainingCapacity();
         gen.base_sp = saved_sp;
 
+        var gen_locals: []Value = &.{};
+        if (gen.locals.items.len > 0) {
+            gen_locals = try self.allocator.alloc(Value, gen.locals.items.len);
+            @memcpy(gen_locals, gen.locals.items);
+        } else if (gen.ip == 0) {
+            // first resume - allocate locals from initial vars
+            gen_locals = try self.allocLocals(gen.func, &gen.vars);
+        }
         self.frames[self.frame_count] = .{
             .chunk = &gen.func.chunk,
             .ip = gen.ip,
             .vars = gen.vars,
+            .locals = gen_locals,
+            .func = gen.func,
             .generator = gen,
         };
         self.frame_count += 1;
@@ -2144,7 +2248,7 @@ pub const VM = struct {
         if (self.functions.get(method_name)) |func| {
             var new_vars: std.StringHashMapUnmanaged(Value) = .{};
             try new_vars.put(self.allocator, "$this", .{ .object = obj });
-            self.frames[self.frame_count] = .{ .chunk = &func.chunk, .ip = 0, .vars = new_vars };
+            self.frames[self.frame_count] = .{ .chunk = &func.chunk, .ip = 0, .vars = new_vars, .locals = try self.allocLocals(func, &new_vars), .func = func };
             self.frame_count += 1;
             try self.runLoop(self.frame_count - 1);
             const result = self.pop();
@@ -2445,6 +2549,43 @@ pub const VM = struct {
         }
     }
 
+    fn getLocalByName(self: *VM, name: []const u8) Value {
+        const frame = self.currentFrame();
+        if (frame.func) |func| {
+            for (func.slot_names, 0..) |sn, si| {
+                if (std.mem.eql(u8, sn, name)) {
+                    if (si < frame.locals.len) return frame.locals[si];
+                    break;
+                }
+            }
+        }
+        return .null;
+    }
+
+    fn saveFrameLocalsToGenerator(self: *VM, gen: *Generator) void {
+        const frame = self.currentFrame();
+        gen.locals.clearRetainingCapacity();
+        if (frame.locals.len > 0) {
+            gen.locals.appendSlice(self.allocator, frame.locals) catch {};
+            self.allocator.free(frame.locals);
+            self.currentFrame().locals = &.{};
+        }
+    }
+
+    fn allocLocals(self: *VM, func: *const ObjFunction, vars: *const std.StringHashMapUnmanaged(Value)) ![]Value {
+        if (func.local_count == 0) return &.{};
+        const locals = try self.allocator.alloc(Value, func.local_count);
+        @memset(locals, .null);
+        for (func.slot_names, 0..) |name, i| {
+            if (name.len > 0) {
+                if (vars.get(name)) |val| {
+                    locals[i] = val;
+                }
+            }
+        }
+        return locals;
+    }
+
     fn popFrame(self: *VM) !void {
         try self.writebackStatics();
         try self.writebackGlobals();
@@ -2452,6 +2593,10 @@ pub const VM = struct {
         self.frame_count -= 1;
         self.frames[self.frame_count].ref_slots.deinit(self.allocator);
         self.frames[self.frame_count].vars.deinit(self.allocator);
+        if (self.frames[self.frame_count].locals.len > 0) {
+            self.allocator.free(self.frames[self.frame_count].locals);
+            self.frames[self.frame_count].locals = &.{};
+        }
     }
 
     fn writebackRefs(self: *VM) !void {
@@ -2476,6 +2621,16 @@ pub const VM = struct {
                 const ci = (@as(u16, hi) << 8) | lo;
                 if (ci < chunk.constants.items.len) {
                     arg_vars[idx] = chunk.constants.items[ci].string;
+                }
+                scan_end -= 3;
+            } else if (op == @intFromEnum(OpCode.get_local)) {
+                const hi = chunk.code.items[scan_end - 2];
+                const lo = chunk.code.items[scan_end - 1];
+                const slot = (@as(u16, hi) << 8) | lo;
+                if (self.currentFrame().func) |func| {
+                    if (slot < func.slot_names.len) {
+                        arg_vars[idx] = func.slot_names[slot];
+                    }
                 }
                 scan_end -= 3;
             } else if (op == @intFromEnum(OpCode.constant)) {
@@ -2757,7 +2912,7 @@ pub const VM = struct {
 
     fn executeFunction(self: *VM, func: *const ObjFunction, vars: std.StringHashMapUnmanaged(Value)) RuntimeError!Value {
         const base_frame = self.frame_count;
-        self.frames[self.frame_count] = .{ .chunk = &func.chunk, .ip = 0, .vars = vars };
+        self.frames[self.frame_count] = .{ .chunk = &func.chunk, .ip = 0, .vars = vars, .locals = try self.allocLocals(func, &vars), .func = func };
         self.frame_count += 1;
         try self.runUntilFrame(base_frame);
         return self.pop();
@@ -2765,7 +2920,7 @@ pub const VM = struct {
 
     pub fn executeFunctionWithRefs(self: *VM, func: *const ObjFunction, vars: std.StringHashMapUnmanaged(Value), ref_slots: std.StringHashMapUnmanaged(*Value)) RuntimeError!Value {
         const base_frame = self.frame_count;
-        self.frames[self.frame_count] = .{ .chunk = &func.chunk, .ip = 0, .vars = vars, .ref_slots = ref_slots };
+        self.frames[self.frame_count] = .{ .chunk = &func.chunk, .ip = 0, .vars = vars, .locals = try self.allocLocals(func, &vars), .func = func, .ref_slots = ref_slots };
         self.frame_count += 1;
         try self.runUntilFrame(base_frame);
         return self.pop();
@@ -2839,7 +2994,7 @@ pub const VM = struct {
                 try self.generators.append(self.allocator, gen);
                 self.push(.{ .generator = gen });
             } else {
-                self.frames[self.frame_count] = .{ .chunk = &func.chunk, .ip = 0, .vars = new_vars, .ref_slots = callee_refs };
+                self.frames[self.frame_count] = .{ .chunk = &func.chunk, .ip = 0, .vars = new_vars, .locals = try self.allocLocals(func, &new_vars), .func = func, .ref_slots = callee_refs };
                 self.frame_count += 1;
             }
         } else return error.RuntimeError;
@@ -2942,6 +3097,10 @@ pub const VM = struct {
                 self.frame_count -= 1;
                 self.frames[self.frame_count].ref_slots.deinit(self.allocator);
                 self.frames[self.frame_count].vars.deinit(self.allocator);
+                if (self.frames[self.frame_count].locals.len > 0) {
+                    self.allocator.free(self.frames[self.frame_count].locals);
+                    self.frames[self.frame_count].locals = &.{};
+                }
             }
             self.sp = base_sp;
             self.handler_count = base_handler;
@@ -2963,17 +3122,19 @@ pub const VM = struct {
         for (fiber.saved_frames.items) |*f| {
             f.vars.deinit(self.allocator);
             f.ref_slots.deinit(self.allocator);
+            if (f.locals.len > 0) self.allocator.free(f.locals);
         }
         fiber.saved_frames.clearRetainingCapacity();
         fiber.saved_stack.clearRetainingCapacity();
         fiber.saved_handlers.clearRetainingCapacity();
 
-        // save frames (move ownership of vars/ref_bindings to fiber)
+        // save frames (move ownership of vars/ref_bindings/locals to fiber)
         for (self.frames[base_frame..self.frame_count]) |frame| {
             try fiber.saved_frames.append(self.allocator, .{
                 .chunk = frame.chunk,
                 .ip = frame.ip,
                 .vars = frame.vars,
+                .locals = frame.locals,
                 .generator = frame.generator,
                 .ref_slots = frame.ref_slots,
             });
@@ -3005,6 +3166,7 @@ pub const VM = struct {
                 .chunk = frame.chunk,
                 .ip = frame.ip,
                 .vars = frame.vars,
+                .locals = frame.locals,
                 .generator = frame.generator,
                 .ref_slots = frame.ref_slots,
             };

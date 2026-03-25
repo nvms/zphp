@@ -100,6 +100,7 @@ pub const Generator = struct {
     func: *const ObjFunction,
     ip: usize = 0,
     vars: std.StringHashMapUnmanaged(Value) = .{},
+    locals: std.ArrayListUnmanaged(Value) = .{},
     stack: std.ArrayListUnmanaged(Value) = .{},
     base_sp: usize = 0,
     current_value: Value = .null,
@@ -118,6 +119,7 @@ pub const Generator = struct {
 
     pub fn deinit(self: *Generator, allocator: std.mem.Allocator) void {
         self.vars.deinit(allocator);
+        self.locals.deinit(allocator);
         self.stack.deinit(allocator);
     }
 };
@@ -139,6 +141,7 @@ pub const Fiber = struct {
         chunk: *const Chunk,
         ip: usize,
         vars: std.StringHashMapUnmanaged(Value),
+        locals: []Value = &.{},
         generator: ?*Generator = null,
         ref_slots: std.StringHashMapUnmanaged(*Value),
     };
@@ -154,6 +157,7 @@ pub const Fiber = struct {
         for (self.saved_frames.items) |*f| {
             f.vars.deinit(allocator);
             f.ref_slots.deinit(allocator);
+            if (f.locals.len > 0) allocator.free(f.locals);
         }
         self.saved_frames.deinit(allocator);
         self.saved_stack.deinit(allocator);
