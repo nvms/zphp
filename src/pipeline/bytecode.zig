@@ -126,6 +126,9 @@ pub const OpCode = enum(u8) {
 
     // isset on property - dispatches to __isset magic method
     isset_prop, // u16: prop name - pop object, push bool
+
+    // optimized concat-assign: $var .= expr without full copy
+    concat_assign, // u16: var name constant index - pop value, append to var's string
 };
 
 

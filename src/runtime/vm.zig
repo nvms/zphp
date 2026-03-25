@@ -894,6 +894,40 @@ pub const VM = struct {
                         arr_val.array.remove(Value.toArrayKey(key));
                     }
                 },
+                .concat_assign => {
+                    const name_idx = self.readU16();
+                    const name = self.currentChunk().constants.items[name_idx].string;
+                    const append_val = self.pop();
+                    const current = self.currentFrame().vars.get(name) orelse .null;
+
+                    if (current == .string and append_val == .string) {
+                        const cs = current.string;
+                        const as = append_val.string;
+                        const new_str = try self.allocator.alloc(u8, cs.len + as.len);
+                        @memcpy(new_str[0..cs.len], cs);
+                        @memcpy(new_str[cs.len..], as);
+                        try self.strings.append(self.allocator, new_str);
+                        try self.currentFrame().vars.put(self.allocator, name, .{ .string = new_str });
+                        self.push(.{ .string = new_str });
+                    } else {
+                        // fallback: format + concat
+                        var buf = std.ArrayListUnmanaged(u8){};
+                        if (current == .string) {
+                            try buf.appendSlice(self.allocator, current.string);
+                        } else {
+                            try current.format(&buf, self.allocator);
+                        }
+                        if (append_val == .string) {
+                            try buf.appendSlice(self.allocator, append_val.string);
+                        } else {
+                            try append_val.format(&buf, self.allocator);
+                        }
+                        const owned = try buf.toOwnedSlice(self.allocator);
+                        try self.strings.append(self.allocator, owned);
+                        try self.currentFrame().vars.put(self.allocator, name, .{ .string = owned });
+                        self.push(.{ .string = owned });
+                    }
+                },
                 .isset_prop => {
                     const name_idx = self.readU16();
                     const prop_name = self.currentChunk().constants.items[name_idx].string;

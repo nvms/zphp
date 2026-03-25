@@ -16,20 +16,26 @@ Requires PHP installed locally. zphp must be built with ReleaseFast - debug buil
 - **closures** - closure creation, captures, higher-order composition
 - **objects** - class instantiation, method calls, property access
 - **array_ops** - array building, filtering, mapping via loops
-- **string_ops** - string building, substr_count, str_replace, explode/implode
+- **string_ops** - string concatenation in loop, substr_count, str_replace, explode/implode
 
 ### Results (Apple M4, PHP 8.5 no JIT, zphp ReleaseFast)
 
 | benchmark | php | zphp | ratio |
 |---|---|---|---|
-| array_ops | 90 ms | 43 ms | 0.48x |
-| string_ops | 96 ms | 110 ms | 1.15x |
-| objects | 98 ms | 258 ms | 2.63x |
-| closures | 100 ms | 551 ms | 5.51x |
-| fibonacci | 158 ms | 1,154 ms | 7.30x |
-| loops | 125 ms | 1,053 ms | 8.42x |
+| array_ops | 95 ms | 43 ms | 0.45x |
+| objects | 99 ms | 266 ms | 2.69x |
+| closures | 103 ms | 535 ms | 5.19x |
+| fibonacci | 159 ms | 1,207 ms | 7.59x |
+| loops | 129 ms | 1,057 ms | 8.19x |
+| string_ops | 93 ms | 2,948 ms | 31.7x |
 
-Array operations are 2x faster than PHP thanks to O(1) integer key lookups on sequential arrays. String and object operations are competitive. Pure computation (fibonacci, loops) is 7-8x slower - the gap between a switch-based bytecode interpreter and PHP's computed goto dispatch with 30 years of optimization. The main bottleneck is variable access: zphp uses HashMap lookups where PHP uses fixed-slot arrays.
+Array operations are 2x faster than PHP thanks to O(1) integer key lookups on sequential arrays. Object operations are competitive at 2.7x. Pure computation (fibonacci, loops) is 7-8x slower due to variable access via HashMap (PHP uses fixed-slot arrays) and switch-based dispatch (PHP uses computed goto). String concatenation in loops (`$s .= expr`) is the worst at 31x due to O(n) allocation per append (PHP uses mutable string buffers with realloc).
+
+### Optimization roadmap
+
+- **Variable slots**: replace HashMap variable lookups with indexed array access (would improve fibonacci/loops/closures)
+- **Mutable string buffers**: use growable buffers for `.=` instead of allocating a new string each time (would fix string_ops)
+- **Computed goto dispatch**: replace switch-based opcode dispatch with computed goto (general ~2x improvement)
 
 ## fmt
 

@@ -831,6 +831,16 @@ const Compiler = struct {
             return;
         }
 
+        // fast path: $var .= expr uses concat_assign to avoid full string copy
+        if (op_tag == .dot_equal and (target.tag == .variable or target.tag == .identifier)) {
+            try self.compileNode(node.data.rhs);
+            const name = self.ast.tokenSlice(target.main_token);
+            const idx = try self.addConstant(.{ .string = name });
+            try self.emitOp(.concat_assign);
+            try self.emitU16(idx);
+            return;
+        }
+
         if (op_tag != .equal) {
             try self.compileGetVar(target);
         }
