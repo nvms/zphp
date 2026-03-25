@@ -1241,7 +1241,7 @@ pub const VM = struct {
                         self.frame_count -= 1;
                         self.frames[self.frame_count].vars.deinit(self.allocator);
                         if (self.frames[self.frame_count].locals.len > 0) {
-                            self.allocator.free(self.frames[self.frame_count].locals);
+                            self.freeLocals(self.frames[self.frame_count].locals);
                             self.frames[self.frame_count].locals = &.{};
                         }
                     }
@@ -1345,7 +1345,7 @@ pub const VM = struct {
                                         self.frame_count -= 1;
                                         self.frames[self.frame_count].vars.deinit(self.allocator);
                                         if (self.frames[self.frame_count].locals.len > 0) {
-                                            self.allocator.free(self.frames[self.frame_count].locals);
+                                            self.freeLocals(self.frames[self.frame_count].locals);
                                             self.frames[self.frame_count].locals = &.{};
                                         }
                                     }
@@ -2197,7 +2197,7 @@ pub const VM = struct {
                             self.frame_count -= 1;
                             self.frames[self.frame_count].vars.deinit(self.allocator);
                             if (self.frames[self.frame_count].locals.len > 0) {
-                                self.allocator.free(self.frames[self.frame_count].locals);
+                                self.freeLocals(self.frames[self.frame_count].locals);
                                 self.frames[self.frame_count].locals = &.{};
                             }
                         }
@@ -3707,7 +3707,7 @@ pub const VM = struct {
                 self.frames[self.frame_count].ref_slots.deinit(self.allocator);
                 self.frames[self.frame_count].vars.deinit(self.allocator);
                 if (self.frames[self.frame_count].locals.len > 0) {
-                    self.allocator.free(self.frames[self.frame_count].locals);
+                    self.freeLocals(self.frames[self.frame_count].locals);
                     self.frames[self.frame_count].locals = &.{};
                 }
             }

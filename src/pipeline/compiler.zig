@@ -2569,6 +2569,8 @@ const Compiler = struct {
                 _ = sub.getOrCreateSlot(var_name);
             }
         }
+        // $this is always bound via closure_bind - give it a slot so the body uses get_local
+        _ = sub.getOrCreateSlot("$this");
 
         try sub.compileNode(body_node);
         try sub.emitOp(.op_null);
