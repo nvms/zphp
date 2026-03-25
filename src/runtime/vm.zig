@@ -215,6 +215,7 @@ pub const VM = struct {
     pending_exception: ?Value = null,
     allocator: Allocator,
     global_slot_names: []const []const u8 = &.{},
+    global_vars_dirty: bool = false,
 
     const StaticEntry = struct {
         var_name: []const u8,
@@ -498,9 +499,21 @@ pub const VM = struct {
                     }
                 },
 
-                .add => self.binaryOp(Value.add),
-                .subtract => self.binaryOp(Value.subtract),
-                .multiply => self.binaryOp(Value.multiply),
+                .add => {
+                    const b = self.pop();
+                    const a = self.pop();
+                    self.push(Value.add(a, b));
+                },
+                .subtract => {
+                    const b = self.pop();
+                    const a = self.pop();
+                    self.push(Value.subtract(a, b));
+                },
+                .multiply => {
+                    const b = self.pop();
+                    const a = self.pop();
+                    self.push(Value.multiply(a, b));
+                },
                 .divide => {
                     const b = self.pop();
                     const a = self.pop();
@@ -521,7 +534,11 @@ pub const VM = struct {
                     }
                     self.push(Value.modulo(a, b));
                 },
-                .power => self.binaryOp(Value.power),
+                .power => {
+                    const b = self.pop();
+                    const a = self.pop();
+                    self.push(Value.power(a, b));
+                },
                 .negate => {
                     const v = self.pop();
                     self.push(v.negate());
@@ -642,6 +659,8 @@ pub const VM = struct {
                 .jump_back => {
                     const offset = self.readU16();
                     self.currentFrame().ip -= offset;
+                    if (self.currentFrame().locals.len > 0)
+                        try self.fastLoop();
                 },
                 .jump_if_false => {
                     const offset = self.readU16();
@@ -660,9 +679,11 @@ pub const VM = struct {
                     const name_idx = self.readU16();
                     const arg_count = self.readByte();
                     const name = self.currentChunk().constants.items[name_idx].string;
+                    if (self.global_vars_dirty) try self.syncGlobalLocalsToVars();
                     try self.callNamedFunction(name, arg_count);
                 },
                 .call_indirect => {
+                    if (self.global_vars_dirty) try self.syncGlobalLocalsToVars();
                     const arg_count = self.readByte();
                     const ac: usize = arg_count;
                     const name_val = self.stack[self.sp - ac - 1];
@@ -702,6 +723,7 @@ pub const VM = struct {
                     } else return error.RuntimeError;
                 },
                 .call_spread => {
+                    if (self.global_vars_dirty) try self.syncGlobalLocalsToVars();
                     const name_idx = self.readU16();
                     const name = self.currentChunk().constants.items[name_idx].string;
                     const args_val = self.pop();
@@ -939,6 +961,7 @@ pub const VM = struct {
                     }
                 },
                 .concat_assign => {
+                    if (self.global_vars_dirty) try self.syncGlobalLocalsToVars();
                     const name_idx = self.readU16();
                     const name = self.currentChunk().constants.items[name_idx].string;
                     const append_val = self.pop();
@@ -1023,22 +1046,33 @@ pub const VM = struct {
                 .set_local => {
                     const slot = self.readU16();
                     const frame = self.currentFrame();
-                    const val = try self.copyValue(self.peek());
+                    const peeked = self.peek();
+                    const val = if (peeked == .array) try self.copyValue(peeked) else peeked;
                     if (slot < frame.locals.len) {
                         frame.locals[slot] = val;
                     }
-                    // dual-write to HashMap for statics writeback, globals writeback, ref_slots
-                    const sn = if (frame.func) |func| func.slot_names else self.global_slot_names;
-                    if (slot < sn.len) {
-                        const name = sn[slot];
-                        if (name.len > 0) {
-                            if (frame.ref_slots.count() > 0) {
+                    if (frame.func) |func| {
+                        // function scope: dual-write for statics/globals writeback
+                        if (slot < func.slot_names.len) {
+                            const name = func.slot_names[slot];
+                            if (name.len > 0) {
+                                if (frame.ref_slots.get(name)) |cell| {
+                                    cell.* = val;
+                                }
+                                try frame.vars.put(self.allocator, name, val);
+                            }
+                        }
+                    } else {
+                        // global scope: skip vars.put, just handle ref_slots
+                        if (slot < self.global_slot_names.len) {
+                            const name = self.global_slot_names[slot];
+                            if (name.len > 0 and frame.ref_slots.count() > 0) {
                                 if (frame.ref_slots.get(name)) |cell| {
                                     cell.* = val;
                                 }
                             }
-                            try frame.vars.put(self.allocator, name, val);
                         }
+                        self.global_vars_dirty = true;
                     }
                 },
                 .isset_prop => {
@@ -1124,6 +1158,7 @@ pub const VM = struct {
                 },
 
                 .closure_bind => {
+                    if (self.global_vars_dirty) try self.syncGlobalLocalsToVars();
                     const var_idx = self.readU16();
                     const var_name = self.currentChunk().constants.items[var_idx].string;
                     try self.ensureClosureInstance();
@@ -1142,6 +1177,7 @@ pub const VM = struct {
                 },
 
                 .closure_bind_ref => {
+                    if (self.global_vars_dirty) try self.syncGlobalLocalsToVars();
                     const var_idx = self.readU16();
                     const var_name = self.currentChunk().constants.items[var_idx].string;
                     try self.ensureClosureInstance();
@@ -1208,6 +1244,7 @@ pub const VM = struct {
                 },
 
                 .get_global => {
+                    if (self.global_vars_dirty) try self.syncGlobalLocalsToVars();
                     const name_idx = self.readU16();
                     const name = self.currentChunk().constants.items[name_idx].string;
                     const raw_val = if (self.frame_count > 1) blk: {
@@ -2255,6 +2292,17 @@ pub const VM = struct {
         gen.stack.clearRetainingCapacity();
         if (self.sp > gen.base_sp) {
             try gen.stack.appendSlice(self.allocator, self.stack[gen.base_sp..self.sp]);
+        }
+    }
+
+    fn syncGlobalLocalsToVars(self: *VM) !void {
+        if (!self.global_vars_dirty) return;
+        self.global_vars_dirty = false;
+        const frame = &self.frames[0];
+        for (self.global_slot_names, 0..) |name, i| {
+            if (name.len > 0 and i < frame.locals.len) {
+                try frame.vars.put(self.allocator, name, frame.locals[i]);
+            }
         }
     }
 
