@@ -3137,8 +3137,8 @@ pub const VM = struct {
                             self.sp = sp + 1;
                             return;
                         };
-                        if (ci_func.locals_only and self.captures.items.len == 0) {
-                            // plain locals-only function
+                        if (ci_func.locals_only and (self.captures.items.len == 0 or !self.hasCaptures(ci_name))) {
+                            // plain locals-only function (or closure with no captures)
                             const ci_lc: usize = ci_func.local_count;
                             const ci_lbase = ic.locals_sp;
                             if (ci_lbase + ci_lc > ic.locals_cap) {
@@ -3992,7 +3992,7 @@ pub const VM = struct {
             if (ac < func.required_params)
                 return error.RuntimeError;
             if (func.locals_only) {
-                if (self.captures.items.len == 0)
+                if (self.captures.items.len == 0 or !self.hasCaptures(name))
                     return self.callLocalsOnly(func, arg_count);
                 if (std.mem.startsWith(u8, name, "__closure_"))
                     return self.callClosureLocalsOnly(func, name, arg_count);
@@ -4087,13 +4087,78 @@ pub const VM = struct {
             return native(&ctx, args);
         } else if (self.functions.get(name)) |func| {
             if (args.len < func.required_params) return error.RuntimeError;
-            if (func.locals_only and self.captures.items.len == 0)
-                return self.executeFunctionLocalsOnly(func, args);
+            if (func.locals_only) {
+                if (self.captures.items.len == 0)
+                    return self.executeFunctionLocalsOnly(func, args);
+                if (std.mem.startsWith(u8, name, "__closure_")) {
+                    if (!self.hasCaptures(name))
+                        return self.executeFunctionLocalsOnly(func, args);
+                    return self.executeClosureLocalsOnly(func, name, args);
+                }
+                if (!self.hasCaptures(name))
+                    return self.executeFunctionLocalsOnly(func, args);
+            }
             var new_vars: std.StringHashMapUnmanaged(Value) = .{};
             try self.bindClosures(&new_vars, null, name);
             try self.bindArgs(&new_vars, func, args[0..@min(args.len, func.arity)]);
             return self.executeFunction(func, new_vars);
         } else return error.RuntimeError;
+    }
+
+    fn hasCaptures(self: *VM, name: []const u8) bool {
+        for (self.captures.items) |cap| {
+            if (cap.closure_name.ptr == name.ptr or
+                (cap.closure_name.len == name.len and std.mem.eql(u8, cap.closure_name, name)))
+                return true;
+        }
+        return false;
+    }
+
+    fn executeClosureLocalsOnly(self: *VM, func: *const ObjFunction, name: []const u8, args: []const Value) RuntimeError!Value {
+        const base_frame = self.frame_count;
+        const lc: usize = func.local_count;
+        const ic = self.ic.?;
+        const lbase = ic.locals_sp;
+
+        const locals = if (lbase + lc <= ic.locals_cap) blk: {
+            const s = ic.locals_buf[lbase..lbase + lc];
+            @memset(s, .null);
+            ic.locals_sp = lbase + lc;
+            break :blk s;
+        } else blk: {
+            const s = try self.allocator.alloc(Value, lc);
+            @memset(s, .null);
+            break :blk s;
+        };
+
+        const bind_count = @min(args.len, func.arity);
+        for (0..bind_count) |i| {
+            locals[i] = try self.copyValue(args[i]);
+        }
+        for (bind_count..func.arity) |i| {
+            if (i < func.defaults.len) locals[i] = func.defaults[i];
+        }
+        // bind captures
+        for (self.captures.items) |cap| {
+            if (cap.closure_name.ptr == name.ptr or
+                (cap.closure_name.len == name.len and std.mem.eql(u8, cap.closure_name, name)))
+            {
+                for (func.slot_names, 0..) |sn, si| {
+                    if (sn.len == cap.var_name.len and std.mem.eql(u8, sn, cap.var_name)) {
+                        locals[si] = try self.copyValue(cap.value);
+                        break;
+                    }
+                }
+            }
+        }
+        self.frames[self.frame_count] = .{ .chunk = &func.chunk, .ip = 0, .vars = .{}, .locals = locals, .func = func };
+        self.frame_count += 1;
+        try self.fastLoop();
+        const fl_frame = &self.frames[self.frame_count - 1];
+        if (fl_frame.chunk == &func.chunk) {
+            try self.runUntilFrame(base_frame);
+        }
+        return self.pop();
     }
 
     pub fn callByNameRef(self: *VM, name: []const u8, args: []Value) RuntimeError!Value {
