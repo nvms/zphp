@@ -3,11 +3,19 @@ const parser = @import("pipeline/parser.zig");
 const compiler = @import("pipeline/compiler.zig");
 const VM = @import("runtime/vm.zig").VM;
 const CompileResult = @import("pipeline/compiler.zig").CompileResult;
+const bytecode_format = @import("bytecode_format.zig");
 
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
+
+    // check for embedded bytecode (standalone executable mode)
+    if (bytecode_format.detectEmbeddedBytecode(allocator)) |bc| {
+        defer allocator.free(bc);
+        try runBytecode(allocator, bc);
+        return;
+    }
 
     const args = try std.process.argsAlloc(allocator);
     defer std.process.argsFree(allocator, args);
@@ -67,6 +75,12 @@ pub fn main() !void {
             std.process.exit(1);
         }
         try @import("fmt.zig").run(allocator, args[2..]);
+    } else if (std.mem.eql(u8, cmd, "build")) {
+        if (args.len < 3) {
+            try writeStderr("usage: zphp build [--compile] <file>\n");
+            std.process.exit(1);
+        }
+        try buildFile(allocator, args[2..]);
     } else if (std.mem.eql(u8, cmd, "version") or std.mem.eql(u8, cmd, "--version")) {
         try writeStdout("zphp 0.1.0\n");
     } else {
@@ -136,6 +150,18 @@ fn loadFile(path: []const u8, allocator: std.mem.Allocator) ?*CompileResult {
 }
 
 fn runFile(allocator: std.mem.Allocator, path: []const u8) !void {
+    if (std.mem.endsWith(u8, path, ".zphpc")) {
+        const bc = std.fs.cwd().readFileAlloc(allocator, path, 256 * 1024 * 1024) catch |err| {
+            try writeStderr("error: could not read file '");
+            try writeStderr(path);
+            try writeStderr("'\n");
+            return err;
+        };
+        defer allocator.free(bc);
+        try runBytecode(allocator, bc);
+        return;
+    }
+
     const source = std.fs.cwd().readFileAlloc(allocator, path, 1024 * 1024 * 10) catch |err| {
         try writeStderr("error: could not read file '");
         try writeStderr(path);
@@ -161,13 +187,26 @@ fn runFile(allocator: std.mem.Allocator, path: []const u8) !void {
     };
     defer result.deinit();
 
+    try runWithVM(allocator, &result);
+}
+
+fn runBytecode(allocator: std.mem.Allocator, bc: []const u8) !void {
+    var result = bytecode_format.deserialize(allocator, bc) catch {
+        try writeStderr("error: invalid bytecode file\n");
+        std.process.exit(1);
+    };
+    defer result.deinit();
+    try runWithVM(allocator, &result);
+}
+
+fn runWithVM(allocator: std.mem.Allocator, result: *CompileResult) !void {
     var vm = VM.init(allocator) catch {
         try writeStderr("vm init error\n");
         std.process.exit(1);
     };
     defer vm.deinit();
     vm.file_loader = &loadFile;
-    vm.interpret(&result) catch {
+    vm.interpret(result) catch {
         if (vm.output.items.len > 0) {
             try writeStdout(vm.output.items);
         }
@@ -184,6 +223,88 @@ fn runFile(allocator: std.mem.Allocator, path: []const u8) !void {
 
     if (vm.output.items.len > 0) {
         try writeStdout(vm.output.items);
+    }
+}
+
+fn buildFile(allocator: std.mem.Allocator, args: []const []const u8) !void {
+    var compile_exe = false;
+    var file_path: ?[]const u8 = null;
+
+    for (args) |arg| {
+        if (std.mem.eql(u8, arg, "--compile")) {
+            compile_exe = true;
+        } else {
+            file_path = arg;
+        }
+    }
+
+    const path = file_path orelse {
+        try writeStderr("usage: zphp build [--compile] <file>\n");
+        std.process.exit(1);
+    };
+
+    const source = std.fs.cwd().readFileAlloc(allocator, path, 1024 * 1024 * 10) catch {
+        try writeStderr("error: could not read file '");
+        try writeStderr(path);
+        try writeStderr("'\n");
+        std.process.exit(1);
+    };
+    defer allocator.free(source);
+
+    var ast = try parser.parse(allocator, source);
+    defer ast.deinit();
+
+    if (ast.errors.len > 0) {
+        try writeStderr("parse error\n");
+        std.process.exit(1);
+    }
+
+    const abs_path = std.fs.cwd().realpathAlloc(allocator, path) catch path;
+    defer if (abs_path.ptr != path.ptr) allocator.free(abs_path);
+
+    var result = compiler.compileWithPath(&ast, allocator, abs_path) catch {
+        try writeStderr("compile error\n");
+        std.process.exit(1);
+    };
+    defer result.deinit();
+
+    const bc = bytecode_format.serialize(allocator, &result) catch {
+        try writeStderr("serialization error\n");
+        std.process.exit(1);
+    };
+    defer allocator.free(bc);
+
+    if (compile_exe) {
+        const exe_path = std.fs.selfExePathAlloc(allocator) catch {
+            try writeStderr("error: could not determine self exe path\n");
+            std.process.exit(1);
+        };
+        defer allocator.free(exe_path);
+
+        // output name: strip .php extension, or append .bin
+        const base = std.fs.path.stem(path);
+        bytecode_format.appendToExecutable(allocator, exe_path, bc, base) catch {
+            try writeStderr("error: could not create executable\n");
+            std.process.exit(1);
+        };
+        try writeStdout("created: ");
+        try writeStdout(base);
+        try writeStdout("\n");
+    } else {
+        // output .zphpc file - strip .php extension if present
+        const base_name = if (std.mem.endsWith(u8, path, ".php")) path[0 .. path.len - 4] else path;
+        const out_path = std.fmt.allocPrint(allocator, "{s}.zphpc", .{base_name}) catch {
+            std.process.exit(1);
+        };
+        defer allocator.free(out_path);
+
+        std.fs.cwd().writeFile(.{ .sub_path = out_path, .data = bc }) catch {
+            try writeStderr("error: could not write bytecode file\n");
+            std.process.exit(1);
+        };
+        try writeStdout("created: ");
+        try writeStdout(out_path);
+        try writeStdout("\n");
     }
 }
 
@@ -211,4 +332,5 @@ test {
     _ = @import("integration_tests.zig");
     _ = @import("fmt.zig");
     _ = @import("websocket.zig");
+    _ = @import("bytecode_format.zig");
 }
