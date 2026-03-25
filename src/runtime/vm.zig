@@ -883,6 +883,24 @@ pub const VM = struct {
                         arr_val.array.remove(Value.toArrayKey(key));
                     }
                 },
+                .isset_prop => {
+                    const name_idx = self.readU16();
+                    const prop_name = self.currentChunk().constants.items[name_idx].string;
+                    const obj_val = self.pop();
+                    if (obj_val == .object) {
+                        const obj = obj_val.object;
+                        if (obj.properties.contains(prop_name)) {
+                            self.push(.{ .bool = obj.get(prop_name) != .null });
+                        } else if (self.hasMethod(obj.class_name, "__isset")) {
+                            const result = self.callMethod(obj, "__isset", &.{.{ .string = prop_name }}) catch Value{ .bool = false };
+                            self.push(.{ .bool = result.isTruthy() });
+                        } else {
+                            self.push(.{ .bool = false });
+                        }
+                    } else {
+                        self.push(.{ .bool = false });
+                    }
+                },
                 .clone_obj => {
                     const val = self.pop();
                     if (val == .object) {

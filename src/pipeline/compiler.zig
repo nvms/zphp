@@ -2686,6 +2686,20 @@ const Compiler = struct {
             return;
         }
 
+        if (callee.tag == .identifier and std.mem.eql(u8, self.ast.tokenSlice(callee.main_token), "isset")) {
+            if (args.len > 0) {
+                const arg = self.ast.nodes[args[0]];
+                if (arg.tag == .property_access) {
+                    try self.compileNode(arg.data.lhs);
+                    const prop_name = self.propName(arg);
+                    const prop_idx = try self.addConstant(.{ .string = prop_name });
+                    try self.emitOp(.isset_prop);
+                    try self.emitU16(prop_idx);
+                    return;
+                }
+            }
+        }
+
         if (hasSplatOrNamed(self.ast, args)) {
             try self.emitSpreadArgs(args);
             if (callee.tag == .identifier) {

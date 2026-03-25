@@ -123,6 +123,9 @@ pub const OpCode = enum(u8) {
     unset_var, // u16: name constant index - remove variable from current scope
     unset_prop, // u16: prop name - pop object, remove property
     unset_array_elem, // pop key, pop array, remove element
+
+    // isset on property - dispatches to __isset magic method
+    isset_prop, // u16: prop name - pop object, push bool
 };
 
 
