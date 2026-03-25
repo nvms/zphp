@@ -478,6 +478,31 @@ const Compiler = struct {
                 continue;
             }
 
+            // ${name} syntax - treat as {$name}
+            if (s[i] == '$' and i + 1 < s.len and s[i + 1] == '{') {
+                if (i > lit_start) {
+                    try self.emitLiteralSegment(s[lit_start..i]);
+                    if (segment_count > 0) try self.emitOp(.concat);
+                    segment_count += 1;
+                }
+                const end = std.mem.indexOfScalarPos(u8, s, i + 2, '}') orelse s.len;
+                const var_name_raw = s[i + 2 .. end];
+                var name_buf: [256]u8 = undefined;
+                name_buf[0] = '$';
+                @memcpy(name_buf[1 .. 1 + var_name_raw.len], var_name_raw);
+                const full_name = name_buf[0 .. 1 + var_name_raw.len];
+                const owned = try self.allocator.dupe(u8, full_name);
+                try self.string_allocs.append(self.allocator, owned);
+                const var_idx = try self.addConstant(.{ .string = owned });
+                try self.emitOp(.get_var);
+                try self.emitU16(var_idx);
+                if (segment_count > 0) try self.emitOp(.concat);
+                segment_count += 1;
+                i = if (end < s.len) end + 1 else end;
+                lit_start = i;
+                continue;
+            }
+
             if (s[i] == '$' and i + 1 < s.len and isVarStart(s[i + 1])) {
                 if (i > lit_start) {
                     try self.emitLiteralSegment(s[lit_start..i]);
