@@ -2029,11 +2029,14 @@ const Compiler = struct {
         const local_count = sub.next_slot;
         sub.local_slots.deinit(self.allocator);
 
+        const method_lo = !is_variadic and !hasRefParams(ref_flags) and !needsVarSync(&sub.chunk) and sub.closure_count == 0;
+
         try self.functions.append(self.allocator, .{
             .name = full_name,
             .arity = @intCast(param_nodes.len),
             .required_params = required,
             .is_variadic = is_variadic,
+            .locals_only = method_lo,
             .params = param_names[0..param_nodes.len],
             .defaults = defaults_owned,
             .ref_params = ref_flags,
@@ -2557,6 +2560,16 @@ const Compiler = struct {
             _ = sub.getOrCreateSlot(param_names[i]);
         }
 
+        // assign slots to captured variables so they use get_local instead of get_var
+        for (use_vars) |use_var_node| {
+            const use_node = self.ast.nodes[use_var_node];
+            const is_ref = use_node.data.rhs != 0;
+            if (!is_ref) {
+                const var_name = self.ast.tokenSlice(use_node.main_token);
+                _ = sub.getOrCreateSlot(var_name);
+            }
+        }
+
         try sub.compileNode(body_node);
         try sub.emitOp(.op_null);
         try sub.emitOp(.return_val);
@@ -2570,9 +2583,20 @@ const Compiler = struct {
             break :blk rp;
         } else &[_]bool{};
 
+        // check for ref captures
+        var has_ref_capture = false;
+        for (use_vars) |use_var_node| {
+            if (self.ast.nodes[use_var_node].data.rhs != 0) {
+                has_ref_capture = true;
+                break;
+            }
+        }
+
         const slot_names = try sub.buildSlotNames();
         const local_count = sub.next_slot;
         sub.local_slots.deinit(self.allocator);
+
+        const closure_lo = !is_arrow and !has_any_ref and !has_ref_capture and !needsVarSync(&sub.chunk);
 
         const func = ObjFunction{
             .name = owned_name,
@@ -2580,6 +2604,7 @@ const Compiler = struct {
             .params = param_names[0..param_nodes.len],
             .chunk = sub.chunk,
             .is_arrow = is_arrow,
+            .locals_only = closure_lo,
             .ref_params = ref_params,
             .local_count = local_count,
             .slot_names = slot_names,

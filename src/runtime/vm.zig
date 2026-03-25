@@ -226,6 +226,15 @@ pub const VM = struct {
         prop: [128]PropIC = @splat(.{}),
         // method call: keyed by (chunk_ptr ^ ip), stores class_ptr + resolved func
         method: [128]MethodIC = @splat(.{}),
+        // stack-allocated locals for callLocalsOnly - avoids heap alloc/free per call
+        locals_buf: [*]Value = undefined,
+        locals_sp: usize = 0,
+        locals_cap: usize = 0,
+        // single-entry function lookup cache
+        fn_cache_name: []const u8 = "",
+        fn_cache_func: ?*const ObjFunction = null,
+        // per-frame sp save for inline call/ret in fastLoop
+        sp_save: [64]usize = undefined,
 
         const PropIC = struct {
             key: usize = 0,
@@ -284,6 +293,9 @@ pub const VM = struct {
         try @import("../stdlib/filesystem.zig").register(&vm, allocator);
         vm.ic = try allocator.create(InlineCache);
         vm.ic.?.* = .{};
+        const locals_buf = try allocator.alloc(Value, 8192);
+        vm.ic.?.locals_buf = locals_buf.ptr;
+        vm.ic.?.locals_cap = 8192;
         return vm;
     }
 
@@ -381,7 +393,7 @@ pub const VM = struct {
             self.frames[i].ref_slots.deinit(self.allocator);
             self.frames[i].vars.deinit(self.allocator);
             if (self.frames[i].locals.len > 0) {
-                self.allocator.free(self.frames[i].locals);
+                self.freeLocals(self.frames[i].locals);
                 self.frames[i].locals = &.{};
             }
         }
@@ -390,7 +402,10 @@ pub const VM = struct {
     pub fn deinit(self: *VM) void {
         self.releaseFrames();
         self.freeHeapItems();
-        if (self.ic) |ic_ptr| self.allocator.destroy(ic_ptr);
+        if (self.ic) |ic_ptr| {
+            if (ic_ptr.locals_cap > 0) self.allocator.free(ic_ptr.locals_buf[0..ic_ptr.locals_cap]);
+            self.allocator.destroy(ic_ptr);
+        }
         self.functions.deinit(self.allocator);
         self.native_fns.deinit(self.allocator);
         self.output.deinit(self.allocator);
@@ -482,6 +497,7 @@ pub const VM = struct {
     }
 
     fn runUntilFrame(self: *VM, base_frame: usize) RuntimeError!void {
+        if (self.frame_count <= base_frame) return;
         return self.runLoop(base_frame);
     }
 
@@ -694,8 +710,10 @@ pub const VM = struct {
                 .jump_back => {
                     const offset = self.readU16();
                     self.currentFrame().ip -= offset;
-                    if (self.currentFrame().locals.len > 0)
+                    if (self.currentFrame().locals.len > 0) {
                         try self.fastLoop();
+                        if (self.frame_count <= base_frame) return;
+                    }
                 },
                 .jump_if_false => {
                     const offset = self.readU16();
@@ -1703,18 +1721,29 @@ pub const VM = struct {
                         if (mc_entry.key == mc_ip and mc_entry.class_ptr == @intFromPtr(obj.class_name.ptr)) {
                             if (mc_entry.func) |func| {
                                 if (func.locals_only and self.captures.items.len == 0) {
-                                    const mc_locals = try self.allocator.alloc(Value, func.local_count);
-                                    @memset(mc_locals, .null);
+                                    const lc: usize = func.local_count;
+                                    const lbase = ic.locals_sp;
+                                    const mc_locals = if (lbase + lc <= ic.locals_cap) blk: {
+                                        const s = ic.locals_buf[lbase..lbase + lc];
+                                        @memset(s, .null);
+                                        ic.locals_sp = lbase + lc;
+                                        break :blk s;
+                                    } else blk: {
+                                        const s = try self.allocator.alloc(Value, lc);
+                                        @memset(s, .null);
+                                        break :blk s;
+                                    };
+                                    // slot 0 = $this for instance methods
+                                    mc_locals[0] = .{ .object = obj };
+                                    // params start at slot 1
                                     for (0..@min(ac, func.arity)) |i| {
-                                        mc_locals[i] = try self.copyValue(self.stack[self.sp - ac + i]);
+                                        mc_locals[i + 1] = try self.copyValue(self.stack[self.sp - ac + i]);
                                     }
                                     for (@min(ac, func.arity)..func.arity) |i| {
-                                        if (i < func.defaults.len) mc_locals[i] = func.defaults[i];
+                                        if (i < func.defaults.len) mc_locals[i + 1] = func.defaults[i];
                                     }
                                     self.sp -= ac + 1;
-                                    var this_vars: std.StringHashMapUnmanaged(Value) = .{};
-                                    try this_vars.put(self.allocator, "$this", .{ .object = obj });
-                                    self.frames[self.frame_count] = .{ .chunk = &func.chunk, .ip = 0, .vars = this_vars, .locals = mc_locals, .func = func };
+                                    self.frames[self.frame_count] = .{ .chunk = &func.chunk, .ip = 0, .vars = .{}, .locals = mc_locals, .func = func };
                                     self.frame_count += 1;
                                     continue;
                                 }
@@ -2776,10 +2805,67 @@ pub const VM = struct {
         }
     }
 
+    fn callClosureLocalsOnly(self: *VM, func: *const ObjFunction, name: []const u8, arg_count: u8) RuntimeError!void {
+        const ac: usize = arg_count;
+        const lc: usize = func.local_count;
+        const ic = self.ic.?;
+        const base = ic.locals_sp;
+
+        const locals = if (base + lc <= ic.locals_cap) blk: {
+            const s = ic.locals_buf[base..base + lc];
+            @memset(s, .null);
+            ic.locals_sp = base + lc;
+            break :blk s;
+        } else blk: {
+            const s = try self.allocator.alloc(Value, lc);
+            @memset(s, .null);
+            break :blk s;
+        };
+
+        // bind args to param slots
+        const bind_count = @min(ac, func.arity);
+        for (0..bind_count) |i| {
+            locals[i] = try self.copyValue(self.stack[self.sp - ac + i]);
+        }
+        for (bind_count..func.arity) |i| {
+            if (i < func.defaults.len) locals[i] = func.defaults[i];
+        }
+        self.sp -= ac;
+
+        // bind captures directly to locals using slot_names
+        for (self.captures.items) |cap| {
+            if (std.mem.eql(u8, cap.closure_name, name)) {
+                for (func.slot_names, 0..) |sn, si| {
+                    if (std.mem.eql(u8, sn, cap.var_name)) {
+                        locals[si] = try self.copyValue(cap.value);
+                        break;
+                    }
+                }
+            }
+        }
+
+        self.frames[self.frame_count] = .{ .chunk = &func.chunk, .ip = 0, .vars = .{}, .locals = locals, .func = func };
+        self.frame_count += 1;
+        try self.fastLoop();
+    }
+
     fn callLocalsOnly(self: *VM, func: *const ObjFunction, arg_count: u8) RuntimeError!void {
         const ac: usize = arg_count;
-        const locals = try self.allocator.alloc(Value, func.local_count);
-        @memset(locals, .null);
+        const lc: usize = func.local_count;
+        const ic = self.ic.?;
+        const base = ic.locals_sp;
+
+        const locals = if (base + lc <= ic.locals_cap) blk: {
+            const s = ic.locals_buf[base..base + lc];
+            @memset(s, .null);
+            ic.locals_sp = base + lc;
+            break :blk s;
+        } else blk: {
+            const s = try self.allocator.alloc(Value, lc);
+            @memset(s, .null);
+            break :blk s;
+        };
+
         const bind_count = @min(ac, func.arity);
         for (0..bind_count) |i| {
             locals[i] = try self.copyValue(self.stack[self.sp - ac + i]);
@@ -2790,142 +2876,263 @@ pub const VM = struct {
         self.sp -= ac;
         self.frames[self.frame_count] = .{ .chunk = &func.chunk, .ip = 0, .vars = .{}, .locals = locals, .func = func };
         self.frame_count += 1;
-        // run as much as possible in the fast inner loop before falling back to runLoop
         try self.fastLoop();
     }
 
     // tight inner interpreter with local ip/sp for hot loops in locals-only functions.
-    // handles common opcodes without pointer-chasing through self.currentFrame().
-    // returns to runLoop for anything complex (calls, returns, exceptions, property access).
+    // handles common opcodes plus call/ret for locals-only functions.
+    // returns to runLoop for anything complex (native calls, closures, exceptions, property access).
     fn fastLoop(self: *VM) RuntimeError!void {
-        const frame = &self.frames[self.frame_count - 1];
-        const code = frame.chunk.code.items;
-        const locals = frame.locals;
-        const consts = frame.chunk.constants.items;
-        var ip = frame.ip;
-        var sp = self.sp;
+        const ic = self.ic.?;
+        const entry_fc = self.frame_count;
 
-        while (true) {
-            const byte = code[ip];
-            ip += 1;
+        reenter: while (true) {
+            const frame = &self.frames[self.frame_count - 1];
+            const code = frame.chunk.code.items;
+            var locals = frame.locals;
+            const consts = frame.chunk.constants.items;
+            var ip = frame.ip;
+            var sp = self.sp;
 
-            if (byte == @intFromEnum(OpCode.get_local)) {
-                const slot = (@as(u16, code[ip]) << 8) | code[ip + 1];
-                ip += 2;
-                self.stack[sp] = locals[slot];
-                sp += 1;
-            } else if (byte == @intFromEnum(OpCode.set_local)) {
-                const slot = (@as(u16, code[ip]) << 8) | code[ip + 1];
-                ip += 2;
-                const val = self.stack[sp - 1];
-                if (val == .array) {
-                    locals[slot] = try self.copyValue(val);
+            while (true) {
+                const byte = code[ip];
+                ip += 1;
+
+                if (byte == @intFromEnum(OpCode.get_local)) {
+                    const slot = (@as(u16, code[ip]) << 8) | code[ip + 1];
+                    ip += 2;
+                    self.stack[sp] = locals[slot];
+                    sp += 1;
+                } else if (byte == @intFromEnum(OpCode.set_local)) {
+                    const slot = (@as(u16, code[ip]) << 8) | code[ip + 1];
+                    ip += 2;
+                    const val = self.stack[sp - 1];
+                    if (val == .array) {
+                        locals[slot] = try self.copyValue(val);
+                    } else {
+                        locals[slot] = val;
+                    }
+                    // fuse set_local + pop (very common pattern)
+                    if (code[ip] == @intFromEnum(OpCode.pop)) {
+                        ip += 1;
+                        sp -= 1;
+                    }
+                } else if (byte == @intFromEnum(OpCode.add)) {
+                    const b = self.stack[sp - 1];
+                    const a = self.stack[sp - 2];
+                    sp -= 2;
+                    self.stack[sp] = if (a == .int and b == .int) .{ .int = a.int +% b.int } else Value.add(a, b);
+                    sp += 1;
+                } else if (byte == @intFromEnum(OpCode.subtract)) {
+                    const b = self.stack[sp - 1];
+                    const a = self.stack[sp - 2];
+                    sp -= 2;
+                    self.stack[sp] = if (a == .int and b == .int) .{ .int = a.int -% b.int } else Value.subtract(a, b);
+                    sp += 1;
+                } else if (byte == @intFromEnum(OpCode.multiply)) {
+                    const b = self.stack[sp - 1];
+                    const a = self.stack[sp - 2];
+                    sp -= 2;
+                    self.stack[sp] = if (a == .int and b == .int) .{ .int = a.int *% b.int } else Value.multiply(a, b);
+                    sp += 1;
+                } else if (byte == @intFromEnum(OpCode.less)) {
+                    const b = self.stack[sp - 1];
+                    const a = self.stack[sp - 2];
+                    sp -= 2;
+                    self.stack[sp] = .{ .bool = if (a == .int and b == .int) a.int < b.int else Value.lessThan(a, b) };
+                    sp += 1;
+                } else if (byte == @intFromEnum(OpCode.less_equal)) {
+                    const b = self.stack[sp - 1];
+                    const a = self.stack[sp - 2];
+                    sp -= 2;
+                    self.stack[sp] = .{ .bool = if (a == .int and b == .int) a.int <= b.int else !Value.lessThan(b, a) };
+                    sp += 1;
+                } else if (byte == @intFromEnum(OpCode.greater)) {
+                    const b = self.stack[sp - 1];
+                    const a = self.stack[sp - 2];
+                    sp -= 2;
+                    self.stack[sp] = .{ .bool = if (a == .int and b == .int) a.int > b.int else Value.lessThan(b, a) };
+                    sp += 1;
+                } else if (byte == @intFromEnum(OpCode.identical)) {
+                    const b_id = self.stack[sp - 1];
+                    const a_id = self.stack[sp - 2];
+                    sp -= 2;
+                    self.stack[sp] = .{ .bool = Value.identical(a_id, b_id) };
+                    sp += 1;
+                } else if (byte == @intFromEnum(OpCode.not_identical)) {
+                    const b_ni = self.stack[sp - 1];
+                    const a_ni = self.stack[sp - 2];
+                    sp -= 2;
+                    self.stack[sp] = .{ .bool = !Value.identical(a_ni, b_ni) };
+                    sp += 1;
+                } else if (byte == @intFromEnum(OpCode.modulo)) {
+                    const b_mod = self.stack[sp - 1];
+                    const a_mod = self.stack[sp - 2];
+                    sp -= 2;
+                    self.stack[sp] = Value.modulo(a_mod, b_mod);
+                    sp += 1;
+                } else if (byte == @intFromEnum(OpCode.negate)) {
+                    self.stack[sp - 1] = self.stack[sp - 1].negate();
+                } else if (byte == @intFromEnum(OpCode.not)) {
+                    self.stack[sp - 1] = .{ .bool = !self.stack[sp - 1].isTruthy() };
+                } else if (byte == @intFromEnum(OpCode.jump_back)) {
+                    const offset = (@as(u16, code[ip]) << 8) | code[ip + 1];
+                    ip += 2;
+                    ip -= offset;
+                } else if (byte == @intFromEnum(OpCode.constant)) {
+                    const idx = (@as(u16, code[ip]) << 8) | code[ip + 1];
+                    ip += 2;
+                    self.stack[sp] = consts[idx];
+                    sp += 1;
+                } else if (byte == @intFromEnum(OpCode.jump_if_false)) {
+                    const offset = (@as(u16, code[ip]) << 8) | code[ip + 1];
+                    ip += 2;
+                    if (!self.stack[sp - 1].isTruthy()) {
+                        ip += offset;
+                    } else if (code[ip] == @intFromEnum(OpCode.pop)) {
+                        ip += 1;
+                        sp -= 1;
+                    }
+                } else if (byte == @intFromEnum(OpCode.jump)) {
+                    const offset = (@as(u16, code[ip]) << 8) | code[ip + 1];
+                    ip += 2;
+                    ip += offset;
+                } else if (byte == @intFromEnum(OpCode.pop)) {
+                    sp -= 1;
+                } else if (byte == @intFromEnum(OpCode.dup)) {
+                    self.stack[sp] = self.stack[sp - 1];
+                    sp += 1;
+                } else if (byte == @intFromEnum(OpCode.op_null)) {
+                    self.stack[sp] = .null;
+                    sp += 1;
+                } else if (byte == @intFromEnum(OpCode.op_true)) {
+                    self.stack[sp] = .{ .bool = true };
+                    sp += 1;
+                } else if (byte == @intFromEnum(OpCode.op_false)) {
+                    self.stack[sp] = .{ .bool = false };
+                    sp += 1;
+                } else if (byte == @intFromEnum(OpCode.cast_int)) {
+                    self.stack[sp - 1] = .{ .int = Value.toInt(self.stack[sp - 1]) };
+                } else if (byte == @intFromEnum(OpCode.call)) {
+                    const name_idx = (@as(u16, code[ip]) << 8) | code[ip + 1];
+                    const arg_count = code[ip + 2];
+                    ip += 3;
+
+                    const name = consts[name_idx].string;
+                    const func = blk: {
+                        if (ic.fn_cache_name.len == name.len and std.mem.eql(u8, ic.fn_cache_name, name))
+                            break :blk ic.fn_cache_func.?;
+                        if (self.functions.get(name)) |f| {
+                            ic.fn_cache_name = name;
+                            ic.fn_cache_func = f;
+                            break :blk f;
+                        }
+                        // native or unknown - bail to runLoop
+                        frame.ip = ip - 4;
+                        self.sp = sp;
+                        return;
+                    };
+
+                    if (!func.locals_only or self.captures.items.len > 0) {
+                        frame.ip = ip - 4;
+                        self.sp = sp;
+                        return;
+                    }
+
+                    const ac: usize = arg_count;
+                    const lc: usize = func.local_count;
+                    const lbase = ic.locals_sp;
+
+                    if (lbase + lc > ic.locals_cap) {
+                        frame.ip = ip - 4;
+                        self.sp = sp;
+                        return;
+                    }
+
+                    const new_locals = ic.locals_buf[lbase .. lbase + lc];
+                    @memset(new_locals, .null);
+                    ic.locals_sp = lbase + lc;
+
+                    const bind_count = @min(ac, func.arity);
+                    for (0..bind_count) |i| {
+                        new_locals[i] = self.stack[sp - ac + i];
+                    }
+                    for (bind_count..func.arity) |i| {
+                        if (i < func.defaults.len) new_locals[i] = func.defaults[i];
+                    }
+                    sp -= ac;
+
+                    frame.ip = ip;
+                    ic.sp_save[self.frame_count - 1] = sp;
+                    self.sp = sp;
+
+                    self.frames[self.frame_count] = .{
+                        .chunk = &func.chunk,
+                        .ip = 0,
+                        .vars = .{},
+                        .locals = new_locals,
+                        .func = func,
+                    };
+                    self.frame_count += 1;
+                    continue :reenter;
+                } else if (byte == @intFromEnum(OpCode.return_val)) {
+                    const result = self.stack[sp - 1];
+                    ic.locals_sp -= locals.len;
+                    self.frame_count -= 1;
+
+                    if (self.frame_count < entry_fc) {
+                        self.stack[sp - 1] = result;
+                        self.sp = sp;
+                        return;
+                    }
+
+                    // restore caller's sp from saved state and push result
+                    sp = ic.sp_save[self.frame_count - 1];
+                    self.stack[sp] = result;
+                    sp += 1;
+                    self.sp = sp;
+                    continue :reenter;
+                } else if (byte == @intFromEnum(OpCode.return_void)) {
+                    ic.locals_sp -= locals.len;
+                    self.frame_count -= 1;
+
+                    if (self.frame_count < entry_fc) {
+                        self.stack[sp] = .null;
+                        self.sp = sp + 1;
+                        return;
+                    }
+
+                    sp = ic.sp_save[self.frame_count - 1];
+                    self.stack[sp] = .null;
+                    sp += 1;
+                    self.sp = sp;
+                    continue :reenter;
                 } else {
-                    locals[slot] = val;
+                    frame.ip = ip - 1;
+                    self.sp = sp;
+                    return;
                 }
-            } else if (byte == @intFromEnum(OpCode.add)) {
-                const b = self.stack[sp - 1];
-                const a = self.stack[sp - 2];
-                sp -= 2;
-                self.stack[sp] = if (a == .int and b == .int) .{ .int = a.int +% b.int } else Value.add(a, b);
-                sp += 1;
-            } else if (byte == @intFromEnum(OpCode.subtract)) {
-                const b = self.stack[sp - 1];
-                const a = self.stack[sp - 2];
-                sp -= 2;
-                self.stack[sp] = if (a == .int and b == .int) .{ .int = a.int -% b.int } else Value.subtract(a, b);
-                sp += 1;
-            } else if (byte == @intFromEnum(OpCode.multiply)) {
-                const b = self.stack[sp - 1];
-                const a = self.stack[sp - 2];
-                sp -= 2;
-                self.stack[sp] = if (a == .int and b == .int) .{ .int = a.int *% b.int } else Value.multiply(a, b);
-                sp += 1;
-            } else if (byte == @intFromEnum(OpCode.less)) {
-                const b = self.stack[sp - 1];
-                const a = self.stack[sp - 2];
-                sp -= 2;
-                self.stack[sp] = .{ .bool = if (a == .int and b == .int) a.int < b.int else Value.lessThan(a, b) };
-                sp += 1;
-            } else if (byte == @intFromEnum(OpCode.less_equal)) {
-                const b = self.stack[sp - 1];
-                const a = self.stack[sp - 2];
-                sp -= 2;
-                self.stack[sp] = .{ .bool = if (a == .int and b == .int) a.int <= b.int else !Value.lessThan(b, a) };
-                sp += 1;
-            } else if (byte == @intFromEnum(OpCode.greater)) {
-                const b = self.stack[sp - 1];
-                const a = self.stack[sp - 2];
-                sp -= 2;
-                self.stack[sp] = .{ .bool = if (a == .int and b == .int) a.int > b.int else Value.lessThan(b, a) };
-                sp += 1;
-            } else if (byte == @intFromEnum(OpCode.identical)) {
-                const b_id = self.stack[sp - 1];
-                const a_id = self.stack[sp - 2];
-                sp -= 2;
-                self.stack[sp] = .{ .bool = Value.identical(a_id, b_id) };
-                sp += 1;
-            } else if (byte == @intFromEnum(OpCode.not_identical)) {
-                const b_ni = self.stack[sp - 1];
-                const a_ni = self.stack[sp - 2];
-                sp -= 2;
-                self.stack[sp] = .{ .bool = !Value.identical(a_ni, b_ni) };
-                sp += 1;
-            } else if (byte == @intFromEnum(OpCode.modulo)) {
-                const b_mod = self.stack[sp - 1];
-                const a_mod = self.stack[sp - 2];
-                sp -= 2;
-                self.stack[sp] = Value.modulo(a_mod, b_mod);
-                sp += 1;
-            } else if (byte == @intFromEnum(OpCode.negate)) {
-                self.stack[sp - 1] = self.stack[sp - 1].negate();
-            } else if (byte == @intFromEnum(OpCode.not)) {
-                self.stack[sp - 1] = .{ .bool = !self.stack[sp - 1].isTruthy() };
-            } else if (byte == @intFromEnum(OpCode.jump_back)) {
-                const offset = (@as(u16, code[ip]) << 8) | code[ip + 1];
-                ip += 2;
-                ip -= offset;
-            } else if (byte == @intFromEnum(OpCode.constant)) {
-                const idx = (@as(u16, code[ip]) << 8) | code[ip + 1];
-                ip += 2;
-                self.stack[sp] = consts[idx];
-                sp += 1;
-            } else if (byte == @intFromEnum(OpCode.jump_if_false)) {
-                const offset = (@as(u16, code[ip]) << 8) | code[ip + 1];
-                ip += 2;
-                if (!self.stack[sp - 1].isTruthy()) ip += offset;
-            } else if (byte == @intFromEnum(OpCode.jump)) {
-                const offset = (@as(u16, code[ip]) << 8) | code[ip + 1];
-                ip += 2;
-                ip += offset;
-            } else if (byte == @intFromEnum(OpCode.pop)) {
-                sp -= 1;
-            } else if (byte == @intFromEnum(OpCode.dup)) {
-                self.stack[sp] = self.stack[sp - 1];
-                sp += 1;
-            } else if (byte == @intFromEnum(OpCode.op_null)) {
-                self.stack[sp] = .null;
-                sp += 1;
-            } else if (byte == @intFromEnum(OpCode.op_true)) {
-                self.stack[sp] = .{ .bool = true };
-                sp += 1;
-            } else if (byte == @intFromEnum(OpCode.op_false)) {
-                self.stack[sp] = .{ .bool = false };
-                sp += 1;
-            } else if (byte == @intFromEnum(OpCode.cast_int)) {
-                self.stack[sp - 1] = .{ .int = Value.toInt(self.stack[sp - 1]) };
-            } else {
-                frame.ip = ip - 1;
-                self.sp = sp;
-                return;
             }
         }
     }
 
     fn executeFunctionLocalsOnly(self: *VM, func: *const ObjFunction, args: []const Value) RuntimeError!Value {
         const base_frame = self.frame_count;
-        const locals = try self.allocator.alloc(Value, func.local_count);
-        @memset(locals, .null);
+        const lc: usize = func.local_count;
+        const ic = self.ic.?;
+        const lbase = ic.locals_sp;
+
+        const locals = if (lbase + lc <= ic.locals_cap) blk: {
+            const s = ic.locals_buf[lbase..lbase + lc];
+            @memset(s, .null);
+            ic.locals_sp = lbase + lc;
+            break :blk s;
+        } else blk: {
+            const s = try self.allocator.alloc(Value, lc);
+            @memset(s, .null);
+            break :blk s;
+        };
+
         const bind_count = @min(args.len, func.arity);
         for (0..bind_count) |i| {
             locals[i] = try self.copyValue(args[i]);
@@ -2961,9 +3168,21 @@ pub const VM = struct {
         self.frames[self.frame_count].ref_slots.deinit(self.allocator);
         self.frames[self.frame_count].vars.deinit(self.allocator);
         if (self.frames[self.frame_count].locals.len > 0) {
-            self.allocator.free(self.frames[self.frame_count].locals);
+            self.freeLocals(self.frames[self.frame_count].locals);
             self.frames[self.frame_count].locals = &.{};
         }
+    }
+
+    fn freeLocals(self: *VM, locals: []Value) void {
+        if (self.ic) |ic| {
+            const lptr = @intFromPtr(locals.ptr);
+            const sptr = @intFromPtr(ic.locals_buf);
+            if (lptr >= sptr and lptr < sptr + ic.locals_cap * @sizeOf(Value)) {
+                ic.locals_sp -= locals.len;
+                return;
+            }
+        }
+        self.allocator.free(locals);
     }
 
     fn writebackRefs(self: *VM) !void {
@@ -3320,8 +3539,12 @@ pub const VM = struct {
             const ac: usize = arg_count;
             if (ac < func.required_params)
                 return error.RuntimeError;
-            if (func.locals_only and self.captures.items.len == 0)
-                return self.callLocalsOnly(func, arg_count);
+            if (func.locals_only) {
+                if (self.captures.items.len == 0)
+                    return self.callLocalsOnly(func, arg_count);
+                if (std.mem.startsWith(u8, name, "__closure_"))
+                    return self.callClosureLocalsOnly(func, name, arg_count);
+            }
             var new_vars: std.StringHashMapUnmanaged(Value) = .{};
             var closure_refs: std.StringHashMapUnmanaged(*Value) = .{};
             try self.bindClosures(&new_vars, &closure_refs, name);
