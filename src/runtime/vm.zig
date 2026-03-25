@@ -898,8 +898,10 @@ pub const VM = struct {
                     const name_idx = self.readU16();
                     const name = self.currentChunk().constants.items[name_idx].string;
                     const append_val = self.pop();
-                    const current = self.currentFrame().vars.get(name) orelse .null;
+                    const is_ref = self.currentFrame().ref_slots.get(name);
+                    const current = if (is_ref) |cell| cell.* else (self.currentFrame().vars.get(name) orelse .null);
 
+                    var result_str: []const u8 = undefined;
                     if (current == .string and append_val == .string) {
                         const cs = current.string;
                         const as = append_val.string;
@@ -907,10 +909,8 @@ pub const VM = struct {
                         @memcpy(new_str[0..cs.len], cs);
                         @memcpy(new_str[cs.len..], as);
                         try self.strings.append(self.allocator, new_str);
-                        try self.currentFrame().vars.put(self.allocator, name, .{ .string = new_str });
-                        self.push(.{ .string = new_str });
+                        result_str = new_str;
                     } else {
-                        // fallback: format + concat
                         var buf = std.ArrayListUnmanaged(u8){};
                         if (current == .string) {
                             try buf.appendSlice(self.allocator, current.string);
@@ -924,9 +924,18 @@ pub const VM = struct {
                         }
                         const owned = try buf.toOwnedSlice(self.allocator);
                         try self.strings.append(self.allocator, owned);
-                        try self.currentFrame().vars.put(self.allocator, name, .{ .string = owned });
-                        self.push(.{ .string = owned });
+                        result_str = owned;
                     }
+                    const result_val = Value{ .string = result_str };
+                    if (is_ref) |cell| {
+                        cell.* = result_val;
+                    }
+                    try self.currentFrame().vars.put(self.allocator, name, result_val);
+                    self.push(result_val);
+                },
+                .get_local, .set_local => {
+                    // reserved for variable slots optimization - not yet implemented
+                    _ = self.readU16();
                 },
                 .isset_prop => {
                     const name_idx = self.readU16();

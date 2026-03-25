@@ -22,6 +22,7 @@ pub const CompileResult = struct {
             self.allocator.free(f.params);
             if (f.defaults.len > 0) self.allocator.free(f.defaults);
             if (f.ref_params.len > 0) self.allocator.free(f.ref_params);
+            if (f.slot_names.len > 0) self.allocator.free(f.slot_names);
         }
         self.functions.deinit(self.allocator);
         for (self.string_allocs.items) |s| self.allocator.free(s);
@@ -88,6 +89,8 @@ const Compiler = struct {
     use_aliases: std.StringHashMapUnmanaged([]const u8) = .{},
     file_path: []const u8 = "",
     trait_properties: std.StringHashMapUnmanaged([]const u32) = .{},
+    local_slots: std.StringHashMapUnmanaged(u16) = .{},
+    next_slot: u16 = 0,
 
     const LoopJump = struct {
         offset: usize,
@@ -2959,6 +2962,54 @@ const Compiler = struct {
     // ==================================================================
     // emit helpers
     // ==================================================================
+
+    fn getOrCreateSlot(self: *Compiler, name: []const u8) u16 {
+        if (self.local_slots.get(name)) |slot| return slot;
+        const slot = self.next_slot;
+        self.local_slots.put(self.allocator, name, slot) catch return slot;
+        self.next_slot += 1;
+        return slot;
+    }
+
+    fn inFunctionScope(self: *Compiler) bool {
+        return self.scope_depth > 0;
+    }
+
+    fn emitGetVar(self: *Compiler, name: []const u8) Error!void {
+        if (self.inFunctionScope()) {
+            if (self.local_slots.get(name)) |slot| {
+                try self.emitOp(.get_local);
+                try self.emitU16(slot);
+                return;
+            }
+        }
+        const idx = try self.addConstant(.{ .string = name });
+        try self.emitOp(.get_var);
+        try self.emitU16(idx);
+    }
+
+    fn emitSetVar(self: *Compiler, name: []const u8) Error!void {
+        if (self.inFunctionScope()) {
+            const slot = self.getOrCreateSlot(name);
+            try self.emitOp(.set_local);
+            try self.emitU16(slot);
+            return;
+        }
+        const idx = try self.addConstant(.{ .string = name });
+        try self.emitOp(.set_var);
+        try self.emitU16(idx);
+    }
+
+    fn buildSlotNames(self: *Compiler) Error![]const []const u8 {
+        if (self.next_slot == 0) return &.{};
+        const names = try self.allocator.alloc([]const u8, self.next_slot);
+        @memset(names, "");
+        var it = self.local_slots.iterator();
+        while (it.next()) |entry| {
+            names[entry.value_ptr.*] = entry.key_ptr.*;
+        }
+        return names;
+    }
 
     fn emitOp(self: *Compiler, op: OpCode) Error!void {
         try self.chunk.write(self.allocator, @intFromEnum(op), 0);

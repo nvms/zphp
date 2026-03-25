@@ -129,6 +129,10 @@ pub const OpCode = enum(u8) {
 
     // optimized concat-assign: $var .= expr without full copy
     concat_assign, // u16: var name constant index - pop value, append to var's string
+
+    // local variable slots (indexed access, no hash lookup)
+    get_local, // u16: slot index - push locals[slot]
+    set_local, // u16: slot index - peek value, store in locals[slot]
 };
 
 
@@ -169,4 +173,6 @@ pub const ObjFunction = struct {
     defaults: []const Value = &.{},
     ref_params: []const bool = &.{},
     chunk: Chunk = .{},
+    local_count: u16 = 0,
+    slot_names: []const []const u8 = &.{},
 };
