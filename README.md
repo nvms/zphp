@@ -4,87 +4,79 @@
 
 <h1 align="center">zphp</h1>
 
-<p align="center">A Zig-based PHP runtime. What bun is to Node, zphp is to PHP.</p>
+<p align="center">A PHP runtime written in Zig. Single binary. No dependencies.</p>
 
 ---
 
-zphp replaces the entire PHP toolchain with a single fast binary. Runtime, package manager, test runner, formatter, and binary compiler - all in one.
+zphp is a from-scratch PHP runtime with near-complete PHP 8.x feature parity. It ships as a single binary under 5MB with no external dependencies - no php-fpm, no nginx, no extensions to install. The runtime includes a built-in HTTP server, WebSocket support, and database drivers for SQLite, MySQL, and PostgreSQL.
 
-| Traditional PHP | zphp |
-|---|---|
-| `php script.php` | `zphp run script.php` |
-| `composer install` | `zphp install` |
-| `composer require pkg` | `zphp add pkg` |
-| `phpunit` | `zphp test` |
-| `php-cs-fixer fix` | `zphp fmt` |
-| _(no equivalent)_ | `zphp build` |
+```sh
+# run PHP
+zphp run app.php
+
+# start an HTTP server with worker pooling
+zphp serve app.php --workers 4
+
+# compile to pre-built bytecode (skips parse/compile on subsequent runs)
+zphp build app.php
+
+# compile to a standalone executable - runtime, C libs, and bytecode in one file
+zphp build --compile app.php
+```
+
+## Features
+
+**Runtime** - classes, interfaces, traits, abstract classes, enums (pure and backed), generators, fibers, closures, arrow functions, match expressions, named arguments, union/intersection/nullable types, readonly properties, constructor promotion, first-class callable syntax, array destructuring, spread operator, try/catch/finally, namespaces, autoloading.
+
+**HTTP Server** - pre-compiled bytecode, VM pooling across requests, keep-alive connections, gzip compression, static file serving with ETag/304, multipart form data and file uploads, chunked transfer encoding, graceful shutdown.
+
+**WebSocket** - RFC 6455, convention-based routing (`ws_onOpen`, `ws_onMessage`, `ws_onClose`), persistent VM state across messages, poll-based event loop multiplexing HTTP and WebSocket connections concurrently.
+
+**Database** - PDO with SQLite, MySQL, and PostgreSQL drivers. Prepared statements, named and positional parameters, transactions, FETCH_ASSOC/NUM/BOTH.
+
+**Tooling** - package manager (reads `composer.json`, resolves from Packagist), test runner, opinionated code formatter, AOT bytecode compiler, standalone binary compiler.
+
+## Quick comparison
+
+| | Traditional PHP | zphp |
+|---|---|---|
+| Run a script | `php script.php` | `zphp run script.php` |
+| HTTP server | php-fpm + nginx | `zphp serve app.php` |
+| Install deps | `composer install` | `zphp install` |
+| Add a package | `composer require pkg` | `zphp add pkg` |
+| Run tests | `phpunit` | `zphp test` |
+| Format code | `php-cs-fixer fix` | `zphp fmt` |
+| Compile to bytecode | opcache (runtime) | `zphp build app.php` |
+| Standalone binary | - | `zphp build --compile app.php` |
+
+## Standalone executables
+
+`zphp build --compile` produces a self-contained binary that bundles the runtime, all linked C libraries (pcre2, sqlite3, zlib, mysql, postgres), and your application bytecode into a single file. The result runs without zphp or any system dependencies installed on the target machine.
+
+```sh
+zphp build --compile server.php   # produces ./server (4-5MB)
+scp server prod:/usr/local/bin/   # deploy
+ssh prod server                    # run
+```
 
 ## Installation
 
-Coming soon. zphp will be distributed as prebuilt binaries via GitHub releases.
+Prebuilt binaries for Linux and macOS will be available via GitHub releases.
+
+## Building from source
+
+Requires Zig 0.15.x and system libraries for pcre2, sqlite3, zlib, and optionally mysql-client and libpq.
 
 ```sh
-# future
-curl -fsSL https://zphp.dev/install | bash
+# Ubuntu/Debian
+apt install libpcre2-dev libsqlite3-dev zlib1g-dev libmysqlclient-dev libpq-dev
+
+# macOS
+brew install pcre2 mysql-client libpq
+
+make build    # build
+make test     # run tests
 ```
-
-## Usage
-
-```sh
-# run a PHP script
-zphp run server.php
-
-# start a new project
-zphp init myapp
-
-# install dependencies from composer.json
-zphp install
-
-# add a package
-zphp add monolog/monolog
-
-# run tests
-zphp test
-
-# format code
-zphp fmt
-
-# compile to a standalone binary
-zphp build -o myapp
-```
-
-## PHP 8.x Support
-
-zphp targets the PHP 8.x language surface that real-world code actually uses:
-
-- Variables, constants, type juggling
-- Functions, closures, arrow functions
-- Classes, interfaces, traits, abstract classes
-- Enums (backed and unit)
-- Union types, intersection types, nullable types
-- Named arguments
-- Match expressions
-- Fibers
-- Attributes
-- Readonly properties and classes
-- First-class callable syntax
-- String interpolation
-- Array destructuring
-- Generators
-- Try/catch/finally with typed exceptions
-- Namespaces and autoloading
-
-## Package Manager
-
-zphp reads `composer.json` and resolves dependencies from Packagist, the standard PHP package repository. Existing PHP projects work with zphp without changes to their dependency configuration.
-
-## Build to Binary
-
-`zphp build` compiles a PHP project into a standalone executable. The bytecode and a minimal runtime are bundled into a single binary that runs without zphp installed.
-
-## Known Divergences from Zend
-
-zphp targets the 95% of PHP semantics that matter. Some obscure Zend behaviors are intentionally not replicated. Divergences are documented here as they are identified.
 
 ---
 
