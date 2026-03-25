@@ -22,18 +22,17 @@ Requires PHP installed locally. zphp must be built with ReleaseFast - debug buil
 
 | benchmark | php | zphp | ratio |
 |---|---|---|---|
-| array_ops | 92 ms | 30 ms | 0.33x |
-| objects | 98 ms | 38 ms | 0.39x |
-| closures | 102 ms | 78 ms | 0.76x |
-| fibonacci | 164 ms | 155 ms | 0.95x |
+| array_ops | 98 ms | 32 ms | 0.33x |
+| objects | 102 ms | 40 ms | 0.39x |
+| closures | 97 ms | 78 ms | 0.80x |
+| fibonacci | 169 ms | 156 ms | 0.92x |
+| string_ops | 95 ms | 115 ms | 1.21x |
 | loops | 133 ms | 188 ms | 1.41x |
-| string_ops | 98 ms | 2,294 ms | 23.4x |
 
-zphp beats PHP on four benchmarks. Array operations are 3x faster thanks to O(1) integer key lookups on sequential arrays. Objects are 2.6x faster with property slot indices and IC-cached slot access. Closures are 24% faster with capture-aware locals-only dispatch and inline closure calls in the fast interpreter. Fibonacci wins via stack-allocated locals and inline call/return. Loops are within 1.4x - the gap is raw dispatch overhead (PHP uses computed goto, zphp uses a switch-based fast interpreter). String concatenation remains the outlier at 23x due to O(n) allocation per append (PHP uses mutable string buffers with realloc).
+zphp beats PHP on four benchmarks. Array operations are 3x faster thanks to O(1) integer key lookups on sequential arrays. Objects are 2.6x faster with property slot indices and IC-cached slot access. Closures are 20% faster with capture-aware locals-only dispatch and inline closure calls in the fast interpreter. Fibonacci wins via stack-allocated locals and inline call/return. String operations are within 1.2x thanks to growable concat_assign buffers on the InlineCache (amortized O(1) append instead of O(n) realloc per iteration). Loops are within 1.4x - the gap is raw dispatch overhead (PHP uses computed goto, zphp uses a switch-based fast interpreter).
 
 ### Optimization targets
 
-- **Mutable string buffers**: use growable buffers for `.=` instead of allocating a new string each time (would fix string_ops)
 - **Computed goto dispatch**: replace switch-based opcode dispatch with computed goto (general improvement for loops)
 
 ## fmt

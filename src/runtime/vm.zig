@@ -241,6 +241,10 @@ pub const VM = struct {
         fn_cache_func: ?*const ObjFunction = null,
         // per-frame sp save for inline call/ret in fastLoop
         sp_save: [64]usize = undefined,
+        // concat_assign string buffer - avoids O(n) realloc per append
+        concat_buf: std.ArrayListUnmanaged(u8) = .{},
+        concat_slot: u16 = 0xFFFF,
+        concat_frame: usize = 0,
 
         const PropIC = struct {
             key: usize = 0,
@@ -410,6 +414,7 @@ pub const VM = struct {
         self.releaseFrames();
         self.freeHeapItems();
         if (self.ic) |ic_ptr| {
+            ic_ptr.concat_buf.deinit(self.allocator);
             if (ic_ptr.locals_cap > 0) self.allocator.free(ic_ptr.locals_buf[0..ic_ptr.locals_cap]);
             self.allocator.destroy(ic_ptr);
         }
@@ -1034,8 +1039,79 @@ pub const VM = struct {
                     const name = self.currentChunk().constants.items[name_idx].string;
                     const append_val = self.pop();
                     const is_ref = self.currentFrame().ref_slots.get(name);
-                    const current = if (is_ref) |cell| cell.* else (self.currentFrame().vars.get(name) orelse .null);
 
+                    // find the local slot for this variable
+                    const ca_sn = if (self.currentFrame().func) |func| func.slot_names else self.global_slot_names;
+                    var ca_slot: u16 = 0xFFFF;
+                    for (ca_sn, 0..) |sn, si| {
+                        if (std.mem.eql(u8, sn, name)) {
+                            ca_slot = @intCast(si);
+                            break;
+                        }
+                    }
+
+                    // try growable buffer path for local variables (no refs)
+                    if (ca_slot != 0xFFFF and is_ref == null and self.ic != null) {
+                        const ic = self.ic.?;
+                        const current = if (ca_slot < self.currentFrame().locals.len) self.currentFrame().locals[ca_slot] else Value.null;
+
+                        // check if we can reuse the existing buffer
+                        if (ic.concat_slot == ca_slot and ic.concat_frame == self.frame_count and ic.concat_buf.items.len > 0) {
+                            // verify the local still points into our buffer
+                            if (current == .string and current.string.len > 0 and
+                                ic.concat_buf.items.len >= current.string.len and
+                                current.string.ptr == ic.concat_buf.items.ptr)
+                            {
+                                // append directly to the buffer
+                                if (append_val == .string) {
+                                    try ic.concat_buf.appendSlice(self.allocator, append_val.string);
+                                } else {
+                                    try append_val.format(&ic.concat_buf, self.allocator);
+                                }
+                                const result_val = Value{ .string = ic.concat_buf.items };
+                                self.currentFrame().locals[ca_slot] = result_val;
+                                try self.currentFrame().vars.put(self.allocator, name, result_val);
+                                self.push(result_val);
+                                continue;
+                            }
+                        }
+
+                        // finalize old buffer: copy its contents to a standalone allocation
+                        // so the previous variable's string isn't corrupted
+                        if (ic.concat_buf.items.len > 0 and ic.concat_slot != 0xFFFF) {
+                            const old_str = try self.allocator.alloc(u8, ic.concat_buf.items.len);
+                            @memcpy(old_str, ic.concat_buf.items);
+                            try self.strings.append(self.allocator, old_str);
+                            // update the old variable to point to the standalone copy
+                            if (ic.concat_frame == self.frame_count and ic.concat_slot < self.currentFrame().locals.len) {
+                                const old_val = self.currentFrame().locals[ic.concat_slot];
+                                if (old_val == .string and old_val.string.ptr == ic.concat_buf.items.ptr) {
+                                    self.currentFrame().locals[ic.concat_slot] = .{ .string = old_str };
+                                }
+                            }
+                        }
+                        ic.concat_buf.clearRetainingCapacity();
+                        if (current == .string) {
+                            try ic.concat_buf.appendSlice(self.allocator, current.string);
+                        } else if (current != .null) {
+                            try current.format(&ic.concat_buf, self.allocator);
+                        }
+                        if (append_val == .string) {
+                            try ic.concat_buf.appendSlice(self.allocator, append_val.string);
+                        } else {
+                            try append_val.format(&ic.concat_buf, self.allocator);
+                        }
+                        ic.concat_slot = ca_slot;
+                        ic.concat_frame = self.frame_count;
+                        const result_val = Value{ .string = ic.concat_buf.items };
+                        self.currentFrame().locals[ca_slot] = result_val;
+                        try self.currentFrame().vars.put(self.allocator, name, result_val);
+                        self.push(result_val);
+                        continue;
+                    }
+
+                    // fallback: allocate new string each time (ref variables, no IC, no slot)
+                    const current = if (is_ref) |cell| cell.* else (self.currentFrame().vars.get(name) orelse .null);
                     var result_str: []const u8 = undefined;
                     if (current == .string and append_val == .string) {
                         const cs = current.string;
@@ -1066,12 +1142,8 @@ pub const VM = struct {
                         cell.* = result_val;
                     }
                     try self.currentFrame().vars.put(self.allocator, name, result_val);
-                    const ca_sn = if (self.currentFrame().func) |func| func.slot_names else self.global_slot_names;
-                    for (ca_sn, 0..) |sn, si| {
-                        if (std.mem.eql(u8, sn, name)) {
-                            if (si < self.currentFrame().locals.len) self.currentFrame().locals[si] = result_val;
-                            break;
-                        }
+                    if (ca_slot != 0xFFFF and ca_slot < self.currentFrame().locals.len) {
+                        self.currentFrame().locals[ca_slot] = result_val;
                     }
                     self.push(result_val);
                 },
