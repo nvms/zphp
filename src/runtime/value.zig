@@ -168,16 +168,41 @@ pub const Fiber = struct {
 pub const PhpObject = struct {
     class_name: []const u8,
     properties: std.StringHashMapUnmanaged(Value) = .{},
+    slots: ?[]Value = null,
+    slot_layout: ?*const SlotLayout = null,
+
+    pub const SlotLayout = struct {
+        names: []const []const u8,
+        defaults: []const Value,
+    };
 
     pub fn deinit(self: *PhpObject, allocator: std.mem.Allocator) void {
         self.properties.deinit(allocator);
+        if (self.slots) |s| allocator.free(s);
+    }
+
+    pub fn getSlotIndex(self: *const PhpObject, name: []const u8) ?u16 {
+        const layout = self.slot_layout orelse return null;
+        for (layout.names, 0..) |n, i| {
+            if (n.ptr == name.ptr or std.mem.eql(u8, n, name)) return @intCast(i);
+        }
+        return null;
     }
 
     pub fn get(self: *const PhpObject, name: []const u8) Value {
+        if (self.slots) |s| {
+            if (self.getSlotIndex(name)) |idx| return s[idx];
+        }
         return self.properties.get(name) orelse .null;
     }
 
     pub fn set(self: *PhpObject, allocator: std.mem.Allocator, name: []const u8, value: Value) !void {
+        if (self.slots) |s| {
+            if (self.getSlotIndex(name)) |idx| {
+                s[idx] = value;
+                return;
+            }
+        }
         try self.properties.put(allocator, name, value);
     }
 };

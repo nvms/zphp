@@ -135,10 +135,24 @@ fn serializeValue(buf: *std.ArrayListUnmanaged(u8), a: std.mem.Allocator, val: V
             try buf.appendSlice(a, ":\"");
             try buf.appendSlice(a, obj.class_name);
             try buf.appendSlice(a, "\":");
-            const count = obj.properties.count();
-            const cl = std.fmt.bufPrint(&tmp, "{d}", .{count}) catch return;
+            const slot_count: u32 = if (obj.slot_layout) |layout| @intCast(layout.names.len) else 0;
+            const total_count = slot_count + obj.properties.count();
+            const cl = std.fmt.bufPrint(&tmp, "{d}", .{total_count}) catch return;
             try buf.appendSlice(a, cl);
             try buf.appendSlice(a, ":{");
+            if (obj.slot_layout) |layout| {
+                if (obj.slots) |slots| {
+                    for (layout.names, 0..) |name, i| {
+                        try buf.appendSlice(a, "s:");
+                        const ks = std.fmt.bufPrint(&tmp, "{d}", .{name.len}) catch return;
+                        try buf.appendSlice(a, ks);
+                        try buf.appendSlice(a, ":\"");
+                        try buf.appendSlice(a, name);
+                        try buf.appendSlice(a, "\";");
+                        try serializeValue(buf, a, slots[i]);
+                    }
+                }
+            }
             var iter = obj.properties.iterator();
             while (iter.next()) |entry| {
                 const k = entry.key_ptr.*;
