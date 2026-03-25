@@ -1011,36 +1011,19 @@ pub const VM = struct {
                     const slot = self.readU16();
                     const frame = self.currentFrame();
                     if (frame.func) |func| {
-                        // function scope: original fast path
                         if (slot < func.slot_names.len and func.slot_names[slot].len > 0) {
                             if (frame.ref_slots.get(func.slot_names[slot])) |cell| {
                                 self.push(cell.*);
                                 continue;
                             }
                         }
-                    } else {
-                        // global scope: check ref_slots if any exist
-                        if (slot < self.global_slot_names.len and self.global_slot_names[slot].len > 0) {
-                            if (frame.ref_slots.count() > 0) {
-                                if (frame.ref_slots.get(self.global_slot_names[slot])) |cell| {
-                                    self.push(cell.*);
-                                    continue;
-                                }
-                            }
+                        if (slot < frame.locals.len) {
+                            self.push(frame.locals[slot]);
+                        } else {
+                            self.push(.null);
                         }
-                    }
-                    if (slot < frame.locals.len) {
-                        const val = frame.locals[slot];
-                        if (val != .null or frame.func != null) {
-                            self.push(val);
-                        } else if (slot < self.global_slot_names.len and self.global_slot_names[slot].len > 0) {
-                            if (frame.vars.get(self.global_slot_names[slot])) |v| {
-                                frame.locals[slot] = v;
-                                self.push(v);
-                            } else self.push(.null);
-                        } else self.push(.null);
                     } else {
-                        self.push(.null);
+                        self.push(self.getLocalGlobal(slot, frame));
                     }
                 },
                 .set_local => {
@@ -1052,7 +1035,6 @@ pub const VM = struct {
                         frame.locals[slot] = val;
                     }
                     if (frame.func) |func| {
-                        // function scope: dual-write for statics/globals writeback
                         if (slot < func.slot_names.len) {
                             const name = func.slot_names[slot];
                             if (name.len > 0) {
@@ -1063,16 +1045,7 @@ pub const VM = struct {
                             }
                         }
                     } else {
-                        // global scope: skip vars.put, just handle ref_slots
-                        if (slot < self.global_slot_names.len) {
-                            const name = self.global_slot_names[slot];
-                            if (name.len > 0 and frame.ref_slots.count() > 0) {
-                                if (frame.ref_slots.get(name)) |cell| {
-                                    cell.* = val;
-                                }
-                            }
-                        }
-                        self.global_vars_dirty = true;
+                        self.setLocalGlobal(slot, val, frame);
                     }
                 },
                 .isset_prop => {
@@ -2293,6 +2266,39 @@ pub const VM = struct {
         if (self.sp > gen.base_sp) {
             try gen.stack.appendSlice(self.allocator, self.stack[gen.base_sp..self.sp]);
         }
+    }
+
+    fn getLocalGlobal(self: *VM, slot: u16, frame: *CallFrame) Value {
+        if (slot < self.global_slot_names.len and self.global_slot_names[slot].len > 0) {
+            if (frame.ref_slots.count() > 0) {
+                if (frame.ref_slots.get(self.global_slot_names[slot])) |cell| {
+                    return cell.*;
+                }
+            }
+        }
+        if (slot < frame.locals.len) {
+            const val = frame.locals[slot];
+            if (val != .null) return val;
+            if (slot < self.global_slot_names.len and self.global_slot_names[slot].len > 0) {
+                if (frame.vars.get(self.global_slot_names[slot])) |v| {
+                    frame.locals[slot] = v;
+                    return v;
+                }
+            }
+        }
+        return .null;
+    }
+
+    fn setLocalGlobal(self: *VM, slot: u16, val: Value, frame: *CallFrame) void {
+        if (slot < self.global_slot_names.len) {
+            const name = self.global_slot_names[slot];
+            if (name.len > 0 and frame.ref_slots.count() > 0) {
+                if (frame.ref_slots.get(name)) |cell| {
+                    cell.* = val;
+                }
+            }
+        }
+        self.global_vars_dirty = true;
     }
 
     fn syncGlobalLocalsToVars(self: *VM) !void {
