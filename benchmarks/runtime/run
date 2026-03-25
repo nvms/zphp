@@ -1,0 +1,65 @@
+#!/bin/bash
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+ZPHP="${ZPHP:-$SCRIPT_DIR/../../zig-out/bin/zphp}"
+PHP="${PHP:-php}"
+RUNS=5
+
+if [ ! -f "$ZPHP" ]; then
+    echo "build zphp first: make build"
+    exit 1
+fi
+
+PHP_DOCKER="$SCRIPT_DIR/../../php"
+if ! command -v "$PHP" &>/dev/null; then
+    if [ -f "$PHP_DOCKER" ]; then
+        PHP="$PHP_DOCKER php"
+    else
+        echo "php not found (set PHP= or install php)"
+        exit 1
+    fi
+fi
+
+echo "runtime benchmark: best of $RUNS runs (build with -Doptimize=ReleaseFast)"
+echo ""
+echo "  php:  $("$PHP" -v 2>/dev/null | head -1)"
+echo "  zphp: $("$ZPHP" version 2>/dev/null || echo "dev")"
+echo ""
+
+printf "  %-16s %10s %10s %8s\n" "benchmark" "php" "zphp" "ratio"
+printf "  %-16s %10s %10s %8s\n" "--------" "---" "----" "-----"
+
+for f in "$SCRIPT_DIR"/*.php; do
+    name="$(basename "$f" .php)"
+
+    # best of N for php
+    best_php=999999
+    for i in $(seq 1 $RUNS); do
+        start=$(python3 -c "import time; print(int(time.time()*1000))")
+        "$PHP" "$f" > /dev/null 2>&1
+        end=$(python3 -c "import time; print(int(time.time()*1000))")
+        elapsed=$((end - start))
+        if [ "$elapsed" -lt "$best_php" ]; then best_php=$elapsed; fi
+    done
+
+    # best of N for zphp
+    best_zphp=999999
+    for i in $(seq 1 $RUNS); do
+        start=$(python3 -c "import time; print(int(time.time()*1000))")
+        "$ZPHP" run "$f" > /dev/null 2>&1
+        end=$(python3 -c "import time; print(int(time.time()*1000))")
+        elapsed=$((end - start))
+        if [ "$elapsed" -lt "$best_zphp" ]; then best_zphp=$elapsed; fi
+    done
+
+    if [ "$best_php" -gt 0 ]; then
+        ratio=$(python3 -c "print(f'{$best_zphp/$best_php:.2f}x')")
+    else
+        ratio="n/a"
+    fi
+
+    printf "  %-16s %8s ms %8s ms %8s\n" "$name" "$best_php" "$best_zphp" "$ratio"
+done
+
+echo ""
