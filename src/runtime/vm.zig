@@ -97,6 +97,11 @@ pub const NativeContext = struct {
         }
         return error.RuntimeError;
     }
+
+    pub fn invokeCallableRef(self: *NativeContext, callable: Value, args: []Value) RuntimeError!Value {
+        if (callable == .string) return self.vm.callByNameRef(callable.string, args);
+        return self.invokeCallable(callable, args);
+    }
 };
 
 const NativeFn = *const fn (*NativeContext, []const Value) RuntimeError!Value;
@@ -2801,6 +2806,41 @@ pub const VM = struct {
             try self.bindArgs(&new_vars, func, args[0..@min(args.len, func.arity)]);
             return self.executeFunction(func, new_vars);
         } else return error.RuntimeError;
+    }
+
+    pub fn callByNameRef(self: *VM, name: []const u8, args: []Value) RuntimeError!Value {
+        if (self.functions.get(name)) |func| {
+            if (func.ref_params.len == 0) {
+                return self.callByName(name, args);
+            }
+            const bind_count = @min(args.len, func.arity);
+            var new_vars: std.StringHashMapUnmanaged(Value) = .{};
+            var ref_slots: std.StringHashMapUnmanaged(*Value) = .{};
+            try self.bindClosures(&new_vars, &ref_slots, name);
+
+            var cells: [16]?*Value = .{null} ** 16;
+            for (0..bind_count) |i| {
+                try new_vars.put(self.allocator, func.params[i], try self.copyValue(args[i]));
+                if (i < func.ref_params.len and func.ref_params[i] and i < 16) {
+                    const cell = try self.allocator.create(Value);
+                    cell.* = args[i];
+                    try self.ref_cells.append(self.allocator, cell);
+                    try ref_slots.put(self.allocator, func.params[i], cell);
+                    cells[i] = cell;
+                }
+            }
+            try self.fillDefaults(&new_vars, func, bind_count);
+
+            const result = try self.executeFunctionWithRefs(func, new_vars, ref_slots);
+
+            for (0..bind_count) |i| {
+                if (cells[i]) |cell| {
+                    args[i] = cell.*;
+                }
+            }
+            return result;
+        }
+        return self.callByName(name, args);
     }
 
     // ==================================================================

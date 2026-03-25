@@ -628,31 +628,14 @@ fn array_walk(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     const arr = args[0].array;
     const callback = args[1];
 
-    const func_name = if (callback == .string) callback.string else null;
-    const func = if (func_name) |n| ctx.vm.functions.get(n) else null;
-    const has_ref = if (func) |f| (f.ref_params.len > 0 and f.ref_params[0]) else false;
-
     for (arr.entries.items, 0..) |entry, idx| {
         const key_val: Value = switch (entry.key) {
             .int => |k| .{ .int = k },
             .string => |s| .{ .string = s },
         };
-        if (has_ref) {
-            const f = func.?;
-            const cell = try ctx.allocator.create(Value);
-            cell.* = entry.value;
-            try ctx.vm.ref_cells.append(ctx.allocator, cell);
-            var new_vars: std.StringHashMapUnmanaged(Value) = .{};
-            var ref_slots: std.StringHashMapUnmanaged(*Value) = .{};
-            try new_vars.put(ctx.allocator, f.params[0], entry.value);
-            try ref_slots.put(ctx.allocator, f.params[0], cell);
-            if (f.arity > 1 and f.params.len > 1) try new_vars.put(ctx.allocator, f.params[1], key_val);
-            try ctx.vm.bindClosures(&new_vars, &ref_slots, func_name.?);
-            _ = try ctx.vm.executeFunctionWithRefs(f, new_vars, ref_slots);
-            arr.entries.items[idx].value = cell.*;
-        } else {
-            _ = try ctx.invokeCallable(callback, &.{ entry.value, key_val });
-        }
+        var call_args = [2]Value{ entry.value, key_val };
+        _ = try ctx.invokeCallableRef(callback, &call_args);
+        arr.entries.items[idx].value = call_args[0];
     }
     return .{ .bool = true };
 }

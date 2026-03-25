@@ -1,5 +1,6 @@
 const std = @import("std");
 const Value = @import("../runtime/value.zig").Value;
+const PhpArray = @import("../runtime/value.zig").PhpArray;
 const NativeContext = @import("../runtime/vm.zig").NativeContext;
 const RuntimeError = error{ RuntimeError, OutOfMemory };
 
@@ -362,30 +363,34 @@ fn native_is_callable(ctx: *NativeContext, args: []const Value) RuntimeError!Val
 }
 
 fn native_settype(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len < 2 or args[1] != .string) return .{ .bool = false };
+    if (args.len < 2 or args[1] != .string) return args[0];
     const type_name = args[1].string;
     const val = args[0];
-    const converted: Value = if (std.mem.eql(u8, type_name, "int") or std.mem.eql(u8, type_name, "integer"))
-        .{ .int = Value.toInt(val) }
-    else if (std.mem.eql(u8, type_name, "float") or std.mem.eql(u8, type_name, "double"))
-        .{ .float = Value.toFloat(val) }
-    else if (std.mem.eql(u8, type_name, "string"))
-        blk: {
-            if (val == .string) break :blk val;
-            var buf = std.ArrayListUnmanaged(u8){};
-            try val.format(&buf, ctx.allocator);
-            const s = try buf.toOwnedSlice(ctx.allocator);
-            try ctx.strings.append(ctx.allocator, s);
-            break :blk Value{ .string = s };
-        }
-    else if (std.mem.eql(u8, type_name, "bool") or std.mem.eql(u8, type_name, "boolean"))
-        .{ .bool = val.isTruthy() }
-    else if (std.mem.eql(u8, type_name, "null"))
-        .null
-    else
-        return Value{ .bool = false };
-    _ = converted;
-    return .{ .bool = true };
+    if (std.mem.eql(u8, type_name, "int") or std.mem.eql(u8, type_name, "integer"))
+        return .{ .int = Value.toInt(val) };
+    if (std.mem.eql(u8, type_name, "float") or std.mem.eql(u8, type_name, "double"))
+        return .{ .float = Value.toFloat(val) };
+    if (std.mem.eql(u8, type_name, "string")) {
+        if (val == .string) return val;
+        var buf = std.ArrayListUnmanaged(u8){};
+        try val.format(&buf, ctx.allocator);
+        const s = try buf.toOwnedSlice(ctx.allocator);
+        try ctx.strings.append(ctx.allocator, s);
+        return .{ .string = s };
+    }
+    if (std.mem.eql(u8, type_name, "bool") or std.mem.eql(u8, type_name, "boolean"))
+        return .{ .bool = val.isTruthy() };
+    if (std.mem.eql(u8, type_name, "null"))
+        return .null;
+    if (std.mem.eql(u8, type_name, "array")) {
+        if (val == .array) return val;
+        const arr = try ctx.allocator.create(PhpArray);
+        arr.* = .{};
+        try arr.append(ctx.allocator, val);
+        try ctx.arrays.append(ctx.allocator, arr);
+        return .{ .array = arr };
+    }
+    return val;
 }
 
 fn native_call_user_func(ctx: *NativeContext, args: []const Value) RuntimeError!Value {

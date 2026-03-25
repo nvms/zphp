@@ -2645,12 +2645,44 @@ const Compiler = struct {
         try self.emitOp(.op_null);
     }
 
+    fn compileSettype(self: *Compiler, args: []const u32) Error!void {
+        if (args.len < 2) {
+            try self.emitOp(.op_false);
+            return;
+        }
+        const target = self.ast.nodes[args[0]];
+        if (target.tag != .variable) {
+            try self.emitOp(.op_false);
+            return;
+        }
+        const var_name = self.ast.tokenSlice(target.main_token);
+        const var_idx = try self.addConstant(.{ .string = var_name });
+
+        // settype returns the converted value, we store it back and push true
+        try self.emitOp(.get_var);
+        try self.emitU16(var_idx);
+        try self.compileNode(args[1]);
+        const fn_idx = try self.addConstant(.{ .string = "settype" });
+        try self.emitOp(.call);
+        try self.emitU16(fn_idx);
+        try self.emitByte(2);
+        try self.emitOp(.set_var);
+        try self.emitU16(var_idx);
+        try self.emitOp(.pop);
+        try self.emitOp(.op_true);
+    }
+
     fn compileCall(self: *Compiler, node: Ast.Node) Error!void {
         const callee = self.ast.nodes[node.data.lhs];
         const args = self.ast.extraSlice(node.data.rhs);
 
         if (callee.tag == .identifier and std.mem.eql(u8, self.ast.tokenSlice(callee.main_token), "unset")) {
             try self.compileUnset(args);
+            return;
+        }
+
+        if (callee.tag == .identifier and std.mem.eql(u8, self.ast.tokenSlice(callee.main_token), "settype")) {
+            try self.compileSettype(args);
             return;
         }
 
