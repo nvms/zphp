@@ -2622,7 +2622,7 @@ pub const VM = struct {
         return .{ .allocator = self.allocator, .arrays = &self.arrays, .strings = &self.strings, .vm = self, .call_name = call_name };
     }
 
-    fn bindClosures(self: *VM, vars: *std.StringHashMapUnmanaged(Value), ref_slots: ?*std.StringHashMapUnmanaged(*Value), name: []const u8) !void {
+    pub fn bindClosures(self: *VM, vars: *std.StringHashMapUnmanaged(Value), ref_slots: ?*std.StringHashMapUnmanaged(*Value), name: []const u8) !void {
         for (self.captures.items) |cap| {
             if (std.mem.eql(u8, cap.closure_name, name)) {
                 if (cap.ref_cell) |cell| {
@@ -2681,6 +2681,14 @@ pub const VM = struct {
     fn executeFunction(self: *VM, func: *const ObjFunction, vars: std.StringHashMapUnmanaged(Value)) RuntimeError!Value {
         const base_frame = self.frame_count;
         self.frames[self.frame_count] = .{ .chunk = &func.chunk, .ip = 0, .vars = vars };
+        self.frame_count += 1;
+        try self.runUntilFrame(base_frame);
+        return self.pop();
+    }
+
+    pub fn executeFunctionWithRefs(self: *VM, func: *const ObjFunction, vars: std.StringHashMapUnmanaged(Value), ref_slots: std.StringHashMapUnmanaged(*Value)) RuntimeError!Value {
+        const base_frame = self.frame_count;
+        self.frames[self.frame_count] = .{ .chunk = &func.chunk, .ip = 0, .vars = vars, .ref_slots = ref_slots };
         self.frame_count += 1;
         try self.runUntilFrame(base_frame);
         return self.pop();

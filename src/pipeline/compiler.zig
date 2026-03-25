@@ -2477,8 +2477,14 @@ const Compiler = struct {
 
         const param_nodes = self.ast.extraSlice(node.data.lhs);
         const param_names = try self.allocator.alloc([]const u8, param_nodes.len);
+        var ref_flags_buf: [16]bool = .{false} ** 16;
+        var has_any_ref = false;
         for (param_nodes, 0..) |p, i| {
             param_names[i] = self.ast.tokenSlice(self.ast.nodes[p].main_token);
+            if (i < 16 and (self.ast.nodes[p].data.rhs & 2) != 0) {
+                ref_flags_buf[i] = true;
+                has_any_ref = true;
+            }
         }
 
         // rhs = extra -> {body, use_count, use_vars...}
@@ -2516,12 +2522,19 @@ const Compiler = struct {
 
         self.closure_count = sub.closure_count;
 
+        const ref_params = if (has_any_ref) blk: {
+            const rp = try self.allocator.alloc(bool, param_nodes.len);
+            for (0..param_nodes.len) |i| rp[i] = if (i < 16) ref_flags_buf[i] else false;
+            break :blk rp;
+        } else &[_]bool{};
+
         const func = ObjFunction{
             .name = owned_name,
             .arity = @intCast(param_nodes.len),
             .params = param_names[0..param_nodes.len],
             .chunk = sub.chunk,
             .is_arrow = is_arrow,
+            .ref_params = ref_params,
         };
 
         try self.functions.append(self.allocator, func);
@@ -2789,11 +2802,17 @@ const Compiler = struct {
 
         const exit_jump = try self.emitJump(.iter_check);
 
-        const val_name = self.ast.tokenSlice(self.ast.nodes[val_n].main_token);
-        const val_idx = try self.addConstant(.{ .string = val_name });
-        try self.emitOp(.set_var);
-        try self.emitU16(val_idx);
-        try self.emitOp(.pop);
+        const val_node = self.ast.nodes[val_n];
+        if (val_node.tag == .array_literal or val_node.tag == .list_destructure) {
+            try self.compileDestructure(val_node);
+            try self.emitOp(.pop);
+        } else {
+            const val_name = self.ast.tokenSlice(val_node.main_token);
+            const val_idx = try self.addConstant(.{ .string = val_name });
+            try self.emitOp(.set_var);
+            try self.emitU16(val_idx);
+            try self.emitOp(.pop);
+        }
 
         if (key_n != 0) {
             const key_name = self.ast.tokenSlice(self.ast.nodes[key_n].main_token);

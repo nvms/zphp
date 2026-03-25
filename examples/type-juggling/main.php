@@ -174,14 +174,12 @@ echo $cfg->port . "\n";
 
 echo "--- list foreach ---\n";
 $pairs = [[1, "one"], [2, "two"], [3, "three"]];
-foreach ($pairs as $pair) {
-    [$num, $word] = $pair;
+foreach ($pairs as [$num, $word]) {
     echo "$num=$word ";
 }
 echo "\n";
 
-foreach ($pairs as $pair) {
-    list($n, $w) = $pair;
+foreach ($pairs as list($n, $w)) {
     echo "$n:$w ";
 }
 echo "\n";
@@ -190,13 +188,17 @@ echo "\n";
 
 echo "--- array_walk ---\n";
 $items = ["apple", "banana", "cherry"];
-$result = array_map(function ($val) { return strtoupper($val); }, $items);
-echo implode(", ", $result) . "\n";
+array_walk($items, function (&$val, $key) {
+    $val = strtoupper($val);
+});
+echo implode(", ", $items) . "\n";
 
 $prices = [10, 20, 30];
 $tax = 1.1;
-$taxed = array_map(function ($price) use ($tax) { return (int) ($price * $tax); }, $prices);
-echo implode(", ", $taxed) . "\n";
+array_walk($prices, function (&$price) use ($tax) {
+    $price = (int) ($price * $tax);
+});
+echo implode(", ", $prices) . "\n";
 
 // === test: nested array spread ===
 
