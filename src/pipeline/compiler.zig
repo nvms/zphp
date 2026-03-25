@@ -2784,6 +2784,7 @@ const Compiler = struct {
         const iter_n = self.ast.extra_data[node.data.lhs];
         const val_n = self.ast.extra_data[node.data.lhs + 1];
         const key_n = self.ast.extra_data[node.data.lhs + 2];
+        const val_by_ref = self.ast.extra_data[node.data.lhs + 3] != 0;
 
         const prev_start = self.loop_start;
         var prev_breaks = self.break_jumps;
@@ -2802,6 +2803,11 @@ const Compiler = struct {
 
         const exit_jump = try self.emitJump(.iter_check);
 
+        // iter_check pushed: key, value (value on top)
+        // for by-ref, also store the key for writeback
+        var ref_key_idx: ?u16 = null;
+        var ref_val_idx: ?u16 = null;
+
         const val_node = self.ast.nodes[val_n];
         if (val_node.tag == .array_literal or val_node.tag == .list_destructure) {
             try self.compileDestructure(val_node);
@@ -2812,6 +2818,7 @@ const Compiler = struct {
             try self.emitOp(.set_var);
             try self.emitU16(val_idx);
             try self.emitOp(.pop);
+            if (val_by_ref) ref_val_idx = val_idx;
         }
 
         if (key_n != 0) {
@@ -2820,14 +2827,39 @@ const Compiler = struct {
             try self.emitOp(.set_var);
             try self.emitU16(key_idx);
             try self.emitOp(.pop);
+            if (val_by_ref) ref_key_idx = key_idx;
         } else {
-            try self.emitOp(.pop);
+            if (val_by_ref) {
+                // need a synthetic key variable for writeback
+                const synth = try self.addConstant(.{ .string = "__foreach_key" });
+                try self.emitOp(.set_var);
+                try self.emitU16(synth);
+                try self.emitOp(.pop);
+                ref_key_idx = synth;
+            } else {
+                try self.emitOp(.pop);
+            }
         }
 
         try self.compileNode(node.data.rhs);
 
         // continue lands here, before iter_advance (same pattern as for loop update)
         try self.patchContinues(&prev_continues);
+
+        // by-ref writeback: $arr[$key] = $val
+        if (val_by_ref) {
+            if (ref_val_idx) |vi| {
+                if (ref_key_idx) |ki| {
+                    try self.compileNode(iter_n);
+                    try self.emitOp(.get_var);
+                    try self.emitU16(ki);
+                    try self.emitOp(.get_var);
+                    try self.emitU16(vi);
+                    try self.emitOp(.array_set);
+                    try self.emitOp(.pop);
+                }
+            }
+        }
 
         try self.emitOp(.iter_advance);
         try self.emitLoop(loop_top);

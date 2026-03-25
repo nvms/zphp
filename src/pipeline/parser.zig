@@ -430,8 +430,8 @@ const Parser = struct {
         const iterable = try self.parseExpression();
         _ = try self.expect(.kw_as);
 
-        // skip & for foreach by-reference (zphp arrays are already reference semantics)
-        if (self.peek() == .amp) _ = self.advance();
+        var val_by_ref: u32 = 0;
+        if (self.peek() == .amp) { _ = self.advance(); val_by_ref = 1; }
         const first = try self.parseExpression();
         var value: u32 = first;
         var key: u32 = 0;
@@ -439,13 +439,14 @@ const Parser = struct {
         if (self.peek() == .fat_arrow) {
             _ = self.advance();
             key = first;
-            if (self.peek() == .amp) _ = self.advance();
+            val_by_ref = 0;
+            if (self.peek() == .amp) { _ = self.advance(); val_by_ref = 1; }
             value = try self.parseExpression();
         }
 
         _ = try self.expect(.r_paren);
         const body = try self.parseStatementOrBlock();
-        const extra = try self.addExtra(&.{ iterable, value, key });
+        const extra = try self.addExtra(&.{ iterable, value, key, val_by_ref });
         return self.addNode(.{ .tag = .foreach_stmt, .main_token = tok, .data = .{ .lhs = extra, .rhs = body } });
     }
 
