@@ -328,7 +328,9 @@ fn method_exists(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
 fn property_exists(_: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len < 2 or args[1] != .string) return .{ .bool = false };
     if (args[0] != .object) return .{ .bool = false };
-    return .{ .bool = args[0].object.properties.contains(args[1].string) };
+    const obj = args[0].object;
+    if (obj.getSlotIndex(args[1].string) != null) return .{ .bool = true };
+    return .{ .bool = obj.properties.contains(args[1].string) };
 }
 
 fn native_is_callable(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
