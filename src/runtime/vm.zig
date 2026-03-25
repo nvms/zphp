@@ -75,10 +75,9 @@ pub const NativeContext = struct {
                 const hi = chunk.code.items[scan_pos - 2];
                 const lo = chunk.code.items[scan_pos - 1];
                 const slot = (@as(u16, hi) << 8) | lo;
-                if (caller.func) |func| {
-                    if (slot < func.slot_names.len) {
-                        arg_vars[scan_idx] = func.slot_names[slot];
-                    }
+                const sn = if (caller.func) |func| func.slot_names else vm.global_slot_names;
+                if (slot < sn.len) {
+                    arg_vars[scan_idx] = sn[slot];
                 }
                 scan_pos -= 3;
             } else {
@@ -87,13 +86,11 @@ pub const NativeContext = struct {
         }
         if (arg_vars[arg_index]) |var_name| {
             caller.vars.put(vm.allocator, var_name, value) catch return;
-            // also update locals if this var has a slot
-            if (caller.func) |func| {
-                for (func.slot_names, 0..) |sn, si| {
-                    if (std.mem.eql(u8, sn, var_name)) {
-                        if (si < caller.locals.len) caller.locals[si] = value;
-                        break;
-                    }
+            const sn2 = if (caller.func) |func| func.slot_names else vm.global_slot_names;
+            for (sn2, 0..) |sn_name, si| {
+                if (std.mem.eql(u8, sn_name, var_name)) {
+                    if (si < caller.locals.len) caller.locals[si] = value;
+                    break;
                 }
             }
         }
@@ -217,6 +214,49 @@ pub const VM = struct {
     handler_floor: usize = 0,
     pending_exception: ?Value = null,
     allocator: Allocator,
+    global_slot_names: []const []const u8 = &.{},
+    global_vars_dirty: bool = false,
+    method_cache_class: []const u8 = "",
+    method_cache_method: []const u8 = "",
+    method_cache_result: []const u8 = "",
+    ic: ?*InlineCache = null,
+
+    const InlineCache = struct {
+        // property access: keyed by (chunk_ptr ^ ip), stores class_ptr for visibility skip
+        prop: [128]PropIC = @splat(.{}),
+        // method call: keyed by (chunk_ptr ^ ip), stores class_ptr + resolved func
+        method: [128]MethodIC = @splat(.{}),
+        // stack-allocated locals for callLocalsOnly - avoids heap alloc/free per call
+        locals_buf: [*]Value = undefined,
+        locals_sp: usize = 0,
+        locals_cap: usize = 0,
+        // single-entry function lookup cache
+        fn_cache_name: []const u8 = "",
+        fn_cache_func: ?*const ObjFunction = null,
+        // per-frame sp save for inline call/ret in fastLoop
+        sp_save: [64]usize = undefined,
+
+        const PropIC = struct {
+            key: usize = 0,
+            class_ptr: usize = 0,
+        };
+
+        const MethodIC = struct {
+            key: usize = 0,
+            class_ptr: usize = 0,
+            func: ?*const ObjFunction = null,
+            native: ?NativeFn = null,
+            full_name: []const u8 = "",
+        };
+
+        fn propIndex(chunk_ptr: usize, ip: usize) u7 {
+            return @truncate((chunk_ptr ^ ip) *% 0x517CC1B727220A95);
+        }
+
+        fn methodIndex(chunk_ptr: usize, ip: usize) u7 {
+            return @truncate((chunk_ptr ^ ip) *% 0x517CC1B727220A95);
+        }
+    };
 
     const StaticEntry = struct {
         var_name: []const u8,
@@ -251,6 +291,11 @@ pub const VM = struct {
         try @import("../stdlib/pdo.zig").register(&vm, allocator);
         try @import("../stdlib/websocket.zig").register(&vm, allocator);
         try @import("../stdlib/filesystem.zig").register(&vm, allocator);
+        vm.ic = try allocator.create(InlineCache);
+        vm.ic.?.* = .{};
+        const locals_buf = try allocator.alloc(Value, 8192);
+        vm.ic.?.locals_buf = locals_buf.ptr;
+        vm.ic.?.locals_cap = 8192;
         return vm;
     }
 
@@ -347,12 +392,20 @@ pub const VM = struct {
         for (0..self.frame_count) |i| {
             self.frames[i].ref_slots.deinit(self.allocator);
             self.frames[i].vars.deinit(self.allocator);
+            if (self.frames[i].locals.len > 0) {
+                self.freeLocals(self.frames[i].locals);
+                self.frames[i].locals = &.{};
+            }
         }
     }
 
     pub fn deinit(self: *VM) void {
         self.releaseFrames();
         self.freeHeapItems();
+        if (self.ic) |ic_ptr| {
+            if (ic_ptr.locals_cap > 0) self.allocator.free(ic_ptr.locals_buf[0..ic_ptr.locals_cap]);
+            self.allocator.destroy(ic_ptr);
+        }
         self.functions.deinit(self.allocator);
         self.native_fns.deinit(self.allocator);
         self.output.deinit(self.allocator);
@@ -418,7 +471,18 @@ pub const VM = struct {
         while (it.next()) |entry| {
             try vars.put(self.allocator, entry.key_ptr.*, entry.value_ptr.*);
         }
-        self.frames[0] = .{ .chunk = &result.chunk, .ip = 0, .vars = vars };
+        var locals: []Value = &.{};
+        if (result.local_count > 0) {
+            locals = try self.allocator.alloc(Value, result.local_count);
+            @memset(locals, .null);
+            for (result.slot_names, 0..) |sn, i| {
+                if (sn.len > 0) {
+                    if (vars.get(sn)) |val| locals[i] = val;
+                }
+            }
+        }
+        self.global_slot_names = result.slot_names;
+        self.frames[0] = .{ .chunk = &result.chunk, .ip = 0, .vars = vars, .locals = locals };
         self.frame_count = 1;
         try self.run();
     }
@@ -433,6 +497,7 @@ pub const VM = struct {
     }
 
     fn runUntilFrame(self: *VM, base_frame: usize) RuntimeError!void {
+        if (self.frame_count <= base_frame) return;
         return self.runLoop(base_frame);
     }
 
@@ -476,20 +541,30 @@ pub const VM = struct {
                     } else {
                         try self.currentFrame().vars.put(self.allocator, name, val);
                     }
-                    // sync locals for vars that also have a slot
-                    if (self.currentFrame().func) |func| {
-                        for (func.slot_names, 0..) |sn, si| {
-                            if (std.mem.eql(u8, sn, name)) {
-                                if (si < self.currentFrame().locals.len) self.currentFrame().locals[si] = val;
-                                break;
-                            }
+                    const sv_sn = if (self.currentFrame().func) |func| func.slot_names else self.global_slot_names;
+                    for (sv_sn, 0..) |sn, si| {
+                        if (std.mem.eql(u8, sn, name)) {
+                            if (si < self.currentFrame().locals.len) self.currentFrame().locals[si] = val;
+                            break;
                         }
                     }
                 },
 
-                .add => self.binaryOp(Value.add),
-                .subtract => self.binaryOp(Value.subtract),
-                .multiply => self.binaryOp(Value.multiply),
+                .add => {
+                    const b = self.pop();
+                    const a = self.pop();
+                    self.push(Value.add(a, b));
+                },
+                .subtract => {
+                    const b = self.pop();
+                    const a = self.pop();
+                    self.push(Value.subtract(a, b));
+                },
+                .multiply => {
+                    const b = self.pop();
+                    const a = self.pop();
+                    self.push(Value.multiply(a, b));
+                },
                 .divide => {
                     const b = self.pop();
                     const a = self.pop();
@@ -510,7 +585,11 @@ pub const VM = struct {
                     }
                     self.push(Value.modulo(a, b));
                 },
-                .power => self.binaryOp(Value.power),
+                .power => {
+                    const b = self.pop();
+                    const a = self.pop();
+                    self.push(Value.power(a, b));
+                },
                 .negate => {
                     const v = self.pop();
                     self.push(v.negate());
@@ -631,6 +710,10 @@ pub const VM = struct {
                 .jump_back => {
                     const offset = self.readU16();
                     self.currentFrame().ip -= offset;
+                    if (self.currentFrame().locals.len > 0) {
+                        try self.fastLoop();
+                        if (self.frame_count <= base_frame) return;
+                    }
                 },
                 .jump_if_false => {
                     const offset = self.readU16();
@@ -649,9 +732,11 @@ pub const VM = struct {
                     const name_idx = self.readU16();
                     const arg_count = self.readByte();
                     const name = self.currentChunk().constants.items[name_idx].string;
+                    if (self.global_vars_dirty) try self.syncGlobalLocalsToVars();
                     try self.callNamedFunction(name, arg_count);
                 },
                 .call_indirect => {
+                    if (self.global_vars_dirty) try self.syncGlobalLocalsToVars();
                     const arg_count = self.readByte();
                     const ac: usize = arg_count;
                     const name_val = self.stack[self.sp - ac - 1];
@@ -691,6 +776,7 @@ pub const VM = struct {
                     } else return error.RuntimeError;
                 },
                 .call_spread => {
+                    if (self.global_vars_dirty) try self.syncGlobalLocalsToVars();
                     const name_idx = self.readU16();
                     const name = self.currentChunk().constants.items[name_idx].string;
                     const args_val = self.pop();
@@ -928,6 +1014,7 @@ pub const VM = struct {
                     }
                 },
                 .concat_assign => {
+                    if (self.global_vars_dirty) try self.syncGlobalLocalsToVars();
                     const name_idx = self.readU16();
                     const name = self.currentChunk().constants.items[name_idx].string;
                     const append_val = self.pop();
@@ -964,12 +1051,11 @@ pub const VM = struct {
                         cell.* = result_val;
                     }
                     try self.currentFrame().vars.put(self.allocator, name, result_val);
-                    if (self.currentFrame().func) |func| {
-                        for (func.slot_names, 0..) |sn, si| {
-                            if (std.mem.eql(u8, sn, name)) {
-                                if (si < self.currentFrame().locals.len) self.currentFrame().locals[si] = result_val;
-                                break;
-                            }
+                    const ca_sn = if (self.currentFrame().func) |func| func.slot_names else self.global_slot_names;
+                    for (ca_sn, 0..) |sn, si| {
+                        if (std.mem.eql(u8, sn, name)) {
+                            if (si < self.currentFrame().locals.len) self.currentFrame().locals[si] = result_val;
+                            break;
                         }
                     }
                     self.push(result_val);
@@ -977,7 +1063,6 @@ pub const VM = struct {
                 .get_local => {
                     const slot = self.readU16();
                     const frame = self.currentFrame();
-                    // check ref_slots first - ref bindings take priority
                     if (frame.func) |func| {
                         if (slot < func.slot_names.len and func.slot_names[slot].len > 0) {
                             if (frame.ref_slots.get(func.slot_names[slot])) |cell| {
@@ -985,21 +1070,23 @@ pub const VM = struct {
                                 continue;
                             }
                         }
-                    }
-                    if (slot < frame.locals.len) {
-                        self.push(frame.locals[slot]);
+                        if (slot < frame.locals.len) {
+                            self.push(frame.locals[slot]);
+                        } else {
+                            self.push(.null);
+                        }
                     } else {
-                        self.push(.null);
+                        self.push(self.getLocalGlobal(slot, frame));
                     }
                 },
                 .set_local => {
                     const slot = self.readU16();
                     const frame = self.currentFrame();
-                    const val = try self.copyValue(self.peek());
+                    const peeked = self.peek();
+                    const val = if (peeked == .array) try self.copyValue(peeked) else peeked;
                     if (slot < frame.locals.len) {
                         frame.locals[slot] = val;
                     }
-                    // dual-write to HashMap for statics writeback, globals writeback, ref_slots
                     if (frame.func) |func| {
                         if (slot < func.slot_names.len) {
                             const name = func.slot_names[slot];
@@ -1010,6 +1097,8 @@ pub const VM = struct {
                                 try frame.vars.put(self.allocator, name, val);
                             }
                         }
+                    } else {
+                        self.setLocalGlobal(slot, val, frame);
                     }
                 },
                 .isset_prop => {
@@ -1095,6 +1184,7 @@ pub const VM = struct {
                 },
 
                 .closure_bind => {
+                    if (self.global_vars_dirty) try self.syncGlobalLocalsToVars();
                     const var_idx = self.readU16();
                     const var_name = self.currentChunk().constants.items[var_idx].string;
                     try self.ensureClosureInstance();
@@ -1113,6 +1203,7 @@ pub const VM = struct {
                 },
 
                 .closure_bind_ref => {
+                    if (self.global_vars_dirty) try self.syncGlobalLocalsToVars();
                     const var_idx = self.readU16();
                     const var_name = self.currentChunk().constants.items[var_idx].string;
                     try self.ensureClosureInstance();
@@ -1150,7 +1241,7 @@ pub const VM = struct {
                         self.frame_count -= 1;
                         self.frames[self.frame_count].vars.deinit(self.allocator);
                         if (self.frames[self.frame_count].locals.len > 0) {
-                            self.allocator.free(self.frames[self.frame_count].locals);
+                            self.freeLocals(self.frames[self.frame_count].locals);
                             self.frames[self.frame_count].locals = &.{};
                         }
                     }
@@ -1179,6 +1270,7 @@ pub const VM = struct {
                 },
 
                 .get_global => {
+                    if (self.global_vars_dirty) try self.syncGlobalLocalsToVars();
                     const name_idx = self.readU16();
                     const name = self.currentChunk().constants.items[name_idx].string;
                     const raw_val = if (self.frame_count > 1) blk: {
@@ -1253,7 +1345,7 @@ pub const VM = struct {
                                         self.frame_count -= 1;
                                         self.frames[self.frame_count].vars.deinit(self.allocator);
                                         if (self.frames[self.frame_count].locals.len > 0) {
-                                            self.allocator.free(self.frames[self.frame_count].locals);
+                                            self.freeLocals(self.frames[self.frame_count].locals);
                                             self.frames[self.frame_count].locals = &.{};
                                         }
                                     }
@@ -1422,11 +1514,23 @@ pub const VM = struct {
                 },
 
                 .get_prop => {
+                    const gp_ip = self.currentFrame().ip;
                     const name_idx = self.readU16();
                     const prop_name = self.currentChunk().constants.items[name_idx].string;
                     const obj_val = self.pop();
                     if (obj_val == .object) {
                         const obj = obj_val.object;
+
+                        // IC: skip visibility on cache hit
+                        if (self.ic) |ic| {
+                            const gp_idx = InlineCache.propIndex(@intFromPtr(self.currentChunk()), gp_ip);
+                            const gp_entry = &ic.prop[gp_idx];
+                            if (gp_entry.key == gp_ip and gp_entry.class_ptr == @intFromPtr(obj.class_name.ptr)) {
+                                self.push(obj.get(prop_name));
+                                continue;
+                            }
+                        }
+
                         const val = obj.get(prop_name);
                         if (val != .null or obj.properties.contains(prop_name)) {
                             const vr = self.findPropertyVisibility(obj.class_name, prop_name);
@@ -1437,6 +1541,13 @@ pub const VM = struct {
                                 try self.strings.append(self.allocator, msg);
                                 if (try self.throwBuiltinException("Error", msg)) continue;
                                 return error.RuntimeError;
+                            }
+                            // populate IC
+                            if (self.ic) |ic| {
+                                if (vr.visibility == .public) {
+                                    const gp_idx = InlineCache.propIndex(@intFromPtr(self.currentChunk()), gp_ip);
+                                    ic.prop[gp_idx] = .{ .key = gp_ip, .class_ptr = @intFromPtr(obj.class_name.ptr) };
+                                }
                             }
                             self.push(val);
                         } else if (self.hasMethod(obj.class_name, "__get")) {
@@ -1602,6 +1713,63 @@ pub const VM = struct {
                     if (obj_val != .object) return error.RuntimeError;
                     const obj = obj_val.object;
 
+                    // IC: skip visibility + resolve on cache hit
+                    if (self.ic) |ic| {
+                        const mc_ip = self.currentFrame().ip - 4;
+                        const mc_idx = InlineCache.methodIndex(@intFromPtr(self.currentChunk()), mc_ip);
+                        const mc_entry = &ic.method[mc_idx];
+                        if (mc_entry.key == mc_ip and mc_entry.class_ptr == @intFromPtr(obj.class_name.ptr)) {
+                            if (mc_entry.func) |func| {
+                                if (func.locals_only and self.captures.items.len == 0) {
+                                    const lc: usize = func.local_count;
+                                    const lbase = ic.locals_sp;
+                                    const mc_locals = if (lbase + lc <= ic.locals_cap) blk: {
+                                        const s = ic.locals_buf[lbase..lbase + lc];
+                                        @memset(s, .null);
+                                        ic.locals_sp = lbase + lc;
+                                        break :blk s;
+                                    } else blk: {
+                                        const s = try self.allocator.alloc(Value, lc);
+                                        @memset(s, .null);
+                                        break :blk s;
+                                    };
+                                    // slot 0 = $this for instance methods
+                                    mc_locals[0] = .{ .object = obj };
+                                    // params start at slot 1
+                                    for (0..@min(ac, func.arity)) |i| {
+                                        mc_locals[i + 1] = try self.copyValue(self.stack[self.sp - ac + i]);
+                                    }
+                                    for (@min(ac, func.arity)..func.arity) |i| {
+                                        if (i < func.defaults.len) mc_locals[i + 1] = func.defaults[i];
+                                    }
+                                    self.sp -= ac + 1;
+                                    self.frames[self.frame_count] = .{ .chunk = &func.chunk, .ip = 0, .vars = .{}, .locals = mc_locals, .func = func };
+                                    self.frame_count += 1;
+                                    continue;
+                                }
+                            } else if (mc_entry.native) |native| {
+                                var args_buf: [16]Value = undefined;
+                                for (0..ac) |i| args_buf[i] = self.stack[self.sp - ac + i];
+                                self.sp -= ac + 1;
+                                var tmp_vars: std.StringHashMapUnmanaged(Value) = .{};
+                                try tmp_vars.put(self.allocator, "$this", .{ .object = obj });
+                                self.frames[self.frame_count] = .{ .chunk = self.currentChunk(), .ip = self.currentFrame().ip, .vars = tmp_vars };
+                                self.frame_count += 1;
+                                const saved_fc = self.frame_count;
+                                var ctx = self.makeContext(null);
+                                const result = try native(&ctx, args_buf[0..ac]);
+                                if (self.frame_count >= saved_fc) {
+                                    self.frame_count -= 1;
+                                    self.frames[self.frame_count].vars.deinit(self.allocator);
+                                    self.push(result);
+                                } else {
+                                    continue;
+                                }
+                                continue;
+                            }
+                        }
+                    }
+
                     // check visibility
                     const mvr = self.findMethodVisibility(obj.class_name, method_name);
                     if (!self.checkVisibility(mvr.defining_class, mvr.visibility)) {
@@ -1629,7 +1797,14 @@ pub const VM = struct {
                         return error.RuntimeError;
                     };
                     if (self.native_fns.get(full_name)) |native| {
-                        // native method - call with $this in a temporary frame
+                        // populate IC
+                        if (self.ic) |ic| {
+                            const mc_ip2 = self.currentFrame().ip - 4;
+                            const mc_idx2 = InlineCache.methodIndex(@intFromPtr(self.currentChunk()), mc_ip2);
+                            if (mvr.visibility == .public) {
+                                ic.method[mc_idx2] = .{ .key = mc_ip2, .class_ptr = @intFromPtr(obj.class_name.ptr), .native = native, .full_name = full_name };
+                            }
+                        }
                         var args_buf: [16]Value = undefined;
                         for (0..ac) |i| args_buf[i] = self.stack[self.sp - ac + i];
                         self.sp -= ac;
@@ -1654,6 +1829,14 @@ pub const VM = struct {
                             continue;
                         }
                     } else if (self.functions.get(full_name)) |func| {
+                        // populate IC
+                        if (self.ic) |ic| {
+                            const mc_ip2 = self.currentFrame().ip - 4;
+                            const mc_idx2 = InlineCache.methodIndex(@intFromPtr(self.currentChunk()), mc_ip2);
+                            if (mvr.visibility == .public) {
+                                ic.method[mc_idx2] = .{ .key = mc_ip2, .class_ptr = @intFromPtr(obj.class_name.ptr), .func = func, .full_name = full_name };
+                            }
+                        }
                         var new_vars: std.StringHashMapUnmanaged(Value) = .{};
                         try new_vars.put(self.allocator, "$this", .{ .object = obj });
 
@@ -2014,7 +2197,7 @@ pub const VM = struct {
                             self.frame_count -= 1;
                             self.frames[self.frame_count].vars.deinit(self.allocator);
                             if (self.frames[self.frame_count].locals.len > 0) {
-                                self.allocator.free(self.frames[self.frame_count].locals);
+                                self.freeLocals(self.frames[self.frame_count].locals);
                                 self.frames[self.frame_count].locals = &.{};
                             }
                         }
@@ -2229,6 +2412,50 @@ pub const VM = struct {
         }
     }
 
+    fn getLocalGlobal(self: *VM, slot: u16, frame: *CallFrame) Value {
+        if (slot < self.global_slot_names.len and self.global_slot_names[slot].len > 0) {
+            if (frame.ref_slots.count() > 0) {
+                if (frame.ref_slots.get(self.global_slot_names[slot])) |cell| {
+                    return cell.*;
+                }
+            }
+        }
+        if (slot < frame.locals.len) {
+            const val = frame.locals[slot];
+            if (val != .null) return val;
+            if (slot < self.global_slot_names.len and self.global_slot_names[slot].len > 0) {
+                if (frame.vars.get(self.global_slot_names[slot])) |v| {
+                    frame.locals[slot] = v;
+                    return v;
+                }
+            }
+        }
+        return .null;
+    }
+
+    fn setLocalGlobal(self: *VM, slot: u16, val: Value, frame: *CallFrame) void {
+        if (slot < self.global_slot_names.len) {
+            const name = self.global_slot_names[slot];
+            if (name.len > 0 and frame.ref_slots.count() > 0) {
+                if (frame.ref_slots.get(name)) |cell| {
+                    cell.* = val;
+                }
+            }
+        }
+        self.global_vars_dirty = true;
+    }
+
+    fn syncGlobalLocalsToVars(self: *VM) !void {
+        if (!self.global_vars_dirty) return;
+        self.global_vars_dirty = false;
+        const frame = &self.frames[0];
+        for (self.global_slot_names, 0..) |name, i| {
+            if (name.len > 0 and i < frame.locals.len) {
+                try frame.vars.put(self.allocator, name, frame.locals[i]);
+            }
+        }
+    }
+
     fn writebackGlobals(self: *VM) !void {
         var i: usize = 0;
         while (i < self.global_vars.items.len) {
@@ -2236,6 +2463,12 @@ pub const VM = struct {
             if (entry.frame_depth == self.frame_count) {
                 const val = try self.copyValue(self.currentFrame().vars.get(entry.var_name) orelse .null);
                 try self.frames[0].vars.put(self.allocator, entry.var_name, val);
+                for (self.global_slot_names, 0..) |sn, si| {
+                    if (std.mem.eql(u8, sn, entry.var_name)) {
+                        if (si < self.frames[0].locals.len) self.frames[0].locals[si] = val;
+                        break;
+                    }
+                }
                 _ = self.global_vars.swapRemove(i);
             } else {
                 i += 1;
@@ -2572,6 +2805,347 @@ pub const VM = struct {
         }
     }
 
+    fn callClosureLocalsOnly(self: *VM, func: *const ObjFunction, name: []const u8, arg_count: u8) RuntimeError!void {
+        const ac: usize = arg_count;
+        const lc: usize = func.local_count;
+        const ic = self.ic.?;
+        const base = ic.locals_sp;
+
+        const locals = if (base + lc <= ic.locals_cap) blk: {
+            const s = ic.locals_buf[base..base + lc];
+            @memset(s, .null);
+            ic.locals_sp = base + lc;
+            break :blk s;
+        } else blk: {
+            const s = try self.allocator.alloc(Value, lc);
+            @memset(s, .null);
+            break :blk s;
+        };
+
+        // bind args to param slots
+        const bind_count = @min(ac, func.arity);
+        for (0..bind_count) |i| {
+            locals[i] = try self.copyValue(self.stack[self.sp - ac + i]);
+        }
+        for (bind_count..func.arity) |i| {
+            if (i < func.defaults.len) locals[i] = func.defaults[i];
+        }
+        self.sp -= ac;
+
+        // bind captures directly to locals using slot_names
+        for (self.captures.items) |cap| {
+            if (std.mem.eql(u8, cap.closure_name, name)) {
+                for (func.slot_names, 0..) |sn, si| {
+                    if (std.mem.eql(u8, sn, cap.var_name)) {
+                        locals[si] = try self.copyValue(cap.value);
+                        break;
+                    }
+                }
+            }
+        }
+
+        self.frames[self.frame_count] = .{ .chunk = &func.chunk, .ip = 0, .vars = .{}, .locals = locals, .func = func };
+        self.frame_count += 1;
+        try self.fastLoop();
+    }
+
+    fn callLocalsOnly(self: *VM, func: *const ObjFunction, arg_count: u8) RuntimeError!void {
+        const ac: usize = arg_count;
+        const lc: usize = func.local_count;
+        const ic = self.ic.?;
+        const base = ic.locals_sp;
+
+        const locals = if (base + lc <= ic.locals_cap) blk: {
+            const s = ic.locals_buf[base..base + lc];
+            @memset(s, .null);
+            ic.locals_sp = base + lc;
+            break :blk s;
+        } else blk: {
+            const s = try self.allocator.alloc(Value, lc);
+            @memset(s, .null);
+            break :blk s;
+        };
+
+        const bind_count = @min(ac, func.arity);
+        for (0..bind_count) |i| {
+            locals[i] = try self.copyValue(self.stack[self.sp - ac + i]);
+        }
+        for (bind_count..func.arity) |i| {
+            if (i < func.defaults.len) locals[i] = func.defaults[i];
+        }
+        self.sp -= ac;
+        self.frames[self.frame_count] = .{ .chunk = &func.chunk, .ip = 0, .vars = .{}, .locals = locals, .func = func };
+        self.frame_count += 1;
+        try self.fastLoop();
+    }
+
+    // tight inner interpreter with local ip/sp for hot loops in locals-only functions.
+    // handles common opcodes plus call/ret for locals-only functions.
+    // returns to runLoop for anything complex (native calls, closures, exceptions, property access).
+    fn fastLoop(self: *VM) RuntimeError!void {
+        const ic = self.ic.?;
+        const entry_fc = self.frame_count;
+
+        reenter: while (true) {
+            const frame = &self.frames[self.frame_count - 1];
+            const code = frame.chunk.code.items;
+            var locals = frame.locals;
+            const consts = frame.chunk.constants.items;
+            var ip = frame.ip;
+            var sp = self.sp;
+
+            while (true) {
+                const byte = code[ip];
+                ip += 1;
+
+                if (byte == @intFromEnum(OpCode.get_local)) {
+                    const slot = (@as(u16, code[ip]) << 8) | code[ip + 1];
+                    ip += 2;
+                    self.stack[sp] = locals[slot];
+                    sp += 1;
+                } else if (byte == @intFromEnum(OpCode.set_local)) {
+                    const slot = (@as(u16, code[ip]) << 8) | code[ip + 1];
+                    ip += 2;
+                    const val = self.stack[sp - 1];
+                    if (val == .array) {
+                        locals[slot] = try self.copyValue(val);
+                    } else {
+                        locals[slot] = val;
+                    }
+                    // fuse set_local + pop (very common pattern)
+                    if (code[ip] == @intFromEnum(OpCode.pop)) {
+                        ip += 1;
+                        sp -= 1;
+                    }
+                } else if (byte == @intFromEnum(OpCode.add)) {
+                    const b = self.stack[sp - 1];
+                    const a = self.stack[sp - 2];
+                    sp -= 2;
+                    self.stack[sp] = if (a == .int and b == .int) .{ .int = a.int +% b.int } else Value.add(a, b);
+                    sp += 1;
+                } else if (byte == @intFromEnum(OpCode.subtract)) {
+                    const b = self.stack[sp - 1];
+                    const a = self.stack[sp - 2];
+                    sp -= 2;
+                    self.stack[sp] = if (a == .int and b == .int) .{ .int = a.int -% b.int } else Value.subtract(a, b);
+                    sp += 1;
+                } else if (byte == @intFromEnum(OpCode.multiply)) {
+                    const b = self.stack[sp - 1];
+                    const a = self.stack[sp - 2];
+                    sp -= 2;
+                    self.stack[sp] = if (a == .int and b == .int) .{ .int = a.int *% b.int } else Value.multiply(a, b);
+                    sp += 1;
+                } else if (byte == @intFromEnum(OpCode.less)) {
+                    const b = self.stack[sp - 1];
+                    const a = self.stack[sp - 2];
+                    sp -= 2;
+                    self.stack[sp] = .{ .bool = if (a == .int and b == .int) a.int < b.int else Value.lessThan(a, b) };
+                    sp += 1;
+                } else if (byte == @intFromEnum(OpCode.less_equal)) {
+                    const b = self.stack[sp - 1];
+                    const a = self.stack[sp - 2];
+                    sp -= 2;
+                    self.stack[sp] = .{ .bool = if (a == .int and b == .int) a.int <= b.int else !Value.lessThan(b, a) };
+                    sp += 1;
+                } else if (byte == @intFromEnum(OpCode.greater)) {
+                    const b = self.stack[sp - 1];
+                    const a = self.stack[sp - 2];
+                    sp -= 2;
+                    self.stack[sp] = .{ .bool = if (a == .int and b == .int) a.int > b.int else Value.lessThan(b, a) };
+                    sp += 1;
+                } else if (byte == @intFromEnum(OpCode.identical)) {
+                    const b_id = self.stack[sp - 1];
+                    const a_id = self.stack[sp - 2];
+                    sp -= 2;
+                    self.stack[sp] = .{ .bool = Value.identical(a_id, b_id) };
+                    sp += 1;
+                } else if (byte == @intFromEnum(OpCode.not_identical)) {
+                    const b_ni = self.stack[sp - 1];
+                    const a_ni = self.stack[sp - 2];
+                    sp -= 2;
+                    self.stack[sp] = .{ .bool = !Value.identical(a_ni, b_ni) };
+                    sp += 1;
+                } else if (byte == @intFromEnum(OpCode.modulo)) {
+                    const b_mod = self.stack[sp - 1];
+                    const a_mod = self.stack[sp - 2];
+                    sp -= 2;
+                    self.stack[sp] = Value.modulo(a_mod, b_mod);
+                    sp += 1;
+                } else if (byte == @intFromEnum(OpCode.negate)) {
+                    self.stack[sp - 1] = self.stack[sp - 1].negate();
+                } else if (byte == @intFromEnum(OpCode.not)) {
+                    self.stack[sp - 1] = .{ .bool = !self.stack[sp - 1].isTruthy() };
+                } else if (byte == @intFromEnum(OpCode.jump_back)) {
+                    const offset = (@as(u16, code[ip]) << 8) | code[ip + 1];
+                    ip += 2;
+                    ip -= offset;
+                } else if (byte == @intFromEnum(OpCode.constant)) {
+                    const idx = (@as(u16, code[ip]) << 8) | code[ip + 1];
+                    ip += 2;
+                    self.stack[sp] = consts[idx];
+                    sp += 1;
+                } else if (byte == @intFromEnum(OpCode.jump_if_false)) {
+                    const offset = (@as(u16, code[ip]) << 8) | code[ip + 1];
+                    ip += 2;
+                    if (!self.stack[sp - 1].isTruthy()) {
+                        ip += offset;
+                    } else if (code[ip] == @intFromEnum(OpCode.pop)) {
+                        ip += 1;
+                        sp -= 1;
+                    }
+                } else if (byte == @intFromEnum(OpCode.jump)) {
+                    const offset = (@as(u16, code[ip]) << 8) | code[ip + 1];
+                    ip += 2;
+                    ip += offset;
+                } else if (byte == @intFromEnum(OpCode.pop)) {
+                    sp -= 1;
+                } else if (byte == @intFromEnum(OpCode.dup)) {
+                    self.stack[sp] = self.stack[sp - 1];
+                    sp += 1;
+                } else if (byte == @intFromEnum(OpCode.op_null)) {
+                    self.stack[sp] = .null;
+                    sp += 1;
+                } else if (byte == @intFromEnum(OpCode.op_true)) {
+                    self.stack[sp] = .{ .bool = true };
+                    sp += 1;
+                } else if (byte == @intFromEnum(OpCode.op_false)) {
+                    self.stack[sp] = .{ .bool = false };
+                    sp += 1;
+                } else if (byte == @intFromEnum(OpCode.cast_int)) {
+                    self.stack[sp - 1] = .{ .int = Value.toInt(self.stack[sp - 1]) };
+                } else if (byte == @intFromEnum(OpCode.call)) {
+                    const name_idx = (@as(u16, code[ip]) << 8) | code[ip + 1];
+                    const arg_count = code[ip + 2];
+                    ip += 3;
+
+                    const name = consts[name_idx].string;
+                    const func = blk: {
+                        if (ic.fn_cache_name.len == name.len and std.mem.eql(u8, ic.fn_cache_name, name))
+                            break :blk ic.fn_cache_func.?;
+                        if (self.functions.get(name)) |f| {
+                            ic.fn_cache_name = name;
+                            ic.fn_cache_func = f;
+                            break :blk f;
+                        }
+                        // native or unknown - bail to runLoop
+                        frame.ip = ip - 4;
+                        self.sp = sp;
+                        return;
+                    };
+
+                    if (!func.locals_only or self.captures.items.len > 0) {
+                        frame.ip = ip - 4;
+                        self.sp = sp;
+                        return;
+                    }
+
+                    const ac: usize = arg_count;
+                    const lc: usize = func.local_count;
+                    const lbase = ic.locals_sp;
+
+                    if (lbase + lc > ic.locals_cap) {
+                        frame.ip = ip - 4;
+                        self.sp = sp;
+                        return;
+                    }
+
+                    const new_locals = ic.locals_buf[lbase .. lbase + lc];
+                    @memset(new_locals, .null);
+                    ic.locals_sp = lbase + lc;
+
+                    const bind_count = @min(ac, func.arity);
+                    for (0..bind_count) |i| {
+                        new_locals[i] = self.stack[sp - ac + i];
+                    }
+                    for (bind_count..func.arity) |i| {
+                        if (i < func.defaults.len) new_locals[i] = func.defaults[i];
+                    }
+                    sp -= ac;
+
+                    frame.ip = ip;
+                    ic.sp_save[self.frame_count - 1] = sp;
+                    self.sp = sp;
+
+                    self.frames[self.frame_count] = .{
+                        .chunk = &func.chunk,
+                        .ip = 0,
+                        .vars = .{},
+                        .locals = new_locals,
+                        .func = func,
+                    };
+                    self.frame_count += 1;
+                    continue :reenter;
+                } else if (byte == @intFromEnum(OpCode.return_val)) {
+                    const result = self.stack[sp - 1];
+                    ic.locals_sp -= locals.len;
+                    self.frame_count -= 1;
+
+                    if (self.frame_count < entry_fc) {
+                        self.stack[sp - 1] = result;
+                        self.sp = sp;
+                        return;
+                    }
+
+                    // restore caller's sp from saved state and push result
+                    sp = ic.sp_save[self.frame_count - 1];
+                    self.stack[sp] = result;
+                    sp += 1;
+                    self.sp = sp;
+                    continue :reenter;
+                } else if (byte == @intFromEnum(OpCode.return_void)) {
+                    ic.locals_sp -= locals.len;
+                    self.frame_count -= 1;
+
+                    if (self.frame_count < entry_fc) {
+                        self.stack[sp] = .null;
+                        self.sp = sp + 1;
+                        return;
+                    }
+
+                    sp = ic.sp_save[self.frame_count - 1];
+                    self.stack[sp] = .null;
+                    sp += 1;
+                    self.sp = sp;
+                    continue :reenter;
+                } else {
+                    frame.ip = ip - 1;
+                    self.sp = sp;
+                    return;
+                }
+            }
+        }
+    }
+
+    fn executeFunctionLocalsOnly(self: *VM, func: *const ObjFunction, args: []const Value) RuntimeError!Value {
+        const base_frame = self.frame_count;
+        const lc: usize = func.local_count;
+        const ic = self.ic.?;
+        const lbase = ic.locals_sp;
+
+        const locals = if (lbase + lc <= ic.locals_cap) blk: {
+            const s = ic.locals_buf[lbase..lbase + lc];
+            @memset(s, .null);
+            ic.locals_sp = lbase + lc;
+            break :blk s;
+        } else blk: {
+            const s = try self.allocator.alloc(Value, lc);
+            @memset(s, .null);
+            break :blk s;
+        };
+
+        const bind_count = @min(args.len, func.arity);
+        for (0..bind_count) |i| {
+            locals[i] = try self.copyValue(args[i]);
+        }
+        for (bind_count..func.arity) |i| {
+            if (i < func.defaults.len) locals[i] = func.defaults[i];
+        }
+        self.frames[self.frame_count] = .{ .chunk = &func.chunk, .ip = 0, .vars = .{}, .locals = locals, .func = func };
+        self.frame_count += 1;
+        try self.runUntilFrame(base_frame);
+        return self.pop();
+    }
+
     fn allocLocals(self: *VM, func: *const ObjFunction, vars: *const std.StringHashMapUnmanaged(Value)) ![]Value {
         if (func.local_count == 0) return &.{};
         const locals = try self.allocator.alloc(Value, func.local_count);
@@ -2594,9 +3168,21 @@ pub const VM = struct {
         self.frames[self.frame_count].ref_slots.deinit(self.allocator);
         self.frames[self.frame_count].vars.deinit(self.allocator);
         if (self.frames[self.frame_count].locals.len > 0) {
-            self.allocator.free(self.frames[self.frame_count].locals);
+            self.freeLocals(self.frames[self.frame_count].locals);
             self.frames[self.frame_count].locals = &.{};
         }
+    }
+
+    fn freeLocals(self: *VM, locals: []Value) void {
+        if (self.ic) |ic| {
+            const lptr = @intFromPtr(locals.ptr);
+            const sptr = @intFromPtr(ic.locals_buf);
+            if (lptr >= sptr and lptr < sptr + ic.locals_cap * @sizeOf(Value)) {
+                ic.locals_sp -= locals.len;
+                return;
+            }
+        }
+        self.allocator.free(locals);
     }
 
     fn writebackRefs(self: *VM) !void {
@@ -2627,10 +3213,9 @@ pub const VM = struct {
                 const hi = chunk.code.items[scan_end - 2];
                 const lo = chunk.code.items[scan_end - 1];
                 const slot = (@as(u16, hi) << 8) | lo;
-                if (self.currentFrame().func) |func| {
-                    if (slot < func.slot_names.len) {
-                        arg_vars[idx] = func.slot_names[slot];
-                    }
+                const sn = if (self.currentFrame().func) |func| func.slot_names else self.global_slot_names;
+                if (slot < sn.len) {
+                    arg_vars[idx] = sn[slot];
                 }
                 scan_end -= 3;
             } else if (op == @intFromEnum(OpCode.constant)) {
@@ -2800,6 +3385,22 @@ pub const VM = struct {
     }
 
     fn resolveMethod(self: *VM, class_name: []const u8, method_name: []const u8) RuntimeError![]const u8 {
+        // single-entry cache: skip string format + hashmap lookup on repeat calls
+        if (self.method_cache_class.ptr == class_name.ptr and
+            self.method_cache_class.len == class_name.len and
+            self.method_cache_method.ptr == method_name.ptr and
+            self.method_cache_method.len == method_name.len)
+        {
+            return self.method_cache_result;
+        }
+        const result = try self.resolveMethodSlow(class_name, method_name);
+        self.method_cache_class = class_name;
+        self.method_cache_method = method_name;
+        self.method_cache_result = result;
+        return result;
+    }
+
+    fn resolveMethodSlow(self: *VM, class_name: []const u8, method_name: []const u8) RuntimeError![]const u8 {
         var current = class_name;
         var buf: [256]u8 = undefined;
         while (true) {
@@ -2938,6 +3539,12 @@ pub const VM = struct {
             const ac: usize = arg_count;
             if (ac < func.required_params)
                 return error.RuntimeError;
+            if (func.locals_only) {
+                if (self.captures.items.len == 0)
+                    return self.callLocalsOnly(func, arg_count);
+                if (std.mem.startsWith(u8, name, "__closure_"))
+                    return self.callClosureLocalsOnly(func, name, arg_count);
+            }
             var new_vars: std.StringHashMapUnmanaged(Value) = .{};
             var closure_refs: std.StringHashMapUnmanaged(*Value) = .{};
             try self.bindClosures(&new_vars, &closure_refs, name);
@@ -3028,6 +3635,8 @@ pub const VM = struct {
             return native(&ctx, args);
         } else if (self.functions.get(name)) |func| {
             if (args.len < func.required_params) return error.RuntimeError;
+            if (func.locals_only and self.captures.items.len == 0)
+                return self.executeFunctionLocalsOnly(func, args);
             var new_vars: std.StringHashMapUnmanaged(Value) = .{};
             try self.bindClosures(&new_vars, null, name);
             try self.bindArgs(&new_vars, func, args[0..@min(args.len, func.arity)]);
@@ -3098,7 +3707,7 @@ pub const VM = struct {
                 self.frames[self.frame_count].ref_slots.deinit(self.allocator);
                 self.frames[self.frame_count].vars.deinit(self.allocator);
                 if (self.frames[self.frame_count].locals.len > 0) {
-                    self.allocator.free(self.frames[self.frame_count].locals);
+                    self.freeLocals(self.frames[self.frame_count].locals);
                     self.frames[self.frame_count].locals = &.{};
                 }
             }

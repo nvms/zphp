@@ -14,6 +14,8 @@ pub const CompileResult = struct {
     functions: std.ArrayListUnmanaged(ObjFunction),
     string_allocs: std.ArrayListUnmanaged([]const u8),
     allocator: Allocator,
+    local_count: u16 = 0,
+    slot_names: []const []const u8 = &.{},
 
     pub fn deinit(self: *CompileResult) void {
         self.chunk.deinit(self.allocator);
@@ -27,6 +29,7 @@ pub const CompileResult = struct {
         self.functions.deinit(self.allocator);
         for (self.string_allocs.items) |s| self.allocator.free(s);
         self.string_allocs.deinit(self.allocator);
+        if (self.slot_names.len > 0) self.allocator.free(self.slot_names);
     }
 };
 
@@ -68,7 +71,10 @@ pub fn compileWithPath(ast: *const Ast, allocator: Allocator, file_path: []const
     var tp_iter = c.trait_properties.valueIterator();
     while (tp_iter.next()) |v| allocator.free(v.*);
     c.trait_properties.deinit(allocator);
-    return .{ .chunk = c.chunk, .functions = c.functions, .string_allocs = c.string_allocs, .allocator = allocator };
+    const slot_names = try c.buildSlotNames();
+    const local_count = c.next_slot;
+    c.local_slots.deinit(allocator);
+    return .{ .chunk = c.chunk, .functions = c.functions, .string_allocs = c.string_allocs, .allocator = allocator, .local_count = local_count, .slot_names = slot_names };
 }
 
 const Compiler = struct {
@@ -1372,12 +1378,16 @@ const Compiler = struct {
         const local_count = sub.next_slot;
         sub.local_slots.deinit(self.allocator);
 
+        const is_closure = std.mem.startsWith(u8, name, "__closure_");
+        const lo = !is_closure and !gen and !is_variadic and !hasRefParams(ref_flags) and !needsVarSync(&sub.chunk) and sub.closure_count == 0;
+
         try self.functions.append(self.allocator, .{
             .name = name,
             .arity = @intCast(param_nodes.len),
             .required_params = required,
             .is_variadic = is_variadic,
             .is_generator = gen,
+            .locals_only = lo,
             .params = param_names[0..param_nodes.len],
             .defaults = defaults_owned,
             .ref_params = ref_flags,
@@ -2019,11 +2029,14 @@ const Compiler = struct {
         const local_count = sub.next_slot;
         sub.local_slots.deinit(self.allocator);
 
+        const method_lo = !is_variadic and !hasRefParams(ref_flags) and !needsVarSync(&sub.chunk) and sub.closure_count == 0;
+
         try self.functions.append(self.allocator, .{
             .name = full_name,
             .arity = @intCast(param_nodes.len),
             .required_params = required,
             .is_variadic = is_variadic,
+            .locals_only = method_lo,
             .params = param_names[0..param_nodes.len],
             .defaults = defaults_owned,
             .ref_params = ref_flags,
@@ -2547,6 +2560,18 @@ const Compiler = struct {
             _ = sub.getOrCreateSlot(param_names[i]);
         }
 
+        // assign slots to captured variables so they use get_local instead of get_var
+        for (use_vars) |use_var_node| {
+            const use_node = self.ast.nodes[use_var_node];
+            const is_ref = use_node.data.rhs != 0;
+            if (!is_ref) {
+                const var_name = self.ast.tokenSlice(use_node.main_token);
+                _ = sub.getOrCreateSlot(var_name);
+            }
+        }
+        // $this is always bound via closure_bind - give it a slot so the body uses get_local
+        _ = sub.getOrCreateSlot("$this");
+
         try sub.compileNode(body_node);
         try sub.emitOp(.op_null);
         try sub.emitOp(.return_val);
@@ -2560,9 +2585,20 @@ const Compiler = struct {
             break :blk rp;
         } else &[_]bool{};
 
+        // check for ref captures
+        var has_ref_capture = false;
+        for (use_vars) |use_var_node| {
+            if (self.ast.nodes[use_var_node].data.rhs != 0) {
+                has_ref_capture = true;
+                break;
+            }
+        }
+
         const slot_names = try sub.buildSlotNames();
         const local_count = sub.next_slot;
         sub.local_slots.deinit(self.allocator);
+
+        const closure_lo = !is_arrow and !has_any_ref and !has_ref_capture and !needsVarSync(&sub.chunk);
 
         const func = ObjFunction{
             .name = owned_name,
@@ -2570,6 +2606,7 @@ const Compiler = struct {
             .params = param_names[0..param_nodes.len],
             .chunk = sub.chunk,
             .is_arrow = is_arrow,
+            .locals_only = closure_lo,
             .ref_params = ref_params,
             .local_count = local_count,
             .slot_names = slot_names,
@@ -2968,6 +3005,37 @@ const Compiler = struct {
     // emit helpers
     // ==================================================================
 
+    fn hasRefParams(ref_flags: []const bool) bool {
+        for (ref_flags) |r| if (r) return true;
+        return false;
+    }
+
+    fn needsVarSync(chunk: *const Chunk) bool {
+        var i: usize = 0;
+        const code = chunk.code.items;
+        while (i < code.len) {
+            if (i >= code.len) break;
+            const b = code[i];
+            if (b == @intFromEnum(OpCode.concat_assign) or b == @intFromEnum(OpCode.get_global) or b == @intFromEnum(OpCode.get_static) or b == @intFromEnum(OpCode.closure_bind) or b == @intFromEnum(OpCode.closure_bind_ref))
+                return true;
+            // skip operands based on opcode
+            const op: OpCode = @enumFromInt(b);
+            i += switch (op) {
+                .constant, .get_var, .set_var, .jump, .jump_back, .jump_if_false, .jump_if_true,
+                .jump_if_not_null, .push_handler, .get_prop, .set_prop, .get_local, .set_local,
+                .get_global, .concat_assign, .unset_var, .unset_prop, .isset_prop,
+                .closure_bind, .closure_bind_ref, .define_const, .get_static_prop, .set_static_prop,
+                => 3,
+                .call, .call_spread, .new_obj, .method_call, .method_call_spread => 4,
+                .static_call => 6,
+                .static_call_spread, .get_static, .set_static => 5,
+                .require, .call_indirect, .call_indirect_spread => 2,
+                else => 1,
+            };
+        }
+        return false;
+    }
+
     fn getOrCreateSlot(self: *Compiler, name: []const u8) u16 {
         if (self.local_slots.get(name)) |slot| return slot;
         const slot = self.next_slot;
@@ -2981,12 +3049,16 @@ const Compiler = struct {
     }
 
     fn emitGetVar(self: *Compiler, name: []const u8) Error!void {
-        if (self.inFunctionScope()) {
-            if (self.local_slots.get(name)) |slot| {
-                try self.emitOp(.get_local);
-                try self.emitU16(slot);
-                return;
-            }
+        if (self.local_slots.get(name)) |slot| {
+            try self.emitOp(.get_local);
+            try self.emitU16(slot);
+            return;
+        }
+        if (!self.inFunctionScope() and name.len > 0 and name[0] == '$') {
+            const slot = self.getOrCreateSlot(name);
+            try self.emitOp(.get_local);
+            try self.emitU16(slot);
+            return;
         }
         const idx = try self.addConstant(.{ .string = name });
         try self.emitOp(.get_var);
@@ -2994,7 +3066,7 @@ const Compiler = struct {
     }
 
     fn emitSetVar(self: *Compiler, name: []const u8) Error!void {
-        if (self.inFunctionScope()) {
+        if (self.inFunctionScope() or (name.len > 0 and name[0] == '$')) {
             const slot = self.getOrCreateSlot(name);
             try self.emitOp(.set_local);
             try self.emitU16(slot);
