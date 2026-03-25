@@ -786,7 +786,11 @@ pub const VM = struct {
                 .array_push => {
                     const val = self.pop();
                     const arr_val = self.peek();
-                    if (arr_val == .array) try arr_val.array.append(self.allocator, val);
+                    if (arr_val == .array) {
+                        try arr_val.array.append(self.allocator, val);
+                    } else if (arr_val == .object and self.hasMethod(arr_val.object.class_name, "offsetSet")) {
+                        _ = self.callMethod(arr_val.object, "offsetSet", &.{ .null, val }) catch {};
+                    }
                 },
                 .array_set_elem => {
                     const val = self.pop();
@@ -2012,6 +2016,20 @@ pub const VM = struct {
                                 self.sp -= ac;
                                 self.frames[self.frame_count] = .{ .chunk = &func.chunk, .ip = 0, .vars = new_vars, .called_class = class_name };
                                 self.frame_count += 1;
+                            } else if (self.native_fns.get(full_name)) |native| {
+                                const ac: usize = arg_count;
+                                var args_buf: [16]Value = undefined;
+                                for (0..ac) |i| args_buf[i] = self.stack[self.sp - ac + i];
+                                self.sp -= ac;
+                                var tmp_vars: std.StringHashMapUnmanaged(Value) = .{};
+                                try tmp_vars.put(self.allocator, "$this", tv);
+                                self.frames[self.frame_count] = .{ .chunk = self.currentChunk(), .ip = self.currentFrame().ip, .vars = tmp_vars };
+                                self.frame_count += 1;
+                                var ctx = self.makeContext(null);
+                                const result = try native(&ctx, args_buf[0..ac]);
+                                self.frame_count -= 1;
+                                self.frames[self.frame_count].vars.deinit(self.allocator);
+                                self.push(result);
                             } else return error.RuntimeError;
                         } else {
                             try self.callNamedFunction(full_name, arg_count);
@@ -2592,7 +2610,7 @@ pub const VM = struct {
         return null;
     }
 
-    fn hasMethod(self: *VM, class_name: []const u8, method_name: []const u8) bool {
+    pub fn hasMethod(self: *VM, class_name: []const u8, method_name: []const u8) bool {
         var current = class_name;
         var buf: [256]u8 = undefined;
         while (true) {

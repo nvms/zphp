@@ -98,10 +98,16 @@ fn native_constant(ctx: *NativeContext, args: []const Value) RuntimeError!Value 
     return ctx.vm.php_constants.get(args[0].string) orelse .null;
 }
 
-fn count(_: *NativeContext, args: []const Value) RuntimeError!Value {
+fn count(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len == 0) return .{ .int = 0 };
     return switch (args[0]) {
         .array => |a| .{ .int = a.length() },
+        .object => |obj| {
+            if (ctx.vm.hasMethod(obj.class_name, "count")) {
+                return ctx.vm.callMethod(obj, "count", &.{}) catch .{ .int = 1 };
+            }
+            return .{ .int = 1 };
+        },
         else => .{ .int = 1 },
     };
 }
