@@ -3126,103 +3126,77 @@ pub const VM = struct {
                     ip += 1;
                     const ci_acn: usize = ci_ac;
                     const ci_name_val = self.stack[sp - ci_acn - 1];
-                    if (ci_name_val == .string) {
-                        const ci_name = ci_name_val.string;
-                        // shift args down to overwrite the callable
-                        for (0..ci_acn) |i| {
-                            self.stack[sp - ci_acn - 1 + i] = self.stack[sp - ci_acn + i];
-                        }
-                        sp -= 1;
+                    if (ci_name_val != .string) {
+                        frame.ip = ip - 2;
                         self.sp = sp;
-                        frame.ip = ip;
-                        // look up function
-                        const ci_func = self.functions.get(ci_name) orelse {
-                            // native or unknown - bail
-                            frame.ip = ip - 2;
-                            self.sp = sp + 1;
-                            return;
-                        };
-                        if (ci_func.locals_only and (self.captures.items.len == 0 or !self.hasCaptures(ci_name))) {
-                            // plain locals-only function (or closure with no captures)
-                            const ci_lc: usize = ci_func.local_count;
-                            const ci_lbase = ic.locals_sp;
-                            if (ci_lbase + ci_lc > ic.locals_cap) {
-                                frame.ip = ip - 2;
-                                self.sp = sp;
-                                return;
-                            }
-                            const ci_locals = ic.locals_buf[ci_lbase .. ci_lbase + ci_lc];
-                            @memset(ci_locals, .null);
-                            ic.locals_sp = ci_lbase + ci_lc;
-                            const ci_bind = @min(ci_acn, ci_func.arity);
-                            for (0..ci_bind) |i| ci_locals[i] = self.stack[sp - ci_acn + i];
-                            for (ci_bind..ci_func.arity) |i| {
-                                if (i < ci_func.defaults.len) ci_locals[i] = ci_func.defaults[i];
-                            }
-                            sp -= ci_acn;
-                            ic.sp_save[self.frame_count - 1] = sp;
-                            self.sp = sp;
-                            self.frames[self.frame_count] = .{
-                                .chunk = &ci_func.chunk,
-                                .ip = 0,
-                                .vars = .{},
-                                .locals = ci_locals,
-                                .func = ci_func,
-                            };
-                            self.frame_count += 1;
-                            continue :reenter;
-                        } else if (ci_func.locals_only and std.mem.startsWith(u8, ci_name, "__closure_")) {
-                            // closure locals-only
-                            const ci_lc: usize = ci_func.local_count;
-                            const ci_lbase = ic.locals_sp;
-                            if (ci_lbase + ci_lc > ic.locals_cap) {
-                                frame.ip = ip - 2;
-                                self.sp = sp;
-                                return;
-                            }
-                            const ci_locals = ic.locals_buf[ci_lbase .. ci_lbase + ci_lc];
-                            @memset(ci_locals, .null);
-                            ic.locals_sp = ci_lbase + ci_lc;
-                            const ci_bind = @min(ci_acn, ci_func.arity);
-                            for (0..ci_bind) |i| ci_locals[i] = self.stack[sp - ci_acn + i];
-                            for (ci_bind..ci_func.arity) |i| {
-                                if (i < ci_func.defaults.len) ci_locals[i] = ci_func.defaults[i];
-                            }
-                            sp -= ci_acn;
-                            // bind captures to locals (pointer compare fast-reject)
-                            for (self.captures.items) |cap| {
-                                if (cap.closure_name.ptr == ci_name.ptr or
-                                    (cap.closure_name.len == ci_name.len and std.mem.eql(u8, cap.closure_name, ci_name)))
-                                {
-                                    for (ci_func.slot_names, 0..) |sn, si| {
-                                        if (sn.len == cap.var_name.len and std.mem.eql(u8, sn, cap.var_name)) {
-                                            ci_locals[si] = cap.value;
-                                            break;
-                                        }
+                        return;
+                    }
+                    const ci_name = ci_name_val.string;
+                    const ci_func = self.functions.get(ci_name) orelse {
+                        frame.ip = ip - 2;
+                        self.sp = sp;
+                        return;
+                    };
+                    // only handle locals-only functions in fastLoop
+                    if (!ci_func.locals_only) {
+                        frame.ip = ip - 2;
+                        self.sp = sp;
+                        return;
+                    }
+                    const has_caps = self.captures.items.len > 0 and self.hasCaptures(ci_name);
+                    if (has_caps and !std.mem.startsWith(u8, ci_name, "__closure_")) {
+                        frame.ip = ip - 2;
+                        self.sp = sp;
+                        return;
+                    }
+                    const ci_lc: usize = ci_func.local_count;
+                    const ci_lbase = ic.locals_sp;
+                    if (ci_lbase + ci_lc > ic.locals_cap) {
+                        frame.ip = ip - 2;
+                        self.sp = sp;
+                        return;
+                    }
+                    // past all bail points - safe to modify stack
+                    // shift args down to overwrite the callable
+                    for (0..ci_acn) |i| {
+                        self.stack[sp - ci_acn - 1 + i] = self.stack[sp - ci_acn + i];
+                    }
+                    sp -= 1;
+                    const ci_locals = ic.locals_buf[ci_lbase .. ci_lbase + ci_lc];
+                    @memset(ci_locals, .null);
+                    ic.locals_sp = ci_lbase + ci_lc;
+                    const ci_bind = @min(ci_acn, ci_func.arity);
+                    for (0..ci_bind) |i| ci_locals[i] = self.stack[sp - ci_acn + i];
+                    for (ci_bind..ci_func.arity) |i| {
+                        if (i < ci_func.defaults.len) ci_locals[i] = ci_func.defaults[i];
+                    }
+                    sp -= ci_acn;
+                    if (has_caps) {
+                        for (self.captures.items) |cap| {
+                            if (cap.closure_name.ptr == ci_name.ptr or
+                                (cap.closure_name.len == ci_name.len and std.mem.eql(u8, cap.closure_name, ci_name)))
+                            {
+                                for (ci_func.slot_names, 0..) |sn, si| {
+                                    if (sn.len == cap.var_name.len and std.mem.eql(u8, sn, cap.var_name)) {
+                                        ci_locals[si] = cap.value;
+                                        break;
                                     }
                                 }
                             }
-                            ic.sp_save[self.frame_count - 1] = sp;
-                            self.sp = sp;
-                            self.frames[self.frame_count] = .{
-                                .chunk = &ci_func.chunk,
-                                .ip = 0,
-                                .vars = .{},
-                                .locals = ci_locals,
-                                .func = ci_func,
-                            };
-                            self.frame_count += 1;
-                            continue :reenter;
                         }
-                        // non-locals-only closure/function - bail
-                        frame.ip = ip - 2;
-                        self.sp = sp + 1;
-                        return;
                     }
-                    // non-string callable - bail
-                    frame.ip = ip - 2;
+                    ic.sp_save[self.frame_count - 1] = sp;
                     self.sp = sp;
-                    return;
+                    frame.ip = ip;
+                    self.frames[self.frame_count] = .{
+                        .chunk = &ci_func.chunk,
+                        .ip = 0,
+                        .vars = .{},
+                        .locals = ci_locals,
+                        .func = ci_func,
+                    };
+                    self.frame_count += 1;
+                    continue :reenter;
                 } else if (byte == @intFromEnum(OpCode.get_prop)) {
                     const gp_ip = ip;
                     ip += 2;
