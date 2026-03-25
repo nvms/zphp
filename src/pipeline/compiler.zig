@@ -1372,12 +1372,16 @@ const Compiler = struct {
         const local_count = sub.next_slot;
         sub.local_slots.deinit(self.allocator);
 
+        const is_closure = std.mem.startsWith(u8, name, "__closure_");
+        const lo = !is_closure and !gen and !is_variadic and !hasRefParams(ref_flags) and !needsVarSync(&sub.chunk) and sub.closure_count == 0;
+
         try self.functions.append(self.allocator, .{
             .name = name,
             .arity = @intCast(param_nodes.len),
             .required_params = required,
             .is_variadic = is_variadic,
             .is_generator = gen,
+            .locals_only = lo,
             .params = param_names[0..param_nodes.len],
             .defaults = defaults_owned,
             .ref_params = ref_flags,
@@ -2967,6 +2971,23 @@ const Compiler = struct {
     // ==================================================================
     // emit helpers
     // ==================================================================
+
+    fn hasRefParams(ref_flags: []const bool) bool {
+        for (ref_flags) |r| if (r) return true;
+        return false;
+    }
+
+    fn needsVarSync(chunk: *const Chunk) bool {
+        for (chunk.code.items) |byte| {
+            if (byte == @intFromEnum(OpCode.concat_assign) or
+                byte == @intFromEnum(OpCode.get_global) or
+                byte == @intFromEnum(OpCode.get_static) or
+                byte == @intFromEnum(OpCode.closure_bind) or
+                byte == @intFromEnum(OpCode.closure_bind_ref))
+                return true;
+        }
+        return false;
+    }
 
     fn getOrCreateSlot(self: *Compiler, name: []const u8) u16 {
         if (self.local_slots.get(name)) |slot| return slot;

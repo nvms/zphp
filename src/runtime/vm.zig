@@ -2572,6 +2572,39 @@ pub const VM = struct {
         }
     }
 
+    fn callLocalsOnly(self: *VM, func: *const ObjFunction, arg_count: u8) RuntimeError!void {
+        const ac: usize = arg_count;
+        const locals = try self.allocator.alloc(Value, func.local_count);
+        @memset(locals, .null);
+        const bind_count = @min(ac, func.arity);
+        for (0..bind_count) |i| {
+            locals[i] = try self.copyValue(self.stack[self.sp - ac + i]);
+        }
+        for (bind_count..func.arity) |i| {
+            if (i < func.defaults.len) locals[i] = func.defaults[i];
+        }
+        self.sp -= ac;
+        self.frames[self.frame_count] = .{ .chunk = &func.chunk, .ip = 0, .vars = .{}, .locals = locals, .func = func };
+        self.frame_count += 1;
+    }
+
+    fn executeFunctionLocalsOnly(self: *VM, func: *const ObjFunction, args: []const Value) RuntimeError!Value {
+        const base_frame = self.frame_count;
+        const locals = try self.allocator.alloc(Value, func.local_count);
+        @memset(locals, .null);
+        const bind_count = @min(args.len, func.arity);
+        for (0..bind_count) |i| {
+            locals[i] = try self.copyValue(args[i]);
+        }
+        for (bind_count..func.arity) |i| {
+            if (i < func.defaults.len) locals[i] = func.defaults[i];
+        }
+        self.frames[self.frame_count] = .{ .chunk = &func.chunk, .ip = 0, .vars = .{}, .locals = locals, .func = func };
+        self.frame_count += 1;
+        try self.runUntilFrame(base_frame);
+        return self.pop();
+    }
+
     fn allocLocals(self: *VM, func: *const ObjFunction, vars: *const std.StringHashMapUnmanaged(Value)) ![]Value {
         if (func.local_count == 0) return &.{};
         const locals = try self.allocator.alloc(Value, func.local_count);
@@ -2938,6 +2971,8 @@ pub const VM = struct {
             const ac: usize = arg_count;
             if (ac < func.required_params)
                 return error.RuntimeError;
+            if (func.locals_only and self.captures.items.len == 0)
+                return self.callLocalsOnly(func, arg_count);
             var new_vars: std.StringHashMapUnmanaged(Value) = .{};
             var closure_refs: std.StringHashMapUnmanaged(*Value) = .{};
             try self.bindClosures(&new_vars, &closure_refs, name);
@@ -3028,6 +3063,8 @@ pub const VM = struct {
             return native(&ctx, args);
         } else if (self.functions.get(name)) |func| {
             if (args.len < func.required_params) return error.RuntimeError;
+            if (func.locals_only and self.captures.items.len == 0)
+                return self.executeFunctionLocalsOnly(func, args);
             var new_vars: std.StringHashMapUnmanaged(Value) = .{};
             try self.bindClosures(&new_vars, null, name);
             try self.bindArgs(&new_vars, func, args[0..@min(args.len, func.arity)]);
