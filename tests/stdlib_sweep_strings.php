@@ -120,7 +120,7 @@ echo $url['fragment'] . "\n";
 echo strstr("user@example.com", "@") . "\n";
 
 // str_getcsv
-$csv = str_getcsv("one,two,three");
+$csv = str_getcsv("one,two,three", ",", "\"", "\\");
 echo count($csv) . " " . $csv[0] . " " . $csv[2] . "\n";
 
 // crc32

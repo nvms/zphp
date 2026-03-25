@@ -174,7 +174,7 @@ echo "yield from: " . implode(", ", $combined) . "\n";
 function csvRows(array $lines): Generator
 {
     foreach ($lines as $line) {
-        yield str_getcsv($line);
+        yield str_getcsv($line, ",", "\"", "\\");
     }
 }
 
