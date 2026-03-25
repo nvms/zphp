@@ -1027,7 +1027,7 @@ const Compiler = struct {
             try self.emitOp(if (op_tag == .plus_plus) .add else .subtract);
             try self.emitOp(.set_prop);
             try self.emitU16(prop_idx);
-            // stack: [old_val]
+            try self.emitOp(.pop);
             return;
         }
 

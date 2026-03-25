@@ -907,6 +907,9 @@ pub const VM = struct {
                     const v = self.pop();
                     if (v == .string) {
                         self.push(v);
+                    } else if (v == .object) {
+                        const s = try self.objectToString(v.object);
+                        self.push(.{ .string = s });
                     } else {
                         var buf = std.ArrayListUnmanaged(u8){};
                         try v.format(&buf, self.allocator);
