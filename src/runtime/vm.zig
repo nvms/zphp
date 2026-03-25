@@ -248,6 +248,7 @@ pub const VM = struct {
 
         const PropIC = struct {
             key: usize = 0,
+            chunk_key: usize = 0,
             class_ptr: usize = 0,
             slot_index: u16 = 0xFFFF,
         };
@@ -1651,7 +1652,8 @@ pub const VM = struct {
                         if (self.ic) |ic| {
                             const gp_idx = InlineCache.propIndex(@intFromPtr(self.currentChunk()), gp_ip);
                             const gp_entry = &ic.prop[gp_idx];
-                            if (gp_entry.key == gp_ip and gp_entry.class_ptr == @intFromPtr(obj.class_name.ptr)) {
+                            const gp_chunk_key = @intFromPtr(self.currentChunk());
+                            if (gp_entry.key == gp_ip and gp_entry.chunk_key == gp_chunk_key and gp_entry.class_ptr == @intFromPtr(obj.class_name.ptr)) {
                                 if (gp_entry.slot_index != 0xFFFF) {
                                     if (obj.slots) |s| {
                                         self.push(s[gp_entry.slot_index]);
@@ -1678,7 +1680,7 @@ pub const VM = struct {
                                 if (vr.visibility == .public) {
                                     const gp_idx = InlineCache.propIndex(@intFromPtr(self.currentChunk()), gp_ip);
                                     const si = if (obj.slot_layout != null) obj.getSlotIndex(prop_name) orelse @as(u16, 0xFFFF) else @as(u16, 0xFFFF);
-                                    ic.prop[gp_idx] = .{ .key = gp_ip, .class_ptr = @intFromPtr(obj.class_name.ptr), .slot_index = si };
+                                    ic.prop[gp_idx] = .{ .key = gp_ip, .chunk_key = @intFromPtr(self.currentChunk()), .class_ptr = @intFromPtr(obj.class_name.ptr), .slot_index = si };
                                 }
                             }
                             self.push(val);
@@ -1706,7 +1708,7 @@ pub const VM = struct {
                         if (self.ic) |ic| {
                             const sp_idx = InlineCache.propIndex(@intFromPtr(self.currentChunk()), sp_ip);
                             const sp_entry = &ic.prop[sp_idx];
-                            if (sp_entry.key == sp_ip and sp_entry.class_ptr == @intFromPtr(obj.class_name.ptr) and sp_entry.slot_index != 0xFFFF) {
+                            if (sp_entry.key == sp_ip and sp_entry.chunk_key == @intFromPtr(self.currentChunk()) and sp_entry.class_ptr == @intFromPtr(obj.class_name.ptr) and sp_entry.slot_index != 0xFFFF) {
                                 if (obj.slots) |s| {
                                     s[sp_entry.slot_index] = val;
                                     self.push(val);
@@ -1745,7 +1747,7 @@ pub const VM = struct {
                                 if (vr.visibility == .public) {
                                     const sp_idx = InlineCache.propIndex(@intFromPtr(self.currentChunk()), sp_ip);
                                     const si = if (obj.slot_layout != null) obj.getSlotIndex(prop_name) orelse @as(u16, 0xFFFF) else @as(u16, 0xFFFF);
-                                    ic.prop[sp_idx] = .{ .key = sp_ip, .class_ptr = @intFromPtr(obj.class_name.ptr), .slot_index = si };
+                                    ic.prop[sp_idx] = .{ .key = sp_ip, .chunk_key = @intFromPtr(self.currentChunk()), .class_ptr = @intFromPtr(obj.class_name.ptr), .slot_index = si };
                                 }
                             }
                         }
@@ -3277,7 +3279,7 @@ pub const VM = struct {
                         const gp_obj = gp_obj_val.object;
                         const gp_idx = InlineCache.propIndex(@intFromPtr(frame.chunk), gp_ip);
                         const gp_entry = &ic.prop[gp_idx];
-                        if (gp_entry.key == gp_ip and gp_entry.class_ptr == @intFromPtr(gp_obj.class_name.ptr) and gp_entry.slot_index != 0xFFFF) {
+                        if (gp_entry.key == gp_ip and gp_entry.chunk_key == @intFromPtr(frame.chunk) and gp_entry.class_ptr == @intFromPtr(gp_obj.class_name.ptr) and gp_entry.slot_index != 0xFFFF) {
                             if (gp_obj.slots) |s| {
                                 self.stack[sp - 1] = s[gp_entry.slot_index];
                                 continue;
@@ -3297,7 +3299,7 @@ pub const VM = struct {
                         const sp_obj = sp_obj_val.object;
                         const sp_idx = InlineCache.propIndex(@intFromPtr(frame.chunk), sp_ip);
                         const sp_entry = &ic.prop[sp_idx];
-                        if (sp_entry.key == sp_ip and sp_entry.class_ptr == @intFromPtr(sp_obj.class_name.ptr) and sp_entry.slot_index != 0xFFFF) {
+                        if (sp_entry.key == sp_ip and sp_entry.chunk_key == @intFromPtr(frame.chunk) and sp_entry.class_ptr == @intFromPtr(sp_obj.class_name.ptr) and sp_entry.slot_index != 0xFFFF) {
                             if (sp_obj.slots) |s| {
                                 const copied = if (sp_val == .array) try self.copyValue(sp_val) else sp_val;
                                 s[sp_entry.slot_index] = copied;
