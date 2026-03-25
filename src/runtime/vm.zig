@@ -216,6 +216,9 @@ pub const VM = struct {
     allocator: Allocator,
     global_slot_names: []const []const u8 = &.{},
     global_vars_dirty: bool = false,
+    method_cache_class: []const u8 = "",
+    method_cache_method: []const u8 = "",
+    method_cache_result: []const u8 = "",
 
     const StaticEntry = struct {
         var_name: []const u8,
@@ -3051,6 +3054,22 @@ pub const VM = struct {
     }
 
     fn resolveMethod(self: *VM, class_name: []const u8, method_name: []const u8) RuntimeError![]const u8 {
+        // single-entry cache: skip string format + hashmap lookup on repeat calls
+        if (self.method_cache_class.ptr == class_name.ptr and
+            self.method_cache_class.len == class_name.len and
+            self.method_cache_method.ptr == method_name.ptr and
+            self.method_cache_method.len == method_name.len)
+        {
+            return self.method_cache_result;
+        }
+        const result = try self.resolveMethodSlow(class_name, method_name);
+        self.method_cache_class = class_name;
+        self.method_cache_method = method_name;
+        self.method_cache_result = result;
+        return result;
+    }
+
+    fn resolveMethodSlow(self: *VM, class_name: []const u8, method_name: []const u8) RuntimeError![]const u8 {
         var current = class_name;
         var buf: [256]u8 = undefined;
         while (true) {
