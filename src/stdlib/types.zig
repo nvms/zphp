@@ -545,8 +545,49 @@ fn native_exit(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     return error.RuntimeError;
 }
 
-fn parseVersionPart(s: []const u8) i64 {
-    return std.fmt.parseInt(i64, s, 10) catch 0;
+const VersionToken = struct {
+    is_num: bool,
+    num: i64 = 0,
+    tag_weight: i64 = 0, // dev=-4 alpha=-3 beta=-2 rc=-1 none=0 pl=1
+};
+
+fn tagWeight(s: []const u8) i64 {
+    if (s.len == 0) return 0;
+    var buf: [10]u8 = undefined;
+    const len = @min(s.len, 10);
+    for (0..len) |i| buf[i] = std.ascii.toLower(s[i]);
+    const lower = buf[0..len];
+    if (std.mem.eql(u8, lower, "dev")) return -4;
+    if (std.mem.eql(u8, lower, "alpha") or std.mem.eql(u8, lower, "a")) return -3;
+    if (std.mem.eql(u8, lower, "beta") or std.mem.eql(u8, lower, "b")) return -2;
+    if (std.mem.startsWith(u8, lower, "rc")) return -1;
+    if (std.mem.eql(u8, lower, "pl") or std.mem.eql(u8, lower, "p")) return 1;
+    return -3; // unknown tags treated as alpha
+}
+
+fn tokenizeVersion(s: []const u8, out: *[16]VersionToken) usize {
+    var tok_count: usize = 0;
+    var i: usize = 0;
+    while (i < s.len and tok_count < 16) {
+        if (s[i] == '.' or s[i] == '-' or s[i] == '_') {
+            i += 1;
+            continue;
+        }
+        if (std.ascii.isDigit(s[i])) {
+            var end = i + 1;
+            while (end < s.len and std.ascii.isDigit(s[end])) end += 1;
+            out[tok_count] = .{ .is_num = true, .num = std.fmt.parseInt(i64, s[i..end], 10) catch 0 };
+            tok_count += 1;
+            i = end;
+        } else {
+            var end = i + 1;
+            while (end < s.len and std.ascii.isAlphabetic(s[end])) end += 1;
+            out[tok_count] = .{ .is_num = false, .tag_weight = tagWeight(s[i..end]) };
+            tok_count += 1;
+            i = end;
+        }
+    }
+    return tok_count;
 }
 
 fn native_version_compare(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
@@ -554,31 +595,45 @@ fn native_version_compare(ctx: *NativeContext, args: []const Value) RuntimeError
     const v1 = args[0].string;
     const v2 = args[1].string;
 
-    var parts1: [8]i64 = .{ -1, -1, -1, -1, -1, -1, -1, -1 };
-    var parts2: [8]i64 = .{ -1, -1, -1, -1, -1, -1, -1, -1 };
-
-    var count1: usize = 0;
-    var iter1 = std.mem.splitScalar(u8, v1, '.');
-    while (iter1.next()) |part| {
-        if (count1 >= 8) break;
-        parts1[count1] = parseVersionPart(part);
-        count1 += 1;
-    }
-    var count2: usize = 0;
-    var iter2 = std.mem.splitScalar(u8, v2, '.');
-    while (iter2.next()) |part| {
-        if (count2 >= 8) break;
-        parts2[count2] = parseVersionPart(part);
-        count2 += 1;
-    }
+    var toks1: [16]VersionToken = undefined;
+    var toks2: [16]VersionToken = undefined;
+    const count1 = tokenizeVersion(v1, &toks1);
+    const count2 = tokenizeVersion(v2, &toks2);
 
     const max_parts = @max(count1, count2);
     var cmp: i64 = 0;
     for (0..max_parts) |j| {
-        const a = if (j < count1) parts1[j] else @as(i64, -1);
-        const b = if (j < count2) parts2[j] else @as(i64, -1);
-        if (a < b) { cmp = -1; break; }
-        if (a > b) { cmp = 1; break; }
+        const has_a = j < count1;
+        const has_b = j < count2;
+        if (!has_a and !has_b) break;
+
+        if (has_a and !has_b) {
+            if (toks1[j].is_num) { cmp = 1; break; } else {
+                // tag vs implicit release: tag < release
+                if (toks1[j].tag_weight < 0) { cmp = -1; break; }
+                if (toks1[j].tag_weight > 0) { cmp = 1; break; }
+            }
+        }
+        if (!has_a and has_b) {
+            if (toks2[j].is_num) { cmp = -1; break; } else {
+                if (toks2[j].tag_weight < 0) { cmp = 1; break; }
+                if (toks2[j].tag_weight > 0) { cmp = -1; break; }
+            }
+        }
+        if (has_a and has_b) {
+            const a = toks1[j];
+            const b = toks2[j];
+            if (a.is_num and b.is_num) {
+                if (a.num < b.num) { cmp = -1; break; }
+                if (a.num > b.num) { cmp = 1; break; }
+            } else if (!a.is_num and !b.is_num) {
+                if (a.tag_weight < b.tag_weight) { cmp = -1; break; }
+                if (a.tag_weight > b.tag_weight) { cmp = 1; break; }
+            } else {
+                // num vs tag: in PHP context, a number part > a tag part
+                if (a.is_num) { cmp = 1; break; } else { cmp = -1; break; }
+            }
+        }
     }
 
     if (args.len >= 3 and args[2] == .string) {
@@ -723,27 +778,15 @@ fn native_class_alias(ctx: *NativeContext, args: []const Value) RuntimeError!Val
             try alias_def.interfaces.append(ctx.allocator, iface);
         }
         try ctx.vm.classes.put(ctx.allocator, alias, alias_def);
-        // register aliased methods so ClassName::method lookups work
+        // copy method info so hasMethod and method visibility checks work
         var method_iter = cls.methods.iterator();
         while (method_iter.next()) |entry| {
-            const method_name = entry.key_ptr.*;
-            var orig_buf: [256]u8 = undefined;
-            const orig_full = std.fmt.bufPrint(&orig_buf, "{s}::{s}", .{ original, method_name }) catch continue;
-            if (ctx.vm.functions.get(orig_full)) |func| {
-                var alias_buf: [256]u8 = undefined;
-                const alias_full = std.fmt.bufPrint(&alias_buf, "{s}::{s}", .{ alias, method_name }) catch continue;
-                const key = try ctx.allocator.dupe(u8, alias_full);
-                try ctx.strings.append(ctx.allocator, key);
-                try ctx.vm.functions.put(ctx.allocator, key, func);
-            }
-            if (ctx.vm.native_fns.get(orig_full)) |native| {
-                var alias_buf: [256]u8 = undefined;
-                const alias_full = std.fmt.bufPrint(&alias_buf, "{s}::{s}", .{ alias, method_name }) catch continue;
-                const key = try ctx.allocator.dupe(u8, alias_full);
-                try ctx.strings.append(ctx.allocator, key);
-                try ctx.vm.native_fns.put(ctx.allocator, key, native);
-            }
+            var alias_class = ctx.vm.classes.getPtr(alias) orelse continue;
+            try alias_class.methods.put(ctx.allocator, entry.key_ptr.*, entry.value_ptr.*);
         }
+        // don't register alias::method in functions map - resolveMethod walks
+        // the parent chain and must find the original class name for correct
+        // private visibility checks in currentDefiningClass
         return .{ .bool = true };
     }
     return .{ .bool = false };
