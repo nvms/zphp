@@ -811,10 +811,16 @@ pub const VM = struct {
                         self.push(result);
                     } else if (name_val == .array) {
                         const arr = name_val.array;
-                        if (arr.entries.items.len != 2) return error.RuntimeError;
+                        if (arr.entries.items.len != 2) {
+                            self.error_msg = std.fmt.allocPrint(self.allocator, "Fatal error: Uncaught TypeError: Array callback must have exactly two elements", .{}) catch null;
+                            return error.RuntimeError;
+                        }
                         const target = arr.entries.items[0].value;
                         const method_val = arr.entries.items[1].value;
-                        if (method_val != .string) return error.RuntimeError;
+                        if (method_val != .string) {
+                            self.error_msg = std.fmt.allocPrint(self.allocator, "Fatal error: Uncaught TypeError: Method name must be a string", .{}) catch null;
+                            return error.RuntimeError;
+                        }
                         const method = method_val.string;
                         var args_buf: [16]Value = undefined;
                         for (0..ac) |i| args_buf[i] = self.stack[self.sp - ac + i];
@@ -826,16 +832,25 @@ pub const VM = struct {
                             var buf: [256]u8 = undefined;
                             const full = std.fmt.bufPrint(&buf, "{s}::{s}", .{ target.string, method }) catch return error.RuntimeError;
                             break :blk try ctx.vm.callByName(full, args_buf[0..ac]);
-                        } else return error.RuntimeError;
+                        } else {
+                            self.error_msg = std.fmt.allocPrint(self.allocator, "Fatal error: Uncaught TypeError: Value of type {s} is not callable", .{valueTypeName(target)}) catch null;
+                            return error.RuntimeError;
+                        };
                         self.push(result);
-                    } else return error.RuntimeError;
+                    } else {
+                        self.error_msg = std.fmt.allocPrint(self.allocator, "Fatal error: Uncaught TypeError: Value of type {s} is not callable", .{valueTypeName(name_val)}) catch null;
+                        return error.RuntimeError;
+                    }
                 },
                 .call_spread => {
                     if (self.global_vars_dirty) try self.syncGlobalLocalsToVars();
                     const name_idx = self.readU16();
                     const name = self.currentChunk().constants.items[name_idx].string;
                     const args_val = self.pop();
-                    if (args_val != .array) return error.RuntimeError;
+                    if (args_val != .array) {
+                        self.error_msg = std.fmt.allocPrint(self.allocator, "Fatal error: Uncaught TypeError: Argument unpacking requires an array", .{}) catch null;
+                        return error.RuntimeError;
+                    }
                     const arr = args_val.array;
                     // check if any args are named (string keys)
                     var has_named = false;
@@ -902,7 +917,10 @@ pub const VM = struct {
                     // stack: [... args_array, func_name]
                     const name_val = self.pop();
                     const args_val = self.pop();
-                    if (args_val != .array or name_val != .string) return error.RuntimeError;
+                    if (args_val != .array or name_val != .string) {
+                        self.error_msg = std.fmt.allocPrint(self.allocator, "Fatal error: Uncaught TypeError: Value of type {s} is not callable", .{valueTypeName(name_val)}) catch null;
+                        return error.RuntimeError;
+                    }
                     const arr = args_val.array;
                     for (arr.entries.items) |entry| {
                         self.push(entry.value);
@@ -1605,7 +1623,12 @@ pub const VM = struct {
                                     };
                                     self.frame_count += 1;
                                     self.runUntilFrame(return_frame) catch {
-                                        if (is_require) return error.RuntimeError;
+                                        if (is_require) {
+                                            if (self.error_msg == null and self.pending_exception == null) {
+                                                self.error_msg = std.fmt.allocPrint(self.allocator, "Fatal error: require(): Failed opening required '{s}'", .{path}) catch null;
+                                            }
+                                            return error.RuntimeError;
+                                        }
                                         self.push(.{ .bool = false });
                                         continue;
                                     };
@@ -1620,11 +1643,17 @@ pub const VM = struct {
                                     }
                                     self.push(.{ .bool = true });
                                 } else {
-                                    if (is_require) return error.RuntimeError;
+                                    if (is_require) {
+                                        self.error_msg = std.fmt.allocPrint(self.allocator, "Fatal error: require(): Failed opening required '{s}'", .{path}) catch null;
+                                        return error.RuntimeError;
+                                    }
                                     self.push(.{ .bool = false });
                                 }
                             } else {
-                                if (is_require) return error.RuntimeError;
+                                if (is_require) {
+                                    self.error_msg = std.fmt.allocPrint(self.allocator, "Fatal error: require(): Failed opening required '{s}'", .{path}) catch null;
+                                    return error.RuntimeError;
+                                }
                                 self.push(.{ .bool = false });
                             }
                         }
@@ -1967,6 +1996,7 @@ pub const VM = struct {
                         } else if (std.mem.eql(u8, method_name, "getReturn")) {
                             self.push(gen.return_value);
                         } else {
+                            self.error_msg = std.fmt.allocPrint(self.allocator, "Fatal error: Uncaught Error: Call to undefined method Generator::{s}()", .{method_name}) catch null;
                             return error.RuntimeError;
                         }
                         continue;
@@ -2036,12 +2066,17 @@ pub const VM = struct {
                         } else if (std.mem.eql(u8, method_name, "isTerminated")) {
                             self.push(.{ .bool = fiber.state == .terminated });
                         } else {
+                            self.error_msg = std.fmt.allocPrint(self.allocator, "Fatal error: Uncaught Error: Call to undefined method Fiber::{s}()", .{method_name}) catch null;
                             return error.RuntimeError;
                         }
                         continue;
                     }
 
-                    if (obj_val != .object) return error.RuntimeError;
+                    if (obj_val != .object) {
+                        self.sp -= ac + 1;
+                        self.error_msg = std.fmt.allocPrint(self.allocator, "Fatal error: Uncaught Error: Call to a member function {s}() on {s}", .{ method_name, valueTypeName(obj_val) }) catch null;
+                        return error.RuntimeError;
+                    }
                     const obj = obj_val.object;
 
                     // IC: skip visibility + resolve on cache hit
@@ -2124,6 +2159,8 @@ pub const VM = struct {
                             self.push(result);
                             continue;
                         }
+                        self.sp -= ac + 1;
+                        self.error_msg = std.fmt.allocPrint(self.allocator, "Fatal error: Uncaught Error: Call to undefined method {s}::{s}()", .{ obj.class_name, method_name }) catch null;
                         return error.RuntimeError;
                     };
                     if (self.native_fns.get(full_name)) |native| {
@@ -2222,26 +2259,36 @@ pub const VM = struct {
                             self.frames[self.frame_count] = .{ .chunk = &func.chunk, .ip = 0, .vars = new_vars, .locals = try self.allocLocals(func, &new_vars), .func = func, .ref_slots = method_refs };
                             self.frame_count += 1;
                         }
-                    } else return error.RuntimeError;
+                    } else {
+                        self.sp -= ac + 1;
+                        self.error_msg = std.fmt.allocPrint(self.allocator, "Fatal error: Uncaught Error: Call to undefined method {s}::{s}()", .{ obj.class_name, method_name }) catch null;
+                        return error.RuntimeError;
+                    }
                 },
 
                 .method_call_spread => {
                     const name_idx = self.readU16();
                     const method_name = self.currentChunk().constants.items[name_idx].string;
                     const args_val = self.pop();
-                    if (args_val != .array) return error.RuntimeError;
+                    if (args_val != .array) {
+                        self.error_msg = std.fmt.allocPrint(self.allocator, "Fatal error: Uncaught TypeError: Argument unpacking requires an array", .{}) catch null;
+                        return error.RuntimeError;
+                    }
                     const arr = args_val.array;
                     const ac = arr.entries.items.len;
                     for (arr.entries.items) |entry| self.push(entry.value);
-                    // object is now below args on the stack (it was pushed before the args array)
-                    // reuse the method_call dispatch by setting up ip to re-read this instruction
-                    // actually, just inline the dispatch
                     const obj_val = self.stack[self.sp - ac - 1];
-                    if (obj_val != .object) return error.RuntimeError;
+                    if (obj_val != .object) {
+                        self.sp -= ac + 1;
+                        self.error_msg = std.fmt.allocPrint(self.allocator, "Fatal error: Uncaught Error: Call to a member function {s}() on {s}", .{ method_name, valueTypeName(obj_val) }) catch null;
+                        return error.RuntimeError;
+                    }
                     const obj = obj_val.object;
                     const mvr = self.findMethodVisibility(obj.class_name, method_name);
                     if (!self.checkVisibility(mvr.defining_class, mvr.visibility)) {
                         self.sp -= ac + 1;
+                        const msg = std.fmt.allocPrint(self.allocator, "Call to {s} method {s}::{s}()", .{ @tagName(mvr.visibility), mvr.defining_class, method_name }) catch null;
+                        self.error_msg = msg;
                         return error.RuntimeError;
                     }
                     const full_name = try self.resolveMethod(obj.class_name, method_name);
@@ -2288,7 +2335,11 @@ pub const VM = struct {
                         self.sp -= 1;
                         self.frames[self.frame_count] = .{ .chunk = &func.chunk, .ip = 0, .vars = new_vars, .locals = try self.allocLocals(func, &new_vars), .func = func };
                         self.frame_count += 1;
-                    } else return error.RuntimeError;
+                    } else {
+                        self.sp -= ac + 1;
+                        self.error_msg = std.fmt.allocPrint(self.allocator, "Fatal error: Uncaught Error: Call to undefined method {s}::{s}()", .{ obj.class_name, method_name }) catch null;
+                        return error.RuntimeError;
+                    }
                 },
 
                 .static_call => {
@@ -2373,7 +2424,10 @@ pub const VM = struct {
                                 self.frame_count -= 1;
                                 self.frames[self.frame_count].vars.deinit(self.allocator);
                                 self.push(result);
-                            } else return error.RuntimeError;
+                            } else {
+                                self.error_msg = std.fmt.allocPrint(self.allocator, "Fatal error: Uncaught Error: Call to undefined method {s}::{s}()", .{ class_name, method_name }) catch null;
+                                return error.RuntimeError;
+                            }
                         } else {
                             try self.callNamedFunction(full_name, arg_count);
                             self.frames[self.frame_count - 1].called_class = class_name;
@@ -2390,7 +2444,10 @@ pub const VM = struct {
                     var class_name = self.currentChunk().constants.items[class_idx].string;
                     const method_name = self.currentChunk().constants.items[method_idx].string;
                     const args_val = self.pop();
-                    if (args_val != .array) return error.RuntimeError;
+                    if (args_val != .array) {
+                        self.error_msg = std.fmt.allocPrint(self.allocator, "Fatal error: Uncaught TypeError: Argument unpacking requires an array", .{}) catch null;
+                        return error.RuntimeError;
+                    }
                     const arr = args_val.array;
                     const ac = arr.entries.items.len;
 
@@ -2437,7 +2494,10 @@ pub const VM = struct {
                                 self.sp -= ac;
                                 self.frames[self.frame_count] = .{ .chunk = &func.chunk, .ip = 0, .vars = new_vars, .locals = try self.allocLocals(func, &new_vars), .func = func };
                                 self.frame_count += 1;
-                            } else return error.RuntimeError;
+                            } else {
+                                self.error_msg = std.fmt.allocPrint(self.allocator, "Fatal error: Uncaught Error: Call to undefined method {s}::{s}()", .{ class_name, method_name }) catch null;
+                                return error.RuntimeError;
+                            }
                         } else {
                             try self.callNamedFunction(full_name, @intCast(ac));
                         }
@@ -2465,7 +2525,10 @@ pub const VM = struct {
 
                 .yield_value => {
                     const val = self.pop();
-                    const gen = self.currentFrame().generator orelse return error.RuntimeError;
+                    const gen = self.currentFrame().generator orelse {
+                        self.error_msg = std.fmt.allocPrint(self.allocator, "Fatal error: Cannot use yield outside of a generator", .{}) catch null;
+                        return error.RuntimeError;
+                    };
                     gen.current_value = val;
                     gen.current_key = .{ .int = gen.implicit_key };
                     gen.implicit_key += 1;
@@ -2482,7 +2545,10 @@ pub const VM = struct {
                 .yield_pair => {
                     const val = self.pop();
                     const key = self.pop();
-                    const gen = self.currentFrame().generator orelse return error.RuntimeError;
+                    const gen = self.currentFrame().generator orelse {
+                        self.error_msg = std.fmt.allocPrint(self.allocator, "Fatal error: Cannot use yield outside of a generator", .{}) catch null;
+                        return error.RuntimeError;
+                    };
                     gen.current_value = val;
                     gen.current_key = key;
                     if (key == .int and key.int >= gen.implicit_key) gen.implicit_key = key.int + 1;
@@ -2498,7 +2564,10 @@ pub const VM = struct {
 
                 .yield_from => {
                     const iterable = self.pop();
-                    const outer_gen = self.currentFrame().generator orelse return error.RuntimeError;
+                    const outer_gen = self.currentFrame().generator orelse {
+                        self.error_msg = std.fmt.allocPrint(self.allocator, "Fatal error: Cannot use yield outside of a generator", .{}) catch null;
+                        return error.RuntimeError;
+                    };
 
                     if (iterable == .generator) {
                         const inner = iterable.generator;
@@ -4765,7 +4834,6 @@ pub const VM = struct {
                 if (std.mem.startsWith(u8, name, "__closure_")) {
                     if (!self.hasCaptures(name))
                         return self.executeFunctionLocalsOnly(func, args);
-                    // ref captures need the slow path (fastLoop doesn't update ref_slots)
                     if (!self.closureHasRefCaptures(name))
                         return self.executeClosureLocalsOnly(func, name, args);
                 } else {
