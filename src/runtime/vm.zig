@@ -255,6 +255,10 @@ pub const VM = struct {
         fn_cache_func: ?*const ObjFunction = null,
         // per-frame sp save for inline call/ret in fastLoop
         sp_save: [64]usize = undefined,
+        // per-frame actual arg count for func_get_args
+        arg_counts: [64]u8 = [_]u8{0xFF} ** 64,
+        // set before pushing a frame, consumed by executeFunction et al
+        pending_arg_count: u8 = 0xFF,
         // concat_assign string buffer - avoids O(n) realloc per append
         concat_buf: std.ArrayListUnmanaged(u8) = .{},
         concat_slot: u16 = 0xFFFF,
@@ -3184,6 +3188,7 @@ pub const VM = struct {
                 try self.fillDefaults(&new_vars, func, bind_count);
                 const inherit_cc = self.currentFrame().called_class;
                 self.frames[self.frame_count] = .{ .chunk = &func.chunk, .ip = 0, .vars = new_vars, .locals = try self.allocLocals(func, &new_vars), .func = func, .ref_slots = closure_refs, .called_class = inherit_cc };
+                self.setFrameArgCount(arg_count);
                 self.frame_count += 1;
                 return;
             }
@@ -3228,6 +3233,7 @@ pub const VM = struct {
         }
 
         self.frames[self.frame_count] = .{ .chunk = &func.chunk, .ip = 0, .vars = .{}, .locals = locals, .func = func, .called_class = self.currentFrame().called_class };
+        self.setFrameArgCount(arg_count);
         self.frame_count += 1;
         try self.fastLoop();
     }
@@ -3258,6 +3264,7 @@ pub const VM = struct {
         }
         self.sp -= ac;
         self.frames[self.frame_count] = .{ .chunk = &func.chunk, .ip = 0, .vars = .{}, .locals = locals, .func = func };
+        self.setFrameArgCount(arg_count);
         self.frame_count += 1;
         try self.fastLoop();
     }
@@ -3940,6 +3947,7 @@ pub const VM = struct {
             if (i < func.defaults.len) locals[i] = func.defaults[i];
         }
         self.frames[self.frame_count] = .{ .chunk = &func.chunk, .ip = 0, .vars = .{}, .locals = locals, .func = func };
+        self.consumePendingArgCount();
         self.frame_count += 1;
         try self.runUntilFrame(base_frame);
         return self.pop();
@@ -4411,6 +4419,7 @@ pub const VM = struct {
     fn executeFunction(self: *VM, func: *const ObjFunction, vars: std.StringHashMapUnmanaged(Value)) RuntimeError!Value {
         const base_frame = self.frame_count;
         self.frames[self.frame_count] = .{ .chunk = &func.chunk, .ip = 0, .vars = vars, .locals = try self.allocLocals(func, &vars), .func = func };
+        self.consumePendingArgCount();
         self.frame_count += 1;
         try self.runUntilFrame(base_frame);
         return self.pop();
@@ -4419,6 +4428,7 @@ pub const VM = struct {
     pub fn executeFunctionWithRefs(self: *VM, func: *const ObjFunction, vars: std.StringHashMapUnmanaged(Value), ref_slots: std.StringHashMapUnmanaged(*Value)) RuntimeError!Value {
         const base_frame = self.frame_count;
         self.frames[self.frame_count] = .{ .chunk = &func.chunk, .ip = 0, .vars = vars, .locals = try self.allocLocals(func, &vars), .func = func, .ref_slots = ref_slots };
+        self.consumePendingArgCount();
         self.frame_count += 1;
         try self.runUntilFrame(base_frame);
         return self.pop();
@@ -4598,6 +4608,7 @@ pub const VM = struct {
             } else {
                 const inherit_cc = if (std.mem.startsWith(u8, name, "__closure_")) self.currentFrame().called_class else null;
                 self.frames[self.frame_count] = .{ .chunk = &func.chunk, .ip = 0, .vars = new_vars, .locals = try self.allocLocals(func, &new_vars), .func = func, .ref_slots = callee_refs, .called_class = inherit_cc };
+                self.setFrameArgCount(arg_count);
                 self.frame_count += 1;
             }
         } else return error.RuntimeError;
@@ -4631,6 +4642,7 @@ pub const VM = struct {
             return native(&ctx, args);
         } else if (self.functions.get(name)) |func| {
             if (args.len < func.required_params) return error.RuntimeError;
+            if (self.ic) |ic| ic.pending_arg_count = @intCast(@min(args.len, 255));
             if (func.locals_only) {
                 if (self.captures.items.len == 0)
                     return self.executeFunctionLocalsOnly(func, args);
@@ -4706,6 +4718,7 @@ pub const VM = struct {
             }
         }
         self.frames[self.frame_count] = .{ .chunk = &func.chunk, .ip = 0, .vars = .{}, .locals = locals, .func = func, .called_class = self.currentFrame().called_class };
+        self.consumePendingArgCount();
         self.frame_count += 1;
         try self.fastLoop();
         const fl_frame = &self.frames[self.frame_count - 1];
@@ -4893,6 +4906,24 @@ pub const VM = struct {
 
     pub fn currentFrame(self: *VM) *CallFrame {
         return &self.frames[self.frame_count - 1];
+    }
+
+    fn setFrameArgCount(self: *VM, ac: u8) void {
+        if (self.ic) |ic| ic.arg_counts[self.frame_count] = ac;
+    }
+
+    fn consumePendingArgCount(self: *VM) void {
+        if (self.ic) |ic| {
+            ic.arg_counts[self.frame_count] = ic.pending_arg_count;
+            ic.pending_arg_count = 0xFF;
+        }
+    }
+
+    pub fn getFrameArgCount(self: *VM) ?u8 {
+        const ic = self.ic orelse return null;
+        const ac = ic.arg_counts[self.frame_count - 1];
+        if (ac == 0xFF) return null;
+        return ac;
     }
 
     fn binaryOp(self: *VM, op: *const fn (Value, Value) Value) void {

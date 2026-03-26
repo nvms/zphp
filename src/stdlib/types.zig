@@ -81,6 +81,9 @@ pub const entries = .{
     .{ "ctype_punct", ctype_punct },
     .{ "ctype_cntrl", ctype_cntrl },
     .{ "ctype_graph", ctype_graph },
+    .{ "func_get_args", native_func_get_args },
+    .{ "func_num_args", native_func_num_args },
+    .{ "func_get_arg", native_func_get_arg },
 };
 
 fn native_define(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
@@ -740,4 +743,89 @@ fn native_spl_autoload_unregister(ctx: *NativeContext, args: []const Value) Runt
         }
     }
     return .{ .bool = true };
+}
+
+fn getFrameParamValue(frame: anytype, slot_names: []const []const u8, param: []const u8) Value {
+    for (slot_names, 0..) |sn, i| {
+        if (std.mem.eql(u8, sn, param)) {
+            if (i < frame.locals.len) return frame.locals[i];
+            break;
+        }
+    }
+    return frame.vars.get(param) orelse .null;
+}
+
+fn native_func_get_args(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const frame = ctx.vm.currentFrame();
+    const func = frame.func orelse return .{ .array = try ctx.createArray() };
+    const arr = try ctx.createArray();
+    const slot_names = func.slot_names;
+    const actual_ac: usize = if (ctx.vm.getFrameArgCount()) |ac| ac else func.arity;
+
+    if (func.is_variadic) {
+        const fixed: usize = func.arity - 1;
+        for (0..@min(actual_ac, fixed)) |i| {
+            const val = getFrameParamValue(frame, slot_names, func.params[i]);
+            try arr.append(ctx.allocator, val);
+        }
+        const variadic_val = getFrameParamValue(frame, slot_names, func.params[fixed]);
+        if (variadic_val == .array) {
+            for (variadic_val.array.entries.items) |entry| {
+                try arr.append(ctx.allocator, entry.value);
+            }
+        }
+    } else {
+        for (0..@min(actual_ac, func.arity)) |i| {
+            const val = getFrameParamValue(frame, slot_names, func.params[i]);
+            try arr.append(ctx.allocator, val);
+        }
+    }
+    return .{ .array = arr };
+}
+
+fn native_func_num_args(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const frame = ctx.vm.currentFrame();
+    const func = frame.func orelse return .{ .int = 0 };
+
+    if (ctx.vm.getFrameArgCount()) |ac| return .{ .int = @intCast(ac) };
+
+    if (func.is_variadic) {
+        const fixed: usize = func.arity - 1;
+        var total: i64 = @intCast(fixed);
+        const slot_names = func.slot_names;
+        const variadic_val = getFrameParamValue(frame, slot_names, func.params[fixed]);
+        if (variadic_val == .array) {
+            total += variadic_val.array.length();
+        }
+        return .{ .int = total };
+    }
+    return .{ .int = @intCast(func.arity) };
+}
+
+fn native_func_get_arg(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len == 0) return .{ .bool = false };
+    const idx = Value.toInt(args[0]);
+    if (idx < 0) return .{ .bool = false };
+    const index: usize = @intCast(idx);
+
+    const frame = ctx.vm.currentFrame();
+    const func = frame.func orelse return .{ .bool = false };
+    const slot_names = func.slot_names;
+
+    if (func.is_variadic) {
+        const fixed: usize = func.arity - 1;
+        if (index < fixed) {
+            return getFrameParamValue(frame, slot_names, func.params[index]);
+        }
+        const variadic_val = getFrameParamValue(frame, slot_names, func.params[fixed]);
+        if (variadic_val == .array) {
+            const vi: i64 = @intCast(index - fixed);
+            const result = variadic_val.array.get(.{ .int = vi });
+            if (result != .null) return result;
+        }
+        return .{ .bool = false };
+    }
+
+    if (index >= func.arity) return .{ .bool = false };
+    return getFrameParamValue(frame, slot_names, func.params[index]);
 }
