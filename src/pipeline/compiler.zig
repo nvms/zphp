@@ -28,6 +28,8 @@ pub const CompileResult = struct {
     local_count: u16 = 0,
     slot_names: []const []const u8 = &.{},
     type_hints: std.ArrayListUnmanaged(TypeHint) = .{},
+    source: []const u8 = "",
+    file_path: []const u8 = "",
 
     pub fn deinit(self: *CompileResult) void {
         self.chunk.deinit(self.allocator);
@@ -87,7 +89,7 @@ pub fn compileWithPath(ast: *const Ast, allocator: Allocator, file_path: []const
     const slot_names = try c.buildSlotNames();
     const local_count = c.next_slot;
     c.local_slots.deinit(allocator);
-    return .{ .chunk = c.chunk, .functions = c.functions, .string_allocs = c.string_allocs, .allocator = allocator, .local_count = local_count, .slot_names = slot_names, .type_hints = c.type_hints };
+    return .{ .chunk = c.chunk, .functions = c.functions, .string_allocs = c.string_allocs, .allocator = allocator, .local_count = local_count, .slot_names = slot_names, .type_hints = c.type_hints, .source = ast.source, .file_path = file_path };
 }
 
 pub const Compiler = struct {
@@ -112,6 +114,7 @@ pub const Compiler = struct {
     local_slots: std.StringHashMapUnmanaged(u16) = .{},
     next_slot: u16 = 0,
     type_hints: std.ArrayListUnmanaged(TypeHint) = .{},
+    current_source_offset: u32 = 0,
 
     pub const LoopJump = struct {
         offset: usize,
@@ -124,6 +127,7 @@ pub const Compiler = struct {
 
     pub fn compileNode(self: *Compiler, idx: u32) Error!void {
         const node = self.ast.nodes[idx];
+        self.current_source_offset = self.ast.tokens[node.main_token].start;
         switch (node.tag) {
             .expression_stmt => {
                 if (self.tryCompileLocalAssignSuper(node.data.lhs)) |emitted| {
@@ -590,11 +594,11 @@ pub const Compiler = struct {
     // ==================================================================
 
     pub fn emitOp(self: *Compiler, op: OpCode) Error!void {
-        try self.chunk.write(self.allocator, @intFromEnum(op), 0);
+        try self.chunk.write(self.allocator, @intFromEnum(op), self.current_source_offset);
     }
 
     pub fn emitByte(self: *Compiler, byte: u8) Error!void {
-        try self.chunk.write(self.allocator, byte, 0);
+        try self.chunk.write(self.allocator, byte, self.current_source_offset);
     }
 
     pub fn emitU16(self: *Compiler, val: u16) Error!void {

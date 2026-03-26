@@ -226,6 +226,8 @@ pub const VM = struct {
     compile_results: std.ArrayListUnmanaged(*CompileResult) = .{},
     error_msg: ?[]const u8 = null,
     exit_requested: bool = false,
+    source: []const u8 = "",
+    file_path: []const u8 = "",
     autoload_callbacks: std.ArrayListUnmanaged(Value) = .{},
     user_error_handler: ?Value = null,
     prev_error_handler: ?Value = null,
@@ -533,6 +535,8 @@ pub const VM = struct {
             }
         }
         self.global_slot_names = result.slot_names;
+        self.source = result.source;
+        self.file_path = result.file_path;
         self.frames[0] = .{ .chunk = &result.chunk, .ip = 0, .vars = vars, .locals = locals };
         self.frame_count = 1;
         try self.run();
@@ -4646,8 +4650,10 @@ pub const VM = struct {
             self.push(try native(&ctx, args[0..ac]));
         } else if (self.functions.get(name)) |func| {
             const ac: usize = arg_count;
-            if (ac < func.required_params)
+            if (ac < func.required_params) {
+                self.error_msg = std.fmt.allocPrint(self.allocator, "Fatal error: Too few arguments to function {s}(), {d} passed, {d} required\n", .{ name, ac, func.required_params }) catch null;
                 return error.RuntimeError;
+            }
             if (g_type_info.count() > 0) {
                 if (try self.checkParamTypes(name, arg_count)) return;
             }
@@ -4718,7 +4724,10 @@ pub const VM = struct {
                 self.setFrameArgCount(arg_count);
                 self.frame_count += 1;
             }
-        } else return error.RuntimeError;
+        } else {
+            self.error_msg = std.fmt.allocPrint(self.allocator, "Fatal error: Uncaught Error: Call to undefined function {s}()\n", .{name}) catch null;
+            return error.RuntimeError;
+        }
     }
 
     pub fn callMethod(self: *VM, obj: *PhpObject, method_name: []const u8, args: []const Value) RuntimeError!Value {

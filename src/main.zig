@@ -4,6 +4,7 @@ const compiler = @import("pipeline/compiler.zig");
 const VM = @import("runtime/vm.zig").VM;
 const CompileResult = @import("pipeline/compiler.zig").CompileResult;
 const bytecode_format = @import("bytecode_format.zig");
+const error_format = @import("error_format.zig");
 
 const max_source_size = 1024 * 1024 * 10;
 
@@ -89,7 +90,12 @@ fn compileSource(allocator: std.mem.Allocator, source: []const u8, path: []const
     defer ast.deinit();
 
     if (ast.errors.len > 0) {
-        try writeStderr("parse error\n");
+        const msg = error_format.formatParseErrors(allocator, &ast, path);
+        if (msg.len > 0) {
+            try writeStderr(msg);
+        } else {
+            try writeStderr("parse error\n");
+        }
         std.process.exit(1);
     }
 
@@ -207,7 +213,12 @@ fn runWithVM(allocator: std.mem.Allocator, result: *CompileResult) !void {
     vm.interpret(result) catch {
         if (vm.output.items.len > 0) try writeStdout(vm.output.items);
         if (vm.exit_requested) std.process.exit(0);
-        try writeStderr(vm.error_msg orelse "runtime error\n");
+        const msg = error_format.formatRuntimeError(allocator, &vm);
+        if (msg.len > 0) {
+            try writeStderr(msg);
+        } else {
+            try writeStderr(vm.error_msg orelse "runtime error\n");
+        }
         std.process.exit(255);
     };
     if (vm.output.items.len > 0) try writeStdout(vm.output.items);

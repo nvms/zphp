@@ -423,7 +423,9 @@ pub fn compileMatch(self: *Compiler, node: Ast.Node) Error!void {
 }
 
 pub fn compileThrow(self: *Compiler, node: Ast.Node) Error!void {
+    const throw_offset = self.current_source_offset;
     try self.compileNode(node.data.lhs);
+    self.current_source_offset = throw_offset;
     try self.emitOp(.throw);
 }
 

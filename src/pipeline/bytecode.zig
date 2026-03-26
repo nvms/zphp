@@ -146,6 +146,13 @@ pub const OpCode = enum(u8) {
 };
 
 
+pub const SourceLocation = struct {
+    line: u32,
+    column: u32,
+    line_start: usize,
+    line_end: usize,
+};
+
 pub const Chunk = struct {
     code: std.ArrayListUnmanaged(u8) = .{},
     constants: std.ArrayListUnmanaged(Value) = .{},
@@ -157,9 +164,9 @@ pub const Chunk = struct {
         self.lines.deinit(allocator);
     }
 
-    pub fn write(self: *Chunk, allocator: std.mem.Allocator, byte: u8, line: u32) !void {
+    pub fn write(self: *Chunk, allocator: std.mem.Allocator, byte: u8, source_offset: u32) !void {
         try self.code.append(allocator, byte);
-        try self.lines.append(allocator, line);
+        try self.lines.append(allocator, source_offset);
     }
 
     pub fn addConstant(self: *Chunk, allocator: std.mem.Allocator, value: Value) !u16 {
@@ -169,6 +176,35 @@ pub const Chunk = struct {
 
     pub fn offset(self: *const Chunk) usize {
         return self.code.items.len;
+    }
+
+    pub fn getSourceLocation(self: *const Chunk, ip: usize, source: []const u8) ?SourceLocation {
+        if (ip >= self.lines.items.len or source.len == 0) return null;
+        const byte_offset = self.lines.items[ip];
+        return locationFromOffset(source, byte_offset);
+    }
+
+    pub fn locationFromOffset(source: []const u8, byte_offset: u32) SourceLocation {
+        var line: u32 = 1;
+        var line_start: usize = 0;
+        const clamped = @min(byte_offset, source.len);
+
+        for (source[0..clamped], 0..) |c, i| {
+            if (c == '\n') {
+                line += 1;
+                line_start = i + 1;
+            }
+        }
+
+        var line_end: usize = clamped;
+        while (line_end < source.len and source[line_end] != '\n') line_end += 1;
+
+        return .{
+            .line = line,
+            .column = @intCast(clamped - line_start + 1),
+            .line_start = line_start,
+            .line_end = line_end,
+        };
     }
 };
 

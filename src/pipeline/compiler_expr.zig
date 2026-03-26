@@ -445,15 +445,19 @@ pub fn compileCall(self: *Compiler, node: Ast.Node) Error!void {
             try self.emitOp(.call_indirect_spread);
         }
     } else if (callee.tag == .identifier) {
+        const call_offset = self.current_source_offset;
         for (args) |arg| try self.compileNode(arg);
+        self.current_source_offset = call_offset;
         const name = self.ast.tokenSlice(callee.main_token);
         const idx = try self.addConstant(.{ .string = name });
         try self.emitOp(.call);
         try self.emitU16(idx);
         try self.emitByte(@intCast(args.len));
     } else {
+        const call_offset = self.current_source_offset;
         try self.compileNode(node.data.lhs);
         for (args) |arg| try self.compileNode(arg);
+        self.current_source_offset = call_offset;
         try self.emitOp(.call_indirect);
         try self.emitByte(@intCast(args.len));
     }
