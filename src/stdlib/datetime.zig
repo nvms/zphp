@@ -394,10 +394,33 @@ fn native_strtotime(_: *NativeContext, args: []const Value) RuntimeError!Value {
     const input = args[0].string;
     const base: i64 = if (args.len >= 2) Value.toInt(args[1]) else std.time.timestamp();
 
+    // @timestamp - unix timestamp literal
+    if (input.len >= 2 and input[0] == '@') {
+        const ts = std.fmt.parseInt(i64, input[1..], 10) catch return Value{ .bool = false };
+        return .{ .int = ts };
+    }
+
+    // YYYY-MM-DD with optional time (space or T separator)
     if (input.len >= 10 and input[4] == '-' and input[7] == '-') {
         const year = std.fmt.parseInt(i64, input[0..4], 10) catch return Value{ .bool = false };
         const month = std.fmt.parseInt(i64, input[5..7], 10) catch return Value{ .bool = false };
         const day = std.fmt.parseInt(i64, input[8..10], 10) catch return Value{ .bool = false };
+        var hour: i64 = 0;
+        var min: i64 = 0;
+        var sec: i64 = 0;
+        if (input.len >= 19 and (input[10] == ' ' or input[10] == 'T') and input[13] == ':' and input[16] == ':') {
+            hour = std.fmt.parseInt(i64, input[11..13], 10) catch 0;
+            min = std.fmt.parseInt(i64, input[14..16], 10) catch 0;
+            sec = std.fmt.parseInt(i64, input[17..19], 10) catch 0;
+        }
+        return .{ .int = dateToTimestamp(year, month, day, hour, min, sec) };
+    }
+
+    // MM/DD/YYYY US date format
+    if (input.len >= 10 and input[2] == '/' and input[5] == '/') {
+        const month = std.fmt.parseInt(i64, input[0..2], 10) catch return Value{ .bool = false };
+        const day = std.fmt.parseInt(i64, input[3..5], 10) catch return Value{ .bool = false };
+        const year = std.fmt.parseInt(i64, input[6..10], 10) catch return Value{ .bool = false };
         var hour: i64 = 0;
         var min: i64 = 0;
         var sec: i64 = 0;
@@ -409,7 +432,75 @@ fn native_strtotime(_: *NativeContext, args: []const Value) RuntimeError!Value {
         return .{ .int = dateToTimestamp(year, month, day, hour, min, sec) };
     }
 
+    // textual month dates: "January 15, 2025", "Jan 15, 2025", "Jan 15 2025", "15 Jan 2025"
+    if (tryParseTextualDate(input)) |ts| return .{ .int = ts };
+
     return parseRelativeTime(input, base);
+}
+
+fn tryParseTextualDate(input: []const u8) ?i64 {
+    const full_months = [_][]const u8{ "january", "february", "march", "april", "may", "june", "july", "august", "september", "october", "november", "december" };
+    const short_months = [_][]const u8{ "jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec" };
+
+    var s = input;
+    while (s.len > 0 and s[0] == ' ') s = s[1..];
+
+    // check if starts with a number (DD Month YYYY format)
+    var leading_day: ?i64 = null;
+    if (s.len >= 2 and s[0] >= '0' and s[0] <= '9') {
+        var dend: usize = 0;
+        while (dend < s.len and s[dend] >= '0' and s[dend] <= '9') dend += 1;
+        if (dend <= 2 and dend < s.len and s[dend] == ' ') {
+            leading_day = std.fmt.parseInt(i64, s[0..dend], 10) catch null;
+            if (leading_day != null) s = s[dend + 1 ..];
+        }
+    }
+
+    var month_num: ?i64 = null;
+    var match_len: usize = 0;
+    for (full_months, 1..) |name, i| {
+        if (s.len >= name.len and eqlLower(s[0..name.len], name)) {
+            month_num = @intCast(i);
+            match_len = name.len;
+            break;
+        }
+    }
+    if (month_num == null) {
+        for (short_months, 1..) |name, i| {
+            if (s.len >= name.len and eqlLower(s[0..name.len], name)) {
+                month_num = @intCast(i);
+                match_len = name.len;
+                break;
+            }
+        }
+    }
+    if (month_num == null) return null;
+    s = s[match_len..];
+
+    if (leading_day) |dd| {
+        // DD Month YYYY
+        while (s.len > 0 and (s[0] == ' ' or s[0] == ',')) s = s[1..];
+        var yend: usize = 0;
+        while (yend < s.len and s[yend] >= '0' and s[yend] <= '9') yend += 1;
+        if (yend == 0) return null;
+        const year = std.fmt.parseInt(i64, s[0..yend], 10) catch return null;
+        return dateToTimestamp(year, month_num.?, dd, 0, 0, 0);
+    }
+
+    // Month DD[,] YYYY or Month DD
+    while (s.len > 0 and s[0] == ' ') s = s[1..];
+    var dend: usize = 0;
+    while (dend < s.len and s[dend] >= '0' and s[dend] <= '9') dend += 1;
+    if (dend == 0) return null;
+    const day = std.fmt.parseInt(i64, s[0..dend], 10) catch return null;
+    s = s[dend..];
+    while (s.len > 0 and (s[0] == ' ' or s[0] == ',')) s = s[1..];
+    if (s.len == 0) return null;
+    var yend: usize = 0;
+    while (yend < s.len and s[yend] >= '0' and s[yend] <= '9') yend += 1;
+    if (yend == 0) return null;
+    const year = std.fmt.parseInt(i64, s[0..yend], 10) catch return null;
+    return dateToTimestamp(year, month_num.?, day, 0, 0, 0);
 }
 
 fn native_time(_: *NativeContext, _: []const Value) RuntimeError!Value {
@@ -454,70 +545,313 @@ pub fn dateToTimestamp(year: i64, month: i64, day: i64, hour: i64, min: i64, sec
 
 pub fn parseRelativeTime(input: []const u8, base: i64) Value {
     var s = input;
-    var sign: i64 = 1;
-    if (s.len > 0 and s[0] == '-') {
-        sign = -1;
-        s = s[1..];
-    } else if (s.len > 0 and s[0] == '+') {
-        s = s[1..];
+    while (s.len > 0 and s[0] == ' ') s = s[1..];
+    while (s.len > 0 and s[s.len - 1] == ' ') s = s[0 .. s.len - 1];
+    if (s.len == 0) return .{ .bool = false };
+
+    // "now"
+    if (eqlLower(s, "now")) return .{ .int = base };
+
+    // "today", "yesterday", "tomorrow", "midnight", "noon"
+    if (tryParseKeyword(s, base)) |ts| return .{ .int = ts };
+
+    // "first day of ..." / "last day of ..."
+    if (tryParseFirstLastDay(s, base)) |ts| return .{ .int = ts };
+
+    // "next/last <weekday>" or "next/last month/year"
+    if (tryParseNextLast(s, base)) |ts| return .{ .int = ts };
+
+    // weekday name alone ("Monday", "Thursday") - next occurrence
+    if (parseWeekdayName(s)) |target_dow| {
+        return .{ .int = resolveNextWeekday(base, target_dow) };
     }
+
+    // numeric relative: "+3 days", "-1 month", "2 weeks", "3 days ago"
+    return parseNumericRelative(s, base);
+}
+
+fn tryParseKeyword(s: []const u8, base: i64) ?i64 {
+    const midnight_ts = baseMidnight(base);
+    if (eqlLower(s, "today") or eqlLower(s, "midnight")) return midnight_ts;
+    if (eqlLower(s, "yesterday")) return midnight_ts - 86400;
+    if (eqlLower(s, "tomorrow")) return midnight_ts + 86400;
+    if (eqlLower(s, "noon")) return midnight_ts + 43200;
+    return null;
+}
+
+fn tryParseFirstLastDay(input: []const u8, base: i64) ?i64 {
+    var s = input;
+    const is_first = startsWithLower(s, "first day of ");
+    const is_last = startsWithLower(s, "last day of ");
+    if (!is_first and !is_last) return null;
+
+    s = if (is_first) s[13..] else s[12..];
     while (s.len > 0 and s[0] == ' ') s = s[1..];
 
-    var num_end: usize = 0;
-    while (num_end < s.len and s[num_end] >= '0' and s[num_end] <= '9') num_end += 1;
-    if (num_end == 0) return .{ .bool = false };
-    const num = std.fmt.parseInt(i64, s[0..num_end], 10) catch return Value{ .bool = false };
-    s = s[num_end..];
-    while (s.len > 0 and s[0] == ' ') s = s[1..];
+    const comps = baseComponents(base);
+    var year = comps.year;
+    var month = comps.month;
+    var hour = comps.hour;
+    var min = comps.min;
+    var sec = comps.sec;
 
-    if (startsWith(s, "second")) {
-        return .{ .int = base + num * sign };
-    } else if (startsWith(s, "minute")) {
-        return .{ .int = base + num * sign * 60 };
-    } else if (startsWith(s, "hour")) {
-        return .{ .int = base + num * sign * 3600 };
-    } else if (startsWith(s, "day")) {
-        return .{ .int = base + num * sign * 86400 };
-    } else if (startsWith(s, "week")) {
-        return .{ .int = base + num * sign * 604800 };
-    } else if (startsWith(s, "month") or startsWith(s, "year")) {
-        const is_year = startsWith(s, "year");
-        const epoch_secs: u64 = @intCast(if (base < 0) 0 else base);
-        const es = std.time.epoch.EpochSeconds{ .secs = epoch_secs };
-        const day_seconds = es.getDaySeconds();
-        const epoch_day = es.getEpochDay();
-        const year_day = epoch_day.calculateYearDay();
-        const month_day = year_day.calculateMonthDay();
-
-        var year: i64 = @intCast(year_day.year);
-        var month: i64 = @intCast(month_day.month.numeric());
-        const day: i64 = @intCast(month_day.day_index + 1);
-
-        if (is_year) {
-            year += num * sign;
-        } else {
-            month += num * sign;
+    if (eqlLower(s, "this month")) {
+        // use current month
+    } else if (eqlLower(s, "next month")) {
+        month += 1;
+        if (month > 12) { month = 1; year += 1; }
+    } else if (eqlLower(s, "last month")) {
+        month -= 1;
+        if (month < 1) { month = 12; year -= 1; }
+    } else if (parseMonthName(s) != null) {
+        month = parseMonthName(s).?;
+        const mname_len = monthNameLen(s);
+        var rest = s[mname_len..];
+        while (rest.len > 0 and rest[0] == ' ') rest = rest[1..];
+        if (rest.len >= 4) {
+            if (std.fmt.parseInt(i64, rest[0..4], 10) catch null) |y| {
+                year = y;
+            }
         }
-
-        // normalize month overflow/underflow
-        if (month > 12) {
-            year += @divFloor(month - 1, 12);
-            month = @mod(month - 1, 12) + 1;
-        } else if (month < 1) {
-            year += @divFloor(month - 12, 12);
-            month = @mod(month - 1, 12) + 1;
-        }
-
-        // PHP behavior: overflow days into next month (Jan 31 + 1 month = Mar 2)
-        const clamped_day = day;
-
-        const hour: i64 = @intCast(day_seconds.getHoursIntoDay());
-        const min: i64 = @intCast(day_seconds.getMinutesIntoHour());
-        const sec: i64 = @intCast(day_seconds.getSecondsIntoMinute());
-        return .{ .int = dateToTimestamp(year, month, clamped_day, hour, min, sec) };
+        hour = 0;
+        min = 0;
+        sec = 0;
     } else {
-        return .{ .bool = false };
+        return null;
     }
+
+    const day: i64 = if (is_first) 1 else daysInMonth(month, year);
+    return dateToTimestamp(year, month, day, hour, min, sec);
+}
+
+fn tryParseNextLast(input: []const u8, base: i64) ?i64 {
+    var s = input;
+    var direction: i64 = 0;
+    if (startsWithLower(s, "next ")) {
+        direction = 1;
+        s = s[5..];
+    } else if (startsWithLower(s, "last ")) {
+        direction = -1;
+        s = s[5..];
+    } else {
+        return null;
+    }
+    while (s.len > 0 and s[0] == ' ') s = s[1..];
+
+    // next/last month or year
+    if (eqlLower(s, "month") or eqlLower(s, "year")) {
+        const comps = baseComponents(base);
+        var year = comps.year;
+        var month = comps.month;
+        if (eqlLower(s, "year")) {
+            year += direction;
+        } else {
+            month += direction;
+        }
+        if (month > 12) { year += @divFloor(month - 1, 12); month = @mod(month - 1, 12) + 1; }
+        if (month < 1) { year += @divFloor(month - 12, 12); month = @mod(month - 1, 12) + 1; }
+        return dateToTimestamp(year, month, comps.day, comps.hour, comps.min, comps.sec);
+    }
+
+    // next/last week - Monday of next/previous week, preserving time
+    if (eqlLower(s, "week")) {
+        const comps = baseComponents(base);
+        const midnight = baseMidnight(base);
+        const epoch_secs: u64 = @intCast(if (midnight < 0) 0 else midnight);
+        const es = std.time.epoch.EpochSeconds{ .secs = epoch_secs };
+        const epoch_day = es.getEpochDay();
+        const day_num: i64 = @intCast(epoch_day.day);
+        const current_dow: i64 = @mod(day_num + 3, 7); // 0=Mon
+        const current_monday = midnight - current_dow * 86400;
+        const target_monday = current_monday + direction * 7 * 86400;
+        return target_monday + comps.hour * 3600 + comps.min * 60 + comps.sec;
+    }
+
+    // next/last <weekday>
+    if (parseWeekdayName(s)) |target_dow| {
+        if (direction > 0) {
+            return resolveNextWeekday(base, target_dow);
+        } else {
+            return resolveLastWeekday(base, target_dow);
+        }
+    }
+
+    return null;
+}
+
+fn parseNumericRelative(input: []const u8, base: i64) Value {
+    var s = input;
+    var result = base;
+
+    // handle chained relative parts: "+1 year 2 months 3 days"
+    while (s.len > 0) {
+        while (s.len > 0 and s[0] == ' ') s = s[1..];
+        if (s.len == 0) break;
+
+        var sign: i64 = 1;
+        if (s[0] == '-') {
+            sign = -1;
+            s = s[1..];
+        } else if (s[0] == '+') {
+            s = s[1..];
+        }
+        while (s.len > 0 and s[0] == ' ') s = s[1..];
+
+        var num_end: usize = 0;
+        while (num_end < s.len and s[num_end] >= '0' and s[num_end] <= '9') num_end += 1;
+        if (num_end == 0) return .{ .bool = false };
+        const num = std.fmt.parseInt(i64, s[0..num_end], 10) catch return Value{ .bool = false };
+        s = s[num_end..];
+        while (s.len > 0 and s[0] == ' ') s = s[1..];
+
+        const unit = parseUnit(s) orelse return Value{ .bool = false };
+        s = s[unit.consumed..];
+        while (s.len > 0 and s[0] == ' ') s = s[1..];
+
+        // check for "ago" suffix
+        var effective_sign = sign;
+        if (startsWithLower(s, "ago")) {
+            effective_sign = -effective_sign;
+            s = s[3..];
+            while (s.len > 0 and s[0] == ' ') s = s[1..];
+        }
+
+        result = applyUnit(result, num * effective_sign, unit.kind);
+    }
+
+    if (result == base and input.len > 0) return .{ .bool = false };
+    return .{ .int = result };
+}
+
+const UnitKind = enum { second, minute, hour, day, week, month, year };
+const UnitResult = struct { kind: UnitKind, consumed: usize };
+
+fn parseUnit(s: []const u8) ?UnitResult {
+    const units = [_]struct { prefix: []const u8, kind: UnitKind }{
+        .{ .prefix = "second", .kind = .second },
+        .{ .prefix = "minute", .kind = .minute },
+        .{ .prefix = "hour", .kind = .hour },
+        .{ .prefix = "day", .kind = .day },
+        .{ .prefix = "week", .kind = .week },
+        .{ .prefix = "month", .kind = .month },
+        .{ .prefix = "year", .kind = .year },
+    };
+    for (units) |u| {
+        if (startsWithLower(s, u.prefix)) {
+            var consumed = u.prefix.len;
+            if (consumed < s.len and (s[consumed] == 's' or s[consumed] == 'S')) consumed += 1;
+            return .{ .kind = u.kind, .consumed = consumed };
+        }
+    }
+    return null;
+}
+
+fn applyUnit(base: i64, delta: i64, kind: UnitKind) i64 {
+    return switch (kind) {
+        .second => base + delta,
+        .minute => base + delta * 60,
+        .hour => base + delta * 3600,
+        .day => base + delta * 86400,
+        .week => base + delta * 604800,
+        .month, .year => blk: {
+            const comps = baseComponents(base);
+            var year = comps.year;
+            var month = comps.month;
+            if (kind == .year) { year += delta; } else { month += delta; }
+            if (month > 12) { year += @divFloor(month - 1, 12); month = @mod(month - 1, 12) + 1; }
+            if (month < 1) { year += @divFloor(month - 12, 12); month = @mod(month - 1, 12) + 1; }
+            break :blk dateToTimestamp(year, month, comps.day, comps.hour, comps.min, comps.sec);
+        },
+    };
+}
+
+fn parseWeekdayName(s: []const u8) ?u3 {
+    const full = [_][]const u8{ "monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday" };
+    const short = [_][]const u8{ "mon", "tue", "wed", "thu", "fri", "sat", "sun" };
+    for (full, 0..) |name, i| {
+        if (s.len >= name.len and eqlLower(s[0..name.len], name)) return @intCast(i);
+    }
+    for (short, 0..) |name, i| {
+        if (s.len == name.len and eqlLower(s[0..name.len], name)) return @intCast(i);
+    }
+    return null;
+}
+
+fn resolveNextWeekday(base: i64, target_dow: u3) i64 {
+    const midnight = baseMidnight(base);
+    const epoch_secs: u64 = @intCast(if (midnight < 0) 0 else midnight);
+    const es = std.time.epoch.EpochSeconds{ .secs = epoch_secs };
+    const epoch_day = es.getEpochDay();
+    const day_num: i64 = @intCast(epoch_day.day);
+    const current_dow: u3 = @intCast(@mod(day_num + 3, 7));
+    var diff: i64 = @as(i64, target_dow) - @as(i64, current_dow);
+    if (diff <= 0) diff += 7;
+    return midnight + diff * 86400;
+}
+
+fn resolveLastWeekday(base: i64, target_dow: u3) i64 {
+    const midnight = baseMidnight(base);
+    const epoch_secs: u64 = @intCast(if (midnight < 0) 0 else midnight);
+    const es = std.time.epoch.EpochSeconds{ .secs = epoch_secs };
+    const epoch_day = es.getEpochDay();
+    const day_num: i64 = @intCast(epoch_day.day);
+    const current_dow: u3 = @intCast(@mod(day_num + 3, 7));
+    var diff: i64 = @as(i64, current_dow) - @as(i64, target_dow);
+    if (diff <= 0) diff += 7;
+    return midnight - diff * 86400;
+}
+
+const DateComponents = struct { year: i64, month: i64, day: i64, hour: i64, min: i64, sec: i64 };
+
+fn baseComponents(base: i64) DateComponents {
+    const epoch_secs: u64 = @intCast(if (base < 0) 0 else base);
+    const es = std.time.epoch.EpochSeconds{ .secs = epoch_secs };
+    const day_seconds = es.getDaySeconds();
+    const epoch_day = es.getEpochDay();
+    const year_day = epoch_day.calculateYearDay();
+    const month_day = year_day.calculateMonthDay();
+    return .{
+        .year = @intCast(year_day.year),
+        .month = @intCast(month_day.month.numeric()),
+        .day = @intCast(month_day.day_index + 1),
+        .hour = @intCast(day_seconds.getHoursIntoDay()),
+        .min = @intCast(day_seconds.getMinutesIntoHour()),
+        .sec = @intCast(day_seconds.getSecondsIntoMinute()),
+    };
+}
+
+fn baseMidnight(base: i64) i64 {
+    return base - @mod(base, 86400);
+}
+
+fn parseMonthName(s: []const u8) ?i64 {
+    const months = [_][]const u8{ "january", "february", "march", "april", "may", "june", "july", "august", "september", "october", "november", "december" };
+    for (months, 1..) |name, i| {
+        if (s.len >= name.len and eqlLower(s[0..name.len], name)) return @intCast(i);
+    }
+    return null;
+}
+
+fn monthNameLen(s: []const u8) usize {
+    const months = [_][]const u8{ "january", "february", "march", "april", "may", "june", "july", "august", "september", "october", "november", "december" };
+    for (months) |name| {
+        if (s.len >= name.len and eqlLower(s[0..name.len], name)) return name.len;
+    }
+    return 0;
+}
+
+fn eqlLower(a: []const u8, lower_b: []const u8) bool {
+    if (a.len != lower_b.len) return false;
+    for (a, lower_b) |ca, cb| {
+        const la: u8 = if (ca >= 'A' and ca <= 'Z') ca + 32 else ca;
+        if (la != cb) return false;
+    }
+    return true;
+}
+
+fn startsWithLower(s: []const u8, lower_prefix: []const u8) bool {
+    if (s.len < lower_prefix.len) return false;
+    return eqlLower(s[0..lower_prefix.len], lower_prefix);
 }
 
 fn daysInMonth(month: i64, year: i64) i64 {
