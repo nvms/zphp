@@ -22,14 +22,14 @@ Requires PHP installed locally. zphp must be built with ReleaseFast - debug buil
 
 | benchmark | php | zphp | ratio |
 |---|---|---|---|
-| array_ops | 94 ms | 28 ms | 0.30x |
-| objects | 101 ms | 35 ms | 0.35x |
-| closures | 96 ms | 90 ms | 0.94x |
-| fibonacci | 164 ms | 153 ms | 0.93x |
-| loops | 130 ms | 124 ms | 0.95x |
-| string_ops | 97 ms | 104 ms | 1.07x |
+| array_ops | 100 ms | 30 ms | 0.30x |
+| objects | 106 ms | 37 ms | 0.35x |
+| closures | 107 ms | 84 ms | 0.79x |
+| fibonacci | 169 ms | 149 ms | 0.88x |
+| loops | 137 ms | 125 ms | 0.91x |
+| string_ops | 100 ms | 115 ms | 1.15x |
 
-zphp beats PHP on five of six benchmarks. Array operations are 3.3x faster thanks to O(1) integer key lookups on sequential arrays. Objects are 2.9x faster with property slot indices and IC-cached slot access. Closures beat PHP via indexed capture lookup (HashMap by closure name instead of linear scan) and fastLoop handling of call_indirect for closures. Fibonacci wins via stack-allocated locals and inline call/return. Loops beat PHP thanks to superinstructions (inc_local, add_local_to_local, less_local_local_jif) that fuse common opcode sequences in hot loops. String operations are within 1.1x thanks to growable concat_assign buffers on the InlineCache.
+zphp beats PHP on five of six benchmarks. Array operations are 3.3x faster thanks to O(1) integer key lookups on sequential arrays. Objects are 2.9x faster with property slot indices and IC-cached slot access. Closures beat PHP via indexed capture lookup (HashMap by closure name instead of linear scan) and fastLoop handling of call_indirect for closures. Fibonacci wins via stack-allocated locals and inline call/return. Loops beat PHP thanks to superinstructions (inc_local, add_local_to_local, less_local_local_jif) that fuse common opcode sequences in hot loops. String operations are within 1.2x thanks to growable concat_assign buffers on the InlineCache.
 
 ### Optimization targets
 

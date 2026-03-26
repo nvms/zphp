@@ -13,14 +13,17 @@ pub fn register(vm: *VM, a: Allocator) !void {
     var exc_def = ClassDef{ .name = "Exception" };
     try exc_def.properties.append(a, .{ .name = "message", .default = .{ .string = "" } });
     try exc_def.properties.append(a, .{ .name = "code", .default = .{ .int = 0 } });
-    try exc_def.methods.put(a, "__construct", .{ .name = "__construct", .arity = 2 });
+    try exc_def.properties.append(a, .{ .name = "previous", .default = .null });
+    try exc_def.methods.put(a, "__construct", .{ .name = "__construct", .arity = 3 });
     try exc_def.methods.put(a, "getMessage", .{ .name = "getMessage", .arity = 0 });
     try exc_def.methods.put(a, "getCode", .{ .name = "getCode", .arity = 0 });
+    try exc_def.methods.put(a, "getPrevious", .{ .name = "getPrevious", .arity = 0 });
     try vm.classes.put(a, "Exception", exc_def);
 
     try vm.native_fns.put(a, "Exception::__construct", exceptionConstruct);
     try vm.native_fns.put(a, "Exception::getMessage", exceptionGetMessage);
     try vm.native_fns.put(a, "Exception::getCode", exceptionGetCode);
+    try vm.native_fns.put(a, "Exception::getPrevious", exceptionGetPrevious);
 
     const subclasses = .{
         .{ "RuntimeException", "Exception" },
@@ -59,6 +62,7 @@ fn exceptionConstruct(ctx: *NativeContext, args: []const Value) RuntimeError!Val
     const obj = this_val.object;
     if (args.len >= 1) try obj.set(ctx.allocator, "message", args[0]);
     if (args.len >= 2) try obj.set(ctx.allocator, "code", args[1]);
+    if (args.len >= 3) try obj.set(ctx.allocator, "previous", args[2]);
     return .null;
 }
 
@@ -72,4 +76,10 @@ fn exceptionGetCode(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
     const this_val = ctx.vm.currentFrame().vars.get("$this") orelse return .null;
     if (this_val != .object) return .null;
     return this_val.object.get("code");
+}
+
+fn exceptionGetPrevious(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const this_val = ctx.vm.currentFrame().vars.get("$this") orelse return .null;
+    if (this_val != .object) return .null;
+    return this_val.object.get("previous");
 }

@@ -1089,10 +1089,20 @@ const Parser = struct {
             while (self.peek() != .r_brace and self.peek() != .eof) {
                 // TraitName::method insteadof OtherTrait;
                 // TraitName::method as alias;
-                // TraitName::method as public;
-                const trait_node = try self.parseQualifiedName();
-                _ = try self.expect(.colon_colon);
-                const method_tok = try self.expectFunctionName();
+                // TraitName::method as public alias;
+                // method as alias;
+                // method as public;
+                const first_node = try self.parseQualifiedName();
+                var trait_node: u32 = 0;
+                var method_tok: u32 = 0;
+
+                if (self.peek() == .colon_colon) {
+                    _ = self.advance();
+                    trait_node = first_node;
+                    method_tok = try self.expectFunctionName();
+                } else {
+                    method_tok = self.nodes.items[first_node].main_token;
+                }
 
                 if (self.peek() == .kw_insteadof) {
                     _ = self.advance();
@@ -1111,7 +1121,21 @@ const Parser = struct {
                     }));
                 } else if (self.peek() == .kw_as) {
                     _ = self.advance();
-                    const alias_tok = self.advance();
+                    // optional visibility modifier before alias
+                    var vis_tok: u32 = 0;
+                    if (self.peek() == .kw_public or self.peek() == .kw_protected or self.peek() == .kw_private) {
+                        vis_tok = self.advance();
+                    }
+                    // alias name (may be absent if only visibility change)
+                    var alias_tok: u32 = 0;
+                    if (self.peek() == .identifier) {
+                        alias_tok = self.advance();
+                    } else if (vis_tok != 0) {
+                        alias_tok = vis_tok;
+                        vis_tok = 0;
+                    } else {
+                        alias_tok = self.advance();
+                    }
                     try conflicts.append(self.allocator, try self.addNode(.{
                         .tag = .trait_as,
                         .main_token = method_tok,
@@ -1307,15 +1331,24 @@ const Parser = struct {
         const tag = self.peek();
         return tag == .identifier or tag == .kw_array or tag == .kw_callable or
             tag == .kw_self or tag == .kw_static or tag == .kw_null or
-            tag == .kw_true or tag == .kw_false;
+            tag == .kw_true or tag == .kw_false or tag == .backslash;
+    }
+
+    fn skipTypeName(self: *Parser) void {
+        if (self.peek() == .backslash) _ = self.advance();
+        if (self.isTypeName()) _ = self.advance();
+        while (self.peek() == .backslash) {
+            _ = self.advance();
+            if (self.peek() == .identifier) _ = self.advance();
+        }
     }
 
     // consumes a full PHP type expression: simple, nullable, union, intersection, DNF
-    // e.g. int, ?string, int|string, Foo&Bar, (Foo&Bar)|null
+    // e.g. int, ?string, int|string, Foo&Bar, (Foo&Bar)|null, ?\Throwable
     fn skipTypeHint(self: *Parser) void {
         if (self.peek() == .question) {
             _ = self.advance();
-            if (self.isTypeName()) _ = self.advance();
+            self.skipTypeName();
             return;
         }
 
@@ -1323,7 +1356,7 @@ const Parser = struct {
         if (self.peek() == .l_paren) {
             _ = self.advance();
             while (self.isTypeName()) {
-                _ = self.advance();
+                self.skipTypeName();
                 if (self.peek() == .amp) {
                     _ = self.advance();
                 } else break;
@@ -1337,7 +1370,7 @@ const Parser = struct {
         }
 
         if (!self.isTypeName()) return;
-        _ = self.advance();
+        self.skipTypeName();
 
         // union: int|string|null or intersection: Foo&Bar
         if (self.peek() == .pipe) {
@@ -1347,21 +1380,21 @@ const Parser = struct {
                     // DNF group mid-union
                     _ = self.advance();
                     while (self.isTypeName()) {
-                        _ = self.advance();
+                        self.skipTypeName();
                         if (self.peek() == .amp) {
                             _ = self.advance();
                         } else break;
                     }
                     if (self.peek() == .r_paren) _ = self.advance();
                 } else if (self.isTypeName()) {
-                    _ = self.advance();
+                    self.skipTypeName();
                 }
             }
         } else if (self.peek() == .amp) {
             if (self.peekAt(1) == .variable or self.peekAt(1) == .ellipsis) return;
             while (self.peek() == .amp) {
                 _ = self.advance();
-                if (self.isTypeName()) _ = self.advance();
+                self.skipTypeName();
             }
         }
     }

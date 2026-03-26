@@ -272,12 +272,17 @@ fn preg_replace(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     const info = parsePattern(args[0].string) orelse return args[2];
     const replacement = if (args[1] == .string) args[1].string else return args[2];
     const subject = args[2].string;
+    const limit: i64 = if (args.len >= 4 and args[3] != .null) Value.toInt(args[3]) else -1;
 
     const code = compilePattern(info.pattern, info.flags) orelse return args[2];
     defer pcre2.pcre2_code_free_8(code);
 
     const match_data = pcre2.pcre2_match_data_create_from_pattern_8(code, null) orelse return args[2];
     defer pcre2.pcre2_match_data_free_8(match_data);
+
+    if (limit > 0) {
+        return pregReplaceLimited(ctx, code, match_data, subject, replacement, @intCast(limit));
+    }
 
     const sub_opts: u32 = pcre2.SUBSTITUTE_OVERFLOW_LENGTH | pcre2.SUBSTITUTE_GLOBAL;
 
@@ -322,6 +327,72 @@ fn preg_replace(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     const result = buf[0..out_len];
     try ctx.strings.append(ctx.allocator, buf);
     return .{ .string = result };
+}
+
+fn pregReplaceLimited(ctx: *NativeContext, code: *pcre2.Code, match_data: *pcre2.MatchData, subject: []const u8, replacement: []const u8, limit: usize) RuntimeError!Value {
+    var parts = std.ArrayListUnmanaged(u8){};
+    defer parts.deinit(ctx.allocator);
+    var offset: usize = 0;
+    var count: usize = 0;
+
+    while (offset <= subject.len and count < limit) {
+        const rc = pcre2.pcre2_match_8(code, subject.ptr, subject.len, offset, 0, match_data, null);
+        if (rc < 0) break;
+
+        const ovector = pcre2.pcre2_get_ovector_pointer_8(match_data);
+        const ms = ovector[0];
+        const me = ovector[1];
+
+        try parts.appendSlice(ctx.allocator, subject[offset..ms]);
+
+        // handle backreferences in replacement
+        var ri: usize = 0;
+        while (ri < replacement.len) {
+            if (replacement[ri] == '$' and ri + 1 < replacement.len and replacement[ri + 1] >= '0' and replacement[ri + 1] <= '9') {
+                const group = replacement[ri + 1] - '0';
+                ri += 2;
+                if (group < @as(u8, @intCast(rc))) {
+                    const gs = ovector[2 * @as(usize, group)];
+                    const ge = ovector[2 * @as(usize, group) + 1];
+                    if (gs <= subject.len and ge <= subject.len) {
+                        try parts.appendSlice(ctx.allocator, subject[gs..ge]);
+                    }
+                }
+            } else if (replacement[ri] == '\\' and ri + 1 < replacement.len and replacement[ri + 1] >= '0' and replacement[ri + 1] <= '9') {
+                const group = replacement[ri + 1] - '0';
+                ri += 2;
+                if (group < @as(u8, @intCast(rc))) {
+                    const gs = ovector[2 * @as(usize, group)];
+                    const ge = ovector[2 * @as(usize, group) + 1];
+                    if (gs <= subject.len and ge <= subject.len) {
+                        try parts.appendSlice(ctx.allocator, subject[gs..ge]);
+                    }
+                }
+            } else {
+                try parts.append(ctx.allocator, replacement[ri]);
+                ri += 1;
+            }
+        }
+
+        count += 1;
+        if (me == offset) {
+            if (offset < subject.len) {
+                try parts.append(ctx.allocator, subject[offset]);
+            }
+            offset += 1;
+        } else {
+            offset = me;
+        }
+    }
+
+    if (offset <= subject.len) {
+        try parts.appendSlice(ctx.allocator, subject[offset..]);
+    }
+
+    const buf = try ctx.allocator.alloc(u8, parts.items.len);
+    @memcpy(buf, parts.items);
+    try ctx.strings.append(ctx.allocator, buf);
+    return .{ .string = buf };
 }
 
 fn preg_replace_callback(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
@@ -401,6 +472,8 @@ fn preg_split(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     const info = parsePattern(args[0].string) orelse return Value.null;
     const subject = args[1].string;
     const limit: i64 = if (args.len >= 3 and args[2] != .null) Value.toInt(args[2]) else -1;
+    const flags: i64 = if (args.len >= 4) Value.toInt(args[3]) else 0;
+    const delim_capture = (flags & 2) != 0;
 
     const code = compilePattern(info.pattern, info.flags) orelse return Value.null;
     defer pcre2.pcre2_code_free_8(code);
@@ -424,6 +497,19 @@ fn preg_split(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
 
         try result.append(ctx.allocator, .{ .string = try ctx.createString(subject[offset..match_start]) });
         splits += 1;
+
+        if (delim_capture and rc > 1) {
+            var i: usize = 1;
+            while (i < @as(usize, @intCast(rc))) : (i += 1) {
+                const gs = ovector[2 * i];
+                const ge = ovector[2 * i + 1];
+                if (gs <= subject.len and ge <= subject.len) {
+                    try result.append(ctx.allocator, .{ .string = try ctx.createString(subject[gs..ge]) });
+                } else {
+                    try result.append(ctx.allocator, .{ .string = "" });
+                }
+            }
+        }
 
         if (match_end == offset) {
             if (offset < subject.len) {

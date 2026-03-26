@@ -509,15 +509,23 @@ pub fn compileTryCatch(self: *Compiler, node: Ast.Node) Error!void {
         }
     }
 
-    // if no catch matched, re-throw
-    try self.emitOp(.throw);
-
-    self.patchJump(skip_catches);
-    for (end_jumps.items) |ej| self.patchJump(ej);
-
-    // finally block runs on both paths
     if (finally_node != 0) {
+        // no catch matched: run finally then re-throw
+        // exception is still on the stack
         try self.compileNode(finally_node);
+        try self.emitOp(.throw);
+
+        self.patchJump(skip_catches);
+        for (end_jumps.items) |ej| self.patchJump(ej);
+
+        // normal path: run finally after try or caught exception
+        try self.compileNode(finally_node);
+    } else {
+        // no finally: just re-throw
+        try self.emitOp(.throw);
+
+        self.patchJump(skip_catches);
+        for (end_jumps.items) |ej| self.patchJump(ej);
     }
 }
 

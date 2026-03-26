@@ -282,6 +282,26 @@ fn array_map(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
         return .{ .array = result };
     }
 
+    // multi-array: callback receives one element from each array
+    if (args.len > 2) {
+        var max_len: usize = 0;
+        for (args[1..]) |a| {
+            if (a == .array) max_len = @max(max_len, a.array.entries.items.len);
+        }
+        var cb_args_buf: [8]Value = undefined;
+        const n_arrays = args.len - 1;
+        var result = try ctx.createArray();
+        for (0..max_len) |i| {
+            for (0..n_arrays) |j| {
+                const arr = if (args[1 + j] == .array) args[1 + j].array else null;
+                cb_args_buf[j] = if (arr != null and i < arr.?.entries.items.len) arr.?.entries.items[i].value else .null;
+            }
+            const mapped = try ctx.invokeCallable(callback, cb_args_buf[0..n_arrays]);
+            try result.append(ctx.allocator, mapped);
+        }
+        return .{ .array = result };
+    }
+
     var result = try ctx.createArray();
     for (src.entries.items) |entry| {
         const mapped = try ctx.invokeCallable(callback, &.{entry.value});
@@ -508,16 +528,17 @@ fn array_column(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     for (src.entries.items) |entry| {
         if (entry.value != .array) continue;
         const row = entry.value.array;
-        const key = Value.toArrayKey(col_key);
-        const val = row.get(key);
-        if (val != .null) {
-            if (args.len >= 3 and args[2] != .null) {
-                const idx_key = Value.toArrayKey(args[2]);
-                const idx_val = row.get(idx_key);
-                try result.set(ctx.allocator, Value.toArrayKey(idx_val), val);
-            } else {
-                try result.append(ctx.allocator, val);
-            }
+        const val = if (col_key == .null) entry.value else blk: {
+            const v = row.get(Value.toArrayKey(col_key));
+            if (v == .null) continue;
+            break :blk v;
+        };
+        if (args.len >= 3 and args[2] != .null) {
+            const idx_key = Value.toArrayKey(args[2]);
+            const idx_val = row.get(idx_key);
+            try result.set(ctx.allocator, Value.toArrayKey(idx_val), val);
+        } else {
+            try result.append(ctx.allocator, val);
         }
     }
     return .{ .array = result };
