@@ -403,6 +403,7 @@ pub const VM = struct {
             self.allocator.destroy(g);
         }
         for (self.fibers.items) |f| {
+            self.cleanupFiberFrames(f);
             f.deinit(self.allocator);
             self.allocator.destroy(f);
         }
@@ -1389,6 +1390,7 @@ pub const VM = struct {
                 },
 
                 .closure_bind => {
+                    if (self.frame_count == 1) self.global_vars_dirty = true;
                     if (self.global_vars_dirty) try self.syncGlobalLocalsToVars();
                     const var_idx = self.readU16();
                     const var_name = self.currentChunk().constants.items[var_idx].string;
@@ -1415,6 +1417,7 @@ pub const VM = struct {
                 },
 
                 .closure_bind_ref => {
+                    if (self.frame_count == 1) self.global_vars_dirty = true;
                     if (self.global_vars_dirty) try self.syncGlobalLocalsToVars();
                     const var_idx = self.readU16();
                     const var_name = self.currentChunk().constants.items[var_idx].string;
@@ -2776,6 +2779,7 @@ pub const VM = struct {
         }
     }
 
+
     fn writebackGlobals(self: *VM) !void {
         var i: usize = 0;
         while (i < self.global_vars.items.len) {
@@ -3975,6 +3979,15 @@ pub const VM = struct {
         self.allocator.free(locals);
     }
 
+    fn cleanupFiberFrames(self: *VM, fiber: *Fiber) void {
+        for (fiber.saved_frames.items) |*f| {
+            f.vars.deinit(self.allocator);
+            f.ref_slots.deinit(self.allocator);
+            if (f.locals.len > 0) self.freeLocals(f.locals);
+        }
+        fiber.saved_frames.clearRetainingCapacity();
+    }
+
     fn writebackRefs(self: *VM) !void {
         _ = self;
     }
@@ -4781,11 +4794,7 @@ pub const VM = struct {
 
     fn saveFiberState(self: *VM, fiber: *Fiber, base_frame: usize, base_sp: usize, base_handler: usize) !void {
         // clear previously saved state
-        for (fiber.saved_frames.items) |*f| {
-            f.vars.deinit(self.allocator);
-            f.ref_slots.deinit(self.allocator);
-            if (f.locals.len > 0) self.allocator.free(f.locals);
-        }
+        self.cleanupFiberFrames(fiber);
         fiber.saved_frames.clearRetainingCapacity();
         fiber.saved_stack.clearRetainingCapacity();
         fiber.saved_handlers.clearRetainingCapacity();
