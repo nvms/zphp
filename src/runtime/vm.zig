@@ -13,6 +13,13 @@ const enums = @import("../stdlib/enums.zig");
 const Allocator = std.mem.Allocator;
 pub const RuntimeError = error{ RuntimeError, OutOfMemory };
 
+const TypeInfo = struct {
+    param_types: []const []const u8 = &.{},
+    return_type: []const u8 = "",
+};
+var g_type_info: std.StringHashMapUnmanaged(TypeInfo) = .{};
+var g_type_info_allocator: ?Allocator = null;
+
 pub const FileLoader = fn (path: []const u8, allocator: Allocator) ?*CompileResult;
 pub const NativeContext = struct {
     allocator: Allocator,
@@ -419,6 +426,12 @@ pub const VM = struct {
             if (ic_ptr.locals_cap > 0) self.allocator.free(ic_ptr.locals_buf[0..ic_ptr.locals_cap]);
             self.allocator.destroy(ic_ptr);
         }
+        var ti_iter = g_type_info.valueIterator();
+        while (ti_iter.next()) |ti| {
+            if (ti.param_types.len > 0) self.allocator.free(ti.param_types);
+        }
+        g_type_info.deinit(self.allocator);
+        g_type_info = .{};
         self.functions.deinit(self.allocator);
         self.native_fns.deinit(self.allocator);
         self.output.deinit(self.allocator);
@@ -478,6 +491,9 @@ pub const VM = struct {
     pub fn interpret(self: *VM, result: *const CompileResult) RuntimeError!void {
         for (result.functions.items) |*func| {
             try self.registerFunction(func);
+        }
+        for (result.type_hints.items) |th| {
+            try g_type_info.put(self.allocator, th.name, .{ .param_types = th.param_types, .return_type = th.return_type });
         }
         var vars: std.StringHashMapUnmanaged(Value) = .{};
         var it = self.request_vars.iterator();
@@ -870,6 +886,9 @@ pub const VM = struct {
                 },
                 .return_val => {
                     const result = self.pop();
+                    if (g_type_info.count() > 0) {
+                        if (try self.checkReturnType(result)) continue;
+                    }
                     try self.popFrame();
                     self.push(result);
                     if (self.frame_count <= base_frame) return;
@@ -1421,6 +1440,9 @@ pub const VM = struct {
 
                                     for (result.functions.items) |*func| {
                                         try self.registerFunction(func);
+                                    }
+                                    for (result.type_hints.items) |th| {
+                                        try g_type_info.put(self.allocator, th.name, .{ .param_types = th.param_types, .return_type = th.return_type });
                                     }
 
                                     // execute via runUntilFrame so halt pops back here
@@ -3523,6 +3545,17 @@ pub const VM = struct {
                     continue :reenter;
                 } else if (byte == @intFromEnum(OpCode.return_val)) {
                     const result = self.stack[sp - 1];
+                    if (g_type_info.count() > 0) {
+                        if (frame.func) |f| {
+                            if (g_type_info.get(f.name)) |ti| {
+                                if (ti.return_type.len > 0 and !self.checkTypeMatch(result, ti.return_type)) {
+                                    frame.ip = ip - 1;
+                                    self.sp = sp;
+                                    return;
+                                }
+                            }
+                        }
+                    }
                     ic.locals_sp -= locals.len;
                     self.frame_count -= 1;
 
@@ -4035,6 +4068,96 @@ pub const VM = struct {
         return self.pop();
     }
 
+    fn valueTypeName(val: Value) []const u8 {
+        return switch (val) {
+            .int => "int",
+            .float => "float",
+            .bool => "bool",
+            .string => "string",
+            .array => "array",
+            .object => |obj| obj.class_name,
+            .null => "null",
+            .generator => "Generator",
+            .fiber => "Fiber",
+        };
+    }
+
+    fn checkSingleType(self: *VM, val: Value, type_name: []const u8) bool {
+        if (std.mem.eql(u8, type_name, "mixed")) return true;
+        if (std.mem.eql(u8, type_name, "void")) return val == .null;
+        if (std.mem.eql(u8, type_name, "int") or std.mem.eql(u8, type_name, "integer")) return val == .int;
+        if (std.mem.eql(u8, type_name, "float") or std.mem.eql(u8, type_name, "double")) return val == .float or val == .int;
+        if (std.mem.eql(u8, type_name, "bool") or std.mem.eql(u8, type_name, "boolean")) return val == .bool;
+        if (std.mem.eql(u8, type_name, "string")) return val == .string;
+        if (std.mem.eql(u8, type_name, "array")) return val == .array;
+        if (std.mem.eql(u8, type_name, "callable")) return val == .string or val == .array or val == .object;
+        if (std.mem.eql(u8, type_name, "null")) return val == .null;
+        if (std.mem.eql(u8, type_name, "false")) return val == .bool and !val.bool;
+        if (std.mem.eql(u8, type_name, "true")) return val == .bool and val.bool;
+        if (std.mem.eql(u8, type_name, "object")) return val == .object;
+        if (std.mem.eql(u8, type_name, "iterable")) return val == .array or val == .generator;
+        if (std.mem.eql(u8, type_name, "self") or std.mem.eql(u8, type_name, "static") or std.mem.eql(u8, type_name, "parent")) return val == .object;
+        if (std.mem.eql(u8, type_name, "Generator")) return val == .generator;
+        if (std.mem.eql(u8, type_name, "Fiber")) return val == .fiber;
+        if (std.mem.eql(u8, type_name, "Closure")) return val == .string and if (val.string.len > 10) std.mem.startsWith(u8, val.string, "__closure_") else false;
+        if (val == .object) return self.isInstanceOf(val.object.class_name, type_name);
+        return false;
+    }
+
+    fn checkTypeMatch(self: *VM, val: Value, type_str: []const u8) bool {
+        if (type_str.len == 0) return true;
+        if (type_str[0] == '?') {
+            if (val == .null) return true;
+            return self.checkSingleType(val, type_str[1..]);
+        }
+        if (std.mem.indexOf(u8, type_str, "|")) |_| {
+            var it = std.mem.splitScalar(u8, type_str, '|');
+            while (it.next()) |part| {
+                if (self.checkSingleType(val, part)) return true;
+            }
+            return false;
+        }
+        return self.checkSingleType(val, type_str);
+    }
+
+    fn checkParamTypes(self: *VM, name: []const u8, arg_count: u8) RuntimeError!bool {
+        if (g_type_info.count() == 0) return false;
+        const ti = g_type_info.get(name) orelse return false;
+        if (ti.param_types.len == 0) return false;
+        const ac: usize = arg_count;
+        for (0..@min(ac, ti.param_types.len)) |i| {
+            const type_str = ti.param_types[i];
+            if (type_str.len == 0) continue;
+            const val = self.stack[self.sp - ac + i];
+            if (!self.checkTypeMatch(val, type_str)) {
+                self.sp -= ac;
+                const msg = std.fmt.allocPrint(self.allocator, "{s}(): Argument #{d} must be of type {s}, {s} given", .{ name, i + 1, type_str, valueTypeName(val) }) catch return error.RuntimeError;
+                try self.strings.append(self.allocator, msg);
+                self.error_msg = msg;
+                if (try self.throwBuiltinException("TypeError", msg)) return true;
+                return error.RuntimeError;
+            }
+        }
+        return false;
+    }
+
+    fn checkReturnType(self: *VM, val: Value) RuntimeError!bool {
+        if (g_type_info.count() == 0) return false;
+        const frame = &self.frames[self.frame_count - 1];
+        const func_name = if (frame.func) |f| f.name else return false;
+        const ti = g_type_info.get(func_name) orelse return false;
+        if (ti.return_type.len == 0) return false;
+        if (!self.checkTypeMatch(val, ti.return_type)) {
+            const msg = std.fmt.allocPrint(self.allocator, "{s}(): Return value must be of type {s}, {s} given", .{ func_name, ti.return_type, valueTypeName(val) }) catch return error.RuntimeError;
+            try self.strings.append(self.allocator, msg);
+            self.error_msg = msg;
+            try self.popFrame();
+            if (try self.throwBuiltinException("TypeError", msg)) return true;
+            return error.RuntimeError;
+        }
+        return false;
+    }
+
     fn callNamedFunction(self: *VM, name: []const u8, arg_count: u8) RuntimeError!void {
         if (self.native_fns.get(name)) |native| {
             var args: [16]Value = undefined;
@@ -4047,6 +4170,9 @@ pub const VM = struct {
             const ac: usize = arg_count;
             if (ac < func.required_params)
                 return error.RuntimeError;
+            if (g_type_info.count() > 0) {
+                if (try self.checkParamTypes(name, arg_count)) return;
+            }
             if (func.locals_only) {
                 if (self.captures.items.len == 0 or !self.hasCaptures(name))
                     return self.callLocalsOnly(func, arg_count);

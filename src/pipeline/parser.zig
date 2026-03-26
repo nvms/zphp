@@ -601,9 +601,10 @@ const Parser = struct {
         }
         _ = try self.expect(.r_paren);
 
+        var ret_range = [2]u32{ 0, 0 };
         if (self.peek() == .colon) {
             _ = self.advance();
-            self.skipTypeHint();
+            ret_range = self.collectTypeHint();
         }
 
         const prev_yield = self.found_yield;
@@ -612,7 +613,7 @@ const Parser = struct {
         const is_gen = self.found_yield;
         self.found_yield = prev_yield;
 
-        const extra = try self.addExtraList(params.items);
+        const extra = try self.addExtraListWithReturnType(params.items, ret_range);
         const rhs = body | (if (is_gen) @as(u32, 1) << 31 else 0);
         return self.addNode(.{ .tag = .function_decl, .main_token = name_tok, .data = .{ .lhs = extra, .rhs = rhs } });
     }
@@ -916,13 +917,14 @@ const Parser = struct {
         }
         _ = try self.expect(.r_paren);
 
+        var ret_range = [2]u32{ 0, 0 };
         if (self.peek() == .colon) {
             _ = self.advance();
-            self.skipTypeHint();
+            ret_range = self.collectTypeHint();
         }
 
         _ = try self.expect(.semicolon);
-        const extra = try self.addExtraList(params.items);
+        const extra = try self.addExtraListWithReturnType(params.items, ret_range);
         return self.addNode(.{ .tag = .interface_method, .main_token = name_tok, .data = .{ .lhs = extra } });
     }
 
@@ -1140,9 +1142,10 @@ const Parser = struct {
         }
         _ = try self.expect(.r_paren);
 
+        var ret_range = [2]u32{ 0, 0 };
         if (self.peek() == .colon) {
             _ = self.advance();
-            self.skipTypeHint();
+            ret_range = self.collectTypeHint();
         }
 
         const prev_yield = self.found_yield;
@@ -1151,7 +1154,7 @@ const Parser = struct {
         const is_gen = self.found_yield;
         self.found_yield = prev_yield;
 
-        const extra = try self.addExtraList(params.items);
+        const extra = try self.addExtraListWithReturnType(params.items, ret_range);
         // bits 30-31 reserved for visibility (set by class/enum parser), bit 29 = generator
         const rhs = body | (if (is_gen) @as(u32, 1) << 29 else 0);
         return self.addNode(.{ .tag = .class_method, .main_token = name_tok, .data = .{ .lhs = extra, .rhs = rhs } });
@@ -1208,9 +1211,10 @@ const Parser = struct {
             _ = try self.expect(.r_paren);
         }
 
+        var ret_range = [2]u32{ 0, 0 };
         if (self.peek() == .colon) {
             _ = self.advance();
-            self.skipTypeHint();
+            ret_range = self.collectTypeHint();
         }
 
         const prev_yield = self.found_yield;
@@ -1219,7 +1223,7 @@ const Parser = struct {
         const is_gen = self.found_yield;
         self.found_yield = prev_yield;
 
-        const param_extra = try self.addExtraList(params.items);
+        const param_extra = try self.addExtraListWithReturnType(params.items, ret_range);
 
         // rhs = extra -> {body (bit 31 = generator), use_count, use_vars...}
         var rhs_data = std.ArrayListUnmanaged(u32){};
@@ -1249,9 +1253,10 @@ const Parser = struct {
         }
         _ = try self.expect(.r_paren);
 
+        var ret_range = [2]u32{ 0, 0 };
         if (self.peek() == .colon) {
             _ = self.advance();
-            self.skipTypeHint();
+            ret_range = self.collectTypeHint();
         }
 
         _ = try self.expect(.fat_arrow);
@@ -1261,7 +1266,7 @@ const Parser = struct {
         const block_extra = try self.addExtraList(&.{ret});
         const body = try self.addNode(.{ .tag = .block, .main_token = fn_tok, .data = .{ .lhs = block_extra } });
 
-        const param_extra = try self.addExtraList(params.items);
+        const param_extra = try self.addExtraListWithReturnType(params.items, ret_range);
         // rhs = extra -> {body, use_count}. 0xFFFFFFFF signals arrow fn (implicit capture)
         const rhs_extra = try self.addExtra(&.{ body, 0xFFFFFFFF });
 
@@ -1355,6 +1360,13 @@ const Parser = struct {
         }
     }
 
+    fn collectTypeHint(self: *Parser) [2]u32 {
+        if (!self.isTypeName() and self.peek() != .question and self.peek() != .l_paren) return .{ 0, 0 };
+        const start = self.pos;
+        self.skipTypeHint();
+        return .{ start, self.pos };
+    }
+
     fn parseParam(self: *Parser) Error!u32 {
         // constructor property promotion: visibility keyword before param
         // 0 = none, 1 = public, 2 = protected, 3 = private
@@ -1366,9 +1378,7 @@ const Parser = struct {
         else if (self.peek() == .kw_protected) { promotion = 2; _ = self.advance(); }
         else if (self.peek() == .kw_private) { promotion = 3; _ = self.advance(); }
         if (self.peek() == .kw_readonly) { param_readonly = true; _ = self.advance(); }
-        if (self.isTypeName() or self.peek() == .question or self.peek() == .l_paren) {
-            self.skipTypeHint();
-        }
+        const type_range = self.collectTypeHint();
         // reference: &$param
         const is_ref = self.peek() == .amp;
         if (is_ref) _ = self.advance();
@@ -1388,6 +1398,10 @@ const Parser = struct {
         if (is_ref) flags |= 2;
         flags |= (promotion << 2);
         if (param_readonly) flags |= 16;
+        if (type_range[0] != type_range[1]) {
+            const type_extra = try self.addExtra(&type_range);
+            flags |= ((type_extra + 1) << 5);
+        }
         return self.addNode(.{ .tag = .variable, .main_token = tok, .data = .{ .lhs = default, .rhs = flags } });
     }
 
@@ -1908,6 +1922,14 @@ const Parser = struct {
         const idx: u32 = @intCast(self.extra_data.items.len);
         try self.extra_data.append(self.allocator, @intCast(items.len));
         try self.extra_data.appendSlice(self.allocator, items);
+        return idx;
+    }
+
+    fn addExtraListWithReturnType(self: *Parser, items: []const u32, ret_range: [2]u32) Error!u32 {
+        const idx: u32 = @intCast(self.extra_data.items.len);
+        try self.extra_data.append(self.allocator, @intCast(items.len));
+        try self.extra_data.appendSlice(self.allocator, items);
+        try self.extra_data.appendSlice(self.allocator, &ret_range);
         return idx;
     }
 

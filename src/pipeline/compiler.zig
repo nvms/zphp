@@ -14,6 +14,12 @@ const compiler_class = @import("compiler_class.zig");
 const Allocator = std.mem.Allocator;
 const Error = Allocator.Error || error{CompileError};
 
+pub const TypeHint = struct {
+    name: []const u8,
+    param_types: []const []const u8 = &.{},
+    return_type: []const u8 = "",
+};
+
 pub const CompileResult = struct {
     chunk: Chunk,
     functions: std.ArrayListUnmanaged(ObjFunction),
@@ -21,6 +27,7 @@ pub const CompileResult = struct {
     allocator: Allocator,
     local_count: u16 = 0,
     slot_names: []const []const u8 = &.{},
+    type_hints: std.ArrayListUnmanaged(TypeHint) = .{},
 
     pub fn deinit(self: *CompileResult) void {
         self.chunk.deinit(self.allocator);
@@ -34,6 +41,7 @@ pub const CompileResult = struct {
         self.functions.deinit(self.allocator);
         for (self.string_allocs.items) |s| self.allocator.free(s);
         self.string_allocs.deinit(self.allocator);
+        self.type_hints.deinit(self.allocator);
         if (self.slot_names.len > 0) self.allocator.free(self.slot_names);
     }
 };
@@ -79,7 +87,7 @@ pub fn compileWithPath(ast: *const Ast, allocator: Allocator, file_path: []const
     const slot_names = try c.buildSlotNames();
     const local_count = c.next_slot;
     c.local_slots.deinit(allocator);
-    return .{ .chunk = c.chunk, .functions = c.functions, .string_allocs = c.string_allocs, .allocator = allocator, .local_count = local_count, .slot_names = slot_names };
+    return .{ .chunk = c.chunk, .functions = c.functions, .string_allocs = c.string_allocs, .allocator = allocator, .local_count = local_count, .slot_names = slot_names, .type_hints = c.type_hints };
 }
 
 pub const Compiler = struct {
@@ -103,6 +111,7 @@ pub const Compiler = struct {
     trait_properties: std.StringHashMapUnmanaged([]const u32) = .{},
     local_slots: std.StringHashMapUnmanaged(u16) = .{},
     next_slot: u16 = 0,
+    type_hints: std.ArrayListUnmanaged(TypeHint) = .{},
 
     pub const LoopJump = struct {
         offset: usize,

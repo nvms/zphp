@@ -1,5 +1,6 @@
 const std = @import("std");
 const Compiler = @import("compiler.zig").Compiler;
+const TypeHint = @import("compiler.zig").TypeHint;
 const Ast = @import("ast.zig").Ast;
 const Token = @import("token.zig").Token;
 const Chunk = @import("bytecode.zig").Chunk;
@@ -8,6 +9,48 @@ const ObjFunction = @import("bytecode.zig").ObjFunction;
 const Value = @import("../runtime/value.zig").Value;
 const Allocator = std.mem.Allocator;
 const Error = Allocator.Error || error{CompileError};
+
+fn buildTypeString(self: *Compiler, start_tok: u32, end_tok: u32) Error![]const u8 {
+    if (start_tok == end_tok) return "";
+    var buf = std.ArrayListUnmanaged(u8){};
+    for (start_tok..end_tok) |t| {
+        const lexeme = self.ast.tokens[t].lexeme(self.ast.source);
+        try buf.appendSlice(self.allocator, lexeme);
+    }
+    const s = try buf.toOwnedSlice(self.allocator);
+    try self.string_allocs.append(self.allocator, s);
+    return s;
+}
+
+fn extractParamTypes(self: *Compiler, param_nodes: []const u32) Error![]const []const u8 {
+    var has_any = false;
+    for (param_nodes) |p| {
+        const rhs = self.ast.nodes[p].data.rhs;
+        if ((rhs >> 5) != 0) { has_any = true; break; }
+    }
+    if (!has_any) return &.{};
+
+    const types = try self.allocator.alloc([]const u8, param_nodes.len);
+    for (param_nodes, 0..) |p, i| {
+        const rhs = self.ast.nodes[p].data.rhs;
+        const type_extra_idx = rhs >> 5;
+        if (type_extra_idx == 0) {
+            types[i] = "";
+        } else {
+            const idx = type_extra_idx - 1;
+            const start_tok = self.ast.extra_data[idx];
+            const end_tok = self.ast.extra_data[idx + 1];
+            types[i] = try buildTypeString(self, start_tok, end_tok);
+        }
+    }
+    return types;
+}
+
+fn extractReturnType(self: *Compiler, extra_base: u32, param_count: u32) Error![]const u8 {
+    const ret_start = self.ast.extra_data[extra_base + 1 + param_count];
+    const ret_end = self.ast.extra_data[extra_base + 1 + param_count + 1];
+    return buildTypeString(self, ret_start, ret_end);
+}
 
 pub fn compileFunction(self: *Compiler, node: Ast.Node) Error!void {
     const name_tok = node.main_token;
@@ -65,6 +108,7 @@ pub fn compileFunction(self: *Compiler, node: Ast.Node) Error!void {
         sub.continue_jumps.deinit(self.allocator);
         sub.string_allocs.deinit(self.allocator);
         sub.local_slots.deinit(self.allocator);
+        sub.type_hints.deinit(self.allocator);
     }
 
     for (param_nodes, 0..) |_, i| {
@@ -102,10 +146,18 @@ pub fn compileFunction(self: *Compiler, node: Ast.Node) Error!void {
         .slot_names = slot_names,
     });
 
+    const param_types = try extractParamTypes(self, param_nodes);
+    const return_type = try extractReturnType(self, node.data.lhs, @intCast(param_nodes.len));
+    if (param_types.len > 0 or return_type.len > 0) {
+        try self.type_hints.append(self.allocator, .{ .name = name, .param_types = param_types, .return_type = return_type });
+    }
+
     for (sub.functions.items) |f| try self.functions.append(self.allocator, f);
     sub.functions.deinit(self.allocator);
     for (sub.string_allocs.items) |s| try self.string_allocs.append(self.allocator, s);
     sub.string_allocs.deinit(self.allocator);
+    for (sub.type_hints.items) |th| try self.type_hints.append(self.allocator, th);
+    sub.type_hints.deinit(self.allocator);
 }
 
 pub fn compileClosure(self: *Compiler, node: Ast.Node) Error!void {
@@ -159,6 +211,7 @@ pub fn compileClosure(self: *Compiler, node: Ast.Node) Error!void {
         sub.continue_jumps.deinit(self.allocator);
         sub.string_allocs.deinit(self.allocator);
         sub.local_slots.deinit(self.allocator);
+        sub.type_hints.deinit(self.allocator);
     }
 
     for (param_nodes, 0..) |_, i| {
@@ -219,10 +272,18 @@ pub fn compileClosure(self: *Compiler, node: Ast.Node) Error!void {
 
     try self.functions.append(self.allocator, func);
 
+    const param_types = try extractParamTypes(self, param_nodes);
+    const return_type = try extractReturnType(self, node.data.lhs, @intCast(param_nodes.len));
+    if (param_types.len > 0 or return_type.len > 0) {
+        try self.type_hints.append(self.allocator, .{ .name = owned_name, .param_types = param_types, .return_type = return_type });
+    }
+
     for (sub.functions.items) |f| try self.functions.append(self.allocator, f);
     sub.functions.deinit(self.allocator);
     for (sub.string_allocs.items) |s| try self.string_allocs.append(self.allocator, s);
     sub.string_allocs.deinit(self.allocator);
+    for (sub.type_hints.items) |th| try self.type_hints.append(self.allocator, th);
+    sub.type_hints.deinit(self.allocator);
 
     const idx = try self.addConstant(.{ .string = owned_name });
     try self.emitConstant(idx);
@@ -690,6 +751,7 @@ fn compileClassMethodBody(self: *Compiler, class_name: []const u8, member: Ast.N
         sub.continue_jumps.deinit(self.allocator);
         sub.string_allocs.deinit(self.allocator);
         sub.local_slots.deinit(self.allocator);
+        sub.type_hints.deinit(self.allocator);
     }
 
     // slot 0 = $this for instance methods
@@ -748,10 +810,18 @@ fn compileClassMethodBody(self: *Compiler, class_name: []const u8, member: Ast.N
         .slot_names = slot_names,
     });
 
+    const param_types = try extractParamTypes(self, param_nodes);
+    const return_type = try extractReturnType(self, member.data.lhs, @intCast(param_nodes.len));
+    if (param_types.len > 0 or return_type.len > 0) {
+        try self.type_hints.append(self.allocator, .{ .name = full_name, .param_types = param_types, .return_type = return_type });
+    }
+
     for (sub.functions.items) |f| try self.functions.append(self.allocator, f);
     sub.functions.deinit(self.allocator);
     for (sub.string_allocs.items) |s| try self.string_allocs.append(self.allocator, s);
     sub.string_allocs.deinit(self.allocator);
+    for (sub.type_hints.items) |th| try self.type_hints.append(self.allocator, th);
+    sub.type_hints.deinit(self.allocator);
 }
 
 fn hasRefParams(ref_flags: []const bool) bool {
