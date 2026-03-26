@@ -362,6 +362,7 @@ pub const Compiler = struct {
         } else if (target.tag == .array_literal) {
             const elements = self.ast.extraSlice(target.data.lhs);
             for (elements, 0..) |elem_idx, i| {
+                if (elem_idx == 0) continue;
                 const elem = self.ast.nodes[elem_idx];
                 if (elem.tag != .array_element) continue;
                 const val_node = self.ast.nodes[elem.data.lhs];

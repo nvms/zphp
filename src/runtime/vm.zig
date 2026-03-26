@@ -1051,6 +1051,10 @@ pub const VM = struct {
                     const arr_val = self.pop();
                     if (arr_val == .array) {
                         arr_val.array.remove(Value.toArrayKey(key));
+                    } else if (arr_val == .object) {
+                        if (self.hasMethod(arr_val.object.class_name, "offsetUnset")) {
+                            _ = self.callMethod(arr_val.object, "offsetUnset", &.{key}) catch {};
+                        }
                     }
                 },
                 .concat_assign => {
@@ -3846,15 +3850,19 @@ pub const VM = struct {
         while (fi > 0) {
             fi -= 1;
             const frame_chunk_ptr = self.frames[fi].chunk;
+            var best: ?[]const u8 = null;
             var iter = self.functions.iterator();
             while (iter.next()) |entry| {
                 if (frame_chunk_ptr == &entry.value_ptr.*.chunk) {
                     const name = entry.key_ptr.*;
                     if (std.mem.indexOf(u8, name, "::")) |sep| {
-                        return name[0..sep];
+                        const class_part = name[0..sep];
+                        if (!self.traits.contains(class_part)) return class_part;
+                        if (best == null) best = class_part;
                     }
                 }
             }
+            if (best) |b| return b;
         }
         return null;
     }

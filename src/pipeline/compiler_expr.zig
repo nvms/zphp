@@ -233,6 +233,18 @@ pub fn compilePrefixOp(self: *Compiler, node: Ast.Node) Error!void {
             try self.emitU16(sprop_idx);
             return;
         }
+        if (target.tag == .array_access) {
+            // ++$arr[k]: arr, key, arr, key, array_get, +1, array_set
+            try self.compileNode(target.data.lhs);
+            try self.compileNode(target.data.rhs);
+            try self.compileNode(target.data.lhs);
+            try self.compileNode(target.data.rhs);
+            try self.emitOp(.array_get);
+            try self.emitConstant(try self.addConstant(.{ .int = 1 }));
+            try self.emitOp(if (op_tag == .plus_plus) .add else .subtract);
+            try self.emitOp(.array_set);
+            return;
+        }
         try self.compileNode(node.data.lhs);
         try self.emitConstant(try self.addConstant(.{ .int = 1 }));
         try self.emitOp(if (op_tag == .plus_plus) .add else .subtract);
@@ -306,6 +318,24 @@ pub fn compilePostfixOp(self: *Compiler, node: Ast.Node) Error!void {
         try self.emitOp(.set_static_prop);
         try self.emitU16(class_idx);
         try self.emitU16(sprop_idx);
+        try self.emitOp(.pop);
+        return;
+    }
+
+    if (target.tag == .array_access) {
+        // $arr[k]++: get old value, then set new value, return old
+        // stack: old_val (from arr[k]), then arr, key, arr, key, array_get, +1, array_set, pop
+        try self.compileNode(target.data.lhs);
+        try self.compileNode(target.data.rhs);
+        try self.emitOp(.array_get);
+        try self.compileNode(target.data.lhs);
+        try self.compileNode(target.data.rhs);
+        try self.compileNode(target.data.lhs);
+        try self.compileNode(target.data.rhs);
+        try self.emitOp(.array_get);
+        try self.emitConstant(try self.addConstant(.{ .int = 1 }));
+        try self.emitOp(if (op_tag == .plus_plus) .add else .subtract);
+        try self.emitOp(.array_set);
         try self.emitOp(.pop);
         return;
     }

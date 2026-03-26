@@ -722,13 +722,26 @@ fn array_rand(_: *NativeContext, args: []const Value) RuntimeError!Value {
 fn native_compact(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     const arr = try ctx.createArray();
     const frame = ctx.vm.currentFrame();
+    const slot_names = if (frame.func) |func| func.slot_names else ctx.vm.global_slot_names;
     for (args) |arg| {
         if (arg != .string) continue;
         const name = arg.string;
         const var_name = try std.fmt.allocPrint(ctx.allocator, "${s}", .{name});
         try ctx.strings.append(ctx.allocator, var_name);
-        if (frame.vars.get(var_name)) |val| {
-            try arr.set(ctx.allocator, .{ .string = name }, val);
+        var found = false;
+        for (slot_names, 0..) |sn, i| {
+            if (std.mem.eql(u8, sn, var_name)) {
+                if (i < frame.locals.len and frame.locals[i] != .null) {
+                    try arr.set(ctx.allocator, .{ .string = name }, frame.locals[i]);
+                    found = true;
+                }
+                break;
+            }
+        }
+        if (!found) {
+            if (frame.vars.get(var_name)) |val| {
+                try arr.set(ctx.allocator, .{ .string = name }, val);
+            }
         }
     }
     return .{ .array = arr };

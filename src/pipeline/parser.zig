@@ -938,15 +938,21 @@ const Parser = struct {
 
         while (self.peek() != .r_brace and self.peek() != .eof) {
             var is_static = false;
+            var is_abstract = false;
             while (self.peek() == .kw_public or self.peek() == .kw_protected or
                 self.peek() == .kw_private or self.peek() == .kw_static or
                 self.peek() == .kw_abstract or self.peek() == .kw_readonly)
             {
                 if (self.peek() == .kw_static) is_static = true;
+                if (self.peek() == .kw_abstract) is_abstract = true;
                 _ = self.advance();
             }
 
             if (self.peek() == .kw_function) {
+                if (is_abstract) {
+                    try members.append(self.allocator, try self.parseInterfaceMethod());
+                    continue;
+                }
                 const method = try self.parseClassMethod();
                 if (is_static) {
                     self.nodes.items[method].tag = .static_class_method;
@@ -1614,11 +1620,19 @@ const Parser = struct {
         defer elements.deinit(self.allocator);
 
         if (self.peek() != end) {
-            try elements.append(self.allocator, try self.parseArrayElement());
+            if (self.peek() == .comma) {
+                try elements.append(self.allocator, 0);
+            } else {
+                try elements.append(self.allocator, try self.parseArrayElement());
+            }
             while (self.peek() == .comma) {
                 _ = self.advance();
-                if (self.peek() == end) break; // trailing comma
-                try elements.append(self.allocator, try self.parseArrayElement());
+                if (self.peek() == end) break;
+                if (self.peek() == .comma) {
+                    try elements.append(self.allocator, 0);
+                } else {
+                    try elements.append(self.allocator, try self.parseArrayElement());
+                }
             }
         }
         _ = try self.expectTag(end);
