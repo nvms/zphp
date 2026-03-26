@@ -1847,7 +1847,10 @@ fn native_parse_str(ctx: *NativeContext, args: []const Value) RuntimeError!Value
         const decoded_val = try urlDecodeSlice(ctx, val);
         try arr.set(ctx.allocator, .{ .string = decoded_key }, .{ .string = decoded_val });
     }
-    return .{ .array = arr };
+    if (args.len >= 2) {
+        ctx.setCallerVar(1, args.len, .{ .array = arr });
+    }
+    return .null;
 }
 
 fn native_strstr(ctx: *NativeContext, args: []const Value) RuntimeError!Value {

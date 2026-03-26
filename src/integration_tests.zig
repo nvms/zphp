@@ -1141,7 +1141,7 @@ test "parse_url path only" {
 test "parse_str basic" {
     try expectOutput(
         \\<?php
-        \\$r = parse_str("a=1&b=hello+world&c=%2Fpath");
+        \\parse_str("a=1&b=hello+world&c=%2Fpath", $r);
         \\echo $r["a"] . " " . $r["b"] . " " . $r["c"];
     , "1 hello world /path");
 }
