@@ -136,6 +136,12 @@ const CaptureEntry = struct {
     ref_cell: ?*Value = null,
 };
 
+const CaptureRange = struct {
+    start: u32,
+    len: u16,
+    has_refs: bool,
+};
+
 pub const ClassDef = struct {
     name: []const u8,
     methods: std.StringHashMapUnmanaged(MethodInfo) = .{},
@@ -206,6 +212,7 @@ pub const VM = struct {
     fiber_suspend_pending: bool = false,
     fiber_suspend_value: Value = .null,
     captures: std.ArrayListUnmanaged(CaptureEntry) = .{},
+    capture_index: std.StringHashMapUnmanaged(CaptureRange) = .{},
     closure_instance_count: u32 = 0,
     php_constants: std.StringHashMapUnmanaged(Value) = .{},
     classes: std.StringHashMapUnmanaged(ClassDef) = .{},
@@ -437,6 +444,7 @@ pub const VM = struct {
         self.output.deinit(self.allocator);
         self.strings.deinit(self.allocator);
         self.captures.deinit(self.allocator);
+        self.capture_index.deinit(self.allocator);
         self.php_constants.deinit(self.allocator);
         self.arrays.deinit(self.allocator);
         self.objects.deinit(self.allocator);
@@ -479,6 +487,7 @@ pub const VM = struct {
         self.fibers.clearRetainingCapacity();
         self.ref_cells.clearRetainingCapacity();
         self.captures.clearRetainingCapacity();
+        self.capture_index.clearRetainingCapacity();
         self.ob_stack.clearRetainingCapacity();
         self.request_vars.clearRetainingCapacity();
         self.statics.clearRetainingCapacity();
@@ -1389,11 +1398,18 @@ pub const VM = struct {
                         v
                     else
                         self.getLocalByName(var_name);
+                    const cap_pos: u32 = @intCast(self.captures.items.len);
                     try self.captures.append(self.allocator, .{
                         .closure_name = closure_name,
                         .var_name = var_name,
                         .value = val,
                     });
+                    const gop = try self.capture_index.getOrPut(self.allocator, closure_name);
+                    if (gop.found_existing) {
+                        gop.value_ptr.len += 1;
+                    } else {
+                        gop.value_ptr.* = .{ .start = cap_pos, .len = 1, .has_refs = false };
+                    }
                 },
 
                 .closure_bind_ref => {
@@ -1412,12 +1428,20 @@ pub const VM = struct {
                         try self.currentFrame().ref_slots.put(self.allocator, var_name, c);
                         break :blk c;
                     };
+                    const cap_pos: u32 = @intCast(self.captures.items.len);
                     try self.captures.append(self.allocator, .{
                         .closure_name = closure_name,
                         .var_name = var_name,
                         .value = .null,
                         .ref_cell = cell,
                     });
+                    const gop = try self.capture_index.getOrPut(self.allocator, closure_name);
+                    if (gop.found_existing) {
+                        gop.value_ptr.len += 1;
+                        gop.value_ptr.has_refs = true;
+                    } else {
+                        gop.value_ptr.* = .{ .start = cap_pos, .len = 1, .has_refs = true };
+                    }
                 },
 
                 .throw => {
@@ -3387,11 +3411,18 @@ pub const VM = struct {
                         self.sp = sp;
                         return;
                     }
-                    const has_caps = self.captures.items.len > 0 and self.hasCaptures(ci_name);
-                    if (has_caps and !std.mem.startsWith(u8, ci_name, "__closure_")) {
+                    const ci_cap_range = self.getCaptureRange(ci_name);
+                    if (ci_cap_range != null and !std.mem.startsWith(u8, ci_name, "__closure_")) {
                         frame.ip = ip - 2;
                         self.sp = sp;
                         return;
+                    }
+                    if (ci_cap_range) |cr| {
+                        if (cr.has_refs) {
+                            frame.ip = ip - 2;
+                            self.sp = sp;
+                            return;
+                        }
                     }
                     const ci_lc: usize = ci_func.local_count;
                     const ci_lbase = ic.locals_sp;
@@ -3415,16 +3446,13 @@ pub const VM = struct {
                         if (i < ci_func.defaults.len) ci_locals[i] = ci_func.defaults[i];
                     }
                     sp -= ci_acn;
-                    if (has_caps) {
-                        for (self.captures.items) |cap| {
-                            if (cap.closure_name.ptr == ci_name.ptr or
-                                (cap.closure_name.len == ci_name.len and std.mem.eql(u8, cap.closure_name, ci_name)))
-                            {
-                                for (ci_func.slot_names, 0..) |sn, si| {
-                                    if (sn.len == cap.var_name.len and std.mem.eql(u8, sn, cap.var_name)) {
-                                        ci_locals[si] = cap.value;
-                                        break;
-                                    }
+                    if (ci_cap_range) |cr| {
+                        const caps = self.captures.items[cr.start .. cr.start + cr.len];
+                        for (caps) |cap| {
+                            for (ci_func.slot_names, 0..) |sn, si| {
+                                if (sn.len == cap.var_name.len and std.mem.eql(u8, sn, cap.var_name)) {
+                                    ci_locals[si] = cap.value;
+                                    break;
                                 }
                             }
                         }
@@ -4271,8 +4299,9 @@ pub const VM = struct {
     }
 
     pub fn bindClosures(self: *VM, vars: *std.StringHashMapUnmanaged(Value), ref_slots: ?*std.StringHashMapUnmanaged(*Value), name: []const u8) !void {
-        for (self.captures.items) |cap| {
-            if (std.mem.eql(u8, cap.closure_name, name)) {
+        if (self.getCaptureRange(name)) |cr| {
+            const caps = self.captures.items[cr.start .. cr.start + cr.len];
+            for (caps) |cap| {
                 if (cap.ref_cell) |cell| {
                     if (ref_slots) |rs| try rs.put(self.allocator, cap.var_name, cell);
                 } else {
@@ -4575,22 +4604,16 @@ pub const VM = struct {
     }
 
     fn closureHasRefCaptures(self: *VM, name: []const u8) bool {
-        for (self.captures.items) |cap| {
-            if (cap.ref_cell != null and
-                (cap.closure_name.ptr == name.ptr or
-                (cap.closure_name.len == name.len and std.mem.eql(u8, cap.closure_name, name))))
-                return true;
-        }
+        if (self.capture_index.get(name)) |range| return range.has_refs;
         return false;
     }
 
     fn hasCaptures(self: *VM, name: []const u8) bool {
-        for (self.captures.items) |cap| {
-            if (cap.closure_name.ptr == name.ptr or
-                (cap.closure_name.len == name.len and std.mem.eql(u8, cap.closure_name, name)))
-                return true;
-        }
-        return false;
+        return self.capture_index.contains(name);
+    }
+
+    fn getCaptureRange(self: *VM, name: []const u8) ?CaptureRange {
+        return self.capture_index.get(name);
     }
 
     fn executeClosureLocalsOnly(self: *VM, func: *const ObjFunction, name: []const u8, args: []const Value) RuntimeError!Value {
@@ -4618,10 +4641,9 @@ pub const VM = struct {
             if (i < func.defaults.len) locals[i] = func.defaults[i];
         }
         // bind captures (no ref cells here - ref captures take the slow path)
-        for (self.captures.items) |cap| {
-            if (cap.closure_name.ptr == name.ptr or
-                (cap.closure_name.len == name.len and std.mem.eql(u8, cap.closure_name, name)))
-            {
+        if (self.getCaptureRange(name)) |cr| {
+            const caps = self.captures.items[cr.start .. cr.start + cr.len];
+            for (caps) |cap| {
                 for (func.slot_names, 0..) |sn, si| {
                     if (sn.len == cap.var_name.len and std.mem.eql(u8, sn, cap.var_name)) {
                         locals[si] = try self.copyValue(cap.value);
