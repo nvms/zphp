@@ -3155,15 +3155,17 @@ pub const VM = struct {
             var sp = self.sp;
 
             while (true) {
-                const byte = code[ip];
+                const byte: OpCode = @enumFromInt(code[ip]);
                 ip += 1;
 
-                if (byte == @intFromEnum(OpCode.get_local)) {
+                switch (byte) {
+                .get_local => {
                     const slot = (@as(u16, code[ip]) << 8) | code[ip + 1];
                     ip += 2;
                     self.stack[sp] = locals[slot];
                     sp += 1;
-                } else if (byte == @intFromEnum(OpCode.set_local)) {
+                },
+                .set_local => {
                     const slot = (@as(u16, code[ip]) << 8) | code[ip + 1];
                     ip += 2;
                     const val = self.stack[sp - 1];
@@ -3172,79 +3174,92 @@ pub const VM = struct {
                     } else {
                         locals[slot] = val;
                     }
-                    // fuse set_local + pop (very common pattern)
                     if (code[ip] == @intFromEnum(OpCode.pop)) {
                         ip += 1;
                         sp -= 1;
                     }
-                } else if (byte == @intFromEnum(OpCode.add)) {
+                },
+                .add => {
                     const b = self.stack[sp - 1];
                     const a = self.stack[sp - 2];
                     sp -= 2;
                     self.stack[sp] = if (a == .int and b == .int) .{ .int = a.int +% b.int } else if (a == .float and b == .float) .{ .float = a.float + b.float } else Value.add(a, b);
                     sp += 1;
-                } else if (byte == @intFromEnum(OpCode.subtract)) {
+                },
+                .subtract => {
                     const b = self.stack[sp - 1];
                     const a = self.stack[sp - 2];
                     sp -= 2;
                     self.stack[sp] = if (a == .int and b == .int) .{ .int = a.int -% b.int } else if (a == .float and b == .float) .{ .float = a.float - b.float } else Value.subtract(a, b);
                     sp += 1;
-                } else if (byte == @intFromEnum(OpCode.multiply)) {
+                },
+                .multiply => {
                     const b = self.stack[sp - 1];
                     const a = self.stack[sp - 2];
                     sp -= 2;
                     self.stack[sp] = if (a == .int and b == .int) .{ .int = a.int *% b.int } else if (a == .float and b == .float) .{ .float = a.float * b.float } else Value.multiply(a, b);
                     sp += 1;
-                } else if (byte == @intFromEnum(OpCode.less)) {
+                },
+                .less => {
                     const b = self.stack[sp - 1];
                     const a = self.stack[sp - 2];
                     sp -= 2;
                     self.stack[sp] = .{ .bool = if (a == .int and b == .int) a.int < b.int else if (a == .float and b == .float) a.float < b.float else Value.lessThan(a, b) };
                     sp += 1;
-                } else if (byte == @intFromEnum(OpCode.less_equal)) {
+                },
+                .less_equal => {
                     const b = self.stack[sp - 1];
                     const a = self.stack[sp - 2];
                     sp -= 2;
                     self.stack[sp] = .{ .bool = if (a == .int and b == .int) a.int <= b.int else !Value.lessThan(b, a) };
                     sp += 1;
-                } else if (byte == @intFromEnum(OpCode.greater)) {
+                },
+                .greater => {
                     const b = self.stack[sp - 1];
                     const a = self.stack[sp - 2];
                     sp -= 2;
                     self.stack[sp] = .{ .bool = if (a == .int and b == .int) a.int > b.int else Value.lessThan(b, a) };
                     sp += 1;
-                } else if (byte == @intFromEnum(OpCode.identical)) {
+                },
+                .identical => {
                     const b_id = self.stack[sp - 1];
                     const a_id = self.stack[sp - 2];
                     sp -= 2;
                     self.stack[sp] = .{ .bool = Value.identical(a_id, b_id) };
                     sp += 1;
-                } else if (byte == @intFromEnum(OpCode.not_identical)) {
+                },
+                .not_identical => {
                     const b_ni = self.stack[sp - 1];
                     const a_ni = self.stack[sp - 2];
                     sp -= 2;
                     self.stack[sp] = .{ .bool = !Value.identical(a_ni, b_ni) };
                     sp += 1;
-                } else if (byte == @intFromEnum(OpCode.modulo)) {
+                },
+                .modulo => {
                     const b_mod = self.stack[sp - 1];
                     const a_mod = self.stack[sp - 2];
                     sp -= 2;
                     self.stack[sp] = Value.modulo(a_mod, b_mod);
                     sp += 1;
-                } else if (byte == @intFromEnum(OpCode.negate)) {
+                },
+                .negate => {
                     self.stack[sp - 1] = self.stack[sp - 1].negate();
-                } else if (byte == @intFromEnum(OpCode.not)) {
+                },
+                .not => {
                     self.stack[sp - 1] = .{ .bool = !self.stack[sp - 1].isTruthy() };
-                } else if (byte == @intFromEnum(OpCode.jump_back)) {
+                },
+                .jump_back => {
                     const offset = (@as(u16, code[ip]) << 8) | code[ip + 1];
                     ip += 2;
                     ip -= offset;
-                } else if (byte == @intFromEnum(OpCode.constant)) {
+                },
+                .constant => {
                     const idx = (@as(u16, code[ip]) << 8) | code[ip + 1];
                     ip += 2;
                     self.stack[sp] = consts[idx];
                     sp += 1;
-                } else if (byte == @intFromEnum(OpCode.jump_if_false)) {
+                },
+                .jump_if_false => {
                     const offset = (@as(u16, code[ip]) << 8) | code[ip + 1];
                     ip += 2;
                     if (!self.stack[sp - 1].isTruthy()) {
@@ -3253,27 +3268,35 @@ pub const VM = struct {
                         ip += 1;
                         sp -= 1;
                     }
-                } else if (byte == @intFromEnum(OpCode.jump)) {
+                },
+                .jump => {
                     const offset = (@as(u16, code[ip]) << 8) | code[ip + 1];
                     ip += 2;
                     ip += offset;
-                } else if (byte == @intFromEnum(OpCode.pop)) {
+                },
+                .pop => {
                     sp -= 1;
-                } else if (byte == @intFromEnum(OpCode.dup)) {
+                },
+                .dup => {
                     self.stack[sp] = self.stack[sp - 1];
                     sp += 1;
-                } else if (byte == @intFromEnum(OpCode.op_null)) {
+                },
+                .op_null => {
                     self.stack[sp] = .null;
                     sp += 1;
-                } else if (byte == @intFromEnum(OpCode.op_true)) {
+                },
+                .op_true => {
                     self.stack[sp] = .{ .bool = true };
                     sp += 1;
-                } else if (byte == @intFromEnum(OpCode.op_false)) {
+                },
+                .op_false => {
                     self.stack[sp] = .{ .bool = false };
                     sp += 1;
-                } else if (byte == @intFromEnum(OpCode.cast_int)) {
+                },
+                .cast_int => {
                     self.stack[sp - 1] = .{ .int = Value.toInt(self.stack[sp - 1]) };
-                } else if (byte == @intFromEnum(OpCode.array_get)) {
+                },
+                .array_get => {
                     const ag_key = self.stack[sp - 1];
                     const ag_arr = self.stack[sp - 2];
                     sp -= 2;
@@ -3285,7 +3308,8 @@ pub const VM = struct {
                         self.sp = sp + 2;
                         return;
                     }
-                } else if (byte == @intFromEnum(OpCode.call_indirect)) {
+                },
+                .call_indirect => {
                     const ci_ac = code[ip];
                     ip += 1;
                     const ci_acn: usize = ci_ac;
@@ -3361,7 +3385,8 @@ pub const VM = struct {
                     };
                     self.frame_count += 1;
                     continue :reenter;
-                } else if (byte == @intFromEnum(OpCode.get_prop)) {
+                },
+                .get_prop => {
                     const gp_ip = ip;
                     ip += 2;
                     const gp_obj_val = self.stack[sp - 1];
@@ -3380,7 +3405,8 @@ pub const VM = struct {
                     frame.ip = ip - 3;
                     self.sp = sp;
                     return;
-                } else if (byte == @intFromEnum(OpCode.set_prop)) {
+                },
+                .set_prop => {
                     const sp_ip = ip;
                     ip += 2;
                     const sp_val = self.stack[sp - 1];
@@ -3402,7 +3428,8 @@ pub const VM = struct {
                     frame.ip = ip - 3;
                     self.sp = sp;
                     return;
-                } else if (byte == @intFromEnum(OpCode.method_call)) {
+                },
+                .method_call => {
                     const mc_arg_count = code[ip + 2];
                     ip += 3;
                     const mc_ac: usize = mc_arg_count;
@@ -3456,7 +3483,8 @@ pub const VM = struct {
                     frame.ip = ip - 4;
                     self.sp = sp;
                     return;
-                } else if (byte == @intFromEnum(OpCode.new_obj)) {
+                },
+                .new_obj => {
                     // fast path for new_obj: slot-based initialization
                     const no_name_idx = (@as(u16, code[ip]) << 8) | code[ip + 1];
                     const no_arg_count = code[ip + 2];
@@ -3550,7 +3578,8 @@ pub const VM = struct {
                     frame.ip = ip - 4;
                     self.sp = sp;
                     return;
-                } else if (byte == @intFromEnum(OpCode.call)) {
+                },
+                .call => {
                     const name_idx = (@as(u16, code[ip]) << 8) | code[ip + 1];
                     const arg_count = code[ip + 2];
                     ip += 3;
@@ -3612,7 +3641,8 @@ pub const VM = struct {
                     };
                     self.frame_count += 1;
                     continue :reenter;
-                } else if (byte == @intFromEnum(OpCode.return_val)) {
+                },
+                .return_val => {
                     const result = self.stack[sp - 1];
                     ic.locals_sp -= locals.len;
                     self.frame_count -= 1;
@@ -3629,7 +3659,8 @@ pub const VM = struct {
                     sp += 1;
                     self.sp = sp;
                     continue :reenter;
-                } else if (byte == @intFromEnum(OpCode.return_void)) {
+                },
+                .return_void => {
                     ic.locals_sp -= locals.len;
                     self.frame_count -= 1;
 
@@ -3644,10 +3675,12 @@ pub const VM = struct {
                     sp += 1;
                     self.sp = sp;
                     continue :reenter;
-                } else {
+                },
+                else => {
                     frame.ip = ip - 1;
                     self.sp = sp;
                     return;
+                },
                 }
             }
         }
