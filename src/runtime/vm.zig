@@ -3545,17 +3545,6 @@ pub const VM = struct {
                     continue :reenter;
                 } else if (byte == @intFromEnum(OpCode.return_val)) {
                     const result = self.stack[sp - 1];
-                    if (g_type_info.count() > 0) {
-                        if (frame.func) |f| {
-                            if (g_type_info.get(f.name)) |ti| {
-                                if (ti.return_type.len > 0 and !self.checkTypeMatch(result, ti.return_type)) {
-                                    frame.ip = ip - 1;
-                                    self.sp = sp;
-                                    return;
-                                }
-                            }
-                        }
-                    }
                     ic.locals_sp -= locals.len;
                     self.frame_count -= 1;
 
@@ -4068,7 +4057,7 @@ pub const VM = struct {
         return self.pop();
     }
 
-    fn valueTypeName(val: Value) []const u8 {
+    noinline fn valueTypeName(val: Value) []const u8 {
         return switch (val) {
             .int => "int",
             .float => "float",
@@ -4082,7 +4071,7 @@ pub const VM = struct {
         };
     }
 
-    fn checkSingleType(self: *VM, val: Value, type_name: []const u8) bool {
+    noinline fn checkSingleType(self: *VM, val: Value, type_name: []const u8) bool {
         if (std.mem.eql(u8, type_name, "mixed")) return true;
         if (std.mem.eql(u8, type_name, "void")) return val == .null;
         if (std.mem.eql(u8, type_name, "int") or std.mem.eql(u8, type_name, "integer")) return val == .int;
@@ -4104,7 +4093,7 @@ pub const VM = struct {
         return false;
     }
 
-    fn checkTypeMatch(self: *VM, val: Value, type_str: []const u8) bool {
+    noinline fn checkTypeMatch(self: *VM, val: Value, type_str: []const u8) bool {
         if (type_str.len == 0) return true;
         if (type_str[0] == '?') {
             if (val == .null) return true;
@@ -4120,10 +4109,11 @@ pub const VM = struct {
         return self.checkSingleType(val, type_str);
     }
 
-    fn checkParamTypes(self: *VM, name: []const u8, arg_count: u8) RuntimeError!bool {
+    noinline fn checkParamTypes(self: *VM, name: []const u8, arg_count: u8) RuntimeError!bool {
         if (g_type_info.count() == 0) return false;
         const ti = g_type_info.get(name) orelse return false;
         if (ti.param_types.len == 0) return false;
+        const func = self.functions.get(name);
         const ac: usize = arg_count;
         for (0..@min(ac, ti.param_types.len)) |i| {
             const type_str = ti.param_types[i];
@@ -4131,7 +4121,11 @@ pub const VM = struct {
             const val = self.stack[self.sp - ac + i];
             if (!self.checkTypeMatch(val, type_str)) {
                 self.sp -= ac;
-                const msg = std.fmt.allocPrint(self.allocator, "{s}(): Argument #{d} must be of type {s}, {s} given", .{ name, i + 1, type_str, valueTypeName(val) }) catch return error.RuntimeError;
+                const param_name = if (func) |f| (if (i < f.params.len) f.params[i] else "") else "";
+                const msg = if (param_name.len > 0)
+                    std.fmt.allocPrint(self.allocator, "{s}(): Argument #{d} ({s}) must be of type {s}, {s} given", .{ name, i + 1, param_name, type_str, valueTypeName(val) }) catch return error.RuntimeError
+                else
+                    std.fmt.allocPrint(self.allocator, "{s}(): Argument #{d} must be of type {s}, {s} given", .{ name, i + 1, type_str, valueTypeName(val) }) catch return error.RuntimeError;
                 try self.strings.append(self.allocator, msg);
                 self.error_msg = msg;
                 if (try self.throwBuiltinException("TypeError", msg)) return true;
@@ -4141,14 +4135,14 @@ pub const VM = struct {
         return false;
     }
 
-    fn checkReturnType(self: *VM, val: Value) RuntimeError!bool {
+    noinline fn checkReturnType(self: *VM, val: Value) RuntimeError!bool {
         if (g_type_info.count() == 0) return false;
         const frame = &self.frames[self.frame_count - 1];
         const func_name = if (frame.func) |f| f.name else return false;
         const ti = g_type_info.get(func_name) orelse return false;
         if (ti.return_type.len == 0) return false;
         if (!self.checkTypeMatch(val, ti.return_type)) {
-            const msg = std.fmt.allocPrint(self.allocator, "{s}(): Return value must be of type {s}, {s} given", .{ func_name, ti.return_type, valueTypeName(val) }) catch return error.RuntimeError;
+            const msg = std.fmt.allocPrint(self.allocator, "{s}(): Return value must be of type {s}, {s} returned", .{ func_name, ti.return_type, valueTypeName(val) }) catch return error.RuntimeError;
             try self.strings.append(self.allocator, msg);
             self.error_msg = msg;
             try self.popFrame();

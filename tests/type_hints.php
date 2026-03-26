@@ -1,73 +1,134 @@
 <?php
-// simple parameter types
-function add(int $a, int $b): int {
+
+// basic scalar types
+function add_ints(int $a, int $b): int {
     return $a + $b;
 }
-echo add(3, 4) . "\n";
+echo add_ints(3, 4) . "\n";
 
-// nullable parameter and return
-function maybe(?string $val): ?string {
-    if ($val === null) return null;
-    return "got: " . $val;
+// float accepts int (widening)
+function double_it(float $x): float {
+    return $x * 2;
 }
-echo maybe("hello") . "\n";
-echo maybe(null) === null ? "null" : "not null";
-echo "\n";
+echo double_it(5) . "\n";
+echo double_it(2.5) . "\n";
+
+// string type
+function greet(string $name): string {
+    return "hello " . $name;
+}
+echo greet("world") . "\n";
+
+// bool type
+function negate(bool $val): bool {
+    return !$val;
+}
+echo var_export(negate(true), true) . "\n";
+echo var_export(negate(false), true) . "\n";
+
+// nullable types
+function maybe_int(?int $x): ?int {
+    return $x;
+}
+echo maybe_int(42) . "\n";
+echo var_export(maybe_int(null), true) . "\n";
 
 // union types
-function flexible(int|string $val): string {
-    return "value: " . $val;
-}
-echo flexible(42) . "\n";
-echo flexible("hi") . "\n";
-
-// void return type
-function doWork(string $msg): void {
-    // no return
-}
-doWork("test");
-echo "void ok\n";
-
-// array type hint
-function first(array $items): mixed {
-    return $items[0];
-}
-echo first([10, 20, 30]) . "\n";
-
-// bool return
-function isPositive(float $n): bool {
-    return $n > 0;
-}
-echo isPositive(3.14) ? "yes" : "no";
-echo "\n";
-
-// closure with type hints
-$double = function(int $x): int {
-    return $x * 2;
-};
-echo $double(5) . "\n";
-
-// arrow function with type hints
-$triple = fn(int $x): int => $x * 3;
-echo $triple(5) . "\n";
-
-// nullable union
-function process(int|string|null $val): string {
-    if ($val === null) return "none";
+function int_or_string(int|string $val): string {
     return "got: " . $val;
 }
-echo process(null) . "\n";
-echo process(99) . "\n";
+echo int_or_string(42) . "\n";
+echo int_or_string("hello") . "\n";
 
-// callable type hint
+// void return
+function do_nothing(): void {
+    // nothing
+}
+do_nothing();
+echo "void ok\n";
+
+// mixed accepts anything
+function accept_mixed(mixed $val): mixed {
+    return $val;
+}
+echo accept_mixed(42) . "\n";
+echo accept_mixed("hi") . "\n";
+
+// array type
+function first_element(array $arr): mixed {
+    return $arr[0];
+}
+echo first_element([10, 20, 30]) . "\n";
+
+// callable type
 function apply(callable $fn, int $x): int {
     return $fn($x);
 }
-echo apply(function($x) { return $x * 2; }, 5) . "\n";
+echo apply(function($n) { return $n * 3; }, 7) . "\n";
 
-// callable in union
-function flexiCall(callable|string $fn): string {
-    if (is_callable($fn)) return "callable";
-    return "string";
+// class types with inheritance
+class Animal {
+    public string $name;
+    public function __construct(string $name) {
+        $this->name = $name;
+    }
 }
-echo flexiCall(function() {}) . "\n";
+
+class Dog extends Animal {}
+
+function get_name(Animal $a): string {
+    return $a->name;
+}
+echo get_name(new Animal("cat")) . "\n";
+echo get_name(new Dog("rex")) . "\n";
+
+// TypeError catching - wrong param type
+try {
+    add_ints("not", "ints");
+} catch (\TypeError $e) {
+    $msg = $e->getMessage();
+    $pos = strpos($msg, ", called in");
+    if ($pos !== false) $msg = substr($msg, 0, $pos);
+    echo "caught: " . $msg . "\n";
+}
+
+// TypeError catching - wrong return type
+function should_return_int(): int {
+    return "oops";
+}
+try {
+    should_return_int();
+} catch (\TypeError $e) {
+    echo "caught: " . $e->getMessage() . "\n";
+}
+
+// multiple params, partial typing
+function partial(int $a, $b): string {
+    return $a . ":" . $b;
+}
+echo partial(1, "anything") . "\n";
+echo partial(2, 99) . "\n";
+
+// iterable type
+function sum_iterable(iterable $items): int {
+    $sum = 0;
+    foreach ($items as $item) {
+        $sum += $item;
+    }
+    return $sum;
+}
+echo sum_iterable([1, 2, 3]) . "\n";
+
+// object type
+function get_class_name(object $obj): string {
+    return get_class($obj);
+}
+echo get_class_name(new Animal("test")) . "\n";
+
+// true/false literal types
+function must_be_true(true $val): true {
+    return $val;
+}
+echo var_export(must_be_true(true), true) . "\n";
+
+echo "done\n";
