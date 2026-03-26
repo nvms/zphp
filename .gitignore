@@ -4,3 +4,4 @@ zig-cache/
 test_compress
 /*.md
 !README.md
+.handoff/
