@@ -164,7 +164,7 @@ fn native_fmod(_: *NativeContext, args: []const Value) RuntimeError!Value {
     const x = Value.toFloat(args[0]);
     const y = Value.toFloat(args[1]);
     if (y == 0.0) return .{ .float = std.math.nan(f64) };
-    return .{ .float = @mod(x, y) };
+    return .{ .float = @rem(x, y) };
 }
 
 fn native_intdiv(_: *NativeContext, args: []const Value) RuntimeError!Value {
