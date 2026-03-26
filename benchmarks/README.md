@@ -22,18 +22,18 @@ Requires PHP installed locally. zphp must be built with ReleaseFast - debug buil
 
 | benchmark | php | zphp | ratio |
 |---|---|---|---|
-| array_ops | 98 ms | 30 ms | 0.31x |
-| objects | 97 ms | 35 ms | 0.36x |
-| closures | 98 ms | 81 ms | 0.83x |
-| fibonacci | 168 ms | 142 ms | 0.85x |
-| loops | 131 ms | 120 ms | 0.92x |
-| string_ops | 91 ms | 101 ms | 1.11x |
+| array_ops | 95 ms | 27 ms | 0.28x |
+| string_ops | 95 ms | 28 ms | 0.29x |
+| objects | 102 ms | 34 ms | 0.33x |
+| closures | 102 ms | 82 ms | 0.80x |
+| loops | 132 ms | 122 ms | 0.92x |
+| fibonacci | 160 ms | 152 ms | 0.95x |
 
-zphp beats PHP on five of six benchmarks. Array operations are 3.3x faster thanks to O(1) integer key lookups on sequential arrays. Objects are 2.9x faster with property slot indices and IC-cached slot access. Closures beat PHP via indexed capture lookup (HashMap by closure name instead of linear scan) and fastLoop handling of call_indirect for closures. Fibonacci wins via stack-allocated locals and inline call/return. Loops beat PHP thanks to superinstructions (inc_local, add_local_to_local, less_local_local_jif) that fuse common opcode sequences in hot loops. String operations are within 1.2x thanks to growable concat_assign buffers on the InlineCache.
+zphp beats PHP on all six benchmarks. Array operations are 3.5x faster thanks to O(1) integer key lookups on sequential arrays. String operations are 3.4x faster after adding concat (string+string, string+int, int+string) to fastLoop - the concat loop stays in the fast tier instead of bailing to runLoop on every iteration, and the growable concat_assign buffer avoids O(n) reallocation per append. Objects are 3x faster with property slot indices and IC-cached slot access. Closures beat PHP via indexed capture lookup (HashMap by closure name instead of linear scan) and fastLoop handling of call_indirect for closures. Loops beat PHP thanks to superinstructions (inc_local, add_local_to_local, less_local_local_jif) that fuse common opcode sequences in hot loops. Fibonacci wins via stack-allocated locals and inline call/return.
 
 ### Optimization targets
 
-- **Computed goto dispatch**: replace switch-based opcode dispatch with computed goto (general improvement, especially string_ops)
+- **Computed goto dispatch**: replace switch-based opcode dispatch with computed goto (general improvement across all benchmarks)
 
 ## fmt
 

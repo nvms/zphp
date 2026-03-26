@@ -3779,7 +3779,13 @@ pub const VM = struct {
                 },
                 .return_val => {
                     const result = self.stack[sp - 1];
-                    ic.locals_sp -= locals.len;
+                    // if this frame has vars, bail to runLoop for full cleanup
+                    if (frame.vars.count() > 0 or frame.ref_slots.count() > 0) {
+                        frame.ip = ip - 1;
+                        self.sp = sp;
+                        return;
+                    }
+                    if (locals.len > 0) self.freeLocals(locals);
                     self.frame_count -= 1;
 
                     if (self.frame_count < entry_fc) {
@@ -3796,7 +3802,12 @@ pub const VM = struct {
                     continue :reenter;
                 },
                 .return_void => {
-                    ic.locals_sp -= locals.len;
+                    if (frame.vars.count() > 0 or frame.ref_slots.count() > 0) {
+                        frame.ip = ip - 1;
+                        self.sp = sp;
+                        return;
+                    }
+                    if (locals.len > 0) self.freeLocals(locals);
                     self.frame_count -= 1;
 
                     if (self.frame_count < entry_fc) {
@@ -3908,6 +3919,50 @@ pub const VM = struct {
                         if (a.float >= b.float) ip += offset;
                     } else {
                         frame.ip = ip - 7;
+                        self.sp = sp;
+                        return;
+                    }
+                },
+                .concat => {
+                    const b = self.stack[sp - 1];
+                    const a = self.stack[sp - 2];
+                    if (a == .string and b == .string) {
+                        const as = a.string;
+                        const bs = b.string;
+                        const owned = try self.allocator.alloc(u8, as.len + bs.len);
+                        @memcpy(owned[0..as.len], as);
+                        @memcpy(owned[as.len..], bs);
+                        try self.strings.append(self.allocator, owned);
+                        sp -= 1;
+                        self.stack[sp - 1] = .{ .string = owned };
+                    } else if (a == .string and b == .int) {
+                        var tmp: [20]u8 = undefined;
+                        const bs = std.fmt.bufPrint(&tmp, "{d}", .{b.int}) catch {
+                            frame.ip = ip - 1;
+                            self.sp = sp;
+                            return;
+                        };
+                        const owned = try self.allocator.alloc(u8, a.string.len + bs.len);
+                        @memcpy(owned[0..a.string.len], a.string);
+                        @memcpy(owned[a.string.len..], bs);
+                        try self.strings.append(self.allocator, owned);
+                        sp -= 1;
+                        self.stack[sp - 1] = .{ .string = owned };
+                    } else if (a == .int and b == .string) {
+                        var tmp: [20]u8 = undefined;
+                        const as = std.fmt.bufPrint(&tmp, "{d}", .{a.int}) catch {
+                            frame.ip = ip - 1;
+                            self.sp = sp;
+                            return;
+                        };
+                        const owned = try self.allocator.alloc(u8, as.len + b.string.len);
+                        @memcpy(owned[0..as.len], as);
+                        @memcpy(owned[as.len..], b.string);
+                        try self.strings.append(self.allocator, owned);
+                        sp -= 1;
+                        self.stack[sp - 1] = .{ .string = owned };
+                    } else {
+                        frame.ip = ip - 1;
                         self.sp = sp;
                         return;
                     }
