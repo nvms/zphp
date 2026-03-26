@@ -422,6 +422,12 @@ pub fn compileCall(self: *Compiler, node: Ast.Node) Error!void {
                 try self.emitU16(prop_idx);
                 return;
             }
+            if (arg.tag == .array_access) {
+                try self.compileNode(arg.data.lhs);
+                try self.compileNode(arg.data.rhs);
+                try self.emitOp(.isset_index);
+                return;
+            }
         }
     }
 

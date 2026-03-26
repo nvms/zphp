@@ -711,11 +711,11 @@ const Parser = struct {
         if (self.peek() == .l_paren) {
             _ = self.advance();
             if (self.peek() != .r_paren) {
-                try args.append(self.allocator, try self.parseExpression());
+                try args.append(self.allocator, try self.parseCallArg());
                 while (self.peek() == .comma) {
                     _ = self.advance();
                     if (self.peek() == .r_paren) break;
-                    try args.append(self.allocator, try self.parseExpression());
+                    try args.append(self.allocator, try self.parseCallArg());
                 }
             }
             _ = try self.expect(.r_paren);

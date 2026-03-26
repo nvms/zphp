@@ -1230,6 +1230,22 @@ pub const VM = struct {
                         self.push(.{ .bool = false });
                     }
                 },
+                .isset_index => {
+                    const key = self.pop();
+                    const arr_val = self.pop();
+                    if (arr_val == .object and self.hasMethod(arr_val.object.class_name, "offsetExists")) {
+                        const result = self.callMethod(arr_val.object, "offsetExists", &.{key}) catch Value{ .bool = false };
+                        self.push(.{ .bool = result.isTruthy() });
+                    } else if (arr_val == .array) {
+                        const v = arr_val.array.get(Value.toArrayKey(key));
+                        self.push(.{ .bool = v != .null });
+                    } else if (arr_val == .string) {
+                        const idx = Value.toInt(key);
+                        self.push(.{ .bool = idx >= 0 and @as(usize, @intCast(idx)) < arr_val.string.len });
+                    } else {
+                        self.push(.{ .bool = false });
+                    }
+                },
                 .clone_obj => {
                     const val = self.pop();
                     if (val == .object) {
@@ -2068,8 +2084,16 @@ pub const VM = struct {
                         }
                         self.sp -= ac;
                         self.sp -= 1;
-                        self.frames[self.frame_count] = .{ .chunk = &func.chunk, .ip = 0, .vars = new_vars, .locals = try self.allocLocals(func, &new_vars), .func = func, .ref_slots = method_refs };
-                        self.frame_count += 1;
+                        if (func.is_generator) {
+                            method_refs.deinit(self.allocator);
+                            const gen = try self.allocator.create(Generator);
+                            gen.* = .{ .func = func, .vars = new_vars };
+                            try self.generators.append(self.allocator, gen);
+                            self.push(.{ .generator = gen });
+                        } else {
+                            self.frames[self.frame_count] = .{ .chunk = &func.chunk, .ip = 0, .vars = new_vars, .locals = try self.allocLocals(func, &new_vars), .func = func, .ref_slots = method_refs };
+                            self.frame_count += 1;
+                        }
                     } else return error.RuntimeError;
                 },
 
