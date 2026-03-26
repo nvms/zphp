@@ -22,12 +22,12 @@ Requires PHP installed locally. zphp must be built with ReleaseFast - debug buil
 
 | benchmark | php | zphp | ratio |
 |---|---|---|---|
-| array_ops | 100 ms | 30 ms | 0.30x |
-| objects | 106 ms | 37 ms | 0.35x |
-| closures | 107 ms | 84 ms | 0.79x |
-| fibonacci | 169 ms | 149 ms | 0.88x |
-| loops | 137 ms | 125 ms | 0.91x |
-| string_ops | 100 ms | 115 ms | 1.15x |
+| array_ops | 98 ms | 30 ms | 0.31x |
+| objects | 97 ms | 35 ms | 0.36x |
+| closures | 98 ms | 81 ms | 0.83x |
+| fibonacci | 168 ms | 142 ms | 0.85x |
+| loops | 131 ms | 120 ms | 0.92x |
+| string_ops | 91 ms | 101 ms | 1.11x |
 
 zphp beats PHP on five of six benchmarks. Array operations are 3.3x faster thanks to O(1) integer key lookups on sequential arrays. Objects are 2.9x faster with property slot indices and IC-cached slot access. Closures beat PHP via indexed capture lookup (HashMap by closure name instead of linear scan) and fastLoop handling of call_indirect for closures. Fibonacci wins via stack-allocated locals and inline call/return. Loops beat PHP thanks to superinstructions (inc_local, add_local_to_local, less_local_local_jif) that fuse common opcode sequences in hot loops. String operations are within 1.2x thanks to growable concat_assign buffers on the InlineCache.
 

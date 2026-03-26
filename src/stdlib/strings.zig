@@ -440,22 +440,57 @@ fn native_substr_replace(ctx: *NativeContext, args: []const Value) RuntimeError!
     return .{ .string = result };
 }
 
-fn native_str_word_count(_: *NativeContext, args: []const Value) RuntimeError!Value {
+fn native_str_word_count(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len == 0) return .{ .int = 0 };
     const s = if (args[0] == .string) args[0].string else return Value{ .int = 0 };
-    var count: i64 = 0;
+    const format: i64 = if (args.len > 1) Value.toInt(args[1]) else 0;
+
+    if (format == 0) {
+        var count: i64 = 0;
+        var in_word = false;
+        for (s) |c| {
+            if (std.ascii.isAlphabetic(c) or c == '\'' or c == '-') {
+                if (!in_word) {
+                    count += 1;
+                    in_word = true;
+                }
+            } else {
+                in_word = false;
+            }
+        }
+        return .{ .int = count };
+    }
+
+    var arr = try ctx.createArray();
     var in_word = false;
-    for (s) |c| {
+    var word_start: usize = 0;
+    for (s, 0..) |c, i| {
         if (std.ascii.isAlphabetic(c) or c == '\'' or c == '-') {
             if (!in_word) {
-                count += 1;
+                word_start = i;
                 in_word = true;
             }
         } else {
-            in_word = false;
+            if (in_word) {
+                const word = s[word_start..i];
+                if (format == 2) {
+                    try arr.set(ctx.allocator, .{ .int = @intCast(word_start) }, .{ .string = word });
+                } else {
+                    try arr.append(ctx.allocator, .{ .string = word });
+                }
+                in_word = false;
+            }
         }
     }
-    return .{ .int = count };
+    if (in_word) {
+        const word = s[word_start..];
+        if (format == 2) {
+            try arr.set(ctx.allocator, .{ .int = @intCast(word_start) }, .{ .string = word });
+        } else {
+            try arr.append(ctx.allocator, .{ .string = word });
+        }
+    }
+    return .{ .array = arr };
 }
 
 fn native_nl2br(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
@@ -780,7 +815,7 @@ fn formatScientific(buf: *std.ArrayListUnmanaged(u8), a: std.mem.Allocator, val:
     if (val == 0) {
         try buf.appendSlice(a, "0.");
         for (0..prec) |_| try buf.append(a, '0');
-        try buf.appendSlice(a, "E+0");
+        try buf.appendSlice(a, "e+0");
         return;
     }
     const is_neg = val < 0;
@@ -790,7 +825,7 @@ fn formatScientific(buf: *std.ArrayListUnmanaged(u8), a: std.mem.Allocator, val:
 
     if (is_neg) try buf.append(a, '-');
     try formatFixedFloat(buf, a, mantissa, prec);
-    try buf.append(a, 'E');
+    try buf.append(a, 'e');
     try buf.append(a, if (exp_val >= 0) '+' else '-');
     var exp_buf: [16]u8 = undefined;
     const abs_exp: u32 = @intCast(if (exp_val < 0) -exp_val else exp_val);
@@ -966,11 +1001,7 @@ fn native_str_getcsv(ctx: *NativeContext, args: []const Value) RuntimeError!Valu
 
     var arr = try ctx.createArray();
     var j: usize = 0;
-    while (j <= s.len) {
-        if (j >= s.len) {
-            try arr.append(ctx.allocator, .{ .string = "" });
-            break;
-        }
+    while (j < s.len) {
         if (s[j] == enc) {
             j += 1;
             var field = std.ArrayListUnmanaged(u8){};

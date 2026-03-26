@@ -1,6 +1,7 @@
 <?php
 // covers: time, date, mktime, strtotime, checkdate, getdate,
-//   date arithmetic, relative dates, timestamp formatting, date format specifiers
+//   date arithmetic, relative dates, timestamp formatting, date format specifiers,
+//   backslash escape in date format, day of year (z), ISO week (W), mktime month overflow
 
 // --- basic timestamp ---
 
@@ -131,5 +132,43 @@ echo "US format: " . date('m/d/Y', $sample) . "\n";
 echo "EU format: " . date('d.m.Y', $sample) . "\n";
 echo "12-hour: " . date('g:i A', $sample) . "\n";
 echo "full: " . date('Y-m-d H:i:s', $sample) . "\n";
+
+// --- backslash escape ---
+
+echo "\n=== Backslash Escape ===\n";
+
+$esc = mktime(14, 30, 0, 7, 4, 2024);
+echo "literal T: " . date('\T', $esc) . "\n";
+echo "literal Y: " . date('\Y', $esc) . "\n";
+echo "ISO format: " . date('Y-m-d\TH:i:s', $esc) . "\n";
+echo "escaped D: " . date('\D\a\y: l', $esc) . "\n";
+
+// --- day of year ---
+
+echo "\n=== Day of Year (z) ===\n";
+
+echo "Jan 1: " . date('z', mktime(0, 0, 0, 1, 1, 2024)) . "\n";
+echo "Feb 1: " . date('z', mktime(0, 0, 0, 2, 1, 2024)) . "\n";
+echo "Mar 1 (leap): " . date('z', mktime(0, 0, 0, 3, 1, 2024)) . "\n";
+echo "Dec 31 (leap): " . date('z', mktime(0, 0, 0, 12, 31, 2024)) . "\n";
+
+// --- ISO week number ---
+
+echo "\n=== ISO Week (W) ===\n";
+
+echo "Jan 1 2024: " . date('W', mktime(0, 0, 0, 1, 1, 2024)) . "\n";
+echo "Mar 7 2024: " . date('W', mktime(0, 0, 0, 3, 7, 2024)) . "\n";
+echo "Jun 15 2024: " . date('W', mktime(0, 0, 0, 6, 15, 2024)) . "\n";
+echo "Dec 31 2024: " . date('W', mktime(0, 0, 0, 12, 31, 2024)) . "\n";
+
+// --- mktime month overflow ---
+
+echo "\n=== Month Overflow ===\n";
+
+echo "month 13: " . date('Y-m-d', mktime(0, 0, 0, 13, 1, 2024)) . "\n";
+echo "month 0: " . date('Y-m-d', mktime(0, 0, 0, 0, 1, 2024)) . "\n";
+echo "month 14: " . date('Y-m-d', mktime(0, 0, 0, 14, 15, 2024)) . "\n";
+echo "month -1: " . date('Y-m-d', mktime(0, 0, 0, -1, 1, 2024)) . "\n";
+echo "month 25: " . date('Y-m-d', mktime(0, 0, 0, 25, 10, 2024)) . "\n";
 
 echo "\nDone.\n";

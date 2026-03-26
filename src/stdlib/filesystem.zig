@@ -103,7 +103,19 @@ fn native_file_put_contents(ctx: *NativeContext, args: []const Value) RuntimeErr
         try ctx.strings.append(ctx.allocator, s);
         break :blk s;
     };
-    std.fs.cwd().writeFile(.{ .sub_path = path, .data = data }) catch return Value{ .bool = false };
+    const flags: i64 = if (args.len >= 3) Value.toInt(args[2]) else 0;
+    const append = (flags & 8) != 0; // FILE_APPEND = 8
+    if (append) {
+        const file = std.fs.cwd().openFile(path, .{ .mode = .write_only }) catch {
+            std.fs.cwd().writeFile(.{ .sub_path = path, .data = data }) catch return Value{ .bool = false };
+            return .{ .int = @intCast(data.len) };
+        };
+        defer file.close();
+        file.seekFromEnd(0) catch return Value{ .bool = false };
+        _ = file.write(data) catch return Value{ .bool = false };
+    } else {
+        std.fs.cwd().writeFile(.{ .sub_path = path, .data = data }) catch return Value{ .bool = false };
+    }
     return .{ .int = @intCast(data.len) };
 }
 
@@ -129,10 +141,15 @@ fn native_is_dir(_: *NativeContext, args: []const Value) RuntimeError!Value {
 fn native_basename(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len == 0 or args[0] != .string) return .{ .string = "" };
     const path = args[0].string;
+    const suffix = if (args.len >= 2 and args[1] == .string) args[1].string else "";
+    var name: []const u8 = path;
     if (std.mem.lastIndexOf(u8, path, "/")) |pos| {
-        return .{ .string = try ctx.createString(path[pos + 1 ..]) };
+        name = path[pos + 1 ..];
     }
-    return args[0];
+    if (suffix.len > 0 and name.len > suffix.len and std.mem.endsWith(u8, name, suffix)) {
+        name = name[0 .. name.len - suffix.len];
+    }
+    return .{ .string = try ctx.createString(name) };
 }
 
 fn native_dirname(ctx: *NativeContext, args: []const Value) RuntimeError!Value {

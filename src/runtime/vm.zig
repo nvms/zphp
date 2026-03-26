@@ -384,6 +384,10 @@ pub const VM = struct {
         try c.put(a, "LOCK_EX", .{ .int = 2 });
         try c.put(a, "LOCK_UN", .{ .int = 8 });
         try c.put(a, "LOCK_NB", .{ .int = 4 });
+        try c.put(a, "FILE_APPEND", .{ .int = 8 });
+        try c.put(a, "SEEK_SET", .{ .int = 0 });
+        try c.put(a, "SEEK_CUR", .{ .int = 1 });
+        try c.put(a, "SEEK_END", .{ .int = 2 });
     }
 
     fn freeHeapItems(self: *VM) void {
@@ -3413,7 +3417,8 @@ pub const VM = struct {
                     sp += 1;
                 },
                 .cast_int => {
-                    self.stack[sp - 1] = .{ .int = Value.toInt(self.stack[sp - 1]) };
+                    const v = self.stack[sp - 1];
+                    self.stack[sp - 1] = .{ .int = Value.toInt(v) };
                 },
                 .array_get => {
                     const ag_key = self.stack[sp - 1];

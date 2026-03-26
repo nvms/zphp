@@ -146,7 +146,9 @@ pub fn formatTimestamp(ctx: *NativeContext, timestamp: i64, format: []const u8) 
     const a = ctx.allocator;
 
     var buf = std.ArrayListUnmanaged(u8){};
-    for (format) |c| {
+    var fi: usize = 0;
+    while (fi < format.len) : (fi += 1) {
+        const c = format[fi];
         switch (c) {
             'Y' => {
                 var tmp: [8]u8 = undefined;
@@ -283,14 +285,28 @@ pub fn formatTimestamp(ctx: *NativeContext, timestamp: i64, format: []const u8) 
                 }) catch " 0000 00:00:00 +0000";
                 try buf.appendSlice(a, s2);
             },
-            'W' => {
+            'z' => {
                 const jan1_ts = dateToTimestamp(year_day.year, 1, 1, 0, 0, 0);
                 const jan1_es = std.time.epoch.EpochSeconds{ .secs = @intCast(if (jan1_ts < 0) 0 else jan1_ts) };
                 const jan1_day: i64 = @intCast(jan1_es.getEpochDay().day);
-                const jan1_dow = @mod(jan1_day + 3, 7);
                 const cur_day: i64 = @intCast(epoch_day.day);
                 const yday = cur_day - jan1_day;
-                const week = @divFloor(yday + jan1_dow + 6, 7);
+                var tmp: [4]u8 = undefined;
+                const s = std.fmt.bufPrint(&tmp, "{d}", .{@as(u32, @intCast(@max(0, yday)))}) catch "0";
+                try buf.appendSlice(a, s);
+            },
+            'W' => {
+                // iso 8601 week number - week 1 contains the first thursday
+                const cur_day: i64 = @intCast(epoch_day.day);
+                const dow = @mod(cur_day + 3, 7); // 0=mon
+                // thursday of this week
+                const thu = cur_day + 3 - dow;
+                // jan 1 of the thursday's year
+                const thu_es = std.time.epoch.EpochSeconds{ .secs = @intCast(@max(0, thu * 86400)) };
+                const thu_year = thu_es.getEpochDay().calculateYearDay().year;
+                const jan1_ts = dateToTimestamp(thu_year, 1, 1, 0, 0, 0);
+                const jan1_day = @divFloor(jan1_ts, 86400);
+                const week = @divFloor(thu - jan1_day, 7) + 1;
                 var tmp: [4]u8 = undefined;
                 const s = std.fmt.bufPrint(&tmp, "{d:0>2}", .{@as(u32, @intCast(@max(1, week)))}) catch "01";
                 try buf.appendSlice(a, s);
@@ -329,7 +345,10 @@ pub fn formatTimestamp(ctx: *NativeContext, timestamp: i64, format: []const u8) 
             'P' => try buf.appendSlice(a, "+00:00"),
             'O' => try buf.appendSlice(a, "+0000"),
             'I' => try buf.append(a, '0'),
-            '\\' => {}, // next char literal (simplified: just skip the backslash)
+            '\\' => {
+                fi += 1;
+                if (fi < format.len) try buf.append(a, format[fi]);
+            },
             else => try buf.append(a, c),
         }
     }
@@ -658,8 +677,11 @@ fn native_microtime(ctx: *NativeContext, args: []const Value) RuntimeError!Value
 // date/time utilities
 
 pub fn dateToTimestamp(year: i64, month: i64, day: i64, hour: i64, min: i64, sec: i64) i64 {
-    const m = if (month < 1) @as(i64, 1) else if (month > 12) @as(i64, 12) else month;
-    const y = year - @as(i64, if (m <= 2) 1 else 0);
+    // normalize month overflow/underflow (e.g. month 13 -> january next year)
+    const adj_month = @mod(month - 1, @as(i64, 12)) + 1;
+    const adj_year = year + @divFloor(month - 1, @as(i64, 12));
+    const m = adj_month;
+    const y = adj_year - @as(i64, if (m <= 2) 1 else 0);
     const era: i64 = @divFloor(if (y >= 0) y else y - 399, 400);
     const yoe: i64 = y - era * 400;
     const mp: i64 = if (m > 2) m - 3 else m + 9;
