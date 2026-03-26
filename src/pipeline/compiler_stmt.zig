@@ -165,9 +165,8 @@ pub fn compileForeach(self: *Compiler, node: Ast.Node) Error!void {
     const exit_jump = try self.emitJump(.iter_check);
 
     // iter_check pushed: key, value (value on top)
-    // for by-ref, also store the key for writeback
-    var ref_key_idx: ?u16 = null;
-    var ref_val_idx: ?u16 = null;
+    var ref_key_name: ?[]const u8 = null;
+    var ref_val_name: ?[]const u8 = null;
 
     const val_node = self.ast.nodes[val_n];
     if (val_node.tag == .array_literal or val_node.tag == .list_destructure) {
@@ -175,36 +174,22 @@ pub fn compileForeach(self: *Compiler, node: Ast.Node) Error!void {
         try self.emitOp(.pop);
     } else {
         const val_name = self.ast.tokenSlice(val_node.main_token);
-        if (val_by_ref) {
-            const val_idx = try self.addConstant(.{ .string = val_name });
-            try self.emitOp(.set_var);
-            try self.emitU16(val_idx);
-            ref_val_idx = val_idx;
-        } else {
-            try self.emitSetVar(val_name);
-        }
+        try self.emitSetVar(val_name);
         try self.emitOp(.pop);
+        if (val_by_ref) ref_val_name = val_name;
     }
 
     if (key_n != 0) {
         const key_name = self.ast.tokenSlice(self.ast.nodes[key_n].main_token);
-        if (val_by_ref) {
-            const key_idx = try self.addConstant(.{ .string = key_name });
-            try self.emitOp(.set_var);
-            try self.emitU16(key_idx);
-            ref_key_idx = key_idx;
-        } else {
-            try self.emitSetVar(key_name);
-        }
+        try self.emitSetVar(key_name);
         try self.emitOp(.pop);
+        if (val_by_ref) ref_key_name = key_name;
     } else {
         if (val_by_ref) {
-            // need a synthetic key variable for writeback
-            const synth = try self.addConstant(.{ .string = "__foreach_key" });
-            try self.emitOp(.set_var);
-            try self.emitU16(synth);
+            const synth_name = "__foreach_key";
+            try self.emitSetVar(synth_name);
             try self.emitOp(.pop);
-            ref_key_idx = synth;
+            ref_key_name = synth_name;
         } else {
             try self.emitOp(.pop);
         }
@@ -216,17 +201,13 @@ pub fn compileForeach(self: *Compiler, node: Ast.Node) Error!void {
     try self.patchContinues(&prev_continues);
 
     // by-ref writeback: $arr[$key] = $val
-    if (val_by_ref) {
-        if (ref_val_idx) |vi| {
-            if (ref_key_idx) |ki| {
-                try self.compileNode(iter_n);
-                try self.emitOp(.get_var);
-                try self.emitU16(ki);
-                try self.emitOp(.get_var);
-                try self.emitU16(vi);
-                try self.emitOp(.array_set);
-                try self.emitOp(.pop);
-            }
+    if (ref_val_name) |vn| {
+        if (ref_key_name) |kn| {
+            try self.compileNode(iter_n);
+            try self.emitGetVar(kn);
+            try self.emitGetVar(vn);
+            try self.emitOp(.array_set);
+            try self.emitOp(.pop);
         }
     }
 

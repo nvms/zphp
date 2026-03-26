@@ -52,6 +52,23 @@ echo "Escaped: \$name\n";
 echo "End: $name";
 echo "\n";
 
+// simple property access without braces
+echo "Simple prop: $obj->prop\n";
+
+// simple property access without braces, text after
+echo "Prop=$obj->prop!\n";
+
+// curly: chained property access
+class Inner { public $val = "deep"; }
+class Outer { public $inner; public function __construct() { $this->inner = new Inner(); } }
+$outer = new Outer();
+echo "Chained: {$outer->inner->val}\n";
+
+// curly: array index then property
+class Item { public $label = "ok"; }
+$items = [new Item()];
+echo "ArrProp: {$items[0]->label}\n";
+
 // empty/null interpolation
 $empty = "";
 $null_var = null;

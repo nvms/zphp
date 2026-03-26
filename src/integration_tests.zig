@@ -358,6 +358,52 @@ test "string no interpolation single quotes" {
     try expectOutput("<?php $x = 1; echo '$x';", "$x");
 }
 
+test "string interpolation object property" {
+    try expectOutput(
+        \\<?php
+        \\class Foo { public $name = 'bar'; }
+        \\$obj = new Foo();
+        \\echo "val=$obj->name!";
+    , "val=bar!");
+}
+
+test "string interpolation curly object property" {
+    try expectOutput(
+        \\<?php
+        \\class Foo { public $name = 'bar'; }
+        \\$obj = new Foo();
+        \\echo "val={$obj->name}!";
+    , "val=bar!");
+}
+
+test "string interpolation curly chained" {
+    try expectOutput(
+        \\<?php
+        \\class Inner { public $val = 'deep'; }
+        \\class Outer { public $inner; public function __construct() { $this->inner = new Inner(); } }
+        \\$obj = new Outer();
+        \\echo "{$obj->inner->val}";
+    , "deep");
+}
+
+test "string interpolation curly method call" {
+    try expectOutput(
+        \\<?php
+        \\class Foo { public function greet() { return 'hi'; } }
+        \\$obj = new Foo();
+        \\echo "{$obj->greet()}";
+    , "hi");
+}
+
+test "string interpolation curly array then property" {
+    try expectOutput(
+        \\<?php
+        \\class Foo { public $x = 'ok'; }
+        \\$arr = [new Foo()];
+        \\echo "{$arr[0]->x}";
+    , "ok");
+}
+
 // ==========================================================================
 // constants
 // ==========================================================================

@@ -35,20 +35,39 @@ pub fn compileAssign(self: *Compiler, node: Ast.Node) Error!void {
             self.patchJump(skip_jump);
             return;
         }
-        try self.compileNode(target.data.lhs);
-        try self.compileNode(target.data.rhs);
-        try self.compileNode(node.data.rhs);
-        try self.emitOp(.array_set);
+        if (op_tag != .equal) {
+            try self.compileNode(target.data.lhs);
+            try self.compileNode(target.data.rhs);
+            try self.compileNode(target.data.lhs);
+            try self.compileNode(target.data.rhs);
+            try self.emitOp(.array_get);
+            try self.compileNode(node.data.rhs);
+            try emitCompoundOp(self, op_tag);
+            try self.emitOp(.array_set);
+        } else {
+            try self.compileNode(target.data.lhs);
+            try self.compileNode(target.data.rhs);
+            try self.compileNode(node.data.rhs);
+            try self.emitOp(.array_set);
+        }
         return;
     }
 
     if (target.tag == .property_access) {
-        try self.compileNode(target.data.lhs);
-        try self.compileNode(node.data.rhs);
         const prop_node = self.ast.nodes[target.data.rhs];
         var prop_name = self.ast.tokenSlice(prop_node.main_token);
         if (prop_name.len > 0 and prop_name[0] == '$') prop_name = prop_name[1..];
         const name_idx = try self.addConstant(.{ .string = prop_name });
+        try self.compileNode(target.data.lhs);
+        if (op_tag != .equal) {
+            try self.emitOp(.dup);
+            try self.emitOp(.get_prop);
+            try self.emitU16(name_idx);
+        }
+        try self.compileNode(node.data.rhs);
+        if (op_tag != .equal) {
+            try emitCompoundOp(self, op_tag);
+        }
         try self.emitOp(.set_prop);
         try self.emitU16(name_idx);
         return;

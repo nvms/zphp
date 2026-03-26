@@ -214,23 +214,30 @@ fn compileInterpolatedString(self: *Compiler, s: []const u8) (Allocator.Error ||
             var j = i + 1;
             while (j < s.len and isVarChar(s[j])) j += 1;
 
-            if (j < s.len and s[j] == '[') {
-                const var_name = s[i..j];
-                try self.emitGetVar(var_name);
+            const var_name = s[i..j];
+            try self.emitGetVar(var_name);
 
+            if (j < s.len and s[j] == '[') {
                 const bracket_end = std.mem.indexOfScalarPos(u8, s, j, ']') orelse s.len;
                 const key_str = s[j + 1 .. bracket_end];
                 try emitArrayKeyAccess(self, key_str);
-                if (segment_count > 0) try self.emitOp(.concat);
-                segment_count += 1;
-                i = if (bracket_end < s.len) bracket_end + 1 else bracket_end;
-            } else {
-                const var_name = s[i..j];
-                try self.emitGetVar(var_name);
-                if (segment_count > 0) try self.emitOp(.concat);
-                segment_count += 1;
-                i = j;
+                j = if (bracket_end < s.len) bracket_end + 1 else bracket_end;
+            } else if (j + 1 < s.len and s[j] == '-' and s[j + 1] == '>') {
+                j += 2;
+                var k = j;
+                while (k < s.len and isVarChar(s[k])) k += 1;
+                if (k > j) {
+                    const prop_name = s[j..k];
+                    const name_idx = try self.addConstant(.{ .string = prop_name });
+                    try self.emitOp(.get_prop);
+                    try self.emitU16(name_idx);
+                    j = k;
+                }
             }
+
+            if (segment_count > 0) try self.emitOp(.concat);
+            segment_count += 1;
+            i = j;
 
             lit_start = i;
             continue;

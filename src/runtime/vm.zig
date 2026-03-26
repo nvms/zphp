@@ -1245,6 +1245,9 @@ pub const VM = struct {
                             try copy.properties.put(self.allocator, entry.key_ptr.*, try self.copyValue(entry.value_ptr.*));
                         }
                         try self.objects.append(self.allocator, copy);
+                        if (self.hasMethod(src.class_name, "__clone")) {
+                            _ = self.callMethod(copy, "__clone", &.{}) catch {};
+                        }
                         self.push(.{ .object = copy });
                     } else {
                         self.push(val);
@@ -2157,19 +2160,22 @@ pub const VM = struct {
                         return error.RuntimeError;
                     }
 
-                    // resolve parent/self relative to the defining class, not $this
                     const this_val = self.currentFrame().vars.get("$this") orelse blk: {
                         const f = self.currentFrame();
                         if (f.func) |fn_info| {
-                            if (fn_info.locals_only and f.locals.len > 0) {
-                                const slot0 = f.locals[0];
-                                if (slot0 == .object) break :blk slot0;
+                            if (fn_info.locals_only) {
+                                for (fn_info.slot_names, 0..) |sn, si| {
+                                    if (std.mem.eql(u8, sn, "$this") and si < f.locals.len and f.locals[si] == .object) {
+                                        break :blk f.locals[si];
+                                    }
+                                }
                             }
                         }
                         break :blk null;
                     };
-                    if (std.mem.eql(u8, class_name, "parent") or std.mem.eql(u8, class_name, "self")) {
-                        // find the defining class from the current function name (ClassName::method)
+                    if (std.mem.eql(u8, class_name, "static")) {
+                        class_name = self.resolveStaticClassName(class_name);
+                    } else if (std.mem.eql(u8, class_name, "parent") or std.mem.eql(u8, class_name, "self")) {
                         const defining_class = self.currentDefiningClass();
                         if (std.mem.eql(u8, class_name, "parent")) {
                             if (defining_class) |dc| {
@@ -2423,7 +2429,17 @@ pub const VM = struct {
             if (self.currentFrame().vars.get("$this")) |this_val| {
                 if (this_val == .object) return this_val.object.class_name;
             }
-            if (self.currentFrame().called_class) |cc| return cc;
+            const f = self.currentFrame();
+            if (f.func) |fn_info| {
+                if (fn_info.locals_only) {
+                    for (fn_info.slot_names, 0..) |sn, si| {
+                        if (std.mem.eql(u8, sn, "$this") and si < f.locals.len and f.locals[si] == .object) {
+                            return f.locals[si].object.class_name;
+                        }
+                    }
+                }
+            }
+            if (f.called_class) |cc| return cc;
             if (self.currentDefiningClass()) |dc| return dc;
         } else if (std.mem.eql(u8, name, "self")) {
             if (self.currentDefiningClass()) |dc| return dc;
@@ -3035,7 +3051,7 @@ pub const VM = struct {
             }
         }
 
-        self.frames[self.frame_count] = .{ .chunk = &func.chunk, .ip = 0, .vars = .{}, .locals = locals, .func = func };
+        self.frames[self.frame_count] = .{ .chunk = &func.chunk, .ip = 0, .vars = .{}, .locals = locals, .func = func, .called_class = self.currentFrame().called_class };
         self.frame_count += 1;
         try self.fastLoop();
     }
@@ -4229,7 +4245,8 @@ pub const VM = struct {
                 try self.generators.append(self.allocator, gen);
                 self.push(.{ .generator = gen });
             } else {
-                self.frames[self.frame_count] = .{ .chunk = &func.chunk, .ip = 0, .vars = new_vars, .locals = try self.allocLocals(func, &new_vars), .func = func, .ref_slots = callee_refs };
+                const inherit_cc = if (std.mem.startsWith(u8, name, "__closure_")) self.currentFrame().called_class else null;
+                self.frames[self.frame_count] = .{ .chunk = &func.chunk, .ip = 0, .vars = new_vars, .locals = try self.allocLocals(func, &new_vars), .func = func, .ref_slots = callee_refs, .called_class = inherit_cc };
                 self.frame_count += 1;
             }
         } else return error.RuntimeError;
@@ -4327,7 +4344,7 @@ pub const VM = struct {
                 }
             }
         }
-        self.frames[self.frame_count] = .{ .chunk = &func.chunk, .ip = 0, .vars = .{}, .locals = locals, .func = func };
+        self.frames[self.frame_count] = .{ .chunk = &func.chunk, .ip = 0, .vars = .{}, .locals = locals, .func = func, .called_class = self.currentFrame().called_class };
         self.frame_count += 1;
         try self.fastLoop();
         const fl_frame = &self.frames[self.frame_count - 1];
