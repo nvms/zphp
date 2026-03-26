@@ -79,6 +79,7 @@ pub const entries = .{
     .{ "parse_str", native_parse_str },
     .{ "strstr", native_strstr },
     .{ "strchr", native_strstr },
+    .{ "strtr", native_strtr },
 };
 
 fn substr(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
@@ -1564,32 +1565,50 @@ fn native_http_build_query(ctx: *NativeContext, args: []const Value) RuntimeErro
     var buf = std.ArrayListUnmanaged(u8){};
     var first = true;
     for (arr.entries.items) |entry| {
-        if (!first) try buf.append(ctx.allocator, '&');
-        first = false;
-
+        var key_buf: [20]u8 = undefined;
         const key_str = switch (entry.key) {
             .string => |s| s,
-            .int => |n| blk: {
-                var tmp: [20]u8 = undefined;
-                break :blk std.fmt.bufPrint(&tmp, "{d}", .{n}) catch "";
-            },
+            .int => |n| std.fmt.bufPrint(&key_buf, "{d}", .{n}) catch "",
         };
-        try appendUrlEncoded(&buf, ctx.allocator, key_str);
-        try buf.append(ctx.allocator, '=');
-
-        if (entry.value == .string) {
-            try appendUrlEncoded(&buf, ctx.allocator, entry.value.string);
-        } else {
-            var tmp = std.ArrayListUnmanaged(u8){};
-            try entry.value.format(&tmp, ctx.allocator);
-            const s = try tmp.toOwnedSlice(ctx.allocator);
-            defer ctx.allocator.free(s);
-            try appendUrlEncoded(&buf, ctx.allocator, s);
-        }
+        try buildQueryPairs(&buf, ctx.allocator, key_str, entry.value, &first);
     }
     const result = try buf.toOwnedSlice(ctx.allocator);
     try ctx.strings.append(ctx.allocator, result);
     return .{ .string = result };
+}
+
+fn buildQueryPairs(buf: *std.ArrayListUnmanaged(u8), a: std.mem.Allocator, prefix: []const u8, value: Value, first: *bool) !void {
+    if (value == .array) {
+        for (value.array.entries.items) |entry| {
+            var key_buf: [20]u8 = undefined;
+            const sub_key = switch (entry.key) {
+                .string => |s| s,
+                .int => |n| std.fmt.bufPrint(&key_buf, "{d}", .{n}) catch "",
+            };
+            // build "prefix[subkey]" into a temp buffer
+            var nested_key = std.ArrayListUnmanaged(u8){};
+            defer nested_key.deinit(a);
+            try nested_key.appendSlice(a, prefix);
+            try nested_key.appendSlice(a, "[");
+            try nested_key.appendSlice(a, sub_key);
+            try nested_key.appendSlice(a, "]");
+            try buildQueryPairs(buf, a, nested_key.items, entry.value, first);
+        }
+    } else {
+        if (!first.*) try buf.append(a, '&');
+        first.* = false;
+        try appendUrlEncoded(buf, a, prefix);
+        try buf.append(a, '=');
+        if (value == .string) {
+            try appendUrlEncoded(buf, a, value.string);
+        } else {
+            var tmp = std.ArrayListUnmanaged(u8){};
+            try value.format(&tmp, a);
+            const s = try tmp.toOwnedSlice(a);
+            defer a.free(s);
+            try appendUrlEncoded(buf, a, s);
+        }
+    }
 }
 
 fn appendUrlEncoded(buf: *std.ArrayListUnmanaged(u8), a: std.mem.Allocator, s: []const u8) !void {
@@ -1612,16 +1631,36 @@ fn native_qp_encode(ctx: *NativeContext, args: []const Value) RuntimeError!Value
     const s = args[0].string;
     var buf = std.ArrayListUnmanaged(u8){};
     const hex = "0123456789ABCDEF";
-    for (s) |c| {
-        if (c >= 33 and c <= 126 and c != '=') {
-            try buf.append(ctx.allocator, c);
-        } else if (c == ' ' or c == '\t') {
+    var line_len: usize = 0;
+    var i: usize = 0;
+    while (i < s.len) {
+        if (i + 1 < s.len and s[i] == '\r' and s[i + 1] == '\n') {
+            try buf.appendSlice(ctx.allocator, "\r\n");
+            line_len = 0;
+            i += 2;
+            continue;
+        }
+        if (s[i] == '\n') {
+            try buf.appendSlice(ctx.allocator, "\r\n");
+            line_len = 0;
+            i += 1;
+            continue;
+        }
+        const c = s[i];
+        const need: usize = if ((c >= 33 and c <= 126 and c != '=') or c == ' ' or c == '\t') 1 else 3;
+        if (line_len + need > 75) {
+            try buf.appendSlice(ctx.allocator, "=\r\n");
+            line_len = 0;
+        }
+        if (need == 1) {
             try buf.append(ctx.allocator, c);
         } else {
             try buf.append(ctx.allocator, '=');
             try buf.append(ctx.allocator, hex[c >> 4]);
             try buf.append(ctx.allocator, hex[c & 0xf]);
         }
+        line_len += need;
+        i += 1;
     }
     const result = try buf.toOwnedSlice(ctx.allocator);
     try ctx.strings.append(ctx.allocator, result);
@@ -1868,4 +1907,67 @@ fn native_strstr(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
         return .{ .string = try ctx.createString(haystack[pos..]) };
     }
     return Value{ .bool = false };
+}
+
+fn native_strtr(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len < 2 or args[0] != .string) return .null;
+    const str = args[0].string;
+
+    if (args.len >= 3 and args[1] == .string and args[2] == .string) {
+        const from = args[1].string;
+        const to = args[2].string;
+        const len = @min(from.len, to.len);
+        const buf = try ctx.allocator.alloc(u8, str.len);
+        try ctx.strings.append(ctx.allocator, buf);
+        for (str, 0..) |c, i| {
+            var replaced = false;
+            for (0..len) |j| {
+                if (c == from[j]) {
+                    buf[i] = to[j];
+                    replaced = true;
+                    break;
+                }
+            }
+            if (!replaced) buf[i] = c;
+        }
+        return .{ .string = buf };
+    }
+
+    if (args[1] == .array) {
+        const replacements = args[1].array;
+        var result = try ctx.allocator.alloc(u8, str.len * 4);
+        try ctx.strings.append(ctx.allocator, result);
+        var out_len: usize = 0;
+        var i: usize = 0;
+        while (i < str.len) {
+            var matched = false;
+            for (replacements.entries.items) |entry| {
+                if (entry.key != .string) continue;
+                const search = entry.key.string;
+                if (search.len == 0) continue;
+                if (i + search.len <= str.len and std.mem.eql(u8, str[i .. i + search.len], search)) {
+                    const repl = if (entry.value == .string) entry.value.string else "";
+                    if (out_len + repl.len > result.len) {
+                        result = try ctx.allocator.realloc(result, result.len * 2 + repl.len);
+                    }
+                    @memcpy(result[out_len .. out_len + repl.len], repl);
+                    out_len += repl.len;
+                    i += search.len;
+                    matched = true;
+                    break;
+                }
+            }
+            if (!matched) {
+                if (out_len >= result.len) {
+                    result = try ctx.allocator.realloc(result, result.len * 2);
+                }
+                result[out_len] = str[i];
+                out_len += 1;
+                i += 1;
+            }
+        }
+        return .{ .string = result[0..out_len] };
+    }
+
+    return .null;
 }
