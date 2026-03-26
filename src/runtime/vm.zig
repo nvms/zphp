@@ -1901,7 +1901,6 @@ pub const VM = struct {
                                     self.sp -= ac + 1;
                                     self.frames[self.frame_count] = .{ .chunk = &func.chunk, .ip = 0, .vars = .{}, .locals = mc_locals, .func = func };
                                     self.frame_count += 1;
-                                    // enter fastLoop for the method body
                                     try self.fastLoop();
                                     continue;
                                 }
@@ -3803,15 +3802,19 @@ pub const VM = struct {
     }
 
     fn currentDefiningClass(self: *VM) ?[]const u8 {
-        // find which class the currently executing function belongs to
-        // by scanning function names for ClassName::method pattern
-        const current_chunk = self.currentChunk();
-        var iter = self.functions.iterator();
-        while (iter.next()) |entry| {
-            if (&entry.value_ptr.*.chunk == current_chunk) {
-                const name = entry.key_ptr.*;
-                if (std.mem.indexOf(u8, name, "::")) |sep| {
-                    return name[0..sep];
+        // walk the call stack from current frame upward to find enclosing class method
+        // closures inside methods need the enclosing method's class for visibility checks
+        var fi: usize = self.frame_count;
+        while (fi > 0) {
+            fi -= 1;
+            const frame_chunk_ptr = self.frames[fi].chunk;
+            var iter = self.functions.iterator();
+            while (iter.next()) |entry| {
+                if (frame_chunk_ptr == &entry.value_ptr.*.chunk) {
+                    const name = entry.key_ptr.*;
+                    if (std.mem.indexOf(u8, name, "::")) |sep| {
+                        return name[0..sep];
+                    }
                 }
             }
         }

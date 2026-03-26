@@ -400,6 +400,7 @@ fn preg_split(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len < 2 or args[0] != .string or args[1] != .string) return .null;
     const info = parsePattern(args[0].string) orelse return Value.null;
     const subject = args[1].string;
+    const limit: i64 = if (args.len >= 3 and args[2] != .null) Value.toInt(args[2]) else -1;
 
     const code = compilePattern(info.pattern, info.flags) orelse return Value.null;
     defer pcre2.pcre2_code_free_8(code);
@@ -409,8 +410,11 @@ fn preg_split(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
 
     var result = try ctx.createArray();
     var offset: usize = 0;
+    var splits: i64 = 1;
 
     while (offset <= subject.len) {
+        if (limit > 0 and splits >= limit) break;
+
         const rc = pcre2.pcre2_match_8(code, subject.ptr, subject.len, offset, 0, match_data, null);
         if (rc < 0) break;
 
@@ -419,6 +423,7 @@ fn preg_split(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
         const match_end = ovector[1];
 
         try result.append(ctx.allocator, .{ .string = try ctx.createString(subject[offset..match_start]) });
+        splits += 1;
 
         if (match_end == offset) {
             if (offset < subject.len) {

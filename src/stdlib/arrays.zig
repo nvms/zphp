@@ -248,13 +248,44 @@ fn reindexArray(arr: *PhpArray) void {
 fn array_map(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len < 2) return .null;
     const callback = args[0];
+
+    // null callback with multiple arrays = zip
+    if (callback == .null and args.len > 2) {
+        var max_len: usize = 0;
+        for (args[1..]) |a| {
+            if (a == .array) max_len = @max(max_len, a.array.entries.items.len);
+        }
+        var result = try ctx.createArray();
+        for (0..max_len) |i| {
+            var tuple = try ctx.createArray();
+            for (args[1..]) |a| {
+                if (a == .array and i < a.array.entries.items.len) {
+                    try tuple.append(ctx.allocator, a.array.entries.items[i].value);
+                } else {
+                    try tuple.append(ctx.allocator, .null);
+                }
+            }
+            try result.append(ctx.allocator, .{ .array = tuple });
+        }
+        return .{ .array = result };
+    }
+
     if (args[1] != .array) return .null;
     const src = args[1].array;
+
+    // null callback with single array returns a copy
+    if (callback == .null) {
+        var result = try ctx.createArray();
+        for (src.entries.items) |entry| {
+            try result.append(ctx.allocator, entry.value);
+        }
+        return .{ .array = result };
+    }
 
     var result = try ctx.createArray();
     for (src.entries.items) |entry| {
         const mapped = try ctx.invokeCallable(callback, &.{entry.value});
-        try result.append(ctx.allocator, mapped);
+        try result.set(ctx.allocator, entry.key, mapped);
     }
     return .{ .array = result };
 }
@@ -349,6 +380,16 @@ fn array_splice(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
             insert_idx += 1;
         }
     }
+
+    // re-index numeric keys
+    var next_int: i64 = 0;
+    for (arr.entries.items) |*entry| {
+        if (entry.key == .int) {
+            entry.key = .{ .int = next_int };
+            next_int += 1;
+        }
+    }
+    arr.next_int_key = next_int;
 
     return .{ .array = removed };
 }

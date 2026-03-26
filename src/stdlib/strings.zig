@@ -113,13 +113,8 @@ fn strpos(_: *NativeContext, args: []const Value) RuntimeError!Value {
     return .{ .bool = false };
 }
 
-fn str_replace(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len < 3) return if (args.len >= 3) args[2] else Value{ .string = "" };
-    const search = if (args[0] == .string) args[0].string else return args[2];
-    const replace = if (args[1] == .string) args[1].string else return args[2];
-    const subject = if (args[2] == .string) args[2].string else return args[2];
-    if (search.len == 0) return args[2];
-
+fn replaceOne(ctx: *NativeContext, subject: []const u8, search: []const u8, replace: []const u8) ![]const u8 {
+    if (search.len == 0) return subject;
     var buf = std.ArrayListUnmanaged(u8){};
     var i: usize = 0;
     while (i < subject.len) {
@@ -133,6 +128,32 @@ fn str_replace(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     }
     const s = try buf.toOwnedSlice(ctx.allocator);
     try ctx.strings.append(ctx.allocator, s);
+    return s;
+}
+
+fn str_replace(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len < 3) return if (args.len >= 3) args[2] else Value{ .string = "" };
+
+    if (args[0] == .array) {
+        const searches = args[0].array;
+        var result = if (args[2] == .string) args[2].string else return args[2];
+        for (searches.entries.items, 0..) |entry, idx| {
+            const needle = if (entry.value == .string) entry.value.string else continue;
+            const replacement = if (args[1] == .array) blk: {
+                break :blk if (idx < args[1].array.entries.items.len)
+                    (if (args[1].array.entries.items[idx].value == .string) args[1].array.entries.items[idx].value.string else "")
+                else
+                    "";
+            } else if (args[1] == .string) args[1].string else "";
+            result = try replaceOne(ctx, result, needle, replacement);
+        }
+        return .{ .string = result };
+    }
+
+    const search = if (args[0] == .string) args[0].string else return args[2];
+    const replace = if (args[1] == .string) args[1].string else return args[2];
+    const subject = if (args[2] == .string) args[2].string else return args[2];
+    const s = try replaceOne(ctx, subject, search, replace);
     return .{ .string = s };
 }
 

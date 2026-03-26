@@ -273,9 +273,23 @@ pub const Value = union(enum) {
         };
     }
 
+    fn arrayEqual(a: *PhpArray, b: *PhpArray, strict: bool) bool {
+        if (a == b) return true;
+        if (a.entries.items.len != b.entries.items.len) return false;
+        for (a.entries.items, b.entries.items) |ea, eb| {
+            if (!ea.key.eql(eb.key)) return false;
+            if (strict) {
+                if (!identical(ea.value, eb.value)) return false;
+            } else {
+                if (!equal(ea.value, eb.value)) return false;
+            }
+        }
+        return true;
+    }
+
     pub fn equal(a: Value, b: Value) bool {
         if (a == .object or b == .object or a == .fiber or b == .fiber) return false;
-        if (a == .array and b == .array) return a.array == b.array;
+        if (a == .array and b == .array) return arrayEqual(a.array, b.array, false);
         if (a == .array or b == .array) return a.isTruthy() == b.isTruthy();
         if (a == .null and b == .null) return true;
         if (a == .null) return !b.isTruthy();
@@ -320,7 +334,7 @@ pub const Value = union(enum) {
             .int => |ai| ai == b.int,
             .float => |af| af == b.float,
             .string => |as_| std.mem.eql(u8, as_, b.string),
-            .array => |ap| ap == b.array,
+            .array => |ap| arrayEqual(ap, b.array, true),
             .object => |ao| ao == b.object,
             .generator => |ag| ag == b.generator,
             .fiber => |af| af == b.fiber,

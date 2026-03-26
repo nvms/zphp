@@ -1881,12 +1881,9 @@ const Parser = struct {
     }
 
     fn isSemiReserved(tag: Token.Tag) bool {
-        return switch (tag) {
-            .kw_match, .kw_enum, .kw_readonly, .kw_self, .kw_parent,
-            .kw_true, .kw_false, .kw_null,
-            => true,
-            else => false,
-        };
+        // php 7.0+ allows most keywords as method/constant names in classes
+        return @intFromEnum(tag) >= @intFromEnum(Token.Tag.kw_abstract) and
+            @intFromEnum(tag) <= @intFromEnum(Token.Tag.kw_yield);
     }
 
     fn expectFunctionName(self: *Parser) Error!u32 {
