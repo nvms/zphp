@@ -134,6 +134,14 @@ pub const OpCode = enum(u8) {
     // local variable slots (indexed access, no hash lookup)
     get_local, // u16: slot index - push locals[slot]
     set_local, // u16: slot index - peek value, store in locals[slot]
+
+    // superinstructions - fused opcode sequences for hot loops
+    inc_local, // u16: slot index - locals[slot] += 1, no stack effect
+    dec_local, // u16: slot index - locals[slot] -= 1, no stack effect
+    add_local_to_local, // u16: src slot, u16: dst slot - locals[dst] += locals[src], no stack effect
+    sub_local_to_local, // u16: src slot, u16: dst slot - locals[dst] -= locals[src], no stack effect
+    mul_local_to_local, // u16: src slot, u16: dst slot - locals[dst] *= locals[src], no stack effect
+    less_local_local_jif, // u16: slot_a, u16: slot_b, u16: jump offset - if !(locals[a] < locals[b]) jump
 };
 
 

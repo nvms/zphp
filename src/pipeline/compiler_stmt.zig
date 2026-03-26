@@ -86,6 +86,40 @@ pub fn compileDoWhile(self: *Compiler, node: Ast.Node) Error!void {
     self.loop_start = prev_start;
 }
 
+fn tryLocalSlot(self: *Compiler, node_idx: u32) ?u16 {
+    if (node_idx == 0) return null;
+    const n = self.ast.nodes[node_idx];
+    if (n.tag != .variable and n.tag != .identifier) return null;
+    const name = self.ast.tokenSlice(n.main_token);
+    return self.local_slots.get(name);
+}
+
+fn tryIncDecUpdate(self: *Compiler, update_n: u32) ?struct { slot: u16, is_inc: bool } {
+    if (update_n == 0) return null;
+    const n = self.ast.nodes[update_n];
+    if (n.tag != .postfix_op) return null;
+    const op_tag = self.ast.tokens[n.main_token].tag;
+    if (op_tag != .plus_plus and op_tag != .minus_minus) return null;
+    const target = self.ast.nodes[n.data.lhs];
+    if (target.tag != .variable and target.tag != .identifier) return null;
+    const name = self.ast.tokenSlice(target.main_token);
+    const slot = self.local_slots.get(name) orelse return null;
+    return .{ .slot = slot, .is_inc = op_tag == .plus_plus };
+}
+
+const OpCode = @import("bytecode.zig").OpCode;
+
+fn tryLessLocalsCond(self: *Compiler, cond_n: u32) ?struct { slot_a: u16, slot_b: u16 } {
+    if (cond_n == 0) return null;
+    const n = self.ast.nodes[cond_n];
+    if (n.tag != .binary_op) return null;
+    const op_tag = self.ast.tokens[n.main_token].tag;
+    if (op_tag != .lt) return null;
+    const slot_a = tryLocalSlot(self, n.data.lhs) orelse return null;
+    const slot_b = tryLocalSlot(self, n.data.rhs) orelse return null;
+    return .{ .slot_a = slot_a, .slot_b = slot_b };
+}
+
 pub fn compileFor(self: *Compiler, node: Ast.Node) Error!void {
     const init_n = self.ast.extra_data[node.data.lhs];
     const cond_n = self.ast.extra_data[node.data.lhs + 1];
@@ -108,11 +142,22 @@ pub fn compileFor(self: *Compiler, node: Ast.Node) Error!void {
     const loop_top = self.chunk.offset();
     self.loop_start = loop_top;
 
+    const cond_super = tryLessLocalsCond(self, cond_n);
+    const update_super = tryIncDecUpdate(self, update_n);
+
     var exit_jump: ?usize = null;
     if (cond_n != 0) {
-        try self.compileNode(cond_n);
-        exit_jump = try self.emitJump(.jump_if_false);
-        try self.emitOp(.pop);
+        if (cond_super) |cs| {
+            try self.emitOp(.less_local_local_jif);
+            try self.emitU16(cs.slot_a);
+            try self.emitU16(cs.slot_b);
+            exit_jump = self.chunk.offset();
+            try self.emitU16(0xffff);
+        } else {
+            try self.compileNode(cond_n);
+            exit_jump = try self.emitJump(.jump_if_false);
+            try self.emitOp(.pop);
+        }
     }
 
     try self.compileNode(node.data.rhs);
@@ -121,15 +166,22 @@ pub fn compileFor(self: *Compiler, node: Ast.Node) Error!void {
     try self.patchContinues(&prev_continues);
 
     if (update_n != 0) {
-        try self.compileNode(update_n);
-        try self.emitOp(.pop);
+        if (update_super) |us| {
+            try self.emitOp(if (us.is_inc) .inc_local else .dec_local);
+            try self.emitU16(us.slot);
+        } else {
+            try self.compileNode(update_n);
+            try self.emitOp(.pop);
+        }
     }
 
     try self.emitLoop(loop_top);
 
     if (exit_jump) |ej| {
         self.patchJump(ej);
-        try self.emitOp(.pop);
+        if (cond_super == null) {
+            try self.emitOp(.pop);
+        }
     }
 
     try self.patchBreaks(&prev_breaks);

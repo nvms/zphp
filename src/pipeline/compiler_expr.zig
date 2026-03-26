@@ -3,6 +3,7 @@ const Compiler = @import("compiler.zig").Compiler;
 const Ast = @import("ast.zig").Ast;
 const Token = @import("token.zig").Token;
 const Value = @import("../runtime/value.zig").Value;
+const OpCode = @import("bytecode.zig").OpCode;
 const Allocator = std.mem.Allocator;
 const Error = Allocator.Error || error{CompileError};
 

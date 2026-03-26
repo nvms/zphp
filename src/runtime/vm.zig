@@ -1212,6 +1212,62 @@ pub const VM = struct {
                         self.setLocalGlobal(slot, val, frame);
                     }
                 },
+                .inc_local => {
+                    const slot = self.readU16();
+                    const frame_il = self.currentFrame();
+                    if (slot < frame_il.locals.len) {
+                        const v = frame_il.locals[slot];
+                        frame_il.locals[slot] = if (v == .int) .{ .int = v.int +% 1 } else if (v == .float) .{ .float = v.float + 1.0 } else Value.add(v, .{ .int = 1 });
+                    }
+                },
+                .dec_local => {
+                    const slot = self.readU16();
+                    const frame_dl = self.currentFrame();
+                    if (slot < frame_dl.locals.len) {
+                        const v = frame_dl.locals[slot];
+                        frame_dl.locals[slot] = if (v == .int) .{ .int = v.int -% 1 } else if (v == .float) .{ .float = v.float - 1.0 } else Value.subtract(v, .{ .int = 1 });
+                    }
+                },
+                .add_local_to_local => {
+                    const src_slot = self.readU16();
+                    const dst_slot = self.readU16();
+                    const frame_al = self.currentFrame();
+                    if (src_slot < frame_al.locals.len and dst_slot < frame_al.locals.len) {
+                        const src = frame_al.locals[src_slot];
+                        const dst = frame_al.locals[dst_slot];
+                        frame_al.locals[dst_slot] = if (src == .int and dst == .int) .{ .int = dst.int +% src.int } else if (src == .float and dst == .float) .{ .float = dst.float + src.float } else Value.add(dst, src);
+                    }
+                },
+                .sub_local_to_local => {
+                    const src_slot = self.readU16();
+                    const dst_slot = self.readU16();
+                    const frame_sl = self.currentFrame();
+                    if (src_slot < frame_sl.locals.len and dst_slot < frame_sl.locals.len) {
+                        const src = frame_sl.locals[src_slot];
+                        const dst = frame_sl.locals[dst_slot];
+                        frame_sl.locals[dst_slot] = if (src == .int and dst == .int) .{ .int = dst.int -% src.int } else if (src == .float and dst == .float) .{ .float = dst.float - src.float } else Value.subtract(dst, src);
+                    }
+                },
+                .mul_local_to_local => {
+                    const src_slot = self.readU16();
+                    const dst_slot = self.readU16();
+                    const frame_ml = self.currentFrame();
+                    if (src_slot < frame_ml.locals.len and dst_slot < frame_ml.locals.len) {
+                        const src = frame_ml.locals[src_slot];
+                        const dst = frame_ml.locals[dst_slot];
+                        frame_ml.locals[dst_slot] = if (src == .int and dst == .int) .{ .int = dst.int *% src.int } else if (src == .float and dst == .float) .{ .float = dst.float * src.float } else Value.multiply(dst, src);
+                    }
+                },
+                .less_local_local_jif => {
+                    const slot_a = self.readU16();
+                    const slot_b = self.readU16();
+                    const offset = self.readU16();
+                    const frame_lj = self.currentFrame();
+                    const a = if (slot_a < frame_lj.locals.len) frame_lj.locals[slot_a] else Value.null;
+                    const b = if (slot_b < frame_lj.locals.len) frame_lj.locals[slot_b] else Value.null;
+                    const is_less = if (a == .int and b == .int) a.int < b.int else if (a == .float and b == .float) a.float < b.float else Value.lessThan(a, b);
+                    if (!is_less) frame_lj.ip += offset;
+                },
                 .isset_prop => {
                     const name_idx = self.readU16();
                     const prop_name = self.currentChunk().constants.items[name_idx].string;
@@ -3675,6 +3731,107 @@ pub const VM = struct {
                     sp += 1;
                     self.sp = sp;
                     continue :reenter;
+                },
+                .inc_local => {
+                    const slot = (@as(u16, code[ip]) << 8) | code[ip + 1];
+                    ip += 2;
+                    const v = locals[slot];
+                    if (v == .int) {
+                        locals[slot] = .{ .int = v.int +% 1 };
+                    } else if (v == .float) {
+                        locals[slot] = .{ .float = v.float + 1.0 };
+                    } else {
+                        frame.ip = ip - 3;
+                        self.sp = sp;
+                        return;
+                    }
+                },
+                .dec_local => {
+                    const slot = (@as(u16, code[ip]) << 8) | code[ip + 1];
+                    ip += 2;
+                    const v = locals[slot];
+                    if (v == .int) {
+                        locals[slot] = .{ .int = v.int -% 1 };
+                    } else if (v == .float) {
+                        locals[slot] = .{ .float = v.float - 1.0 };
+                    } else {
+                        frame.ip = ip - 3;
+                        self.sp = sp;
+                        return;
+                    }
+                },
+                .add_local_to_local => {
+                    const src_slot = (@as(u16, code[ip]) << 8) | code[ip + 1];
+                    const dst_slot = (@as(u16, code[ip + 2]) << 8) | code[ip + 3];
+                    ip += 4;
+                    const src = locals[src_slot];
+                    const dst = locals[dst_slot];
+                    if (src == .int and dst == .int) {
+                        locals[dst_slot] = .{ .int = dst.int +% src.int };
+                    } else if (src == .float and dst == .float) {
+                        locals[dst_slot] = .{ .float = dst.float + src.float };
+                    } else if (src == .int and dst == .float) {
+                        locals[dst_slot] = .{ .float = dst.float + @as(f64, @floatFromInt(src.int)) };
+                    } else if (src == .float and dst == .int) {
+                        locals[dst_slot] = .{ .float = @as(f64, @floatFromInt(dst.int)) + src.float };
+                    } else {
+                        frame.ip = ip - 5;
+                        self.sp = sp;
+                        return;
+                    }
+                },
+                .sub_local_to_local => {
+                    const src_slot = (@as(u16, code[ip]) << 8) | code[ip + 1];
+                    const dst_slot = (@as(u16, code[ip + 2]) << 8) | code[ip + 3];
+                    ip += 4;
+                    const src = locals[src_slot];
+                    const dst = locals[dst_slot];
+                    if (src == .int and dst == .int) {
+                        locals[dst_slot] = .{ .int = dst.int -% src.int };
+                    } else if (src == .float and dst == .float) {
+                        locals[dst_slot] = .{ .float = dst.float - src.float };
+                    } else {
+                        frame.ip = ip - 5;
+                        self.sp = sp;
+                        return;
+                    }
+                },
+                .mul_local_to_local => {
+                    const src_slot = (@as(u16, code[ip]) << 8) | code[ip + 1];
+                    const dst_slot = (@as(u16, code[ip + 2]) << 8) | code[ip + 3];
+                    ip += 4;
+                    const src = locals[src_slot];
+                    const dst = locals[dst_slot];
+                    if (src == .int and dst == .int) {
+                        locals[dst_slot] = .{ .int = dst.int *% src.int };
+                    } else if (src == .float and dst == .float) {
+                        locals[dst_slot] = .{ .float = dst.float * src.float };
+                    } else if (src == .float and dst == .int) {
+                        locals[dst_slot] = .{ .float = @as(f64, @floatFromInt(dst.int)) * src.float };
+                    } else if (src == .int and dst == .float) {
+                        locals[dst_slot] = .{ .float = dst.float * @as(f64, @floatFromInt(src.int)) };
+                    } else {
+                        frame.ip = ip - 5;
+                        self.sp = sp;
+                        return;
+                    }
+                },
+                .less_local_local_jif => {
+                    const slot_a = (@as(u16, code[ip]) << 8) | code[ip + 1];
+                    const slot_b = (@as(u16, code[ip + 2]) << 8) | code[ip + 3];
+                    const offset = (@as(u16, code[ip + 4]) << 8) | code[ip + 5];
+                    ip += 6;
+                    const a = locals[slot_a];
+                    const b = locals[slot_b];
+                    if (a == .int and b == .int) {
+                        if (a.int >= b.int) ip += offset;
+                    } else if (a == .float and b == .float) {
+                        if (a.float >= b.float) ip += offset;
+                    } else {
+                        frame.ip = ip - 7;
+                        self.sp = sp;
+                        return;
+                    }
                 },
                 else => {
                     frame.ip = ip - 1;

@@ -126,8 +126,15 @@ pub const Compiler = struct {
         const node = self.ast.nodes[idx];
         switch (node.tag) {
             .expression_stmt => {
-                try self.compileNode(node.data.lhs);
-                try self.emitOp(.pop);
+                if (self.tryCompileLocalAssignSuper(node.data.lhs)) |emitted| {
+                    if (!emitted) {
+                        try self.compileNode(node.data.lhs);
+                        try self.emitOp(.pop);
+                    }
+                } else |_| {
+                    try self.compileNode(node.data.lhs);
+                    try self.emitOp(.pop);
+                }
             },
             .echo_stmt => {
                 for (self.ast.extraSlice(node.data.lhs)) |expr| {
@@ -551,6 +558,31 @@ pub const Compiler = struct {
         const idx = try self.addConstant(.{ .string = name });
         try self.emitOp(.set_var);
         try self.emitU16(idx);
+    }
+
+    // superinstruction: $local_dst op= $local_src as a statement (no stack effect)
+    pub fn tryCompileLocalAssignSuper(self: *Compiler, expr_idx: u32) Error!bool {
+        const expr = self.ast.nodes[expr_idx];
+        if (expr.tag != .assign) return false;
+        const op_tag = self.ast.tokens[expr.main_token].tag;
+        const super_op: OpCode = switch (op_tag) {
+            .plus_equal => .add_local_to_local,
+            .minus_equal => .sub_local_to_local,
+            .star_equal => .mul_local_to_local,
+            else => return false,
+        };
+        const target = self.ast.nodes[expr.data.lhs];
+        if (target.tag != .variable and target.tag != .identifier) return false;
+        const rhs = self.ast.nodes[expr.data.rhs];
+        if (rhs.tag != .variable and rhs.tag != .identifier) return false;
+        const dst_name = self.ast.tokenSlice(target.main_token);
+        const src_name = self.ast.tokenSlice(rhs.main_token);
+        const dst_slot = self.local_slots.get(dst_name) orelse return false;
+        const src_slot = self.local_slots.get(src_name) orelse return false;
+        try self.emitOp(super_op);
+        try self.emitU16(src_slot);
+        try self.emitU16(dst_slot);
+        return true;
     }
 
     // ==================================================================

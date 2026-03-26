@@ -22,18 +22,18 @@ Requires PHP installed locally. zphp must be built with ReleaseFast - debug buil
 
 | benchmark | php | zphp | ratio |
 |---|---|---|---|
-| array_ops | 103 ms | 30 ms | 0.29x |
-| objects | 102 ms | 36 ms | 0.35x |
-| fibonacci | 162 ms | 149 ms | 0.92x |
-| string_ops | 99 ms | 104 ms | 1.05x |
-| closures | 99 ms | 131 ms | 1.32x |
-| loops | 132 ms | 187 ms | 1.42x |
+| array_ops | 96 ms | 29 ms | 0.30x |
+| objects | 103 ms | 37 ms | 0.36x |
+| fibonacci | 169 ms | 151 ms | 0.89x |
+| loops | 134 ms | 125 ms | 0.93x |
+| string_ops | 101 ms | 111 ms | 1.10x |
+| closures | 101 ms | 131 ms | 1.30x |
 
-zphp beats PHP on two benchmarks. Array operations are 3.3x faster thanks to O(1) integer key lookups on sequential arrays. Objects are 2.7x faster with property slot indices and IC-cached slot access. Fibonacci wins via stack-allocated locals and inline call/return. String operations are within 1.1x thanks to growable concat_assign buffers on the InlineCache (amortized O(1) append instead of O(n) realloc per iteration). Closures are within 1.4x - closure calls go through runLoop (not the fast interpreter) due to captures and call_indirect dispatch. Loops are within 1.4x - the gap is raw dispatch overhead (PHP uses computed goto, zphp uses a switch-based fast interpreter).
+zphp beats PHP on four benchmarks. Array operations are 3.3x faster thanks to O(1) integer key lookups on sequential arrays. Objects are 2.7x faster with property slot indices and IC-cached slot access. Fibonacci wins via stack-allocated locals and inline call/return. Loops beat PHP thanks to superinstructions (inc_local, add_local_to_local, less_local_local_jif) that fuse common opcode sequences in hot loops - reducing 18 dispatch cycles per iteration to 4. String operations are within 1.1x thanks to growable concat_assign buffers on the InlineCache. Closures are within 1.3x - closure calls go through runLoop due to captures and call_indirect dispatch.
 
 ### Optimization targets
 
-- **Computed goto dispatch**: replace switch-based opcode dispatch with computed goto (general improvement for loops)
+- **Computed goto dispatch**: replace switch-based opcode dispatch with computed goto (general improvement, especially closures)
 
 ## fmt
 
