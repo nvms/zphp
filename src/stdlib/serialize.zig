@@ -12,6 +12,15 @@ pub const entries = .{
 };
 
 fn formatPhpFloat(buf: *std.ArrayListUnmanaged(u8), a: std.mem.Allocator, f: f64) !void {
+    if (std.math.isNan(f)) {
+        try buf.appendSlice(a, "NAN");
+        return;
+    }
+    if (std.math.isInf(f)) {
+        if (f < 0) try buf.append(a, '-');
+        try buf.appendSlice(a, "INF");
+        return;
+    }
     if (f == 0.0) {
         if (std.math.signbit(f)) {
             try buf.appendSlice(a, "-0");
@@ -240,23 +249,25 @@ fn unserializeValue(ctx: *NativeContext, s: []const u8, pos: usize) !ParseResult
             return .{ .value = .{ .array = arr }, .pos = p };
         },
         'O' => {
-            // object unserialization: create a plain object with the class name
             if (pos + 2 >= s.len or s[pos + 1] != ':') return error.RuntimeError;
-            const name_result = try parseString(s, pos + 2 - 2);
-            // re-parse: O:len:"name":count:{...}
             const colon1 = std.mem.indexOfPos(u8, s, pos + 2, ":") orelse return error.RuntimeError;
             const name_len = std.fmt.parseInt(usize, s[pos + 2 .. colon1], 10) catch return error.RuntimeError;
             if (colon1 + 2 + name_len + 1 >= s.len) return error.RuntimeError;
-            const class_name = s[colon1 + 2 .. colon1 + 2 + name_len];
-            _ = name_result;
-            var p = colon1 + 2 + name_len + 2; // past closing quote and colon
+            const class_name = try ctx.createString(s[colon1 + 2 .. colon1 + 2 + name_len]);
+            var p = colon1 + 2 + name_len + 2;
             const count_end = std.mem.indexOfPos(u8, s, p, ":") orelse return error.RuntimeError;
             const prop_count = std.fmt.parseInt(usize, s[p..count_end], 10) catch return error.RuntimeError;
             if (count_end + 1 >= s.len or s[count_end + 1] != '{') return error.RuntimeError;
             p = count_end + 2;
 
-            const obj = try ctx.allocator.create(@import("../runtime/value.zig").PhpObject);
-            obj.* = .{ .class_name = class_name };
+            const obj = try ctx.createObject(class_name);
+            if (ctx.vm.classes.get(class_name)) |cls| {
+                if (cls.slot_layout) |layout| {
+                    obj.slots = try ctx.allocator.alloc(Value, layout.names.len);
+                    for (layout.defaults, 0..) |def, i| obj.slots.?[i] = def;
+                    obj.slot_layout = layout;
+                }
+            }
 
             for (0..prop_count) |_| {
                 const key_result = try unserializeValue(ctx, s, p);

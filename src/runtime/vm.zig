@@ -2427,6 +2427,7 @@ pub const VM = struct {
                     gen.vars = self.currentFrame().vars;
                     self.saveFrameLocalsToGenerator(gen);
                     try self.saveGeneratorStack(gen);
+                    self.saveGeneratorHandlers(gen);
                     gen.state = .suspended;
                     self.frame_count -= 1;
                     return;
@@ -2443,6 +2444,7 @@ pub const VM = struct {
                     gen.vars = self.currentFrame().vars;
                     self.saveFrameLocalsToGenerator(gen);
                     try self.saveGeneratorStack(gen);
+                    self.saveGeneratorHandlers(gen);
                     gen.state = .suspended;
                     self.frame_count -= 1;
                     return;
@@ -2464,6 +2466,7 @@ pub const VM = struct {
                             outer_gen.ip = self.currentFrame().ip;
                             outer_gen.vars = self.currentFrame().vars;
                             self.saveFrameLocalsToGenerator(outer_gen);
+                            self.saveGeneratorHandlers(outer_gen);
                             outer_gen.state = .suspended;
                             self.frame_count -= 1;
                             return;
@@ -2483,6 +2486,7 @@ pub const VM = struct {
                             outer_gen.ip = self.currentFrame().ip;
                             outer_gen.vars = self.currentFrame().vars;
                             self.saveFrameLocalsToGenerator(outer_gen);
+                            self.saveGeneratorHandlers(outer_gen);
                             outer_gen.state = .suspended;
                             self.frame_count -= 1;
                             return;
@@ -2671,6 +2675,8 @@ pub const VM = struct {
             .generator = gen,
         };
         self.frame_count += 1;
+
+        self.restoreGeneratorHandlers(gen);
 
         if (gen.ip > 0) {
             self.push(sent_value);
@@ -3117,6 +3123,33 @@ pub const VM = struct {
             gen.locals.appendSlice(self.allocator, frame.locals) catch {};
             self.allocator.free(frame.locals);
             self.currentFrame().locals = &.{};
+        }
+    }
+
+    fn saveGeneratorHandlers(self: *VM, gen: *Generator) void {
+        const count = self.handler_count - self.handler_floor;
+        gen.handler_count = count;
+        for (0..count) |i| {
+            const h = self.exception_handlers[self.handler_floor + i];
+            gen.saved_handlers[i] = .{
+                .catch_ip = h.catch_ip,
+                .sp_offset = h.sp -| gen.base_sp,
+                .chunk = h.chunk,
+            };
+        }
+        self.handler_count = self.handler_floor;
+    }
+
+    fn restoreGeneratorHandlers(self: *VM, gen: *Generator) void {
+        for (0..gen.handler_count) |i| {
+            const h = gen.saved_handlers[i];
+            self.exception_handlers[self.handler_count] = .{
+                .catch_ip = h.catch_ip,
+                .frame_count = self.frame_count,
+                .sp = gen.base_sp + h.sp_offset,
+                .chunk = h.chunk,
+            };
+            self.handler_count += 1;
         }
     }
 
@@ -4253,7 +4286,7 @@ pub const VM = struct {
         return layout;
     }
 
-    fn initObjectProperties(self: *VM, obj: *PhpObject, class_name: []const u8) RuntimeError!void {
+    pub fn initObjectProperties(self: *VM, obj: *PhpObject, class_name: []const u8) RuntimeError!void {
         if (self.classes.get(class_name)) |cls| {
             if (cls.slot_layout) |layout| {
                 const slots = self.allocator.alloc(Value, layout.names.len) catch return error.RuntimeError;

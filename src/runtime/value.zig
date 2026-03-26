@@ -108,7 +108,14 @@ pub const Generator = struct {
     return_value: Value = .null,
     implicit_key: i64 = 0,
     handler_count: usize = 0,
+    saved_handlers: [8]SavedHandler = undefined,
     delegate: ?DelegateState = null,
+
+    pub const SavedHandler = struct {
+        catch_ip: usize,
+        sp_offset: usize,
+        chunk: *const Chunk,
+    };
 
     pub const DelegateState = union(enum) {
         gen: *Generator,
