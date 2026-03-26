@@ -59,7 +59,7 @@ pub const entries = .{
     .{ "memory_get_peak_usage", native_memory_get_usage },
     .{ "set_error_handler", native_set_error_handler },
     .{ "set_exception_handler", native_set_exception_handler },
-    .{ "restore_error_handler", native_noop_true },
+    .{ "restore_error_handler", native_restore_error_handler },
     .{ "restore_exception_handler", native_noop_true },
     .{ "error_reporting", native_error_reporting },
     .{ "trigger_error", native_trigger_error },
@@ -656,12 +656,27 @@ fn native_memory_get_usage(_: *NativeContext, _: []const Value) RuntimeError!Val
     return .{ .int = 0 };
 }
 
-fn native_set_error_handler(_: *NativeContext, _: []const Value) RuntimeError!Value {
+fn native_set_error_handler(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    const prev = ctx.vm.user_error_handler orelse Value.null;
+    ctx.vm.prev_error_handler = ctx.vm.user_error_handler;
+    if (args.len > 0 and args[0] != .null) {
+        ctx.vm.user_error_handler = args[0];
+    } else {
+        ctx.vm.user_error_handler = null;
+    }
+    return prev;
+}
+
+fn native_set_exception_handler(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    _ = ctx;
+    _ = args;
     return .null;
 }
 
-fn native_set_exception_handler(_: *NativeContext, _: []const Value) RuntimeError!Value {
-    return .null;
+fn native_restore_error_handler(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    ctx.vm.user_error_handler = ctx.vm.prev_error_handler;
+    ctx.vm.prev_error_handler = null;
+    return .{ .bool = true };
 }
 
 fn native_noop_true(_: *NativeContext, _: []const Value) RuntimeError!Value {
@@ -675,7 +690,21 @@ fn native_error_reporting(_: *NativeContext, args: []const Value) RuntimeError!V
 
 fn native_trigger_error(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len == 0 or args[0] != .string) return .{ .bool = false };
-    try ctx.vm.output.appendSlice(ctx.allocator, args[0].string);
+    const message = args[0].string;
+    const errno: i64 = if (args.len >= 2) Value.toInt(args[1]) else 256; // E_USER_ERROR
+
+    if (ctx.vm.user_error_handler) |handler| {
+        const call_args = &[_]Value{
+            .{ .int = errno },
+            .{ .string = message },
+            .{ .string = "" },
+            .{ .int = 0 },
+        };
+        _ = ctx.invokeCallable(handler, call_args) catch {};
+        return .{ .bool = true };
+    }
+
+    try ctx.vm.output.appendSlice(ctx.allocator, message);
     return .{ .bool = true };
 }
 
