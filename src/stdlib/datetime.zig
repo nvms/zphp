@@ -500,7 +500,7 @@ fn native_strtotime(_: *NativeContext, args: []const Value) RuntimeError!Value {
         return .{ .int = ts };
     }
 
-    // YYYY-MM-DD with optional time (space or T separator)
+    // YYYY-MM-DD with optional time (space or T separator) and optional timezone
     if (input.len >= 10 and input[4] == '-' and input[7] == '-') {
         const year = std.fmt.parseInt(i64, input[0..4], 10) catch return Value{ .bool = false };
         const month = std.fmt.parseInt(i64, input[5..7], 10) catch return Value{ .bool = false };
@@ -508,15 +508,21 @@ fn native_strtotime(_: *NativeContext, args: []const Value) RuntimeError!Value {
         var hour: i64 = 0;
         var min: i64 = 0;
         var sec: i64 = 0;
+        var tz_offset: i64 = 0;
         if (input.len >= 19 and (input[10] == ' ' or input[10] == 'T') and input[13] == ':' and input[16] == ':') {
             hour = std.fmt.parseInt(i64, input[11..13], 10) catch 0;
             min = std.fmt.parseInt(i64, input[14..16], 10) catch 0;
             sec = std.fmt.parseInt(i64, input[17..19], 10) catch 0;
+            var rest = input[19..];
+            while (rest.len > 0 and rest[0] == ' ') rest = rest[1..];
+            if (rest.len > 0) {
+                if (parseTimezoneOffset(rest)) |off| tz_offset = off;
+            }
         }
-        return .{ .int = dateToTimestamp(year, month, day, hour, min, sec) };
+        return .{ .int = dateToTimestamp(year, month, day, hour, min, sec) - tz_offset };
     }
 
-    // MM/DD/YYYY US date format
+    // MM/DD/YYYY US date format with optional timezone
     if (input.len >= 10 and input[2] == '/' and input[5] == '/') {
         const month = std.fmt.parseInt(i64, input[0..2], 10) catch return Value{ .bool = false };
         const day = std.fmt.parseInt(i64, input[3..5], 10) catch return Value{ .bool = false };
@@ -524,13 +530,22 @@ fn native_strtotime(_: *NativeContext, args: []const Value) RuntimeError!Value {
         var hour: i64 = 0;
         var min: i64 = 0;
         var sec: i64 = 0;
+        var tz_offset: i64 = 0;
         if (input.len >= 19 and input[10] == ' ' and input[13] == ':' and input[16] == ':') {
             hour = std.fmt.parseInt(i64, input[11..13], 10) catch 0;
             min = std.fmt.parseInt(i64, input[14..16], 10) catch 0;
             sec = std.fmt.parseInt(i64, input[17..19], 10) catch 0;
+            var rest = input[19..];
+            while (rest.len > 0 and rest[0] == ' ') rest = rest[1..];
+            if (rest.len > 0) {
+                if (parseTimezoneOffset(rest)) |off| tz_offset = off;
+            }
         }
-        return .{ .int = dateToTimestamp(year, month, day, hour, min, sec) };
+        return .{ .int = dateToTimestamp(year, month, day, hour, min, sec) - tz_offset };
     }
+
+    // RFC 2822: "Mon, 15 Jan 2025 10:30:45 +0000" or "15 Jan 2025 10:30:45 GMT"
+    if (tryParseRfc2822(input)) |ts| return .{ .int = ts };
 
     // textual month dates: "January 15, 2025", "Jan 15, 2025", "Jan 15 2025", "15 Jan 2025"
     if (tryParseTextualDate(input)) |ts| return .{ .int = ts };
@@ -702,6 +717,9 @@ pub fn parseRelativeTime(input: []const u8, base: i64) Value {
 
     // "today", "yesterday", "tomorrow", "midnight", "noon"
     if (tryParseKeyword(s, base)) |ts| return .{ .int = ts };
+
+    // ordinal weekday: "first Monday of March 2025", "second Tuesday of next month", "last Friday of December"
+    if (tryParseOrdinalWeekday(s, base)) |ts| return .{ .int = ts };
 
     // "first day of ..." / "last day of ..."
     if (tryParseFirstLastDay(s, base)) |ts| return .{ .int = ts };
@@ -1011,6 +1029,202 @@ fn daysInMonth(month: i64, year: i64) i64 {
         if (@mod(y, 4) == 0 and (@mod(y, 100) != 0 or @mod(y, 400) == 0)) d = 29;
     }
     return d;
+}
+
+fn parseTimezoneOffset(s: []const u8) ?i64 {
+    // numeric: +0000, -0500, +05:30
+    if (s.len >= 5 and (s[0] == '+' or s[0] == '-')) {
+        const sign: i64 = if (s[0] == '-') -1 else 1;
+        if (s.len >= 6 and s[3] == ':') {
+            // +05:30 format
+            const h = std.fmt.parseInt(i64, s[1..3], 10) catch return null;
+            const m = std.fmt.parseInt(i64, s[4..6], 10) catch return null;
+            return sign * (h * 3600 + m * 60);
+        }
+        const h = std.fmt.parseInt(i64, s[1..3], 10) catch return null;
+        const m = std.fmt.parseInt(i64, s[3..5], 10) catch return null;
+        return sign * (h * 3600 + m * 60);
+    }
+    // named abbreviations
+    const zones = [_]struct { name: []const u8, offset: i64 }{
+        .{ .name = "utc", .offset = 0 },
+        .{ .name = "gmt", .offset = 0 },
+        .{ .name = "est", .offset = -5 * 3600 },
+        .{ .name = "edt", .offset = -4 * 3600 },
+        .{ .name = "cst", .offset = -6 * 3600 },
+        .{ .name = "cdt", .offset = -5 * 3600 },
+        .{ .name = "mst", .offset = -7 * 3600 },
+        .{ .name = "mdt", .offset = -6 * 3600 },
+        .{ .name = "pst", .offset = -8 * 3600 },
+        .{ .name = "pdt", .offset = -7 * 3600 },
+    };
+    for (zones) |z| {
+        if (s.len >= z.name.len and eqlLower(s[0..z.name.len], z.name)) return z.offset;
+    }
+    return null;
+}
+
+fn tryParseRfc2822(input: []const u8) ?i64 {
+    var s = input;
+    while (s.len > 0 and s[0] == ' ') s = s[1..];
+
+    // skip optional "Day, " prefix (e.g. "Mon, ")
+    if (s.len >= 5 and s[3] == ',' and s[4] == ' ') {
+        s = s[5..];
+        while (s.len > 0 and s[0] == ' ') s = s[1..];
+    }
+
+    // DD Mon YYYY HH:MM:SS
+    var dend: usize = 0;
+    while (dend < s.len and s[dend] >= '0' and s[dend] <= '9') dend += 1;
+    if (dend == 0 or dend > 2 or dend >= s.len or s[dend] != ' ') return null;
+    const day = std.fmt.parseInt(i64, s[0..dend], 10) catch return null;
+    s = s[dend + 1 ..];
+
+    // month abbreviation
+    const short_months = [_][]const u8{ "jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec" };
+    var month: i64 = 0;
+    for (short_months, 1..) |name, i| {
+        if (s.len >= 3 and eqlLower(s[0..3], name)) {
+            month = @intCast(i);
+            break;
+        }
+    }
+    if (month == 0) return null;
+    s = s[3..];
+    if (s.len == 0 or s[0] != ' ') return null;
+    s = s[1..];
+
+    // YYYY
+    if (s.len < 4) return null;
+    const year = std.fmt.parseInt(i64, s[0..4], 10) catch return null;
+    s = s[4..];
+
+    var hour: i64 = 0;
+    var min: i64 = 0;
+    var sec: i64 = 0;
+    var tz_offset: i64 = 0;
+
+    if (s.len >= 9 and s[0] == ' ' and s[3] == ':' and s[6] == ':') {
+        hour = std.fmt.parseInt(i64, s[1..3], 10) catch 0;
+        min = std.fmt.parseInt(i64, s[4..6], 10) catch 0;
+        sec = std.fmt.parseInt(i64, s[7..9], 10) catch 0;
+        s = s[9..];
+        while (s.len > 0 and s[0] == ' ') s = s[1..];
+        if (s.len > 0) {
+            if (parseTimezoneOffset(s)) |off| tz_offset = off;
+        }
+    }
+
+    return dateToTimestamp(year, month, day, hour, min, sec) - tz_offset;
+}
+
+fn tryParseOrdinalWeekday(input: []const u8, base: i64) ?i64 {
+    var s = input;
+    while (s.len > 0 and s[0] == ' ') s = s[1..];
+
+    // parse ordinal: first/second/third/fourth/fifth/last or 1st/2nd/3rd/4th/5th
+    const ordinals = [_]struct { name: []const u8, val: i64 }{
+        .{ .name = "first", .val = 1 },
+        .{ .name = "second", .val = 2 },
+        .{ .name = "third", .val = 3 },
+        .{ .name = "fourth", .val = 4 },
+        .{ .name = "fifth", .val = 5 },
+    };
+    var ordinal: i64 = 0;
+    var is_last = false;
+    if (startsWithLower(s, "last ")) {
+        is_last = true;
+        s = s[5..];
+    } else {
+        for (ordinals) |o| {
+            if (startsWithLower(s, o.name) and s.len > o.name.len and s[o.name.len] == ' ') {
+                ordinal = o.val;
+                s = s[o.name.len + 1 ..];
+                break;
+            }
+        }
+        if (ordinal == 0) return null;
+    }
+
+    // parse weekday name
+    while (s.len > 0 and s[0] == ' ') s = s[1..];
+    const target_dow = parseWeekdayName(s) orelse return null;
+    // advance past weekday name
+    const full_days = [_][]const u8{ "monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday" };
+    const short_days = [_][]const u8{ "mon", "tue", "wed", "thu", "fri", "sat", "sun" };
+    var consumed: usize = 0;
+    for (full_days) |name| {
+        if (s.len >= name.len and eqlLower(s[0..name.len], name)) {
+            consumed = name.len;
+            break;
+        }
+    }
+    if (consumed == 0) {
+        for (short_days) |name| {
+            if (s.len >= name.len and eqlLower(s[0..name.len], name)) {
+                consumed = name.len;
+                break;
+            }
+        }
+    }
+    s = s[consumed..];
+    while (s.len > 0 and s[0] == ' ') s = s[1..];
+
+    // expect "of"
+    if (!startsWithLower(s, "of ")) return null;
+    s = s[3..];
+    while (s.len > 0 and s[0] == ' ') s = s[1..];
+
+    // parse month context: "March 2025", "next month", "last month", "January", month name alone
+    const comps = baseComponents(base);
+    var year = comps.year;
+    var month: i64 = comps.month;
+
+    if (startsWithLower(s, "next month")) {
+        month += 1;
+        if (month > 12) { month = 1; year += 1; }
+    } else if (startsWithLower(s, "last month")) {
+        month -= 1;
+        if (month < 1) { month = 12; year -= 1; }
+    } else if (startsWithLower(s, "this month")) {
+        // use current
+    } else if (parseMonthName(s)) |m| {
+        month = m;
+        const mlen = monthNameLen(s);
+        var rest = s[mlen..];
+        while (rest.len > 0 and rest[0] == ' ') rest = rest[1..];
+        if (rest.len >= 4) {
+            if (std.fmt.parseInt(i64, rest[0..4], 10) catch null) |y| year = y;
+        }
+    } else {
+        return null;
+    }
+
+    if (is_last) {
+        // find the last occurrence of target_dow in the month
+        const dim = daysInMonth(month, year);
+        const last_day_ts = dateToTimestamp(year, month, dim, 0, 0, 0);
+        const last_epoch: u64 = @intCast(if (last_day_ts < 0) 0 else last_day_ts);
+        const last_es = std.time.epoch.EpochSeconds{ .secs = last_epoch };
+        const last_day_num: i64 = @intCast(last_es.getEpochDay().day);
+        const last_dow: i64 = @mod(last_day_num + 3, 7); // 0=Mon
+        var diff = last_dow - @as(i64, target_dow);
+        if (diff < 0) diff += 7;
+        return dateToTimestamp(year, month, dim - diff, 0, 0, 0);
+    }
+
+    // find the Nth occurrence of target_dow in the month
+    const first_ts = dateToTimestamp(year, month, 1, 0, 0, 0);
+    const first_epoch: u64 = @intCast(if (first_ts < 0) 0 else first_ts);
+    const first_es = std.time.epoch.EpochSeconds{ .secs = first_epoch };
+    const first_day_num: i64 = @intCast(first_es.getEpochDay().day);
+    const first_dow: i64 = @mod(first_day_num + 3, 7); // 0=Mon
+    var days_to_first = @as(i64, target_dow) - first_dow;
+    if (days_to_first < 0) days_to_first += 7;
+    const result_day = 1 + days_to_first + (ordinal - 1) * 7;
+    if (result_day > daysInMonth(month, year)) return null;
+    return dateToTimestamp(year, month, result_day, 0, 0, 0);
 }
 
 fn startsWith(s: []const u8, prefix: []const u8) bool {
