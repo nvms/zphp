@@ -18,7 +18,7 @@ pub fn compileAssign(self: *Compiler, node: Ast.Node) Error!void {
     }
 
     if (target.tag == .array_push_target) {
-        try self.compileNode(target.data.lhs);
+        try compileVivifyChain(self,target.data.lhs);
         try self.compileNode(node.data.rhs);
         try self.emitOp(.array_push);
         return;
@@ -29,7 +29,7 @@ pub fn compileAssign(self: *Compiler, node: Ast.Node) Error!void {
             try self.compileNode(node.data.lhs);
             const skip_jump = try self.emitJump(.jump_if_not_null);
             try self.emitOp(.pop);
-            try self.compileNode(target.data.lhs);
+            try compileVivifyChain(self,target.data.lhs);
             try self.compileNode(target.data.rhs);
             try self.compileNode(node.data.rhs);
             try self.emitOp(.array_set);
@@ -37,16 +37,16 @@ pub fn compileAssign(self: *Compiler, node: Ast.Node) Error!void {
             return;
         }
         if (op_tag != .equal) {
-            try self.compileNode(target.data.lhs);
+            try compileVivifyChain(self,target.data.lhs);
             try self.compileNode(target.data.rhs);
-            try self.compileNode(target.data.lhs);
+            try compileVivifyChain(self,target.data.lhs);
             try self.compileNode(target.data.rhs);
             try self.emitOp(.array_get);
             try self.compileNode(node.data.rhs);
             try emitCompoundOp(self, op_tag);
             try self.emitOp(.array_set);
         } else {
-            try self.compileNode(target.data.lhs);
+            try compileVivifyChain(self,target.data.lhs);
             try self.compileNode(target.data.rhs);
             try self.compileNode(node.data.rhs);
             try self.emitOp(.array_set);
@@ -554,6 +554,17 @@ pub fn compileArrayAccess(self: *Compiler, node: Ast.Node) Error!void {
     try self.compileNode(node.data.lhs);
     try self.compileNode(node.data.rhs);
     try self.emitOp(.array_get);
+}
+
+pub fn compileVivifyChain(self: *Compiler, node_idx: u32) Error!void {
+    const node = self.ast.nodes[node_idx];
+    if (node.tag == .array_access) {
+        try compileVivifyChain(self,node.data.lhs);
+        try self.compileNode(node.data.rhs);
+        try self.emitOp(.array_get_vivify);
+    } else {
+        try self.compileNode(node_idx);
+    }
 }
 
 pub fn compileArrayLiteral(self: *Compiler, node: Ast.Node) Error!void {

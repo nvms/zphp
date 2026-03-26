@@ -69,6 +69,7 @@ pub const OpCode = enum(u8) {
     array_push, // pop value, append to array at stack top
     array_set_elem, // pop value, pop key, set on array at stack top
     array_get, // pop key, pop array, push value
+    array_get_vivify, // pop key, pop array, push value (create intermediate arrays if missing)
     array_set, // pop value, pop key, pop array, set, push value
 
     // exceptions

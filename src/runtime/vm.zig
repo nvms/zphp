@@ -975,6 +975,35 @@ pub const VM = struct {
                         self.push(.null);
                     }
                 },
+                .array_get_vivify => {
+                    const key = self.pop();
+                    const arr_val = self.pop();
+                    if (arr_val == .array) {
+                        const arr_key = Value.toArrayKey(key);
+                        const existing = arr_val.array.get(arr_key);
+                        if (existing != .null) {
+                            if (existing == .array) {
+                                self.push(existing);
+                            } else {
+                                const new_arr = try self.allocator.create(PhpArray);
+                                new_arr.* = .{};
+                                try self.arrays.append(self.allocator, new_arr);
+                                const new_val = Value{ .array = new_arr };
+                                try arr_val.array.set(self.allocator, arr_key, new_val);
+                                self.push(new_val);
+                            }
+                        } else {
+                            const new_arr = try self.allocator.create(PhpArray);
+                            new_arr.* = .{};
+                            try self.arrays.append(self.allocator, new_arr);
+                            const new_val = Value{ .array = new_arr };
+                            try arr_val.array.set(self.allocator, arr_key, new_val);
+                            self.push(new_val);
+                        }
+                    } else {
+                        self.push(.null);
+                    }
+                },
                 .array_set => {
                     const val = self.pop();
                     const key = self.pop();
@@ -3434,6 +3463,27 @@ pub const VM = struct {
                     if (ag_arr == .array) {
                         self.stack[sp] = ag_arr.array.get(Value.toArrayKey(ag_key));
                         sp += 1;
+                    } else {
+                        frame.ip = ip - 1;
+                        self.sp = sp + 2;
+                        return;
+                    }
+                },
+                .array_get_vivify => {
+                    const agv_key = self.stack[sp - 1];
+                    const agv_arr = self.stack[sp - 2];
+                    sp -= 2;
+                    if (agv_arr == .array) {
+                        const agv_arr_key = Value.toArrayKey(agv_key);
+                        const agv_existing = agv_arr.array.get(agv_arr_key);
+                        if (agv_existing == .array) {
+                            self.stack[sp] = agv_existing;
+                            sp += 1;
+                        } else {
+                            frame.ip = ip - 1;
+                            self.sp = sp + 2;
+                            return;
+                        }
                     } else {
                         frame.ip = ip - 1;
                         self.sp = sp + 2;
