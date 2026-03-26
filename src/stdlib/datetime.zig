@@ -14,6 +14,8 @@ pub const entries = .{
     .{ "strtotime", native_strtotime },
     .{ "time", native_time },
     .{ "microtime", native_microtime },
+    .{ "checkdate", native_checkdate },
+    .{ "getdate", native_getdate },
 };
 
 pub fn register(vm: *VM, a: Allocator) !void {
@@ -248,6 +250,85 @@ pub fn formatTimestamp(ctx: *NativeContext, timestamp: i64, format: []const u8) 
                 const s = std.fmt.bufPrint(&tmp, "{d}", .{d}) catch "0";
                 try buf.appendSlice(a, s);
             },
+            'c' => {
+                // ISO 8601: YYYY-MM-DDTHH:MM:SS+00:00
+                var tmp: [32]u8 = undefined;
+                const s = std.fmt.bufPrint(&tmp, "{d}-{d:0>2}-{d:0>2}T{d:0>2}:{d:0>2}:{d:0>2}+00:00", .{
+                    year_day.year,
+                    month_day.month.numeric(),
+                    month_day.day_index + 1,
+                    day_seconds.getHoursIntoDay(),
+                    day_seconds.getMinutesIntoHour(),
+                    day_seconds.getSecondsIntoMinute(),
+                }) catch "0000-00-00T00:00:00+00:00";
+                try buf.appendSlice(a, s);
+            },
+            'r' => {
+                // RFC 2822: Day, DD Mon YYYY HH:MM:SS +0000
+                const day_num: i64 = @intCast(epoch_day.day);
+                const dow: usize = @intCast(@mod(day_num + 3, 7));
+                const day_names = [_][]const u8{ "Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun" };
+                const mon_names = [_][]const u8{ "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec" };
+                try buf.appendSlice(a, day_names[dow]);
+                try buf.appendSlice(a, ", ");
+                var tmp: [32]u8 = undefined;
+                const s = std.fmt.bufPrint(&tmp, "{d:0>2} ", .{month_day.day_index + 1}) catch "01 ";
+                try buf.appendSlice(a, s);
+                try buf.appendSlice(a, mon_names[month_day.month.numeric() - 1]);
+                const s2 = std.fmt.bufPrint(&tmp, " {d} {d:0>2}:{d:0>2}:{d:0>2} +0000", .{
+                    year_day.year,
+                    day_seconds.getHoursIntoDay(),
+                    day_seconds.getMinutesIntoHour(),
+                    day_seconds.getSecondsIntoMinute(),
+                }) catch " 0000 00:00:00 +0000";
+                try buf.appendSlice(a, s2);
+            },
+            'W' => {
+                const jan1_ts = dateToTimestamp(year_day.year, 1, 1, 0, 0, 0);
+                const jan1_es = std.time.epoch.EpochSeconds{ .secs = @intCast(if (jan1_ts < 0) 0 else jan1_ts) };
+                const jan1_day: i64 = @intCast(jan1_es.getEpochDay().day);
+                const jan1_dow = @mod(jan1_day + 3, 7);
+                const cur_day: i64 = @intCast(epoch_day.day);
+                const yday = cur_day - jan1_day;
+                const week = @divFloor(yday + jan1_dow + 6, 7);
+                var tmp: [4]u8 = undefined;
+                const s = std.fmt.bufPrint(&tmp, "{d:0>2}", .{@as(u32, @intCast(@max(1, week)))}) catch "01";
+                try buf.appendSlice(a, s);
+            },
+            'w' => {
+                const day_num: i64 = @intCast(epoch_day.day);
+                const dow: u8 = @intCast(@mod(day_num + 4, 7)); // 0=sunday
+                var tmp: [2]u8 = undefined;
+                const s = std.fmt.bufPrint(&tmp, "{d}", .{dow}) catch "0";
+                try buf.appendSlice(a, s);
+            },
+            'L' => {
+                const yr: u32 = @intCast(year_day.year);
+                const leap = yr % 4 == 0 and (yr % 100 != 0 or yr % 400 == 0);
+                try buf.append(a, if (leap) '1' else '0');
+            },
+            'o' => {
+                var tmp: [8]u8 = undefined;
+                const s = std.fmt.bufPrint(&tmp, "{d}", .{year_day.year}) catch "0000";
+                try buf.appendSlice(a, s);
+            },
+            'S' => {
+                const day_val = month_day.day_index + 1;
+                const suffix: []const u8 = if (day_val == 11 or day_val == 12 or day_val == 13)
+                    "th"
+                else switch (@as(u8, @intCast(day_val % 10))) {
+                    1 => "st",
+                    2 => "nd",
+                    3 => "rd",
+                    else => "th",
+                };
+                try buf.appendSlice(a, suffix);
+            },
+            'Z' => try buf.append(a, '0'),
+            'e', 'T' => try buf.appendSlice(a, "UTC"),
+            'P' => try buf.appendSlice(a, "+00:00"),
+            'O' => try buf.appendSlice(a, "+0000"),
+            'I' => try buf.append(a, '0'),
             '\\' => {}, // next char literal (simplified: just skip the backslash)
             else => try buf.append(a, c),
         }
@@ -505,6 +586,51 @@ fn tryParseTextualDate(input: []const u8) ?i64 {
 
 fn native_time(_: *NativeContext, _: []const Value) RuntimeError!Value {
     return .{ .int = std.time.timestamp() };
+}
+
+fn native_checkdate(_: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len < 3) return .{ .bool = false };
+    const month = Value.toInt(args[0]);
+    const day = Value.toInt(args[1]);
+    const year = Value.toInt(args[2]);
+    if (year < 1 or year > 32767 or month < 1 or month > 12 or day < 1) return .{ .bool = false };
+    const days_in_month = [_]i64{ 31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31 };
+    var max_day = days_in_month[@intCast(month - 1)];
+    if (month == 2) {
+        const y: u32 = @intCast(year);
+        if (y % 4 == 0 and (y % 100 != 0 or y % 400 == 0)) max_day = 29;
+    }
+    return .{ .bool = day <= max_day };
+}
+
+fn native_getdate(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    const timestamp: i64 = if (args.len >= 1) Value.toInt(args[0]) else std.time.timestamp();
+    const epoch_secs: u64 = @intCast(if (timestamp < 0) 0 else timestamp);
+    const es = std.time.epoch.EpochSeconds{ .secs = epoch_secs };
+    const day_seconds = es.getDaySeconds();
+    const epoch_day = es.getEpochDay();
+    const year_day = epoch_day.calculateYearDay();
+    const month_day = year_day.calculateMonthDay();
+    const day_num: i64 = @intCast(epoch_day.day);
+    const dow: i64 = @intCast(@mod(day_num + 4, 7)); // 0=sunday
+
+    var arr = try ctx.createArray();
+    try arr.set(ctx.allocator, .{ .string = "seconds" }, .{ .int = day_seconds.getSecondsIntoMinute() });
+    try arr.set(ctx.allocator, .{ .string = "minutes" }, .{ .int = day_seconds.getMinutesIntoHour() });
+    try arr.set(ctx.allocator, .{ .string = "hours" }, .{ .int = day_seconds.getHoursIntoDay() });
+    try arr.set(ctx.allocator, .{ .string = "mday" }, .{ .int = @as(i64, month_day.day_index) + 1 });
+    try arr.set(ctx.allocator, .{ .string = "wday" }, .{ .int = dow });
+    try arr.set(ctx.allocator, .{ .string = "mon" }, .{ .int = month_day.month.numeric() });
+    try arr.set(ctx.allocator, .{ .string = "year" }, .{ .int = year_day.year });
+    const jan1_ts = dateToTimestamp(year_day.year, 1, 1, 0, 0, 0);
+    const jan1_es = std.time.epoch.EpochSeconds{ .secs = @intCast(if (jan1_ts < 0) 0 else jan1_ts) };
+    const jan1_day: i64 = @intCast(jan1_es.getEpochDay().day);
+    const cur_day: i64 = @intCast(epoch_day.day);
+    try arr.set(ctx.allocator, .{ .string = "yday" }, .{ .int = cur_day - jan1_day });
+    try arr.set(ctx.allocator, .{ .string = "weekday" }, .{ .string = ([_][]const u8{ "Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday" })[@intCast(dow)] });
+    try arr.set(ctx.allocator, .{ .string = "month" }, .{ .string = ([_][]const u8{ "January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December" })[@intCast(month_day.month.numeric() - 1)] });
+    try arr.set(ctx.allocator, .{ .string = "0" }, .{ .int = timestamp });
+    return .{ .array = arr };
 }
 
 fn native_microtime(ctx: *NativeContext, args: []const Value) RuntimeError!Value {

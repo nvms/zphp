@@ -182,7 +182,18 @@ fn is_numeric(_: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len == 0) return .{ .bool = false };
     return .{ .bool = switch (args[0]) {
         .int, .float => true,
-        .string => |s| if (std.fmt.parseFloat(f64, s)) |_| true else |_| false,
+        .string => |s| blk: {
+            var start: usize = 0;
+            if (s.len > 0 and (s[0] == '+' or s[0] == '-')) start = 1;
+            if (start >= s.len) break :blk false;
+            // reject hex/octal/binary prefixes - PHP 8 only accepts decimal
+            if (s.len > start + 1 and s[start] == '0') {
+                const next = s[start + 1];
+                if (next == 'x' or next == 'X' or next == 'o' or next == 'O' or next == 'b' or next == 'B')
+                    break :blk false;
+            }
+            break :blk if (std.fmt.parseFloat(f64, s)) |_| true else |_| false;
+        },
         else => false,
     } };
 }

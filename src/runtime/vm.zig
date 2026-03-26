@@ -3041,6 +3041,31 @@ pub const VM = struct {
     fn callClosureLocalsOnly(self: *VM, func: *const ObjFunction, name: []const u8, arg_count: u8) RuntimeError!void {
         const ac: usize = arg_count;
         const lc: usize = func.local_count;
+
+        // check if any captures are by-ref - if so, can't use locals-only fast path
+        // because fastLoop's set_local doesn't update ref_slots
+        for (self.captures.items) |cap| {
+            if (cap.ref_cell != null and
+                (cap.closure_name.ptr == name.ptr or
+                (cap.closure_name.len == name.len and std.mem.eql(u8, cap.closure_name, name))))
+            {
+                // fall through to non-locals path via callNamedFunction's slow path
+                var new_vars: std.StringHashMapUnmanaged(Value) = .{};
+                var closure_refs: std.StringHashMapUnmanaged(*Value) = .{};
+                try self.bindClosures(&new_vars, &closure_refs, name);
+                const bind_count = @min(ac, func.arity);
+                for (0..bind_count) |i| {
+                    try new_vars.put(self.allocator, func.params[i], try self.copyValue(self.stack[self.sp - ac + i]));
+                }
+                self.sp -= ac;
+                try self.fillDefaults(&new_vars, func, bind_count);
+                const inherit_cc = self.currentFrame().called_class;
+                self.frames[self.frame_count] = .{ .chunk = &func.chunk, .ip = 0, .vars = new_vars, .locals = try self.allocLocals(func, &new_vars), .func = func, .ref_slots = closure_refs, .called_class = inherit_cc };
+                self.frame_count += 1;
+                return;
+            }
+        }
+
         const ic = self.ic.?;
         const base = ic.locals_sp;
 
@@ -4340,16 +4365,33 @@ pub const VM = struct {
                 if (std.mem.startsWith(u8, name, "__closure_")) {
                     if (!self.hasCaptures(name))
                         return self.executeFunctionLocalsOnly(func, args);
-                    return self.executeClosureLocalsOnly(func, name, args);
+                    // ref captures need the slow path (fastLoop doesn't update ref_slots)
+                    if (!self.closureHasRefCaptures(name))
+                        return self.executeClosureLocalsOnly(func, name, args);
+                } else {
+                    if (!self.hasCaptures(name))
+                        return self.executeFunctionLocalsOnly(func, args);
                 }
-                if (!self.hasCaptures(name))
-                    return self.executeFunctionLocalsOnly(func, args);
             }
             var new_vars: std.StringHashMapUnmanaged(Value) = .{};
-            try self.bindClosures(&new_vars, null, name);
+            var closure_refs: std.StringHashMapUnmanaged(*Value) = .{};
+            try self.bindClosures(&new_vars, &closure_refs, name);
             try self.bindArgs(&new_vars, func, args[0..@min(args.len, func.arity)]);
+            if (closure_refs.count() > 0) {
+                return self.executeFunctionWithRefs(func, new_vars, closure_refs);
+            }
             return self.executeFunction(func, new_vars);
         } else return error.RuntimeError;
+    }
+
+    fn closureHasRefCaptures(self: *VM, name: []const u8) bool {
+        for (self.captures.items) |cap| {
+            if (cap.ref_cell != null and
+                (cap.closure_name.ptr == name.ptr or
+                (cap.closure_name.len == name.len and std.mem.eql(u8, cap.closure_name, name))))
+                return true;
+        }
+        return false;
     }
 
     fn hasCaptures(self: *VM, name: []const u8) bool {
@@ -4385,7 +4427,7 @@ pub const VM = struct {
         for (bind_count..func.arity) |i| {
             if (i < func.defaults.len) locals[i] = func.defaults[i];
         }
-        // bind captures
+        // bind captures (no ref cells here - ref captures take the slow path)
         for (self.captures.items) |cap| {
             if (cap.closure_name.ptr == name.ptr or
                 (cap.closure_name.len == name.len and std.mem.eql(u8, cap.closure_name, name)))

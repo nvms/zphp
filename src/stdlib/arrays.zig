@@ -336,6 +336,37 @@ fn native_usort(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
 
 fn native_range(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len < 2) return .null;
+
+    // character range: single-char strings
+    if (args[0] == .string and args[0].string.len == 1 and args[1] == .string and args[1].string.len == 1) {
+        const lo = args[0].string[0];
+        const hi = args[1].string[0];
+        const step: u8 = if (args.len >= 3) @intCast(@max(1, Value.toInt(args[2]))) else 1;
+        var arr = try ctx.createArray();
+        if (lo <= hi) {
+            var c = lo;
+            while (c <= hi) {
+                const s = try ctx.allocator.alloc(u8, 1);
+                s[0] = c;
+                try ctx.strings.append(ctx.allocator, s);
+                try arr.append(ctx.allocator, .{ .string = s });
+                if (c > hi - step) break;
+                c += step;
+            }
+        } else {
+            var c = lo;
+            while (c >= hi) {
+                const s = try ctx.allocator.alloc(u8, 1);
+                s[0] = c;
+                try ctx.strings.append(ctx.allocator, s);
+                try arr.append(ctx.allocator, .{ .string = s });
+                if (c < hi + step) break;
+                c -= step;
+            }
+        }
+        return .{ .array = arr };
+    }
+
     const lo = Value.toInt(args[0]);
     const hi = Value.toInt(args[1]);
     const step = if (args.len >= 3) @max(1, Value.toInt(args[2])) else @as(i64, 1);

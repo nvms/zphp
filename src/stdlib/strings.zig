@@ -1457,21 +1457,74 @@ fn native_mb_lcfirst(ctx: *NativeContext, args: []const Value) RuntimeError!Valu
 fn native_strip_tags(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len == 0 or args[0] != .string) return .{ .string = "" };
     const s = args[0].string;
+
+    var allowed_tags_buf: [64][64]u8 = undefined;
+    var allowed_tags_lens: [64]usize = undefined;
+    var n_allowed: usize = 0;
+    if (args.len >= 2 and args[1] == .string) {
+        const allow = args[1].string;
+        var ai: usize = 0;
+        while (ai < allow.len and n_allowed < 64) {
+            if (allow[ai] == '<') {
+                ai += 1;
+                var tlen: usize = 0;
+                while (ai < allow.len and allow[ai] != '>') : (ai += 1) {
+                    if (tlen < 64) {
+                        allowed_tags_buf[n_allowed][tlen] = toLowerAscii(allow[ai]);
+                        tlen += 1;
+                    }
+                }
+                if (ai < allow.len) ai += 1;
+                allowed_tags_lens[n_allowed] = tlen;
+                n_allowed += 1;
+            } else {
+                ai += 1;
+            }
+        }
+    }
+
     var buf = std.ArrayListUnmanaged(u8){};
-    var in_tag = false;
     var i: usize = 0;
-    while (i < s.len) : (i += 1) {
+    while (i < s.len) {
         if (s[i] == '<') {
-            in_tag = true;
-        } else if (s[i] == '>' and in_tag) {
-            in_tag = false;
-        } else if (!in_tag) {
+            const tag_start = i;
+            i += 1;
+            const is_closing = i < s.len and s[i] == '/';
+            if (is_closing) i += 1;
+            var name_buf: [64]u8 = undefined;
+            var name_len: usize = 0;
+            while (i < s.len and s[i] != '>' and s[i] != ' ' and s[i] != '/') : (i += 1) {
+                if (name_len < 64) {
+                    name_buf[name_len] = toLowerAscii(s[i]);
+                    name_len += 1;
+                }
+            }
+            while (i < s.len and s[i] != '>') : (i += 1) {}
+            if (i < s.len) i += 1;
+
+            var keep = false;
+            for (0..n_allowed) |ai| {
+                const alen = allowed_tags_lens[ai];
+                if (alen == name_len and std.mem.eql(u8, allowed_tags_buf[ai][0..alen], name_buf[0..name_len])) {
+                    keep = true;
+                    break;
+                }
+            }
+            if (keep) {
+                try buf.appendSlice(ctx.allocator, s[tag_start..i]);
+            }
+        } else {
             try buf.append(ctx.allocator, s[i]);
+            i += 1;
         }
     }
     const result = try buf.toOwnedSlice(ctx.allocator);
     try ctx.strings.append(ctx.allocator, result);
     return .{ .string = result };
+}
+
+fn toLowerAscii(c: u8) u8 {
+    return if (c >= 'A' and c <= 'Z') c + 32 else c;
 }
 
 fn native_http_build_query(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
