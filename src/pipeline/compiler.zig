@@ -94,6 +94,7 @@ pub const Compiler = struct {
     continue_jumps: std.ArrayListUnmanaged(LoopJump),
     use_continue_jumps: bool = false,
     loop_depth: u32 = 0,
+    foreach_depth: u32 = 0,
     closure_count: u32 = 0,
     is_generator: bool = false,
     namespace: []const u8 = "",
@@ -134,6 +135,7 @@ pub const Compiler = struct {
                     }
                     try self.emitOp(.generator_return);
                 } else {
+                    for (0..self.foreach_depth) |_| try self.emitOp(.iter_end);
                     if (node.data.lhs != 0) {
                         try self.compileNode(node.data.lhs);
                         try self.emitOp(.return_val);

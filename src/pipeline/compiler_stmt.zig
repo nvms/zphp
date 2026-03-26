@@ -154,6 +154,7 @@ pub fn compileForeach(self: *Compiler, node: Ast.Node) Error!void {
     self.continue_jumps = .{};
     self.use_continue_jumps = true;
     self.loop_depth += 1;
+    self.foreach_depth += 1;
 
     try self.compileNode(iter_n);
     try self.emitOp(.iter_begin);
@@ -240,6 +241,7 @@ pub fn compileForeach(self: *Compiler, node: Ast.Node) Error!void {
     self.continue_jumps = prev_continues;
     self.use_continue_jumps = prev_use_cj;
     self.loop_depth -= 1;
+    self.foreach_depth -= 1;
     self.loop_start = prev_start;
 }
 
