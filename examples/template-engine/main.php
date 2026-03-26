@@ -5,7 +5,8 @@
 // strtolower, strtoupper, ucfirst, sprintf, array destructuring with skipped
 // elements, match expressions, null coalesce (??), spread operator,
 // array_key_exists, compact, extract, constructor property promotion,
-// ArrayAccess, Countable, protected property access from closure in trait method
+// ArrayAccess, Countable, protected property access from closure in trait method,
+// multi-class trait method sharing with closures accessing private properties
 
 // --- trait: renderable ---
 
@@ -24,6 +25,16 @@ trait Escapable {
             ['&amp;', '&lt;', '&gt;', '&quot;'],
             $text
         );
+    }
+}
+
+trait Cacheable {
+    private array $cache = [];
+    public function cached(string $key, callable $compute): string {
+        if (!array_key_exists($key, $this->cache)) {
+            $this->cache[$key] = $compute();
+        }
+        return $this->cache[$key];
     }
 }
 
@@ -75,6 +86,8 @@ abstract class Node implements NodeInterface {
 // --- concrete nodes ---
 
 class TextNode extends Node {
+    use Cacheable;
+
     public function getType(): NodeType {
         return NodeType::Text;
     }
@@ -84,7 +97,9 @@ class TextNode extends Node {
     }
 
     protected function renderContent(): string {
-        return $this->escape($this->content);
+        return $this->cached('render', function() {
+            return $this->escape($this->content);
+        });
     }
 
     public function toString(): string {
@@ -126,6 +141,7 @@ class VariableNode extends Node {
 }
 
 class BlockNode extends Node implements ContainerInterface {
+    use Cacheable;
     private array $children = [];
 
     public function getType(): NodeType {
@@ -145,10 +161,12 @@ class BlockNode extends Node implements ContainerInterface {
     }
 
     protected function renderContent(): string {
-        $rendered = array_map(function($child) {
-            return $child->toString();
-        }, $this->children);
-        return implode(' -> ', $rendered);
+        return $this->cached('children', function() {
+            $rendered = array_map(function($child) {
+                return $child->toString();
+            }, $this->children);
+            return implode(' -> ', $rendered);
+        });
     }
 
     public function toString(): string {

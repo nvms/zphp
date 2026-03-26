@@ -3849,16 +3849,38 @@ pub const VM = struct {
         var fi: usize = self.frame_count;
         while (fi > 0) {
             fi -= 1;
-            const frame_chunk_ptr = self.frames[fi].chunk;
+            const frame = &self.frames[fi];
+            const frame_chunk_ptr = frame.chunk;
             var best: ?[]const u8 = null;
+            // when a trait method chunk is shared by multiple classes, use $this
+            // to disambiguate which class is actually executing
+            const this_class: ?[]const u8 = blk: {
+                if (frame.func != null and frame.locals.len > 0 and frame.locals[0] == .object)
+                    break :blk frame.locals[0].object.class_name;
+                const this_val = frame.vars.get("$this") orelse break :blk null;
+                if (this_val == .object) break :blk this_val.object.class_name;
+                break :blk null;
+            };
             var iter = self.functions.iterator();
             while (iter.next()) |entry| {
                 if (frame_chunk_ptr == &entry.value_ptr.*.chunk) {
                     const name = entry.key_ptr.*;
                     if (std.mem.indexOf(u8, name, "::")) |sep| {
                         const class_part = name[0..sep];
-                        if (!self.traits.contains(class_part)) return class_part;
-                        if (best == null) best = class_part;
+                        if (self.traits.contains(class_part)) {
+                            if (best == null) best = class_part;
+                            continue;
+                        }
+                        // if we have $this, prefer the class that matches $this
+                        // or is in $this's inheritance chain
+                        if (this_class) |tc| {
+                            if (std.mem.eql(u8, class_part, tc) or self.isInstanceOf(tc, class_part))
+                                return class_part;
+                            // non-trait but doesn't match $this - keep looking
+                            if (best == null) best = class_part;
+                        } else {
+                            return class_part;
+                        }
                     }
                 }
             }
