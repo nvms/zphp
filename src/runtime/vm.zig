@@ -2259,6 +2259,35 @@ pub const VM = struct {
                         continue;
                     }
 
+                    if (obj_val == .string and std.mem.startsWith(u8, obj_val.string, "__closure_")) {
+                        const closure_name = obj_val.string;
+                        if (std.mem.eql(u8, method_name, "bindTo")) {
+                            const new_this = if (ac >= 1) self.stack[self.sp - ac] else Value.null;
+                            self.sp -= ac + 1;
+                            const result = try self.cloneClosureWithThis(closure_name, new_this);
+                            self.push(result);
+                            continue;
+                        } else if (std.mem.eql(u8, method_name, "call")) {
+                            const new_this = if (ac >= 1) self.stack[self.sp - ac] else Value.null;
+                            var call_args: [16]Value = undefined;
+                            const extra = if (ac > 1) ac - 1 else 0;
+                            for (0..extra) |i| call_args[i] = self.stack[self.sp - ac + 1 + i];
+                            self.sp -= ac + 1;
+                            const bound = try self.cloneClosureWithThis(closure_name, new_this);
+                            if (bound == .string) {
+                                const result = try self.callByName(bound.string, call_args[0..extra]);
+                                self.push(result);
+                            } else {
+                                self.push(.null);
+                            }
+                            continue;
+                        } else {
+                            self.sp -= ac + 1;
+                            self.error_msg = std.fmt.allocPrint(self.allocator, "Fatal error: Uncaught Error: Call to undefined method Closure::{s}()", .{method_name}) catch null;
+                            return error.RuntimeError;
+                        }
+                    }
+
                     if (obj_val != .object) {
                         self.sp -= ac + 1;
                         self.error_msg = std.fmt.allocPrint(self.allocator, "Fatal error: Uncaught Error: Call to a member function {s}() on {s}", .{ method_name, valueTypeName(obj_val) }) catch null;
@@ -3497,6 +3526,58 @@ pub const VM = struct {
             }
             self.stack[self.sp - 1] = .{ .string = inst_name };
         }
+    }
+
+    pub fn cloneClosureWithThis(self: *VM, closure_name: []const u8, new_this: Value) !Value {
+        const func = self.functions.get(closure_name) orelse return .null;
+
+        const id = self.closure_instance_count;
+        self.closure_instance_count += 1;
+        const new_name = try std.fmt.allocPrint(self.allocator, "__closure_bound_{d}", .{id});
+        try self.strings.append(self.allocator, new_name);
+        try self.functions.put(self.allocator, new_name, func);
+
+        // copy captures from original, replacing $this
+        if (self.capture_index.get(closure_name)) |cr| {
+            const caps = self.captures.items[cr.start .. cr.start + cr.len];
+            const new_start: u32 = @intCast(self.captures.items.len);
+            var has_this = false;
+            for (caps) |cap| {
+                var new_cap = CaptureEntry{
+                    .closure_name = new_name,
+                    .var_name = cap.var_name,
+                    .value = cap.value,
+                    .ref_cell = cap.ref_cell,
+                };
+                if (std.mem.eql(u8, cap.var_name, "$this")) {
+                    new_cap.value = new_this;
+                    new_cap.ref_cell = null;
+                    has_this = true;
+                }
+                try self.captures.append(self.allocator, new_cap);
+            }
+            // if original had no $this capture but caller wants one, add it
+            if (!has_this and new_this != .null) {
+                try self.captures.append(self.allocator, .{
+                    .closure_name = new_name,
+                    .var_name = "$this",
+                    .value = new_this,
+                });
+            }
+            const new_len: u16 = @intCast(self.captures.items.len - new_start);
+            try self.capture_index.put(self.allocator, new_name, .{ .start = new_start, .len = new_len, .has_refs = cr.has_refs });
+        } else if (new_this != .null) {
+            // no captures at all on original, just add $this
+            const new_start: u32 = @intCast(self.captures.items.len);
+            try self.captures.append(self.allocator, .{
+                .closure_name = new_name,
+                .var_name = "$this",
+                .value = new_this,
+            });
+            try self.capture_index.put(self.allocator, new_name, .{ .start = new_start, .len = 1, .has_refs = false });
+        }
+
+        return .{ .string = new_name };
     }
 
     fn getLocalByName(self: *VM, name: []const u8) Value {

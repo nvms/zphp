@@ -136,6 +136,15 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try vm.native_fns.put(a, "ReflectionFunction::getReturnType", rfGetReturnType);
     try vm.native_fns.put(a, "ReflectionFunction::getNumberOfParameters", rfGetNumberOfParameters);
     try vm.native_fns.put(a, "ReflectionFunction::getNumberOfRequiredParameters", rfGetNumberOfRequiredParameters);
+
+    // Closure class (static methods only - instance methods handled in VM dispatch)
+    var closure_def = ClassDef{ .name = "Closure" };
+    try closure_def.methods.put(a, "bind", .{ .name = "bind", .arity = 2, .is_static = true });
+    try closure_def.methods.put(a, "fromCallable", .{ .name = "fromCallable", .arity = 1, .is_static = true });
+    try vm.classes.put(a, "Closure", closure_def);
+
+    try vm.native_fns.put(a, "Closure::bind", closureBind);
+    try vm.native_fns.put(a, "Closure::fromCallable", closureFromCallable);
 }
 
 fn getThis(ctx: *NativeContext) ?*PhpObject {
@@ -679,4 +688,39 @@ fn buildParamArray(ctx: *NativeContext, func: *const ObjFunction, type_key: []co
         try arr.append(ctx.allocator, .{ .object = obj });
     }
     return .{ .array = arr };
+}
+
+// --- Closure ---
+
+fn closureBind(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len < 1) return .null;
+    const closure = args[0];
+    if (closure != .string or !std.mem.startsWith(u8, closure.string, "__closure_")) return .null;
+    const new_this = if (args.len >= 2) args[1] else Value.null;
+    return ctx.vm.cloneClosureWithThis(closure.string, new_this);
+}
+
+fn closureFromCallable(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len < 1) return .null;
+    const callable = args[0];
+    // if already a closure, return as-is
+    if (callable == .string and std.mem.startsWith(u8, callable.string, "__closure_")) return callable;
+    // if it's a string function name, wrap it (just return the name - it's callable)
+    if (callable == .string) {
+        if (ctx.vm.functions.contains(callable.string) or ctx.vm.native_fns.contains(callable.string))
+            return callable;
+    }
+    // array callable [obj, method] or [class, method]
+    if (callable == .array) {
+        const entries = callable.array.entries.items;
+        if (entries.len == 2 and entries[1].value == .string) {
+            if (entries[0].value == .string) {
+                // static method - return "Class::method" string
+                const full = std.fmt.allocPrint(ctx.allocator, "{s}::{s}", .{ entries[0].value.string, entries[1].value.string }) catch return .null;
+                try ctx.strings.append(ctx.allocator, full);
+                return .{ .string = full };
+            }
+        }
+    }
+    return callable;
 }
