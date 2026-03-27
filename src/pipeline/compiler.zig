@@ -407,7 +407,7 @@ pub const Compiler = struct {
         return switch (n.tag) {
             .integer_literal => blk: {
                 const text = self.ast.tokenSlice(n.main_token);
-                break :blk .{ .int = std.fmt.parseInt(i64, text, 10) catch 0 };
+                break :blk .{ .int = parsePhpInt(text) };
             },
             .float_literal => blk: {
                 const text = self.ast.tokenSlice(n.main_token);
@@ -653,6 +653,7 @@ pub const Compiler = struct {
                 'x', 'X' => return std.fmt.parseInt(i64, clean[2..], 16) catch 0,
                 'b', 'B' => return std.fmt.parseInt(i64, clean[2..], 2) catch 0,
                 'o', 'O' => return std.fmt.parseInt(i64, clean[2..], 8) catch 0,
+                '0'...'7' => return std.fmt.parseInt(i64, clean[1..], 8) catch 0,
                 else => {},
             }
         }

@@ -84,6 +84,9 @@ pub const entries = .{
     .{ "preg_replace_callback", preg_replace_callback },
     .{ "preg_split", preg_split },
     .{ "preg_quote", preg_quote },
+    .{ "preg_grep", preg_grep },
+    .{ "preg_last_error", preg_last_error },
+    .{ "preg_last_error_msg", preg_last_error_msg },
 };
 
 const PatternInfo = struct {
@@ -549,4 +552,36 @@ fn preg_quote(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     const result = try buf.toOwnedSlice(ctx.allocator);
     try ctx.strings.append(ctx.allocator, result);
     return .{ .string = result };
+}
+
+fn preg_grep(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len < 2 or args[0] != .string or args[1] != .array) return .null;
+    const info = parsePattern(args[0].string) orelse return Value.null;
+    const input = args[1].array;
+    const invert = args.len >= 3 and Value.toInt(args[2]) == 1;
+
+    const code = compilePattern(info.pattern, info.flags) orelse return Value.null;
+    defer pcre2.pcre2_code_free_8(code);
+
+    const match_data = pcre2.pcre2_match_data_create_from_pattern_8(code, null) orelse return Value.null;
+    defer pcre2.pcre2_match_data_free_8(match_data);
+
+    var result = try ctx.createArray();
+    for (input.entries.items) |entry| {
+        const str = if (entry.value == .string) entry.value.string else continue;
+        const rc = pcre2.pcre2_match_8(code, str.ptr, str.len, 0, 0, match_data, null);
+        const matched = rc >= 0;
+        if (matched != invert) {
+            try result.set(ctx.allocator, entry.key, entry.value);
+        }
+    }
+    return .{ .array = result };
+}
+
+fn preg_last_error(_: *NativeContext, _: []const Value) RuntimeError!Value {
+    return .{ .int = 0 };
+}
+
+fn preg_last_error_msg(_: *NativeContext, _: []const Value) RuntimeError!Value {
+    return .{ .string = "No error" };
 }

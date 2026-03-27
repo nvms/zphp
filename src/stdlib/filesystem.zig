@@ -49,6 +49,10 @@ pub const entries = .{
     .{ "flock", native_flock },
     .{ "fgetcsv", native_fgetcsv },
     .{ "fputcsv", native_fputcsv },
+    .{ "touch", native_touch },
+    .{ "chmod", native_chmod },
+    .{ "stat", native_stat },
+    .{ "chdir", native_chdir },
 };
 
 // file handle management - store handles in PhpObjects with class "FileHandle"
@@ -669,3 +673,98 @@ fn native_fputcsv(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     try ctx.strings.append(ctx.allocator, owned);
     return .{ .int = @intCast(written) };
 }
+
+fn native_touch(_: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len == 0 or args[0] != .string) return .{ .bool = false };
+    const path = args[0].string;
+
+    // if file doesn't exist, create it
+    const file = std.fs.cwd().createFile(path, .{ .exclusive = true }) catch |err| switch (err) {
+        error.PathAlreadyExists => {
+            // file exists - update access and modification times
+            if (args.len >= 2 and args[1] != .null) {
+                const mtime: i128 = @as(i128, Value.toInt(args[1])) * 1_000_000_000;
+                const f = std.fs.cwd().openFile(path, .{ .mode = .write_only }) catch return Value{ .bool = false };
+                defer f.close();
+                const atime = if (args.len >= 3 and args[2] != .null) @as(i128, Value.toInt(args[2])) * 1_000_000_000 else mtime;
+                f.updateTimes(atime, mtime) catch return Value{ .bool = true };
+            }
+            return .{ .bool = true };
+        },
+        else => return .{ .bool = false },
+    };
+    file.close();
+    return .{ .bool = true };
+}
+
+fn native_chmod(_: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len < 2 or args[0] != .string) return .{ .bool = false };
+    const path = args[0].string;
+    const mode_val = Value.toInt(args[1]);
+    if (mode_val < 0) return .{ .bool = false };
+    const mode: std.posix.mode_t = @intCast(mode_val);
+
+    const file = std.fs.cwd().openFile(path, .{ .mode = .read_write }) catch
+        return Value{ .bool = false };
+    defer file.close();
+    file.chmod(mode) catch return Value{ .bool = false };
+    return .{ .bool = true };
+}
+
+fn native_stat(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len == 0 or args[0] != .string) return .{ .bool = false };
+    const path = args[0].string;
+
+    const file = std.fs.cwd().openFile(path, .{}) catch
+        return Value{ .bool = false };
+    defer file.close();
+    const stat = file.stat() catch return Value{ .bool = false };
+
+    var result = try ctx.createArray();
+    const size: i64 = @intCast(stat.size);
+    const atime: i64 = @intCast(@divTrunc(stat.atime, 1_000_000_000));
+    const mtime: i64 = @intCast(@divTrunc(stat.mtime, 1_000_000_000));
+    const ctime: i64 = @intCast(@divTrunc(stat.ctime, 1_000_000_000));
+
+    // numeric indices (PHP stat format)
+    try result.append(ctx.allocator, .{ .int = 0 }); // 0: dev
+    try result.append(ctx.allocator, .{ .int = 0 }); // 1: ino
+    try result.append(ctx.allocator, .{ .int = 0 }); // 2: mode
+    try result.append(ctx.allocator, .{ .int = 1 }); // 3: nlink
+    try result.append(ctx.allocator, .{ .int = 0 }); // 4: uid
+    try result.append(ctx.allocator, .{ .int = 0 }); // 5: gid
+    try result.append(ctx.allocator, .{ .int = 0 }); // 6: rdev
+    try result.append(ctx.allocator, .{ .int = size }); // 7: size
+    try result.append(ctx.allocator, .{ .int = atime }); // 8: atime
+    try result.append(ctx.allocator, .{ .int = mtime }); // 9: mtime
+    try result.append(ctx.allocator, .{ .int = ctime }); // 10: ctime
+    try result.append(ctx.allocator, .{ .int = -1 }); // 11: blksize
+    try result.append(ctx.allocator, .{ .int = -1 }); // 12: blocks
+
+    // named keys
+    try result.set(ctx.allocator, .{ .string = "dev" }, .{ .int = 0 });
+    try result.set(ctx.allocator, .{ .string = "ino" }, .{ .int = 0 });
+    try result.set(ctx.allocator, .{ .string = "mode" }, .{ .int = 0 });
+    try result.set(ctx.allocator, .{ .string = "nlink" }, .{ .int = 1 });
+    try result.set(ctx.allocator, .{ .string = "uid" }, .{ .int = 0 });
+    try result.set(ctx.allocator, .{ .string = "gid" }, .{ .int = 0 });
+    try result.set(ctx.allocator, .{ .string = "rdev" }, .{ .int = 0 });
+    try result.set(ctx.allocator, .{ .string = "size" }, .{ .int = size });
+    try result.set(ctx.allocator, .{ .string = "atime" }, .{ .int = atime });
+    try result.set(ctx.allocator, .{ .string = "mtime" }, .{ .int = mtime });
+    try result.set(ctx.allocator, .{ .string = "ctime" }, .{ .int = ctime });
+    try result.set(ctx.allocator, .{ .string = "blksize" }, .{ .int = -1 });
+    try result.set(ctx.allocator, .{ .string = "blocks" }, .{ .int = -1 });
+
+    return .{ .array = result };
+}
+
+fn native_chdir(_: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len == 0 or args[0] != .string) return .{ .bool = false };
+    const path = args[0].string;
+    var dir = std.fs.cwd().openDir(path, .{}) catch return Value{ .bool = false };
+    defer dir.close();
+    std.posix.fchdir(dir.fd) catch return Value{ .bool = false };
+    return .{ .bool = true };
+}
+

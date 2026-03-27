@@ -81,6 +81,10 @@ pub const entries = .{
     .{ "strchr", native_strstr },
     .{ "strtr", native_strtr },
     .{ "vsprintf", native_vsprintf },
+    .{ "levenshtein", native_levenshtein },
+    .{ "similar_text", native_similar_text },
+    .{ "soundex", native_soundex },
+    .{ "metaphone", native_metaphone },
 };
 
 fn substr(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
@@ -1986,5 +1990,357 @@ fn native_vsprintf(ctx: *NativeContext, args: []const Value) RuntimeError!Value 
         vals[i] = entry.value;
     }
     const result = try sprintfImpl(ctx, fmt_str, vals);
+    return .{ .string = result };
+}
+
+fn native_levenshtein(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len < 2 or args[0] != .string or args[1] != .string) return .{ .int = -1 };
+    const s1 = args[0].string;
+    const s2 = args[1].string;
+
+    if (s1.len > 255 or s2.len > 255) return .{ .int = -1 };
+    if (s1.len == 0) return .{ .int = @intCast(s2.len) };
+    if (s2.len == 0) return .{ .int = @intCast(s1.len) };
+
+    const cost_ins: i64 = if (args.len >= 3) Value.toInt(args[2]) else 1;
+    const cost_rep: i64 = if (args.len >= 4) Value.toInt(args[3]) else 1;
+    const cost_del: i64 = if (args.len >= 5) Value.toInt(args[4]) else 1;
+
+    const rows = s1.len + 1;
+    const cols = s2.len + 1;
+    var prev = try ctx.allocator.alloc(i64, cols);
+    defer ctx.allocator.free(prev);
+    var curr = try ctx.allocator.alloc(i64, cols);
+    defer ctx.allocator.free(curr);
+
+    for (0..cols) |j| prev[j] = @as(i64, @intCast(j)) * cost_ins;
+
+    for (0..s1.len) |i| {
+        curr[0] = @as(i64, @intCast(i + 1)) * cost_del;
+        for (0..s2.len) |j| {
+            if (s1[i] == s2[j]) {
+                curr[j + 1] = prev[j];
+            } else {
+                const ins = curr[j] + cost_ins;
+                const del = prev[j + 1] + cost_del;
+                const rep = prev[j] + cost_rep;
+                curr[j + 1] = @min(ins, @min(del, rep));
+            }
+        }
+        const tmp = prev;
+        prev = curr;
+        curr = tmp;
+    }
+
+    _ = rows;
+    return .{ .int = prev[s2.len] };
+}
+
+fn similarTextImpl(s1: []const u8, s2: []const u8, longest: *i64) void {
+    var max_len: i64 = 0;
+    var best_s1: usize = 0;
+    var best_s2: usize = 0;
+
+    for (0..s1.len) |i| {
+        for (0..s2.len) |j| {
+            var l: usize = 0;
+            while (i + l < s1.len and j + l < s2.len and s1[i + l] == s2[j + l]) l += 1;
+            if (@as(i64, @intCast(l)) > max_len) {
+                max_len = @intCast(l);
+                best_s1 = i;
+                best_s2 = j;
+            }
+        }
+    }
+
+    longest.* += max_len;
+    if (max_len > 0) {
+        if (best_s1 > 0 and best_s2 > 0) {
+            similarTextImpl(s1[0..best_s1], s2[0..best_s2], longest);
+        }
+        const end1 = best_s1 + @as(usize, @intCast(max_len));
+        const end2 = best_s2 + @as(usize, @intCast(max_len));
+        if (end1 < s1.len and end2 < s2.len) {
+            similarTextImpl(s1[end1..], s2[end2..], longest);
+        }
+    }
+}
+
+fn native_similar_text(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len < 2 or args[0] != .string or args[1] != .string) return .{ .int = 0 };
+    const s1 = args[0].string;
+    const s2 = args[1].string;
+
+    var matching: i64 = 0;
+    similarTextImpl(s1, s2, &matching);
+
+    if (args.len >= 3) {
+        const total: f64 = @floatFromInt(s1.len + s2.len);
+        const pct: f64 = if (total > 0) @as(f64, @floatFromInt(matching * 2)) * 100.0 / total else 0.0;
+        ctx.setCallerVar(2, args.len, .{ .float = pct });
+    }
+
+    return .{ .int = matching };
+}
+
+fn native_soundex(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len == 0 or args[0] != .string) return .{ .string = "" };
+    const input = args[0].string;
+    if (input.len == 0) return .{ .string = "" };
+
+    const correct_table = [26]u8{
+        '0', '1', '2', '3', '0', '1', '2', '0', '0', '2', '2', '4', '5',
+        '5', '0', '1', '2', '6', '2', '3', '0', '1', '0', '2', '0', '2',
+    };
+    var first: u8 = 0;
+    var start: usize = 0;
+    for (input, 0..) |c, i| {
+        const upper = std.ascii.toUpper(c);
+        if (upper >= 'A' and upper <= 'Z') {
+            first = upper;
+            start = i + 1;
+            break;
+        }
+    }
+    if (first == 0) return .{ .string = "" };
+
+    var result_buf: [4]u8 = .{ first, '0', '0', '0' };
+    var pos: usize = 1;
+    var last_code = correct_table[first - 'A'];
+
+    for (input[start..]) |c| {
+        if (pos >= 4) break;
+        const upper = std.ascii.toUpper(c);
+        if (upper < 'A' or upper > 'Z') continue;
+        const code = correct_table[upper - 'A'];
+        if (code != '0' and code != last_code) {
+            result_buf[pos] = code;
+            pos += 1;
+        }
+        last_code = code;
+    }
+
+    const result = try ctx.allocator.alloc(u8, 4);
+    @memcpy(result, &result_buf);
+    try ctx.strings.append(ctx.allocator, result);
+    return .{ .string = result };
+}
+
+fn native_metaphone(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len == 0 or args[0] != .string) return .{ .string = "" };
+    const input = args[0].string;
+    const max_phonemes: usize = if (args.len >= 2) @intCast(@max(Value.toInt(args[1]), 0)) else 32;
+    if (input.len == 0) return .{ .string = "" };
+
+    var buf = std.ArrayListUnmanaged(u8){};
+    var upper = try ctx.allocator.alloc(u8, input.len);
+    defer ctx.allocator.free(upper);
+    for (input, 0..) |c, i| upper[i] = std.ascii.toUpper(c);
+
+    var i: usize = 0;
+
+    // skip initial silent consonant pairs
+    if (upper.len >= 2) {
+        const pair = upper[0..2];
+        if (std.mem.eql(u8, pair, "AE") or std.mem.eql(u8, pair, "GN") or
+            std.mem.eql(u8, pair, "KN") or std.mem.eql(u8, pair, "PN") or
+            std.mem.eql(u8, pair, "WR"))
+        {
+            i = 1;
+        }
+    }
+
+    while (i < upper.len and buf.items.len < max_phonemes) {
+        const c = upper[i];
+        const prev: u8 = if (i > 0) upper[i - 1] else 0;
+        const next: u8 = if (i + 1 < upper.len) upper[i + 1] else 0;
+
+        if (!std.ascii.isAlphabetic(c)) {
+            i += 1;
+            continue;
+        }
+
+        // vowels only at start
+        if (c == 'A' or c == 'E' or c == 'I' or c == 'O' or c == 'U') {
+            if (i == 0) try buf.append(ctx.allocator, c);
+            i += 1;
+            continue;
+        }
+
+        // skip doubled letters (except C)
+        if (c == prev and c != 'C') {
+            i += 1;
+            continue;
+        }
+
+        switch (c) {
+            'B' => {
+                if (prev != 'M') try buf.append(ctx.allocator, 'B');
+                i += 1;
+            },
+            'C' => {
+                if (next == 'I' or next == 'E' or next == 'Y') {
+                    if (next == 'I' and i + 2 < upper.len and upper[i + 2] == 'A') {
+                        try buf.append(ctx.allocator, 'X');
+                        i += 3;
+                    } else {
+                        try buf.append(ctx.allocator, 'S');
+                        i += 2;
+                    }
+                } else {
+                    try buf.append(ctx.allocator, 'K');
+                    i += 1;
+                }
+            },
+            'D' => {
+                if (next == 'G' and i + 2 < upper.len) {
+                    const after = upper[i + 2];
+                    if (after == 'I' or after == 'E' or after == 'Y') {
+                        try buf.append(ctx.allocator, 'J');
+                        i += 3;
+                    } else {
+                        try buf.append(ctx.allocator, 'T');
+                        i += 1;
+                    }
+                } else {
+                    try buf.append(ctx.allocator, 'T');
+                    i += 1;
+                }
+            },
+            'F' => {
+                try buf.append(ctx.allocator, 'F');
+                i += 1;
+            },
+            'G' => {
+                if (next == 'H') {
+                    const after_h: u8 = if (i + 2 < upper.len) upper[i + 2] else 0;
+                    const after_is_vowel = after_h == 'A' or after_h == 'E' or after_h == 'I' or after_h == 'O' or after_h == 'U';
+                    const prev_is_vowel = prev == 'A' or prev == 'E' or prev == 'I' or prev == 'O' or prev == 'U';
+                    if (prev_is_vowel and !after_is_vowel) {
+                        try buf.append(ctx.allocator, 'F');
+                        i += 2;
+                        continue;
+                    } else if (i == 0) {
+                        // GH at start -> hard G
+                        try buf.append(ctx.allocator, 'K');
+                        i += 2;
+                        continue;
+                    } else if (!after_is_vowel) {
+                        i += 2;
+                        continue;
+                    }
+                }
+                if (i > 0 and (next == 'N' or (next == 0 and prev != 0))) {
+                    if (next == 0 or (i + 2 >= upper.len and next == 'N')) {
+                        i += 1;
+                        continue;
+                    }
+                }
+                if (prev == 'G') {
+                    i += 1;
+                    continue;
+                }
+                if (next == 'I' or next == 'E' or next == 'Y') {
+                    try buf.append(ctx.allocator, 'J');
+                } else {
+                    try buf.append(ctx.allocator, 'K');
+                }
+                i += 1;
+            },
+            'H' => {
+                if ((prev == 'A' or prev == 'E' or prev == 'I' or prev == 'O' or prev == 'U') or
+                    (next == 'A' or next == 'E' or next == 'I' or next == 'O' or next == 'U'))
+                {
+                    if (next == 'A' or next == 'E' or next == 'I' or next == 'O' or next == 'U') {
+                        if (!(prev == 'S' or prev == 'C' or prev == 'P' or prev == 'T' or prev == 'G')) {
+                            try buf.append(ctx.allocator, 'H');
+                        }
+                    }
+                }
+                i += 1;
+            },
+            'J' => {
+                try buf.append(ctx.allocator, 'J');
+                i += 1;
+            },
+            'K' => {
+                if (prev != 'C') try buf.append(ctx.allocator, 'K');
+                i += 1;
+            },
+            'L' => {
+                try buf.append(ctx.allocator, 'L');
+                i += 1;
+            },
+            'M' => {
+                try buf.append(ctx.allocator, 'M');
+                i += 1;
+            },
+            'N' => {
+                try buf.append(ctx.allocator, 'N');
+                i += 1;
+            },
+            'P' => {
+                if (next == 'H') {
+                    try buf.append(ctx.allocator, 'F');
+                    i += 2;
+                } else {
+                    try buf.append(ctx.allocator, 'P');
+                    i += 1;
+                }
+            },
+            'Q' => {
+                try buf.append(ctx.allocator, 'K');
+                i += 1;
+            },
+            'R' => {
+                try buf.append(ctx.allocator, 'R');
+                i += 1;
+            },
+            'S' => {
+                if (next == 'H' or (next == 'I' and i + 2 < upper.len and (upper[i + 2] == 'O' or upper[i + 2] == 'A'))) {
+                    try buf.append(ctx.allocator, 'X');
+                    i += 2;
+                } else {
+                    try buf.append(ctx.allocator, 'S');
+                    i += 1;
+                }
+            },
+            'T' => {
+                if (next == 'H') {
+                    try buf.append(ctx.allocator, '0');
+                    i += 2;
+                } else if (next == 'I' and i + 2 < upper.len and (upper[i + 2] == 'O' or upper[i + 2] == 'A')) {
+                    try buf.append(ctx.allocator, 'X');
+                    i += 3;
+                } else {
+                    try buf.append(ctx.allocator, 'T');
+                    i += 1;
+                }
+            },
+            'V' => {
+                try buf.append(ctx.allocator, 'F');
+                i += 1;
+            },
+            'W', 'Y' => {
+                if (next == 'A' or next == 'E' or next == 'I' or next == 'O' or next == 'U') {
+                    try buf.append(ctx.allocator, c);
+                }
+                i += 1;
+            },
+            'X' => {
+                try buf.append(ctx.allocator, 'K');
+                try buf.append(ctx.allocator, 'S');
+                i += 1;
+            },
+            'Z' => {
+                try buf.append(ctx.allocator, 'S');
+                i += 1;
+            },
+            else => i += 1,
+        }
+    }
+
+    const result = try buf.toOwnedSlice(ctx.allocator);
+    try ctx.strings.append(ctx.allocator, result);
     return .{ .string = result };
 }

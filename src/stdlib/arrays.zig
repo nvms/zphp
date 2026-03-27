@@ -70,6 +70,7 @@ pub const entries = .{
     .{ "array_replace_recursive", array_replace_recursive },
     .{ "array_walk_recursive", array_walk_recursive },
     .{ "array_merge_recursive", array_merge_recursive },
+    .{ "array_intersect_assoc", array_intersect_assoc },
 };
 
 fn array_push(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
@@ -1213,6 +1214,32 @@ fn array_merge_recursive(ctx: *NativeContext, args: []const Value) RuntimeError!
     for (args[1..]) |arg| {
         if (arg != .array) continue;
         result = try deepMerge(ctx, result, arg.array);
+    }
+    return .{ .array = result };
+}
+
+fn array_intersect_assoc(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len < 2 or args[0] != .array) return .null;
+    const src = args[0].array;
+
+    var result = try ctx.createArray();
+    for (src.entries.items) |entry| {
+        var in_all = true;
+        for (args[1..]) |arg| {
+            if (arg != .array) continue;
+            var found = false;
+            for (arg.array.entries.items) |other| {
+                if (entry.key.eql(other.key) and Value.equal(entry.value, other.value)) {
+                    found = true;
+                    break;
+                }
+            }
+            if (!found) {
+                in_all = false;
+                break;
+            }
+        }
+        if (in_all) try result.set(ctx.allocator, entry.key, entry.value);
     }
     return .{ .array = result };
 }
