@@ -215,6 +215,35 @@ else
     failed=$((failed + 5))
 fi
 
+# --- TLS tests ---
+TLS_PORT=19877
+openssl req -x509 -newkey rsa:2048 -keyout /tmp/zphp_test.key -out /tmp/zphp_test.crt -days 1 -nodes -subj "/CN=localhost" 2>/dev/null
+
+"$ZPHP" serve "$APP" --port $TLS_PORT --workers 2 --tls-cert /tmp/zphp_test.crt --tls-key /tmp/zphp_test.key &
+TLS_PID=$!
+
+for i in $(seq 1 20); do
+    if curl -sk -o /dev/null "https://localhost:$TLS_PORT/health" 2>/dev/null; then
+        break
+    fi
+    sleep 0.1
+done
+
+tls_health=$(curl -sk https://localhost:$TLS_PORT/health)
+check "tls health" '{"status":"ok"}' "$tls_health"
+
+tls_get=$(curl -sk "https://localhost:$TLS_PORT/echo?name=bob")
+check_contains "tls get params" '"name":"bob"' "$tls_get"
+
+tls_post=$(curl -sk -X POST -H "Content-Type: application/x-www-form-urlencoded" -d "key=val" "https://localhost:$TLS_PORT/echo")
+check_contains "tls post data" '"key":"val"' "$tls_post"
+
+tls_status=$(curl -sk -o /dev/null -w "%{http_code}" https://localhost:$TLS_PORT/status)
+check "tls status 201" "201" "$tls_status"
+
+kill $TLS_PID 2>/dev/null; wait $TLS_PID 2>/dev/null || true
+rm -f /tmp/zphp_test.key /tmp/zphp_test.crt
+
 # test: graceful shutdown
 kill -TERM $SERVER_PID
 wait $SERVER_PID 2>/dev/null
