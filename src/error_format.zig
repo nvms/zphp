@@ -156,6 +156,12 @@ fn formatUncaughtException(buf: *Writer, alloc: std.mem.Allocator, vm: *const VM
 
     write(buf, alloc, "\nStack trace:\n");
     writeStackTrace(buf, alloc, vm);
+
+    if (frame.chunk.getSourceLocation(ip, source)) |loc| {
+        writeFmt(buf, alloc, "  thrown in {s} on line {d}\n", .{ path, loc.line });
+    } else {
+        writeFmt(buf, alloc, "  thrown in {s}\n", .{path});
+    }
 }
 
 fn appendLocationContext(buf: *Writer, alloc: std.mem.Allocator, vm: *const VM) void {
@@ -182,22 +188,30 @@ fn appendLocationContext(buf: *Writer, alloc: std.mem.Allocator, vm: *const VM) 
 }
 
 fn writeStackTrace(buf: *Writer, alloc: std.mem.Allocator, vm: *const VM) void {
-    var depth: u32 = 0;
-    var i: usize = vm.frame_count;
+    if (vm.frame_count == 0) return;
     const source = vm.source;
     const path = displayPath(vm.file_path);
-    while (i > 0) : (depth += 1) {
-        i -= 1;
-        const frame = &vm.frames[i];
-        const ip = if (frame.ip > 0) frame.ip - 1 else 0;
-        const func_name = if (frame.func) |f| f.name else "{main}";
+    var depth: u32 = 0;
 
-        if (frame.chunk.getSourceLocation(ip, source)) |loc| {
-            writeFmt(buf, alloc, "  #{d} {s}:{d} {s}()\n", .{ depth, path, loc.line, func_name });
+    // each entry shows where frame[i] was called from (frame[i-1]'s IP)
+    var i: usize = vm.frame_count - 1;
+    while (i >= 1) : ({
+        i -= 1;
+        depth += 1;
+    }) {
+        const frame = &vm.frames[i];
+        const func_name = if (frame.func) |f| f.name else "{main}";
+        const caller = &vm.frames[i - 1];
+        const caller_ip = if (caller.ip > 0) caller.ip - 1 else 0;
+
+        if (caller.chunk.getSourceLocation(caller_ip, source)) |loc| {
+            writeFmt(buf, alloc, "#{d} {s}({d}): {s}()\n", .{ depth, path, loc.line, func_name });
         } else {
-            writeFmt(buf, alloc, "  #{d} {s} {s}()\n", .{ depth, path, func_name });
+            writeFmt(buf, alloc, "#{d} {s}: {s}()\n", .{ depth, path, func_name });
         }
     }
+
+    writeFmt(buf, alloc, "#{d} {{main}}\n", .{depth});
 }
 
 fn estimateTokenLength(source: []const u8, loc: SourceLocation) u32 {
