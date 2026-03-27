@@ -76,6 +76,7 @@ pub fn compileWithPath(ast: *const Ast, allocator: Allocator, file_path: []const
         c.string_allocs.deinit(allocator);
         c.break_jumps.deinit(allocator);
         c.continue_jumps.deinit(allocator);
+        c.use_aliases.deinit(allocator);
     }
 
     const root = ast.nodes[0];
@@ -89,6 +90,7 @@ pub fn compileWithPath(ast: *const Ast, allocator: Allocator, file_path: []const
     var tp_iter = c.trait_properties.valueIterator();
     while (tp_iter.next()) |v| allocator.free(v.*);
     c.trait_properties.deinit(allocator);
+    c.use_aliases.deinit(allocator);
     const slot_names = try c.buildSlotNames();
     const local_count = c.next_slot;
     c.local_slots.deinit(allocator);
