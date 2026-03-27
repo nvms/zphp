@@ -28,6 +28,10 @@ pub fn initContext(cert_path: [*:0]const u8, key_path: [*:0]const u8) ?*SSL_CTX 
         return null;
     }
 
+    // advertise http/1.1 via ALPN
+    const alpn = "\x08http/1.1";
+    _ = c.SSL_CTX_set_alpn_protos(ctx, alpn, alpn.len);
+
     return ctx;
 }
 

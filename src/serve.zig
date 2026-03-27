@@ -204,6 +204,13 @@ fn setNonBlocking(fd: posix.fd_t) void {
     _ = posix.fcntl(fd, 4, flags | O_NONBLOCK) catch return;
 }
 
+fn certMtime(path: []const u8) i128 {
+    const f = std.fs.cwd().openFile(path, .{}) catch return 0;
+    defer f.close();
+    const stat = f.stat() catch return 0;
+    return stat.mtime;
+}
+
 // main serve entry point
 
 pub fn serve(allocator: Allocator, config: ServeConfig) !void {
@@ -264,21 +271,26 @@ pub fn serve(allocator: Allocator, config: ServeConfig) !void {
     posix.sigaction(posix.SIG.TERM, &sa, null);
 
     var tls_ctx: ?*tls.SSL_CTX = null;
+    var tls_cert_z: ?[:0]u8 = null;
+    var tls_key_z: ?[:0]u8 = null;
+    var tls_cert_mtime: i128 = 0;
     if (config.tls_cert) |cert| {
         const key = config.tls_key orelse {
             try writeStderr("error: --tls-key required when --tls-cert is specified\n");
             std.process.exit(1);
         };
-        const cert_z = try allocator.dupeZ(u8, cert);
-        defer allocator.free(cert_z);
-        const key_z = try allocator.dupeZ(u8, key);
-        defer allocator.free(key_z);
-        tls_ctx = tls.initContext(cert_z, key_z) orelse {
+        tls_cert_z = try allocator.dupeZ(u8, cert);
+        tls_key_z = try allocator.dupeZ(u8, key);
+        tls_ctx = tls.initContext(tls_cert_z.?, tls_key_z.?) orelse {
             try writeStderr("error: failed to initialize TLS (check cert/key paths)\n");
             std.process.exit(1);
         };
+        tls_cert_mtime = certMtime(cert);
     }
-    defer if (tls_ctx) |ctx| tls.freeContext(ctx);
+    defer {
+        if (tls_cert_z) |z| allocator.free(z);
+        if (tls_key_z) |z| allocator.free(z);
+    }
 
     const addr = std.net.Address.parseIp4("0.0.0.0", config.port) catch unreachable;
     var server = try addr.listen(.{ .reuse_address = true });
@@ -323,9 +335,10 @@ pub fn serve(allocator: Allocator, config: ServeConfig) !void {
         .{ .fd = signal_pipe[0], .events = posix.POLL.IN, .revents = 0 },
     };
 
+    const poll_timeout: i32 = if (tls_ctx != null) 30000 else -1;
     var robin: usize = 0;
     while (true) {
-        _ = posix.poll(&main_poll, -1) catch continue;
+        _ = posix.poll(&main_poll, poll_timeout) catch continue;
 
         if (main_poll[1].revents & posix.POLL.IN != 0) {
             try writeStderr("\nshutting down...\n");
@@ -337,6 +350,18 @@ pub fn serve(allocator: Allocator, config: ServeConfig) !void {
             queue.push(.{ .conn = conn });
             _ = posix.write(workers_data[robin].wake_pipe[1], &[_]u8{1}) catch {};
             robin = (robin + 1) % worker_count;
+        }
+
+        if (tls_cert_z != null and tls_key_z != null) {
+            const new_mtime = certMtime(config.tls_cert.?);
+            if (new_mtime != tls_cert_mtime and new_mtime != 0) {
+                if (tls.initContext(tls_cert_z.?, tls_key_z.?)) |new_ctx| {
+                    tls_ctx = new_ctx;
+                    tls_cert_mtime = new_mtime;
+                    for (workers_data) |*wd| wd.tls_ctx = new_ctx;
+                    try writeStderr("tls: certificate reloaded\n");
+                }
+            }
         }
     }
 
@@ -438,8 +463,12 @@ fn compactConnections(w: *Worker) void {
     while (i < w.n_fds) {
         if (w.conns[i]) |*c| {
             if (c.state == .closing) {
-                if (c.ws_obj != null and w.vm.functions.contains("ws_onClose")) {
-                    _ = w.vm.callByName("ws_onClose", &.{Value{ .object = c.ws_obj.? }}) catch {};
+                if (c.ws_obj) |ws_obj| {
+                    ws_obj.set(w.allocator, "__ws_closed", .{ .bool = true }) catch {};
+                    ws_obj.set(w.allocator, "__ws_ssl", .{ .int = 0 }) catch {};
+                    if (w.vm.functions.contains("ws_onClose")) {
+                        _ = w.vm.callByName("ws_onClose", &.{Value{ .object = ws_obj }}) catch {};
+                    }
                 }
                 c.deinit(w.allocator);
                 const last = w.n_fds - 1;
