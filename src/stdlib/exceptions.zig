@@ -25,28 +25,32 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try vm.native_fns.put(a, "Exception::getCode", exceptionGetCode);
     try vm.native_fns.put(a, "Exception::getPrevious", exceptionGetPrevious);
 
+    // hierarchy validated against PHP 8.5 (php -r 'new ReflectionClass(...)->getParentClass()')
+    // note: in PHP, Error and Exception are separate (both implement Throwable).
+    // zphp uses Error -> Exception as simplification so catch(Exception) catches both.
     const subclasses = .{
         .{ "RuntimeException", "Exception" },
-        .{ "InvalidArgumentException", "Exception" },
         .{ "LogicException", "Exception" },
-        .{ "BadMethodCallException", "LogicException" },
-        .{ "OverflowException", "RuntimeException" },
-        .{ "TypeError", "Exception" },
-        .{ "RangeException", "RuntimeException" },
-        .{ "UnexpectedValueException", "RuntimeException" },
+        .{ "InvalidArgumentException", "LogicException" },
+        .{ "BadFunctionCallException", "LogicException" },
+        .{ "BadMethodCallException", "BadFunctionCallException" },
         .{ "LengthException", "LogicException" },
         .{ "DomainException", "LogicException" },
-        .{ "OutOfRangeException", "RuntimeException" },
+        .{ "OutOfRangeException", "LogicException" },
+        .{ "OverflowException", "RuntimeException" },
+        .{ "RangeException", "RuntimeException" },
+        .{ "UnexpectedValueException", "RuntimeException" },
         .{ "OutOfBoundsException", "RuntimeException" },
         .{ "UnderflowException", "RuntimeException" },
-        .{ "ArithmeticError", "Exception" },
-        .{ "DivisionByZeroError", "ArithmeticError" },
-        .{ "AssertionError", "Exception" },
+        .{ "PDOException", "RuntimeException" },
         .{ "Error", "Exception" },
+        .{ "TypeError", "Error" },
+        .{ "ArithmeticError", "Error" },
+        .{ "DivisionByZeroError", "ArithmeticError" },
+        .{ "AssertionError", "Error" },
         .{ "FiberError", "Error" },
         .{ "ValueError", "Error" },
         .{ "UnhandledMatchError", "Error" },
-        .{ "PDOException", "RuntimeException" },
     };
 
     inline for (subclasses) |entry| {
