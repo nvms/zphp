@@ -19,6 +19,7 @@ const session_dir = "/tmp";
 const default_name = "PHPSESSID";
 
 fn getSessionVar(ctx: *NativeContext, key: []const u8) ?Value {
+    if (ctx.vm.frame_count == 0) return null;
     return ctx.vm.frames[0].vars.get(key);
 }
 

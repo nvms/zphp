@@ -35,19 +35,25 @@ pub fn freeContext(ctx: *SSL_CTX) void {
     c.SSL_CTX_free(ctx);
 }
 
-pub fn accept(ctx: *SSL_CTX, fd: posix.fd_t) ?*SSL {
+pub const HandshakeResult = enum { complete, want_read, want_write, failed };
+
+pub fn beginAccept(ctx: *SSL_CTX, fd: posix.fd_t) ?*SSL {
     const ssl = c.SSL_new(ctx) orelse return null;
     if (c.SSL_set_fd(ssl, fd) != 1) {
         c.SSL_free(ssl);
         return null;
     }
-    const ret = c.SSL_accept(ssl);
-    if (ret != 1) {
-        c.ERR_clear_error();
-        c.SSL_free(ssl);
-        return null;
-    }
     return ssl;
+}
+
+pub fn continueAccept(ssl: *SSL) HandshakeResult {
+    const ret = c.SSL_accept(ssl);
+    if (ret == 1) return .complete;
+    const err = c.SSL_get_error(ssl, ret);
+    if (err == c.SSL_ERROR_WANT_READ) return .want_read;
+    if (err == c.SSL_ERROR_WANT_WRITE) return .want_write;
+    c.ERR_clear_error();
+    return .failed;
 }
 
 pub fn read(ssl: *SSL, buf: []u8) !usize {

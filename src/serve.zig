@@ -51,7 +51,7 @@ const Request = struct {
 
 // connection state machine
 
-const ConnState = enum { http_reading, ws_idle, closing };
+const ConnState = enum { tls_handshaking, http_reading, ws_idle, closing };
 
 const Connection = struct {
     fd: posix.fd_t,
@@ -202,12 +202,6 @@ fn setNonBlocking(fd: posix.fd_t) void {
     const O_NONBLOCK: u32 = if (@import("builtin").os.tag == .linux) 0x800 else 0x4;
     const flags = posix.fcntl(fd, 3, 0) catch return;
     _ = posix.fcntl(fd, 4, flags | O_NONBLOCK) catch return;
-}
-
-fn setBlocking(fd: posix.fd_t) void {
-    const O_NONBLOCK: u32 = if (@import("builtin").os.tag == .linux) 0x800 else 0x4;
-    const flags = posix.fcntl(fd, 3, 0) catch return;
-    _ = posix.fcntl(fd, 4, flags & ~O_NONBLOCK) catch return;
 }
 
 // main serve entry point
@@ -380,9 +374,10 @@ fn eventLoop(w: *Worker) void {
                 continue;
             }
 
-            if (revents & posix.POLL.IN != 0) {
+            if (revents & (posix.POLL.IN | posix.POLL.OUT) != 0) {
                 if (w.conns[i]) |*c| {
                     switch (c.state) {
+                        .tls_handshaking => processTlsHandshake(w, c, i),
                         .http_reading => processHttpRead(w, c),
                         .ws_idle => processWsRead(w, c),
                         .closing => {},
@@ -400,22 +395,40 @@ fn registerConnection(w: *Worker, server_conn: std.net.Server.Connection) void {
         server_conn.stream.close();
         return;
     }
+    setNonBlocking(server_conn.stream.handle);
     var ssl_ptr: ?*tls.SSL = null;
+    var initial_state: ConnState = .http_reading;
+    var poll_events: i16 = posix.POLL.IN;
     if (w.tls_ctx) |ctx| {
-        setBlocking(server_conn.stream.handle);
-        ssl_ptr = tls.accept(ctx, server_conn.stream.handle) orelse {
+        ssl_ptr = tls.beginAccept(ctx, server_conn.stream.handle) orelse {
             server_conn.stream.close();
             return;
         };
+        switch (tls.continueAccept(ssl_ptr.?)) {
+            .complete => {},
+            .want_read => {
+                initial_state = .tls_handshaking;
+                poll_events = posix.POLL.IN;
+            },
+            .want_write => {
+                initial_state = .tls_handshaking;
+                poll_events = posix.POLL.OUT;
+            },
+            .failed => {
+                tls.shutdown(ssl_ptr.?);
+                server_conn.stream.close();
+                return;
+            },
+        }
     }
-    setNonBlocking(server_conn.stream.handle);
-    const c = Connection.init(w.allocator, server_conn, ssl_ptr) catch {
+    var c = Connection.init(w.allocator, server_conn, ssl_ptr) catch {
         if (ssl_ptr) |s| tls.shutdown(s);
         server_conn.stream.close();
         return;
     };
+    c.state = initial_state;
     const slot = w.n_fds;
-    w.poll_fds[slot] = .{ .fd = c.fd, .events = posix.POLL.IN, .revents = 0 };
+    w.poll_fds[slot] = .{ .fd = c.fd, .events = poll_events, .revents = 0 };
     w.conns[slot] = c;
     w.n_fds += 1;
 }
@@ -480,6 +493,24 @@ fn decodeChunkedBody(data: []u8) ?ChunkedResult {
     }
 
     return null;
+}
+
+// TLS handshake continuation
+
+fn processTlsHandshake(w: *Worker, c: *Connection, poll_idx: usize) void {
+    const ssl = c.ssl orelse {
+        c.state = .closing;
+        return;
+    };
+    switch (tls.continueAccept(ssl)) {
+        .complete => {
+            c.state = .http_reading;
+            w.poll_fds[poll_idx].events = posix.POLL.IN;
+        },
+        .want_read => w.poll_fds[poll_idx].events = posix.POLL.IN,
+        .want_write => w.poll_fds[poll_idx].events = posix.POLL.OUT,
+        .failed => c.state = .closing,
+    }
 }
 
 // HTTP processing
