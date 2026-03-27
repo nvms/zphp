@@ -8,6 +8,7 @@ pub const OpCode = enum(u8) {
     op_false,
     pop,
     dup,
+    swap,
 
     get_var, // u16: name constant index
     set_var, // u16: name constant index

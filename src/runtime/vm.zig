@@ -598,6 +598,11 @@ pub const VM = struct {
                 .op_false => self.push(.{ .bool = false }),
                 .pop => _ = self.pop(),
                 .dup => self.push(self.stack[self.sp - 1]),
+                .swap => {
+                    const tmp = self.stack[self.sp - 1];
+                    self.stack[self.sp - 1] = self.stack[self.sp - 2];
+                    self.stack[self.sp - 2] = tmp;
+                },
 
                 .get_var => {
                     const idx = self.readU16();
@@ -2693,7 +2698,16 @@ pub const VM = struct {
                     } else if (self.getStaticProp(class_name, prop_name)) |val| {
                         self.push(val);
                     } else {
-                        self.push(.null);
+                        if (!self.classes.contains(class_name) and !self.interfaces.contains(class_name)) {
+                            try self.tryAutoload(class_name);
+                            if (self.getStaticProp(class_name, prop_name)) |val| {
+                                self.push(val);
+                            } else {
+                                self.push(.null);
+                            }
+                        } else {
+                            self.push(.null);
+                        }
                     }
                 },
 
@@ -2865,7 +2879,16 @@ pub const VM = struct {
                     if (self.getStaticProp(iface, prop_name)) |val| return val;
                 }
                 current = cls.parent;
-            } else break;
+            } else {
+                self.tryAutoload(cn) catch {};
+                if (self.classes.getPtr(cn)) |cls| {
+                    if (cls.static_props.get(prop_name)) |val| return val;
+                    for (cls.interfaces.items) |iface| {
+                        if (self.getStaticProp(iface, prop_name)) |val| return val;
+                    }
+                    current = cls.parent;
+                } else break;
+            }
         }
         return null;
     }
@@ -3219,6 +3242,9 @@ pub const VM = struct {
             try self.applyTrait(&def, class_name, trait_name, alias_rules[0..alias_count], insteadof_rules[0..insteadof_count]);
         }
 
+        if (def.parent) |parent_name| {
+            if (!self.classes.contains(parent_name)) try self.tryAutoload(parent_name);
+        }
         def.slot_layout = try self.buildSlotLayout(&def);
         try self.classes.put(self.allocator, class_name, def);
     }

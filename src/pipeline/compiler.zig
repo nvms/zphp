@@ -378,6 +378,14 @@ pub const Compiler = struct {
                 if (slot_node.tag == .list_destructure) {
                     try self.compileDestructure(slot_node);
                     try self.emitOp(.pop);
+                } else if (slot_node.tag == .property_access) {
+                    // stack: ..., src_array, value
+                    try self.compileNode(slot_node.data.lhs); // push object
+                    try self.emitOp(.swap); // stack: ..., src_array, object, value
+                    const prop_name = self.propName(slot_node);
+                    const prop_idx = try self.addConstant(.{ .string = prop_name });
+                    try self.emitOp(.set_prop);
+                    try self.emitU16(prop_idx);
                 } else {
                     const name = self.ast.tokenSlice(slot_node.main_token);
                     try self.emitSetVar(name);

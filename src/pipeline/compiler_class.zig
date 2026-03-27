@@ -1172,7 +1172,7 @@ fn needsVarSync(chunk: *const Chunk) bool {
 }
 
 fn opcodeWidth(b: u8) usize {
-    const op: OpCode = @enumFromInt(b);
+    const op: OpCode = std.meta.intToEnum(OpCode, b) catch return 1;
     return switch (op) {
         // 1 + u16 = 3 bytes
         .constant, .get_var, .set_var, .jump, .jump_back, .jump_if_false, .jump_if_true,
