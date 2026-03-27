@@ -2583,6 +2583,20 @@ pub const VM = struct {
                     }
 
                     const full_name = self.resolveMethod(class_name, method_name) catch {
+                        if (self.hasMethod(class_name, "__callStatic")) {
+                            const ac: usize = arg_count;
+                            var args_arr = try self.allocator.create(PhpArray);
+                            args_arr.* = .{};
+                            try self.arrays.append(self.allocator, args_arr);
+                            for (0..ac) |i| try args_arr.append(self.allocator, self.stack[self.sp - ac + i]);
+                            self.sp -= ac;
+                            const cs_name = try self.resolveMethod(class_name, "__callStatic");
+                            self.push(.{ .string = method_name });
+                            self.push(.{ .array = args_arr });
+                            try self.callNamedFunction(cs_name, 2);
+                            self.frames[self.frame_count - 1].called_class = class_name;
+                            continue;
+                        }
                         self.error_msg = std.fmt.allocPrint(self.allocator, "Fatal error: Uncaught Error: Call to undefined method {s}::{s}()", .{ class_name, method_name }) catch null;
                         return error.RuntimeError;
                     };
@@ -2656,6 +2670,14 @@ pub const VM = struct {
                     }
 
                     const full_name = self.resolveMethod(class_name, method_name) catch {
+                        if (self.hasMethod(class_name, "__callStatic")) {
+                            const cs_name = try self.resolveMethod(class_name, "__callStatic");
+                            self.push(.{ .string = method_name });
+                            self.push(.{ .array = arr });
+                            try self.callNamedFunction(cs_name, 2);
+                            self.frames[self.frame_count - 1].called_class = class_name;
+                            continue;
+                        }
                         self.error_msg = std.fmt.allocPrint(self.allocator, "Fatal error: Uncaught Error: Call to undefined method {s}::{s}()", .{ class_name, method_name }) catch null;
                         return error.RuntimeError;
                     };
@@ -2714,6 +2736,19 @@ pub const VM = struct {
                         try self.tryAutoload(class_name);
                     }
                     const full_name = self.resolveMethod(class_name, method_name) catch {
+                        if (self.hasMethod(class_name, "__callStatic")) {
+                            var args_arr = try self.allocator.create(PhpArray);
+                            args_arr.* = .{};
+                            try self.arrays.append(self.allocator, args_arr);
+                            for (0..ac) |i| try args_arr.append(self.allocator, self.stack[self.sp - ac + i]);
+                            self.sp -= ac + 1; // +1 for class name on stack
+                            const cs_name = try self.resolveMethod(class_name, "__callStatic");
+                            self.push(.{ .string = method_name });
+                            self.push(.{ .array = args_arr });
+                            try self.callNamedFunction(cs_name, 2);
+                            self.frames[self.frame_count - 1].called_class = class_name;
+                            continue;
+                        }
                         self.error_msg = std.fmt.allocPrint(self.allocator, "Fatal error: Uncaught Error: Call to undefined method {s}::{s}()", .{ class_name, method_name }) catch null;
                         return error.RuntimeError;
                     };
