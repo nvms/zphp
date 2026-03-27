@@ -78,14 +78,14 @@ pub const H2Session = struct {
         c.nghttp2_session_del(self.session);
     }
 
-    pub fn recv(self: *H2Session, data: []const u8) i64 {
-        return c.nghttp2_session_mem_recv2(self.session, data.ptr, data.len);
+    pub fn recv(self: *H2Session, data: []const u8) isize {
+        return c.nghttp2_session_mem_recv(self.session, data.ptr, data.len);
     }
 
     pub fn flush(self: *H2Session) !void {
         while (true) {
             var data: [*c]const u8 = null;
-            const len = c.nghttp2_session_mem_send2(self.session, &data);
+            const len = c.nghttp2_session_mem_send(self.session, &data);
             if (len < 0) return error.RuntimeError;
             if (len == 0) break;
             const ulen: usize = @intCast(len);
@@ -159,13 +159,13 @@ pub const H2Session = struct {
         if (body.len > 0) {
             const src = self.allocator.create(BodySource) catch return;
             src.* = .{ .data = self.allocator.dupe(u8, body) catch return, .pos = 0 };
-            var prd = c.nghttp2_data_provider2{
+            var prd = c.nghttp2_data_provider{
                 .source = .{ .ptr = @ptrCast(src) },
                 .read_callback = bodyReadCb,
             };
-            _ = c.nghttp2_submit_response2(self.session, stream_id, &nv, nv.len, &prd);
+            _ = c.nghttp2_submit_response(self.session, stream_id, &nv, nv.len, &prd);
         } else {
-            _ = c.nghttp2_submit_response2(self.session, stream_id, &nv, nv.len, null);
+            _ = c.nghttp2_submit_response(self.session, stream_id, &nv, nv.len, null);
         }
     }
 };
