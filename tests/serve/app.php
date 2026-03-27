@@ -12,7 +12,7 @@ if ($path === "/health") {
         "get" => $_GET,
         "post" => $_POST,
         "uri" => $_SERVER["REQUEST_URI"],
-    ]);
+    ], JSON_UNESCAPED_SLASHES);
 } elseif ($path === "/headers") {
     header("X-Custom: hello");
     header("X-Another: world");

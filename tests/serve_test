@@ -93,7 +93,7 @@ check_contains "html content-type" "text/html" "$ct"
 
 # test: request uri includes query string
 resp=$(curl -s "http://localhost:$PORT/echo?x=1")
-check_contains "request uri has query" '"\/echo?x=1"' "$resp"
+check_contains "request uri has query" '"/echo?x=1"' "$resp"
 
 # test: keep-alive (multiple requests on same connection)
 ka_resp=$(curl -s http://localhost:$PORT/health http://localhost:$PORT/health 2>&1)
