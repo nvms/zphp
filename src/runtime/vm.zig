@@ -20,6 +20,10 @@ const TypeInfo = struct {
 var g_type_info: std.StringHashMapUnmanaged(TypeInfo) = .{};
 var g_type_info_allocator: ?Allocator = null;
 
+pub fn getTypeInfo(key: []const u8) ?TypeInfo {
+    return g_type_info.get(key);
+}
+
 pub const FileLoader = fn (path: []const u8, allocator: Allocator) ?*CompileResult;
 pub const NativeContext = struct {
     allocator: Allocator,
@@ -190,7 +194,7 @@ pub const ClassDef = struct {
 
     pub const Visibility = enum(u8) { public = 0, protected = 1, private = 2 };
 
-    const MethodInfo = struct {
+    pub const MethodInfo = struct {
         name: []const u8,
         arity: u8,
         is_static: bool = false,
@@ -363,6 +367,7 @@ pub const VM = struct {
         try @import("../stdlib/pdo.zig").register(&vm, allocator);
         try @import("../stdlib/websocket.zig").register(&vm, allocator);
         try @import("../stdlib/filesystem.zig").register(&vm, allocator);
+        try @import("../stdlib/reflection.zig").register(&vm, allocator);
         vm.ic = try allocator.create(InlineCache);
         vm.ic.?.* = .{};
         const locals_buf = try allocator.alloc(Value, 8192);
@@ -5001,7 +5006,7 @@ pub const VM = struct {
         try self.fillDefaults(vars, func, args.len);
     }
 
-    fn resolveDefault(self: *VM, val: Value) !Value {
+    pub fn resolveDefault(self: *VM, val: Value) !Value {
         if (val.isEmptyArrayDefault()) {
             const arr = try self.allocator.create(PhpArray);
             arr.* = .{};
