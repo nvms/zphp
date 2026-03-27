@@ -8,6 +8,29 @@ const c = @cImport({
 
 pub const SSL = c.SSL;
 pub const SSL_CTX = c.SSL_CTX;
+pub const AlpnProtocol = enum { h2, http11 };
+
+fn alpnSelectCb(
+    _: ?*c.SSL,
+    out: [*c][*c]const u8,
+    outlen: [*c]u8,
+    in: [*c]const u8,
+    inlen: c_uint,
+    _: ?*anyopaque,
+) callconv(.c) c_int {
+    // server prefers h2, falls back to http/1.1
+    const server_protos = "\x02h2\x08http/1.1";
+    const ret = c.SSL_select_next_proto(
+        @ptrCast(out),
+        outlen,
+        server_protos,
+        server_protos.len,
+        in,
+        inlen,
+    );
+    if (ret == c.OPENSSL_NPN_NEGOTIATED) return c.SSL_TLSEXT_ERR_OK;
+    return c.SSL_TLSEXT_ERR_NOACK;
+}
 
 pub fn initContext(cert_path: [*:0]const u8, key_path: [*:0]const u8) ?*SSL_CTX {
     const method = c.TLS_server_method() orelse return null;
@@ -28,11 +51,18 @@ pub fn initContext(cert_path: [*:0]const u8, key_path: [*:0]const u8) ?*SSL_CTX 
         return null;
     }
 
-    // advertise http/1.1 via ALPN
-    const alpn = "\x08http/1.1";
-    _ = c.SSL_CTX_set_alpn_protos(ctx, alpn, alpn.len);
+    // server-side ALPN: prefer h2, fall back to http/1.1
+    c.SSL_CTX_set_alpn_select_cb(ctx, alpnSelectCb, null);
 
     return ctx;
+}
+
+pub fn getAlpnProtocol(ssl: *SSL) AlpnProtocol {
+    var proto: [*c]const u8 = null;
+    var len: c_uint = 0;
+    c.SSL_get0_alpn_selected(ssl, &proto, &len);
+    if (len == 2 and proto != null and proto[0] == 'h' and proto[1] == '2') return .h2;
+    return .http11;
 }
 
 pub fn freeContext(ctx: *SSL_CTX) void {

@@ -8,6 +8,7 @@ const PhpArray = @import("runtime/value.zig").PhpArray;
 const PhpObject = @import("runtime/value.zig").PhpObject;
 
 const tls = @import("tls.zig");
+const h2 = @import("h2.zig");
 
 const Allocator = std.mem.Allocator;
 const posix = std.posix;
@@ -51,7 +52,7 @@ const Request = struct {
 
 // connection state machine
 
-const ConnState = enum { tls_handshaking, http_reading, ws_idle, closing };
+const ConnState = enum { tls_handshaking, http_reading, h2_active, ws_idle, closing };
 
 const Connection = struct {
     fd: posix.fd_t,
@@ -63,6 +64,7 @@ const Connection = struct {
     buffered: usize,
     keep_alive: bool,
     ws_obj: ?*PhpObject,
+    h2_session: ?*h2.H2Session,
 
     fn init(allocator: Allocator, server_conn: std.net.Server.Connection, ssl_ptr: ?*tls.SSL) !Connection {
         return .{
@@ -75,6 +77,7 @@ const Connection = struct {
             .buffered = 0,
             .keep_alive = true,
             .ws_obj = null,
+            .h2_session = null,
         };
     }
 
@@ -93,6 +96,10 @@ const Connection = struct {
     }
 
     fn deinit(self: *Connection, allocator: Allocator) void {
+        if (self.h2_session) |session| {
+            session.deinit();
+            allocator.destroy(session);
+        }
         if (self.ssl) |s| tls.shutdown(s);
         allocator.free(self.buf);
         self.stream.close();
@@ -404,6 +411,7 @@ fn eventLoop(w: *Worker) void {
                     switch (c.state) {
                         .tls_handshaking => processTlsHandshake(w, c, i),
                         .http_reading => processHttpRead(w, c),
+                        .h2_active => processH2Read(w, c),
                         .ws_idle => processWsRead(w, c),
                         .closing => {},
                     }
@@ -526,19 +534,36 @@ fn decodeChunkedBody(data: []u8) ?ChunkedResult {
 
 // TLS handshake continuation
 
-fn processTlsHandshake(w: *Worker, c: *Connection, poll_idx: usize) void {
-    const ssl = c.ssl orelse {
-        c.state = .closing;
+fn processTlsHandshake(w: *Worker, conn: *Connection, poll_idx: usize) void {
+    const ssl = conn.ssl orelse {
+        conn.state = .closing;
         return;
     };
     switch (tls.continueAccept(ssl)) {
         .complete => {
-            c.state = .http_reading;
+            if (tls.getAlpnProtocol(ssl) == .h2) {
+                const session = w.allocator.create(h2.H2Session) catch {
+                    conn.state = .closing;
+                    return;
+                };
+                session.initSession(w.allocator, ssl, conn.fd) catch {
+                    w.allocator.destroy(session);
+                    conn.state = .closing;
+                    return;
+                };
+                conn.h2_session = session;
+                conn.state = .h2_active;
+                session.flush() catch {
+                    conn.state = .closing;
+                };
+            } else {
+                conn.state = .http_reading;
+            }
             w.poll_fds[poll_idx].events = posix.POLL.IN;
         },
         .want_read => w.poll_fds[poll_idx].events = posix.POLL.IN,
         .want_write => w.poll_fds[poll_idx].events = posix.POLL.OUT,
-        .failed => c.state = .closing,
+        .failed => conn.state = .closing,
     }
 }
 
@@ -643,6 +668,134 @@ fn processHttpRead(w: *Worker, c: *Connection) void {
     writeResponse(c, code, ct, extra_headers, w.vm.output.items, c.keep_alive, acceptsGzip(&req), w.allocator) catch {};
     shiftBuffer(c, consumed);
     if (!c.keep_alive) c.state = .closing;
+}
+
+// HTTP/2 processing
+
+fn processH2Read(w: *Worker, conn: *Connection) void {
+    const session = conn.h2_session orelse {
+        conn.state = .closing;
+        return;
+    };
+
+    const n = conn.ioRead(conn.buf[conn.buffered..]) catch |err| {
+        if (err == error.WouldBlock) return;
+        conn.state = .closing;
+        return;
+    };
+    if (n == 0) { conn.state = .closing; return; }
+    conn.buffered += n;
+
+    const consumed = session.recv(conn.buf[0..conn.buffered]);
+    if (consumed < 0) { conn.state = .closing; return; }
+    const uconsumed: usize = @intCast(consumed);
+    if (uconsumed > 0) shiftBuffer(conn, uconsumed);
+
+    // process completed streams sequentially
+    while (session.findCompletedStream()) |stream| {
+        handleH2Request(w, conn, session, stream);
+    }
+
+    session.flush() catch { conn.state = .closing; };
+}
+
+fn handleH2Request(w: *Worker, conn: *Connection, session: *h2.H2Session, stream: *h2.H2Stream) void {
+    const stream_id = stream.stream_id;
+
+    // build Request from h2 stream
+    var req = Request{
+        .method = stream.method,
+        .uri = stream.path,
+        .path = stream.path,
+        .query_string = "",
+    };
+    if (std.mem.indexOf(u8, stream.path, "?")) |q| {
+        req.path = stream.path[0..q];
+        req.query_string = stream.path[q + 1 ..];
+    }
+    for (stream.headers[0..stream.header_count], 0..) |hdr, i| {
+        if (i < 64) {
+            req.headers[i] = .{ .name = hdr.name, .value = hdr.value };
+        }
+    }
+    req.header_count = stream.header_count;
+    req.body = stream.body.items;
+
+    // try static file
+    if (w.doc_root.len > 0 and tryServeStaticH2(w.allocator, session, stream_id, w.doc_root, &req)) {
+        stream.reset(w.allocator);
+        return;
+    }
+
+    // PHP execution
+    w.vm.reset();
+    const mock_conn = std.net.Server.Connection{
+        .stream = conn.stream,
+        .address = std.net.Address{ .in = .{ .sa = .{ .port = 0, .addr = conn.addr_bytes, .zero = [_]u8{0} ** 8 } } },
+    };
+    populateSuperglobals(&w.vm, &req, mock_conn, w.port) catch {
+        session.submitResponse(stream_id, 500, "text/plain", "Internal Server Error");
+        stream.reset(w.allocator);
+        return;
+    };
+    // override SERVER_PROTOCOL for h2
+    if (w.vm.request_vars.get("$_SERVER")) |sv| {
+        if (sv == .array) sv.array.set(w.allocator, .{ .string = "SERVER_PROTOCOL" }, .{ .string = "HTTP/2.0" }) catch {};
+    }
+    // set Host from :authority if not already set by header
+    if (stream.authority.len > 0) {
+        if (w.vm.request_vars.get("$_SERVER")) |sv| {
+            if (sv == .array) sv.array.set(w.allocator, .{ .string = "HTTP_HOST" }, .{ .string = stream.authority }) catch {};
+        }
+    }
+
+    w.vm.interpret(w.result) catch {
+        session.submitResponse(stream_id, 500, "text/plain", "Internal Server Error");
+        stream.reset(w.allocator);
+        return;
+    };
+
+    var session_ctx = w.vm.makeContext(null);
+    @import("stdlib/session.zig").finalizeSession(&session_ctx);
+
+    const ct: []const u8 = if (w.vm.frame_count > 0) blk: {
+        const v = w.vm.frames[0].vars.get("__response_content_type") orelse break :blk "text/html";
+        break :blk if (v == .string) v.string else "text/html";
+    } else "text/html";
+    const code: u16 = if (w.vm.frame_count > 0) blk: {
+        const v = w.vm.frames[0].vars.get("__response_code") orelse break :blk @as(u16, 200);
+        break :blk if (v == .int) @intCast(v.int) else 200;
+    } else 200;
+
+    session.submitResponse(stream_id, code, ct, w.vm.output.items);
+    stream.reset(w.allocator);
+}
+
+fn tryServeStaticH2(allocator: Allocator, session: *h2.H2Session, stream_id: i32, doc_root: []const u8, req: *const Request) bool {
+    const path = req.path;
+    if (std.mem.endsWith(u8, path, ".php")) return false;
+    if (path.len <= 1) return false;
+    const rel = if (path[0] == '/') path[1..] else path;
+    if (rel.len == 0) return false;
+    if (std.mem.indexOf(u8, rel, "..") != null) return false;
+
+    const file_path = std.fs.path.join(allocator, &.{ doc_root, rel }) catch return false;
+    defer allocator.free(file_path);
+    const file = std.fs.cwd().openFile(file_path, .{}) catch return false;
+    defer file.close();
+    const stat = file.stat() catch return false;
+    if (stat.kind != .file) return false;
+
+    const size: usize = @intCast(stat.size);
+    if (size > 10 * 1024 * 1024) return false;
+
+    const body = allocator.alloc(u8, size) catch return false;
+    defer allocator.free(body);
+    const bytes_read = file.readAll(body) catch return false;
+
+    const mime = mimeType(rel);
+    session.submitResponse(stream_id, 200, mime, body[0..bytes_read]);
+    return true;
 }
 
 // WebSocket processing

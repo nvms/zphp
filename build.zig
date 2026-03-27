@@ -17,6 +17,7 @@ pub fn build(b: *std.Build) void {
     exe_mod.linkSystemLibrary("pq", .{});
     exe_mod.linkSystemLibrary("ssl", .{ .use_pkg_config = .no });
     exe_mod.linkSystemLibrary("crypto", .{ .use_pkg_config = .no });
+    exe_mod.linkSystemLibrary("nghttp2", .{});
     exe_mod.link_libc = true;
 
     const exe = b.addExecutable(.{
@@ -48,6 +49,7 @@ pub fn build(b: *std.Build) void {
     test_mod.linkSystemLibrary("pq", .{});
     test_mod.linkSystemLibrary("ssl", .{ .use_pkg_config = .no });
     test_mod.linkSystemLibrary("crypto", .{ .use_pkg_config = .no });
+    test_mod.linkSystemLibrary("nghttp2", .{});
     test_mod.link_libc = true;
 
     const unit_tests = b.addTest(.{

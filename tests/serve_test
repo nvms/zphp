@@ -243,6 +243,40 @@ check "tls status 201" "201" "$tls_status"
 
 kill $TLS_PID 2>/dev/null; wait $TLS_PID 2>/dev/null || true
 
+# --- HTTP/2 tests ---
+H2_PORT=19880
+
+"$ZPHP" serve "$APP" --port $H2_PORT --workers 2 --tls-cert /tmp/zphp_test.crt --tls-key /tmp/zphp_test.key &
+H2_PID=$!
+for i in $(seq 1 20); do
+    if curl -sk -o /dev/null "https://localhost:$H2_PORT/health" 2>/dev/null; then break; fi
+    sleep 0.1
+done
+
+h2_proto=$(curl -sk -o /dev/null -w "%{http_version}" --http2 https://localhost:$H2_PORT/health)
+check "h2 negotiation" "2" "$h2_proto"
+
+h2_health=$(curl -sk --http2 https://localhost:$H2_PORT/health)
+check "h2 health" '{"status":"ok"}' "$h2_health"
+
+h2_get=$(curl -sk --http2 "https://localhost:$H2_PORT/echo?name=alice&age=30")
+check_contains "h2 get params name" '"name":"alice"' "$h2_get"
+
+h2_post=$(curl -sk --http2 -X POST -H "Content-Type: application/x-www-form-urlencoded" -d "key=val" "https://localhost:$H2_PORT/echo")
+check_contains "h2 post data" '"key":"val"' "$h2_post"
+
+h2_status=$(curl -sk --http2 -o /dev/null -w "%{http_code}" https://localhost:$H2_PORT/status)
+check "h2 status 201" "201" "$h2_status"
+
+h1_fallback=$(curl -sk --http1.1 https://localhost:$H2_PORT/health)
+check "h1 fallback" '{"status":"ok"}' "$h1_fallback"
+
+h2_multi=$(curl -sk --http2 https://localhost:$H2_PORT/health https://localhost:$H2_PORT/health https://localhost:$H2_PORT/health 2>&1)
+h2_count=$(echo "$h2_multi" | grep -o '"status":"ok"' | wc -l | tr -d ' ')
+check "h2 multiplexing" "3" "$h2_count"
+
+kill $H2_PID 2>/dev/null; wait $H2_PID 2>/dev/null || true
+
 # --- WebSocket tests (WS + WSS) ---
 WS_PORT=19878
 WSS_PORT=19879
