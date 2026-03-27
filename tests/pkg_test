@@ -39,7 +39,7 @@ check_contains() {
     local name="$1"
     local needle="$2"
     local haystack="$3"
-    if echo "$haystack" | grep -q "$needle"; then
+    if printf '%s\n' "$haystack" | grep -qF "$needle"; then
         passed=$((passed + 1))
         echo "  pass  $name"
     else
@@ -82,7 +82,7 @@ check_contains "autoloader has spl_autoload" "spl_autoload_register" "$autoload_
 
 # test: constraint matching resolves correct major version
 lock_content=$(cat zphp.lock)
-check_contains "constraint picked 3.x" '"3\.' "$lock_content"
+check_contains "constraint picked 3.x" '"3.' "$lock_content"
 
 # test: packages command
 pkg_output=$("$ZPHP" packages 2>&1)
