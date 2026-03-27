@@ -1558,6 +1558,16 @@ pub const VM = struct {
                     } else {
                         gop.value_ptr.* = .{ .start = cap_pos, .len = 1, .has_refs = false };
                     }
+                    // closures defined inside class methods inherit class scope
+                    if (std.mem.eql(u8, var_name, "$this") and val == .object) {
+                        try self.captures.append(self.allocator, .{
+                            .closure_name = closure_name,
+                            .var_name = "$__closure_scope",
+                            .value = .{ .string = val.object.class_name },
+                        });
+                        const gop2 = try self.capture_index.getOrPut(self.allocator, closure_name);
+                        gop2.value_ptr.len += 1;
+                    }
                 },
 
                 .closure_bind_ref => {
@@ -2264,17 +2274,30 @@ pub const VM = struct {
                         const closure_name = obj_val.string;
                         if (std.mem.eql(u8, method_name, "bindTo")) {
                             const new_this = if (ac >= 1) self.stack[self.sp - ac] else Value.null;
+                            const bt_scope: ClosureScope = blk: {
+                                if (ac >= 2) {
+                                    const sa = self.stack[self.sp - ac + 1];
+                                    if (sa == .string) {
+                                        if (std.mem.eql(u8, sa.string, "static")) break :blk .preserve;
+                                        break :blk .{ .set = sa.string };
+                                    }
+                                    if (sa == .object) break :blk .{ .set = sa.object.class_name };
+                                    if (sa == .null) break :blk .clear;
+                                }
+                                break :blk .preserve;
+                            };
                             self.sp -= ac + 1;
-                            const result = try self.cloneClosureWithThis(closure_name, new_this);
+                            const result = try self.cloneClosureWithThis(closure_name, new_this, bt_scope);
                             self.push(result);
                             continue;
                         } else if (std.mem.eql(u8, method_name, "call")) {
                             const new_this = if (ac >= 1) self.stack[self.sp - ac] else Value.null;
+                            const call_scope: ClosureScope = if (new_this == .object) .{ .set = new_this.object.class_name } else .preserve;
                             var call_args: [16]Value = undefined;
                             const extra = if (ac > 1) ac - 1 else 0;
                             for (0..extra) |i| call_args[i] = self.stack[self.sp - ac + 1 + i];
                             self.sp -= ac + 1;
-                            const bound = try self.cloneClosureWithThis(closure_name, new_this);
+                            const bound = try self.cloneClosureWithThis(closure_name, new_this, call_scope);
                             if (bound == .string) {
                                 const result = try self.callByName(bound.string, call_args[0..extra]);
                                 self.push(result);
@@ -3529,7 +3552,13 @@ pub const VM = struct {
         }
     }
 
-    pub fn cloneClosureWithThis(self: *VM, closure_name: []const u8, new_this: Value) !Value {
+    pub const ClosureScope = union(enum) {
+        preserve, // keep existing scope ('static' or omitted)
+        clear, // explicitly null - remove scope
+        set: []const u8, // explicit class name
+    };
+
+    pub fn cloneClosureWithThis(self: *VM, closure_name: []const u8, new_this: Value, scope_action: ClosureScope) !Value {
         const func = self.functions.get(closure_name) orelse return .null;
 
         const id = self.closure_instance_count;
@@ -3538,12 +3567,35 @@ pub const VM = struct {
         try self.strings.append(self.allocator, new_name);
         try self.functions.put(self.allocator, new_name, func);
 
-        // copy captures from original, replacing $this
         if (self.capture_index.get(closure_name)) |cr| {
-            const caps = self.captures.items[cr.start .. cr.start + cr.len];
+            // copy source captures to a stack buffer to avoid dangling slice
+            // when self.captures reallocates during append
+            var src_buf: [32]CaptureEntry = undefined;
+            const src_len = cr.len;
+            for (0..src_len) |i| src_buf[i] = self.captures.items[cr.start + i];
+            const src = src_buf[0..src_len];
+
             const new_start: u32 = @intCast(self.captures.items.len);
             var has_this = false;
-            for (caps) |cap| {
+            var has_scope = false;
+            for (src) |cap| {
+                if (std.mem.eql(u8, cap.var_name, "$__closure_scope")) {
+                    has_scope = true;
+                    switch (scope_action) {
+                        .preserve => try self.captures.append(self.allocator, .{
+                            .closure_name = new_name,
+                            .var_name = "$__closure_scope",
+                            .value = cap.value,
+                        }),
+                        .clear => {},
+                        .set => |s| try self.captures.append(self.allocator, .{
+                            .closure_name = new_name,
+                            .var_name = "$__closure_scope",
+                            .value = .{ .string = s },
+                        }),
+                    }
+                    continue;
+                }
                 var new_cap = CaptureEntry{
                     .closure_name = new_name,
                     .var_name = cap.var_name,
@@ -3557,7 +3609,6 @@ pub const VM = struct {
                 }
                 try self.captures.append(self.allocator, new_cap);
             }
-            // if original had no $this capture but caller wants one, add it
             if (!has_this and new_this != .null) {
                 try self.captures.append(self.allocator, .{
                     .closure_name = new_name,
@@ -3565,17 +3616,39 @@ pub const VM = struct {
                     .value = new_this,
                 });
             }
+            if (!has_scope) {
+                switch (scope_action) {
+                    .set => |s| try self.captures.append(self.allocator, .{
+                        .closure_name = new_name,
+                        .var_name = "$__closure_scope",
+                        .value = .{ .string = s },
+                    }),
+                    .preserve, .clear => {},
+                }
+            }
             const new_len: u16 = @intCast(self.captures.items.len - new_start);
             try self.capture_index.put(self.allocator, new_name, .{ .start = new_start, .len = new_len, .has_refs = cr.has_refs });
-        } else if (new_this != .null) {
-            // no captures at all on original, just add $this
+        } else {
             const new_start: u32 = @intCast(self.captures.items.len);
-            try self.captures.append(self.allocator, .{
-                .closure_name = new_name,
-                .var_name = "$this",
-                .value = new_this,
-            });
-            try self.capture_index.put(self.allocator, new_name, .{ .start = new_start, .len = 1, .has_refs = false });
+            if (new_this != .null) {
+                try self.captures.append(self.allocator, .{
+                    .closure_name = new_name,
+                    .var_name = "$this",
+                    .value = new_this,
+                });
+            }
+            switch (scope_action) {
+                .set => |s| try self.captures.append(self.allocator, .{
+                    .closure_name = new_name,
+                    .var_name = "$__closure_scope",
+                    .value = .{ .string = s },
+                }),
+                .preserve, .clear => {},
+            }
+            const cap_len = self.captures.items.len - new_start;
+            if (cap_len > 0) {
+                try self.capture_index.put(self.allocator, new_name, .{ .start = new_start, .len = @intCast(cap_len), .has_refs = false });
+            }
         }
 
         return .{ .string = new_name };
@@ -4866,7 +4939,32 @@ pub const VM = struct {
         return false;
     }
 
+    fn closureScopeForFrame(self: *VM, frame: *const CallFrame) ?[]const u8 {
+        const frame_chunk_ptr = frame.chunk;
+        var iter = self.functions.iterator();
+        while (iter.next()) |entry| {
+            if (frame_chunk_ptr == &entry.value_ptr.*.chunk) {
+                const name = entry.key_ptr.*;
+                if (std.mem.startsWith(u8, name, "__closure_")) {
+                    if (self.capture_index.get(name)) |cr| {
+                        const caps = self.captures.items[cr.start .. cr.start + cr.len];
+                        for (caps) |cap| {
+                            if (std.mem.eql(u8, cap.var_name, "$__closure_scope") and cap.value == .string)
+                                return cap.value.string;
+                        }
+                    }
+                }
+            }
+        }
+        return null;
+    }
+
     fn currentDefiningClass(self: *VM) ?[]const u8 {
+        // bound closure scope takes priority over frame walk
+        if (self.frame_count > 0) {
+            if (self.closureScopeForFrame(&self.frames[self.frame_count - 1])) |scope|
+                return scope;
+        }
         // walk the call stack from current frame upward to find enclosing class method
         // closures inside methods need the enclosing method's class for visibility checks
         var fi: usize = self.frame_count;
@@ -5080,6 +5178,7 @@ pub const VM = struct {
         if (self.getCaptureRange(name)) |cr| {
             const caps = self.captures.items[cr.start .. cr.start + cr.len];
             for (caps) |cap| {
+                if (std.mem.eql(u8, cap.var_name, "$__closure_scope")) continue;
                 if (cap.ref_cell) |cell| {
                     if (ref_slots) |rs| try rs.put(self.allocator, cap.var_name, cell);
                 } else {

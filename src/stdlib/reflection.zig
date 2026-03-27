@@ -697,7 +697,22 @@ fn closureBind(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     const closure = args[0];
     if (closure != .string or !std.mem.startsWith(u8, closure.string, "__closure_")) return .null;
     const new_this = if (args.len >= 2) args[1] else Value.null;
-    return ctx.vm.cloneClosureWithThis(closure.string, new_this);
+    const scope = resolveScope(args);
+    return ctx.vm.cloneClosureWithThis(closure.string, new_this, scope);
+}
+
+fn resolveScope(args: []const Value) VM.ClosureScope {
+    if (args.len >= 3) {
+        const scope_arg = args[2];
+        if (scope_arg == .null) return .clear;
+        if (scope_arg == .string) {
+            if (std.mem.eql(u8, scope_arg.string, "static")) return .preserve;
+            return .{ .set = scope_arg.string };
+        }
+        if (scope_arg == .object) return .{ .set = scope_arg.object.class_name };
+        return .clear;
+    }
+    return .preserve;
 }
 
 fn closureFromCallable(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
