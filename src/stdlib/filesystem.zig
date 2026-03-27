@@ -49,6 +49,9 @@ pub const entries = .{
     .{ "flock", native_flock },
     .{ "fgetcsv", native_fgetcsv },
     .{ "fputcsv", native_fputcsv },
+    .{ "stream_get_meta_data", stream_get_meta_data },
+    .{ "fstat", native_fstat },
+    .{ "stream_get_contents", stream_get_contents },
     .{ "touch", native_touch },
     .{ "chmod", native_chmod },
     .{ "stat", native_stat },
@@ -561,6 +564,45 @@ fn native_flock(_: *NativeContext, args: []const Value) RuntimeError!Value {
     const op: i32 = @intCast(args[1].int & 0xff);
     std.posix.flock(file.handle, op) catch return Value{ .bool = false };
     return .{ .bool = true };
+}
+
+fn stream_get_meta_data(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len == 0 or args[0] != .object) return .{ .bool = false };
+    const obj = args[0].object;
+    const mode_val = obj.get("__mode");
+    const mode = if (mode_val == .string) mode_val.string else "r";
+    const result = try ctx.createArray();
+    try result.set(ctx.allocator, .{ .string = "timed_out" }, .{ .bool = false });
+    try result.set(ctx.allocator, .{ .string = "blocked" }, .{ .bool = true });
+    try result.set(ctx.allocator, .{ .string = "eof" }, .{ .bool = false });
+    try result.set(ctx.allocator, .{ .string = "stream_type" }, .{ .string = "STDIO" });
+    try result.set(ctx.allocator, .{ .string = "mode" }, .{ .string = mode });
+    try result.set(ctx.allocator, .{ .string = "unread_bytes" }, .{ .int = 0 });
+    try result.set(ctx.allocator, .{ .string = "seekable" }, .{ .bool = true });
+    try result.set(ctx.allocator, .{ .string = "uri" }, .{ .string = "" });
+    return .{ .array = result };
+}
+
+fn stream_get_contents(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len == 0 or args[0] != .object) return .{ .bool = false };
+    const file = getFileHandle(args[0].object) orelse return Value{ .bool = false };
+    const buf = file.readToEndAlloc(ctx.allocator, 10 * 1024 * 1024) catch return Value{ .bool = false };
+    try ctx.strings.append(ctx.allocator, buf);
+    return .{ .string = buf };
+}
+
+fn native_fstat(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len == 0 or args[0] != .object) return .{ .bool = false };
+    const file = getFileHandle(args[0].object) orelse return Value{ .bool = false };
+    const stat = std.posix.fstat(file.handle) catch return Value{ .bool = false };
+    const result = try ctx.createArray();
+    const mode: i64 = @intCast(stat.mode);
+    const size: i64 = @intCast(stat.size);
+    try result.set(ctx.allocator, .{ .string = "mode" }, .{ .int = mode });
+    try result.set(ctx.allocator, .{ .string = "size" }, .{ .int = size });
+    try result.set(ctx.allocator, .{ .int = 2 }, .{ .int = mode });
+    try result.set(ctx.allocator, .{ .int = 7 }, .{ .int = size });
+    return .{ .array = result };
 }
 
 fn native_fgetcsv(ctx: *NativeContext, args: []const Value) RuntimeError!Value {

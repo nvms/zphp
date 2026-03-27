@@ -63,34 +63,68 @@ pub const NativeContext = struct {
         if (vm.frame_count == 0) return;
         const caller = &vm.frames[vm.frame_count - 1];
         const chunk = caller.chunk;
-        // ip points past the call instruction (opcode + u16 name + u8 argc = 4 bytes)
         if (caller.ip < 4) return;
-        var scan_pos = caller.ip - 4;
-        var arg_vars: [16]?[]const u8 = .{null} ** 16;
-        var scan_idx: usize = arg_count;
-        while (scan_idx > 0 and scan_pos >= 3) {
-            scan_idx -= 1;
-            if (chunk.code.items[scan_pos - 3] == @intFromEnum(OpCode.get_var)) {
-                const hi = chunk.code.items[scan_pos - 2];
-                const lo = chunk.code.items[scan_pos - 1];
-                const const_idx = (@as(u16, hi) << 8) | lo;
-                if (const_idx < chunk.constants.items.len) {
-                    arg_vars[scan_idx] = chunk.constants.items[const_idx].string;
-                }
-                scan_pos -= 3;
-            } else if (chunk.code.items[scan_pos - 3] == @intFromEnum(OpCode.get_local)) {
-                const hi = chunk.code.items[scan_pos - 2];
-                const lo = chunk.code.items[scan_pos - 1];
-                const slot = (@as(u16, hi) << 8) | lo;
-                const sn = if (caller.func) |func| func.slot_names else vm.global_slot_names;
-                if (slot < sn.len) {
-                    arg_vars[scan_idx] = sn[slot];
-                }
-                scan_pos -= 3;
-            } else {
+        const call_pos = caller.ip - 4;
+        const code = chunk.code.items;
+
+        // forward-scan to find instruction boundaries leading to the call
+        // argument expressions don't contain variable-length instructions
+        const max_scan = arg_count * 12;
+        const region_start = if (call_pos > max_scan) call_pos - max_scan else 0;
+
+        // try alignments until forward scan lands exactly on call_pos
+        var instrs: [128]usize = undefined;
+        var instr_count: usize = 0;
+        var try_start = region_start;
+        while (try_start < call_pos) : (try_start += 1) {
+            var pos = try_start;
+            var count: usize = 0;
+            while (pos < call_pos and count < 128) {
+                instrs[count] = pos;
+                count += 1;
+                pos += OpCode.widthFromByte(code[pos]);
+            }
+            if (pos == call_pos) {
+                instr_count = count;
                 break;
             }
         }
+        if (instr_count == 0) return;
+
+        // walk backward through instructions using stack simulation to group into args
+        var arg_vars: [16]?[]const u8 = .{null} ** 16;
+        var scan_idx: usize = arg_count;
+        var i = instr_count;
+
+        while (scan_idx > 0 and i > 0) {
+            scan_idx -= 1;
+            var depth: i32 = 0;
+            const arg_end = i;
+            while (i > 0 and depth < 1) {
+                i -= 1;
+                const op: OpCode = @enumFromInt(code[instrs[i]]);
+                depth += @as(i32, op.stackEffect());
+            }
+            if (depth < 1) break;
+
+            // single-instruction variable arg: exactly one instruction that's get_var/get_local
+            if (arg_end - i == 1) {
+                const ip = instrs[i];
+                if (code[ip] == @intFromEnum(OpCode.get_var)) {
+                    const const_idx = (@as(u16, code[ip + 1]) << 8) | code[ip + 2];
+                    if (const_idx < chunk.constants.items.len) {
+                        arg_vars[scan_idx] = chunk.constants.items[const_idx].string;
+                    }
+                } else if (code[ip] == @intFromEnum(OpCode.get_local)) {
+                    const slot = (@as(u16, code[ip + 1]) << 8) | code[ip + 2];
+                    const sn = if (caller.func) |func| func.slot_names else vm.global_slot_names;
+                    if (slot < sn.len) {
+                        arg_vars[scan_idx] = sn[slot];
+                    }
+                }
+            }
+        }
+
         if (arg_vars[arg_index]) |var_name| {
             caller.vars.put(vm.allocator, var_name, value) catch return;
             const sn2 = if (caller.func) |func| func.slot_names else vm.global_slot_names;
@@ -393,6 +427,9 @@ pub const VM = struct {
         try c.put(a, "PHP_URL_FRAGMENT", .{ .int = 7 });
         try c.put(a, "PASSWORD_DEFAULT", .{ .int = 1 });
         try c.put(a, "PASSWORD_BCRYPT", .{ .int = 1 });
+        try c.put(a, "PREG_PATTERN_ORDER", .{ .int = 1 });
+        try c.put(a, "PREG_SET_ORDER", .{ .int = 2 });
+        try c.put(a, "PREG_OFFSET_CAPTURE", .{ .int = 256 });
         try c.put(a, "PREG_SPLIT_DELIM_CAPTURE", .{ .int = 2 });
         try c.put(a, "PREG_SPLIT_NO_EMPTY", .{ .int = 1 });
         try c.put(a, "LOCK_SH", .{ .int = 1 });
@@ -4970,6 +5007,18 @@ pub const VM = struct {
             arr.* = .{};
             try self.arrays.append(self.allocator, arr);
             return .{ .array = arr };
+        }
+        if (val == .string) {
+            const s = val.string;
+            // deferred class constant: "\x00CC\x00ClassName\x00CONST_NAME"
+            if (s.len > 4 and s[0] == 0 and s[1] == 'C' and s[2] == 'C' and s[3] == 0) {
+                const rest = s[4..];
+                if (std.mem.indexOfScalar(u8, rest, 0)) |sep| {
+                    const class_name = rest[0..sep];
+                    const const_name = rest[sep + 1 ..];
+                    return self.getStaticProp(class_name, const_name) orelse .null;
+                }
+            }
         }
         return val;
     }

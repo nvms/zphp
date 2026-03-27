@@ -386,6 +386,7 @@ pub const Compiler = struct {
                     const prop_idx = try self.addConstant(.{ .string = prop_name });
                     try self.emitOp(.set_prop);
                     try self.emitU16(prop_idx);
+                    try self.emitOp(.pop);
                 } else {
                     const name = self.ast.tokenSlice(slot_node.main_token);
                     try self.emitSetVar(name);
@@ -463,6 +464,29 @@ pub const Compiler = struct {
                 break :blk .null;
             },
             .array_literal => Value.empty_array_default,
+            .static_prop_access => blk: {
+                const class_node = self.ast.nodes[n.data.lhs];
+                var class_name = self.ast.tokenSlice(class_node.main_token);
+                class_name = self.resolveClassName(class_name);
+                var prop_name = self.ast.tokenSlice(n.main_token);
+                if (prop_name.len > 0 and prop_name[0] == '$') prop_name = prop_name[1..];
+                // encode as deferred sentinel: "\x00CC\x00ClassName\x00CONST_NAME"
+                const sentinel = std.fmt.allocPrint(self.allocator, "\x00CC\x00{s}\x00{s}", .{ class_name, prop_name }) catch break :blk Value.null;
+                self.string_allocs.append(self.allocator, sentinel) catch break :blk Value.null;
+                break :blk .{ .string = sentinel };
+            },
+            .identifier => blk: {
+                const name = self.ast.tokenSlice(n.main_token);
+                // handle built-in constants used as defaults
+                if (std.mem.eql(u8, name, "true") or std.mem.eql(u8, name, "TRUE")) break :blk Value{ .bool = true };
+                if (std.mem.eql(u8, name, "false") or std.mem.eql(u8, name, "FALSE")) break :blk Value{ .bool = false };
+                if (std.mem.eql(u8, name, "null") or std.mem.eql(u8, name, "NULL")) break :blk Value.null;
+                // treat as a constant name (sentinel for runtime resolution)
+                const resolved = self.resolveClassName(name);
+                const sentinel = std.fmt.allocPrint(self.allocator, "\x00CC\x00\x00{s}", .{resolved}) catch break :blk Value.null;
+                self.string_allocs.append(self.allocator, sentinel) catch break :blk Value.null;
+                break :blk .{ .string = sentinel };
+            },
             else => .null,
         };
     }

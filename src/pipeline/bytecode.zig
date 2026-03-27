@@ -148,6 +148,54 @@ pub const OpCode = enum(u8) {
     sub_local_to_local, // u16: src slot, u16: dst slot - locals[dst] -= locals[src], no stack effect
     mul_local_to_local, // u16: src slot, u16: dst slot - locals[dst] *= locals[src], no stack effect
     less_local_local_jif, // u16: slot_a, u16: slot_b, u16: jump offset - if !(locals[a] < locals[b]) jump
+
+    pub fn width(self: OpCode) usize {
+        return switch (self) {
+            .constant, .get_var, .set_var, .jump, .jump_back, .jump_if_false, .jump_if_true,
+            .jump_if_not_null, .push_handler, .get_prop, .set_prop, .get_local, .set_local,
+            .get_global, .concat_assign, .unset_var, .unset_prop, .isset_prop,
+            .closure_bind, .closure_bind_ref, .define_const,
+            .iter_check, .inc_local, .dec_local, .trait_decl,
+            => 3,
+            .call, .call_spread, .new_obj, .method_call, .method_call_spread => 4,
+            .get_static_prop, .set_static_prop, .get_static, .set_static,
+            .static_call_spread, .add_local_to_local, .sub_local_to_local, .mul_local_to_local,
+            => 5,
+            .static_call => 6,
+            .less_local_local_jif => 7,
+            .require, .call_indirect, .call_indirect_spread => 2,
+            .class_decl, .interface_decl, .enum_decl => 1,
+            else => 1,
+        };
+    }
+
+    pub fn widthFromByte(b: u8) usize {
+        const op: OpCode = std.meta.intToEnum(OpCode, b) catch return 1;
+        return op.width();
+    }
+
+    // net stack effect: +1 = pushes a value, 0 = neutral, -1 = consumes one net
+    pub fn stackEffect(self: OpCode) i8 {
+        return switch (self) {
+            // push a value
+            .constant, .op_null, .op_true, .op_false, .dup, .get_var, .get_local,
+            .get_global, .get_static, .get_prop, .get_prop_dynamic,
+            .get_static_prop, .array_new, .clone_obj, .isset_prop, .isset_index,
+            => 1,
+            // binary ops: pop 2, push 1
+            .add, .subtract, .multiply, .divide, .modulo, .power, .concat,
+            .bit_and, .bit_or, .bit_xor, .shift_left, .shift_right,
+            .equal, .not_equal, .identical, .not_identical,
+            .less, .less_equal, .greater, .greater_equal, .spaceship,
+            .instance_check,
+            => -1,
+            // unary ops: pop 1, push 1
+            .negate, .bit_not, .not, .cast_int, .cast_float, .cast_string,
+            .cast_bool, .cast_array,
+            => 0,
+            else => 0,
+        };
+    }
 };
 
 

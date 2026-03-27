@@ -473,6 +473,7 @@ fn array_chunk(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len < 2 or args[0] != .array) return .null;
     const src = args[0].array;
     const size: usize = @intCast(@max(1, Value.toInt(args[1])));
+    const preserve_keys = args.len >= 3 and Value.isTruthy(args[2]);
 
     var result = try ctx.createArray();
     var i: usize = 0;
@@ -480,7 +481,11 @@ fn array_chunk(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
         var chunk = try ctx.createArray();
         const end = @min(i + size, src.entries.items.len);
         for (src.entries.items[i..end]) |entry| {
-            try chunk.append(ctx.allocator, entry.value);
+            if (preserve_keys) {
+                try chunk.set(ctx.allocator, entry.key, entry.value);
+            } else {
+                try chunk.append(ctx.allocator, entry.value);
+            }
         }
         try result.append(ctx.allocator, .{ .array = chunk });
         i = end;

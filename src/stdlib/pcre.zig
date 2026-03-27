@@ -206,6 +206,10 @@ fn preg_match_all(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     const info = parsePattern(args[0].string) orelse return Value{ .int = 0 };
     const subject = args[1].string;
 
+    const flags: u32 = if (args.len >= 4) @intCast(@max(0, Value.toInt(args[3]))) else 0;
+    const set_order = (flags & 2) != 0; // PREG_SET_ORDER
+    const offset_capture = (flags & 256) != 0; // PREG_OFFSET_CAPTURE
+
     const code = compilePattern(info.pattern, info.flags) orelse return Value{ .int = 0 };
     defer pcre2.pcre2_code_free_8(code);
 
@@ -216,12 +220,19 @@ fn preg_match_all(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     _ = pcre2.pcre2_pattern_info_8(code, pcre2.INFO_CAPTURECOUNT, @ptrCast(&capture_count));
     const group_count: usize = capture_count + 1;
 
-    var group_arrays = std.ArrayListUnmanaged(*PhpArray){};
-    for (0..group_count) |_| {
-        const arr = try ctx.createArray();
-        try group_arrays.append(ctx.allocator, arr);
+    const out = if (args.len >= 3 and args[2] == .array) args[2].array else try ctx.createArray();
+    out.entries.items.len = 0;
+    out.next_int_key = 0;
+
+    var group_arrays: ?std.ArrayListUnmanaged(*PhpArray) = null;
+    if (!set_order) {
+        var ga = std.ArrayListUnmanaged(*PhpArray){};
+        for (0..group_count) |_| {
+            try ga.append(ctx.allocator, try ctx.createArray());
+        }
+        group_arrays = ga;
     }
-    defer group_arrays.deinit(ctx.allocator);
+    defer if (group_arrays) |*ga| ga.deinit(ctx.allocator);
 
     var total_matches: i64 = 0;
     var offset: usize = 0;
@@ -233,17 +244,29 @@ fn preg_match_all(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
         const ovector = pcre2.pcre2_get_ovector_pointer_8(match_data);
         const count: usize = @intCast(rc);
 
-        for (0..group_count) |i| {
-            if (i < count) {
-                const start = ovector[i * 2];
-                const end = ovector[i * 2 + 1];
-                if (start == pcre2.UNSET or end == pcre2.UNSET) {
-                    try group_arrays.items[i].append(ctx.allocator, .{ .string = "" });
-                } else {
-                    try group_arrays.items[i].append(ctx.allocator, .{ .string = try ctx.createString(subject[start..end]) });
+        if (set_order) {
+            const match_arr = try ctx.createArray();
+            // find last matched group (PHP omits trailing unmatched groups in SET_ORDER)
+            var last_matched: usize = 0;
+            for (0..group_count) |i| {
+                if (i < count) {
+                    const s = ovector[i * 2];
+                    const e = ovector[i * 2 + 1];
+                    if (s != pcre2.UNSET and e != pcre2.UNSET) {
+                        last_matched = i;
+                    }
                 }
-            } else {
-                try group_arrays.items[i].append(ctx.allocator, .{ .string = "" });
+            }
+            for (0..last_matched + 1) |i| {
+                const val = try matchGroupValue(ctx, subject, ovector, count, i, offset_capture);
+                try match_arr.append(ctx.allocator, val);
+            }
+            try addNamedGroupsToMatch(ctx, match_arr, code, ovector, subject, count, offset_capture);
+            try out.append(ctx.allocator, .{ .array = match_arr });
+        } else {
+            for (0..group_count) |i| {
+                const val = try matchGroupValue(ctx, subject, ovector, count, i, offset_capture);
+                try group_arrays.?.items[i].append(ctx.allocator, val);
             }
         }
 
@@ -256,19 +279,67 @@ fn preg_match_all(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
         }
     }
 
-    if (args.len >= 3) {
-        const out = if (args[2] == .array) args[2].array else try ctx.createArray();
-        out.entries.items.len = 0;
-        out.next_int_key = 0;
-        for (group_arrays.items) |arr| {
+    if (!set_order) {
+        for (group_arrays.?.items) |arr| {
             try out.append(ctx.allocator, .{ .array = arr });
-        }
-        if (args[2] != .array) {
-            ctx.setCallerVar(2, args.len, .{ .array = out });
         }
     }
 
+    if (args.len >= 3 and args[2] != .array) {
+        ctx.setCallerVar(2, args.len, .{ .array = out });
+    }
+
     return .{ .int = total_matches };
+}
+
+fn matchGroupValue(ctx: *NativeContext, subject: []const u8, ovector: [*]usize, count: usize, i: usize, offset_capture: bool) RuntimeError!Value {
+    if (i < count) {
+        const start = ovector[i * 2];
+        const end = ovector[i * 2 + 1];
+        if (start == pcre2.UNSET or end == pcre2.UNSET) {
+            return if (offset_capture) try makeOffsetPair(ctx, "", -1) else Value{ .string = "" };
+        }
+        const str = try ctx.createString(subject[start..end]);
+        return if (offset_capture) try makeOffsetPair(ctx, str, @intCast(start)) else Value{ .string = str };
+    }
+    return if (offset_capture) try makeOffsetPair(ctx, "", -1) else Value{ .string = "" };
+}
+
+fn makeOffsetPair(ctx: *NativeContext, str: []const u8, offset: i64) RuntimeError!Value {
+    const pair = try ctx.createArray();
+    try pair.append(ctx.allocator, .{ .string = str });
+    try pair.append(ctx.allocator, .{ .int = offset });
+    return Value{ .array = pair };
+}
+
+fn addNamedGroupsToMatch(ctx: *NativeContext, arr: *PhpArray, code: *pcre2.Code, ovector: [*]usize, subject: []const u8, count: usize, offset_capture: bool) !void {
+    var name_count: u32 = 0;
+    _ = pcre2.pcre2_pattern_info_8(code, pcre2.INFO_NAMECOUNT, @ptrCast(&name_count));
+    if (name_count == 0) return;
+    var name_entry_size: u32 = 0;
+    _ = pcre2.pcre2_pattern_info_8(code, pcre2.INFO_NAMEENTRYSIZE, @ptrCast(&name_entry_size));
+    if (name_entry_size == 0) return;
+
+    var name_table: [*]const u8 = undefined;
+    _ = pcre2.pcre2_pattern_info_8(code, pcre2.INFO_NAMETABLE, @ptrCast(&name_table));
+
+    for (0..name_count) |i| {
+        const entry = name_table + i * name_entry_size;
+        const group_num = (@as(usize, entry[0]) << 8) | @as(usize, entry[1]);
+        const name_end = std.mem.indexOfScalar(u8, entry[2..name_entry_size], 0) orelse (name_entry_size - 2);
+        const name = entry[2 .. 2 + name_end];
+        if (group_num < count) {
+            const start = ovector[group_num * 2];
+            const end = ovector[group_num * 2 + 1];
+            const val: Value = if (start == pcre2.UNSET or end == pcre2.UNSET) blk: {
+                break :blk if (offset_capture) try makeOffsetPair(ctx, "", -1) else Value{ .string = "" };
+            } else blk: {
+                const s = try ctx.createString(subject[start..end]);
+                break :blk if (offset_capture) try makeOffsetPair(ctx, s, @intCast(start)) else Value{ .string = s };
+            };
+            try arr.set(ctx.allocator, .{ .string = try ctx.createString(name) }, val);
+        }
+    }
 }
 
 fn preg_replace(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
