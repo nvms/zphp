@@ -4,7 +4,13 @@
 //   scandir, file, fopen, fclose, fwrite, fread, fgets, feof, fseek, ftell,
 //   rewind, ftruncate, filesize, tempnam, sys_get_temp_dir
 
-$tmp = sys_get_temp_dir() . '/zphp_file_io_test_' . time();
+$tmp = sys_get_temp_dir() . '/zphp_file_io_test';
+
+// clean up from any prior run
+if (file_exists($tmp)) {
+    foreach (glob("$tmp/*") as $f) { unlink($f); }
+    rmdir($tmp);
+}
 
 // --- directory operations ---
 
