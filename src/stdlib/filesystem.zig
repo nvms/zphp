@@ -646,10 +646,9 @@ fn native_fputcsv(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
             else => "",
         };
 
-        // check if quoting is needed
         var needs_quote = false;
         for (val) |c| {
-            if (c == delimiter or c == enclosure or c == '\n' or c == '\r') {
+            if (c == delimiter or c == enclosure or c == '\n' or c == '\r' or c == ' ' or c == '\t') {
                 needs_quote = true;
                 break;
             }

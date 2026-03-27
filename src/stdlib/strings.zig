@@ -88,6 +88,7 @@ pub const entries = .{
     .{ "count_chars", native_count_chars },
     .{ "str_increment", native_str_increment },
     .{ "str_decrement", native_str_decrement },
+    .{ "substr_compare", native_substr_compare },
 };
 
 fn substr(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
@@ -2499,4 +2500,44 @@ fn native_str_decrement(ctx: *NativeContext, args: []const Value) RuntimeError!V
     const r2 = buf3[start..];
     try ctx.strings.append(ctx.allocator, buf3);
     return .{ .string = r2 };
+}
+
+fn native_substr_compare(_: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len < 3 or args[0] != .string or args[1] != .string) return .{ .bool = false };
+    const haystack = args[0].string;
+    const needle = args[1].string;
+    var offset: i64 = Value.toInt(args[2]);
+    const length: ?usize = if (args.len >= 4 and args[3] != .null)
+        @intCast(@max(Value.toInt(args[3]), 0))
+    else
+        null;
+    const case_insensitive = args.len >= 5 and args[4].isTruthy();
+
+    if (offset < 0) {
+        offset = @as(i64, @intCast(haystack.len)) + offset;
+        if (offset < 0) offset = 0;
+    }
+    const off: usize = @intCast(offset);
+    if (off > haystack.len) return .{ .bool = false };
+
+    const hay_sub = haystack[off..];
+    const hay_len = if (length) |l| @min(l, hay_sub.len) else hay_sub.len;
+    const ndl_len = if (length) |l| @min(l, needle.len) else needle.len;
+    const cmp_len = @min(hay_len, ndl_len);
+
+    var i: usize = 0;
+    while (i < cmp_len) : (i += 1) {
+        var a = hay_sub[i];
+        var b = needle[i];
+        if (case_insensitive) {
+            a = std.ascii.toLower(a);
+            b = std.ascii.toLower(b);
+        }
+        if (a < b) return .{ .int = -1 };
+        if (a > b) return .{ .int = 1 };
+    }
+
+    if (hay_len < ndl_len) return .{ .int = -1 };
+    if (hay_len > ndl_len) return .{ .int = 1 };
+    return .{ .int = 0 };
 }

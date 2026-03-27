@@ -12,6 +12,7 @@ pub const entries = .{
     .{ "hash", native_hash },
     .{ "hash_hmac", native_hash_hmac },
     .{ "hash_algos", native_hash_algos },
+    .{ "hash_equals", native_hash_equals },
 };
 
 fn native_password_hash(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
@@ -214,4 +215,14 @@ fn native_hash_algos(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
         try arr.append(ctx.allocator, .{ .string = name });
     }
     return .{ .array = arr };
+}
+
+fn native_hash_equals(_: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len < 2 or args[0] != .string or args[1] != .string) return .{ .bool = false };
+    const known = args[0].string;
+    const user = args[1].string;
+    if (known.len != user.len) return .{ .bool = false };
+    var result: u8 = 0;
+    for (known, user) |a, b| result |= a ^ b;
+    return .{ .bool = result == 0 };
 }

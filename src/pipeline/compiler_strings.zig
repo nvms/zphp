@@ -381,21 +381,120 @@ pub fn processEscapes(allocator: Allocator, s: []const u8) ![]const u8 {
     while (i < s.len) {
         if (s[i] == '\\' and i + 1 < s.len) {
             switch (s[i + 1]) {
-                'n' => try buf.append(allocator, '\n'),
-                'r' => try buf.append(allocator, '\r'),
-                't' => try buf.append(allocator, '\t'),
-                'v' => try buf.append(allocator, 0x0b),
-                'e' => try buf.append(allocator, 0x1b),
-                'f' => try buf.append(allocator, 0x0c),
-                '\\' => try buf.append(allocator, '\\'),
-                '$' => try buf.append(allocator, '$'),
-                '"' => try buf.append(allocator, '"'),
+                'n' => {
+                    try buf.append(allocator, '\n');
+                    i += 2;
+                },
+                'r' => {
+                    try buf.append(allocator, '\r');
+                    i += 2;
+                },
+                't' => {
+                    try buf.append(allocator, '\t');
+                    i += 2;
+                },
+                'v' => {
+                    try buf.append(allocator, 0x0b);
+                    i += 2;
+                },
+                'e' => {
+                    try buf.append(allocator, 0x1b);
+                    i += 2;
+                },
+                'f' => {
+                    try buf.append(allocator, 0x0c);
+                    i += 2;
+                },
+                '\\' => {
+                    try buf.append(allocator, '\\');
+                    i += 2;
+                },
+                '$' => {
+                    try buf.append(allocator, '$');
+                    i += 2;
+                },
+                '"' => {
+                    try buf.append(allocator, '"');
+                    i += 2;
+                },
+                'x' => {
+                    // \xNN hex escape
+                    var val: u8 = 0;
+                    var consumed: usize = 2;
+                    var digits: usize = 0;
+                    while (digits < 2 and i + 2 + digits < s.len) : (digits += 1) {
+                        const c = s[i + 2 + digits];
+                        const d: u8 = if (c >= '0' and c <= '9') c - '0'
+                            else if (c >= 'a' and c <= 'f') c - 'a' + 10
+                            else if (c >= 'A' and c <= 'F') c - 'A' + 10
+                            else break;
+                        val = val * 16 + d;
+                        consumed += 1;
+                    }
+                    if (digits > 0) {
+                        try buf.append(allocator, val);
+                        i += consumed;
+                    } else {
+                        try buf.append(allocator, '\\');
+                        try buf.append(allocator, 'x');
+                        i += 2;
+                    }
+                },
+                '0'...'7' => {
+                    // \NNN octal escape (up to 3 digits)
+                    var val: u8 = 0;
+                    var consumed: usize = 1;
+                    var digits: usize = 0;
+                    while (digits < 3 and i + 1 + digits < s.len) : (digits += 1) {
+                        const c = s[i + 1 + digits];
+                        if (c < '0' or c > '7') break;
+                        const new_val = @as(u16, val) * 8 + (c - '0');
+                        if (new_val > 255) break;
+                        val = @intCast(new_val);
+                        consumed += 1;
+                    }
+                    try buf.append(allocator, val);
+                    i += consumed;
+                },
+                'u' => {
+                    // \u{NNNN} unicode escape
+                    if (i + 3 < s.len and s[i + 2] == '{') {
+                        var end = i + 3;
+                        while (end < s.len and s[end] != '}') end += 1;
+                        if (end < s.len) {
+                            const hex_str = s[i + 3 .. end];
+                            const cp = std.fmt.parseInt(u21, hex_str, 16) catch {
+                                try buf.append(allocator, '\\');
+                                try buf.append(allocator, 'u');
+                                i += 2;
+                                continue;
+                            };
+                            var utf8_buf: [4]u8 = undefined;
+                            const utf8_len = std.unicode.utf8Encode(cp, &utf8_buf) catch {
+                                try buf.append(allocator, '\\');
+                                try buf.append(allocator, 'u');
+                                i += 2;
+                                continue;
+                            };
+                            try buf.appendSlice(allocator, utf8_buf[0..utf8_len]);
+                            i = end + 1;
+                        } else {
+                            try buf.append(allocator, '\\');
+                            try buf.append(allocator, 'u');
+                            i += 2;
+                        }
+                    } else {
+                        try buf.append(allocator, '\\');
+                        try buf.append(allocator, 'u');
+                        i += 2;
+                    }
+                },
                 else => {
                     try buf.append(allocator, '\\');
                     try buf.append(allocator, s[i + 1]);
+                    i += 2;
                 },
             }
-            i += 2;
         } else {
             try buf.append(allocator, s[i]);
             i += 1;

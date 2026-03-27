@@ -833,24 +833,41 @@ fn needsVarSync(chunk: *const Chunk) bool {
     var i: usize = 0;
     const code = chunk.code.items;
     while (i < code.len) {
-        if (i >= code.len) break;
         const b = code[i];
         if (b == @intFromEnum(OpCode.concat_assign) or b == @intFromEnum(OpCode.get_global) or b == @intFromEnum(OpCode.get_static) or b == @intFromEnum(OpCode.closure_bind) or b == @intFromEnum(OpCode.closure_bind_ref))
             return true;
-        // skip operands based on opcode
-        const op: OpCode = @enumFromInt(b);
-        i += switch (op) {
-            .constant, .get_var, .set_var, .jump, .jump_back, .jump_if_false, .jump_if_true,
-            .jump_if_not_null, .push_handler, .get_prop, .set_prop, .get_local, .set_local,
-            .get_global, .concat_assign, .unset_var, .unset_prop, .isset_prop,
-            .closure_bind, .closure_bind_ref, .define_const, .get_static_prop, .set_static_prop,
-            => 3,
-            .call, .call_spread, .new_obj, .method_call, .method_call_spread => 4,
-            .static_call => 6,
-            .static_call_spread, .get_static, .set_static => 5,
-            .require, .call_indirect, .call_indirect_spread => 2,
-            else => 1,
-        };
+        i += opcodeWidth(b);
     }
     return false;
+}
+
+fn opcodeWidth(b: u8) usize {
+    const op: OpCode = @enumFromInt(b);
+    return switch (op) {
+        // 1 + u16 = 3 bytes
+        .constant, .get_var, .set_var, .jump, .jump_back, .jump_if_false, .jump_if_true,
+        .jump_if_not_null, .push_handler, .get_prop, .set_prop, .get_local, .set_local,
+        .get_global, .concat_assign, .unset_var, .unset_prop, .isset_prop,
+        .closure_bind, .closure_bind_ref, .define_const,
+        .iter_check, .inc_local, .dec_local, .trait_decl,
+        => 3,
+        // 1 + u16 + u8 = 4 bytes
+        .call, .call_spread, .new_obj, .method_call, .method_call_spread => 4,
+        // 1 + u16 + u16 = 5 bytes
+        .get_static_prop, .set_static_prop,
+        .get_static, .set_static,
+        .static_call_spread,
+        .add_local_to_local, .sub_local_to_local, .mul_local_to_local,
+        => 5,
+        // 1 + u16 + u16 + u8 = 6 bytes
+        .static_call => 6,
+        // 1 + u16 + u16 + u16 = 7 bytes
+        .less_local_local_jif => 7,
+        // 1 + u8 = 2 bytes
+        .require, .call_indirect, .call_indirect_spread => 2,
+        // variable-length: scan past inline operands
+        .class_decl, .interface_decl, .enum_decl => 1,
+        // all other opcodes are 1 byte (no operands)
+        else => 1,
+    };
 }
