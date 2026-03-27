@@ -1938,7 +1938,7 @@ pub const VM = struct {
                         if (!has_prop and self.hasMethod(obj.class_name, "__set")) {
                             _ = self.callMethod(obj, "__set", &.{ .{ .string = prop_name }, new_val }) catch {};
                         } else {
-                            try obj.properties.put(self.allocator, prop_name, new_val);
+                            try obj.set(self.allocator, prop_name, new_val);
                         }
                     }
                     self.push(new_val);

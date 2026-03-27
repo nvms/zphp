@@ -470,23 +470,28 @@ pub const Value = union(enum) {
                     if (f < 0) try buf.append(allocator, '-');
                     try buf.appendSlice(allocator, "INF");
                 } else {
-                    // PHP uses 14 significant digits for float display
-                    // compute digits before decimal to get correct precision
                     const abs_f = @abs(f);
-                    const digits_before: usize = if (abs_f >= 1.0)
-                        @as(usize, @intFromFloat(@floor(@log10(abs_f)))) + 1
-                    else
-                        1;
-                    const precision: usize = if (digits_before < 14) 14 - digits_before else 0;
-                    var tmp: [64]u8 = undefined;
-                    const s = formatFloat(&tmp, f, precision);
-                    // strip trailing zeros after decimal point
-                    var end: usize = s.len;
-                    if (std.mem.indexOf(u8, s, ".")) |_| {
-                        while (end > 1 and s[end - 1] == '0') end -= 1;
-                        if (end > 0 and s[end - 1] == '.') end -= 1;
+                    // very small or very large numbers use scientific notation
+                    if (abs_f != 0 and (abs_f < 1e-4 or abs_f >= 1e15)) {
+                        var tmp: [64]u8 = undefined;
+                        const s = formatScientific(&tmp, f);
+                        try buf.appendSlice(allocator, s);
+                    } else {
+                        // PHP uses 14 significant digits
+                        const digits_before: usize = if (abs_f >= 1.0)
+                            @as(usize, @intFromFloat(@floor(@log10(abs_f)))) + 1
+                        else
+                            0;
+                        const precision: usize = if (digits_before < 14) 14 - digits_before else 0;
+                        var tmp: [64]u8 = undefined;
+                        const s = formatFloat(&tmp, f, precision);
+                        var end: usize = s.len;
+                        if (std.mem.indexOf(u8, s, ".")) |_| {
+                            while (end > 1 and s[end - 1] == '0') end -= 1;
+                            if (end > 0 and s[end - 1] == '.') end -= 1;
+                        }
+                        try buf.appendSlice(allocator, s[0..end]);
                     }
-                    try buf.appendSlice(allocator, s[0..end]);
                 }
             },
             .string => |s| try buf.appendSlice(allocator, s),
@@ -502,6 +507,32 @@ pub const Value = union(enum) {
         switch (p) {
             inline 0...15 => |cp| return std.fmt.bufPrint(buf, "{d:." ++ std.fmt.comptimePrint("{d}", .{@min(cp, 14)}) ++ "}", .{f}) catch "0",
         }
+    }
+
+    fn formatScientific(buf: *[64]u8, f: f64) []const u8 {
+        // PHP format: [-]d.dddE[+-]d+  (uppercase E, 14 significant digits)
+        const abs_f = @abs(f);
+        const exp: i32 = if (abs_f != 0)
+            @intFromFloat(@floor(@log10(abs_f)))
+        else
+            0;
+        const mantissa = f / std.math.pow(f64, 10.0, @floatFromInt(exp));
+
+        // 14 significant digits total, 13 after the decimal in mantissa
+        var tmp: [64]u8 = undefined;
+        const m = formatFloat(&tmp, @abs(mantissa), 13);
+
+        // strip trailing zeros but keep at least one decimal place
+        var end: usize = m.len;
+        if (std.mem.indexOf(u8, m, ".")) |dot| {
+            while (end > dot + 2 and m[end - 1] == '0') end -= 1;
+        }
+
+        const sign: []const u8 = if (f < 0) "-" else "";
+        const exp_sign: u8 = if (exp >= 0) '+' else '-';
+        const exp_abs: u32 = @intCast(if (exp >= 0) exp else -exp);
+
+        return std.fmt.bufPrint(buf, "{s}{s}E{c}{d}", .{ sign, m[0..end], exp_sign, exp_abs }) catch "0";
     }
 
     // overflow-safe int arithmetic, promotes to float on overflow

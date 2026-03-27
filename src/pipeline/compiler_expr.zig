@@ -55,6 +55,24 @@ pub fn compileAssign(self: *Compiler, node: Ast.Node) Error!void {
     }
 
     if (target.tag == .property_access) {
+        if (self.isDynamicProp(target)) {
+            const prop_node = self.ast.nodes[target.data.rhs];
+            const var_name = self.ast.tokenSlice(prop_node.main_token);
+            // stack order for set_prop_dynamic: obj, value, prop_name
+            try self.compileNode(target.data.lhs);
+            if (op_tag != .equal) {
+                try self.emitOp(.dup);
+                try self.emitGetVar(var_name);
+                try self.emitOp(.get_prop_dynamic);
+            }
+            try self.compileNode(node.data.rhs);
+            if (op_tag != .equal) {
+                try emitCompoundOp(self, op_tag);
+            }
+            try self.emitGetVar(var_name);
+            try self.emitOp(.set_prop_dynamic);
+            return;
+        }
         const prop_node = self.ast.nodes[target.data.rhs];
         var prop_name = self.ast.tokenSlice(prop_node.main_token);
         if (prop_name.len > 0 and prop_name[0] == '$') prop_name = prop_name[1..];
