@@ -403,6 +403,24 @@ pub const VM = struct {
         try c.put(a, "SEEK_SET", .{ .int = 0 });
         try c.put(a, "SEEK_CUR", .{ .int = 1 });
         try c.put(a, "SEEK_END", .{ .int = 2 });
+        try c.put(a, "FILTER_VALIDATE_INT", .{ .int = 257 });
+        try c.put(a, "FILTER_VALIDATE_FLOAT", .{ .int = 259 });
+        try c.put(a, "FILTER_VALIDATE_IP", .{ .int = 275 });
+        try c.put(a, "FILTER_VALIDATE_EMAIL", .{ .int = 274 });
+        try c.put(a, "FILTER_VALIDATE_URL", .{ .int = 273 });
+        try c.put(a, "FILTER_VALIDATE_BOOLEAN", .{ .int = 258 });
+        try c.put(a, "FILTER_SANITIZE_STRING", .{ .int = 513 });
+        try c.put(a, "FILTER_SANITIZE_EMAIL", .{ .int = 517 });
+        try c.put(a, "FILTER_SANITIZE_URL", .{ .int = 518 });
+        try c.put(a, "FILTER_SANITIZE_NUMBER_INT", .{ .int = 519 });
+        try c.put(a, "FILTER_SANITIZE_NUMBER_FLOAT", .{ .int = 520 });
+        try c.put(a, "FILTER_SANITIZE_ENCODED", .{ .int = 514 });
+        try c.put(a, "FILTER_FLAG_IPV4", .{ .int = 1048576 });
+        try c.put(a, "FILTER_FLAG_IPV6", .{ .int = 2097152 });
+        try c.put(a, "FILTER_FLAG_NO_ENCODE_QUOTES", .{ .int = 128 });
+        try c.put(a, "FILTER_FLAG_STRIP_LOW", .{ .int = 4 });
+        try c.put(a, "FILTER_FLAG_STRIP_HIGH", .{ .int = 8 });
+        try c.put(a, "FILTER_DEFAULT", .{ .int = 516 });
     }
 
     fn freeHeapItems(self: *VM) void {
@@ -615,7 +633,11 @@ pub const VM = struct {
                 .add => {
                     const b = self.pop();
                     const a = self.pop();
-                    self.push(Value.add(a, b));
+                    if (a == .array and b == .array) {
+                        self.push(.{ .array = try self.arrayUnion(a.array, b.array) });
+                    } else {
+                        self.push(Value.add(a, b));
+                    }
                 },
                 .subtract => {
                     const b = self.pop();
@@ -1719,6 +1741,20 @@ pub const VM = struct {
                         idef.parent = self.currentChunk().constants.items[parent_idx].string;
                     }
 
+                    const const_count = self.readByte();
+                    if (const_count > 0) {
+                        var def = ClassDef{ .name = iface_name };
+                        var ci: usize = const_count;
+                        while (ci > 0) : (ci -= 1) {
+                            const cname_idx = self.readU16();
+                            const cname = self.currentChunk().constants.items[cname_idx].string;
+                            const cval = self.stack[self.sp - ci];
+                            try def.static_props.put(self.allocator, cname, cval);
+                        }
+                        self.sp -= const_count;
+                        try self.classes.put(self.allocator, iface_name, def);
+                    }
+
                     try self.interfaces.put(self.allocator, iface_name, idef);
                 },
 
@@ -1859,11 +1895,10 @@ pub const VM = struct {
                     const arg_count = self.readByte();
                     const ac: usize = arg_count;
                     const name_val = self.stack[self.sp - ac - 1];
-                    if (name_val != .string) {
+                    const class_name = if (name_val == .string) name_val.string else if (name_val == .object) name_val.object.class_name else {
                         self.error_msg = std.fmt.allocPrint(self.allocator, "Fatal error: Class name must be a valid object or a string", .{}) catch null;
                         return error.RuntimeError;
-                    }
-                    const class_name = name_val.string;
+                    };
                     if (!self.classes.contains(class_name)) try self.tryAutoload(class_name);
 
                     const obj = try self.allocator.create(PhpObject);
@@ -2826,6 +2861,9 @@ pub const VM = struct {
         while (current) |cn| {
             if (self.classes.getPtr(cn)) |cls| {
                 if (cls.static_props.get(prop_name)) |val| return val;
+                for (cls.interfaces.items) |iface| {
+                    if (self.getStaticProp(iface, prop_name)) |val| return val;
+                }
                 current = cls.parent;
             } else break;
         }
@@ -4810,6 +4848,23 @@ pub const VM = struct {
         }
     }
 
+    fn arrayUnion(self: *VM, a: *PhpArray, b: *PhpArray) RuntimeError!*PhpArray {
+        const result = try self.cloneArray(a);
+        for (b.entries.items) |entry| {
+            var found = false;
+            for (result.entries.items) |existing| {
+                if (PhpArray.Key.eql(existing.key, entry.key)) {
+                    found = true;
+                    break;
+                }
+            }
+            if (!found) {
+                try result.entries.append(self.allocator, entry);
+            }
+        }
+        return result;
+    }
+
     fn cloneArray(self: *VM, src: *PhpArray) RuntimeError!*PhpArray {
         const copy = self.allocator.create(PhpArray) catch return error.RuntimeError;
         copy.* = .{ .next_int_key = src.next_int_key, .cursor = src.cursor };
@@ -5102,6 +5157,10 @@ pub const VM = struct {
                 self.frame_count += 1;
             }
         } else {
+            if (std.mem.lastIndexOfScalar(u8, name, '\\')) |pos| {
+                const base = name[pos + 1 ..];
+                if (base.len > 0) return self.callNamedFunction(base, arg_count);
+            }
             self.error_msg = std.fmt.allocPrint(self.allocator, "Fatal error: Uncaught Error: Call to undefined function {s}()\n", .{name}) catch null;
             return error.RuntimeError;
         }

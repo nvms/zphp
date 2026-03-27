@@ -12,14 +12,39 @@ const Error = Allocator.Error || error{CompileError};
 
 fn buildTypeString(self: *Compiler, start_tok: u32, end_tok: u32) Error![]const u8 {
     if (start_tok == end_tok) return "";
+    if (start_tok + 1 == end_tok) {
+        const lexeme = self.ast.tokens[start_tok].lexeme(self.ast.source);
+        if (self.ast.tokens[start_tok].tag == .identifier and !isPrimitiveType(lexeme)) {
+            return self.resolveClassName(lexeme);
+        }
+        return lexeme;
+    }
     var buf = std.ArrayListUnmanaged(u8){};
     for (start_tok..end_tok) |t| {
+        const tag = self.ast.tokens[t].tag;
         const lexeme = self.ast.tokens[t].lexeme(self.ast.source);
-        try buf.appendSlice(self.allocator, lexeme);
+        if (tag == .identifier and !isPrimitiveType(lexeme)) {
+            try buf.appendSlice(self.allocator, self.resolveClassName(lexeme));
+        } else {
+            try buf.appendSlice(self.allocator, lexeme);
+        }
     }
     const s = try buf.toOwnedSlice(self.allocator);
     try self.string_allocs.append(self.allocator, s);
     return s;
+}
+
+fn isPrimitiveType(name: []const u8) bool {
+    const primitives = [_][]const u8{
+        "int", "integer", "float", "double", "bool", "boolean",
+        "string", "array", "object", "callable", "void", "null",
+        "false", "true", "mixed", "never", "iterable", "self",
+        "static", "parent", "Generator", "Fiber", "Closure",
+    };
+    for (primitives) |p| {
+        if (std.mem.eql(u8, name, p)) return true;
+    }
+    return false;
 }
 
 fn extractParamTypes(self: *Compiler, param_nodes: []const u32) Error![]const []const u8 {
@@ -54,7 +79,8 @@ fn extractReturnType(self: *Compiler, extra_base: u32, param_count: u32) Error![
 
 pub fn compileFunction(self: *Compiler, node: Ast.Node) Error!void {
     const name_tok = node.main_token;
-    const name = self.ast.tokenSlice(name_tok);
+    const raw_name = self.ast.tokenSlice(name_tok);
+    const name = if (std.mem.startsWith(u8, raw_name, "__closure_")) raw_name else self.resolveClassName(raw_name);
     const param_nodes = self.ast.extraSlice(node.data.lhs);
 
     const param_names = try self.allocator.alloc([]const u8, param_nodes.len);
@@ -521,11 +547,10 @@ pub fn compileClassDecl(self: *Compiler, node: Ast.Node) Error!void {
         try self.emitU16(0xffff);
     }
 
-    // emit implements count and names
+    // emit implements count and names (already resolved in impl_names)
     try self.emitByte(@intCast(impl_count));
     for (0..impl_count) |i| {
-        const resolved_impl = self.resolveClassName(impl_names[i]);
-        const iname_idx = try self.addConstant(.{ .string = resolved_impl });
+        const iname_idx = try self.addConstant(.{ .string = impl_names[i] });
         try self.emitU16(iname_idx);
     }
 
@@ -834,12 +859,22 @@ pub fn compileAnonymousClass(self: *Compiler, node: Ast.Node) Error!void {
 }
 
 pub fn compileInterfaceDecl(self: *Compiler, node: Ast.Node) Error!void {
-    const iface_name = self.ast.tokenSlice(node.main_token);
+    const iface_name = self.resolveClassName(self.ast.tokenSlice(node.main_token));
     const members = self.ast.extraSlice(node.data.lhs);
 
     var method_count: u8 = 0;
+    var const_count: u8 = 0;
     for (members) |m| {
         if (self.ast.nodes[m].tag == .interface_method) method_count += 1;
+        if (self.ast.nodes[m].tag == .const_decl) const_count += 1;
+    }
+
+    // compile const default values onto stack
+    for (members) |m| {
+        const member = self.ast.nodes[m];
+        if (member.tag == .const_decl) {
+            try self.compileNode(member.data.lhs);
+        }
     }
 
     const name_idx = try self.addConstant(.{ .string = iface_name });
@@ -863,6 +898,16 @@ pub fn compileInterfaceDecl(self: *Compiler, node: Ast.Node) Error!void {
         try self.emitU16(pidx);
     } else {
         try self.emitU16(0xffff);
+    }
+
+    try self.emitByte(const_count);
+    for (members) |m| {
+        const member = self.ast.nodes[m];
+        if (member.tag == .const_decl) {
+            const cname = self.ast.tokenSlice(member.main_token);
+            const cname_idx = try self.addConstant(.{ .string = cname });
+            try self.emitU16(cname_idx);
+        }
     }
 }
 

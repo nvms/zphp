@@ -90,6 +90,9 @@ pub const entries = .{
     .{ "class_implements", native_class_implements },
     .{ "iterator_to_array", native_iterator_to_array },
     .{ "iterator_count", native_iterator_count },
+    .{ "filter_var", native_filter_var },
+    .{ "is_resource", native_is_resource },
+    .{ "get_resource_type", native_get_resource_type },
 };
 
 fn native_define(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
@@ -1019,4 +1022,108 @@ fn native_iterator_count(ctx: *NativeContext, args: []const Value) RuntimeError!
     }
 
     return .{ .int = 0 };
+}
+
+fn native_filter_var(_: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len < 1) return .{ .bool = false };
+    const value = args[0];
+
+    if (args.len < 2) return value;
+
+    const filter = if (args[1] == .int) args[1].int else return .{ .bool = false };
+    const flags: i64 = if (args.len > 2 and args[2] == .int) args[2].int else 0;
+
+    switch (filter) {
+        275 => { // FILTER_VALIDATE_IP
+            const s = if (value == .string) value.string else return .{ .bool = false };
+            const ipv4_only = (flags & 1048576) != 0;
+            const ipv6_only = (flags & 2097152) != 0;
+            if (!ipv6_only) {
+                if (isValidIPv4(s)) return value;
+                if (ipv4_only) return .{ .bool = false };
+            }
+            if (!ipv4_only) {
+                if (isValidIPv6(s)) return value;
+            }
+            return .{ .bool = false };
+        },
+        274 => { // FILTER_VALIDATE_EMAIL
+            const s = if (value == .string) value.string else return .{ .bool = false };
+            if (std.mem.indexOf(u8, s, "@")) |at| {
+                if (at > 0 and at < s.len - 1 and std.mem.indexOf(u8, s[at + 1 ..], ".") != null) return value;
+            }
+            return .{ .bool = false };
+        },
+        273 => { // FILTER_VALIDATE_URL
+            const s = if (value == .string) value.string else return .{ .bool = false };
+            if (std.mem.startsWith(u8, s, "http://") or std.mem.startsWith(u8, s, "https://") or std.mem.startsWith(u8, s, "ftp://")) return value;
+            return .{ .bool = false };
+        },
+        257 => { // FILTER_VALIDATE_INT
+            if (value == .int) return value;
+            const s = if (value == .string) value.string else return .{ .bool = false };
+            _ = std.fmt.parseInt(i64, s, 10) catch return .{ .bool = false };
+            return value;
+        },
+        258 => { // FILTER_VALIDATE_BOOLEAN
+            if (value == .bool) return value;
+            const s = if (value == .string) value.string else return .{ .null = {} };
+            if (std.mem.eql(u8, s, "true") or std.mem.eql(u8, s, "1") or std.mem.eql(u8, s, "yes") or std.mem.eql(u8, s, "on")) return .{ .bool = true };
+            if (std.mem.eql(u8, s, "false") or std.mem.eql(u8, s, "0") or std.mem.eql(u8, s, "no") or std.mem.eql(u8, s, "off") or s.len == 0) return .{ .bool = false };
+            return .{ .null = {} };
+        },
+        else => return value,
+    }
+}
+
+fn isValidIPv4(s: []const u8) bool {
+    var parts: u8 = 0;
+    var it = std.mem.splitScalar(u8, s, '.');
+    while (it.next()) |part| {
+        if (part.len == 0 or part.len > 3) return false;
+        const n = std.fmt.parseUnsigned(u8, part, 10) catch return false;
+        _ = n;
+        parts += 1;
+    }
+    return parts == 4;
+}
+
+fn isValidIPv6(s: []const u8) bool {
+    if (s.len < 2) return false;
+    var groups: u8 = 0;
+    var has_double_colon = false;
+    var it = std.mem.splitSequence(u8, s, ":");
+    while (it.next()) |part| {
+        if (part.len == 0) {
+            if (has_double_colon) continue;
+            has_double_colon = true;
+            groups += 1;
+            continue;
+        }
+        if (part.len > 4) return false;
+        for (part) |c| {
+            if (!std.ascii.isHex(c)) return false;
+        }
+        groups += 1;
+    }
+    if (has_double_colon) return groups <= 8;
+    return groups == 8;
+}
+
+fn native_is_resource(_: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len < 1) return .{ .bool = false };
+    return .{ .bool = args[0] == .object and isResourceObject(args[0].object.class_name) };
+}
+
+fn native_get_resource_type(_: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len < 1) return .{ .bool = false };
+    if (args[0] == .object) return .{ .string = args[0].object.class_name };
+    return .{ .bool = false };
+}
+
+fn isResourceObject(name: []const u8) bool {
+    return std.mem.eql(u8, name, "__stream") or
+        std.mem.eql(u8, name, "__file") or
+        std.mem.eql(u8, name, "__curl") or
+        std.mem.eql(u8, name, "FileHandle");
 }

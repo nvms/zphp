@@ -392,7 +392,14 @@ fn native_fopen(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     const path = args[0].string;
     const mode = args[1].string;
 
-    const file = openWithMode(path, mode) catch return Value{ .bool = false };
+    const file = if (std.mem.eql(u8, path, "php://temp") or std.mem.eql(u8, path, "php://memory")) blk: {
+        const tmp = std.fmt.allocPrint(ctx.allocator, "/tmp/zphp_{d}", .{@as(u64, @truncate(@as(u128, @bitCast(std.time.nanoTimestamp()))))}) catch return Value{ .bool = false };
+        defer ctx.allocator.free(tmp);
+        const f = std.fs.cwd().createFile(tmp, .{ .read = true, .truncate = true }) catch return Value{ .bool = false };
+        std.fs.cwd().deleteFile(tmp) catch {};
+        break :blk f;
+    } else
+        openWithMode(path, mode) catch return Value{ .bool = false };
 
     const obj = try ctx.allocator.create(PhpObject);
     obj.* = .{ .class_name = "FileHandle" };

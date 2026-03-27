@@ -179,7 +179,7 @@ pub fn compileBinaryOp(self: *Compiler, node: Ast.Node) Error!void {
     if (op_tag == .kw_instanceof) {
         try self.compileNode(node.data.lhs);
         const rhs = self.ast.nodes[node.data.rhs];
-        const class_name = self.ast.tokenSlice(rhs.main_token);
+        const class_name = try resolveNodeClassName(self, rhs);
         const idx = try self.addConstant(.{ .string = class_name });
         try self.emitOp(.constant);
         try self.emitU16(idx);
@@ -453,7 +453,8 @@ pub fn compileCall(self: *Compiler, node: Ast.Node) Error!void {
     if (hasSplatOrNamed(self.ast, args)) {
         try emitSpreadArgs(self, args);
         if (callee.tag == .identifier) {
-            const name = self.ast.tokenSlice(callee.main_token);
+            const raw_name = self.ast.tokenSlice(callee.main_token);
+            const name = self.resolveClassName(raw_name);
             const idx = try self.addConstant(.{ .string = name });
             try self.emitOp(.call_spread);
             try self.emitU16(idx);
@@ -466,7 +467,8 @@ pub fn compileCall(self: *Compiler, node: Ast.Node) Error!void {
         const call_offset = self.current_source_offset;
         for (args) |arg| try self.compileNode(arg);
         self.current_source_offset = call_offset;
-        const name = self.ast.tokenSlice(callee.main_token);
+        const raw_name = self.ast.tokenSlice(callee.main_token);
+        const name = self.resolveClassName(raw_name);
         const idx = try self.addConstant(.{ .string = name });
         try self.emitOp(.call);
         try self.emitU16(idx);

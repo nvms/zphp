@@ -12,6 +12,7 @@ pub const entries = .{
     .{ "array_values", array_values },
     .{ "in_array", in_array },
     .{ "array_key_exists", array_key_exists },
+    .{ "key_exists", array_key_exists },
     .{ "array_search", array_search },
     .{ "array_reverse", array_reverse },
     .{ "array_merge", array_merge },
