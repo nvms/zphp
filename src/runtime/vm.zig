@@ -2037,7 +2037,7 @@ pub const VM = struct {
                             const sent = if (ac > 0) self.stack[self.sp + 1] else Value{ .null = {} };
                             if (gen.state == .created) try self.resumeGenerator(gen, .null);
                             try self.resumeGenerator(gen, sent);
-                            self.push(.null);
+                            self.push(if (gen.state == .completed) .null else gen.current_value);
                         } else if (std.mem.eql(u8, method_name, "rewind")) {
                             self.push(.null);
                         } else if (std.mem.eql(u8, method_name, "getReturn")) {
