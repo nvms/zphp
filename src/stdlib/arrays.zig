@@ -71,6 +71,7 @@ pub const entries = .{
     .{ "array_walk_recursive", array_walk_recursive },
     .{ "array_merge_recursive", array_merge_recursive },
     .{ "array_intersect_assoc", array_intersect_assoc },
+    .{ "array_multisort", array_multisort },
 };
 
 fn array_push(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
@@ -1242,4 +1243,81 @@ fn array_intersect_assoc(ctx: *NativeContext, args: []const Value) RuntimeError!
         if (in_all) try result.set(ctx.allocator, entry.key, entry.value);
     }
     return .{ .array = result };
+}
+
+fn array_multisort(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len == 0 or args[0] != .array) return .{ .bool = false };
+
+    const SortSpec = struct { arr: *PhpArray, order: i64, kind: i64 };
+    var specs: [32]SortSpec = undefined;
+    var spec_count: usize = 0;
+
+    for (args) |arg| {
+        if (arg == .array) {
+            specs[spec_count] = .{ .arr = arg.array, .order = 4, .kind = 0 };
+            spec_count += 1;
+            if (spec_count >= 32) break;
+        } else if (arg == .int and spec_count > 0) {
+            const v = arg.int;
+            if (v == 3 or v == 4) {
+                specs[spec_count - 1].order = v;
+            } else {
+                specs[spec_count - 1].kind = v;
+            }
+        }
+    }
+
+    if (spec_count == 0) return .{ .bool = false };
+
+    const n = specs[0].arr.entries.items.len;
+    for (specs[0..spec_count]) |s| {
+        if (s.arr.entries.items.len != n) return .{ .bool = false };
+    }
+
+    var indices = try ctx.allocator.alloc(usize, n);
+    defer ctx.allocator.free(indices);
+    for (0..n) |i| indices[i] = i;
+
+    const sort_specs = specs[0..spec_count];
+    std.mem.sort(usize, indices, sort_specs, struct {
+        fn lessThan(sp: []const SortSpec, a: usize, b: usize) bool {
+            for (sp) |s| {
+                const va = s.arr.entries.items[a].value;
+                const vb = s.arr.entries.items[b].value;
+                const cmp = cmpValues(va, vb, s.kind);
+                if (cmp != 0) return if (s.order == 3) cmp > 0 else cmp < 0;
+            }
+            return false;
+        }
+
+        fn cmpValues(a: Value, b: Value, k: i64) i32 {
+            if (k == 2) {
+                const sa = if (a == .string) a.string else "";
+                const sb = if (b == .string) b.string else "";
+                return switch (std.mem.order(u8, sa, sb)) {
+                    .lt => -1, .gt => 1, .eq => 0,
+                };
+            }
+            if (k == 1) {
+                const fa = Value.toFloat(a);
+                const fb = Value.toFloat(b);
+                if (fa < fb) return -1;
+                if (fa > fb) return 1;
+                return 0;
+            }
+            if (Value.lessThan(a, b)) return -1;
+            if (Value.lessThan(b, a)) return 1;
+            return 0;
+        }
+    }.lessThan);
+
+    for (sort_specs) |s| {
+        var tmp = try ctx.allocator.alloc(PhpArray.Entry, n);
+        defer ctx.allocator.free(tmp);
+        for (indices, 0..) |src, dst| tmp[dst] = s.arr.entries.items[src];
+        @memcpy(s.arr.entries.items[0..n], tmp);
+        reindexArray(s.arr);
+    }
+
+    return .{ .bool = true };
 }
