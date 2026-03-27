@@ -407,6 +407,7 @@ pub const VM = struct {
         try c.put(a, "JSON_PRETTY_PRINT", .{ .int = 128 });
         try c.put(a, "JSON_UNESCAPED_SLASHES", .{ .int = 64 });
         try c.put(a, "JSON_UNESCAPED_UNICODE", .{ .int = 256 });
+        try c.put(a, "JSON_THROW_ON_ERROR", .{ .int = 4194304 });
         try c.put(a, "E_ERROR", .{ .int = 1 });
         try c.put(a, "E_WARNING", .{ .int = 2 });
         try c.put(a, "E_NOTICE", .{ .int = 8 });
@@ -5274,7 +5275,26 @@ pub const VM = struct {
             for (0..ac) |i| args[i] = self.stack[self.sp - ac + i];
             self.sp -= ac;
             var ctx = self.makeContext(name);
-            self.push(try native(&ctx, args[0..ac]));
+            const result = native(&ctx, args[0..ac]) catch {
+                if (self.pending_exception) |exc| {
+                    self.pending_exception = null;
+                    if (self.handler_count > self.handler_floor) {
+                        const handler = self.exception_handlers[self.handler_count - 1];
+                        self.handler_count -= 1;
+                        while (self.frame_count > handler.frame_count) {
+                            self.frame_count -= 1;
+                            self.frames[self.frame_count].vars.deinit(self.allocator);
+                        }
+                        self.sp = handler.sp;
+                        self.push(exc);
+                        self.currentFrame().ip = handler.catch_ip;
+                        return;
+                    }
+                    self.pending_exception = exc;
+                }
+                return error.RuntimeError;
+            };
+            self.push(result);
         } else if (self.functions.get(name)) |func| {
             const ac: usize = arg_count;
             if (ac < func.required_params) {

@@ -7,8 +7,6 @@ const RuntimeError = error{ RuntimeError, OutOfMemory };
 pub const entries = .{
     .{ "serialize", native_serialize },
     .{ "unserialize", native_unserialize },
-    .{ "json_last_error", native_json_last_error },
-    .{ "json_last_error_msg", native_json_last_error_msg },
 };
 
 fn formatPhpFloat(buf: *std.ArrayListUnmanaged(u8), a: std.mem.Allocator, f: f64) !void {
@@ -302,10 +300,3 @@ fn parseString(s: []const u8, pos: usize) !StringResult {
     return .{ .str = str, .pos = end + 2 };
 }
 
-fn native_json_last_error(_: *NativeContext, _: []const Value) RuntimeError!Value {
-    return .{ .int = 0 };
-}
-
-fn native_json_last_error_msg(_: *NativeContext, _: []const Value) RuntimeError!Value {
-    return .{ .string = "No error" };
-}

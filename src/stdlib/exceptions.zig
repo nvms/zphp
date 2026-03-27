@@ -43,6 +43,7 @@ pub fn register(vm: *VM, a: Allocator) !void {
         .{ "OutOfBoundsException", "RuntimeException" },
         .{ "UnderflowException", "RuntimeException" },
         .{ "PDOException", "RuntimeException" },
+        .{ "JsonException", "Exception" },
         .{ "Error", "Exception" },
         .{ "TypeError", "Error" },
         .{ "ArithmeticError", "Error" },
