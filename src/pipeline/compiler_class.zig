@@ -173,13 +173,37 @@ pub fn compileClosure(self: *Compiler, node: Ast.Node) Error!void {
     const param_names = try self.allocator.alloc([]const u8, param_nodes.len);
     var ref_flags_buf: [16]bool = .{false} ** 16;
     var has_any_ref = false;
+    var defaults = std.ArrayListUnmanaged(Value){};
+    defer defaults.deinit(self.allocator);
+    var required: u8 = 0;
+    var seen_default = false;
+    var is_variadic = false;
+
     for (param_nodes, 0..) |p, i| {
-        param_names[i] = self.ast.tokenSlice(self.ast.nodes[p].main_token);
-        if (i < 16 and (self.ast.nodes[p].data.rhs & 2) != 0) {
+        const pnode = self.ast.nodes[p];
+        param_names[i] = self.ast.tokenSlice(pnode.main_token);
+        if (i < 16 and (pnode.data.rhs & 2) != 0) {
             ref_flags_buf[i] = true;
             has_any_ref = true;
         }
+        if ((pnode.data.rhs & 1) != 0) {
+            is_variadic = true;
+            try defaults.append(self.allocator, .null);
+        } else if (pnode.data.lhs != 0) {
+            seen_default = true;
+            try defaults.append(self.allocator, self.evalConstExpr(pnode.data.lhs));
+        } else {
+            if (!seen_default) required += 1;
+            try defaults.append(self.allocator, .null);
+        }
     }
+    if (!seen_default and !is_variadic) required = @intCast(param_nodes.len);
+
+    const defaults_owned = if (seen_default or is_variadic) blk: {
+        const d = try self.allocator.alloc(Value, defaults.items.len);
+        @memcpy(d, defaults.items);
+        break :blk d;
+    } else &[_]Value{};
 
     // rhs = extra -> {body (bit 31 = generator), use_count, use_vars...}
     // use_count 0xFFFFFFFF = arrow fn (implicit capture)
@@ -260,10 +284,13 @@ pub fn compileClosure(self: *Compiler, node: Ast.Node) Error!void {
     const func = ObjFunction{
         .name = owned_name,
         .arity = @intCast(param_nodes.len),
+        .required_params = required,
         .params = param_names[0..param_nodes.len],
+        .defaults = defaults_owned,
         .chunk = sub.chunk,
         .is_arrow = is_arrow,
         .is_generator = gen,
+        .is_variadic = is_variadic,
         .locals_only = closure_lo,
         .ref_params = ref_params,
         .local_count = local_count,
