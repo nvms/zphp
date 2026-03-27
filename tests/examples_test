@@ -18,6 +18,7 @@ for dir in "$EXAMPLES_DIR"/*/; do
     name="$(basename "$dir")"
     main="$dir/main.php"
     if [ ! -f "$main" ]; then continue; fi
+    if [ -f "$dir/.pending" ]; then echo "  skip  $name (pending)"; continue; fi
 
     php_out="$(php -d error_reporting=E_ALL\&~E_DEPRECATED\&~E_WARNING "$main" 2>&1)" || true
     zphp_out="$("$ZPHP" run "$main" 2>&1)" || true

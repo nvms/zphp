@@ -1,0 +1,59 @@
+{
+  "packages": [
+    {
+      "name": "slim/psr7",
+      "version": "1.8.0",
+      "dist": "https://api.github.com/repos/slimphp/Slim-Psr7/zipball/76e7e3b1cdfd583e9035c4c966c08e01e45ce959"
+    },
+    {
+      "name": "slim/slim",
+      "version": "4.15.1",
+      "dist": "https://api.github.com/repos/slimphp/Slim/zipball/887893516557506f254d950425ce7f5387a26970"
+    },
+    {
+      "name": "psr/http-message",
+      "version": "2.0",
+      "dist": "https://api.github.com/repos/php-fig/http-message/zipball/402d35bcb92c70c026d1a6a9883f06b2ead23d71"
+    },
+    {
+      "name": "psr/http-factory",
+      "version": "1.1.0",
+      "dist": "https://api.github.com/repos/php-fig/http-factory/zipball/2b4765fddfe3b508ac62f829e852b1501d3f6e8a"
+    },
+    {
+      "name": "ralouphie/getallheaders",
+      "version": "3.0.3",
+      "dist": "https://api.github.com/repos/ralouphie/getallheaders/zipball/120b605dfeb996808c31b6477290a714d356e822"
+    },
+    {
+      "name": "fig/http-message-util",
+      "version": "1.1.5",
+      "dist": "https://api.github.com/repos/php-fig/http-message-util/zipball/9d94dc0154230ac39e5bf89398b324a86f63f765"
+    },
+    {
+      "name": "psr/log",
+      "version": "3.0.2",
+      "dist": "https://api.github.com/repos/php-fig/log/zipball/f16e1d5863e37f8d8c2a01719f5b34baa2b714d3"
+    },
+    {
+      "name": "psr/http-server-middleware",
+      "version": "1.0.2",
+      "dist": "https://api.github.com/repos/php-fig/http-server-middleware/zipball/c1481f747daaa6a0782775cd6a8c26a1bf4a3829"
+    },
+    {
+      "name": "psr/http-server-handler",
+      "version": "1.0.2",
+      "dist": "https://api.github.com/repos/php-fig/http-server-handler/zipball/84c4fb66179be4caaf8e97bd239203245302e7d4"
+    },
+    {
+      "name": "nikic/fast-route",
+      "version": "v1.3.0",
+      "dist": "https://api.github.com/repos/nikic/FastRoute/zipball/181d480e08d9476e61381e04a71b34dc0432e812"
+    },
+    {
+      "name": "psr/container",
+      "version": "2.0.2",
+      "dist": "https://api.github.com/repos/php-fig/container/zipball/c71ecc56dfe541dbd90c5360474fbc405f8d5963"
+    }
+  ]
+}
