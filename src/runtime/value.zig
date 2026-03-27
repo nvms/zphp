@@ -496,16 +496,60 @@ pub const Value = union(enum) {
         }
     }
 
+    // overflow-safe int arithmetic, promotes to float on overflow
+    pub fn intAdd(a: i64, b: i64) Value {
+        const r = @addWithOverflow(a, b);
+        if (r[1] == 0) return .{ .int = r[0] };
+        return .{ .float = @as(f64, @floatFromInt(a)) + @as(f64, @floatFromInt(b)) };
+    }
+    pub fn intSub(a: i64, b: i64) Value {
+        const r = @subWithOverflow(a, b);
+        if (r[1] == 0) return .{ .int = r[0] };
+        return .{ .float = @as(f64, @floatFromInt(a)) - @as(f64, @floatFromInt(b)) };
+    }
+    pub fn intMul(a: i64, b: i64) Value {
+        const r = @mulWithOverflow(a, b);
+        if (r[1] == 0) return .{ .int = r[0] };
+        return .{ .float = @as(f64, @floatFromInt(a)) * @as(f64, @floatFromInt(b)) };
+    }
+    pub fn intInc(a: i64) Value {
+        const r = @addWithOverflow(a, @as(i64, 1));
+        if (r[1] == 0) return .{ .int = r[0] };
+        return .{ .float = @as(f64, @floatFromInt(a)) + 1.0 };
+    }
+    pub fn intDec(a: i64) Value {
+        const r = @subWithOverflow(a, @as(i64, 1));
+        if (r[1] == 0) return .{ .int = r[0] };
+        return .{ .float = @as(f64, @floatFromInt(a)) - 1.0 };
+    }
+
     const BinOp = enum { add, sub, mul };
 
     fn numericBinOp(a: Value, b: Value, op: BinOp) Value {
         if (a == .int and b == .int) {
             const ai = a.int;
             const bi = b.int;
-            return .{ .int = switch (op) {
-                .add => ai +% bi,
-                .sub => ai -% bi,
-                .mul => ai *% bi,
+            switch (op) {
+                .add => {
+                    const r = @addWithOverflow(ai, bi);
+                    if (r[1] == 0) return .{ .int = r[0] };
+                },
+                .sub => {
+                    const r = @subWithOverflow(ai, bi);
+                    if (r[1] == 0) return .{ .int = r[0] };
+                },
+                .mul => {
+                    const r = @mulWithOverflow(ai, bi);
+                    if (r[1] == 0) return .{ .int = r[0] };
+                },
+            }
+            // overflow: promote to float
+            const af: f64 = @floatFromInt(ai);
+            const bf: f64 = @floatFromInt(bi);
+            return .{ .float = switch (op) {
+                .add => af + bf,
+                .sub => af - bf,
+                .mul => af * bf,
             } };
         }
         const af = toFloat(a);

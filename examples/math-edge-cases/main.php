@@ -9,8 +9,10 @@
 echo "--- integer limits ---\n";
 echo "INT_MAX: " . PHP_INT_MAX . "\n";
 echo "INT_MIN: " . PHP_INT_MIN . "\n";
-echo "INT_MAX is positive: " . (PHP_INT_MAX > 0 ? "true" : "false") . "\n";
-echo "INT_MIN is negative: " . (PHP_INT_MIN < 0 ? "true" : "false") . "\n";
+echo "overflow to float: " . (is_float(PHP_INT_MAX + 1) ? "true" : "false") . "\n";
+echo "underflow to float: " . (is_float(PHP_INT_MIN - 1) ? "true" : "false") . "\n";
+echo "mul overflow: " . (is_float(PHP_INT_MAX * 2) ? "true" : "false") . "\n";
+echo "overflow positive: " . (PHP_INT_MAX + 1 > 0 ? "true" : "false") . "\n";
 
 // --- float precision ---
 

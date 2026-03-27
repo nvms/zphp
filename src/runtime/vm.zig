@@ -1296,7 +1296,7 @@ pub const VM = struct {
                     const frame_il = self.currentFrame();
                     if (slot < frame_il.locals.len) {
                         const v = frame_il.locals[slot];
-                        frame_il.locals[slot] = if (v == .int) .{ .int = v.int +% 1 } else if (v == .float) .{ .float = v.float + 1.0 } else Value.add(v, .{ .int = 1 });
+                        frame_il.locals[slot] = if (v == .int) Value.intInc(v.int) else if (v == .float) .{ .float = v.float + 1.0 } else Value.add(v, .{ .int = 1 });
                     }
                 },
                 .dec_local => {
@@ -1304,7 +1304,7 @@ pub const VM = struct {
                     const frame_dl = self.currentFrame();
                     if (slot < frame_dl.locals.len) {
                         const v = frame_dl.locals[slot];
-                        frame_dl.locals[slot] = if (v == .int) .{ .int = v.int -% 1 } else if (v == .float) .{ .float = v.float - 1.0 } else Value.subtract(v, .{ .int = 1 });
+                        frame_dl.locals[slot] = if (v == .int) Value.intDec(v.int) else if (v == .float) .{ .float = v.float - 1.0 } else Value.subtract(v, .{ .int = 1 });
                     }
                 },
                 .add_local_to_local => {
@@ -1314,7 +1314,7 @@ pub const VM = struct {
                     if (src_slot < frame_al.locals.len and dst_slot < frame_al.locals.len) {
                         const src = frame_al.locals[src_slot];
                         const dst = frame_al.locals[dst_slot];
-                        frame_al.locals[dst_slot] = if (src == .int and dst == .int) .{ .int = dst.int +% src.int } else if (src == .float and dst == .float) .{ .float = dst.float + src.float } else Value.add(dst, src);
+                        frame_al.locals[dst_slot] = if (src == .int and dst == .int) Value.intAdd(dst.int, src.int) else if (src == .float and dst == .float) .{ .float = dst.float + src.float } else Value.add(dst, src);
                     }
                 },
                 .sub_local_to_local => {
@@ -1324,7 +1324,7 @@ pub const VM = struct {
                     if (src_slot < frame_sl.locals.len and dst_slot < frame_sl.locals.len) {
                         const src = frame_sl.locals[src_slot];
                         const dst = frame_sl.locals[dst_slot];
-                        frame_sl.locals[dst_slot] = if (src == .int and dst == .int) .{ .int = dst.int -% src.int } else if (src == .float and dst == .float) .{ .float = dst.float - src.float } else Value.subtract(dst, src);
+                        frame_sl.locals[dst_slot] = if (src == .int and dst == .int) Value.intSub(dst.int, src.int) else if (src == .float and dst == .float) .{ .float = dst.float - src.float } else Value.subtract(dst, src);
                     }
                 },
                 .mul_local_to_local => {
@@ -1334,7 +1334,7 @@ pub const VM = struct {
                     if (src_slot < frame_ml.locals.len and dst_slot < frame_ml.locals.len) {
                         const src = frame_ml.locals[src_slot];
                         const dst = frame_ml.locals[dst_slot];
-                        frame_ml.locals[dst_slot] = if (src == .int and dst == .int) .{ .int = dst.int *% src.int } else if (src == .float and dst == .float) .{ .float = dst.float * src.float } else Value.multiply(dst, src);
+                        frame_ml.locals[dst_slot] = if (src == .int and dst == .int) Value.intMul(dst.int, src.int) else if (src == .float and dst == .float) .{ .float = dst.float * src.float } else Value.multiply(dst, src);
                     }
                 },
                 .less_local_local_jif => {
@@ -3466,7 +3466,7 @@ pub const VM = struct {
                     const b = self.stack[sp - 1];
                     const a = self.stack[sp - 2];
                     sp -= 2;
-                    self.stack[sp] = if (a == .int and b == .int) .{ .int = a.int +% b.int } else if (a == .float and b == .float) .{ .float = a.float + b.float } else Value.add(a, b);
+                    self.stack[sp] = if (a == .int and b == .int) Value.intAdd(a.int, b.int) else if (a == .float and b == .float) .{ .float = a.float + b.float } else Value.add(a, b);
                     sp += 1;
                     const _next = code[ip];
                     ip += 1;
@@ -3476,7 +3476,7 @@ pub const VM = struct {
                     const b = self.stack[sp - 1];
                     const a = self.stack[sp - 2];
                     sp -= 2;
-                    self.stack[sp] = if (a == .int and b == .int) .{ .int = a.int -% b.int } else if (a == .float and b == .float) .{ .float = a.float - b.float } else Value.subtract(a, b);
+                    self.stack[sp] = if (a == .int and b == .int) Value.intSub(a.int, b.int) else if (a == .float and b == .float) .{ .float = a.float - b.float } else Value.subtract(a, b);
                     sp += 1;
                     const _next = code[ip];
                     ip += 1;
@@ -3486,7 +3486,7 @@ pub const VM = struct {
                     const b = self.stack[sp - 1];
                     const a = self.stack[sp - 2];
                     sp -= 2;
-                    self.stack[sp] = if (a == .int and b == .int) .{ .int = a.int *% b.int } else if (a == .float and b == .float) .{ .float = a.float * b.float } else Value.multiply(a, b);
+                    self.stack[sp] = if (a == .int and b == .int) Value.intMul(a.int, b.int) else if (a == .float and b == .float) .{ .float = a.float * b.float } else Value.multiply(a, b);
                     sp += 1;
                     const _next = code[ip];
                     ip += 1;
@@ -4078,7 +4078,9 @@ pub const VM = struct {
                     ip += 2;
                     const v = locals[slot];
                     if (v == .int) {
-                        locals[slot] = .{ .int = v.int +% 1 };
+                        const r = @addWithOverflow(v.int, @as(i64, 1));
+                        if (r[1] != 0) { frame.ip = ip - 3; self.sp = sp; return; }
+                        locals[slot] = .{ .int = r[0] };
                         const _next = code[ip];
                         ip += 1;
                         continue :dispatch @as(OpCode, @enumFromInt(_next));
@@ -4098,7 +4100,9 @@ pub const VM = struct {
                     ip += 2;
                     const v = locals[slot];
                     if (v == .int) {
-                        locals[slot] = .{ .int = v.int -% 1 };
+                        const r = @subWithOverflow(v.int, @as(i64, 1));
+                        if (r[1] != 0) { frame.ip = ip - 3; self.sp = sp; return; }
+                        locals[slot] = .{ .int = r[0] };
                         const _next = code[ip];
                         ip += 1;
                         continue :dispatch @as(OpCode, @enumFromInt(_next));
@@ -4120,7 +4124,9 @@ pub const VM = struct {
                     const src = locals[src_slot];
                     const dst = locals[dst_slot];
                     if (src == .int and dst == .int) {
-                        locals[dst_slot] = .{ .int = dst.int +% src.int };
+                        const r = @addWithOverflow(dst.int, src.int);
+                        if (r[1] != 0) { frame.ip = ip - 5; self.sp = sp; return; }
+                        locals[dst_slot] = .{ .int = r[0] };
                         const _next = code[ip];
                         ip += 1;
                         continue :dispatch @as(OpCode, @enumFromInt(_next));
@@ -4152,7 +4158,9 @@ pub const VM = struct {
                     const src = locals[src_slot];
                     const dst = locals[dst_slot];
                     if (src == .int and dst == .int) {
-                        locals[dst_slot] = .{ .int = dst.int -% src.int };
+                        const r = @subWithOverflow(dst.int, src.int);
+                        if (r[1] != 0) { frame.ip = ip - 5; self.sp = sp; return; }
+                        locals[dst_slot] = .{ .int = r[0] };
                         const _next = code[ip];
                         ip += 1;
                         continue :dispatch @as(OpCode, @enumFromInt(_next));
@@ -4174,7 +4182,9 @@ pub const VM = struct {
                     const src = locals[src_slot];
                     const dst = locals[dst_slot];
                     if (src == .int and dst == .int) {
-                        locals[dst_slot] = .{ .int = dst.int *% src.int };
+                        const r = @mulWithOverflow(dst.int, src.int);
+                        if (r[1] != 0) { frame.ip = ip - 5; self.sp = sp; return; }
+                        locals[dst_slot] = .{ .int = r[0] };
                         const _next = code[ip];
                         ip += 1;
                         continue :dispatch @as(OpCode, @enumFromInt(_next));

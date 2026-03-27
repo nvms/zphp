@@ -22,12 +22,12 @@ Requires PHP installed locally. zphp must be built with ReleaseFast - debug buil
 
 | benchmark | php | zphp | ratio |
 |---|---|---|---|
-| string_ops | 98 ms | 24 ms | 0.24x |
-| array_ops | 90 ms | 27 ms | 0.30x |
-| objects | 102 ms | 35 ms | 0.34x |
-| fibonacci | 162 ms | 129 ms | 0.80x |
-| closures | 99 ms | 85 ms | 0.86x |
-| loops | 124 ms | 106 ms | 0.85x |
+| string_ops | 97 ms | 24 ms | 0.25x |
+| array_ops | 95 ms | 29 ms | 0.31x |
+| objects | 99 ms | 34 ms | 0.34x |
+| closures | 100 ms | 89 ms | 0.89x |
+| fibonacci | 162 ms | 148 ms | 0.91x |
+| loops | 129 ms | 127 ms | 0.98x |
 
 zphp beats PHP on all six benchmarks. Array operations are 3.3x faster thanks to O(1) integer key lookups on sequential arrays. String operations are 4x faster after adding concat (string+string, string+int, int+string) to fastLoop - the concat loop stays in the fast tier instead of bailing to runLoop on every iteration, and the growable concat_assign buffer avoids O(n) reallocation per append. Objects are 3x faster with property slot indices and IC-cached slot access. Closures beat PHP via indexed capture lookup (HashMap by closure name instead of linear scan) and fastLoop handling of call_indirect for closures. Loops and fibonacci benefit from labeled switch dispatch in fastLoop - each opcode handler jumps directly to the next via `continue :dispatch`, eliminating the while loop overhead and giving the CPU branch predictor per-handler context. Superinstructions (inc_local, add_local_to_local, less_local_local_jif) fuse common opcode sequences in hot loops.
 
