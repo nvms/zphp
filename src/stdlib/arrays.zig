@@ -72,6 +72,8 @@ pub const entries = .{
     .{ "array_merge_recursive", array_merge_recursive },
     .{ "array_intersect_assoc", array_intersect_assoc },
     .{ "array_multisort", array_multisort },
+    .{ "array_diff_uassoc", array_diff_uassoc },
+    .{ "array_diff_ukey", array_diff_ukey },
 };
 
 fn array_push(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
@@ -1320,4 +1322,60 @@ fn array_multisort(ctx: *NativeContext, args: []const Value) RuntimeError!Value 
     }
 
     return .{ .bool = true };
+}
+
+fn keyToValue(key: PhpArray.Key) Value {
+    return switch (key) {
+        .int => |i| .{ .int = i },
+        .string => |s| .{ .string = s },
+    };
+}
+
+fn array_diff_uassoc(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len < 3 or args[0] != .array) return .null;
+    const src = args[0].array;
+    const callback = args[args.len - 1];
+
+    var result = try ctx.createArray();
+    for (src.entries.items) |entry| {
+        var in_any = false;
+        for (args[1 .. args.len - 1]) |arg| {
+            if (arg != .array) continue;
+            for (arg.array.entries.items) |other| {
+                if (!Value.equal(entry.value, other.value)) continue;
+                const cmp = try ctx.invokeCallable(callback, &.{ keyToValue(entry.key), keyToValue(other.key) });
+                if (Value.toInt(cmp) == 0) {
+                    in_any = true;
+                    break;
+                }
+            }
+            if (in_any) break;
+        }
+        if (!in_any) try result.set(ctx.allocator, entry.key, entry.value);
+    }
+    return .{ .array = result };
+}
+
+fn array_diff_ukey(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len < 3 or args[0] != .array) return .null;
+    const src = args[0].array;
+    const callback = args[args.len - 1];
+
+    var result = try ctx.createArray();
+    for (src.entries.items) |entry| {
+        var in_any = false;
+        for (args[1 .. args.len - 1]) |arg| {
+            if (arg != .array) continue;
+            for (arg.array.entries.items) |other| {
+                const cmp = try ctx.invokeCallable(callback, &.{ keyToValue(entry.key), keyToValue(other.key) });
+                if (Value.toInt(cmp) == 0) {
+                    in_any = true;
+                    break;
+                }
+            }
+            if (in_any) break;
+        }
+        if (!in_any) try result.set(ctx.allocator, entry.key, entry.value);
+    }
+    return .{ .array = result };
 }

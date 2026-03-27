@@ -1,6 +1,8 @@
 const std = @import("std");
 const Value = @import("../runtime/value.zig").Value;
+const PhpArray = @import("../runtime/value.zig").PhpArray;
 const NativeContext = @import("../runtime/vm.zig").NativeContext;
+const VM = @import("../runtime/vm.zig").VM;
 const RuntimeError = error{ RuntimeError, OutOfMemory };
 
 pub const entries = .{
@@ -15,6 +17,12 @@ pub const entries = .{
     .{ "is_uploaded_file", native_is_uploaded_file },
     .{ "sys_get_temp_dir", native_sys_get_temp_dir },
     .{ "tempnam", native_tempnam },
+    .{ "debug_backtrace", native_debug_backtrace },
+    .{ "debug_print_backtrace", native_debug_print_backtrace },
+    .{ "get_defined_functions", native_get_defined_functions },
+    .{ "get_defined_vars", native_get_defined_vars },
+    .{ "get_defined_classes", native_get_defined_classes },
+    .{ "set_time_limit", native_set_time_limit },
 };
 
 fn native_sleep(_: *NativeContext, args: []const Value) RuntimeError!Value {
@@ -112,4 +120,163 @@ fn native_tempnam(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     const result = try buf.toOwnedSlice(ctx.allocator);
     try ctx.strings.append(ctx.allocator, result);
     return .{ .string = result };
+}
+
+fn buildBacktrace(ctx: *NativeContext, ignore_args: bool, limit: usize) RuntimeError!*PhpArray {
+    const vm = ctx.vm;
+    const alloc = ctx.allocator;
+    var result = try ctx.createArray();
+
+    if (vm.frame_count <= 1) return result;
+
+    const max = if (limit > 0) @min(limit, vm.frame_count - 1) else vm.frame_count - 1;
+    var count: usize = 0;
+    var i: usize = vm.frame_count - 1;
+
+    while (i >= 1 and count < max) : ({
+        i -= 1;
+        count += 1;
+    }) {
+        var entry = try ctx.createArray();
+        try entry.set(alloc, .{ .string = "file" }, .{ .string = vm.file_path });
+
+        const caller = &vm.frames[i - 1];
+        if (caller.chunk.getSourceLocation(caller.ip, vm.source)) |loc| {
+            try entry.set(alloc, .{ .string = "line" }, .{ .int = @intCast(loc.line) });
+        }
+
+        const frame = &vm.frames[i];
+        if (frame.func) |func| {
+            if (std.mem.indexOf(u8, func.name, "::")) |sep| {
+                try entry.set(alloc, .{ .string = "class" }, .{ .string = func.name[0..sep] });
+                try entry.set(alloc, .{ .string = "function" }, .{ .string = func.name[sep + 2 ..] });
+                try entry.set(alloc, .{ .string = "type" }, .{ .string = "->" });
+            } else {
+                try entry.set(alloc, .{ .string = "function" }, .{ .string = func.name });
+                if (frame.called_class) |cls| {
+                    try entry.set(alloc, .{ .string = "class" }, .{ .string = cls });
+                    try entry.set(alloc, .{ .string = "type" }, .{ .string = "->" });
+                }
+            }
+        }
+
+        if (!ignore_args) {
+            var args_arr = try ctx.createArray();
+            if (vm.ic) |ic| {
+                const ac = ic.arg_counts[i];
+                if (ac != 0xFF) {
+                    const offset: usize = ic.fga_offsets[i];
+                    const arg_count: usize = ac;
+                    if (offset + arg_count <= 256) {
+                        for (0..arg_count) |a| {
+                            try args_arr.append(alloc, ic.fga_buf[offset + a]);
+                        }
+                    }
+                }
+            }
+            try entry.set(alloc, .{ .string = "args" }, .{ .array = args_arr });
+        }
+
+        try result.append(alloc, .{ .array = entry });
+    }
+
+    return result;
+}
+
+fn native_debug_backtrace(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    const options = if (args.len >= 1) Value.toInt(args[0]) else 0;
+    const limit_raw = if (args.len >= 2) Value.toInt(args[1]) else 0;
+    const ignore_args = (options & 2) != 0;
+    const limit: usize = if (limit_raw > 0) @intCast(limit_raw) else 0;
+    return .{ .array = try buildBacktrace(ctx, ignore_args, limit) };
+}
+
+fn native_debug_print_backtrace(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    const options = if (args.len >= 1) Value.toInt(args[0]) else 0;
+    const limit_raw = if (args.len >= 2) Value.toInt(args[1]) else 0;
+    const ignore_args = (options & 2) != 0;
+    const limit: usize = if (limit_raw > 0) @intCast(limit_raw) else 0;
+    const trace = try buildBacktrace(ctx, ignore_args, limit);
+
+    const out = &ctx.vm.output;
+    const alloc = ctx.allocator;
+    for (trace.entries.items, 0..) |entry, idx| {
+        const arr = entry.value.array;
+        const func = arr.get(.{ .string = "function" });
+        const file = arr.get(.{ .string = "file" });
+        const line = arr.get(.{ .string = "line" });
+        var num_buf: [20]u8 = undefined;
+        const num_str = std.fmt.bufPrint(&num_buf, "{d}", .{idx}) catch "0";
+        try out.appendSlice(alloc, "#");
+        try out.appendSlice(alloc, num_str);
+        try out.appendSlice(alloc, " ");
+        if (file == .string) {
+            try out.appendSlice(alloc, file.string);
+            if (line == .int) {
+                try out.appendSlice(alloc, "(");
+                var line_buf: [20]u8 = undefined;
+                const line_str = std.fmt.bufPrint(&line_buf, "{d}", .{line.int}) catch "0";
+                try out.appendSlice(alloc, line_str);
+                try out.appendSlice(alloc, ")");
+            }
+            try out.appendSlice(alloc, ": ");
+        }
+        try out.appendSlice(alloc, if (func == .string) func.string else "{main}");
+        try out.appendSlice(alloc, "()\n");
+    }
+    return .null;
+}
+
+fn native_get_defined_functions(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const vm = ctx.vm;
+    const alloc = ctx.allocator;
+    var result = try ctx.createArray();
+
+    var internal = try ctx.createArray();
+    var iter_n = vm.native_fns.iterator();
+    while (iter_n.next()) |entry| {
+        try internal.append(alloc, .{ .string = entry.key_ptr.* });
+    }
+
+    var user = try ctx.createArray();
+    var iter_u = vm.functions.iterator();
+    while (iter_u.next()) |entry| {
+        try user.append(alloc, .{ .string = entry.key_ptr.* });
+    }
+
+    try result.set(alloc, .{ .string = "internal" }, .{ .array = internal });
+    try result.set(alloc, .{ .string = "user" }, .{ .array = user });
+    return .{ .array = result };
+}
+
+fn native_get_defined_vars(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const vm = ctx.vm;
+    const alloc = ctx.allocator;
+    var result = try ctx.createArray();
+
+    if (vm.frame_count == 0) return .{ .array = result };
+    const frame = &vm.frames[vm.frame_count - 1];
+    var iter = frame.vars.iterator();
+    while (iter.next()) |entry| {
+        const name = entry.key_ptr.*;
+        if (name.len > 0 and name[0] == '$') continue;
+        try result.set(alloc, .{ .string = name }, entry.value_ptr.*);
+    }
+    return .{ .array = result };
+}
+
+fn native_get_defined_classes(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const vm = ctx.vm;
+    const alloc = ctx.allocator;
+    var result = try ctx.createArray();
+
+    var iter = vm.classes.iterator();
+    while (iter.next()) |entry| {
+        try result.append(alloc, .{ .string = entry.key_ptr.* });
+    }
+    return .{ .array = result };
+}
+
+fn native_set_time_limit(_: *NativeContext, _: []const Value) RuntimeError!Value {
+    return .{ .bool = true };
 }
