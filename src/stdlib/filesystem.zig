@@ -47,6 +47,8 @@ pub const entries = .{
     .{ "fflush", native_fflush },
     .{ "ftruncate", native_ftruncate },
     .{ "flock", native_flock },
+    .{ "fgetcsv", native_fgetcsv },
+    .{ "fputcsv", native_fputcsv },
 };
 
 // file handle management - store handles in PhpObjects with class "FileHandle"
@@ -548,4 +550,122 @@ fn native_flock(_: *NativeContext, args: []const Value) RuntimeError!Value {
     const op: i32 = @intCast(args[1].int & 0xff);
     std.posix.flock(file.handle, op) catch return Value{ .bool = false };
     return .{ .bool = true };
+}
+
+fn native_fgetcsv(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len == 0 or args[0] != .object) return .{ .bool = false };
+    const file = getFileHandle(args[0].object) orelse return Value{ .bool = false };
+    // args: handle, [length], [delimiter], [enclosure], [escape]
+    const delimiter: u8 = if (args.len >= 3 and args[2] == .string and args[2].string.len > 0) args[2].string[0] else ',';
+    const enclosure: u8 = if (args.len >= 4 and args[3] == .string and args[3].string.len > 0) args[3].string[0] else '"';
+
+    // read a line
+    var line = std.ArrayListUnmanaged(u8){};
+    var byte: [1]u8 = undefined;
+    while (line.items.len < 65536) {
+        const n = file.read(&byte) catch break;
+        if (n == 0) break;
+        try line.append(ctx.allocator, byte[0]);
+        if (byte[0] == '\n') break;
+    }
+    if (line.items.len == 0) return .{ .bool = false };
+
+    // register the line buffer for cleanup
+    const line_owned = try line.toOwnedSlice(ctx.allocator);
+    try ctx.strings.append(ctx.allocator, line_owned);
+
+    // trim trailing newline
+    var raw = line_owned;
+    if (raw.len > 0 and raw[raw.len - 1] == '\n') raw = raw[0 .. raw.len - 1];
+    if (raw.len > 0 and raw[raw.len - 1] == '\r') raw = raw[0 .. raw.len - 1];
+
+    // parse CSV fields
+    var result = try ctx.createArray();
+    var field = std.ArrayListUnmanaged(u8){};
+    var in_quotes = false;
+    var i: usize = 0;
+    while (i < raw.len) : (i += 1) {
+        const c = raw[i];
+        if (in_quotes) {
+            if (c == enclosure) {
+                if (i + 1 < raw.len and raw[i + 1] == enclosure) {
+                    try field.append(ctx.allocator, enclosure);
+                    i += 1;
+                } else {
+                    in_quotes = false;
+                }
+            } else {
+                try field.append(ctx.allocator, c);
+            }
+        } else {
+            if (c == enclosure) {
+                in_quotes = true;
+            } else if (c == delimiter) {
+                const s = try field.toOwnedSlice(ctx.allocator);
+                try ctx.strings.append(ctx.allocator, s);
+                try result.append(ctx.allocator, .{ .string = s });
+            } else {
+                try field.append(ctx.allocator, c);
+            }
+        }
+    }
+    // last field
+    const s = try field.toOwnedSlice(ctx.allocator);
+    try ctx.strings.append(ctx.allocator, s);
+    try result.append(ctx.allocator, .{ .string = s });
+
+    return .{ .array = result };
+}
+
+fn native_fputcsv(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len < 2 or args[0] != .object or args[1] != .array) return .{ .bool = false };
+    const file = getFileHandle(args[0].object) orelse return Value{ .bool = false };
+    const arr = args[1].array;
+    const delimiter: u8 = if (args.len >= 3 and args[2] == .string and args[2].string.len > 0) args[2].string[0] else ',';
+    const enclosure: u8 = if (args.len >= 4 and args[3] == .string and args[3].string.len > 0) args[3].string[0] else '"';
+
+    var buf = std.ArrayListUnmanaged(u8){};
+    for (arr.entries.items, 0..) |entry, i| {
+        if (i > 0) try buf.append(ctx.allocator, delimiter);
+        const val = switch (entry.value) {
+            .string => |sv| sv,
+            .int => |iv| blk: {
+                const tmp = try std.fmt.allocPrint(ctx.allocator, "{d}", .{iv});
+                try ctx.strings.append(ctx.allocator, tmp);
+                break :blk tmp;
+            },
+            .float => |fv| blk: {
+                const tmp = try std.fmt.allocPrint(ctx.allocator, "{d}", .{fv});
+                try ctx.strings.append(ctx.allocator, tmp);
+                break :blk tmp;
+            },
+            else => "",
+        };
+
+        // check if quoting is needed
+        var needs_quote = false;
+        for (val) |c| {
+            if (c == delimiter or c == enclosure or c == '\n' or c == '\r') {
+                needs_quote = true;
+                break;
+            }
+        }
+
+        if (needs_quote) {
+            try buf.append(ctx.allocator, enclosure);
+            for (val) |c| {
+                if (c == enclosure) try buf.append(ctx.allocator, enclosure);
+                try buf.append(ctx.allocator, c);
+            }
+            try buf.append(ctx.allocator, enclosure);
+        } else {
+            try buf.appendSlice(ctx.allocator, val);
+        }
+    }
+    try buf.append(ctx.allocator, '\n');
+
+    const written = file.write(buf.items) catch return Value{ .bool = false };
+    const owned = try buf.toOwnedSlice(ctx.allocator);
+    try ctx.strings.append(ctx.allocator, owned);
+    return .{ .int = @intCast(written) };
 }

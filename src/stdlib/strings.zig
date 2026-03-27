@@ -80,6 +80,7 @@ pub const entries = .{
     .{ "strstr", native_strstr },
     .{ "strchr", native_strstr },
     .{ "strtr", native_strtr },
+    .{ "vsprintf", native_vsprintf },
 };
 
 fn substr(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
@@ -1970,4 +1971,20 @@ fn native_strtr(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     }
 
     return .null;
+}
+
+fn native_vsprintf(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len < 2) return .{ .string = "" };
+    const fmt_str = if (args[0] == .string) args[0].string else return Value{ .string = "" };
+    if (args[1] != .array) return .{ .string = "" };
+
+    // convert array values to a slice for sprintfImpl
+    const arr = args[1].array;
+    var vals = try ctx.allocator.alloc(Value, arr.entries.items.len);
+    defer ctx.allocator.free(vals);
+    for (arr.entries.items, 0..) |entry, i| {
+        vals[i] = entry.value;
+    }
+    const result = try sprintfImpl(ctx, fmt_str, vals);
+    return .{ .string = result };
 }

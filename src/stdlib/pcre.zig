@@ -83,6 +83,7 @@ pub const entries = .{
     .{ "preg_replace", preg_replace },
     .{ "preg_replace_callback", preg_replace_callback },
     .{ "preg_split", preg_split },
+    .{ "preg_quote", preg_quote },
 };
 
 const PatternInfo = struct {
@@ -526,4 +527,26 @@ fn preg_split(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     }
 
     return .{ .array = result };
+}
+
+fn preg_quote(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len == 0 or args[0] != .string) return .{ .string = "" };
+    const input = args[0].string;
+    const delimiter: ?u8 = if (args.len >= 2 and args[1] == .string and args[1].string.len > 0) args[1].string[0] else null;
+
+    // pcre special chars: . \ + * ? [ ^ ] $ ( ) { } = ! < > | : - #
+    const specials = ".\\+*?[^]$(){}=!<>|:-#";
+
+    var buf = std.ArrayListUnmanaged(u8){};
+    for (input) |c| {
+        if (delimiter != null and c == delimiter.?) {
+            try buf.append(ctx.allocator, '\\');
+        } else if (std.mem.indexOfScalar(u8, specials, c) != null) {
+            try buf.append(ctx.allocator, '\\');
+        }
+        try buf.append(ctx.allocator, c);
+    }
+    const result = try buf.toOwnedSlice(ctx.allocator);
+    try ctx.strings.append(ctx.allocator, result);
+    return .{ .string = result };
 }

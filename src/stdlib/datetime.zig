@@ -16,6 +16,7 @@ pub const entries = .{
     .{ "microtime", native_microtime },
     .{ "checkdate", native_checkdate },
     .{ "getdate", native_getdate },
+    .{ "gmdate", native_gmdate },
 };
 
 pub fn register(vm: *VM, a: Allocator) !void {
@@ -1229,4 +1230,9 @@ fn tryParseOrdinalWeekday(input: []const u8, base: i64) ?i64 {
 
 fn startsWith(s: []const u8, prefix: []const u8) bool {
     return s.len >= prefix.len and std.mem.eql(u8, s[0..prefix.len], prefix);
+}
+
+// gmdate is identical to date since zphp timestamps are always UTC
+fn native_gmdate(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    return native_date(ctx, args);
 }

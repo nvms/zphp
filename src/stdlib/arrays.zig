@@ -65,6 +65,11 @@ pub const entries = .{
     .{ "end", native_end },
     .{ "key", native_key },
     .{ "sizeof", native_sizeof },
+    .{ "array_intersect_key", array_intersect_key },
+    .{ "array_diff_assoc", array_diff_assoc },
+    .{ "array_replace_recursive", array_replace_recursive },
+    .{ "array_walk_recursive", array_walk_recursive },
+    .{ "array_merge_recursive", array_merge_recursive },
 };
 
 fn array_push(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
@@ -1057,4 +1062,157 @@ fn native_key(_: *NativeContext, args: []const Value) RuntimeError!Value {
 fn native_sizeof(_: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len == 0 or args[0] != .array) return .{ .int = 0 };
     return .{ .int = args[0].array.length() };
+}
+
+fn array_intersect_key(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len < 2 or args[0] != .array) return .null;
+    const src = args[0].array;
+
+    var result = try ctx.createArray();
+    for (src.entries.items) |entry| {
+        var in_all = true;
+        for (args[1..]) |arg| {
+            if (arg != .array) continue;
+            var found = false;
+            for (arg.array.entries.items) |other| {
+                if (entry.key.eql(other.key)) {
+                    found = true;
+                    break;
+                }
+            }
+            if (!found) {
+                in_all = false;
+                break;
+            }
+        }
+        if (in_all) try result.set(ctx.allocator, entry.key, entry.value);
+    }
+    return .{ .array = result };
+}
+
+fn array_diff_assoc(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len < 2 or args[0] != .array) return .null;
+    const src = args[0].array;
+
+    var result = try ctx.createArray();
+    for (src.entries.items) |entry| {
+        var in_any = false;
+        for (args[1..]) |arg| {
+            if (arg != .array) continue;
+            for (arg.array.entries.items) |other| {
+                if (entry.key.eql(other.key) and Value.equal(entry.value, other.value)) {
+                    in_any = true;
+                    break;
+                }
+            }
+            if (in_any) break;
+        }
+        if (!in_any) try result.set(ctx.allocator, entry.key, entry.value);
+    }
+    return .{ .array = result };
+}
+
+fn deepReplace(ctx: *NativeContext, base: *PhpArray, overlay: *PhpArray) RuntimeError!*PhpArray {
+    var result = try ctx.createArray();
+    for (base.entries.items) |entry| {
+        try result.set(ctx.allocator, entry.key, entry.value);
+    }
+    for (overlay.entries.items) |entry| {
+        const existing = result.get(entry.key);
+        if (existing == .array and entry.value == .array) {
+            const merged = try deepReplace(ctx, existing.array, entry.value.array);
+            try result.set(ctx.allocator, entry.key, .{ .array = merged });
+        } else {
+            try result.set(ctx.allocator, entry.key, entry.value);
+        }
+    }
+    return result;
+}
+
+fn array_replace_recursive(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len == 0 or args[0] != .array) return .null;
+    var result = args[0].array;
+    for (args[1..]) |arg| {
+        if (arg != .array) continue;
+        result = try deepReplace(ctx, result, arg.array);
+    }
+    return .{ .array = result };
+}
+
+fn walkRecursive(ctx: *NativeContext, arr: *PhpArray, callback: Value) RuntimeError!void {
+    for (arr.entries.items) |entry| {
+        if (entry.value == .array) {
+            try walkRecursive(ctx, entry.value.array, callback);
+        } else {
+            var call_args = [2]Value{ entry.value, switch (entry.key) {
+                .int => |k| Value{ .int = k },
+                .string => |s| Value{ .string = s },
+            } };
+            _ = try ctx.invokeCallableRef(callback, &call_args);
+        }
+    }
+}
+
+fn array_walk_recursive(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len < 2 or args[0] != .array) return .{ .bool = false };
+    try walkRecursive(ctx, args[0].array, args[1]);
+    return .{ .bool = true };
+}
+
+fn deepMerge(ctx: *NativeContext, a: *PhpArray, b: *PhpArray) RuntimeError!*PhpArray {
+    var result = try ctx.createArray();
+    for (a.entries.items) |entry| {
+        try result.set(ctx.allocator, entry.key, entry.value);
+    }
+    for (b.entries.items) |entry| {
+        switch (entry.key) {
+            .int => try result.append(ctx.allocator, entry.value),
+            .string => {
+                const existing = result.get(entry.key);
+                if (existing == .array and entry.value == .array) {
+                    const merged = try deepMerge(ctx, existing.array, entry.value.array);
+                    try result.set(ctx.allocator, entry.key, .{ .array = merged });
+                } else if (existing != .null) {
+                    // both are scalars - wrap into array
+                    if (entry.value == .array) {
+                        // existing is scalar, incoming is array
+                        var merged = try ctx.createArray();
+                        try merged.append(ctx.allocator, existing);
+                        for (entry.value.array.entries.items) |sub| {
+                            try merged.append(ctx.allocator, sub.value);
+                        }
+                        try result.set(ctx.allocator, entry.key, .{ .array = merged });
+                    } else if (existing == .array) {
+                        // existing is array, incoming is scalar
+                        var merged = try ctx.createArray();
+                        for (existing.array.entries.items) |sub| {
+                            try merged.append(ctx.allocator, sub.value);
+                        }
+                        try merged.append(ctx.allocator, entry.value);
+                        try result.set(ctx.allocator, entry.key, .{ .array = merged });
+                    } else {
+                        // both scalars - combine into array
+                        var merged = try ctx.createArray();
+                        try merged.append(ctx.allocator, existing);
+                        try merged.append(ctx.allocator, entry.value);
+                        try result.set(ctx.allocator, entry.key, .{ .array = merged });
+                    }
+                } else {
+                    try result.set(ctx.allocator, entry.key, entry.value);
+                }
+            },
+        }
+    }
+    return result;
+}
+
+fn array_merge_recursive(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len == 0) return .null;
+    if (args[0] != .array) return .null;
+    var result = args[0].array;
+    for (args[1..]) |arg| {
+        if (arg != .array) continue;
+        result = try deepMerge(ctx, result, arg.array);
+    }
+    return .{ .array = result };
 }
