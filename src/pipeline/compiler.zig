@@ -478,6 +478,11 @@ pub const Compiler = struct {
         return name;
     }
 
+    pub fn isDynamicProp(self: *Compiler, node: Ast.Node) bool {
+        const prop_node = self.ast.nodes[node.data.rhs];
+        return self.ast.tokens[prop_node.main_token].tag == .variable;
+    }
+
     // ==================================================================
     // loop helpers
     // ==================================================================

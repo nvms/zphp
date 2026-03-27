@@ -591,9 +591,17 @@ pub fn compileArrayLiteral(self: *Compiler, node: Ast.Node) Error!void {
 
 pub fn compilePropertyAccess(self: *Compiler, node: Ast.Node) Error!void {
     try self.compileNode(node.data.lhs);
-    const name_idx = try self.addConstant(.{ .string = self.propName(node) });
-    try self.emitOp(.get_prop);
-    try self.emitU16(name_idx);
+    if (self.isDynamicProp(node)) {
+        // $obj->$field: load variable value as property name
+        const prop_node = self.ast.nodes[node.data.rhs];
+        const var_name = self.ast.tokenSlice(prop_node.main_token);
+        try self.emitGetVar(var_name);
+        try self.emitOp(.get_prop_dynamic);
+    } else {
+        const name_idx = try self.addConstant(.{ .string = self.propName(node) });
+        try self.emitOp(.get_prop);
+        try self.emitU16(name_idx);
+    }
 }
 
 pub fn compileMethodCall(self: *Compiler, node: Ast.Node) Error!void {

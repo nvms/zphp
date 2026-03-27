@@ -1173,21 +1173,27 @@ pub const VM = struct {
                             }
                         }
 
-                        // finalize old buffer: copy its contents to a standalone allocation
-                        // so the previous variable's string isn't corrupted
+                        // finalize old buffer: transfer ownership to self.strings so
+                        // external references (array entries etc.) remain valid, then
+                        // start a fresh buffer
                         if (ic.concat_buf.items.len > 0 and ic.concat_slot != 0xFFFF) {
                             const old_str = try self.allocator.alloc(u8, ic.concat_buf.items.len);
                             @memcpy(old_str, ic.concat_buf.items);
                             try self.strings.append(self.allocator, old_str);
-                            // update the old variable to point to the standalone copy
                             if (ic.concat_frame == self.frame_count and ic.concat_slot < self.currentFrame().locals.len) {
                                 const old_val = self.currentFrame().locals[ic.concat_slot];
                                 if (old_val == .string and old_val.string.ptr == ic.concat_buf.items.ptr) {
                                     self.currentFrame().locals[ic.concat_slot] = .{ .string = old_str };
                                 }
                             }
+                            // preserve old buffer memory for external references
+                            if (ic.concat_buf.capacity > 0) {
+                                try self.strings.append(self.allocator, ic.concat_buf.allocatedSlice());
+                                ic.concat_buf = .{};
+                            }
+                        } else {
+                            ic.concat_buf.clearRetainingCapacity();
                         }
-                        ic.concat_buf.clearRetainingCapacity();
                         if (current == .string) {
                             try ic.concat_buf.appendSlice(self.allocator, current.string);
                         } else if (current != .null) {
@@ -1895,6 +1901,43 @@ pub const VM = struct {
                     } else {
                         self.push(.null);
                     }
+                },
+
+                .get_prop_dynamic => {
+                    const prop_name_val = self.pop();
+                    const obj_val = self.pop();
+                    if (obj_val == .object and prop_name_val == .string) {
+                        const obj = obj_val.object;
+                        const prop_name = prop_name_val.string;
+                        const val = obj.get(prop_name);
+                        if (val != .null or obj.properties.contains(prop_name) or (obj.slots != null and obj.getSlotIndex(prop_name) != null)) {
+                            self.push(val);
+                        } else if (self.hasMethod(obj.class_name, "__get")) {
+                            const result = self.callMethod(obj, "__get", &.{.{ .string = prop_name }}) catch .null;
+                            self.push(result);
+                        } else {
+                            self.push(.null);
+                        }
+                    } else {
+                        self.push(.null);
+                    }
+                },
+
+                .set_prop_dynamic => {
+                    const prop_name_val = self.pop();
+                    const new_val = try self.copyValue(self.pop());
+                    const obj_val = self.pop();
+                    if (obj_val == .object and prop_name_val == .string) {
+                        const obj = obj_val.object;
+                        const prop_name = prop_name_val.string;
+                        const has_prop = obj.properties.contains(prop_name) or (obj.slots != null and obj.getSlotIndex(prop_name) != null);
+                        if (!has_prop and self.hasMethod(obj.class_name, "__set")) {
+                            _ = self.callMethod(obj, "__set", &.{ .{ .string = prop_name }, new_val }) catch {};
+                        } else {
+                            try obj.properties.put(self.allocator, prop_name, new_val);
+                        }
+                    }
+                    self.push(new_val);
                 },
 
                 .set_prop => {
