@@ -22,18 +22,16 @@ Requires PHP installed locally. zphp must be built with ReleaseFast - debug buil
 
 | benchmark | php | zphp | ratio |
 |---|---|---|---|
-| array_ops | 95 ms | 27 ms | 0.28x |
-| string_ops | 95 ms | 28 ms | 0.29x |
-| objects | 102 ms | 34 ms | 0.33x |
-| closures | 102 ms | 82 ms | 0.80x |
-| loops | 132 ms | 122 ms | 0.92x |
-| fibonacci | 160 ms | 152 ms | 0.95x |
+| string_ops | 98 ms | 24 ms | 0.24x |
+| array_ops | 90 ms | 27 ms | 0.30x |
+| objects | 102 ms | 35 ms | 0.34x |
+| fibonacci | 162 ms | 129 ms | 0.80x |
+| closures | 99 ms | 85 ms | 0.86x |
+| loops | 124 ms | 106 ms | 0.85x |
 
-zphp beats PHP on all six benchmarks. Array operations are 3.5x faster thanks to O(1) integer key lookups on sequential arrays. String operations are 3.4x faster after adding concat (string+string, string+int, int+string) to fastLoop - the concat loop stays in the fast tier instead of bailing to runLoop on every iteration, and the growable concat_assign buffer avoids O(n) reallocation per append. Objects are 3x faster with property slot indices and IC-cached slot access. Closures beat PHP via indexed capture lookup (HashMap by closure name instead of linear scan) and fastLoop handling of call_indirect for closures. Loops beat PHP thanks to superinstructions (inc_local, add_local_to_local, less_local_local_jif) that fuse common opcode sequences in hot loops. Fibonacci wins via stack-allocated locals and inline call/return.
+zphp beats PHP on all six benchmarks. Array operations are 3.3x faster thanks to O(1) integer key lookups on sequential arrays. String operations are 4x faster after adding concat (string+string, string+int, int+string) to fastLoop - the concat loop stays in the fast tier instead of bailing to runLoop on every iteration, and the growable concat_assign buffer avoids O(n) reallocation per append. Objects are 3x faster with property slot indices and IC-cached slot access. Closures beat PHP via indexed capture lookup (HashMap by closure name instead of linear scan) and fastLoop handling of call_indirect for closures. Loops and fibonacci benefit from labeled switch dispatch in fastLoop - each opcode handler jumps directly to the next via `continue :dispatch`, eliminating the while loop overhead and giving the CPU branch predictor per-handler context. Superinstructions (inc_local, add_local_to_local, less_local_local_jif) fuse common opcode sequences in hot loops.
 
 ### Optimization targets
-
-- **Computed goto dispatch**: replace switch-based opcode dispatch with computed goto (general improvement across all benchmarks)
 
 ## fmt
 

@@ -3392,12 +3392,15 @@ pub const VM = struct {
                 const byte: OpCode = @enumFromInt(code[ip]);
                 ip += 1;
 
-                switch (byte) {
+                dispatch: switch (byte) {
                 .get_local => {
                     const slot = (@as(u16, code[ip]) << 8) | code[ip + 1];
                     ip += 2;
                     self.stack[sp] = locals[slot];
                     sp += 1;
+                    const _next = code[ip];
+                    ip += 1;
+                    continue :dispatch @as(OpCode, @enumFromInt(_next));
                 },
                 .set_local => {
                     const slot = (@as(u16, code[ip]) << 8) | code[ip + 1];
@@ -3412,6 +3415,9 @@ pub const VM = struct {
                         ip += 1;
                         sp -= 1;
                     }
+                    const _next = code[ip];
+                    ip += 1;
+                    continue :dispatch @as(OpCode, @enumFromInt(_next));
                 },
                 .add => {
                     const b = self.stack[sp - 1];
@@ -3419,6 +3425,9 @@ pub const VM = struct {
                     sp -= 2;
                     self.stack[sp] = if (a == .int and b == .int) .{ .int = a.int +% b.int } else if (a == .float and b == .float) .{ .float = a.float + b.float } else Value.add(a, b);
                     sp += 1;
+                    const _next = code[ip];
+                    ip += 1;
+                    continue :dispatch @as(OpCode, @enumFromInt(_next));
                 },
                 .subtract => {
                     const b = self.stack[sp - 1];
@@ -3426,6 +3435,9 @@ pub const VM = struct {
                     sp -= 2;
                     self.stack[sp] = if (a == .int and b == .int) .{ .int = a.int -% b.int } else if (a == .float and b == .float) .{ .float = a.float - b.float } else Value.subtract(a, b);
                     sp += 1;
+                    const _next = code[ip];
+                    ip += 1;
+                    continue :dispatch @as(OpCode, @enumFromInt(_next));
                 },
                 .multiply => {
                     const b = self.stack[sp - 1];
@@ -3433,6 +3445,9 @@ pub const VM = struct {
                     sp -= 2;
                     self.stack[sp] = if (a == .int and b == .int) .{ .int = a.int *% b.int } else if (a == .float and b == .float) .{ .float = a.float * b.float } else Value.multiply(a, b);
                     sp += 1;
+                    const _next = code[ip];
+                    ip += 1;
+                    continue :dispatch @as(OpCode, @enumFromInt(_next));
                 },
                 .less => {
                     const b = self.stack[sp - 1];
@@ -3440,6 +3455,9 @@ pub const VM = struct {
                     sp -= 2;
                     self.stack[sp] = .{ .bool = if (a == .int and b == .int) a.int < b.int else if (a == .float and b == .float) a.float < b.float else Value.lessThan(a, b) };
                     sp += 1;
+                    const _next = code[ip];
+                    ip += 1;
+                    continue :dispatch @as(OpCode, @enumFromInt(_next));
                 },
                 .less_equal => {
                     const b = self.stack[sp - 1];
@@ -3447,6 +3465,9 @@ pub const VM = struct {
                     sp -= 2;
                     self.stack[sp] = .{ .bool = if (a == .int and b == .int) a.int <= b.int else !Value.lessThan(b, a) };
                     sp += 1;
+                    const _next = code[ip];
+                    ip += 1;
+                    continue :dispatch @as(OpCode, @enumFromInt(_next));
                 },
                 .greater => {
                     const b = self.stack[sp - 1];
@@ -3454,6 +3475,9 @@ pub const VM = struct {
                     sp -= 2;
                     self.stack[sp] = .{ .bool = if (a == .int and b == .int) a.int > b.int else Value.lessThan(b, a) };
                     sp += 1;
+                    const _next = code[ip];
+                    ip += 1;
+                    continue :dispatch @as(OpCode, @enumFromInt(_next));
                 },
                 .identical => {
                     const b_id = self.stack[sp - 1];
@@ -3461,6 +3485,9 @@ pub const VM = struct {
                     sp -= 2;
                     self.stack[sp] = .{ .bool = Value.identical(a_id, b_id) };
                     sp += 1;
+                    const _next = code[ip];
+                    ip += 1;
+                    continue :dispatch @as(OpCode, @enumFromInt(_next));
                 },
                 .not_identical => {
                     const b_ni = self.stack[sp - 1];
@@ -3468,6 +3495,9 @@ pub const VM = struct {
                     sp -= 2;
                     self.stack[sp] = .{ .bool = !Value.identical(a_ni, b_ni) };
                     sp += 1;
+                    const _next = code[ip];
+                    ip += 1;
+                    continue :dispatch @as(OpCode, @enumFromInt(_next));
                 },
                 .modulo => {
                     const b_mod = self.stack[sp - 1];
@@ -3475,23 +3505,38 @@ pub const VM = struct {
                     sp -= 2;
                     self.stack[sp] = Value.modulo(a_mod, b_mod);
                     sp += 1;
+                    const _next = code[ip];
+                    ip += 1;
+                    continue :dispatch @as(OpCode, @enumFromInt(_next));
                 },
                 .negate => {
                     self.stack[sp - 1] = self.stack[sp - 1].negate();
+                    const _next = code[ip];
+                    ip += 1;
+                    continue :dispatch @as(OpCode, @enumFromInt(_next));
                 },
                 .not => {
                     self.stack[sp - 1] = .{ .bool = !self.stack[sp - 1].isTruthy() };
+                    const _next = code[ip];
+                    ip += 1;
+                    continue :dispatch @as(OpCode, @enumFromInt(_next));
                 },
                 .jump_back => {
                     const offset = (@as(u16, code[ip]) << 8) | code[ip + 1];
                     ip += 2;
                     ip -= offset;
+                    const _next = code[ip];
+                    ip += 1;
+                    continue :dispatch @as(OpCode, @enumFromInt(_next));
                 },
                 .constant => {
                     const idx = (@as(u16, code[ip]) << 8) | code[ip + 1];
                     ip += 2;
                     self.stack[sp] = consts[idx];
                     sp += 1;
+                    const _next = code[ip];
+                    ip += 1;
+                    continue :dispatch @as(OpCode, @enumFromInt(_next));
                 },
                 .jump_if_false => {
                     const offset = (@as(u16, code[ip]) << 8) | code[ip + 1];
@@ -3502,34 +3547,58 @@ pub const VM = struct {
                         ip += 1;
                         sp -= 1;
                     }
+                    const _next = code[ip];
+                    ip += 1;
+                    continue :dispatch @as(OpCode, @enumFromInt(_next));
                 },
                 .jump => {
                     const offset = (@as(u16, code[ip]) << 8) | code[ip + 1];
                     ip += 2;
                     ip += offset;
+                    const _next = code[ip];
+                    ip += 1;
+                    continue :dispatch @as(OpCode, @enumFromInt(_next));
                 },
                 .pop => {
                     sp -= 1;
+                    const _next = code[ip];
+                    ip += 1;
+                    continue :dispatch @as(OpCode, @enumFromInt(_next));
                 },
                 .dup => {
                     self.stack[sp] = self.stack[sp - 1];
                     sp += 1;
+                    const _next = code[ip];
+                    ip += 1;
+                    continue :dispatch @as(OpCode, @enumFromInt(_next));
                 },
                 .op_null => {
                     self.stack[sp] = .null;
                     sp += 1;
+                    const _next = code[ip];
+                    ip += 1;
+                    continue :dispatch @as(OpCode, @enumFromInt(_next));
                 },
                 .op_true => {
                     self.stack[sp] = .{ .bool = true };
                     sp += 1;
+                    const _next = code[ip];
+                    ip += 1;
+                    continue :dispatch @as(OpCode, @enumFromInt(_next));
                 },
                 .op_false => {
                     self.stack[sp] = .{ .bool = false };
                     sp += 1;
+                    const _next = code[ip];
+                    ip += 1;
+                    continue :dispatch @as(OpCode, @enumFromInt(_next));
                 },
                 .cast_int => {
                     const v = self.stack[sp - 1];
                     self.stack[sp - 1] = .{ .int = Value.toInt(v) };
+                    const _next = code[ip];
+                    ip += 1;
+                    continue :dispatch @as(OpCode, @enumFromInt(_next));
                 },
                 .array_get => {
                     const ag_key = self.stack[sp - 1];
@@ -3538,6 +3607,9 @@ pub const VM = struct {
                     if (ag_arr == .array) {
                         self.stack[sp] = ag_arr.array.get(Value.toArrayKey(ag_key));
                         sp += 1;
+                        const _next = code[ip];
+                        ip += 1;
+                        continue :dispatch @as(OpCode, @enumFromInt(_next));
                     } else {
                         frame.ip = ip - 1;
                         self.sp = sp + 2;
@@ -3554,6 +3626,9 @@ pub const VM = struct {
                         if (agv_existing == .array) {
                             self.stack[sp] = agv_existing;
                             sp += 1;
+                            const _next = code[ip];
+                            ip += 1;
+                            continue :dispatch @as(OpCode, @enumFromInt(_next));
                         } else {
                             frame.ip = ip - 1;
                             self.sp = sp + 2;
@@ -3657,7 +3732,9 @@ pub const VM = struct {
                         if (gp_entry.key == gp_ip and gp_entry.chunk_key == @intFromPtr(frame.chunk) and gp_entry.class_ptr == @intFromPtr(gp_obj.class_name.ptr) and gp_entry.slot_index != 0xFFFF) {
                             if (gp_obj.slots) |s| {
                                 self.stack[sp - 1] = s[gp_entry.slot_index];
-                                continue;
+                                const _next_gp = code[ip];
+                                ip += 1;
+                                continue :dispatch @as(OpCode, @enumFromInt(_next_gp));
                             }
                         }
                     }
@@ -3681,7 +3758,9 @@ pub const VM = struct {
                                 s[sp_entry.slot_index] = copied;
                                 sp -= 1;
                                 self.stack[sp - 1] = copied;
-                                continue;
+                                const _next_sp = code[ip];
+                                ip += 1;
+                                continue :dispatch @as(OpCode, @enumFromInt(_next_sp));
                             }
                         }
                     }
@@ -3824,7 +3903,9 @@ pub const VM = struct {
                                     sp -= 1;
                                     self.stack[sp] = .{ .object = no_obj };
                                     sp += 1;
-                                    continue;
+                                    const _next2 = code[ip];
+                                    ip += 1;
+                                    continue :dispatch @as(OpCode, @enumFromInt(_next2));
                                 }
                             }
                         }
@@ -3833,7 +3914,9 @@ pub const VM = struct {
                         sp -= no_ac;
                         self.stack[sp] = .{ .object = no_obj };
                         sp += 1;
-                        continue;
+                        const _next_no = code[ip];
+                        ip += 1;
+                        continue :dispatch @as(OpCode, @enumFromInt(_next_no));
                     }
                     frame.ip = ip - 4;
                     self.sp = sp;
@@ -3953,8 +4036,14 @@ pub const VM = struct {
                     const v = locals[slot];
                     if (v == .int) {
                         locals[slot] = .{ .int = v.int +% 1 };
+                        const _next = code[ip];
+                        ip += 1;
+                        continue :dispatch @as(OpCode, @enumFromInt(_next));
                     } else if (v == .float) {
                         locals[slot] = .{ .float = v.float + 1.0 };
+                        const _next = code[ip];
+                        ip += 1;
+                        continue :dispatch @as(OpCode, @enumFromInt(_next));
                     } else {
                         frame.ip = ip - 3;
                         self.sp = sp;
@@ -3967,8 +4056,14 @@ pub const VM = struct {
                     const v = locals[slot];
                     if (v == .int) {
                         locals[slot] = .{ .int = v.int -% 1 };
+                        const _next = code[ip];
+                        ip += 1;
+                        continue :dispatch @as(OpCode, @enumFromInt(_next));
                     } else if (v == .float) {
                         locals[slot] = .{ .float = v.float - 1.0 };
+                        const _next = code[ip];
+                        ip += 1;
+                        continue :dispatch @as(OpCode, @enumFromInt(_next));
                     } else {
                         frame.ip = ip - 3;
                         self.sp = sp;
@@ -3983,12 +4078,24 @@ pub const VM = struct {
                     const dst = locals[dst_slot];
                     if (src == .int and dst == .int) {
                         locals[dst_slot] = .{ .int = dst.int +% src.int };
+                        const _next = code[ip];
+                        ip += 1;
+                        continue :dispatch @as(OpCode, @enumFromInt(_next));
                     } else if (src == .float and dst == .float) {
                         locals[dst_slot] = .{ .float = dst.float + src.float };
+                        const _next = code[ip];
+                        ip += 1;
+                        continue :dispatch @as(OpCode, @enumFromInt(_next));
                     } else if (src == .int and dst == .float) {
                         locals[dst_slot] = .{ .float = dst.float + @as(f64, @floatFromInt(src.int)) };
+                        const _next = code[ip];
+                        ip += 1;
+                        continue :dispatch @as(OpCode, @enumFromInt(_next));
                     } else if (src == .float and dst == .int) {
                         locals[dst_slot] = .{ .float = @as(f64, @floatFromInt(dst.int)) + src.float };
+                        const _next = code[ip];
+                        ip += 1;
+                        continue :dispatch @as(OpCode, @enumFromInt(_next));
                     } else {
                         frame.ip = ip - 5;
                         self.sp = sp;
@@ -4003,8 +4110,14 @@ pub const VM = struct {
                     const dst = locals[dst_slot];
                     if (src == .int and dst == .int) {
                         locals[dst_slot] = .{ .int = dst.int -% src.int };
+                        const _next = code[ip];
+                        ip += 1;
+                        continue :dispatch @as(OpCode, @enumFromInt(_next));
                     } else if (src == .float and dst == .float) {
                         locals[dst_slot] = .{ .float = dst.float - src.float };
+                        const _next = code[ip];
+                        ip += 1;
+                        continue :dispatch @as(OpCode, @enumFromInt(_next));
                     } else {
                         frame.ip = ip - 5;
                         self.sp = sp;
@@ -4019,12 +4132,24 @@ pub const VM = struct {
                     const dst = locals[dst_slot];
                     if (src == .int and dst == .int) {
                         locals[dst_slot] = .{ .int = dst.int *% src.int };
+                        const _next = code[ip];
+                        ip += 1;
+                        continue :dispatch @as(OpCode, @enumFromInt(_next));
                     } else if (src == .float and dst == .float) {
                         locals[dst_slot] = .{ .float = dst.float * src.float };
+                        const _next = code[ip];
+                        ip += 1;
+                        continue :dispatch @as(OpCode, @enumFromInt(_next));
                     } else if (src == .float and dst == .int) {
                         locals[dst_slot] = .{ .float = @as(f64, @floatFromInt(dst.int)) * src.float };
+                        const _next = code[ip];
+                        ip += 1;
+                        continue :dispatch @as(OpCode, @enumFromInt(_next));
                     } else if (src == .int and dst == .float) {
                         locals[dst_slot] = .{ .float = dst.float * @as(f64, @floatFromInt(src.int)) };
+                        const _next = code[ip];
+                        ip += 1;
+                        continue :dispatch @as(OpCode, @enumFromInt(_next));
                     } else {
                         frame.ip = ip - 5;
                         self.sp = sp;
@@ -4040,8 +4165,14 @@ pub const VM = struct {
                     const b = locals[slot_b];
                     if (a == .int and b == .int) {
                         if (a.int >= b.int) ip += offset;
+                        const _next = code[ip];
+                        ip += 1;
+                        continue :dispatch @as(OpCode, @enumFromInt(_next));
                     } else if (a == .float and b == .float) {
                         if (a.float >= b.float) ip += offset;
+                        const _next = code[ip];
+                        ip += 1;
+                        continue :dispatch @as(OpCode, @enumFromInt(_next));
                     } else {
                         frame.ip = ip - 7;
                         self.sp = sp;
@@ -4060,6 +4191,9 @@ pub const VM = struct {
                         try self.strings.append(self.allocator, owned);
                         sp -= 1;
                         self.stack[sp - 1] = .{ .string = owned };
+                        const _next = code[ip];
+                        ip += 1;
+                        continue :dispatch @as(OpCode, @enumFromInt(_next));
                     } else if (a == .string and b == .int) {
                         var tmp: [20]u8 = undefined;
                         const bs = std.fmt.bufPrint(&tmp, "{d}", .{b.int}) catch {
@@ -4073,6 +4207,9 @@ pub const VM = struct {
                         try self.strings.append(self.allocator, owned);
                         sp -= 1;
                         self.stack[sp - 1] = .{ .string = owned };
+                        const _next = code[ip];
+                        ip += 1;
+                        continue :dispatch @as(OpCode, @enumFromInt(_next));
                     } else if (a == .int and b == .string) {
                         var tmp: [20]u8 = undefined;
                         const as = std.fmt.bufPrint(&tmp, "{d}", .{a.int}) catch {
@@ -4086,6 +4223,9 @@ pub const VM = struct {
                         try self.strings.append(self.allocator, owned);
                         sp -= 1;
                         self.stack[sp - 1] = .{ .string = owned };
+                        const _next = code[ip];
+                        ip += 1;
+                        continue :dispatch @as(OpCode, @enumFromInt(_next));
                     } else {
                         frame.ip = ip - 1;
                         self.sp = sp;
