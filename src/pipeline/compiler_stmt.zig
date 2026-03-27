@@ -205,6 +205,7 @@ pub fn compileForeach(self: *Compiler, node: Ast.Node) Error!void {
     self.break_jumps = .{};
     self.continue_jumps = .{};
     self.use_continue_jumps = true;
+    if (self.loop_depth < 32) self.loop_is_foreach[self.loop_depth] = true;
     self.loop_depth += 1;
     self.foreach_depth += 1;
 
@@ -274,6 +275,7 @@ pub fn compileForeach(self: *Compiler, node: Ast.Node) Error!void {
     self.continue_jumps = prev_continues;
     self.use_continue_jumps = prev_use_cj;
     self.loop_depth -= 1;
+    if (self.loop_depth < 32) self.loop_is_foreach[self.loop_depth] = false;
     self.foreach_depth -= 1;
     self.loop_start = prev_start;
 }

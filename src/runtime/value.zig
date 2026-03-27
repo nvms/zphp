@@ -225,6 +225,14 @@ pub const Value = union(enum) {
     generator: *Generator,
     fiber: *Fiber,
 
+    // sentinel for "default = []" in function params - fillDefaults creates a fresh empty array
+    var empty_array_sentinel: PhpArray = .{};
+    pub const empty_array_default: Value = .{ .array = &empty_array_sentinel };
+
+    pub fn isEmptyArrayDefault(self: Value) bool {
+        return self == .array and self.array == &empty_array_sentinel;
+    }
+
     pub fn isTruthy(self: Value) bool {
         return switch (self) {
             .null => false,

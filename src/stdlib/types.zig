@@ -87,6 +87,8 @@ pub const entries = .{
     .{ "func_get_arg", native_func_get_arg },
     .{ "interface_exists", native_interface_exists },
     .{ "class_implements", native_class_implements },
+    .{ "iterator_to_array", native_iterator_to_array },
+    .{ "iterator_count", native_iterator_count },
 };
 
 fn native_define(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
@@ -827,9 +829,17 @@ fn getFrameParamValue(frame: anytype, slot_names: []const []const u8, param: []c
 }
 
 fn native_func_get_args(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const frame = ctx.vm.currentFrame();
-    const func = frame.func orelse return .{ .array = try ctx.createArray() };
     const arr = try ctx.createArray();
+
+    if (ctx.vm.getFrameArgs()) |saved_args| {
+        for (saved_args) |val| {
+            try arr.append(ctx.allocator, val);
+        }
+        return .{ .array = arr };
+    }
+
+    const frame = ctx.vm.currentFrame();
+    const func = frame.func orelse return .{ .array = arr };
     const slot_names = func.slot_names;
     const actual_ac: usize = if (ctx.vm.getFrameArgCount()) |ac| ac else func.arity;
 
@@ -878,6 +888,11 @@ fn native_func_get_arg(ctx: *NativeContext, args: []const Value) RuntimeError!Va
     const idx = Value.toInt(args[0]);
     if (idx < 0) return .{ .bool = false };
     const index: usize = @intCast(idx);
+
+    if (ctx.vm.getFrameArgs()) |saved_args| {
+        if (index < saved_args.len) return saved_args[index];
+        return .{ .bool = false };
+    }
 
     const frame = ctx.vm.currentFrame();
     const func = frame.func orelse return .{ .bool = false };
@@ -935,4 +950,55 @@ fn native_class_implements(ctx: *NativeContext, args: []const Value) RuntimeErro
     }
 
     return .{ .array = result };
+}
+
+fn native_iterator_to_array(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len == 0) return .{ .array = try ctx.createArray() };
+
+    if (args[0] == .array) return args[0];
+
+    if (args[0] == .generator) {
+        const gen = args[0].generator;
+        const arr = try ctx.createArray();
+        const preserve_keys = if (args.len > 1 and args[1] == .bool) args[1].bool else true;
+
+        if (gen.state == .created) try ctx.vm.resumeGenerator(gen, .null);
+
+        while (gen.state != .completed) {
+            if (preserve_keys) {
+                try arr.set(ctx.allocator, switch (gen.current_key) {
+                    .int => |i| .{ .int = i },
+                    .string => |s| .{ .string = s },
+                    else => .{ .int = arr.length() },
+                }, gen.current_value);
+            } else {
+                try arr.append(ctx.allocator, gen.current_value);
+            }
+            try ctx.vm.resumeGenerator(gen, .null);
+        }
+        return .{ .array = arr };
+    }
+
+    return .{ .array = try ctx.createArray() };
+}
+
+fn native_iterator_count(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len == 0) return .{ .int = 0 };
+
+    if (args[0] == .array) return .{ .int = args[0].array.length() };
+
+    if (args[0] == .generator) {
+        const gen = args[0].generator;
+        var n: i64 = 0;
+
+        if (gen.state == .created) try ctx.vm.resumeGenerator(gen, .null);
+
+        while (gen.state != .completed) {
+            n += 1;
+            try ctx.vm.resumeGenerator(gen, .null);
+        }
+        return .{ .int = n };
+    }
+
+    return .{ .int = 0 };
 }

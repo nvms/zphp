@@ -261,6 +261,10 @@ pub const VM = struct {
         sp_save: [64]usize = undefined,
         // per-frame actual arg count for func_get_args
         arg_counts: [64]u8 = [_]u8{0xFF} ** 64,
+        // per-frame saved arg values for func_get_args (flat buffer indexed by frame)
+        fga_buf: [256]Value = @splat(.null),
+        fga_offsets: [64]u16 = @splat(0),
+        fga_sp: u16 = 0,
         // set before pushing a frame, consumed by executeFunction et al
         pending_arg_count: u8 = 0xFF,
         // concat_assign string buffer - avoids O(n) realloc per append
@@ -880,7 +884,7 @@ pub const VM = struct {
                             const count = @max(pos, func.required_params);
                             for (0..count) |i| {
                                 if (resolved[i] == .null and i < func.defaults.len) {
-                                    resolved[i] = func.defaults[i];
+                                    resolved[i] = try self.resolveDefault(func.defaults[i]);
                                 }
                             }
                             for (0..count) |i| self.push(resolved[i]);
@@ -1808,7 +1812,7 @@ pub const VM = struct {
                                     ctor_locals[i + 1] = self.stack[self.sp - ac + i];
                                 }
                                 for (@min(ac, func.arity)..func.arity) |i| {
-                                    if (i < func.defaults.len) ctor_locals[i + 1] = func.defaults[i];
+                                    if (i < func.defaults.len) ctor_locals[i + 1] = try self.resolveDefault(func.defaults[i]);
                                 }
                                 self.sp -= ac;
                                 self.frames[self.frame_count] = .{ .chunk = &func.chunk, .ip = 0, .vars = .{}, .locals = ctor_locals, .func = func };
@@ -1829,7 +1833,7 @@ pub const VM = struct {
                                 }
                                 self.sp -= ac;
                                 for (ac..func.arity) |i| {
-                                    const default = if (i < func.defaults.len) func.defaults[i] else Value.null;
+                                    const default = if (i < func.defaults.len) try self.resolveDefault(func.defaults[i]) else Value.null;
                                     try new_vars.put(self.allocator, func.params[i], default);
                                 }
                                 self.frames[self.frame_count] = .{ .chunk = &func.chunk, .ip = 0, .vars = new_vars, .locals = try self.allocLocals(func, &new_vars), .func = func };
@@ -2147,7 +2151,7 @@ pub const VM = struct {
                                         mc_locals[i + 1] = try self.copyValue(self.stack[self.sp - ac + i]);
                                     }
                                     for (@min(ac, func.arity)..func.arity) |i| {
-                                        if (i < func.defaults.len) mc_locals[i + 1] = func.defaults[i];
+                                        if (i < func.defaults.len) mc_locals[i + 1] = try self.resolveDefault(func.defaults[i]);
                                     }
                                     self.sp -= ac + 1;
                                     self.frames[self.frame_count] = .{ .chunk = &func.chunk, .ip = 0, .vars = .{}, .locals = mc_locals, .func = func };
@@ -2371,7 +2375,7 @@ pub const VM = struct {
                                 try new_vars.put(self.allocator, func.params[i], self.stack[self.sp - ac + i]);
                             }
                             for (ac..func.arity) |i| {
-                                if (i < func.defaults.len) try new_vars.put(self.allocator, func.params[i], func.defaults[i]);
+                                if (i < func.defaults.len) try new_vars.put(self.allocator, func.params[i], try self.resolveDefault(func.defaults[i]));
                             }
                         }
                         self.sp -= ac;
@@ -2531,7 +2535,7 @@ pub const VM = struct {
                                         try new_vars.put(self.allocator, func.params[i], self.stack[self.sp - ac + i]);
                                     }
                                     for (ac..func.arity) |i| {
-                                        if (i < func.defaults.len) try new_vars.put(self.allocator, func.params[i], func.defaults[i]);
+                                        if (i < func.defaults.len) try new_vars.put(self.allocator, func.params[i], try self.resolveDefault(func.defaults[i]));
                                     }
                                 }
                                 self.sp -= ac;
@@ -2762,7 +2766,7 @@ pub const VM = struct {
         return true;
     }
 
-    fn resumeGenerator(self: *VM, gen: *Generator, sent_value: Value) RuntimeError!void {
+    pub fn resumeGenerator(self: *VM, gen: *Generator, sent_value: Value) RuntimeError!void {
         if (gen.state == .completed) return;
 
         // if delegating, advance the delegate instead of resuming bytecode
@@ -3331,6 +3335,7 @@ pub const VM = struct {
                 for (0..bind_count) |i| {
                     try new_vars.put(self.allocator, func.params[i], try self.copyValue(self.stack[self.sp - ac + i]));
                 }
+                self.saveFrameArgs(arg_count);
                 self.sp -= ac;
                 try self.fillDefaults(&new_vars, func, bind_count);
                 const inherit_cc = self.currentFrame().called_class;
@@ -3361,8 +3366,9 @@ pub const VM = struct {
             locals[i] = try self.copyValue(self.stack[self.sp - ac + i]);
         }
         for (bind_count..func.arity) |i| {
-            if (i < func.defaults.len) locals[i] = func.defaults[i];
+            if (i < func.defaults.len) locals[i] = try self.resolveDefault(func.defaults[i]);
         }
+        self.saveFrameArgs(arg_count);
         self.sp -= ac;
 
         // bind captures directly to locals using slot_names
@@ -3407,8 +3413,9 @@ pub const VM = struct {
             locals[i] = try self.copyValue(self.stack[self.sp - ac + i]);
         }
         for (bind_count..func.arity) |i| {
-            if (i < func.defaults.len) locals[i] = func.defaults[i];
+            if (i < func.defaults.len) locals[i] = try self.resolveDefault(func.defaults[i]);
         }
+        self.saveFrameArgs(arg_count);
         self.sp -= ac;
         self.frames[self.frame_count] = .{ .chunk = &func.chunk, .ip = 0, .vars = .{}, .locals = locals, .func = func };
         self.setFrameArgCount(arg_count);
@@ -3737,7 +3744,7 @@ pub const VM = struct {
                     const ci_bind = @min(ci_acn, ci_func.arity);
                     for (0..ci_bind) |i| ci_locals[i] = self.stack[sp - ci_acn + i];
                     for (ci_bind..ci_func.arity) |i| {
-                        if (i < ci_func.defaults.len) ci_locals[i] = ci_func.defaults[i];
+                        if (i < ci_func.defaults.len) ci_locals[i] = try self.resolveDefault(ci_func.defaults[i]);
                     }
                     sp -= ci_acn;
                     if (ci_cap_range) |cr| {
@@ -3843,7 +3850,7 @@ pub const VM = struct {
                                     mc_locals[i + 1] = self.stack[sp - mc_ac + i];
                                 }
                                 for (@min(mc_ac, mc_func.arity)..mc_func.arity) |i| {
-                                    if (i < mc_func.defaults.len) mc_locals[i + 1] = mc_func.defaults[i];
+                                    if (i < mc_func.defaults.len) mc_locals[i + 1] = try self.resolveDefault(mc_func.defaults[i]);
                                 }
                                 sp -= mc_ac + 1;
                                 frame.ip = ip;
@@ -3921,7 +3928,7 @@ pub const VM = struct {
                                         ctor_locals[i + 1] = self.stack[sp - no_ac + i];
                                     }
                                     for (@min(no_ac, ctor_func.arity)..ctor_func.arity) |i| {
-                                        if (i < ctor_func.defaults.len) ctor_locals[i + 1] = ctor_func.defaults[i];
+                                        if (i < ctor_func.defaults.len) ctor_locals[i + 1] = try self.resolveDefault(ctor_func.defaults[i]);
                                     }
                                     sp -= no_ac;
                                     self.sp = sp;
@@ -4010,7 +4017,7 @@ pub const VM = struct {
                         new_locals[i] = self.stack[sp - ac + i];
                     }
                     for (bind_count..func.arity) |i| {
-                        if (i < func.defaults.len) new_locals[i] = func.defaults[i];
+                        if (i < func.defaults.len) new_locals[i] = try self.resolveDefault(func.defaults[i]);
                     }
                     sp -= ac;
 
@@ -4317,7 +4324,7 @@ pub const VM = struct {
             locals[i] = try self.copyValue(args[i]);
         }
         for (bind_count..func.arity) |i| {
-            if (i < func.defaults.len) locals[i] = func.defaults[i];
+            if (i < func.defaults.len) locals[i] = try self.resolveDefault(func.defaults[i]);
         }
         self.frames[self.frame_count] = .{ .chunk = &func.chunk, .ip = 0, .vars = .{}, .locals = locals, .func = func };
         self.consumePendingArgCount();
@@ -4779,10 +4786,20 @@ pub const VM = struct {
         try self.fillDefaults(vars, func, args.len);
     }
 
+    fn resolveDefault(self: *VM, val: Value) !Value {
+        if (val.isEmptyArrayDefault()) {
+            const arr = try self.allocator.create(PhpArray);
+            arr.* = .{};
+            try self.arrays.append(self.allocator, arr);
+            return .{ .array = arr };
+        }
+        return val;
+    }
+
     fn fillDefaults(self: *VM, vars: *std.StringHashMapUnmanaged(Value), func: *const ObjFunction, arg_count: usize) !void {
         for (arg_count..func.arity) |i| {
             if (i < func.defaults.len) {
-                try vars.put(self.allocator, func.params[i], func.defaults[i]);
+                try vars.put(self.allocator, func.params[i], try self.resolveDefault(func.defaults[i]));
             } else {
                 try vars.put(self.allocator, func.params[i], .null);
             }
@@ -4946,6 +4963,7 @@ pub const VM = struct {
                     try new_vars.put(self.allocator, func.params[i], try self.copyValue(self.stack[self.sp - ac + i]));
                 }
             }
+            self.saveFrameArgs(arg_count);
             self.sp -= ac;
             if (!func.is_variadic) {
                 try self.fillDefaults(&new_vars, func, @min(ac, func.arity));
@@ -5080,7 +5098,7 @@ pub const VM = struct {
             locals[i] = try self.copyValue(args[i]);
         }
         for (bind_count..func.arity) |i| {
-            if (i < func.defaults.len) locals[i] = func.defaults[i];
+            if (i < func.defaults.len) locals[i] = try self.resolveDefault(func.defaults[i]);
         }
         // bind captures (no ref cells here - ref captures take the slow path)
         if (self.getCaptureRange(name)) |cr| {
@@ -5301,6 +5319,38 @@ pub const VM = struct {
         const ac = ic.arg_counts[self.frame_count - 1];
         if (ac == 0xFF) return null;
         return ac;
+    }
+
+    fn saveFrameArgs(self: *VM, arg_count: u8) void {
+        const ic = self.ic orelse return;
+        const ac: usize = arg_count;
+        if (ac == 0) {
+            ic.fga_offsets[self.frame_count] = ic.fga_sp;
+            return;
+        }
+        const sp = ic.fga_sp;
+        if (sp + ac > 256) return;
+        ic.fga_offsets[self.frame_count] = sp;
+        for (0..ac) |i| {
+            ic.fga_buf[sp + i] = self.stack[self.sp - ac + i];
+        }
+        ic.fga_sp = @intCast(sp + ac);
+    }
+
+    fn restoreFrameArgsSp(self: *VM) void {
+        const ic = self.ic orelse return;
+        ic.fga_sp = ic.fga_offsets[self.frame_count];
+    }
+
+    pub fn getFrameArgs(self: *VM) ?[]const Value {
+        const ic = self.ic orelse return null;
+        const fc = self.frame_count - 1;
+        const ac_raw = ic.arg_counts[fc];
+        if (ac_raw == 0xFF) return null;
+        const ac: usize = ac_raw;
+        const offset: usize = ic.fga_offsets[fc];
+        if (offset + ac > 256) return null;
+        return ic.fga_buf[offset..offset + ac];
     }
 
     fn binaryOp(self: *VM, op: *const fn (Value, Value) Value) void {

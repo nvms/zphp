@@ -105,6 +105,7 @@ pub const Compiler = struct {
     use_continue_jumps: bool = false,
     loop_depth: u32 = 0,
     foreach_depth: u32 = 0,
+    loop_is_foreach: [32]bool = [_]bool{false} ** 32,
     closure_count: u32 = 0,
     is_generator: bool = false,
     namespace: []const u8 = "",
@@ -166,6 +167,13 @@ pub const Compiler = struct {
             },
             .break_stmt => {
                 const level = if (node.data.lhs > 0) node.data.lhs else 1;
+                // emit iter_end for each foreach loop we're breaking out of
+                const target_depth = self.loop_depth -| level;
+                for (target_depth..self.loop_depth) |d| {
+                    if (d < 32 and self.loop_is_foreach[d]) {
+                        try self.emitOp(.iter_end);
+                    }
+                }
                 const j = try self.emitJump(.jump);
                 try self.break_jumps.append(self.allocator, .{
                     .offset = j,
@@ -440,7 +448,7 @@ pub const Compiler = struct {
                 }
                 break :blk .null;
             },
-            .array_literal => .null,
+            .array_literal => Value.empty_array_default,
             else => .null,
         };
     }
