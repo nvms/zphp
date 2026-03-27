@@ -1855,6 +1855,61 @@ pub const VM = struct {
                     self.push(.{ .object = obj });
                 },
 
+                .new_obj_dynamic => {
+                    const arg_count = self.readByte();
+                    const ac: usize = arg_count;
+                    const name_val = self.stack[self.sp - ac - 1];
+                    if (name_val != .string) {
+                        self.error_msg = std.fmt.allocPrint(self.allocator, "Fatal error: Class name must be a valid object or a string", .{}) catch null;
+                        return error.RuntimeError;
+                    }
+                    const class_name = name_val.string;
+                    if (!self.classes.contains(class_name)) try self.tryAutoload(class_name);
+
+                    const obj = try self.allocator.create(PhpObject);
+                    obj.* = .{ .class_name = class_name };
+                    try self.objects.append(self.allocator, obj);
+                    try self.initObjectProperties(obj, class_name);
+
+                    const ctor_name = self.resolveMethod(class_name, "__construct") catch null;
+                    if (ctor_name) |cn| {
+                        if (self.native_fns.get(cn)) |native| {
+                            var args_buf: [16]Value = undefined;
+                            for (0..ac) |i| args_buf[i] = self.stack[self.sp - ac + i];
+                            self.sp -= ac + 1;
+                            var tmp_vars: std.StringHashMapUnmanaged(Value) = .{};
+                            try tmp_vars.put(self.allocator, "$this", .{ .object = obj });
+                            self.frames[self.frame_count] = .{ .chunk = self.currentChunk(), .ip = self.currentFrame().ip, .vars = tmp_vars };
+                            self.frame_count += 1;
+                            var ctx = self.makeContext(null);
+                            _ = try native(&ctx, args_buf[0..ac]);
+                            self.frame_count -= 1;
+                            self.frames[self.frame_count].vars.deinit(self.allocator);
+                        } else if (self.functions.get(cn)) |func| {
+                            var new_vars: std.StringHashMapUnmanaged(Value) = .{};
+                            try new_vars.put(self.allocator, "$this", .{ .object = obj });
+                            for (0..@min(ac, func.arity)) |i| {
+                                try new_vars.put(self.allocator, func.params[i], self.stack[self.sp - ac + i]);
+                            }
+                            self.sp -= ac + 1;
+                            for (@min(ac, func.arity)..func.arity) |i| {
+                                const default = if (i < func.defaults.len) try self.resolveDefault(func.defaults[i]) else Value.null;
+                                try new_vars.put(self.allocator, func.params[i], default);
+                            }
+                            self.frames[self.frame_count] = .{ .chunk = &func.chunk, .ip = 0, .vars = new_vars, .locals = try self.allocLocals(func, &new_vars), .func = func };
+                            self.frame_count += 1;
+                            const ctor_base = self.frame_count - 1;
+                            try self.runUntilFrame(ctor_base);
+                            _ = self.pop();
+                        } else {
+                            self.sp -= ac + 1;
+                        }
+                    } else {
+                        self.sp -= ac + 1;
+                    }
+                    self.push(.{ .object = obj });
+                },
+
                 .get_prop => {
                     const gp_ip = self.currentFrame().ip;
                     const name_idx = self.readU16();

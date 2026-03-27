@@ -14,6 +14,8 @@ const compiler_class = @import("compiler_class.zig");
 const Allocator = std.mem.Allocator;
 const Error = Allocator.Error || error{CompileError};
 
+var global_closure_counter: u32 = 0;
+
 pub const TypeHint = struct {
     name: []const u8,
     param_types: []const []const u8 = &.{},
@@ -64,6 +66,7 @@ pub fn compileWithPath(ast: *const Ast, allocator: Allocator, file_path: []const
         .break_jumps = .{},
         .continue_jumps = .{},
         .file_path = file_path,
+        .closure_count = global_closure_counter,
     };
     errdefer {
         c.chunk.deinit(allocator);
@@ -89,6 +92,7 @@ pub fn compileWithPath(ast: *const Ast, allocator: Allocator, file_path: []const
     const slot_names = try c.buildSlotNames();
     const local_count = c.next_slot;
     c.local_slots.deinit(allocator);
+    global_closure_counter = c.closure_count;
     return .{ .chunk = c.chunk, .functions = c.functions, .string_allocs = c.string_allocs, .allocator = allocator, .local_count = local_count, .slot_names = slot_names, .type_hints = c.type_hints, .source = ast.source, .file_path = file_path };
 }
 
@@ -268,6 +272,7 @@ pub const Compiler = struct {
             .enum_decl => try compiler_class.compileEnumDecl(self, node),
             .enum_case => {},
             .new_expr => try compiler_expr.compileNewExpr(self, node),
+            .new_expr_dynamic => try compiler_expr.compileNewExprDynamic(self, node),
             .method_call => try compiler_expr.compileMethodCall(self, node),
             .static_call => try compiler_expr.compileStaticCall(self, node),
             .static_prop_access => try compiler_expr.compileStaticPropAccess(self, node),

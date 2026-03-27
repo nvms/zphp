@@ -689,7 +689,38 @@ const Parser = struct {
     }
 
     fn parseNewExpr(self: *Parser) Error!u32 {
-        _ = self.advance(); // new
+        const new_tok = self.advance(); // new
+
+        // dynamic class name: new $var(...) or new $var['key'](...)
+        if (self.peek() == .dollar or self.peek() == .variable) {
+            var class_expr = try self.parsePrimaryExpr();
+            // handle subscript access: $var['key'], $var['a']['b'], etc.
+            while (self.peek() == .l_bracket) {
+                _ = self.advance();
+                const idx = try self.parseExpression();
+                _ = try self.expect(.r_bracket);
+                class_expr = try self.addNode(.{ .tag = .array_access, .main_token = 0, .data = .{ .lhs = class_expr, .rhs = idx } });
+            }
+
+            var args = std.ArrayListUnmanaged(u32){};
+            defer args.deinit(self.allocator);
+            if (self.peek() == .l_paren) {
+                _ = self.advance();
+                if (self.peek() != .r_paren) {
+                    try args.append(self.allocator, try self.parseCallArg());
+                    while (self.peek() == .comma) {
+                        _ = self.advance();
+                        if (self.peek() == .r_paren) break;
+                        try args.append(self.allocator, try self.parseCallArg());
+                    }
+                }
+                _ = try self.expect(.r_paren);
+            }
+
+            const extra = try self.addExtraList(args.items);
+            return self.addNode(.{ .tag = .new_expr_dynamic, .main_token = new_tok, .data = .{ .lhs = class_expr, .rhs = extra } });
+        }
+
         if (self.peek() == .backslash) _ = self.advance();
         const name_tok = if (self.peek() == .kw_self or self.peek() == .kw_static or self.peek() == .kw_parent)
             self.advance()

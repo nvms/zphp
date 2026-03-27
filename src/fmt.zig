@@ -366,6 +366,17 @@ const Formatter = struct {
             .static_call => self.formatStaticCall(node),
             .static_prop_access => self.formatStaticPropAccess(node),
             .new_expr => self.formatNewExpr(node),
+            .new_expr_dynamic => {
+                self.write("new ");
+                self.formatNode(node.data.lhs);
+                self.write("(");
+                const args = self.ast.extraSlice(node.data.rhs);
+                for (args, 0..) |arg, i| {
+                    if (i > 0) self.write(", ");
+                    self.formatNode(arg);
+                }
+                self.write(")");
+            },
             .cast_expr => self.formatCastExpr(node),
 
             .closure_expr => self.formatClosure(node),

@@ -741,6 +741,14 @@ pub fn compileNewExpr(self: *Compiler, node: Ast.Node) Error!void {
     try self.emitByte(@intCast(args.len));
 }
 
+pub fn compileNewExprDynamic(self: *Compiler, node: Ast.Node) Error!void {
+    try self.compileNode(node.data.lhs);
+    const args = self.ast.extraSlice(node.data.rhs);
+    for (args) |arg| try self.compileNode(arg);
+    try self.emitOp(.new_obj_dynamic);
+    try self.emitByte(@intCast(args.len));
+}
+
 pub fn compileYield(self: *Compiler, node: Ast.Node) Error!void {
     if (node.data.lhs != 0) {
         try self.compileNode(node.data.lhs);

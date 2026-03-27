@@ -36,6 +36,7 @@ pub const LockEntry = struct {
     dist_url: []const u8,
     dist_sha: []const u8 = "",
     autoload_psr4: std.StringHashMapUnmanaged([]const u8) = .{},
+    autoload_files: std.ArrayListUnmanaged([]const u8) = .{},
 };
 
 pub fn parseComposerJson(allocator: Allocator, source: []const u8) !ComposerJson {
@@ -91,7 +92,7 @@ pub fn parseComposerJson(allocator: Allocator, source: []const u8) !ComposerJson
     return result;
 }
 
-pub fn downloadPackage(allocator: Allocator, entry: *const LockEntry) !void {
+pub fn downloadPackage(allocator: Allocator, entry: *LockEntry) !void {
     if (entry.dist_url.len == 0) return;
 
     const vendor_dir = try std.fmt.allocPrint(allocator, "vendor/{s}", .{entry.name});
@@ -156,6 +157,51 @@ fn moveNestedDir(allocator: Allocator, vendor_dir: []const u8) !void {
     }
 }
 
+fn readLocalAutoload(allocator: Allocator, entry: *LockEntry) !void {
+    const path = try std.fmt.allocPrint(allocator, "vendor/{s}/composer.json", .{entry.name});
+    defer allocator.free(path);
+    const data = std.fs.cwd().readFileAlloc(allocator, path, 1024 * 1024) catch return;
+    defer allocator.free(data);
+    const parsed = std.json.parseFromSlice(std.json.Value, allocator, data, .{}) catch return;
+    defer parsed.deinit();
+    const root = parsed.value;
+    if (root != .object) return;
+    const al = root.object.get("autoload") orelse return;
+    if (al != .object) return;
+
+    if (al.object.get("psr-4")) |psr4| {
+        if (psr4 == .object) {
+            var it = psr4.object.iterator();
+            while (it.next()) |e| {
+                if (!entry.autoload_psr4.contains(e.key_ptr.*)) {
+                    const k = try allocator.dupe(u8, e.key_ptr.*);
+                    const v = if (e.value_ptr.* == .string) try allocator.dupe(u8, e.value_ptr.string) else try allocator.dupe(u8, "src/");
+                    try entry.autoload_psr4.put(allocator, k, v);
+                }
+            }
+        }
+    }
+
+    if (al.object.get("files")) |files| {
+        if (files == .array) {
+            for (files.array.items) |item| {
+                if (item == .string) {
+                    try entry.autoload_files.append(allocator, try allocator.dupe(u8, item.string));
+                }
+            }
+        }
+    }
+}
+
+fn appendPhpEscaped(buf: *std.ArrayListUnmanaged(u8), allocator: Allocator, s: []const u8) !void {
+    for (s) |c| {
+        if (c == '\\' or c == '\'') {
+            try buf.append(allocator, '\\');
+        }
+        try buf.append(allocator, c);
+    }
+}
+
 pub fn generateAutoloader(allocator: Allocator, entries: []const LockEntry, project_psr4: *std.StringHashMapUnmanaged([]const u8)) !void {
     std.fs.cwd().makePath("vendor") catch {};
 
@@ -170,42 +216,67 @@ pub fn generateAutoloader(allocator: Allocator, entries: []const LockEntry, proj
     var proj_it = project_psr4.iterator();
     while (proj_it.next()) |entry| {
         try buf.appendSlice(allocator, "        '");
-        try buf.appendSlice(allocator, entry.key_ptr.*);
-        try buf.appendSlice(allocator, "' => '");
-        try buf.appendSlice(allocator, entry.value_ptr.*);
-        try buf.appendSlice(allocator, "',\n");
+        try appendPhpEscaped(&buf, allocator, entry.key_ptr.*);
+        try buf.appendSlice(allocator, "' => ['");
+        try appendPhpEscaped(&buf, allocator, entry.value_ptr.*);
+        try buf.appendSlice(allocator, "'],\n");
     }
 
-    // vendor autoload
+    // vendor autoload - collect dirs per namespace prefix
+    var ns_dirs = std.StringHashMapUnmanaged(std.ArrayListUnmanaged([]const u8)){};
     for (entries) |entry| {
         var it = entry.autoload_psr4.iterator();
         while (it.next()) |e| {
-            try buf.appendSlice(allocator, "        '");
-            try buf.appendSlice(allocator, e.key_ptr.*);
-            try buf.appendSlice(allocator, "' => 'vendor/");
-            try buf.appendSlice(allocator, entry.name);
-            try buf.appendSlice(allocator, "/");
-            try buf.appendSlice(allocator, e.value_ptr.*);
-            try buf.appendSlice(allocator, "',\n");
+            const dir = try std.fmt.allocPrint(allocator, "vendor/{s}/{s}", .{ entry.name, e.value_ptr.* });
+            const gop = try ns_dirs.getOrPut(allocator, e.key_ptr.*);
+            if (!gop.found_existing) gop.value_ptr.* = .{};
+            try gop.value_ptr.append(allocator, dir);
         }
+    }
+
+    var ns_it = ns_dirs.iterator();
+    while (ns_it.next()) |entry| {
+        try buf.appendSlice(allocator, "        '");
+        try appendPhpEscaped(&buf, allocator, entry.key_ptr.*);
+        try buf.appendSlice(allocator, "' => [");
+        for (entry.value_ptr.items, 0..) |dir, i| {
+            if (i > 0) try buf.appendSlice(allocator, ", ");
+            try buf.appendSlice(allocator, "'");
+            try appendPhpEscaped(&buf, allocator, dir);
+            try buf.appendSlice(allocator, "'");
+        }
+        try buf.appendSlice(allocator, "],\n");
     }
 
     try buf.appendSlice(allocator, "    ];\n");
     try buf.appendSlice(allocator,
-        \\    foreach ($map as $prefix => $dir) {
+        \\    foreach ($map as $prefix => $dirs) {
         \\        $len = strlen($prefix);
         \\        if (strncmp($prefix, $class, $len) === 0) {
         \\            $relative = substr($class, $len);
-        \\            $file = $dir . str_replace('\\', '/', $relative) . '.php';
-        \\            if (file_exists($file)) {
-        \\                require $file;
-        \\                return;
+        \\            foreach ($dirs as $dir) {
+        \\                $file = $dir . '/' . str_replace('\\', '/', $relative) . '.php';
+        \\                if (file_exists($file)) {
+        \\                    require $file;
+        \\                    return;
+        \\                }
         \\            }
         \\        }
         \\    }
         \\});
         \\
     );
+
+    // files autoload - unconditional requires
+    for (entries) |entry| {
+        for (entry.autoload_files.items) |file| {
+            try buf.appendSlice(allocator, "require_once 'vendor/");
+            try buf.appendSlice(allocator, entry.name);
+            try buf.appendSlice(allocator, "/");
+            try appendPhpEscaped(&buf, allocator, file);
+            try buf.appendSlice(allocator, "';\n");
+        }
+    }
 
     std.fs.cwd().writeFile(.{ .sub_path = "vendor/autoload.php", .data = buf.items }) catch {};
 }
@@ -682,6 +753,7 @@ pub fn install(allocator: Allocator) !void {
     for (entries.items, 0..) |*entry, i| {
         tui.progress(i + 1, entries.items.len, entry.name);
         try downloadPackage(allocator, entry);
+        try readLocalAutoload(allocator, entry);
     }
     tui.progressDone(entries.items.len, "packages downloaded");
 
@@ -760,6 +832,7 @@ pub fn add(allocator: Allocator, name: []const u8) !void {
     for (entries.items, 0..) |*entry, i| {
         tui.progress(i + 1, entries.items.len, entry.name);
         try downloadPackage(allocator, entry);
+        try readLocalAutoload(allocator, entry);
     }
     tui.progressDone(entries.items.len, "packages downloaded");
 
