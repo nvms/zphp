@@ -567,15 +567,18 @@ fn processHttpRead(w: *Worker, c: *Connection) void {
     var session_ctx = w.vm.makeContext(null);
     @import("stdlib/session.zig").finalizeSession(&session_ctx);
 
-    const frame_vars = &w.vm.frames[0].vars;
-    const ct_val = frame_vars.get("__response_content_type") orelse Value{ .string = "text/html" };
-    const ct = if (ct_val == .string) ct_val.string else "text/html";
-    const code_val = frame_vars.get("__response_code") orelse Value{ .int = 200 };
-    const code = if (code_val == .int) code_val.int else 200;
-    const extra_headers = if (frame_vars.get("__response_headers")) |v|
-        (if (v == .array) v.array else null)
-    else
-        null;
+    const ct: []const u8 = if (w.vm.frame_count > 0) blk: {
+        const v = w.vm.frames[0].vars.get("__response_content_type") orelse break :blk "text/html";
+        break :blk if (v == .string) v.string else "text/html";
+    } else "text/html";
+    const code: i64 = if (w.vm.frame_count > 0) blk: {
+        const v = w.vm.frames[0].vars.get("__response_code") orelse break :blk @as(i64, 200);
+        break :blk if (v == .int) v.int else 200;
+    } else 200;
+    const extra_headers: ?*PhpArray = if (w.vm.frame_count > 0) blk: {
+        const v = w.vm.frames[0].vars.get("__response_headers") orelse break :blk null;
+        break :blk if (v == .array) v.array else null;
+    } else null;
 
     writeResponse(c, code, ct, extra_headers, w.vm.output.items, c.keep_alive, acceptsGzip(&req), w.allocator) catch {};
     shiftBuffer(c, consumed);
@@ -607,6 +610,10 @@ fn handleWsUpgrade(w: *Worker, c: *Connection, ws_key: []const u8) void {
     };
     ws_obj.* = .{ .class_name = "WebSocketConnection" };
     ws_obj.set(w.allocator, "__ws_fd", .{ .int = @intCast(c.fd) }) catch {
+        c.state = .closing;
+        return;
+    };
+    ws_obj.set(w.allocator, "__ws_ssl", .{ .int = if (c.ssl) |s| @intCast(@intFromPtr(s)) else @as(i64, 0) }) catch {
         c.state = .closing;
         return;
     };

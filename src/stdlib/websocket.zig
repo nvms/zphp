@@ -6,6 +6,7 @@ const VM = vm_mod.VM;
 const NativeContext = vm_mod.NativeContext;
 const ClassDef = vm_mod.ClassDef;
 const ws = @import("../websocket.zig");
+const tls = @import("../tls.zig");
 
 const Allocator = std.mem.Allocator;
 const RuntimeError = error{ RuntimeError, OutOfMemory };
@@ -26,19 +27,34 @@ fn getThis(ctx: *NativeContext) ?*PhpObject {
     return v.object;
 }
 
-fn getStream(obj: *PhpObject) ?std.net.Stream {
-    const v = obj.get("__ws_fd");
-    if (v != .int or v.int < 0) return null;
-    return std.net.Stream{ .handle = @intCast(v.int) };
+const WsWriter = struct {
+    fd: std.posix.fd_t,
+    ssl: ?*tls.SSL,
+
+    pub fn write(self: WsWriter, data: []const u8) !usize {
+        if (self.ssl) |s| return tls.write(s, data);
+        return std.posix.write(self.fd, data);
+    }
+};
+
+fn getWriter(obj: *PhpObject) ?WsWriter {
+    const fd_val = obj.get("__ws_fd");
+    if (fd_val != .int or fd_val.int < 0) return null;
+    const ssl_val = obj.get("__ws_ssl");
+    const ssl_ptr: ?*tls.SSL = if (ssl_val == .int and ssl_val.int != 0)
+        @ptrFromInt(@as(usize, @intCast(ssl_val.int)))
+    else
+        null;
+    return .{ .fd = @intCast(fd_val.int), .ssl = ssl_ptr };
 }
 
 fn wsSend(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     const obj = getThis(ctx) orelse return .null;
     const closed = obj.get("__ws_closed");
     if (closed == .bool and closed.bool) return .null;
-    const stream = getStream(obj) orelse return .null;
+    var writer = getWriter(obj) orelse return .null;
     if (args.len < 1 or args[0] != .string) return .null;
-    ws.writeFrame(stream, .text, args[0].string) catch return .null;
+    ws.writeFrame(&writer, .text, args[0].string) catch return .null;
     return .null;
 }
 
@@ -46,8 +62,8 @@ fn wsClose(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
     const obj = getThis(ctx) orelse return .null;
     const closed = obj.get("__ws_closed");
     if (closed == .bool and closed.bool) return .null;
-    const stream = getStream(obj) orelse return .null;
-    ws.writeCloseFrame(stream, 1000) catch {};
+    var writer = getWriter(obj) orelse return .null;
+    ws.writeCloseFrame(&writer, 1000) catch {};
     try obj.set(ctx.allocator, "__ws_closed", .{ .bool = true });
     return .null;
 }

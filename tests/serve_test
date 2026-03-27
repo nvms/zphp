@@ -242,6 +242,117 @@ tls_status=$(curl -sk -o /dev/null -w "%{http_code}" https://localhost:$TLS_PORT
 check "tls status 201" "201" "$tls_status"
 
 kill $TLS_PID 2>/dev/null; wait $TLS_PID 2>/dev/null || true
+
+# --- WebSocket tests (WS + WSS) ---
+WS_PORT=19878
+WSS_PORT=19879
+WS_APP="$SCRIPT_DIR/serve/ws_app.php"
+
+"$ZPHP" serve "$WS_APP" --port $WS_PORT --workers 1 &
+WS_PID=$!
+
+"$ZPHP" serve "$WS_APP" --port $WSS_PORT --workers 1 --tls-cert /tmp/zphp_test.crt --tls-key /tmp/zphp_test.key &
+WSS_PID=$!
+
+sleep 1
+
+ws_result=$(python3 -c "
+import socket, os, base64, struct
+
+def ws_connect(host, port, use_tls=False):
+    import ssl as ssl_mod
+    key = base64.b64encode(os.urandom(16)).decode()
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    if use_tls:
+        ctx = ssl_mod.create_default_context()
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl_mod.CERT_NONE
+        s = ctx.wrap_socket(s, server_hostname='localhost')
+    s.connect((host, port))
+    s.settimeout(5)
+    req = 'GET / HTTP/1.1\r\nHost: localhost\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: ' + key + '\r\nSec-WebSocket-Version: 13\r\n\r\n'
+    s.sendall(req.encode())
+    resp = b''
+    while b'\r\n\r\n' not in resp:
+        resp += s.recv(4096)
+    if b'101' not in resp:
+        return None
+    return s
+
+def read_frame(sock):
+    hdr = b''
+    while len(hdr) < 2:
+        hdr += sock.recv(2 - len(hdr))
+    length = hdr[1] & 0x7f
+    if length == 126:
+        ext = b''
+        while len(ext) < 2:
+            ext += sock.recv(2 - len(ext))
+        length = struct.unpack('>H', ext)[0]
+    payload = b''
+    while len(payload) < length:
+        payload += sock.recv(length - len(payload))
+    return payload.decode()
+
+def send_frame(sock, msg):
+    payload = msg.encode()
+    mask_key = os.urandom(4)
+    masked = bytes(b ^ mask_key[i % 4] for i, b in enumerate(payload))
+    frame = bytes([0x81, 0x80 | len(payload)]) + mask_key + masked
+    sock.sendall(frame)
+
+results = []
+
+# WS tests
+try:
+    s = ws_connect('localhost', $WS_PORT)
+    welcome = read_frame(s)
+    results.append('ws_welcome=' + welcome)
+    send_frame(s, 'ping')
+    reply = read_frame(s)
+    results.append('ws_ping=' + reply)
+    send_frame(s, 'hello')
+    reply = read_frame(s)
+    results.append('ws_hello=' + reply)
+    s.close()
+except Exception as e:
+    results.append('ws_error=' + str(e))
+
+# WSS tests
+try:
+    s = ws_connect('localhost', $WSS_PORT, use_tls=True)
+    welcome = read_frame(s)
+    results.append('wss_welcome=' + welcome)
+    send_frame(s, 'ping')
+    reply = read_frame(s)
+    results.append('wss_ping=' + reply)
+    send_frame(s, 'hello')
+    reply = read_frame(s)
+    results.append('wss_hello=' + reply)
+    s.close()
+except Exception as e:
+    results.append('wss_error=' + str(e))
+
+print('|'.join(results))
+" 2>&1)
+
+for pair in $(echo "$ws_result" | tr '|' ' '); do
+    key="${pair%%=*}"
+    val="${pair#*=}"
+    case "$key" in
+        ws_welcome) check "ws welcome" "welcome" "$val" ;;
+        ws_ping)    check "ws ping/pong" "pong" "$val" ;;
+        ws_hello)   check "ws message" "got:hello" "$val" ;;
+        wss_welcome) check "wss welcome" "welcome" "$val" ;;
+        wss_ping)    check "wss ping/pong" "pong" "$val" ;;
+        wss_hello)   check "wss message" "got:hello" "$val" ;;
+        ws_error)   failed=$((failed + 3)); echo "  FAIL  ws: $val" ;;
+        wss_error)  failed=$((failed + 3)); echo "  FAIL  wss: $val" ;;
+    esac
+done
+
+kill $WS_PID 2>/dev/null; wait $WS_PID 2>/dev/null || true
+kill $WSS_PID 2>/dev/null; wait $WSS_PID 2>/dev/null || true
 rm -f /tmp/zphp_test.key /tmp/zphp_test.crt
 
 # test: graceful shutdown
