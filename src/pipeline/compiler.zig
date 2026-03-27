@@ -273,6 +273,7 @@ pub const Compiler = struct {
             .enum_case => {},
             .new_expr => try compiler_expr.compileNewExpr(self, node),
             .new_expr_dynamic => try compiler_expr.compileNewExprDynamic(self, node),
+            .anonymous_class => try compiler_class.compileAnonymousClass(self, node),
             .method_call => try compiler_expr.compileMethodCall(self, node),
             .static_call => try compiler_expr.compileStaticCall(self, node),
             .static_prop_access => try compiler_expr.compileStaticPropAccess(self, node),
@@ -464,6 +465,7 @@ pub const Compiler = struct {
 
     pub fn resolveClassName(self: *Compiler, name: []const u8) []const u8 {
         if (name.len > 0 and name[0] == '\\') return name[1..];
+        if (std.mem.eql(u8, name, "self") or std.mem.eql(u8, name, "static") or std.mem.eql(u8, name, "parent")) return name;
         if (self.use_aliases.get(name)) |fqn| return fqn;
         if (self.namespace.len == 0) return name;
         const qualified = std.fmt.allocPrint(self.allocator, "{s}\\{s}", .{ self.namespace, name }) catch return name;

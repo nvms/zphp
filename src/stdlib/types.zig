@@ -30,6 +30,7 @@ pub const entries = .{
     .{ "constant", native_constant },
     .{ "is_object", is_object },
     .{ "get_class", get_class },
+    .{ "get_called_class", get_called_class },
     .{ "class_exists", class_exists },
     .{ "method_exists", method_exists },
     .{ "property_exists", property_exists },
@@ -316,9 +317,26 @@ fn get_class(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     return .{ .string = args[0].object.class_name };
 }
 
+fn get_called_class(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    var i = ctx.vm.frame_count;
+    while (i > 0) {
+        i -= 1;
+        if (ctx.vm.frames[i].called_class) |cc| return .{ .string = cc };
+    }
+    return .{ .bool = false };
+}
+
 fn class_exists(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len == 0 or args[0] != .string) return .{ .bool = false };
-    return .{ .bool = ctx.vm.classes.contains(args[0].string) };
+    const name = args[0].string;
+    if (ctx.vm.classes.contains(name)) return .{ .bool = true };
+    // second arg controls autoloading (default true)
+    const autoload = args.len < 2 or !(args[1] == .bool and !args[1].bool);
+    if (autoload and ctx.vm.autoload_callbacks.items.len > 0) {
+        try ctx.vm.tryAutoload(name);
+        return .{ .bool = ctx.vm.classes.contains(name) };
+    }
+    return .{ .bool = false };
 }
 
 fn method_exists(ctx: *NativeContext, args: []const Value) RuntimeError!Value {

@@ -346,6 +346,7 @@ fn renderNode(ast: *const Ast, idx: u32, buf: *Buf) !void {
             }
             try w.writeByte(')');
         },
+        .anonymous_class => try w.writeAll("(new-anon-class)"),
         .method_call, .nullsafe_method_call => {
             try w.writeAll(if (node.tag == .nullsafe_method_call) "(?-> " else "(-> ");
             try renderNode(ast, node.data.lhs, buf);

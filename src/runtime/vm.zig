@@ -2500,7 +2500,10 @@ pub const VM = struct {
                         }
                     }
 
-                    const full_name = try self.resolveMethod(class_name, method_name);
+                    const full_name = self.resolveMethod(class_name, method_name) catch {
+                        self.error_msg = std.fmt.allocPrint(self.allocator, "Fatal error: Uncaught Error: Call to undefined method {s}::{s}()", .{ class_name, method_name }) catch null;
+                        return error.RuntimeError;
+                    };
 
                     // if we have $this, pass it through to the called method
                     if (this_val) |tv| {
@@ -2570,7 +2573,10 @@ pub const VM = struct {
                         }
                     }
 
-                    const full_name = try self.resolveMethod(class_name, method_name);
+                    const full_name = self.resolveMethod(class_name, method_name) catch {
+                        self.error_msg = std.fmt.allocPrint(self.allocator, "Fatal error: Uncaught Error: Call to undefined method {s}::{s}()", .{ class_name, method_name }) catch null;
+                        return error.RuntimeError;
+                    };
                     for (arr.entries.items) |entry| self.push(entry.value);
 
                     if (this_val) |tv| {
@@ -2609,6 +2615,34 @@ pub const VM = struct {
                     } else {
                         try self.callNamedFunction(full_name, @intCast(ac));
                     }
+                },
+
+                .static_call_dynamic => {
+                    const method_idx = self.readU16();
+                    const arg_count = self.readByte();
+                    const method_name = self.currentChunk().constants.items[method_idx].string;
+                    const ac: usize = arg_count;
+                    const class_val = self.stack[self.sp - ac - 1];
+                    if (class_val != .string) {
+                        self.error_msg = std.fmt.allocPrint(self.allocator, "Fatal error: Uncaught TypeError: {s}::method() requires a class name string", .{method_name}) catch null;
+                        return error.RuntimeError;
+                    }
+                    const class_name = class_val.string;
+                    if (!self.classes.contains(class_name)) {
+                        try self.tryAutoload(class_name);
+                    }
+                    const full_name = self.resolveMethod(class_name, method_name) catch {
+                        self.error_msg = std.fmt.allocPrint(self.allocator, "Fatal error: Uncaught Error: Call to undefined method {s}::{s}()", .{ class_name, method_name }) catch null;
+                        return error.RuntimeError;
+                    };
+                    // remove class name from stack (shift args down)
+                    var i: usize = 0;
+                    while (i < ac) : (i += 1) {
+                        self.stack[self.sp - ac - 1 + i] = self.stack[self.sp - ac + i];
+                    }
+                    self.sp -= 1;
+                    try self.callNamedFunction(full_name, arg_count);
+                    self.frames[self.frame_count - 1].called_class = class_name;
                 },
 
                 .get_static_prop => {
@@ -4687,6 +4721,7 @@ pub const VM = struct {
     fn resolveMethodSlow(self: *VM, class_name: []const u8, method_name: []const u8) RuntimeError![]const u8 {
         var current = class_name;
         var buf: [256]u8 = undefined;
+        var tried_autoload = false;
         while (true) {
             const full = std.fmt.bufPrint(&buf, "{s}::{s}", .{ current, method_name }) catch return error.RuntimeError;
             if (self.functions.getEntry(full)) |entry| return entry.key_ptr.*;
@@ -4696,6 +4731,10 @@ pub const VM = struct {
                     current = p;
                     continue;
                 }
+            } else if (!tried_autoload and self.autoload_callbacks.items.len > 0) {
+                tried_autoload = true;
+                try self.tryAutoload(current);
+                continue;
             }
             return error.RuntimeError;
         }

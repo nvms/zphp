@@ -377,6 +377,7 @@ const Formatter = struct {
                 }
                 self.write(")");
             },
+            .anonymous_class => self.write("new class { /* anonymous */ }"),
             .cast_expr => self.formatCastExpr(node),
 
             .closure_expr => self.formatClosure(node),

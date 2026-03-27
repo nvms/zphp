@@ -675,9 +675,20 @@ pub fn compileNullsafeMethodCall(self: *Compiler, node: Ast.Node) Error!void {
 
 pub fn compileStaticCall(self: *Compiler, node: Ast.Node) Error!void {
     const class_node = self.ast.nodes[node.data.lhs];
-    const class_name = try resolveNodeClassName(self, class_node);
     const method_name = self.ast.tokenSlice(node.main_token);
     const args = self.ast.extraSlice(node.data.rhs);
+
+    if (class_node.tag == .variable) {
+        try self.compileNode(node.data.lhs);
+        const method_idx = try self.addConstant(.{ .string = method_name });
+        for (args) |arg| try self.compileNode(arg);
+        try self.emitOp(.static_call_dynamic);
+        try self.emitU16(method_idx);
+        try self.emitByte(@intCast(args.len));
+        return;
+    }
+
+    const class_name = try resolveNodeClassName(self, class_node);
     const class_idx = try self.addConstant(.{ .string = class_name });
     const method_idx = try self.addConstant(.{ .string = method_name });
 

@@ -122,6 +122,7 @@ pub const Ast = struct {
             trait_as, // main_token = method name, lhs = trait name node, rhs = alias token index (identifier or visibility keyword)
             new_expr, // main_token = class name, lhs = extra index -> {count, arg...}
             new_expr_dynamic, // lhs = class name expression, rhs = extra index -> {count, arg...}
+            anonymous_class, // main_token = new, lhs = extra (members), rhs = extra {ctor_arg_count, ctor_args..., parent, impl_count, impls...}
             method_call, // main_token = method name, lhs = object, rhs = extra index -> {count, arg...}
             static_call, // main_token = method name, lhs = class name node, rhs = extra index -> {count, arg...}
             static_prop_access, // main_token = $variable, lhs = class name node

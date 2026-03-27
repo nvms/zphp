@@ -3,7 +3,7 @@
 //   middleware pipeline, request/response objects, namespace resolution,
 //   interface implementation, closures as route handlers, dependency injection
 
-require 'vendor/autoload.php';
+require __DIR__ . '/vendor/autoload.php';
 
 use Slim\Factory\AppFactory;
 use Slim\Psr7\Factory\ServerRequestFactory;

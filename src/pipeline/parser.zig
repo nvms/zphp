@@ -138,7 +138,7 @@ const Parser = struct {
             .kw_return => self.parseReturnStmt(),
             .kw_break => self.parseBreakContinue(.break_stmt),
             .kw_continue => self.parseBreakContinue(.continue_stmt),
-            .kw_class, .kw_abstract => self.parseClassDecl(),
+            .kw_class, .kw_abstract, .kw_final => self.parseClassDecl(),
             .kw_interface => self.parseInterfaceDecl(),
             .kw_trait => self.parseTraitDecl(),
             .kw_enum => self.parseEnumDecl(),
@@ -201,6 +201,7 @@ const Parser = struct {
     }
 
     fn parseStaticVarStmt(self: *Parser) Error!u32 {
+        if (self.pos + 1 < self.tokens.len and self.tokens[self.pos + 1].tag == .colon_colon) return self.parseExpressionStmt();
         _ = self.advance(); // static
         const var_tok = try self.expect(.variable);
         var default: u32 = 0;
@@ -233,6 +234,9 @@ const Parser = struct {
 
     fn parseUseStmt(self: *Parser) Error!u32 {
         const tok = self.advance(); // use
+
+        // use function Foo\bar; / use const Foo\BAR; - consume the keyword
+        if (self.peek() == .kw_function or self.peek() == .kw_const) _ = self.advance();
 
         // use App\Models\User;
         // use App\Models\User as Alias;
@@ -691,6 +695,11 @@ const Parser = struct {
     fn parseNewExpr(self: *Parser) Error!u32 {
         const new_tok = self.advance(); // new
 
+        // anonymous class: new class (...) { ... }
+        if (self.peek() == .kw_class) {
+            return self.parseAnonymousClass(new_tok);
+        }
+
         // dynamic class name: new $var(...) or new $var['key'](...)
         if (self.peek() == .dollar or self.peek() == .variable) {
             var class_expr = try self.parsePrimaryExpr();
@@ -727,6 +736,31 @@ const Parser = struct {
         else
             try self.expect(.identifier);
 
+        // new static::$prop() or new self::$prop() - dynamic class from static property
+        if (self.peek() == .colon_colon and self.pos + 1 < self.tokens.len and self.tokens[self.pos + 1].tag == .variable) {
+            var class_expr = try self.addNode(.{ .tag = .identifier, .main_token = name_tok, .data = .{} });
+            class_expr = try self.parseStaticAccess(class_expr);
+            while (self.peek() == .colon_colon) {
+                class_expr = try self.parseStaticAccess(class_expr);
+            }
+            var dyn_args = std.ArrayListUnmanaged(u32){};
+            defer dyn_args.deinit(self.allocator);
+            if (self.peek() == .l_paren) {
+                _ = self.advance();
+                if (self.peek() != .r_paren) {
+                    try dyn_args.append(self.allocator, try self.parseCallArg());
+                    while (self.peek() == .comma) {
+                        _ = self.advance();
+                        if (self.peek() == .r_paren) break;
+                        try dyn_args.append(self.allocator, try self.parseCallArg());
+                    }
+                }
+                _ = try self.expect(.r_paren);
+            }
+            const dyn_extra = try self.addExtraList(dyn_args.items);
+            return self.addNode(.{ .tag = .new_expr_dynamic, .main_token = new_tok, .data = .{ .lhs = class_expr, .rhs = dyn_extra } });
+        }
+
         // consume qualified name parts: \Identifier\Identifier...
         var name_parts = std.ArrayListUnmanaged(u32){};
         defer name_parts.deinit(self.allocator);
@@ -758,6 +792,119 @@ const Parser = struct {
         else
             @as(u32, 0);
         return self.addNode(.{ .tag = .new_expr, .main_token = name_tok, .data = .{ .lhs = extra, .rhs = name_extra } });
+    }
+
+    fn parseAnonymousClass(self: *Parser, new_tok: u32) Error!u32 {
+        _ = self.advance(); // class
+
+        // constructor args
+        var ctor_args = std.ArrayListUnmanaged(u32){};
+        defer ctor_args.deinit(self.allocator);
+        if (self.peek() == .l_paren) {
+            _ = self.advance();
+            if (self.peek() != .r_paren) {
+                try ctor_args.append(self.allocator, try self.parseCallArg());
+                while (self.peek() == .comma) {
+                    _ = self.advance();
+                    if (self.peek() == .r_paren) break;
+                    try ctor_args.append(self.allocator, try self.parseCallArg());
+                }
+            }
+            _ = try self.expect(.r_paren);
+        }
+
+        var parent: u32 = 0;
+        if (self.peek() == .kw_extends) {
+            _ = self.advance();
+            parent = try self.parseQualifiedName();
+        }
+
+        var implements = std.ArrayListUnmanaged(u32){};
+        defer implements.deinit(self.allocator);
+        if (self.peek() == .kw_implements) {
+            _ = self.advance();
+            try implements.append(self.allocator, try self.parseQualifiedName());
+            while (self.peek() == .comma) {
+                _ = self.advance();
+                try implements.append(self.allocator, try self.parseQualifiedName());
+            }
+        }
+
+        _ = try self.expect(.l_brace);
+
+        var members = std.ArrayListUnmanaged(u32){};
+        defer members.deinit(self.allocator);
+        while (self.peek() != .r_brace and self.peek() != .eof) {
+            var is_static = false;
+            var is_abstract = false;
+            var is_readonly = false;
+            var visibility: u32 = 0;
+            while (self.peek() == .kw_public or self.peek() == .kw_protected or
+                self.peek() == .kw_private or self.peek() == .kw_static or
+                self.peek() == .kw_abstract or self.peek() == .kw_readonly)
+            {
+                if (self.peek() == .kw_static) is_static = true;
+                if (self.peek() == .kw_abstract) is_abstract = true;
+                if (self.peek() == .kw_readonly) is_readonly = true;
+                if (self.peek() == .kw_protected) visibility = 1;
+                if (self.peek() == .kw_private) visibility = 2;
+                _ = self.advance();
+            }
+
+            if (self.peek() == .kw_use) {
+                try members.append(self.allocator, try self.parseTraitUse());
+            } else if (self.peek() == .kw_function) {
+                if (is_abstract) {
+                    try members.append(self.allocator, try self.parseInterfaceMethod());
+                } else {
+                    const method = try self.parseClassMethod();
+                    if (is_static) {
+                        self.nodes.items[method].tag = .static_class_method;
+                    }
+                    self.nodes.items[method].data.rhs = self.nodes.items[method].data.rhs | (visibility << 30);
+                    try members.append(self.allocator, method);
+                }
+            } else if (self.peek() == .variable) {
+                const prop = try self.parseClassProperty();
+                if (is_static) {
+                    self.nodes.items[prop].tag = .static_class_property;
+                }
+                self.nodes.items[prop].data.rhs = visibility | (if (is_readonly) @as(u32, 4) else 0);
+                try members.append(self.allocator, prop);
+            } else if (self.peek() == .kw_const) {
+                try members.append(self.allocator, try self.parseConstDecl());
+            } else if (self.isTypeName() or self.peek() == .question or self.peek() == .l_paren) {
+                self.skipTypeHint();
+                if (self.peek() == .variable) {
+                    const prop = try self.parseClassProperty();
+                    if (is_static) {
+                        self.nodes.items[prop].tag = .static_class_property;
+                    }
+                    self.nodes.items[prop].data.rhs = visibility | (if (is_readonly) @as(u32, 4) else 0);
+                    try members.append(self.allocator, prop);
+                } else {
+                    _ = self.advance();
+                }
+            } else {
+                _ = self.advance();
+            }
+        }
+        _ = try self.expect(.r_brace);
+
+        const members_extra = try self.addExtraList(members.items);
+
+        // rhs: {ctor_arg_count, ctor_args..., parent, impl_count, impls...}
+        var rhs_data = std.ArrayListUnmanaged(u32){};
+        defer rhs_data.deinit(self.allocator);
+        try rhs_data.append(self.allocator, @intCast(ctor_args.items.len));
+        for (ctor_args.items) |a| try rhs_data.append(self.allocator, a);
+        try rhs_data.append(self.allocator, parent);
+        try rhs_data.append(self.allocator, @intCast(implements.items.len));
+        for (implements.items) |impl| try rhs_data.append(self.allocator, impl);
+        const rhs_idx: u32 = @intCast(self.extra_data.items.len);
+        try self.extra_data.appendSlice(self.allocator, rhs_data.items);
+
+        return self.addNode(.{ .tag = .anonymous_class, .main_token = new_tok, .data = .{ .lhs = members_extra, .rhs = rhs_idx } });
     }
 
     fn parseYieldExpr(self: *Parser) Error!u32 {
@@ -794,7 +941,7 @@ const Parser = struct {
     }
 
     fn parseClassDecl(self: *Parser) Error!u32 {
-        if (self.peek() == .kw_abstract) _ = self.advance();
+        if (self.peek() == .kw_abstract or self.peek() == .kw_final) _ = self.advance();
         _ = self.advance(); // class
         const name_tok = try self.expect(.identifier);
 
@@ -1233,6 +1380,7 @@ const Parser = struct {
     }
 
     fn parseClosureExpr(self: *Parser) Error!u32 {
+        if (self.peek() == .kw_static) _ = self.advance();
         const fn_tok = self.advance(); // function
         _ = try self.expect(.l_paren);
 
@@ -1585,6 +1733,7 @@ const Parser = struct {
             .kw_null => self.addLiteral(.null_literal),
             .variable => self.addLiteral(.variable),
             .identifier => if (self.peekAt(1) == .backslash) self.parseQualifiedName() else self.addLiteral(.identifier),
+            .backslash => self.parseQualifiedName(),
             .kw_isset, .kw_empty, .kw_unset, .kw_eval, .kw_exit, .kw_die => self.addLiteral(.identifier),
             .kw_list => self.parseListDestructure(),
             .kw_match => if (self.isMatchExpr()) self.parseMatchExpr() else self.addLiteral(.identifier),
@@ -1593,7 +1742,8 @@ const Parser = struct {
             .l_paren => if (self.isCastExpr()) self.parseCastExpr() else self.parseGroupedExpr(),
             .l_bracket => self.parseArrayLiteral(),
             .kw_array => self.parseArrayKw(),
-            .kw_static, .kw_self, .kw_parent => self.addLiteral(.identifier),
+            .kw_static => if (self.peekAt(1) == .kw_function) self.parseClosureExpr() else self.addLiteral(.identifier),
+            .kw_self, .kw_parent => self.addLiteral(.identifier),
             else => {
                 try self.addError(.expected_expression);
                 return error.ParseError;

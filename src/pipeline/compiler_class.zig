@@ -101,6 +101,8 @@ pub fn compileFunction(self: *Compiler, node: Ast.Node) Error!void {
         .is_generator = gen,
         .closure_count = self.closure_count,
         .file_path = self.file_path,
+        .namespace = self.namespace,
+        .use_aliases = self.use_aliases,
     };
     errdefer {
         sub.chunk.deinit(self.allocator);
@@ -228,6 +230,8 @@ pub fn compileClosure(self: *Compiler, node: Ast.Node) Error!void {
         .is_generator = gen,
         .closure_count = self.closure_count,
         .file_path = self.file_path,
+        .namespace = self.namespace,
+        .use_aliases = self.use_aliases,
     };
     errdefer {
         sub.chunk.deinit(self.allocator);
@@ -341,7 +345,7 @@ pub fn compileClassDecl(self: *Compiler, node: Ast.Node) Error!void {
     var impl_names: [16][]const u8 = undefined;
     for (0..impl_count) |i| {
         const impl_node = self.ast.nodes[self.ast.extra_data[rhs_base + 2 + i]];
-        impl_names[i] = self.ast.tokenSlice(impl_node.main_token);
+        impl_names[i] = if (impl_node.tag == .qualified_name) (self.buildQualifiedString(self.ast.extraSlice(impl_node.data.lhs)) catch self.ast.tokenSlice(impl_node.main_token)) else self.resolveClassName(self.ast.tokenSlice(impl_node.main_token));
     }
 
     var method_count: u8 = 0;
@@ -509,7 +513,8 @@ pub fn compileClassDecl(self: *Compiler, node: Ast.Node) Error!void {
     }
 
     if (parent_node != 0) {
-        const parent_name = self.ast.tokenSlice(self.ast.nodes[parent_node].main_token);
+        const pnode = self.ast.nodes[parent_node];
+        const parent_name = if (pnode.tag == .qualified_name) try self.buildQualifiedString(self.ast.extraSlice(pnode.data.lhs)) else self.resolveClassName(self.ast.tokenSlice(pnode.main_token));
         const parent_idx = try self.addConstant(.{ .string = parent_name });
         try self.emitU16(parent_idx);
     } else {
@@ -519,7 +524,8 @@ pub fn compileClassDecl(self: *Compiler, node: Ast.Node) Error!void {
     // emit implements count and names
     try self.emitByte(@intCast(impl_count));
     for (0..impl_count) |i| {
-        const iname_idx = try self.addConstant(.{ .string = impl_names[i] });
+        const resolved_impl = self.resolveClassName(impl_names[i]);
+        const iname_idx = try self.addConstant(.{ .string = resolved_impl });
         try self.emitU16(iname_idx);
     }
 
@@ -578,6 +584,255 @@ pub fn compileClassDecl(self: *Compiler, node: Ast.Node) Error!void {
     }
 }
 
+pub fn compileAnonymousClass(self: *Compiler, node: Ast.Node) Error!void {
+    const anon_name = try std.fmt.allocPrint(self.allocator, "__anon_class_{d}", .{self.closure_count});
+    try self.string_allocs.append(self.allocator, anon_name);
+    self.closure_count += 1;
+
+    const members = self.ast.extraSlice(node.data.lhs);
+    const rhs_base = node.data.rhs;
+
+    // decode rhs: {ctor_arg_count, ctor_args..., parent, impl_count, impls...}
+    const ctor_arg_count = self.ast.extra_data[rhs_base];
+    const ctor_args_start = rhs_base + 1;
+    const parent_node = self.ast.extra_data[ctor_args_start + ctor_arg_count];
+    const impl_count = self.ast.extra_data[ctor_args_start + ctor_arg_count + 1];
+    var impl_names: [16][]const u8 = undefined;
+    for (0..impl_count) |i| {
+        const impl_node = self.ast.nodes[self.ast.extra_data[ctor_args_start + ctor_arg_count + 2 + i]];
+        impl_names[i] = if (impl_node.tag == .qualified_name) (self.buildQualifiedString(self.ast.extraSlice(impl_node.data.lhs)) catch self.ast.tokenSlice(impl_node.main_token)) else self.resolveClassName(self.ast.tokenSlice(impl_node.main_token));
+    }
+
+    var method_count: u8 = 0;
+    for (members) |member_idx| {
+        const member = self.ast.nodes[member_idx];
+        if (member.tag == .class_method or member.tag == .static_class_method) {
+            try compileClassMethodBody(self, anon_name, member);
+            method_count += 1;
+        }
+    }
+
+    var promoted_count: u8 = 0;
+    var constructor_params: []const u32 = &.{};
+    for (members) |member_idx| {
+        const member = self.ast.nodes[member_idx];
+        if (member.tag == .class_method and std.mem.eql(u8, self.ast.tokenSlice(member.main_token), "__construct")) {
+            constructor_params = self.ast.extraSlice(member.data.lhs);
+            for (constructor_params) |p| {
+                const pnode = self.ast.nodes[p];
+                if ((pnode.data.rhs >> 2) & 3 > 0) promoted_count += 1;
+            }
+            break;
+        }
+    }
+
+    var trait_prop_members = std.ArrayListUnmanaged(u32){};
+    defer trait_prop_members.deinit(self.allocator);
+    for (members) |member_idx| {
+        const member = self.ast.nodes[member_idx];
+        if (member.tag == .trait_use) {
+            for (self.ast.extraSlice(member.data.lhs)) |tn| {
+                const tname = self.ast.tokenSlice(self.ast.nodes[tn].main_token);
+                if (self.trait_properties.get(tname)) |props| {
+                    for (props) |pi| try trait_prop_members.append(self.allocator, pi);
+                }
+            }
+        }
+    }
+
+    var prop_count: u8 = 0;
+    for (members) |member_idx| {
+        const member = self.ast.nodes[member_idx];
+        if (member.tag == .class_property) prop_count += 1;
+    }
+    prop_count += @intCast(trait_prop_members.items.len);
+    prop_count += promoted_count;
+    for (members) |member_idx| {
+        const member = self.ast.nodes[member_idx];
+        if (member.tag == .class_property) {
+            if (member.data.lhs != 0) {
+                try self.compileNode(member.data.lhs);
+            }
+        }
+    }
+    for (trait_prop_members.items) |tpi| {
+        const tmember = self.ast.nodes[tpi];
+        if (tmember.data.lhs != 0) {
+            try self.compileNode(tmember.data.lhs);
+        }
+    }
+    for (constructor_params) |p| {
+        const pnode = self.ast.nodes[p];
+        if ((pnode.data.rhs >> 2) & 3 > 0) {
+            try self.emitOp(.op_null);
+        }
+    }
+
+    var static_prop_count: u8 = 0;
+    for (members) |member_idx| {
+        const member = self.ast.nodes[member_idx];
+        if (member.tag == .static_class_property or member.tag == .const_decl) static_prop_count += 1;
+    }
+    for (members) |member_idx| {
+        const member = self.ast.nodes[member_idx];
+        if (member.tag == .static_class_property) {
+            if (member.data.lhs != 0) {
+                try self.compileNode(member.data.lhs);
+            }
+        } else if (member.tag == .const_decl) {
+            try self.compileNode(member.data.lhs);
+        }
+    }
+
+    const name_idx = try self.addConstant(.{ .string = anon_name });
+    try self.emitOp(.class_decl);
+    try self.emitU16(name_idx);
+    try self.emitByte(method_count);
+
+    for (members) |member_idx| {
+        const member = self.ast.nodes[member_idx];
+        if (member.tag == .class_method or member.tag == .static_class_method) {
+            const method_name_str = self.ast.tokenSlice(member.main_token);
+            const mname_idx = try self.addConstant(.{ .string = method_name_str });
+            try self.emitU16(mname_idx);
+            const param_nodes = self.ast.extraSlice(member.data.lhs);
+            try self.emitByte(@intCast(param_nodes.len));
+            try self.emitByte(if (member.tag == .static_class_method) @as(u8, 1) else @as(u8, 0));
+            const vis: u8 = @intCast(member.data.rhs >> 30);
+            try self.emitByte(vis);
+        }
+    }
+
+    try self.emitByte(prop_count);
+    for (members) |member_idx| {
+        const member = self.ast.nodes[member_idx];
+        if (member.tag == .class_property) {
+            var prop_name = self.ast.tokenSlice(member.main_token);
+            if (prop_name.len > 0 and prop_name[0] == '$') prop_name = prop_name[1..];
+            const pname_idx = try self.addConstant(.{ .string = prop_name });
+            try self.emitU16(pname_idx);
+            try self.emitByte(if (member.data.lhs != 0) @as(u8, 1) else @as(u8, 0));
+            try self.emitByte(@intCast(member.data.rhs));
+        }
+    }
+    for (trait_prop_members.items) |tpi| {
+        const tmember = self.ast.nodes[tpi];
+        var tprop_name = self.ast.tokenSlice(tmember.main_token);
+        if (tprop_name.len > 0 and tprop_name[0] == '$') tprop_name = tprop_name[1..];
+        const tpname_idx = try self.addConstant(.{ .string = tprop_name });
+        try self.emitU16(tpname_idx);
+        try self.emitByte(if (tmember.data.lhs != 0) @as(u8, 1) else @as(u8, 0));
+        try self.emitByte(@intCast(tmember.data.rhs));
+    }
+    for (constructor_params) |p| {
+        const pnode = self.ast.nodes[p];
+        const promotion = (pnode.data.rhs >> 2) & 3;
+        if (promotion > 0) {
+            var param_name = self.ast.tokenSlice(pnode.main_token);
+            if (param_name.len > 0 and param_name[0] == '$') param_name = param_name[1..];
+            const pname_idx = try self.addConstant(.{ .string = param_name });
+            try self.emitU16(pname_idx);
+            try self.emitByte(1);
+            const is_ro: u8 = if ((pnode.data.rhs & 16) != 0) 4 else 0;
+            try self.emitByte(@as(u8, @intCast(promotion - 1)) | is_ro);
+        }
+    }
+
+    try self.emitByte(static_prop_count);
+    for (members) |member_idx| {
+        const member = self.ast.nodes[member_idx];
+        if (member.tag == .static_class_property) {
+            var prop_name = self.ast.tokenSlice(member.main_token);
+            if (prop_name.len > 0 and prop_name[0] == '$') prop_name = prop_name[1..];
+            const pname_idx = try self.addConstant(.{ .string = prop_name });
+            try self.emitU16(pname_idx);
+            try self.emitByte(if (member.data.lhs != 0) @as(u8, 1) else @as(u8, 0));
+            try self.emitByte(@intCast(member.data.rhs));
+        } else if (member.tag == .const_decl) {
+            const cname = self.ast.tokenSlice(member.main_token);
+            const cname_idx = try self.addConstant(.{ .string = cname });
+            try self.emitU16(cname_idx);
+            try self.emitByte(1);
+            try self.emitByte(0);
+        }
+    }
+
+    if (parent_node != 0) {
+        const apnode = self.ast.nodes[parent_node];
+        const parent_name = if (apnode.tag == .qualified_name) try self.buildQualifiedString(self.ast.extraSlice(apnode.data.lhs)) else self.resolveClassName(self.ast.tokenSlice(apnode.main_token));
+        const parent_idx = try self.addConstant(.{ .string = parent_name });
+        try self.emitU16(parent_idx);
+    } else {
+        try self.emitU16(0xffff);
+    }
+
+    try self.emitByte(@intCast(impl_count));
+    for (0..impl_count) |i| {
+        const iname_idx = try self.addConstant(.{ .string = impl_names[i] });
+        try self.emitU16(iname_idx);
+    }
+
+    var all_traits = std.ArrayListUnmanaged([]const u8){};
+    defer all_traits.deinit(self.allocator);
+    for (members) |member_idx| {
+        const member = self.ast.nodes[member_idx];
+        if (member.tag == .trait_use) {
+            for (self.ast.extraSlice(member.data.lhs)) |tn| {
+                try all_traits.append(self.allocator, self.ast.tokenSlice(self.ast.nodes[tn].main_token));
+            }
+        }
+    }
+    try self.emitByte(@intCast(all_traits.items.len));
+    for (all_traits.items) |tname| {
+        const tname_idx = try self.addConstant(.{ .string = tname });
+        try self.emitU16(tname_idx);
+    }
+
+    const ConflictRule = struct { cnode: Ast.Node };
+    var all_conflicts = std.ArrayListUnmanaged(ConflictRule){};
+    defer all_conflicts.deinit(self.allocator);
+    for (members) |member_idx| {
+        const member = self.ast.nodes[member_idx];
+        if (member.tag == .trait_use and member.data.rhs != 0) {
+            for (self.ast.extraSlice(member.data.rhs)) |cn| {
+                try all_conflicts.append(self.allocator, .{ .cnode = self.ast.nodes[cn] });
+            }
+        }
+    }
+    try self.emitByte(@intCast(all_conflicts.items.len));
+    for (all_conflicts.items) |cr| {
+        const method_name = self.ast.tokenSlice(cr.cnode.main_token);
+        const trait_name = self.ast.tokenSlice(self.ast.nodes[cr.cnode.data.lhs].main_token);
+        const method_idx = try self.addConstant(.{ .string = method_name });
+        const trait_idx = try self.addConstant(.{ .string = trait_name });
+        try self.emitU16(method_idx);
+        try self.emitU16(trait_idx);
+        if (cr.cnode.tag == .trait_insteadof) {
+            try self.emitByte(1);
+            const excluded = self.ast.extraSlice(cr.cnode.data.rhs);
+            try self.emitByte(@intCast(excluded.len));
+            for (excluded) |en| {
+                const ename = self.ast.tokenSlice(self.ast.nodes[en].main_token);
+                const eidx = try self.addConstant(.{ .string = ename });
+                try self.emitU16(eidx);
+            }
+        } else {
+            try self.emitByte(2);
+            const alias = self.ast.tokenSlice(cr.cnode.data.rhs);
+            const aidx = try self.addConstant(.{ .string = alias });
+            try self.emitU16(aidx);
+        }
+    }
+
+    // now instantiate with constructor args
+    for (0..ctor_arg_count) |i| {
+        try self.compileNode(self.ast.extra_data[ctor_args_start + i]);
+    }
+    try self.emitOp(.new_obj);
+    try self.emitU16(name_idx);
+    try self.emitByte(@intCast(ctor_arg_count));
+}
+
 pub fn compileInterfaceDecl(self: *Compiler, node: Ast.Node) Error!void {
     const iface_name = self.ast.tokenSlice(node.main_token);
     const members = self.ast.extraSlice(node.data.lhs);
@@ -602,7 +857,8 @@ pub fn compileInterfaceDecl(self: *Compiler, node: Ast.Node) Error!void {
     }
 
     if (node.data.rhs != 0) {
-        const parent_name = self.ast.tokenSlice(self.ast.nodes[node.data.rhs].main_token);
+        const ipnode = self.ast.nodes[node.data.rhs];
+        const parent_name = if (ipnode.tag == .qualified_name) try self.buildQualifiedString(self.ast.extraSlice(ipnode.data.lhs)) else self.resolveClassName(self.ast.tokenSlice(ipnode.main_token));
         const pidx = try self.addConstant(.{ .string = parent_name });
         try self.emitU16(pidx);
     } else {
@@ -771,6 +1027,8 @@ fn compileClassMethodBody(self: *Compiler, class_name: []const u8, member: Ast.N
         .is_generator = method_gen,
         .closure_count = self.closure_count,
         .file_path = self.file_path,
+        .namespace = self.namespace,
+        .use_aliases = self.use_aliases,
     };
     errdefer {
         sub.chunk.deinit(self.allocator);

@@ -15,7 +15,7 @@ spl_autoload_register(function ($class) {
         if (strncmp($prefix, $class, $len) === 0) {
             $relative = substr($class, $len);
             foreach ($dirs as $dir) {
-                $file = $dir . '/' . str_replace('\\', '/', $relative) . '.php';
+                $file = __DIR__ . '/../' . $dir . '/' . str_replace('\\', '/', $relative) . '.php';
                 if (file_exists($file)) {
                     require $file;
                     return;
@@ -24,5 +24,5 @@ spl_autoload_register(function ($class) {
         }
     }
 });
-require_once 'vendor/ralouphie/getallheaders/src/getallheaders.php';
-require_once 'vendor/nikic/fast-route/src/functions.php';
+require_once __DIR__ . '/ralouphie/getallheaders/src/getallheaders.php';
+require_once __DIR__ . '/nikic/fast-route/src/functions.php';
