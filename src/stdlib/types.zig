@@ -2,6 +2,7 @@ const std = @import("std");
 const Value = @import("../runtime/value.zig").Value;
 const PhpArray = @import("../runtime/value.zig").PhpArray;
 const NativeContext = @import("../runtime/vm.zig").NativeContext;
+const ClassDef = @import("../runtime/vm.zig").ClassDef;
 const RuntimeError = error{ RuntimeError, OutOfMemory };
 
 pub const entries = .{
@@ -84,6 +85,8 @@ pub const entries = .{
     .{ "func_get_args", native_func_get_args },
     .{ "func_num_args", native_func_num_args },
     .{ "func_get_arg", native_func_get_arg },
+    .{ "interface_exists", native_interface_exists },
+    .{ "class_implements", native_class_implements },
 };
 
 fn native_define(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
@@ -768,10 +771,6 @@ fn native_class_alias(ctx: *NativeContext, args: []const Value) RuntimeError!Val
     const original = args[0].string;
     const alias = args[1].string;
     if (ctx.vm.classes.get(original)) |cls| {
-        // create an empty alias class that inherits everything from the original
-        const VM = @import("../runtime/vm.zig").VM;
-        _ = VM;
-        const ClassDef = @import("../runtime/vm.zig").ClassDef;
         var alias_def = ClassDef{ .name = alias, .parent = original };
         // copy interfaces
         for (cls.interfaces.items) |iface| {
@@ -900,4 +899,40 @@ fn native_func_get_arg(ctx: *NativeContext, args: []const Value) RuntimeError!Va
 
     if (index >= func.arity) return .{ .bool = false };
     return getFrameParamValue(frame, slot_names, func.params[index]);
+}
+
+fn native_interface_exists(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len == 0 or args[0] != .string) return .{ .bool = false };
+    return .{ .bool = ctx.vm.interfaces.contains(args[0].string) };
+}
+
+fn native_class_implements(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len == 0) return .{ .bool = false };
+    const class_name = if (args[0] == .object)
+        args[0].object.class_name
+    else if (args[0] == .string)
+        args[0].string
+    else
+        return Value{ .bool = false };
+
+    const cls = ctx.vm.classes.get(class_name) orelse return Value{ .bool = false };
+
+    var result = try ctx.createArray();
+    for (cls.interfaces.items) |iface| {
+        try result.set(ctx.allocator, .{ .string = iface }, .{ .string = iface });
+    }
+
+    // walk parent chain
+    var parent = cls.parent;
+    while (parent) |p| {
+        const pcls = ctx.vm.classes.get(p) orelse break;
+        for (pcls.interfaces.items) |iface| {
+            if (result.get(.{ .string = iface }) == .null) {
+                try result.set(ctx.allocator, .{ .string = iface }, .{ .string = iface });
+            }
+        }
+        parent = pcls.parent;
+    }
+
+    return .{ .array = result };
 }

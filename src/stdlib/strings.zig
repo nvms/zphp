@@ -85,6 +85,9 @@ pub const entries = .{
     .{ "similar_text", native_similar_text },
     .{ "soundex", native_soundex },
     .{ "metaphone", native_metaphone },
+    .{ "count_chars", native_count_chars },
+    .{ "str_increment", native_str_increment },
+    .{ "str_decrement", native_str_decrement },
 };
 
 fn substr(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
@@ -2343,4 +2346,157 @@ fn native_metaphone(ctx: *NativeContext, args: []const Value) RuntimeError!Value
     const result = try buf.toOwnedSlice(ctx.allocator);
     try ctx.strings.append(ctx.allocator, result);
     return .{ .string = result };
+}
+
+fn native_count_chars(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len == 0 or args[0] != .string) return .null;
+    const s = args[0].string;
+    const mode: i64 = if (args.len >= 2) Value.toInt(args[1]) else 0;
+
+    var freq: [256]i64 = [_]i64{0} ** 256;
+    for (s) |c| freq[c] += 1;
+
+    if (mode == 3) {
+        var buf2 = std.ArrayListUnmanaged(u8){};
+        for (0..256) |i| {
+            if (freq[i] > 0) try buf2.append(ctx.allocator, @intCast(i));
+        }
+        const r = try buf2.toOwnedSlice(ctx.allocator);
+        try ctx.strings.append(ctx.allocator, r);
+        return .{ .string = r };
+    }
+
+    if (mode == 4) {
+        var buf2 = std.ArrayListUnmanaged(u8){};
+        for (0..256) |i| {
+            if (freq[i] == 0) try buf2.append(ctx.allocator, @intCast(i));
+        }
+        const r = try buf2.toOwnedSlice(ctx.allocator);
+        try ctx.strings.append(ctx.allocator, r);
+        return .{ .string = r };
+    }
+
+    var arr = try ctx.createArray();
+    for (0..256) |i| {
+        const include = switch (mode) {
+            0 => true,
+            1 => freq[i] > 0,
+            2 => freq[i] == 0,
+            else => true,
+        };
+        if (include) {
+            try arr.set(ctx.allocator, .{ .int = @intCast(i) }, .{ .int = freq[i] });
+        }
+    }
+    return .{ .array = arr };
+}
+
+fn native_str_increment(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len == 0 or args[0] != .string) return .{ .string = "" };
+    const s = args[0].string;
+    if (s.len == 0) return .{ .string = "" };
+
+    var buf3 = try ctx.allocator.alloc(u8, s.len + 1);
+    @memcpy(buf3[1..], s);
+
+    var carry = true;
+    var j: usize = s.len;
+    while (carry and j > 0) {
+        j -= 1;
+        const c = buf3[j + 1];
+        if (c >= 'a' and c <= 'z') {
+            if (c == 'z') {
+                buf3[j + 1] = 'a';
+            } else {
+                buf3[j + 1] = c + 1;
+                carry = false;
+            }
+        } else if (c >= 'A' and c <= 'Z') {
+            if (c == 'Z') {
+                buf3[j + 1] = 'A';
+            } else {
+                buf3[j + 1] = c + 1;
+                carry = false;
+            }
+        } else if (c >= '0' and c <= '9') {
+            if (c == '9') {
+                buf3[j + 1] = '0';
+            } else {
+                buf3[j + 1] = c + 1;
+                carry = false;
+            }
+        } else {
+            buf3[j + 1] = c + 1;
+            carry = false;
+        }
+    }
+
+    if (carry) {
+        const first = s[0];
+        if (first >= 'a' and first <= 'z') {
+            buf3[0] = 'a';
+        } else if (first >= 'A' and first <= 'Z') {
+            buf3[0] = 'A';
+        } else {
+            buf3[0] = '1';
+        }
+        try ctx.strings.append(ctx.allocator, buf3);
+        return .{ .string = buf3 };
+    }
+
+    const r2 = buf3[1..];
+    try ctx.strings.append(ctx.allocator, buf3);
+    return .{ .string = r2 };
+}
+
+fn native_str_decrement(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len == 0 or args[0] != .string) return .{ .string = "" };
+    const s = args[0].string;
+    if (s.len == 0) return .{ .string = "" };
+
+    if (s.len == 1) {
+        if (s[0] == 'a' or s[0] == 'A' or s[0] == '0') return .{ .string = s };
+    }
+
+    var buf3 = try ctx.allocator.alloc(u8, s.len);
+    @memcpy(buf3, s);
+
+    var borrow = true;
+    var j: usize = s.len;
+    while (borrow and j > 0) {
+        j -= 1;
+        const c = buf3[j];
+        if (c >= 'a' and c <= 'z') {
+            if (c == 'a') {
+                buf3[j] = 'z';
+            } else {
+                buf3[j] = c - 1;
+                borrow = false;
+            }
+        } else if (c >= 'A' and c <= 'Z') {
+            if (c == 'A') {
+                buf3[j] = 'Z';
+            } else {
+                buf3[j] = c - 1;
+                borrow = false;
+            }
+        } else if (c >= '0' and c <= '9') {
+            if (c == '0') {
+                buf3[j] = '9';
+            } else {
+                buf3[j] = c - 1;
+                borrow = false;
+            }
+        } else {
+            buf3[j] = c - 1;
+            borrow = false;
+        }
+    }
+
+    var start: usize = 0;
+    if (borrow and buf3.len > 1) start = 1;
+
+    const r2 = buf3[start..];
+    try ctx.strings.append(ctx.allocator, buf3);
+    return .{ .string = r2 };
 }

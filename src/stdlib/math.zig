@@ -45,6 +45,7 @@ pub const entries = .{
     .{ "is_nan", native_is_nan },
     .{ "mt_rand", native_rand },
     .{ "fpow", native_fpow },
+    .{ "fdiv", native_fdiv },
 };
 
 fn native_abs(_: *NativeContext, args: []const Value) RuntimeError!Value {
@@ -339,4 +340,11 @@ fn native_is_nan(_: *NativeContext, args: []const Value) RuntimeError!Value {
 fn native_fpow(_: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len < 2) return .{ .float = 0.0 };
     return .{ .float = std.math.pow(f64, Value.toFloat(args[0]), Value.toFloat(args[1])) };
+}
+
+fn native_fdiv(_: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len < 2) return .{ .float = 0.0 };
+    const num = Value.toFloat(args[0]);
+    const den = Value.toFloat(args[1]);
+    return .{ .float = num / den };
 }

@@ -265,7 +265,7 @@ pub const Value = union(enum) {
     pub fn modulo(a: Value, b: Value) Value {
         const bi = toInt(b);
         if (bi == 0) return .{ .int = 0 };
-        return .{ .int = @mod(toInt(a), bi) };
+        return .{ .int = @rem(toInt(a), bi) };
     }
 
     pub fn power(a: Value, b: Value) Value {
@@ -456,6 +456,11 @@ pub const Value = union(enum) {
                     var tmp: [32]u8 = undefined;
                     const s = std.fmt.bufPrint(&tmp, "{d}", .{i}) catch return;
                     try buf.appendSlice(allocator, s);
+                } else if (std.math.isNan(f)) {
+                    try buf.appendSlice(allocator, "NAN");
+                } else if (std.math.isInf(f)) {
+                    if (f < 0) try buf.append(allocator, '-');
+                    try buf.appendSlice(allocator, "INF");
                 } else {
                     // PHP uses 14 significant digits for float display
                     // compute digits before decimal to get correct precision
