@@ -91,77 +91,6 @@ pub fn parseComposerJson(allocator: Allocator, source: []const u8) !ComposerJson
     return result;
 }
 
-pub fn resolvePackage(allocator: Allocator, name: []const u8, constraint: []const u8) !?LockEntry {
-    _ = constraint;
-
-    // query packagist API
-    const url = try std.fmt.allocPrint(allocator, "https://repo.packagist.org/p2/{s}.json", .{name});
-    defer allocator.free(url);
-
-    const body = httpGet(allocator, url) catch return null;
-    defer allocator.free(body);
-
-    const parsed = json.parseFromSlice(json.Value, allocator, body, .{}) catch return null;
-    defer parsed.deinit();
-
-    if (parsed.value != .object) return null;
-    const root = parsed.value.object;
-
-    // get packages.name array
-    if (root.get("packages")) |pkgs| {
-        if (pkgs != .object) return null;
-        if (pkgs.object.get(name)) |versions| {
-            if (versions != .array) return null;
-            if (versions.array.items.len == 0) return null;
-
-            // first entry is the latest version
-            const latest = versions.array.items[0];
-            if (latest != .object) return null;
-
-            var entry = LockEntry{
-                .name = try allocator.dupe(u8, name),
-                .version = "",
-                .dist_url = "",
-            };
-
-            if (latest.object.get("version")) |v| {
-                if (v == .string) entry.version = try allocator.dupe(u8, v.string);
-            }
-
-            if (latest.object.get("dist")) |dist| {
-                if (dist == .object) {
-                    if (dist.object.get("url")) |u| {
-                        if (u == .string) entry.dist_url = try allocator.dupe(u8, u.string);
-                    }
-                    if (dist.object.get("shasum")) |s| {
-                        if (s == .string) entry.dist_sha = try allocator.dupe(u8, s.string);
-                    }
-                }
-            }
-
-            // parse autoload psr-4 from package metadata
-            if (latest.object.get("autoload")) |al| {
-                if (al == .object) {
-                    if (al.object.get("psr-4")) |psr4| {
-                        if (psr4 == .object) {
-                            var it = psr4.object.iterator();
-                            while (it.next()) |e| {
-                                const k = try allocator.dupe(u8, e.key_ptr.*);
-                                const v2 = if (e.value_ptr.* == .string) try allocator.dupe(u8, e.value_ptr.string) else try allocator.dupe(u8, "src/");
-                                try entry.autoload_psr4.put(allocator, k, v2);
-                            }
-                        }
-                    }
-                }
-            }
-
-            return entry;
-        }
-    }
-
-    return null;
-}
-
 pub fn downloadPackage(allocator: Allocator, entry: *const LockEntry) !void {
     if (entry.dist_url.len == 0) return;
 
@@ -352,6 +281,322 @@ fn httpGet(allocator: Allocator, url: []const u8) ![]u8 {
     return result.stdout;
 }
 
+// semver
+
+const SemVer = struct {
+    major: u32 = 0,
+    minor: u32 = 0,
+    patch: u32 = 0,
+    valid: bool = true,
+
+    fn gte(self: SemVer, other: SemVer) bool {
+        if (self.major != other.major) return self.major > other.major;
+        if (self.minor != other.minor) return self.minor > other.minor;
+        return self.patch >= other.patch;
+    }
+
+    fn lt(self: SemVer, other: SemVer) bool {
+        return !self.gte(other);
+    }
+};
+
+fn parseSemVer(version: []const u8) SemVer {
+    var ver = version;
+    if (ver.len > 0 and ver[0] == 'v') ver = ver[1..];
+
+    // reject dev versions
+    if (std.mem.startsWith(u8, ver, "dev-")) return .{ .valid = false };
+    if (std.mem.endsWith(u8, ver, "-dev")) return .{ .valid = false };
+
+    var result = SemVer{};
+    var parts: [3][]const u8 = .{ "", "", "" };
+    var pi: usize = 0;
+    var start: usize = 0;
+    for (ver, 0..) |c, i| {
+        if (c == '.') {
+            if (pi < 3) parts[pi] = ver[start..i];
+            pi += 1;
+            start = i + 1;
+        } else if (c == '-' or c == '+') {
+            // pre-release or build metadata - take what we have and stop
+            if (pi < 3) parts[pi] = ver[start..i];
+            pi = 3;
+            break;
+        }
+    }
+    if (pi < 3) parts[pi] = ver[start..];
+
+    result.major = std.fmt.parseInt(u32, parts[0], 10) catch return .{ .valid = false };
+    if (parts[1].len > 0) result.minor = std.fmt.parseInt(u32, parts[1], 10) catch return .{ .valid = false };
+    if (parts[2].len > 0) result.patch = std.fmt.parseInt(u32, parts[2], 10) catch return .{ .valid = false };
+
+    return result;
+}
+
+const Constraint = struct {
+    kind: enum { any, exact, caret, tilde, range },
+    min: SemVer = .{},
+    max: SemVer = .{},
+    min_inclusive: bool = true,
+    max_inclusive: bool = false,
+};
+
+fn parseConstraint(raw: []const u8) Constraint {
+    var s = std.mem.trim(u8, raw, " ");
+    if (s.len == 0 or std.mem.eql(u8, s, "*")) return .{ .kind = .any };
+
+    // caret: ^1.2.3 -> >=1.2.3 <2.0.0
+    if (s[0] == '^') {
+        const ver = parseSemVer(s[1..]);
+        if (!ver.valid) return .{ .kind = .any };
+        var max = SemVer{};
+        if (ver.major > 0) {
+            max.major = ver.major + 1;
+        } else if (ver.minor > 0) {
+            max.minor = ver.minor + 1;
+        } else {
+            max.patch = ver.patch + 1;
+        }
+        return .{ .kind = .caret, .min = ver, .max = max };
+    }
+
+    // tilde: ~1.2.3 -> >=1.2.3 <1.3.0, ~1.2 -> >=1.2.0 <1.3.0
+    if (s[0] == '~') {
+        const ver = parseSemVer(s[1..]);
+        if (!ver.valid) return .{ .kind = .any };
+        return .{ .kind = .tilde, .min = ver, .max = .{ .major = ver.major, .minor = ver.minor + 1 } };
+    }
+
+    // range: >=1.0 <2.0 (space separated)
+    if (std.mem.startsWith(u8, s, ">=")) {
+        const rest = s[2..];
+        // check for space-separated upper bound
+        if (std.mem.indexOf(u8, rest, " <")) |pos| {
+            const min_str = std.mem.trim(u8, rest[0..pos], " ");
+            const max_str = std.mem.trim(u8, rest[pos + 2 ..], " ");
+            const min_ver = parseSemVer(min_str);
+            const max_ver = parseSemVer(max_str);
+            if (min_ver.valid and max_ver.valid) {
+                return .{ .kind = .range, .min = min_ver, .max = max_ver };
+            }
+        }
+        // just >=X.Y.Z with no upper bound
+        const min_ver = parseSemVer(std.mem.trim(u8, rest, " "));
+        if (min_ver.valid) {
+            return .{ .kind = .range, .min = min_ver, .max = .{ .major = std.math.maxInt(u32) }, .max_inclusive = true };
+        }
+        return .{ .kind = .any };
+    }
+
+    // wildcard: 1.0.*, 1.*
+    if (std.mem.endsWith(u8, s, ".*")) {
+        const prefix = s[0 .. s.len - 2];
+        // could be "1" or "1.0"
+        if (std.mem.indexOf(u8, prefix, ".")) |dot| {
+            const major = std.fmt.parseInt(u32, prefix[0..dot], 10) catch return .{ .kind = .any };
+            const minor = std.fmt.parseInt(u32, prefix[dot + 1 ..], 10) catch return .{ .kind = .any };
+            return .{ .kind = .range, .min = .{ .major = major, .minor = minor }, .max = .{ .major = major, .minor = minor + 1 } };
+        } else {
+            const major = std.fmt.parseInt(u32, prefix, 10) catch return .{ .kind = .any };
+            return .{ .kind = .range, .min = .{ .major = major }, .max = .{ .major = major + 1 } };
+        }
+    }
+
+    // exact version or composer "||" ranges - for now treat || as picking from any
+    if (std.mem.indexOf(u8, s, "||")) |_| {
+        return .{ .kind = .any };
+    }
+
+    // exact version
+    const ver = parseSemVer(s);
+    if (ver.valid) return .{ .kind = .exact, .min = ver, .max = ver, .max_inclusive = true };
+
+    return .{ .kind = .any };
+}
+
+fn satisfiesConstraint(constraint: Constraint, version: SemVer) bool {
+    if (!version.valid) return false;
+    return switch (constraint.kind) {
+        .any => true,
+        .exact => version.major == constraint.min.major and version.minor == constraint.min.minor and version.patch == constraint.min.patch,
+        .caret, .tilde, .range => blk: {
+            if (!version.gte(constraint.min)) break :blk false;
+            if (constraint.max_inclusive) {
+                break :blk !version.gte(.{ .major = constraint.max.major, .minor = constraint.max.minor, .patch = constraint.max.patch + 1 });
+            }
+            break :blk version.lt(constraint.max);
+        },
+    };
+}
+
+// resolves a package, picking the best version matching the constraint.
+// also extracts transitive require entries from the chosen version.
+const ResolveResult = struct {
+    entry: LockEntry,
+    requires: std.StringHashMapUnmanaged([]const u8),
+};
+
+fn resolveWithConstraint(allocator: Allocator, name: []const u8, constraint_str: []const u8) !?ResolveResult {
+    const url = try std.fmt.allocPrint(allocator, "https://repo.packagist.org/p2/{s}.json", .{name});
+    defer allocator.free(url);
+
+    const body = httpGet(allocator, url) catch return null;
+    defer allocator.free(body);
+
+    const parsed = json.parseFromSlice(json.Value, allocator, body, .{}) catch return null;
+    defer parsed.deinit();
+
+    if (parsed.value != .object) return null;
+    const root = parsed.value.object;
+
+    const pkgs = root.get("packages") orelse return null;
+    if (pkgs != .object) return null;
+    const versions = pkgs.object.get(name) orelse return null;
+    if (versions != .array) return null;
+    if (versions.array.items.len == 0) return null;
+
+    const constraint = parseConstraint(constraint_str);
+
+    for (versions.array.items) |ver_obj| {
+        if (ver_obj != .object) continue;
+
+        const ver_str_val = ver_obj.object.get("version") orelse continue;
+        if (ver_str_val != .string) continue;
+        const ver_str = ver_str_val.string;
+
+        const sv = parseSemVer(ver_str);
+        if (!sv.valid) continue;
+        if (!satisfiesConstraint(constraint, sv)) continue;
+
+        var entry = LockEntry{
+            .name = try allocator.dupe(u8, name),
+            .version = try allocator.dupe(u8, ver_str),
+            .dist_url = "",
+        };
+
+        if (ver_obj.object.get("dist")) |dist| {
+            if (dist == .object) {
+                if (dist.object.get("url")) |u| {
+                    if (u == .string) entry.dist_url = try allocator.dupe(u8, u.string);
+                }
+                if (dist.object.get("shasum")) |s| {
+                    if (s == .string) entry.dist_sha = try allocator.dupe(u8, s.string);
+                }
+            }
+        }
+
+        if (ver_obj.object.get("autoload")) |al| {
+            if (al == .object) {
+                if (al.object.get("psr-4")) |psr4| {
+                    if (psr4 == .object) {
+                        var it = psr4.object.iterator();
+                        while (it.next()) |e| {
+                            const k = try allocator.dupe(u8, e.key_ptr.*);
+                            const v2 = if (e.value_ptr.* == .string) try allocator.dupe(u8, e.value_ptr.string) else try allocator.dupe(u8, "src/");
+                            try entry.autoload_psr4.put(allocator, k, v2);
+                        }
+                    }
+                }
+            }
+        }
+
+        // extract require for transitive resolution
+        var requires = std.StringHashMapUnmanaged([]const u8){};
+        if (ver_obj.object.get("require")) |req| {
+            if (req == .object) {
+                var it = req.object.iterator();
+                while (it.next()) |e| {
+                    const dep_name = e.key_ptr.*;
+                    // skip php runtime and extension constraints
+                    if (std.mem.eql(u8, dep_name, "php") or std.mem.startsWith(u8, dep_name, "ext-")) continue;
+                    const k = try allocator.dupe(u8, dep_name);
+                    const v = if (e.value_ptr.* == .string) try allocator.dupe(u8, e.value_ptr.string) else try allocator.dupe(u8, "*");
+                    try requires.put(allocator, k, v);
+                }
+            }
+        }
+
+        return .{ .entry = entry, .requires = requires };
+    }
+
+    return null;
+}
+
+const ResolveError = struct {
+    package: []const u8,
+    required_by: []const u8,
+    constraint: []const u8,
+    existing_version: []const u8,
+};
+
+fn resolveAll(
+    allocator: Allocator,
+    direct_deps: *std.StringHashMapUnmanaged([]const u8),
+    entries: *std.ArrayListUnmanaged(LockEntry),
+    errors: *std.ArrayListUnmanaged(ResolveError),
+) !void {
+    // resolved_map: name -> index into entries
+    var resolved_map = std.StringHashMapUnmanaged(usize){};
+    defer resolved_map.deinit(allocator);
+
+    // stack for BFS: (name, constraint, required_by)
+    const QueueItem = struct { name: []const u8, constraint: []const u8, required_by: []const u8 };
+    var queue = std.ArrayListUnmanaged(QueueItem){};
+    defer queue.deinit(allocator);
+
+    // seed with direct deps
+    var it = direct_deps.iterator();
+    while (it.next()) |entry| {
+        try queue.append(allocator, .{
+            .name = entry.key_ptr.*,
+            .constraint = entry.value_ptr.*,
+            .required_by = "composer.json",
+        });
+    }
+
+    var qi: usize = 0;
+    while (qi < queue.items.len) : (qi += 1) {
+        const item = queue.items[qi];
+
+        if (resolved_map.get(item.name)) |idx| {
+            // already resolved - check if existing version satisfies new constraint
+            const existing = entries.items[idx];
+            const c = parseConstraint(item.constraint);
+            const sv = parseSemVer(existing.version);
+            if (!satisfiesConstraint(c, sv)) {
+                try errors.append(allocator, .{
+                    .package = try allocator.dupe(u8, item.name),
+                    .required_by = try allocator.dupe(u8, item.required_by),
+                    .constraint = try allocator.dupe(u8, item.constraint),
+                    .existing_version = try allocator.dupe(u8, existing.version),
+                });
+            }
+            continue;
+        }
+
+        const result = try resolveWithConstraint(allocator, item.name, item.constraint);
+        if (result) |r| {
+            const idx = entries.items.len;
+            try entries.append(allocator, r.entry);
+            try resolved_map.put(allocator, entries.items[idx].name, idx);
+
+            // enqueue transitive deps
+            var dep_it = r.requires.iterator();
+            while (dep_it.next()) |dep| {
+                try queue.append(allocator, .{
+                    .name = dep.key_ptr.*,
+                    .constraint = dep.value_ptr.*,
+                    .required_by = entries.items[idx].name,
+                });
+            }
+            // keep the requires map alive - keys/values are used by queue items
+        } else {
+            tui.blank();
+            tui.warn(item.name);
+        }
+    }
+}
+
 // commands
 
 pub fn install(allocator: Allocator) !void {
@@ -366,10 +611,26 @@ pub fn install(allocator: Allocator) !void {
     var composer = try parseComposerJson(allocator, source);
     defer composer.deinit();
 
-    // skip php version constraint
+    // skip php runtime and extension constraints
     if (composer.require.fetchRemove("php")) |removed| {
         allocator.free(removed.key);
         allocator.free(removed.value);
+    }
+    var skip_keys = std.ArrayListUnmanaged([]const u8){};
+    defer skip_keys.deinit(allocator);
+    {
+        var kit = composer.require.iterator();
+        while (kit.next()) |entry| {
+            if (std.mem.startsWith(u8, entry.key_ptr.*, "ext-")) {
+                try skip_keys.append(allocator, entry.key_ptr.*);
+            }
+        }
+    }
+    for (skip_keys.items) |key| {
+        if (composer.require.fetchRemove(key)) |removed| {
+            allocator.free(removed.key);
+            allocator.free(removed.value);
+        }
     }
 
     const pkg_count = composer.require.count();
@@ -397,21 +658,24 @@ pub fn install(allocator: Allocator) !void {
         }
         entries.deinit(allocator);
     }
-    var resolved: usize = 0;
 
-    var it = composer.require.iterator();
-    while (it.next()) |entry| {
-        resolved += 1;
-        tui.progress(resolved, pkg_count, entry.key_ptr.*);
-        const lock_entry = try resolvePackage(allocator, entry.key_ptr.*, entry.value_ptr.*);
-        if (lock_entry) |le| {
-            try entries.append(allocator, le);
-        } else {
-            tui.blank();
-            tui.warn(entry.key_ptr.*);
-        }
-    }
+    var conflicts = std.ArrayListUnmanaged(ResolveError){};
+    defer conflicts.deinit(allocator);
+
+    try resolveAll(allocator, &composer.require, &entries, &conflicts);
     tui.progressDone(entries.items.len, "packages resolved");
+
+    if (conflicts.items.len > 0) {
+        tui.blank();
+        tui.header("conflicts");
+        for (conflicts.items) |c| {
+            const msg = std.fmt.allocPrint(allocator, "{s} requires {s} {s}, but {s} is already resolved", .{ c.required_by, c.package, c.constraint, c.existing_version }) catch continue;
+            defer allocator.free(msg);
+            tui.err(msg);
+        }
+        tui.blank();
+        return;
+    }
 
     tui.blank();
     tui.header("downloading");
@@ -459,46 +723,90 @@ pub fn add(allocator: Allocator, name: []const u8) !void {
     tui.header("adding");
     tui.step("resolving", name);
 
-    const entry = try resolvePackage(allocator, name, "*") orelse {
+    var deps = std.StringHashMapUnmanaged([]const u8){};
+    defer deps.deinit(allocator);
+    const name_dupe = try allocator.dupe(u8, name);
+    const star = try allocator.dupe(u8, "*");
+    try deps.put(allocator, name_dupe, star);
+
+    var entries = std.ArrayListUnmanaged(LockEntry){};
+    defer entries.deinit(allocator);
+
+    var conflicts = std.ArrayListUnmanaged(ResolveError){};
+    defer conflicts.deinit(allocator);
+
+    try resolveAll(allocator, &deps, &entries, &conflicts);
+
+    if (entries.items.len == 0) {
         tui.err("package not found on packagist");
         return;
-    };
+    }
 
-    tui.item(entry.name, entry.version);
-    tui.step("downloading", entry.name);
-    try downloadPackage(allocator, &entry);
+    if (conflicts.items.len > 0) {
+        for (conflicts.items) |c| {
+            const msg = std.fmt.allocPrint(allocator, "{s} requires {s} {s}, but {s} is already resolved", .{ c.required_by, c.package, c.constraint, c.existing_version }) catch continue;
+            defer allocator.free(msg);
+            tui.err(msg);
+        }
+        return;
+    }
+
+    for (entries.items) |*entry| {
+        tui.item(entry.name, entry.version);
+    }
+
+    tui.blank();
+    tui.header("downloading");
+    for (entries.items, 0..) |*entry, i| {
+        tui.progress(i + 1, entries.items.len, entry.name);
+        try downloadPackage(allocator, entry);
+    }
+    tui.progressDone(entries.items.len, "packages downloaded");
 
     // update composer.json
     const source = std.fs.cwd().readFileAlloc(allocator, "composer.json", 1024 * 1024) catch {
-        // create a new composer.json
         var buf = std.ArrayListUnmanaged(u8){};
         defer buf.deinit(allocator);
         try buf.appendSlice(allocator, "{\n  \"require\": {\n    \"");
         try buf.appendSlice(allocator, name);
         try buf.appendSlice(allocator, "\": \"^");
-        // extract major.minor from version
-        const ver = if (entry.version.len > 0 and entry.version[0] == 'v') entry.version[1..] else entry.version;
+        const ver = if (entries.items[0].version.len > 0 and entries.items[0].version[0] == 'v') entries.items[0].version[1..] else entries.items[0].version;
         try buf.appendSlice(allocator, ver);
         try buf.appendSlice(allocator, "\"\n  }\n}\n");
         std.fs.cwd().writeFile(.{ .sub_path = "composer.json", .data = buf.items }) catch {};
         tui.success("created composer.json");
+
+        var empty_psr4 = std.StringHashMapUnmanaged([]const u8){};
+        try generateAutoloader(allocator, entries.items, &empty_psr4);
+        try writeLockFile(allocator, entries.items);
+        tui.success("updated zphp.lock");
+        tui.blank();
         return;
     };
     defer allocator.free(source);
 
-    // re-run full install to regenerate lock and autoloader
-    var entries_list = std.ArrayListUnmanaged(LockEntry){};
-    defer entries_list.deinit(allocator);
-    try entries_list.append(allocator, entry);
+    // merge with existing lock entries (avoid duplicates)
+    var all_entries = std.ArrayListUnmanaged(LockEntry){};
+    defer all_entries.deinit(allocator);
 
-    // read existing lock entries
+    for (entries.items) |e| try all_entries.append(allocator, e);
+
     if (try readLockFile(allocator)) |existing| {
-        for (existing) |e| try entries_list.append(allocator, e);
+        for (existing) |e| {
+            var already = false;
+            for (all_entries.items) |a| {
+                if (std.mem.eql(u8, a.name, e.name)) {
+                    already = true;
+                    break;
+                }
+            }
+            if (!already) try all_entries.append(allocator, e);
+        }
     }
 
     var composer = try parseComposerJson(allocator, source);
-    try generateAutoloader(allocator, entries_list.items, &composer.autoload_psr4);
-    try writeLockFile(allocator, entries_list.items);
+    try generateAutoloader(allocator, all_entries.items, &composer.autoload_psr4);
+    try writeLockFile(allocator, all_entries.items);
 
     tui.success("updated zphp.lock");
     tui.blank();
@@ -535,4 +843,165 @@ pub fn remove(allocator: Allocator, name: []const u8) !void {
 
     tui.success("removed");
     tui.blank();
+}
+
+// unit tests
+
+test "parseSemVer basic" {
+    const v = parseSemVer("1.2.3");
+    try std.testing.expect(v.valid);
+    try std.testing.expectEqual(@as(u32, 1), v.major);
+    try std.testing.expectEqual(@as(u32, 2), v.minor);
+    try std.testing.expectEqual(@as(u32, 3), v.patch);
+}
+
+test "parseSemVer leading v" {
+    const v = parseSemVer("v2.5.0");
+    try std.testing.expect(v.valid);
+    try std.testing.expectEqual(@as(u32, 2), v.major);
+    try std.testing.expectEqual(@as(u32, 5), v.minor);
+}
+
+test "parseSemVer dev versions" {
+    try std.testing.expect(!parseSemVer("dev-main").valid);
+    try std.testing.expect(!parseSemVer("1.0.0-dev").valid);
+}
+
+test "parseSemVer pre-release" {
+    const v = parseSemVer("2.0.0-beta.1");
+    try std.testing.expect(v.valid);
+    try std.testing.expectEqual(@as(u32, 2), v.major);
+    try std.testing.expectEqual(@as(u32, 0), v.minor);
+    try std.testing.expectEqual(@as(u32, 0), v.patch);
+}
+
+test "parseSemVer two-part" {
+    const v = parseSemVer("3.1");
+    try std.testing.expect(v.valid);
+    try std.testing.expectEqual(@as(u32, 3), v.major);
+    try std.testing.expectEqual(@as(u32, 1), v.minor);
+    try std.testing.expectEqual(@as(u32, 0), v.patch);
+}
+
+test "caret constraint" {
+    const c = parseConstraint("^1.2.3");
+    try std.testing.expect(c.kind == .caret);
+
+    try std.testing.expect(satisfiesConstraint(c, parseSemVer("1.2.3")));
+    try std.testing.expect(satisfiesConstraint(c, parseSemVer("1.9.0")));
+    try std.testing.expect(!satisfiesConstraint(c, parseSemVer("2.0.0")));
+    try std.testing.expect(!satisfiesConstraint(c, parseSemVer("1.2.2")));
+    try std.testing.expect(!satisfiesConstraint(c, parseSemVer("0.9.0")));
+}
+
+test "caret constraint 0.x" {
+    const c = parseConstraint("^0.2.0");
+    try std.testing.expect(satisfiesConstraint(c, parseSemVer("0.2.0")));
+    try std.testing.expect(satisfiesConstraint(c, parseSemVer("0.2.5")));
+    try std.testing.expect(!satisfiesConstraint(c, parseSemVer("0.3.0")));
+}
+
+test "tilde constraint" {
+    const c = parseConstraint("~1.2.3");
+    try std.testing.expect(c.kind == .tilde);
+
+    try std.testing.expect(satisfiesConstraint(c, parseSemVer("1.2.3")));
+    try std.testing.expect(satisfiesConstraint(c, parseSemVer("1.2.9")));
+    try std.testing.expect(!satisfiesConstraint(c, parseSemVer("1.3.0")));
+    try std.testing.expect(!satisfiesConstraint(c, parseSemVer("1.2.2")));
+}
+
+test "wildcard constraint" {
+    const c = parseConstraint("1.0.*");
+    try std.testing.expect(satisfiesConstraint(c, parseSemVer("1.0.0")));
+    try std.testing.expect(satisfiesConstraint(c, parseSemVer("1.0.99")));
+    try std.testing.expect(!satisfiesConstraint(c, parseSemVer("1.1.0")));
+}
+
+test "range constraint" {
+    const c = parseConstraint(">=1.0.0 <2.0.0");
+    try std.testing.expect(satisfiesConstraint(c, parseSemVer("1.0.0")));
+    try std.testing.expect(satisfiesConstraint(c, parseSemVer("1.5.3")));
+    try std.testing.expect(!satisfiesConstraint(c, parseSemVer("2.0.0")));
+    try std.testing.expect(!satisfiesConstraint(c, parseSemVer("0.9.0")));
+}
+
+test "exact constraint" {
+    const c = parseConstraint("1.2.3");
+    try std.testing.expect(c.kind == .exact);
+    try std.testing.expect(satisfiesConstraint(c, parseSemVer("1.2.3")));
+    try std.testing.expect(!satisfiesConstraint(c, parseSemVer("1.2.4")));
+}
+
+test "any constraint" {
+    const c = parseConstraint("*");
+    try std.testing.expect(c.kind == .any);
+    try std.testing.expect(satisfiesConstraint(c, parseSemVer("999.0.0")));
+}
+
+test "caret two-part version" {
+    // ^3.0 is common in composer - means >=3.0.0 <4.0.0
+    const c = parseConstraint("^3.0");
+    try std.testing.expect(satisfiesConstraint(c, parseSemVer("3.0.0")));
+    try std.testing.expect(satisfiesConstraint(c, parseSemVer("3.7.2")));
+    try std.testing.expect(!satisfiesConstraint(c, parseSemVer("4.0.0")));
+    try std.testing.expect(!satisfiesConstraint(c, parseSemVer("2.9.9")));
+}
+
+test "version with build metadata" {
+    const v = parseSemVer("1.5.0+build.123");
+    try std.testing.expect(v.valid);
+    try std.testing.expectEqual(@as(u32, 1), v.major);
+    try std.testing.expectEqual(@as(u32, 5), v.minor);
+    try std.testing.expectEqual(@as(u32, 0), v.patch);
+}
+
+test "leading v with constraint" {
+    // packagist versions often have leading v
+    const c = parseConstraint("^3.0");
+    try std.testing.expect(satisfiesConstraint(c, parseSemVer("v3.5.1")));
+    try std.testing.expect(!satisfiesConstraint(c, parseSemVer("v4.0.0")));
+}
+
+test "dev versions rejected by constraint" {
+    const c = parseConstraint("^1.0");
+    try std.testing.expect(!satisfiesConstraint(c, parseSemVer("dev-main")));
+    try std.testing.expect(!satisfiesConstraint(c, parseSemVer("1.0.0-dev")));
+}
+
+test "wildcard major" {
+    const c = parseConstraint("2.*");
+    try std.testing.expect(satisfiesConstraint(c, parseSemVer("2.0.0")));
+    try std.testing.expect(satisfiesConstraint(c, parseSemVer("2.99.99")));
+    try std.testing.expect(!satisfiesConstraint(c, parseSemVer("3.0.0")));
+    try std.testing.expect(!satisfiesConstraint(c, parseSemVer("1.9.9")));
+}
+
+test "or constraint falls back to any" {
+    const c = parseConstraint("^1.0 || ^2.0");
+    try std.testing.expect(c.kind == .any);
+}
+
+test "gte only constraint" {
+    const c = parseConstraint(">=2.0.0");
+    try std.testing.expect(satisfiesConstraint(c, parseSemVer("2.0.0")));
+    try std.testing.expect(satisfiesConstraint(c, parseSemVer("99.0.0")));
+    try std.testing.expect(!satisfiesConstraint(c, parseSemVer("1.9.9")));
+}
+
+test "empty constraint is any" {
+    const c = parseConstraint("");
+    try std.testing.expect(c.kind == .any);
+}
+
+test "parseComposerJson with require" {
+    const src =
+        \\{"require":{"psr/log":"^3.0","monolog/monolog":"^3.5"}}
+    ;
+    var cj = try parseComposerJson(std.testing.allocator, src);
+    defer cj.deinit();
+
+    try std.testing.expectEqual(@as(u32, 2), cj.require.count());
+    try std.testing.expect(cj.require.get("psr/log") != null);
+    try std.testing.expect(cj.require.get("monolog/monolog") != null);
 }

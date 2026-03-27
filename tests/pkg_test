@@ -80,9 +80,74 @@ autoload_content=$(cat vendor/autoload.php)
 check_contains "autoloader has psr4 map" "Psr\\\\Log\\\\" "$autoload_content"
 check_contains "autoloader has spl_autoload" "spl_autoload_register" "$autoload_content"
 
+# test: constraint matching resolves correct major version
+lock_content=$(cat zphp.lock)
+check_contains "constraint picked 3.x" '"3\.' "$lock_content"
+
 # test: packages command
 pkg_output=$("$ZPHP" packages 2>&1)
 check_contains "packages lists psr/log" "psr/log" "$pkg_output"
+
+# clean up for transitive deps test
+rm -rf vendor zphp.lock composer.json
+
+# test: transitive dependency resolution via install
+cat > composer.json << 'EOF'
+{
+    "require": {
+        "monolog/monolog": "^3.0"
+    }
+}
+EOF
+
+"$ZPHP" install 2>/dev/null
+check_exists "monolog downloaded" "vendor/monolog/monolog"
+check_exists "transitive psr/log downloaded" "vendor/psr/log"
+
+# lock file should contain both packages
+lock_content=$(cat zphp.lock)
+check_contains "lock has monolog" '"monolog/monolog"' "$lock_content"
+check_contains "lock has transitive psr/log" '"psr/log"' "$lock_content"
+
+# autoloader should have entries for both
+autoload_content=$(cat vendor/autoload.php)
+check_contains "autoloader has monolog" "Monolog" "$autoload_content"
+check_contains "autoloader has psr/log" "Psr\\\\Log\\\\" "$autoload_content"
+
+# packages command should list both
+pkg_output=$("$ZPHP" packages 2>&1)
+check_contains "packages lists monolog" "monolog/monolog" "$pkg_output"
+check_contains "packages lists transitive dep" "psr/log" "$pkg_output"
+
+# clean up for add test
+rm -rf vendor zphp.lock composer.json
+
+# test: add with transitive deps
+"$ZPHP" add monolog/monolog 2>/dev/null
+check_exists "add: monolog downloaded" "vendor/monolog/monolog"
+check_exists "add: transitive psr/log downloaded" "vendor/psr/log"
+lock_content=$(cat zphp.lock)
+check_contains "add: lock has monolog" '"monolog/monolog"' "$lock_content"
+check_contains "add: lock has transitive psr/log" '"psr/log"' "$lock_content"
+check_exists "add: composer.json created" "composer.json"
+
+# test: remove leaves lock file consistent
+"$ZPHP" remove monolog/monolog 2>/dev/null
+lock_content=$(cat zphp.lock)
+check_contains "remove: psr/log still in lock" '"psr/log"' "$lock_content"
+
+# test: install skips ext-* constraints
+rm -rf vendor zphp.lock composer.json
+cat > composer.json << 'EOF'
+{
+    "require": {
+        "psr/log": "^3.0",
+        "ext-mbstring": "*"
+    }
+}
+EOF
+install_output=$("$ZPHP" install 2>&1)
+check_exists "ext skip: psr/log downloaded" "vendor/psr/log"
 
 echo ""
 echo "$passed passed, $failed failed"
