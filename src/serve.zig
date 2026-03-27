@@ -7,6 +7,8 @@ const Value = @import("runtime/value.zig").Value;
 const PhpArray = @import("runtime/value.zig").PhpArray;
 const PhpObject = @import("runtime/value.zig").PhpObject;
 
+const tls = @import("tls.zig");
+
 const Allocator = std.mem.Allocator;
 const posix = std.posix;
 const zlib = @cImport(@cInclude("zlib.h"));
@@ -23,6 +25,8 @@ pub const ServeConfig = struct {
     workers: u16 = 0,
     file: []const u8,
     document_root: []const u8 = "",
+    tls_cert: ?[]const u8 = null,
+    tls_key: ?[]const u8 = null,
 };
 
 const Request = struct {
@@ -52,6 +56,7 @@ const ConnState = enum { http_reading, ws_idle, closing };
 const Connection = struct {
     fd: posix.fd_t,
     stream: std.net.Stream,
+    ssl: ?*tls.SSL,
     addr_bytes: u32,
     state: ConnState,
     buf: []u8,
@@ -59,10 +64,11 @@ const Connection = struct {
     keep_alive: bool,
     ws_obj: ?*PhpObject,
 
-    fn init(allocator: Allocator, server_conn: std.net.Server.Connection) !Connection {
+    fn init(allocator: Allocator, server_conn: std.net.Server.Connection, ssl_ptr: ?*tls.SSL) !Connection {
         return .{
             .fd = server_conn.stream.handle,
             .stream = server_conn.stream,
+            .ssl = ssl_ptr,
             .addr_bytes = server_conn.address.in.sa.addr,
             .state = .http_reading,
             .buf = try allocator.alloc(u8, 65536),
@@ -72,7 +78,22 @@ const Connection = struct {
         };
     }
 
+    fn ioRead(self: *Connection, buf: []u8) !usize {
+        if (self.ssl) |s| return tls.read(s, buf);
+        return posix.read(self.fd, buf);
+    }
+
+    fn ioWrite(self: *Connection, data: []const u8) !usize {
+        if (self.ssl) |s| return tls.write(s, data);
+        return self.stream.write(data);
+    }
+
+    pub fn write(self: *Connection, data: []const u8) !usize {
+        return self.ioWrite(data);
+    }
+
     fn deinit(self: *Connection, allocator: Allocator) void {
+        if (self.ssl) |s| tls.shutdown(s);
         allocator.free(self.buf);
         self.stream.close();
     }
@@ -143,13 +164,14 @@ const Worker = struct {
     port: u16,
     ws_enabled: bool,
     ws_initialized: bool,
+    tls_ctx: ?*tls.SSL_CTX,
     wake_pipe: [2]posix.fd_t,
     poll_fds: [MAX_CONNS + 1]posix.pollfd,
     conns: [MAX_CONNS + 1]?Connection,
     n_fds: usize,
 };
 
-fn initWorker(allocator: Allocator, result: *const CompileResult, doc_root: []const u8, port: u16, ws_enabled: bool) !Worker {
+fn initWorker(allocator: Allocator, result: *const CompileResult, doc_root: []const u8, port: u16, ws_enabled: bool, tls_ctx: ?*tls.SSL_CTX) !Worker {
     return .{
         .allocator = allocator,
         .result = result,
@@ -158,6 +180,7 @@ fn initWorker(allocator: Allocator, result: *const CompileResult, doc_root: []co
         .port = port,
         .ws_enabled = ws_enabled,
         .ws_initialized = false,
+        .tls_ctx = tls_ctx,
         .wake_pipe = try posix.pipe(),
         .poll_fds = [_]posix.pollfd{.{ .fd = -1, .events = 0, .revents = 0 }} ** (MAX_CONNS + 1),
         .conns = [_]?Connection{null} ** (MAX_CONNS + 1),
@@ -177,8 +200,14 @@ fn deinitWorker(w: *Worker) void {
 
 fn setNonBlocking(fd: posix.fd_t) void {
     const O_NONBLOCK: u32 = if (@import("builtin").os.tag == .linux) 0x800 else 0x4;
-    const flags = posix.fcntl(fd, 3, 0) catch return; // F_GETFL = 3
-    _ = posix.fcntl(fd, 4, flags | O_NONBLOCK) catch return; // F_SETFL = 4
+    const flags = posix.fcntl(fd, 3, 0) catch return;
+    _ = posix.fcntl(fd, 4, flags | O_NONBLOCK) catch return;
+}
+
+fn setBlocking(fd: posix.fd_t) void {
+    const O_NONBLOCK: u32 = if (@import("builtin").os.tag == .linux) 0x800 else 0x4;
+    const flags = posix.fcntl(fd, 3, 0) catch return;
+    _ = posix.fcntl(fd, 4, flags & ~O_NONBLOCK) catch return;
 }
 
 // main serve entry point
@@ -240,6 +269,23 @@ pub fn serve(allocator: Allocator, config: ServeConfig) !void {
     posix.sigaction(posix.SIG.INT, &sa, null);
     posix.sigaction(posix.SIG.TERM, &sa, null);
 
+    var tls_ctx: ?*tls.SSL_CTX = null;
+    if (config.tls_cert) |cert| {
+        const key = config.tls_key orelse {
+            try writeStderr("error: --tls-key required when --tls-cert is specified\n");
+            std.process.exit(1);
+        };
+        const cert_z = try allocator.dupeZ(u8, cert);
+        defer allocator.free(cert_z);
+        const key_z = try allocator.dupeZ(u8, key);
+        defer allocator.free(key_z);
+        tls_ctx = tls.initContext(cert_z, key_z) orelse {
+            try writeStderr("error: failed to initialize TLS (check cert/key paths)\n");
+            std.process.exit(1);
+        };
+    }
+    defer if (tls_ctx) |ctx| tls.freeContext(ctx);
+
     const addr = std.net.Address.parseIp4("0.0.0.0", config.port) catch unreachable;
     var server = try addr.listen(.{ .reuse_address = true });
     defer server.deinit();
@@ -258,7 +304,7 @@ pub fn serve(allocator: Allocator, config: ServeConfig) !void {
     const port_str = std.fmt.bufPrint(&port_buf, "{d}", .{config.port}) catch "?";
     try writeStderr("zphp serving ");
     try writeStderr(config.file);
-    try writeStderr(" on :");
+    if (tls_ctx != null) try writeStderr(" (https) on :") else try writeStderr(" on :");
     try writeStderr(port_str);
     try writeStderr(" (");
     var wc_buf: [8]u8 = undefined;
@@ -272,7 +318,7 @@ pub fn serve(allocator: Allocator, config: ServeConfig) !void {
     defer allocator.free(threads);
 
     for (workers_data, threads) |*wd, *t| {
-        wd.* = initWorker(allocator, &result, doc_root, config.port, ws_enabled) catch continue;
+        wd.* = initWorker(allocator, &result, doc_root, config.port, ws_enabled, tls_ctx) catch continue;
         wd.poll_fds[0] = .{ .fd = wd.wake_pipe[0], .events = posix.POLL.IN, .revents = 0 };
         t.* = try std.Thread.spawn(.{}, eventLoop, .{wd});
     }
@@ -354,8 +400,17 @@ fn registerConnection(w: *Worker, server_conn: std.net.Server.Connection) void {
         server_conn.stream.close();
         return;
     }
+    var ssl_ptr: ?*tls.SSL = null;
+    if (w.tls_ctx) |ctx| {
+        setBlocking(server_conn.stream.handle);
+        ssl_ptr = tls.accept(ctx, server_conn.stream.handle) orelse {
+            server_conn.stream.close();
+            return;
+        };
+    }
     setNonBlocking(server_conn.stream.handle);
-    const c = Connection.init(w.allocator, server_conn) catch {
+    const c = Connection.init(w.allocator, server_conn, ssl_ptr) catch {
+        if (ssl_ptr) |s| tls.shutdown(s);
         server_conn.stream.close();
         return;
     };
@@ -430,7 +485,7 @@ fn decodeChunkedBody(data: []u8) ?ChunkedResult {
 // HTTP processing
 
 fn processHttpRead(w: *Worker, c: *Connection) void {
-    const n = posix.read(c.fd, c.buf[c.buffered..]) catch |err| {
+    const n = c.ioRead(c.buf[c.buffered..]) catch |err| {
         if (err == error.WouldBlock) return;
         c.state = .closing;
         return;
@@ -484,7 +539,7 @@ fn processHttpRead(w: *Worker, c: *Connection) void {
     }
 
     // static file
-    if (tryServeStatic(w.allocator, c.stream, w.doc_root, &req, c.keep_alive)) {
+    if (tryServeStatic(w.allocator, c, w.doc_root, &req, c.keep_alive)) {
         shiftBuffer(c, consumed);
         if (!c.keep_alive) c.state = .closing;
         return;
@@ -502,7 +557,7 @@ fn processHttpRead(w: *Worker, c: *Connection) void {
     };
 
     w.vm.interpret(w.result) catch {
-        writeResponse(c.stream, 500, "text/plain", null, "500 Internal Server Error", c.keep_alive, false, w.allocator) catch {};
+        writeResponse(c, 500, "text/plain", null, "500 Internal Server Error", c.keep_alive, false, w.allocator) catch {};
         shiftBuffer(c, consumed);
         if (!c.keep_alive) c.state = .closing;
         return;
@@ -522,7 +577,7 @@ fn processHttpRead(w: *Worker, c: *Connection) void {
     else
         null;
 
-    writeResponse(c.stream, code, ct, extra_headers, w.vm.output.items, c.keep_alive, acceptsGzip(&req), w.allocator) catch {};
+    writeResponse(c, code, ct, extra_headers, w.vm.output.items, c.keep_alive, acceptsGzip(&req), w.allocator) catch {};
     shiftBuffer(c, consumed);
     if (!c.keep_alive) c.state = .closing;
 }
@@ -532,7 +587,7 @@ fn processHttpRead(w: *Worker, c: *Connection) void {
 fn handleWsUpgrade(w: *Worker, c: *Connection, ws_key: []const u8) void {
     var accept_buf: [28]u8 = undefined;
     const accept = ws_proto.computeAcceptKey(ws_key, &accept_buf);
-    ws_proto.writeHandshakeResponse(c.stream, accept) catch {
+    ws_proto.writeHandshakeResponse(c, accept) catch {
         c.state = .closing;
         return;
     };
@@ -575,7 +630,7 @@ fn handleWsUpgrade(w: *Worker, c: *Connection, ws_key: []const u8) void {
 fn processWsRead(w: *Worker, c: *Connection) void {
     const max_msg_size: usize = 1024 * 1024;
 
-    const n = posix.read(c.fd, c.buf[c.buffered..]) catch |err| {
+    const n = c.ioRead(c.buf[c.buffered..]) catch |err| {
         if (err == error.WouldBlock) return;
         c.state = .closing;
         return;
@@ -600,13 +655,13 @@ fn processWsRead(w: *Worker, c: *Connection) void {
                 _ = w.vm.callByName("ws_onMessage", &.{ ws_val, Value{ .string = data } }) catch {};
             },
             .ping => {
-                ws_proto.writeFrame(c.stream, .pong, parsed.frame.payload) catch {
+                ws_proto.writeFrame(c, .pong, parsed.frame.payload) catch {
                     c.state = .closing;
                     break;
                 };
             },
             .close => {
-                ws_proto.writeCloseFrame(c.stream, 1000) catch {};
+                ws_proto.writeCloseFrame(c, 1000) catch {};
                 c.state = .closing;
                 break;
             },
@@ -923,7 +978,7 @@ fn urlDecode(a: Allocator, input: []const u8) ![]const u8 {
     return buf.toOwnedSlice(a);
 }
 
-fn tryServeStatic(allocator: Allocator, stream: std.net.Stream, doc_root: []const u8, req: *const Request, keep_alive: bool) bool {
+fn tryServeStatic(allocator: Allocator, conn: *Connection, doc_root: []const u8, req: *const Request, keep_alive: bool) bool {
     const path = req.path;
     if (std.mem.endsWith(u8, path, ".php")) return false;
     if (path.len <= 1) return false;
@@ -950,7 +1005,7 @@ fn tryServeStatic(allocator: Allocator, stream: std.net.Stream, doc_root: []cons
             const conn_val = if (keep_alive) "keep-alive" else "close";
             var hdr_buf: [512]u8 = undefined;
             const hdr = std.fmt.bufPrint(&hdr_buf, "HTTP/1.1 304 Not Modified\r\nETag: {s}\r\nConnection: {s}\r\n\r\n", .{ etag, conn_val }) catch return false;
-            _ = stream.write(hdr) catch return false;
+            _ = conn.ioWrite(hdr) catch return false;
             return true;
         }
     }
@@ -966,15 +1021,15 @@ fn tryServeStatic(allocator: Allocator, stream: std.net.Stream, doc_root: []cons
             defer allocator.free(compressed);
             var hdr_buf: [512]u8 = undefined;
             const hdr = std.fmt.bufPrint(&hdr_buf, "HTTP/1.1 200 OK\r\nContent-Type: {s}\r\nContent-Length: {d}\r\nContent-Encoding: gzip\r\nETag: {s}\r\nCache-Control: public, max-age=3600\r\nVary: Accept-Encoding\r\nConnection: {s}\r\n\r\n", .{ mime, compressed.len, etag, conn_val }) catch return false;
-            _ = stream.write(hdr) catch return false;
-            _ = stream.write(compressed) catch return true;
+            _ = conn.ioWrite(hdr) catch return false;
+            _ = conn.ioWrite(compressed) catch return true;
             return true;
         }
     }
 
     var hdr_buf: [512]u8 = undefined;
     const hdr = std.fmt.bufPrint(&hdr_buf, "HTTP/1.1 200 OK\r\nContent-Type: {s}\r\nContent-Length: {d}\r\nETag: {s}\r\nCache-Control: public, max-age=3600\r\nConnection: {s}\r\n\r\n", .{ mime, size, etag, conn_val }) catch return false;
-    _ = stream.write(hdr) catch return false;
+    _ = conn.ioWrite(hdr) catch return false;
 
     var fbuf: [32768]u8 = undefined;
     var remaining: u64 = size;
@@ -982,7 +1037,7 @@ fn tryServeStatic(allocator: Allocator, stream: std.net.Stream, doc_root: []cons
         const to_read = @min(remaining, fbuf.len);
         const nr = file.read(fbuf[0..to_read]) catch return true;
         if (nr == 0) break;
-        _ = stream.write(fbuf[0..nr]) catch return true;
+        _ = conn.ioWrite(fbuf[0..nr]) catch return true;
         remaining -= nr;
     }
     return true;
@@ -1016,7 +1071,7 @@ fn mimeType(path: []const u8) []const u8 {
     return "application/octet-stream";
 }
 
-fn writeResponse(stream: std.net.Stream, code: i64, content_type: []const u8, extra_headers: ?*PhpArray, body: []const u8, keep_alive: bool, use_gzip: bool, allocator: Allocator) !void {
+fn writeResponse(conn: *Connection, code: i64, content_type: []const u8, extra_headers: ?*PhpArray, body: []const u8, keep_alive: bool, use_gzip: bool, allocator: Allocator) !void {
     const status_text = switch (code) {
         200 => "200 OK", 201 => "201 Created", 204 => "204 No Content",
         301 => "301 Moved Permanently", 302 => "302 Found", 304 => "304 Not Modified",
@@ -1061,8 +1116,8 @@ fn writeResponse(stream: std.net.Stream, code: i64, content_type: []const u8, ex
     }
 
     if (pos + 2 <= hdr_buf.len) { hdr_buf[pos] = '\r'; hdr_buf[pos + 1] = '\n'; pos += 2; }
-    _ = stream.write(hdr_buf[0..pos]) catch return;
-    if (actual_body.len > 0) _ = stream.write(actual_body) catch return;
+    _ = conn.ioWrite(hdr_buf[0..pos]) catch return;
+    if (actual_body.len > 0) _ = conn.ioWrite(actual_body) catch return;
 }
 
 fn acceptsGzip(req: *const Request) bool {

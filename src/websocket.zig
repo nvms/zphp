@@ -33,10 +33,10 @@ pub fn computeAcceptKey(key: []const u8, buf: *[28]u8) []const u8 {
     return std.base64.standard.Encoder.encode(buf, &hash);
 }
 
-pub fn writeHandshakeResponse(stream: std.net.Stream, accept_key: []const u8) !void {
+pub fn writeHandshakeResponse(writer: anytype, accept_key: []const u8) !void {
     var hdr_buf: [256]u8 = undefined;
     const hdr = std.fmt.bufPrint(&hdr_buf, "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: {s}\r\n\r\n", .{accept_key}) catch return error.IoError;
-    _ = stream.write(hdr) catch return error.IoError;
+    _ = writer.write(hdr) catch return error.IoError;
 }
 
 fn readExact(stream: std.net.Stream, buf: []u8) ReadError!void {
@@ -138,8 +138,7 @@ pub fn tryParseFrame(buf: []u8, max_size: usize) ?ParsedFrame {
     };
 }
 
-pub fn writeFrame(stream: std.net.Stream, opcode: Opcode, payload: []const u8) !void {
-    // coalesce header + payload into single write to avoid two syscalls
+pub fn writeFrame(writer: anytype, opcode: Opcode, payload: []const u8) !void {
     var hdr: [10]u8 = undefined;
     var hdr_len: usize = 2;
 
@@ -161,17 +160,17 @@ pub fn writeFrame(stream: std.net.Stream, opcode: Opcode, payload: []const u8) !
         var buf: [4096]u8 = undefined;
         @memcpy(buf[0..hdr_len], hdr[0..hdr_len]);
         @memcpy(buf[hdr_len .. hdr_len + payload.len], payload);
-        _ = try stream.write(buf[0 .. hdr_len + payload.len]);
+        _ = try writer.write(buf[0 .. hdr_len + payload.len]);
     } else {
-        _ = try stream.write(hdr[0..hdr_len]);
-        if (payload.len > 0) _ = try stream.write(payload);
+        _ = try writer.write(hdr[0..hdr_len]);
+        if (payload.len > 0) _ = try writer.write(payload);
     }
 }
 
-pub fn writeCloseFrame(stream: std.net.Stream, code: u16) !void {
+pub fn writeCloseFrame(writer: anytype, code: u16) !void {
     var payload: [2]u8 = undefined;
     std.mem.writeInt(u16, &payload, code, .big);
-    try writeFrame(stream, .close, &payload);
+    try writeFrame(writer, .close, &payload);
 }
 
 // tests
