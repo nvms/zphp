@@ -4296,6 +4296,20 @@ pub const VM = struct {
         var current = obj_class;
         while (true) {
             if (std.mem.eql(u8, current, target_class)) return true;
+            // built-in exception hierarchy (always checked, even for registered classes)
+            if (builtinExceptionParent(current)) |builtin_parent| {
+                if (std.mem.eql(u8, target_class, "Throwable") or
+                    std.mem.eql(u8, target_class, "Exception") or
+                    std.mem.eql(u8, target_class, "Error"))
+                {
+                    // walk the builtin hierarchy
+                    var bp = builtin_parent;
+                    while (true) {
+                        if (std.mem.eql(u8, bp, target_class)) return true;
+                        bp = builtinExceptionParent(bp) orelse break;
+                    }
+                }
+            }
             if (self.classes.get(current)) |cls| {
                 for (cls.interfaces.items) |iface| {
                     if (self.implementsInterface(iface, target_class)) return true;
@@ -4304,10 +4318,6 @@ pub const VM = struct {
                     current = p;
                     continue;
                 }
-            } else if (builtinExceptionParent(current)) |p| {
-                if (std.mem.eql(u8, target_class, "Throwable")) return true;
-                current = p;
-                continue;
             }
             return false;
         }
