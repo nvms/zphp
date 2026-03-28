@@ -24,8 +24,13 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try array_access.methods.append(a, "offsetUnset");
     try vm.interfaces.put(a, "ArrayAccess", array_access);
 
+    // Traversable interface (base for Iterator and IteratorAggregate)
+    const traversable = vm_mod.InterfaceDef{ .name = "Traversable" };
+    try vm.interfaces.put(a, "Traversable", traversable);
+
     // Iterator interface
     var iterator = vm_mod.InterfaceDef{ .name = "Iterator" };
+    iterator.parent = "Traversable";
     try iterator.methods.append(a, "current");
     try iterator.methods.append(a, "key");
     try iterator.methods.append(a, "next");
@@ -35,6 +40,7 @@ pub fn register(vm: *VM, a: Allocator) !void {
 
     // IteratorAggregate interface
     var iter_agg = vm_mod.InterfaceDef{ .name = "IteratorAggregate" };
+    iter_agg.parent = "Traversable";
     try iter_agg.methods.append(a, "getIterator");
     try vm.interfaces.put(a, "IteratorAggregate", iter_agg);
 
