@@ -25,7 +25,7 @@ fn json_encode(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len == 0) return .{ .bool = false };
     const flags = if (args.len >= 2) Value.toInt(args[1]) else 0;
     var buf = std.ArrayListUnmanaged(u8){};
-    encodeValue(&buf, ctx.allocator, args[0], 0, flags) catch {
+    encodeValue(&buf, ctx.allocator, args[0], 0, flags, ctx.vm) catch {
         buf.deinit(ctx.allocator);
         // check if it was a NaN/Inf error
         if (args[0] == .float and (std.math.isNan(args[0].float) or std.math.isInf(args[0].float))) {
@@ -47,7 +47,7 @@ fn json_encode(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     return .{ .string = result };
 }
 
-fn encodeValue(buf: *std.ArrayListUnmanaged(u8), a: std.mem.Allocator, val: Value, depth: usize, flags: i64) !void {
+fn encodeValue(buf: *std.ArrayListUnmanaged(u8), a: std.mem.Allocator, val: Value, depth: usize, flags: i64, vm: ?*vm_mod.VM) !void {
     const pretty = (flags & JSON_PRETTY_PRINT) != 0;
     const unescape_slashes = (flags & JSON_UNESCAPED_SLASHES) != 0;
     const unescape_unicode = (flags & JSON_UNESCAPED_UNICODE) != 0;
@@ -157,7 +157,7 @@ fn encodeValue(buf: *std.ArrayListUnmanaged(u8), a: std.mem.Allocator, val: Valu
                         try buf.append(a, '\n');
                         try appendIndent(buf, a, depth + 1);
                     }
-                    try encodeValue(buf, a, entry.value, depth + 1, flags);
+                    try encodeValue(buf, a, entry.value, depth + 1, flags, vm);
                 }
                 if (pretty and arr.entries.items.len > 0) {
                     try buf.append(a, '\n');
@@ -188,7 +188,7 @@ fn encodeValue(buf: *std.ArrayListUnmanaged(u8), a: std.mem.Allocator, val: Valu
                     }
                     try buf.append(a, ':');
                     if (pretty) try buf.append(a, ' ');
-                    try encodeValue(buf, a, entry.value, depth + 1, flags);
+                    try encodeValue(buf, a, entry.value, depth + 1, flags, vm);
                 }
                 if (pretty and arr.entries.items.len > 0) {
                     try buf.append(a, '\n');
@@ -197,7 +197,79 @@ fn encodeValue(buf: *std.ArrayListUnmanaged(u8), a: std.mem.Allocator, val: Valu
                 try buf.append(a, '}');
             }
         },
-        .object, .generator, .fiber => try buf.appendSlice(a, "{}"),
+        .object => |obj| {
+            if (vm) |v| {
+                if (v.isInstanceOf(obj.class_name, "JsonSerializable")) {
+                    const result = v.callMethod(obj, "jsonSerialize", &.{}) catch {
+                        try buf.appendSlice(a, "{}");
+                        return;
+                    };
+                    try encodeValue(buf, a, result, depth, flags, vm);
+                    return;
+                }
+            }
+
+            // collect public property names in stable order
+            const PropEntry = struct { name: []const u8, value: Value };
+            var props: [128]PropEntry = undefined;
+            var prop_count: usize = 0;
+
+            // slots first (declared properties in class order)
+            if (obj.slot_layout) |layout| {
+                for (layout.names, 0..) |name, i| {
+                    const is_public = if (vm) |v| blk: {
+                        const vr = v.findPropertyVisibility(obj.class_name, name);
+                        break :blk vr.visibility == .public;
+                    } else true;
+                    if (is_public and obj.slots != null and i < obj.slots.?.len) {
+                        props[prop_count] = .{ .name = name, .value = obj.slots.?[i] };
+                        prop_count += 1;
+                    }
+                }
+            }
+
+            // dynamic properties (always public)
+            var dyn_iter = obj.properties.iterator();
+            while (dyn_iter.next()) |entry| {
+                // skip if already in slots
+                var in_slots = false;
+                if (obj.slot_layout) |layout| {
+                    for (layout.names) |sn| {
+                        if (std.mem.eql(u8, sn, entry.key_ptr.*)) { in_slots = true; break; }
+                    }
+                }
+                if (!in_slots and prop_count < props.len) {
+                    props[prop_count] = .{ .name = entry.key_ptr.*, .value = entry.value_ptr.* };
+                    prop_count += 1;
+                }
+            }
+
+            if (prop_count == 0) {
+                try buf.appendSlice(a, "{}");
+                return;
+            }
+
+            try buf.append(a, '{');
+            for (props[0..prop_count], 0..) |prop, idx| {
+                if (idx > 0) try buf.append(a, ',');
+                if (pretty) {
+                    try buf.append(a, '\n');
+                    try appendIndent(buf, a, depth + 1);
+                }
+                try buf.append(a, '"');
+                try buf.appendSlice(a, prop.name);
+                try buf.append(a, '"');
+                try buf.append(a, ':');
+                if (pretty) try buf.append(a, ' ');
+                try encodeValue(buf, a, prop.value, depth + 1, flags, vm);
+            }
+            if (pretty) {
+                try buf.append(a, '\n');
+                try appendIndent(buf, a, depth);
+            }
+            try buf.append(a, '}');
+        },
+        .generator, .fiber => try buf.appendSlice(a, "{}"),
     }
 }
 

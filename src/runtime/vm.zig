@@ -4922,9 +4922,9 @@ pub const VM = struct {
         return self.isInstanceOf(caller_class, target_class) or self.isInstanceOf(target_class, caller_class);
     }
 
-    const VisResult = struct { visibility: ClassDef.Visibility, defining_class: []const u8, is_readonly: bool = false };
+    pub const VisResult = struct { visibility: ClassDef.Visibility, defining_class: []const u8, is_readonly: bool = false };
 
-    fn findPropertyVisibility(self: *VM, class_name: []const u8, prop_name: []const u8) VisResult {
+    pub fn findPropertyVisibility(self: *VM, class_name: []const u8, prop_name: []const u8) VisResult {
         var current: ?[]const u8 = class_name;
         while (current) |cn| {
             if (self.classes.get(cn)) |cls| {
