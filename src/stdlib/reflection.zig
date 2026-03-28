@@ -34,6 +34,7 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try rc_def.methods.put(a, "isAbstract", .{ .name = "isAbstract", .arity = 0 });
     try rc_def.methods.put(a, "isInterface", .{ .name = "isInterface", .arity = 0 });
     try rc_def.methods.put(a, "getInterfaceNames", .{ .name = "getInterfaceNames", .arity = 0 });
+    try rc_def.methods.put(a, "getAttributes", .{ .name = "getAttributes", .arity = 0 });
     try vm.classes.put(a, "ReflectionClass", rc_def);
 
     try vm.native_fns.put(a, "ReflectionClass::__construct", rcConstruct);
@@ -50,6 +51,7 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try vm.native_fns.put(a, "ReflectionClass::isAbstract", rcIsAbstract);
     try vm.native_fns.put(a, "ReflectionClass::isInterface", rcIsInterface);
     try vm.native_fns.put(a, "ReflectionClass::getInterfaceNames", rcGetInterfaceNames);
+    try vm.native_fns.put(a, "ReflectionClass::getAttributes", rcGetAttributes);
 
     // ReflectionMethod
     var rm_def = ClassDef{ .name = "ReflectionMethod" };
@@ -92,6 +94,9 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try rp_def.methods.put(a, "allowsNull", .{ .name = "allowsNull", .arity = 0 });
     try rp_def.methods.put(a, "isPassedByReference", .{ .name = "isPassedByReference", .arity = 0 });
     try rp_def.methods.put(a, "hasType", .{ .name = "hasType", .arity = 0 });
+    try rp_def.methods.put(a, "getAttributes", .{ .name = "getAttributes", .arity = 0 });
+    try rp_def.methods.put(a, "getDeclaringClass", .{ .name = "getDeclaringClass", .arity = 0 });
+    try rp_def.methods.put(a, "isVariadic", .{ .name = "isVariadic", .arity = 0 });
     try vm.classes.put(a, "ReflectionParameter", rp_def);
 
     try vm.native_fns.put(a, "ReflectionParameter::getName", rpGetName);
@@ -103,6 +108,9 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try vm.native_fns.put(a, "ReflectionParameter::allowsNull", rpAllowsNull);
     try vm.native_fns.put(a, "ReflectionParameter::isPassedByReference", rpIsPassedByReference);
     try vm.native_fns.put(a, "ReflectionParameter::hasType", rpHasType);
+    try vm.native_fns.put(a, "ReflectionParameter::getAttributes", rpGetAttributes);
+    try vm.native_fns.put(a, "ReflectionParameter::getDeclaringClass", rpGetDeclaringClass);
+    try vm.native_fns.put(a, "ReflectionParameter::isVariadic", rpIsVariadic);
 
     // ReflectionNamedType
     var rnt_def = ClassDef{ .name = "ReflectionNamedType" };
@@ -136,6 +144,11 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try vm.native_fns.put(a, "ReflectionFunction::getReturnType", rfGetReturnType);
     try vm.native_fns.put(a, "ReflectionFunction::getNumberOfParameters", rfGetNumberOfParameters);
     try vm.native_fns.put(a, "ReflectionFunction::getNumberOfRequiredParameters", rfGetNumberOfRequiredParameters);
+
+    // ReflectionAttribute
+    var ra_def = ClassDef{ .name = "ReflectionAttribute" };
+    try ra_def.static_props.put(a, "IS_INSTANCEOF", .{ .int = 2 });
+    try vm.classes.put(a, "ReflectionAttribute", ra_def);
 
     // Closure class (static methods only - instance methods handled in VM dispatch)
     var closure_def = ClassDef{ .name = "Closure" };
@@ -418,6 +431,10 @@ fn rcGetInterfaceNames(ctx: *NativeContext, _: []const Value) RuntimeError!Value
     return .{ .array = arr };
 }
 
+fn rcGetAttributes(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    return .{ .array = try ctx.createArray() };
+}
+
 // --- ReflectionMethod ---
 
 fn rmGetName(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
@@ -566,6 +583,27 @@ fn rpHasType(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
     return .{ .bool = type_val == .string and type_val.string.len > 0 };
 }
 
+fn rpGetAttributes(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    return .{ .array = try ctx.createArray() };
+}
+
+fn rpGetDeclaringClass(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const this = getThis(ctx) orelse return .null;
+    const declaring = this.get("_declaring_class");
+    if (declaring != .string or declaring.string.len == 0) return .null;
+
+    const obj = try ctx.createObject("ReflectionClass");
+    try obj.set(ctx.allocator, "name", declaring);
+    try obj.set(ctx.allocator, "_is_interface", .{ .bool = ctx.vm.interfaces.contains(declaring.string) });
+    return .{ .object = obj };
+}
+
+fn rpIsVariadic(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const this = getThis(ctx) orelse return .{ .bool = false };
+    const v = this.get("_is_variadic");
+    return .{ .bool = v == .bool and v.bool };
+}
+
 // --- ReflectionNamedType ---
 
 fn rntGetName(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
@@ -684,6 +722,15 @@ fn buildParamArray(ctx: *NativeContext, func: *const ObjFunction, type_key: []co
         // by-reference
         const by_ref = if (i < func.ref_params.len) func.ref_params[i] else false;
         try obj.set(ctx.allocator, "_by_reference", .{ .bool = by_ref });
+
+        // variadic
+        const is_variadic = func.is_variadic and i == func.arity - 1;
+        try obj.set(ctx.allocator, "_is_variadic", .{ .bool = is_variadic });
+
+        // declaring class
+        if (std.mem.indexOf(u8, type_key, "::")) |sep| {
+            try obj.set(ctx.allocator, "_declaring_class", .{ .string = type_key[0..sep] });
+        }
 
         try arr.append(ctx.allocator, .{ .object = obj });
     }

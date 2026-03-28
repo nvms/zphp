@@ -56,6 +56,7 @@ pub const entries = .{
     .{ "chmod", native_chmod },
     .{ "stat", native_stat },
     .{ "chdir", native_chdir },
+    .{ "stream_resolve_include_path", native_stream_resolve_include_path },
 };
 
 // file handle management - store handles in PhpObjects with class "FileHandle"
@@ -814,5 +815,12 @@ fn native_chdir(_: *NativeContext, args: []const Value) RuntimeError!Value {
     defer dir.close();
     std.posix.fchdir(dir.fd) catch return Value{ .bool = false };
     return .{ .bool = true };
+}
+
+fn native_stream_resolve_include_path(_: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len == 0 or args[0] != .string) return .{ .bool = false };
+    const path = args[0].string;
+    std.fs.cwd().access(path, .{}) catch return .{ .bool = false };
+    return .{ .string = path };
 }
 
