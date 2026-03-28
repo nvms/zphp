@@ -2938,10 +2938,11 @@ pub const VM = struct {
                                 const ac: usize = arg_count;
                                 var new_vars: std.StringHashMapUnmanaged(Value) = .{};
                                 try new_vars.put(self.allocator, "$this", tv);
-                                for (0..ac) |i| {
+                                for (0..@min(ac, func.arity)) |i| {
                                     try new_vars.put(self.allocator, func.params[i], self.stack[self.sp - ac + i]);
                                 }
                                 self.sp -= ac;
+                                try self.fillDefaults(&new_vars, func, ac);
                                 self.frames[self.frame_count] = .{ .chunk = &func.chunk, .ip = 0, .vars = new_vars, .locals = try self.allocLocals(func, &new_vars), .func = func, .called_class = class_name };
                                 self.frame_count += 1;
                                 }
