@@ -10,10 +10,17 @@ const Allocator = std.mem.Allocator;
 const RuntimeError = error{ RuntimeError, OutOfMemory };
 
 pub fn register(vm: *VM, a: Allocator) !void {
+    var throwable = vm_mod.InterfaceDef{ .name = "Throwable" };
+    try throwable.methods.append(a, "getMessage");
+    try throwable.methods.append(a, "getCode");
+    try throwable.methods.append(a, "getPrevious");
+    try vm.interfaces.put(a, "Throwable", throwable);
+
     var exc_def = ClassDef{ .name = "Exception" };
     try exc_def.properties.append(a, .{ .name = "message", .default = .{ .string = "" } });
     try exc_def.properties.append(a, .{ .name = "code", .default = .{ .int = 0 } });
     try exc_def.properties.append(a, .{ .name = "previous", .default = .null });
+    try exc_def.interfaces.append(a, "Throwable");
     try exc_def.methods.put(a, "__construct", .{ .name = "__construct", .arity = 3 });
     try exc_def.methods.put(a, "getMessage", .{ .name = "getMessage", .arity = 0 });
     try exc_def.methods.put(a, "getCode", .{ .name = "getCode", .arity = 0 });
@@ -25,9 +32,22 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try vm.native_fns.put(a, "Exception::getCode", exceptionGetCode);
     try vm.native_fns.put(a, "Exception::getPrevious", exceptionGetPrevious);
 
-    // hierarchy validated against PHP 8.5 (php -r 'new ReflectionClass(...)->getParentClass()')
-    // note: in PHP, Error and Exception are separate (both implement Throwable).
-    // zphp uses Error -> Exception as simplification so catch(Exception) catches both.
+    var err_def = ClassDef{ .name = "Error" };
+    try err_def.properties.append(a, .{ .name = "message", .default = .{ .string = "" } });
+    try err_def.properties.append(a, .{ .name = "code", .default = .{ .int = 0 } });
+    try err_def.properties.append(a, .{ .name = "previous", .default = .null });
+    try err_def.interfaces.append(a, "Throwable");
+    try err_def.methods.put(a, "__construct", .{ .name = "__construct", .arity = 3 });
+    try err_def.methods.put(a, "getMessage", .{ .name = "getMessage", .arity = 0 });
+    try err_def.methods.put(a, "getCode", .{ .name = "getCode", .arity = 0 });
+    try err_def.methods.put(a, "getPrevious", .{ .name = "getPrevious", .arity = 0 });
+    try vm.classes.put(a, "Error", err_def);
+
+    try vm.native_fns.put(a, "Error::__construct", exceptionConstruct);
+    try vm.native_fns.put(a, "Error::getMessage", exceptionGetMessage);
+    try vm.native_fns.put(a, "Error::getCode", exceptionGetCode);
+    try vm.native_fns.put(a, "Error::getPrevious", exceptionGetPrevious);
+
     const subclasses = .{
         .{ "RuntimeException", "Exception" },
         .{ "LogicException", "Exception" },
@@ -44,7 +64,6 @@ pub fn register(vm: *VM, a: Allocator) !void {
         .{ "UnderflowException", "RuntimeException" },
         .{ "PDOException", "RuntimeException" },
         .{ "JsonException", "Exception" },
-        .{ "Error", "Exception" },
         .{ "TypeError", "Error" },
         .{ "ArithmeticError", "Error" },
         .{ "DivisionByZeroError", "ArithmeticError" },
