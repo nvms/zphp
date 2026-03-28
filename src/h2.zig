@@ -11,6 +11,11 @@ pub const MAX_STREAMS: usize = 64;
 
 pub const Header = struct { name: []const u8, value: []const u8 };
 
+pub const BodySource = struct {
+    data: []const u8,
+    pos: usize,
+};
+
 pub const H2Stream = struct {
     stream_id: i32,
     method: []const u8 = "GET",
@@ -22,10 +27,45 @@ pub const H2Stream = struct {
     body: std.ArrayListUnmanaged(u8) = .{},
     complete: bool = false,
     active: bool = false,
+    body_source: ?*BodySource = null,
+
+    pub fn resetRequest(self: *H2Stream, allocator: Allocator) void {
+        self.freeHeaders(allocator);
+        self.body.deinit(allocator);
+        self.body = .{};
+        self.complete = false;
+    }
 
     pub fn reset(self: *H2Stream, allocator: Allocator) void {
+        self.freeHeaders(allocator);
+        self.freeBodySource(allocator);
         self.body.deinit(allocator);
         self.* = .{ .stream_id = 0 };
+    }
+
+    fn freeHeaders(self: *H2Stream, allocator: Allocator) void {
+        const pseudo = &[_][]const u8{ self.method, self.path, self.authority, self.scheme };
+        const defaults = &[_][]const u8{ "GET", "/", "", "https" };
+        for (pseudo, defaults) |val, def| {
+            if (val.ptr != def.ptr and val.len > 0) allocator.free(val);
+        }
+        for (self.headers[0..self.header_count]) |hdr| {
+            if (hdr.name.len > 0) allocator.free(hdr.name);
+            if (hdr.value.len > 0) allocator.free(hdr.value);
+        }
+        self.method = "GET";
+        self.path = "/";
+        self.authority = "";
+        self.scheme = "https";
+        self.header_count = 0;
+    }
+
+    fn freeBodySource(self: *H2Stream, allocator: Allocator) void {
+        if (self.body_source) |src| {
+            if (src.data.len > 0) allocator.free(src.data);
+            allocator.destroy(src);
+            self.body_source = null;
+        }
     }
 };
 
@@ -68,6 +108,15 @@ pub const H2Session = struct {
             .{ .settings_id = c.NGHTTP2_SETTINGS_MAX_CONCURRENT_STREAMS, .value = MAX_STREAMS },
         };
         _ = c.nghttp2_submit_settings(self.session, c.NGHTTP2_FLAG_NONE, &settings, settings.len);
+    }
+
+    pub fn submitGoaway(self: *H2Session) void {
+        var last_stream: i32 = 0;
+        for (&self.streams) |*s| {
+            if (s.active and s.stream_id > last_stream) last_stream = s.stream_id;
+        }
+        _ = c.nghttp2_submit_goaway(self.session, c.NGHTTP2_FLAG_NONE, last_stream, c.NGHTTP2_NO_ERROR, null, 0);
+        self.flush() catch {};
     }
 
     pub fn deinit(self: *H2Session) void {
@@ -158,7 +207,14 @@ pub const H2Session = struct {
 
         if (body.len > 0) {
             const src = self.allocator.create(BodySource) catch return;
-            src.* = .{ .data = self.allocator.dupe(u8, body) catch return, .pos = 0 };
+            const data = self.allocator.dupe(u8, body) catch {
+                self.allocator.destroy(src);
+                return;
+            };
+            src.* = .{ .data = data, .pos = 0 };
+            if (self.findStream(stream_id)) |stream| {
+                stream.body_source = src;
+            }
             var prd = c.nghttp2_data_provider{
                 .source = .{ .ptr = @ptrCast(src) },
                 .read_callback = bodyReadCb,
@@ -168,11 +224,6 @@ pub const H2Session = struct {
             _ = c.nghttp2_submit_response(self.session, stream_id, &nv, nv.len, null);
         }
     }
-};
-
-const BodySource = struct {
-    data: []const u8,
-    pos: usize,
 };
 
 fn bodyReadCb(
@@ -237,7 +288,10 @@ fn onHeader(
     if (frame.*.hd.type != c.NGHTTP2_HEADERS) return 0;
     const stream = self.findStream(frame.*.hd.stream_id) orelse return 0;
     const name = self.allocator.dupe(u8, name_ptr[0..namelen]) catch return c.NGHTTP2_ERR_CALLBACK_FAILURE;
-    const value = self.allocator.dupe(u8, value_ptr[0..valuelen]) catch return c.NGHTTP2_ERR_CALLBACK_FAILURE;
+    const value = self.allocator.dupe(u8, value_ptr[0..valuelen]) catch {
+        self.allocator.free(name);
+        return c.NGHTTP2_ERR_CALLBACK_FAILURE;
+    };
 
     if (name.len > 0 and name[0] == ':') {
         if (std.mem.eql(u8, name, ":method")) {
@@ -248,7 +302,10 @@ fn onHeader(
             stream.authority = value;
         } else if (std.mem.eql(u8, name, ":scheme")) {
             stream.scheme = value;
+        } else {
+            self.allocator.free(value);
         }
+        self.allocator.free(name);
     } else {
         if (stream.header_count < 64) {
             stream.headers[stream.header_count] = .{ .name = name, .value = value };

@@ -198,7 +198,10 @@ fn initWorker(allocator: Allocator, result: *const CompileResult, doc_root: []co
 fn deinitWorker(w: *Worker) void {
     var i: usize = 1;
     while (i < w.n_fds) : (i += 1) {
-        if (w.conns[i]) |*c| c.deinit(w.allocator);
+        if (w.conns[i]) |*conn| {
+            if (conn.h2_session) |session| session.submitGoaway();
+            conn.deinit(w.allocator);
+        }
     }
     posix.close(w.wake_pipe[0]);
     posix.close(w.wake_pipe[1]);
@@ -478,6 +481,7 @@ fn compactConnections(w: *Worker) void {
                         _ = w.vm.callByName("ws_onClose", &.{Value{ .object = ws_obj }}) catch {};
                     }
                 }
+                if (c.h2_session) |session| session.submitGoaway();
                 c.deinit(w.allocator);
                 const last = w.n_fds - 1;
                 if (i != last) {
@@ -678,6 +682,11 @@ fn processH2Read(w: *Worker, conn: *Connection) void {
         return;
     };
 
+    session.flushBuffered() catch {
+        conn.state = .closing;
+        return;
+    };
+
     const n = conn.ioRead(conn.buf[conn.buffered..]) catch |err| {
         if (err == error.WouldBlock) return;
         conn.state = .closing;
@@ -691,7 +700,6 @@ fn processH2Read(w: *Worker, conn: *Connection) void {
     const uconsumed: usize = @intCast(consumed);
     if (uconsumed > 0) shiftBuffer(conn, uconsumed);
 
-    // process completed streams sequentially
     while (session.findCompletedStream()) |stream| {
         handleH2Request(w, conn, session, stream);
     }
@@ -723,7 +731,7 @@ fn handleH2Request(w: *Worker, conn: *Connection, session: *h2.H2Session, stream
 
     // try static file
     if (w.doc_root.len > 0 and tryServeStaticH2(w.allocator, session, stream_id, w.doc_root, &req)) {
-        stream.reset(w.allocator);
+        stream.resetRequest(w.allocator);
         return;
     }
 
@@ -735,7 +743,7 @@ fn handleH2Request(w: *Worker, conn: *Connection, session: *h2.H2Session, stream
     };
     populateSuperglobals(&w.vm, &req, mock_conn, w.port) catch {
         session.submitResponse(stream_id, 500, "text/plain", "Internal Server Error");
-        stream.reset(w.allocator);
+        stream.resetRequest(w.allocator);
         return;
     };
     // override SERVER_PROTOCOL for h2
@@ -751,7 +759,7 @@ fn handleH2Request(w: *Worker, conn: *Connection, session: *h2.H2Session, stream
 
     w.vm.interpret(w.result) catch {
         session.submitResponse(stream_id, 500, "text/plain", "Internal Server Error");
-        stream.reset(w.allocator);
+        stream.resetRequest(w.allocator);
         return;
     };
 
@@ -764,11 +772,11 @@ fn handleH2Request(w: *Worker, conn: *Connection, session: *h2.H2Session, stream
     } else "text/html";
     const code: u16 = if (w.vm.frame_count > 0) blk: {
         const v = w.vm.frames[0].vars.get("__response_code") orelse break :blk @as(u16, 200);
-        break :blk if (v == .int) @intCast(v.int) else 200;
+        break :blk if (v == .int) std.math.cast(u16, v.int) orelse 200 else 200;
     } else 200;
 
     session.submitResponse(stream_id, code, ct, w.vm.output.items);
-    stream.reset(w.allocator);
+    stream.resetRequest(w.allocator);
 }
 
 fn tryServeStaticH2(allocator: Allocator, session: *h2.H2Session, stream_id: i32, doc_root: []const u8, req: *const Request) bool {
