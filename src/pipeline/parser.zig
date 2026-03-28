@@ -1777,6 +1777,10 @@ const Parser = struct {
             .kw_array => self.parseArrayKw(),
             .kw_static => if (self.peekAt(1) == .kw_function) self.parseClosureExpr() else if (self.peekAt(1) == .kw_fn) self.parseStaticArrowFunc() else self.addLiteral(.identifier),
             .kw_self, .kw_parent => self.addLiteral(.identifier),
+            .amp => {
+                _ = self.advance();
+                return self.parsePrimaryExpr();
+            },
             else => {
                 try self.addError(.expected_expression);
                 return error.ParseError;
