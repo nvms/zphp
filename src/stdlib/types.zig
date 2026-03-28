@@ -1172,5 +1172,6 @@ fn native_spl_object_hash(ctx: *NativeContext, args: []const Value) RuntimeError
     if (args.len == 0 or args[0] != .object) return .{ .bool = false };
     const ptr = @intFromPtr(args[0].object);
     const hash = std.fmt.allocPrint(ctx.allocator, "{x:0>32}", .{ptr}) catch return .{ .bool = false };
+    ctx.vm.strings.append(ctx.allocator, hash) catch {};
     return .{ .string = hash };
 }

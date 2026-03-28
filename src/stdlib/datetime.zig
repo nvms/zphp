@@ -41,6 +41,7 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try dt_def.methods.put(a, "createFromTimestamp", .{ .name = "createFromTimestamp", .arity = 1, .is_static = true });
     try dt_def.methods.put(a, "getMicrosecond", .{ .name = "getMicrosecond", .arity = 0 });
     try dt_def.methods.put(a, "setMicrosecond", .{ .name = "setMicrosecond", .arity = 1 });
+    try dt_def.methods.put(a, "getLastErrors", .{ .name = "getLastErrors", .arity = 0, .is_static = true });
     try vm.classes.put(a, "DateTime", dt_def);
 
     try vm.native_fns.put(a, "DateTime::__construct", dtConstruct);
@@ -54,6 +55,7 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try vm.native_fns.put(a, "DateTime::createFromTimestamp", dtCreateFromTimestamp);
     try vm.native_fns.put(a, "DateTime::getMicrosecond", dtGetMicrosecond);
     try vm.native_fns.put(a, "DateTime::setMicrosecond", dtSetMicrosecond);
+    try vm.native_fns.put(a, "DateTime::getLastErrors", dtGetLastErrors);
 
     // DateTimeImmutable
     var dti_def = ClassDef{ .name = "DateTimeImmutable" };
@@ -66,6 +68,7 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try dti_def.methods.put(a, "diff", .{ .name = "diff", .arity = 1 });
     try dti_def.methods.put(a, "createFromTimestamp", .{ .name = "createFromTimestamp", .arity = 1, .is_static = true });
     try dti_def.methods.put(a, "getMicrosecond", .{ .name = "getMicrosecond", .arity = 0 });
+    try dti_def.methods.put(a, "getLastErrors", .{ .name = "getLastErrors", .arity = 0, .is_static = true });
     try vm.classes.put(a, "DateTimeImmutable", dti_def);
 
     try vm.native_fns.put(a, "DateTimeImmutable::__construct", dtConstruct);
@@ -75,6 +78,7 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try vm.native_fns.put(a, "DateTimeImmutable::diff", dtDiff);
     try vm.native_fns.put(a, "DateTimeImmutable::createFromTimestamp", dtiCreateFromTimestamp);
     try vm.native_fns.put(a, "DateTimeImmutable::getMicrosecond", dtGetMicrosecond);
+    try vm.native_fns.put(a, "DateTimeImmutable::getLastErrors", dtGetLastErrors);
 
     // DateInterval
     var di_def = ClassDef{ .name = "DateInterval" };
@@ -87,6 +91,10 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try di_def.properties.append(a, .{ .name = "days", .default = .{ .int = 0 } });
     try di_def.properties.append(a, .{ .name = "invert", .default = .{ .int = 0 } });
     try vm.classes.put(a, "DateInterval", di_def);
+}
+
+fn dtGetLastErrors(_: *NativeContext, _: []const Value) RuntimeError!Value {
+    return .{ .bool = false };
 }
 
 fn getThis(ctx: *NativeContext) ?*PhpObject {

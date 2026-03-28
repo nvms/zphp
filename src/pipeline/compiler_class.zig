@@ -1014,6 +1014,24 @@ pub fn compileTraitDecl(self: *Compiler, node: Ast.Node) Error!void {
         prop_indices.deinit(self.allocator);
     }
 
+    // collect own property members (not sub-trait props)
+    var own_props = std.ArrayListUnmanaged(u32){};
+    defer own_props.deinit(self.allocator);
+    for (members) |member_idx| {
+        const member = self.ast.nodes[member_idx];
+        if (member.tag == .class_property) {
+            try own_props.append(self.allocator, member_idx);
+        }
+    }
+
+    // compile defaults for own properties
+    for (own_props.items) |pi| {
+        const pmember = self.ast.nodes[pi];
+        if (pmember.data.lhs != 0) {
+            try self.compileNode(pmember.data.lhs);
+        }
+    }
+
     const name_idx = try self.addConstant(.{ .string = trait_name });
     try self.emitOp(.trait_decl);
     try self.emitU16(name_idx);
@@ -1022,10 +1040,20 @@ pub fn compileTraitDecl(self: *Compiler, node: Ast.Node) Error!void {
         const st_idx = try self.addConstant(.{ .string = st });
         try self.emitU16(st_idx);
     }
+    try self.emitByte(@intCast(own_props.items.len));
+    for (own_props.items) |pi| {
+        const pmember = self.ast.nodes[pi];
+        var pname = self.ast.tokenSlice(pmember.main_token);
+        if (pname.len > 0 and pname[0] == '$') pname = pname[1..];
+        const pname_idx = try self.addConstant(.{ .string = pname });
+        try self.emitU16(pname_idx);
+        try self.emitByte(if (pmember.data.lhs != 0) @as(u8, 1) else @as(u8, 0));
+        try self.emitByte(@intCast(pmember.data.rhs));
+    }
 }
 
 pub fn compileEnumDecl(self: *Compiler, node: Ast.Node) Error!void {
-    const enum_name = self.ast.tokenSlice(node.main_token);
+    const enum_name = self.resolveClassName(self.ast.tokenSlice(node.main_token));
     const members = self.ast.extraSlice(node.data.lhs);
 
     const rhs_base = node.data.rhs;

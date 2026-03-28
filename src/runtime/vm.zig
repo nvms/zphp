@@ -235,9 +235,9 @@ pub const InterfaceDef = struct {
 };
 
 pub const VM = struct {
-    frames: [256]CallFrame = undefined,
+    frames: [512]CallFrame = undefined,
     frame_count: usize = 0,
-    stack: [256]Value = undefined,
+    stack: [512]Value = undefined,
     sp: usize = 0,
     functions: std.StringHashMapUnmanaged(*const ObjFunction) = .{},
     native_fns: std.StringHashMapUnmanaged(NativeFn) = .{},
@@ -259,6 +259,7 @@ pub const VM = struct {
     interfaces: std.StringHashMapUnmanaged(InterfaceDef) = .{},
     traits: std.StringHashMapUnmanaged(void) = .{},
     trait_uses: std.StringHashMapUnmanaged([]const []const u8) = .{},
+    trait_props: std.StringHashMapUnmanaged([]const ClassDef.PropertyDef) = .{},
     statics: std.StringHashMapUnmanaged(Value) = .{},
     static_vars: std.ArrayListUnmanaged(StaticEntry) = .{},
     global_vars: std.ArrayListUnmanaged(StaticEntry) = .{},
@@ -270,6 +271,8 @@ pub const VM = struct {
     source: []const u8 = "",
     file_path: []const u8 = "",
     autoload_callbacks: std.ArrayListUnmanaged(Value) = .{},
+    autoload_depth: u8 = 0,
+    magic_get_guard: std.ArrayListUnmanaged(struct { obj_ptr: usize, prop_name: []const u8 }) = .{},
     user_error_handler: ?Value = null,
     prev_error_handler: ?Value = null,
     ob_stack: std.ArrayListUnmanaged(usize) = .{},
@@ -299,12 +302,12 @@ pub const VM = struct {
         fn_cache_name: []const u8 = "",
         fn_cache_func: ?*const ObjFunction = null,
         // per-frame sp save for inline call/ret in fastLoop
-        sp_save: [64]usize = undefined,
+        sp_save: [512]usize = undefined,
         // per-frame actual arg count for func_get_args
-        arg_counts: [64]u8 = [_]u8{0xFF} ** 64,
+        arg_counts: [512]u8 = [_]u8{0xFF} ** 512,
         // per-frame saved arg values for func_get_args (flat buffer indexed by frame)
-        fga_buf: [256]Value = @splat(.null),
-        fga_offsets: [64]u16 = @splat(0),
+        fga_buf: [512]Value = @splat(.null),
+        fga_offsets: [512]u16 = @splat(0),
         fga_sp: u16 = 0,
         // set before pushing a frame, consumed by executeFunction et al
         pending_arg_count: u8 = 0xFF,
@@ -549,6 +552,9 @@ pub const VM = struct {
         var tu_iter = self.trait_uses.valueIterator();
         while (tu_iter.next()) |subs| self.allocator.free(subs.*);
         self.trait_uses.deinit(self.allocator);
+        var tp_iter = self.trait_props.valueIterator();
+        while (tp_iter.next()) |props| self.allocator.free(props.*);
+        self.trait_props.deinit(self.allocator);
         self.statics.deinit(self.allocator);
         self.static_vars.deinit(self.allocator);
         self.global_vars.deinit(self.allocator);
@@ -557,6 +563,7 @@ pub const VM = struct {
         self.ob_stack.deinit(self.allocator);
         self.request_vars.deinit(self.allocator);
         self.autoload_callbacks.deinit(self.allocator);
+        self.magic_get_guard.deinit(self.allocator);
     }
 
     pub fn reset(self: *VM) void {
@@ -1939,6 +1946,30 @@ pub const VM = struct {
                         }
                         try self.trait_uses.put(self.allocator, trait_name, subs);
                     }
+                    const tp_count = self.readByte();
+                    if (tp_count > 0) {
+                        var tp_names: [32][]const u8 = undefined;
+                        var tp_has_default: [32]u8 = undefined;
+                        var tp_vis: [32]ClassDef.Visibility = undefined;
+                        for (0..tp_count) |pi| {
+                            tp_names[pi] = self.currentChunk().constants.items[self.readU16()].string;
+                            tp_has_default[pi] = self.readByte();
+                            const vis_byte = self.readByte();
+                            tp_vis[pi] = @enumFromInt(vis_byte & 0x03);
+                        }
+                        const tp_defaults = self.popDefaults(32, tp_has_default[0..tp_count]);
+                        const props = try self.allocator.alloc(ClassDef.PropertyDef, tp_count);
+                        var dj: usize = 0;
+                        for (0..tp_count) |pi| {
+                            const dval = if (tp_has_default[pi] == 1) blk: {
+                                const v = tp_defaults[dj];
+                                dj += 1;
+                                break :blk v;
+                            } else Value{ .null = {} };
+                            props[pi] = .{ .name = tp_names[pi], .default = dval, .visibility = tp_vis[pi] };
+                        }
+                        try self.trait_props.put(self.allocator, trait_name, props);
+                    }
                 },
 
                 .enum_decl => try self.handleEnumDecl(),
@@ -2189,7 +2220,7 @@ pub const VM = struct {
                             }
                             self.push(val);
                         } else if (self.hasMethod(obj.class_name, "__get")) {
-                            const result = self.callMethod(obj, "__get", &.{.{ .string = prop_name }}) catch .null;
+                            const result = try self.callMagicGet(obj, prop_name);
                             self.push(result);
                         } else {
                             self.push(.null);
@@ -2209,7 +2240,7 @@ pub const VM = struct {
                         if (val != .null or obj.properties.contains(prop_name) or (obj.slots != null and obj.getSlotIndex(prop_name) != null)) {
                             self.push(val);
                         } else if (self.hasMethod(obj.class_name, "__get")) {
-                            const result = self.callMethod(obj, "__get", &.{.{ .string = prop_name }}) catch .null;
+                            const result = try self.callMagicGet(obj, prop_name);
                             self.push(result);
                         } else {
                             self.push(.null);
@@ -3693,6 +3724,18 @@ pub const VM = struct {
                 });
             }
         }
+
+        if (self.trait_props.get(trait_name)) |props| {
+            for (props) |prop| {
+                var exists = false;
+                for (def.properties.items) |existing| {
+                    if (std.mem.eql(u8, existing.name, prop.name)) { exists = true; break; }
+                }
+                if (!exists) {
+                    try def.properties.append(self.allocator, prop);
+                }
+            }
+        }
     }
 
     // ==================================================================
@@ -3986,6 +4029,10 @@ pub const VM = struct {
     }
 
     fn executeFunctionLocalsOnly(self: *VM, func: *const ObjFunction, args: []const Value) RuntimeError!Value {
+        if (self.frame_count >= 511) {
+            self.error_msg = "Fatal error: maximum call stack depth exceeded";
+            return error.RuntimeError;
+        }
         const base_frame = self.frame_count;
         const lc: usize = func.local_count;
         const ic = self.ic.?;
@@ -4166,6 +4213,10 @@ pub const VM = struct {
     }
 
     pub fn tryAutoload(self: *VM, class_name: []const u8) RuntimeError!void {
+        if (self.autoload_depth >= 64) return;
+        self.autoload_depth += 1;
+        defer self.autoload_depth -= 1;
+
         for (self.autoload_callbacks.items) |callback| {
             if (callback == .string) {
                 _ = self.callByName(callback.string, &.{.{ .string = class_name }}) catch continue;
@@ -4556,6 +4607,10 @@ pub const VM = struct {
     }
 
     fn executeFunction(self: *VM, func: *const ObjFunction, vars: std.StringHashMapUnmanaged(Value)) RuntimeError!Value {
+        if (self.frame_count >= 511) {
+            self.error_msg = "Fatal error: maximum call stack depth exceeded";
+            return error.RuntimeError;
+        }
         const base_frame = self.frame_count;
         self.frames[self.frame_count] = .{ .chunk = &func.chunk, .ip = 0, .vars = vars, .locals = try self.allocLocals(func, &vars), .func = func };
         self.consumePendingArgCount();
@@ -4565,6 +4620,10 @@ pub const VM = struct {
     }
 
     pub fn executeFunctionWithRefs(self: *VM, func: *const ObjFunction, vars: std.StringHashMapUnmanaged(Value), ref_slots: std.StringHashMapUnmanaged(*Value)) RuntimeError!Value {
+        if (self.frame_count >= 511) {
+            self.error_msg = "Fatal error: maximum call stack depth exceeded";
+            return error.RuntimeError;
+        }
         const base_frame = self.frame_count;
         self.frames[self.frame_count] = .{ .chunk = &func.chunk, .ip = 0, .vars = vars, .locals = try self.allocLocals(func, &vars), .func = func, .ref_slots = ref_slots };
         self.consumePendingArgCount();
@@ -4794,6 +4853,10 @@ pub const VM = struct {
     }
 
     pub fn callMethod(self: *VM, obj: *PhpObject, method_name: []const u8, args: []const Value) RuntimeError!Value {
+        if (self.frame_count >= 511) {
+            self.error_msg = "Fatal error: maximum call stack depth exceeded";
+            return error.RuntimeError;
+        }
         const full_name = self.resolveMethod(obj.class_name, method_name) catch return error.RuntimeError;
         if (self.native_fns.get(full_name)) |native| {
             var tmp_vars: std.StringHashMapUnmanaged(Value) = .{};
@@ -4813,6 +4876,32 @@ pub const VM = struct {
             try self.bindArgs(&new_vars, func, args[0..@min(args.len, func.arity)]);
             return self.executeFunction(func, new_vars);
         } else return error.RuntimeError;
+    }
+
+    fn callMagicGet(self: *VM, obj: *PhpObject, prop_name: []const u8) RuntimeError!Value {
+        const obj_id = @intFromPtr(obj);
+        for (self.magic_get_guard.items) |e| {
+            if (e.obj_ptr == obj_id and std.mem.eql(u8, e.prop_name, prop_name)) return .null;
+        }
+        try self.magic_get_guard.append(self.allocator, .{ .obj_ptr = obj_id, .prop_name = prop_name });
+        const result = self.callMethod(obj, "__get", &.{.{ .string = prop_name }}) catch |err| blk: {
+            self.removeMagicGetGuard(obj_id, prop_name);
+            if (err == error.RuntimeError) return error.RuntimeError;
+            break :blk .null;
+        };
+        self.removeMagicGetGuard(obj_id, prop_name);
+        return result;
+    }
+
+    fn removeMagicGetGuard(self: *VM, obj_id: usize, prop_name: []const u8) void {
+        var i: usize = self.magic_get_guard.items.len;
+        while (i > 0) {
+            i -= 1;
+            if (self.magic_get_guard.items[i].obj_ptr == obj_id and std.mem.eql(u8, self.magic_get_guard.items[i].prop_name, prop_name)) {
+                _ = self.magic_get_guard.swapRemove(i);
+                return;
+            }
+        }
     }
 
     pub fn callByName(self: *VM, name: []const u8, args: []const Value) RuntimeError!Value {
