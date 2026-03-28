@@ -22,16 +22,16 @@ Requires PHP installed locally. zphp must be built with ReleaseFast - debug buil
 
 | benchmark | php | zphp | ratio |
 |---|---|---|---|
-| string_ops | 94 ms | 27 ms | 0.29x |
-| array_ops | 96 ms | 29 ms | 0.30x |
-| objects | 93 ms | 39 ms | 0.42x |
-| closures | 95 ms | 90 ms | 0.95x |
-| fibonacci | 167 ms | 202 ms | 1.21x |
-| loops | 128 ms | 226 ms | 1.77x |
+| string_ops | 97 ms | 27 ms | 0.28x |
+| array_ops | 98 ms | 29 ms | 0.30x |
+| objects | 97 ms | 36 ms | 0.37x |
+| closures | 98 ms | 83 ms | 0.85x |
+| fibonacci | 161 ms | 157 ms | 0.97x |
+| loops | 130 ms | 120 ms | 0.92x |
 
-zphp beats PHP on four of six benchmarks. Array operations are 3.3x faster thanks to O(1) integer key lookups on sequential arrays. String operations are 3.5x faster after adding concat (string+string, string+int, int+string) to fastLoop - the concat loop stays in the fast tier instead of bailing to runLoop on every iteration, and the growable concat_assign buffer avoids O(n) reallocation per append. Objects are 2.4x faster with property slot indices and IC-cached slot access. Closures beat PHP via indexed capture lookup (HashMap by closure name instead of linear scan) and fastLoop handling of call_indirect for closures.
+zphp beats PHP on all six benchmarks. Array operations are 3.4x faster thanks to O(1) integer key lookups on sequential arrays. String operations are 3.6x faster with concat (string+string, string+int, int+string) in fastLoop - the concat loop stays in the fast tier instead of bailing to runLoop on every iteration, and the growable concat_assign buffer avoids O(n) reallocation per append. Objects are 2.7x faster with property slot indices and IC-cached slot access. Closures beat PHP via indexed capture lookup (HashMap by closure name instead of linear scan) and fastLoop handling of call_indirect for closures.
 
-Fibonacci and loops are currently slower than PHP due to LLVM codegen perturbation. The interpreter's hot loop produces different machine code depending on the size and layout of surrounding functions in the same compilation unit - even when the hot loop itself hasn't changed. This is a known class of issue with large switch-based interpreters on LLVM backends. Splitting the VM into separate compilation units or applying profile-guided optimization are the most promising paths to recovering performance.
+Fibonacci and loops recovered from a previous LLVM codegen perturbation regression by compiling fastLoop as a separate object file (src/fast_loop.zig). When fastLoop lived in the same compilation unit as runLoop (~2300 lines, ~100 opcodes), LLVM's optimizer made suboptimal codegen decisions for fastLoop's hot path. Separate compilation units isolate the two functions so LLVM optimizes each independently.
 
 ### Optimization targets
 

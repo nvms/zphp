@@ -4,6 +4,20 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
+    // fastLoop compiled as a separate object so LLVM optimizes it
+    // independently of runLoop (prevents codegen perturbation)
+    const fast_loop_mod = b.createModule(.{
+        .root_source_file = b.path("src/fast_loop.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    fast_loop_mod.link_libc = true;
+
+    const fast_loop_obj = b.addObject(.{
+        .name = "fast_loop",
+        .root_module = fast_loop_mod,
+    });
+
     const exe_mod = b.createModule(.{
         .root_source_file = b.path("src/main.zig"),
         .target = target,
@@ -19,12 +33,12 @@ pub fn build(b: *std.Build) void {
     exe_mod.linkSystemLibrary("crypto", .{ .use_pkg_config = .no });
     exe_mod.linkSystemLibrary("nghttp2", .{});
     exe_mod.link_libc = true;
+    exe_mod.addObject(fast_loop_obj);
 
     const exe = b.addExecutable(.{
         .name = "zphp",
         .root_module = exe_mod,
     });
-
     b.installArtifact(exe);
 
     const run_cmd = b.addRunArtifact(exe);
@@ -35,6 +49,11 @@ pub fn build(b: *std.Build) void {
 
     const run_step = b.step("run", "Run zphp");
     run_step.dependOn(&run_cmd.step);
+
+    const fast_loop_test_obj = b.addObject(.{
+        .name = "fast_loop_test",
+        .root_module = fast_loop_mod,
+    });
 
     const test_mod = b.createModule(.{
         .root_source_file = b.path("src/main.zig"),
@@ -51,6 +70,7 @@ pub fn build(b: *std.Build) void {
     test_mod.linkSystemLibrary("crypto", .{ .use_pkg_config = .no });
     test_mod.linkSystemLibrary("nghttp2", .{});
     test_mod.link_libc = true;
+    test_mod.addObject(fast_loop_test_obj);
 
     const unit_tests = b.addTest(.{
         .root_module = test_mod,
