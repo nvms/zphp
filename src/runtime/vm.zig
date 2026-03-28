@@ -1001,12 +1001,16 @@ pub const VM = struct {
                             const full = std.fmt.bufPrint(&buf, "{s}::{s}", .{ target.string, method }) catch return error.RuntimeError;
                             break :blk try ctx.vm.callByName(full, args_buf[0..ac]);
                         } else {
-                            self.error_msg = std.fmt.allocPrint(self.allocator, "Fatal error: Uncaught TypeError: Value of type {s} is not callable", .{valueTypeName(target)}) catch null;
+                            var buf2: [256]u8 = undefined;
+                            const msg = std.fmt.bufPrint(&buf2, "Value of type {s} is not callable", .{valueTypeName(target)}) catch "Value is not callable";
+                            if (try self.throwBuiltinException("TypeError", msg)) continue;
                             return error.RuntimeError;
                         };
                         self.push(result);
                     } else {
-                        self.error_msg = std.fmt.allocPrint(self.allocator, "Fatal error: Uncaught TypeError: Value of type {s} is not callable", .{valueTypeName(name_val)}) catch null;
+                        var buf2: [256]u8 = undefined;
+                        const msg = std.fmt.bufPrint(&buf2, "Value of type {s} is not callable", .{valueTypeName(name_val)}) catch "Value is not callable";
+                        if (try self.throwBuiltinException("TypeError", msg)) continue;
                         return error.RuntimeError;
                     }
                 },
@@ -1086,7 +1090,9 @@ pub const VM = struct {
                     const name_val = self.pop();
                     const args_val = self.pop();
                     if (args_val != .array or name_val != .string) {
-                        self.error_msg = std.fmt.allocPrint(self.allocator, "Fatal error: Uncaught TypeError: Value of type {s} is not callable", .{valueTypeName(name_val)}) catch null;
+                        var buf2: [256]u8 = undefined;
+                        const msg = std.fmt.bufPrint(&buf2, "Value of type {s} is not callable", .{valueTypeName(name_val)}) catch "Value is not callable";
+                        if (try self.throwBuiltinException("TypeError", msg)) continue;
                         return error.RuntimeError;
                     }
                     const arr = args_val.array;
@@ -1214,7 +1220,10 @@ pub const VM = struct {
                 .iter_begin => {
                     var iterable = self.stack[self.sp - 1];
                     if (iterable == .generator) {
-                        try self.resumeGenerator(iterable.generator, .null);
+                        self.resumeGenerator(iterable.generator, .null) catch {
+                            if (self.dispatchPendingException(base_frame)) continue;
+                            return error.RuntimeError;
+                        };
                         self.push(.{ .int = -1 }); // sentinel: -1 means generator iteration
                     } else if (iterable == .object) {
                         // IteratorAggregate: replace iterable with getIterator() result
@@ -1280,7 +1289,10 @@ pub const VM = struct {
                 .iter_advance => {
                     const iterable = self.stack[self.sp - 2];
                     if (iterable == .generator) {
-                        try self.resumeGenerator(iterable.generator, .null);
+                        self.resumeGenerator(iterable.generator, .null) catch {
+                            if (self.dispatchPendingException(base_frame)) continue;
+                            return error.RuntimeError;
+                        };
                     } else if (Value.toInt(self.stack[self.sp - 1]) == -2 and iterable == .object) {
                         _ = self.callMethod(iterable.object, "next", &.{}) catch {};
                     } else {
@@ -2400,23 +2412,54 @@ pub const VM = struct {
                         self.sp -= 1; // pop generator
                         if (std.mem.eql(u8, method_name, "current")) {
                             // auto-start if not yet started
-                            if (gen.state == .created) try self.resumeGenerator(gen, .null);
+                            if (gen.state == .created) {
+                                self.resumeGenerator(gen, .null) catch {
+                                    if (self.dispatchPendingException(base_frame)) continue;
+                                    return error.RuntimeError;
+                                };
+                            }
                             self.push(gen.current_value);
                         } else if (std.mem.eql(u8, method_name, "key")) {
-                            if (gen.state == .created) try self.resumeGenerator(gen, .null);
+                            if (gen.state == .created) {
+                                self.resumeGenerator(gen, .null) catch {
+                                    if (self.dispatchPendingException(base_frame)) continue;
+                                    return error.RuntimeError;
+                                };
+                            }
                             self.push(gen.current_key);
                         } else if (std.mem.eql(u8, method_name, "valid")) {
-                            if (gen.state == .created) try self.resumeGenerator(gen, .null);
+                            if (gen.state == .created) {
+                                self.resumeGenerator(gen, .null) catch {
+                                    if (self.dispatchPendingException(base_frame)) continue;
+                                    return error.RuntimeError;
+                                };
+                            }
                             self.push(.{ .bool = gen.state != .completed });
                         } else if (std.mem.eql(u8, method_name, "next")) {
                             // next() always advances: if not started, start then advance
-                            if (gen.state == .created) try self.resumeGenerator(gen, .null);
-                            try self.resumeGenerator(gen, .null);
+                            if (gen.state == .created) {
+                                self.resumeGenerator(gen, .null) catch {
+                                    if (self.dispatchPendingException(base_frame)) continue;
+                                    return error.RuntimeError;
+                                };
+                            }
+                            self.resumeGenerator(gen, .null) catch {
+                                if (self.dispatchPendingException(base_frame)) continue;
+                                return error.RuntimeError;
+                            };
                             self.push(.null);
                         } else if (std.mem.eql(u8, method_name, "send")) {
                             const sent = if (ac > 0) self.stack[self.sp + 1] else Value{ .null = {} };
-                            if (gen.state == .created) try self.resumeGenerator(gen, .null);
-                            try self.resumeGenerator(gen, sent);
+                            if (gen.state == .created) {
+                                self.resumeGenerator(gen, .null) catch {
+                                    if (self.dispatchPendingException(base_frame)) continue;
+                                    return error.RuntimeError;
+                                };
+                            }
+                            self.resumeGenerator(gen, sent) catch {
+                                if (self.dispatchPendingException(base_frame)) continue;
+                                return error.RuntimeError;
+                            };
                             self.push(if (gen.state == .completed) .null else gen.current_value);
                         } else if (std.mem.eql(u8, method_name, "rewind")) {
                             self.push(.null);
@@ -3128,7 +3171,12 @@ pub const VM = struct {
 
                     if (iterable == .generator) {
                         const inner = iterable.generator;
-                        if (inner.state == .created) try self.resumeGenerator(inner, .null);
+                        if (inner.state == .created) {
+                            self.resumeGenerator(inner, .null) catch {
+                                if (self.dispatchPendingException(base_frame)) continue;
+                                return error.RuntimeError;
+                            };
+                        }
 
                         if (inner.state == .suspended) {
                             outer_gen.delegate = .{ .gen = inner };
@@ -3296,6 +3344,27 @@ pub const VM = struct {
         return true;
     }
 
+    fn dispatchPendingException(self: *VM, base_frame: usize) bool {
+        const exc = self.pending_exception orelse return false;
+        if (self.handler_count <= self.handler_floor) return false;
+        const handler = self.exception_handlers[self.handler_count - 1];
+        if (handler.frame_count <= base_frame and base_frame > 0) return false;
+        self.pending_exception = null;
+        self.handler_count -= 1;
+        while (self.frame_count > handler.frame_count) {
+            self.frame_count -= 1;
+            self.frames[self.frame_count].vars.deinit(self.allocator);
+            if (self.frames[self.frame_count].locals.len > 0) {
+                self.freeLocals(self.frames[self.frame_count].locals);
+                self.frames[self.frame_count].locals = &.{};
+            }
+        }
+        self.sp = handler.sp;
+        self.push(exc);
+        self.currentFrame().ip = handler.catch_ip;
+        return true;
+    }
+
     pub fn resumeGenerator(self: *VM, gen: *Generator, sent_value: Value) RuntimeError!void {
         if (gen.state == .completed) return;
 
@@ -3392,20 +3461,7 @@ pub const VM = struct {
                 self.frames[self.frame_count].vars.deinit(self.allocator);
             }
             self.sp = saved_sp;
-            if (self.pending_exception) |exc| {
-                self.pending_exception = null;
-                if (self.handler_count > self.handler_floor) {
-                    const handler = self.exception_handlers[self.handler_count - 1];
-                    self.handler_count -= 1;
-                    while (self.frame_count > handler.frame_count) {
-                        self.frame_count -= 1;
-                        self.frames[self.frame_count].vars.deinit(self.allocator);
-                    }
-                    self.sp = handler.sp;
-                    self.push(exc);
-                    self.currentFrame().ip = handler.catch_ip;
-                    return;
-                }
+            if (self.pending_exception != null) {
                 return error.RuntimeError;
             }
             return err;

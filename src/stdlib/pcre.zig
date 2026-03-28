@@ -13,6 +13,7 @@ const pcre2 = struct {
     const DOTALL: u32 = 0x00000020;
     const EXTENDED: u32 = 0x00000080;
     const UTF: u32 = 0x00080000;
+    const ANCHORED: u32 = 0x80000000;
 
     const SUBSTITUTE_GLOBAL: u32 = 0x00000100;
     const SUBSTITUTE_OVERFLOW_LENGTH: u32 = 0x00001000;
@@ -99,8 +100,16 @@ fn parsePattern(raw: []const u8) ?PatternInfo {
     const delim = raw[0];
     if (delim == '\\' or std.ascii.isAlphanumeric(delim)) return null;
 
+    const close_delim: u8 = switch (delim) {
+        '(' => ')',
+        '{' => '}',
+        '[' => ']',
+        '<' => '>',
+        else => delim,
+    };
+
     var end = raw.len - 1;
-    while (end > 0 and raw[end] != delim) end -= 1;
+    while (end > 0 and raw[end] != close_delim) end -= 1;
     if (end == 0) return null;
 
     const pattern = raw[1..end];
@@ -114,6 +123,7 @@ fn parsePattern(raw: []const u8) ?PatternInfo {
             's' => flags |= pcre2.DOTALL,
             'x' => flags |= pcre2.EXTENDED,
             'u' => flags |= pcre2.UTF,
+            'A' => flags |= pcre2.ANCHORED,
             else => {},
         }
     }
@@ -144,7 +154,8 @@ fn preg_match(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     const match_data = pcre2.pcre2_match_data_create_from_pattern_8(code, null) orelse return Value{ .int = 0 };
     defer pcre2.pcre2_match_data_free_8(match_data);
 
-    const rc = pcre2.pcre2_match_8(code, subject.ptr, subject.len, 0, 0, match_data, null);
+    const offset: usize = if (args.len >= 5 and args[4] == .int and args[4].int >= 0) @intCast(args[4].int) else 0;
+    const rc = pcre2.pcre2_match_8(code, subject.ptr, subject.len, offset, 0, match_data, null);
     if (rc < 0) return .{ .int = 0 };
 
     if (args.len >= 3) {
