@@ -283,6 +283,15 @@ pub fn compileClosure(self: *Compiler, node: Ast.Node) Error!void {
     }
     _ = sub.getOrCreateSlot("$this");
 
+    // arrow functions: pre-register parent scope variables so they compile as
+    // get_local instead of get_var, enabling locals-only execution path
+    if (is_arrow) {
+        var parent_it = self.local_slots.iterator();
+        while (parent_it.next()) |entry| {
+            _ = sub.getOrCreateSlot(entry.key_ptr.*);
+        }
+    }
+
     try sub.compileNode(body_node);
     try sub.emitOp(.op_null);
     try sub.emitOp(if (gen) .generator_return else .return_val);
@@ -309,7 +318,7 @@ pub fn compileClosure(self: *Compiler, node: Ast.Node) Error!void {
     const local_count = sub.next_slot;
     sub.local_slots.deinit(self.allocator);
 
-    const closure_lo = !is_arrow and !gen and !has_any_ref and !has_ref_capture and !needsVarSync(&sub.chunk);
+    const closure_lo = !gen and !has_any_ref and !has_ref_capture and !needsVarSync(&sub.chunk);
 
     const func = ObjFunction{
         .name = owned_name,
@@ -352,6 +361,21 @@ pub fn compileClosure(self: *Compiler, node: Ast.Node) Error!void {
         const is_ref = use_node.data.rhs != 0;
         try self.emitOp(if (is_ref) .closure_bind_ref else .closure_bind);
         try self.emitU16(var_idx);
+    }
+
+    // arrow functions: emit closure_bind for all captured outer-scope variables
+    if (is_arrow) {
+        for (slot_names) |sn| {
+            var is_param = false;
+            for (param_names[0..param_nodes.len]) |pn| {
+                if (sn.len == pn.len and std.mem.eql(u8, sn, pn)) { is_param = true; break; }
+            }
+            if (is_param) continue;
+            if (std.mem.eql(u8, sn, "$this")) continue;
+            const sn_idx = try self.addConstant(.{ .string = sn });
+            try self.emitOp(.closure_bind);
+            try self.emitU16(sn_idx);
+        }
     }
 
     // bind $this for closures in method context
