@@ -269,6 +269,8 @@ pub fn compileClosure(self: *Compiler, node: Ast.Node) Error!void {
         .namespace = self.namespace,
         .use_aliases = self.use_aliases,
         .use_fn_aliases = self.use_fn_aliases,
+        .current_class = self.current_class,
+        .in_trait = self.in_trait,
     };
     errdefer {
         sub.chunk.deinit(self.allocator);
@@ -970,6 +972,9 @@ pub fn compileTraitDecl(self: *Compiler, node: Ast.Node) Error!void {
     const members = self.ast.extraSlice(node.data.lhs);
 
     // compile trait methods as TraitName::methodName functions
+    const prev_in_trait = self.in_trait;
+    self.in_trait = true;
+    defer self.in_trait = prev_in_trait;
     for (members) |member_idx| {
         const member = self.ast.nodes[member_idx];
         if (member.tag == .class_method or member.tag == .static_class_method) {
@@ -1184,6 +1189,8 @@ fn compileClassMethodBody(self: *Compiler, class_name: []const u8, member: Ast.N
         .namespace = self.namespace,
         .use_aliases = self.use_aliases,
         .use_fn_aliases = self.use_fn_aliases,
+        .current_class = class_name,
+        .in_trait = self.in_trait,
     };
     errdefer {
         sub.chunk.deinit(self.allocator);

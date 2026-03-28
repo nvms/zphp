@@ -281,6 +281,7 @@ pub const VM = struct {
     handler_count: usize = 0,
     handler_floor: usize = 0,
     pending_exception: ?Value = null,
+    run_base_frame: usize = 0,
     allocator: Allocator,
     global_slot_names: []const []const u8 = &.{},
     global_vars_dirty: bool = false,
@@ -653,6 +654,9 @@ pub const VM = struct {
     }
 
     fn runLoop(self: *VM, base_frame: usize) RuntimeError!void {
+        const prev_base_frame = self.run_base_frame;
+        self.run_base_frame = base_frame;
+        defer self.run_base_frame = prev_base_frame;
         while (true) {
             const op: OpCode = @enumFromInt(self.readByte());
             switch (op) {
@@ -1730,6 +1734,13 @@ pub const VM = struct {
                     }
 
                     const handler = self.exception_handlers[self.handler_count - 1];
+
+                    // handler belongs to an outer runLoop - propagate up
+                    if (handler.frame_count <= base_frame and base_frame > 0) {
+                        self.pending_exception = exception;
+                        return error.RuntimeError;
+                    }
+
                     self.handler_count -= 1;
 
                     // unwind frames back to where handler was set
@@ -1828,13 +1839,52 @@ pub const VM = struct {
 
                                     const return_frame = self.frame_count;
                                     const sp_before = self.sp;
+                                    var req_locals: []Value = &.{};
+                                    if (result.local_count > 0) {
+                                        req_locals = try self.allocator.alloc(Value, result.local_count);
+                                        @memset(req_locals, .null);
+                                    }
                                     self.frames[self.frame_count] = .{
                                         .chunk = &result.chunk,
                                         .ip = 0,
                                         .vars = .{},
+                                        .locals = req_locals,
                                     };
                                     self.frame_count += 1;
                                     self.runUntilFrame(return_frame) catch {
+                                        // clean up remaining inner frames including the require frame
+                                        while (self.frame_count > return_frame) {
+                                            self.frame_count -= 1;
+                                            self.frames[self.frame_count].vars.deinit(self.allocator);
+                                            if (self.frames[self.frame_count].locals.len > 0) {
+                                                self.freeLocals(self.frames[self.frame_count].locals);
+                                                self.frames[self.frame_count].locals = &.{};
+                                            }
+                                        }
+
+                                        // dispatch pending exception to handler in this scope
+                                        if (self.pending_exception) |exc| {
+                                            if (self.handler_count > self.handler_floor) {
+                                                const handler = self.exception_handlers[self.handler_count - 1];
+                                                if (handler.frame_count > base_frame or base_frame == 0) {
+                                                    self.pending_exception = null;
+                                                    self.handler_count -= 1;
+                                                    while (self.frame_count > handler.frame_count) {
+                                                        self.frame_count -= 1;
+                                                        self.frames[self.frame_count].vars.deinit(self.allocator);
+                                                        if (self.frames[self.frame_count].locals.len > 0) {
+                                                            self.freeLocals(self.frames[self.frame_count].locals);
+                                                            self.frames[self.frame_count].locals = &.{};
+                                                        }
+                                                    }
+                                                    self.sp = handler.sp;
+                                                    self.push(exc);
+                                                    self.currentFrame().ip = handler.catch_ip;
+                                                    continue;
+                                                }
+                                            }
+                                        }
+
                                         if (is_require) {
                                             if (self.error_msg == null and self.pending_exception == null) {
                                                 self.error_msg = std.fmt.allocPrint(self.allocator, "Fatal error: require(): Failed opening required '{s}'", .{path}) catch null;
@@ -3226,6 +3276,13 @@ pub const VM = struct {
         }
 
         const handler = self.exception_handlers[self.handler_count - 1];
+
+        // handler belongs to an outer runLoop - propagate up
+        if (handler.frame_count <= self.run_base_frame and self.run_base_frame > 0) {
+            self.pending_exception = .{ .object = obj };
+            return false;
+        }
+
         self.handler_count -= 1;
 
         while (self.frame_count > handler.frame_count) {
@@ -4239,7 +4296,6 @@ pub const VM = struct {
         var current = obj_class;
         while (true) {
             if (std.mem.eql(u8, current, target_class)) return true;
-            // check interfaces implemented by this class
             if (self.classes.get(current)) |cls| {
                 for (cls.interfaces.items) |iface| {
                     if (self.implementsInterface(iface, target_class)) return true;
@@ -4248,9 +4304,36 @@ pub const VM = struct {
                     current = p;
                     continue;
                 }
+            } else if (builtinExceptionParent(current)) |p| {
+                if (std.mem.eql(u8, target_class, "Throwable")) return true;
+                current = p;
+                continue;
             }
             return false;
         }
+    }
+
+    fn builtinExceptionParent(class_name: []const u8) ?[]const u8 {
+        if (std.mem.eql(u8, class_name, "Exception") or std.mem.eql(u8, class_name, "Error")) return "Throwable";
+        const exception_children = [_][]const u8{
+            "RuntimeException",     "LogicException",          "InvalidArgumentException",
+            "BadMethodCallException", "BadFunctionCallException", "OutOfRangeException",
+            "OverflowException",    "UnderflowException",      "LengthException",
+            "DomainException",      "RangeException",          "UnexpectedValueException",
+            "JsonException",        "PDOException",
+        };
+        for (exception_children) |name| {
+            if (std.mem.eql(u8, class_name, name)) return "Exception";
+        }
+        const error_children = [_][]const u8{
+            "TypeError",      "ValueError",          "ArithmeticError",
+            "DivisionByZeroError", "UnhandledMatchError", "FiberError",
+            "ParseError",     "CompileError",
+        };
+        for (error_children) |name| {
+            if (std.mem.eql(u8, class_name, name)) return "Error";
+        }
+        return null;
     }
 
     fn checkVisibility(self: *VM, target_class: []const u8, vis: ClassDef.Visibility) bool {
