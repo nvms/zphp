@@ -17,6 +17,8 @@ pub const entries = .{
     .{ "checkdate", native_checkdate },
     .{ "getdate", native_getdate },
     .{ "gmdate", native_gmdate },
+    .{ "date_default_timezone_set", native_tz_set },
+    .{ "date_default_timezone_get", native_tz_get },
 };
 
 pub fn register(vm: *VM, a: Allocator) !void {
@@ -1243,4 +1245,14 @@ fn startsWith(s: []const u8, prefix: []const u8) bool {
 // gmdate is identical to date since zphp timestamps are always UTC
 fn native_gmdate(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     return native_date(ctx, args);
+}
+
+// timezone stubs - zphp always runs in UTC
+fn native_tz_set(_: *NativeContext, _: []const Value) RuntimeError!Value {
+    return .{ .bool = true };
+}
+
+fn native_tz_get(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    _ = ctx;
+    return .{ .string = "UTC" };
 }

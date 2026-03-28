@@ -141,6 +141,10 @@ fn compileInterpolatedString(self: *Compiler, s: []const u8) (Allocator.Error ||
 
     while (i < s.len) {
         if (s[i] == '\\' and i + 1 < s.len) {
+            if (s[i + 1] == '\\') {
+                i += 2;
+                continue;
+            }
             if (s[i + 1] == '$') {
                 i += 2;
                 continue;
@@ -159,9 +163,15 @@ fn compileInterpolatedString(self: *Compiler, s: []const u8) (Allocator.Error ||
     var lit_start: usize = 0;
 
     while (i < s.len) {
-        if (s[i] == '\\' and i + 1 < s.len and s[i + 1] == '$') {
-            i += 2;
-            continue;
+        if (s[i] == '\\' and i + 1 < s.len) {
+            if (s[i + 1] == '\\') {
+                i += 2;
+                continue;
+            }
+            if (s[i + 1] == '$') {
+                i += 2;
+                continue;
+            }
         }
 
         if (s[i] == '{' and i + 1 < s.len and s[i + 1] == '$') {

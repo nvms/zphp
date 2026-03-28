@@ -100,6 +100,9 @@ pub const entries = .{
     .{ "str_increment", native_str_increment },
     .{ "str_decrement", native_str_decrement },
     .{ "substr_compare", native_substr_compare },
+    .{ "strcspn", native_strcspn },
+    .{ "strspn", native_strspn },
+    .{ "strpbrk", native_strpbrk },
 };
 
 fn substr(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
@@ -2643,4 +2646,54 @@ fn native_substr_compare(_: *NativeContext, args: []const Value) RuntimeError!Va
     if (hay_len < ndl_len) return .{ .int = -1 };
     if (hay_len > ndl_len) return .{ .int = 1 };
     return .{ .int = 0 };
+}
+
+fn native_strcspn(_: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len < 2 or args[0] != .string or args[1] != .string) return .{ .int = 0 };
+    const s = args[0].string;
+    const chars = args[1].string;
+    const start: usize = if (args.len >= 3) @intCast(@max(0, Value.toInt(args[2]))) else 0;
+    const length: usize = if (args.len >= 4) @intCast(@max(0, Value.toInt(args[3]))) else s.len;
+    const end = @min(start + length, s.len);
+
+    for (start..end) |i| {
+        for (chars) |c| {
+            if (s[i] == c) return .{ .int = @intCast(i - start) };
+        }
+    }
+    return .{ .int = @intCast(end - start) };
+}
+
+fn native_strspn(_: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len < 2 or args[0] != .string or args[1] != .string) return .{ .int = 0 };
+    const s = args[0].string;
+    const chars = args[1].string;
+    const start: usize = if (args.len >= 3) @intCast(@max(0, Value.toInt(args[2]))) else 0;
+    const length: usize = if (args.len >= 4) @intCast(@max(0, Value.toInt(args[3]))) else s.len;
+    const end = @min(start + length, s.len);
+
+    for (start..end) |i| {
+        var found = false;
+        for (chars) |c| {
+            if (s[i] == c) { found = true; break; }
+        }
+        if (!found) return .{ .int = @intCast(i - start) };
+    }
+    return .{ .int = @intCast(end - start) };
+}
+
+fn native_strpbrk(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len < 2 or args[0] != .string or args[1] != .string) return .{ .bool = false };
+    const s = args[0].string;
+    const chars = args[1].string;
+    for (s, 0..) |ch, i| {
+        for (chars) |c| {
+            if (ch == c) {
+                const result = try ctx.allocator.dupe(u8, s[i..]);
+                try ctx.vm.strings.append(ctx.allocator, result);
+                return .{ .string = result };
+            }
+        }
+    }
+    return .{ .bool = false };
 }

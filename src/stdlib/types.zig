@@ -63,6 +63,7 @@ pub const entries = .{
     .{ "set_exception_handler", native_set_exception_handler },
     .{ "restore_error_handler", native_restore_error_handler },
     .{ "restore_exception_handler", native_noop_true },
+    .{ "register_shutdown_function", native_noop_null },
     .{ "error_reporting", native_error_reporting },
     .{ "trigger_error", native_trigger_error },
     .{ "user_error", native_trigger_error },
@@ -770,6 +771,10 @@ fn native_restore_error_handler(ctx: *NativeContext, _: []const Value) RuntimeEr
 
 fn native_noop_true(_: *NativeContext, _: []const Value) RuntimeError!Value {
     return .{ .bool = true };
+}
+
+fn native_noop_null(_: *NativeContext, _: []const Value) RuntimeError!Value {
+    return .null;
 }
 
 fn native_error_reporting(_: *NativeContext, args: []const Value) RuntimeError!Value {

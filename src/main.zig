@@ -175,6 +175,48 @@ fn loadFile(path: []const u8, allocator: std.mem.Allocator) ?*CompileResult {
     return heap_result;
 }
 
+const PhpArray = @import("runtime/value.zig").PhpArray;
+
+fn initCliServerVars(vm: *VM, a: std.mem.Allocator) !void {
+    const arr = try a.create(PhpArray);
+    arr.* = .{};
+    try vm.arrays.append(a, arr);
+
+    const entries = .{
+        .{ "REQUEST_URI", "/" },
+        .{ "SERVER_NAME", "localhost" },
+        .{ "SERVER_PORT", "80" },
+        .{ "HTTP_HOST", "localhost" },
+        .{ "REQUEST_METHOD", "GET" },
+        .{ "SCRIPT_NAME", "/" },
+        .{ "SCRIPT_FILENAME", "" },
+        .{ "DOCUMENT_ROOT", "" },
+        .{ "SERVER_PROTOCOL", "HTTP/1.1" },
+        .{ "GATEWAY_INTERFACE", "CGI/1.1" },
+        .{ "SERVER_SOFTWARE", "zphp" },
+        .{ "REMOTE_ADDR", "127.0.0.1" },
+        .{ "REQUEST_TIME", "" },
+        .{ "argv", "" },
+        .{ "argc", "" },
+        .{ "PHP_SELF", "/" },
+    };
+    inline for (entries) |e| {
+        try arr.set(a, .{ .string = e[0] }, .{ .string = e[1] });
+    }
+    try vm.request_vars.put(a, "$_SERVER", .{ .array = arr });
+
+    // empty superglobals
+    const empty_arr = try a.create(PhpArray);
+    empty_arr.* = .{};
+    try vm.arrays.append(a, empty_arr);
+    try vm.request_vars.put(a, "$_GET", .{ .array = empty_arr });
+    try vm.request_vars.put(a, "$_POST", .{ .array = empty_arr });
+    try vm.request_vars.put(a, "$_REQUEST", .{ .array = empty_arr });
+    try vm.request_vars.put(a, "$_COOKIE", .{ .array = empty_arr });
+    try vm.request_vars.put(a, "$_FILES", .{ .array = empty_arr });
+    try vm.request_vars.put(a, "$_ENV", .{ .array = empty_arr });
+}
+
 fn runFile(allocator: std.mem.Allocator, path: []const u8) !void {
     if (std.mem.endsWith(u8, path, ".zphpc")) {
         const bc = std.fs.cwd().readFileAlloc(allocator, path, 256 * 1024 * 1024) catch |err| {
@@ -216,6 +258,7 @@ fn runWithVM(allocator: std.mem.Allocator, result: *CompileResult) !void {
     };
     defer vm.deinit();
     vm.file_loader = &loadFile;
+    try initCliServerVars(&vm, allocator);
     vm.interpret(result) catch {
         if (vm.output.items.len > 0) try writeStdout(vm.output.items);
         if (vm.exit_requested) std.process.exit(0);

@@ -19,11 +19,21 @@ fn buildTypeString(self: *Compiler, start_tok: u32, end_tok: u32) Error![]const 
         }
         return lexeme;
     }
+
+    // check if leading backslash means fully qualified
+    var is_fqn = false;
+    if (start_tok < end_tok) {
+        const first_lex = self.ast.tokens[start_tok].lexeme(self.ast.source);
+        if (std.mem.eql(u8, first_lex, "\\")) is_fqn = true;
+    }
+
     var buf = std.ArrayListUnmanaged(u8){};
     for (start_tok..end_tok) |t| {
         const tag = self.ast.tokens[t].tag;
         const lexeme = self.ast.tokens[t].lexeme(self.ast.source);
-        if (tag == .identifier and !isPrimitiveType(lexeme)) {
+        // skip leading backslash in FQN types (it just means "absolute")
+        if (is_fqn and std.mem.eql(u8, lexeme, "\\") and buf.items.len == 0) continue;
+        if (tag == .identifier and !isPrimitiveType(lexeme) and !is_fqn) {
             try buf.appendSlice(self.allocator, self.resolveClassName(lexeme));
         } else {
             try buf.appendSlice(self.allocator, lexeme);
