@@ -22,14 +22,16 @@ Requires PHP installed locally. zphp must be built with ReleaseFast - debug buil
 
 | benchmark | php | zphp | ratio |
 |---|---|---|---|
-| string_ops | 97 ms | 24 ms | 0.25x |
-| array_ops | 95 ms | 29 ms | 0.31x |
-| objects | 99 ms | 34 ms | 0.34x |
-| closures | 100 ms | 89 ms | 0.89x |
-| fibonacci | 162 ms | 148 ms | 0.91x |
-| loops | 129 ms | 127 ms | 0.98x |
+| string_ops | 94 ms | 27 ms | 0.29x |
+| array_ops | 96 ms | 29 ms | 0.30x |
+| objects | 93 ms | 39 ms | 0.42x |
+| closures | 95 ms | 90 ms | 0.95x |
+| fibonacci | 167 ms | 202 ms | 1.21x |
+| loops | 128 ms | 226 ms | 1.77x |
 
-zphp beats PHP on all six benchmarks. Array operations are 3.3x faster thanks to O(1) integer key lookups on sequential arrays. String operations are 4x faster after adding concat (string+string, string+int, int+string) to fastLoop - the concat loop stays in the fast tier instead of bailing to runLoop on every iteration, and the growable concat_assign buffer avoids O(n) reallocation per append. Objects are 3x faster with property slot indices and IC-cached slot access. Closures beat PHP via indexed capture lookup (HashMap by closure name instead of linear scan) and fastLoop handling of call_indirect for closures. Loops and fibonacci benefit from labeled switch dispatch in fastLoop - each opcode handler jumps directly to the next via `continue :dispatch`, eliminating the while loop overhead and giving the CPU branch predictor per-handler context. Superinstructions (inc_local, add_local_to_local, less_local_local_jif) fuse common opcode sequences in hot loops.
+zphp beats PHP on four of six benchmarks. Array operations are 3.3x faster thanks to O(1) integer key lookups on sequential arrays. String operations are 3.5x faster after adding concat (string+string, string+int, int+string) to fastLoop - the concat loop stays in the fast tier instead of bailing to runLoop on every iteration, and the growable concat_assign buffer avoids O(n) reallocation per append. Objects are 2.4x faster with property slot indices and IC-cached slot access. Closures beat PHP via indexed capture lookup (HashMap by closure name instead of linear scan) and fastLoop handling of call_indirect for closures.
+
+Fibonacci and loops are currently slower than PHP due to LLVM codegen perturbation - the fastLoop function (876 lines, unchanged) produces different machine code depending on the size and layout of surrounding code in vm.zig. Bisecting confirmed the regression started at commit 109c45d (adding namespace/autoload features to runLoop), despite fastLoop being identical. The hot path (labeled switch dispatch, superinstructions) is the same - only binary layout changed. This is a known class of issue with large switch-based interpreters on LLVM backends.
 
 ### Optimization targets
 
