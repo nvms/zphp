@@ -1107,6 +1107,9 @@ pub const VM = struct {
                             try arr_val.array.set(self.allocator, arr_key, new_val);
                             self.push(new_val);
                         }
+                    } else if (arr_val == .object and self.hasMethod(arr_val.object.class_name, "offsetGet")) {
+                        const result = self.callMethod(arr_val.object, "offsetGet", &.{key}) catch .null;
+                        self.push(result);
                     } else {
                         self.push(.null);
                     }

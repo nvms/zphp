@@ -16,6 +16,14 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try countable.methods.append(a, "count");
     try vm.interfaces.put(a, "Countable", countable);
 
+    // ArrayAccess interface
+    var array_access = vm_mod.InterfaceDef{ .name = "ArrayAccess" };
+    try array_access.methods.append(a, "offsetGet");
+    try array_access.methods.append(a, "offsetSet");
+    try array_access.methods.append(a, "offsetExists");
+    try array_access.methods.append(a, "offsetUnset");
+    try vm.interfaces.put(a, "ArrayAccess", array_access);
+
     // SplStack
     var stack_def = ClassDef{ .name = "SplStack" };
     try stack_def.interfaces.append(a, "Countable");
@@ -55,6 +63,7 @@ pub fn register(vm: *VM, a: Allocator) !void {
     // ArrayObject
     var ao_def = ClassDef{ .name = "ArrayObject" };
     try ao_def.interfaces.append(a, "Countable");
+    try ao_def.interfaces.append(a, "ArrayAccess");
     try ao_def.methods.put(a, "__construct", .{ .name = "__construct", .arity = 1 });
     try ao_def.methods.put(a, "offsetGet", .{ .name = "offsetGet", .arity = 1 });
     try ao_def.methods.put(a, "offsetSet", .{ .name = "offsetSet", .arity = 2 });
