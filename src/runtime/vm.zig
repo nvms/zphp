@@ -1090,18 +1090,53 @@ pub const VM = struct {
                     // stack: [... args_array, func_name]
                     const name_val = self.pop();
                     const args_val = self.pop();
-                    if (args_val != .array or name_val != .string) {
+                    if (args_val != .array) {
                         var buf2: [256]u8 = undefined;
                         const msg = std.fmt.bufPrint(&buf2, "Value of type {s} is not callable", .{valueTypeName(name_val)}) catch "Value is not callable";
                         if (try self.throwBuiltinException("TypeError", msg)) continue;
                         return error.RuntimeError;
                     }
                     const arr = args_val.array;
-                    for (arr.entries.items) |entry| {
-                        self.push(entry.value);
+                    if (name_val == .string) {
+                        for (arr.entries.items) |entry| self.push(entry.value);
+                        const ac: u8 = @intCast(arr.entries.items.len);
+                        try self.callNamedFunction(name_val.string, ac);
+                    } else if (name_val == .array) {
+                        const cb_arr = name_val.array;
+                        if (cb_arr.entries.items.len == 2) {
+                            const target = cb_arr.entries.items[0].value;
+                            const method_val = cb_arr.entries.items[1].value;
+                            if (method_val == .string) {
+                                var args_buf: [32]Value = undefined;
+                                const ac = arr.entries.items.len;
+                                for (0..ac) |i| args_buf[i] = arr.entries.items[i].value;
+                                const result = if (target == .object)
+                                    try self.callMethod(target.object, method_val.string, args_buf[0..ac])
+                                else if (target == .string) blk: {
+                                    var buf: [256]u8 = undefined;
+                                    const full = std.fmt.bufPrint(&buf, "{s}::{s}", .{ target.string, method_val.string }) catch return error.RuntimeError;
+                                    break :blk try self.callByName(full, args_buf[0..ac]);
+                                } else {
+                                    var buf2: [256]u8 = undefined;
+                                    const msg = std.fmt.bufPrint(&buf2, "Value of type {s} is not callable", .{valueTypeName(name_val)}) catch "Value is not callable";
+                                    if (try self.throwBuiltinException("TypeError", msg)) continue;
+                                    return error.RuntimeError;
+                                };
+                                self.push(result);
+                            } else {
+                                if (try self.throwBuiltinException("TypeError", "Method name must be a string")) continue;
+                                return error.RuntimeError;
+                            }
+                        } else {
+                            if (try self.throwBuiltinException("TypeError", "Array callback must have exactly two elements")) continue;
+                            return error.RuntimeError;
+                        }
+                    } else {
+                        var buf2: [256]u8 = undefined;
+                        const msg = std.fmt.bufPrint(&buf2, "Value of type {s} is not callable", .{valueTypeName(name_val)}) catch "Value is not callable";
+                        if (try self.throwBuiltinException("TypeError", msg)) continue;
+                        return error.RuntimeError;
                     }
-                    const ac: u8 = @intCast(arr.entries.items.len);
-                    try self.callNamedFunction(name_val.string, ac);
                 },
                 .return_val => {
                     const result = self.pop();
@@ -1165,8 +1200,14 @@ pub const VM = struct {
                     } else if (arr_val == .string) {
                         const s = arr_val.string;
                         const idx = Value.toInt(key);
-                        if (idx >= 0 and @as(usize, @intCast(idx)) < s.len) {
-                            self.push(.{ .string = s[@intCast(idx)..][0..1] });
+                        const resolved: ?usize = if (idx >= 0)
+                            if (@as(usize, @intCast(idx)) < s.len) @as(usize, @intCast(idx)) else null
+                        else if (@as(usize, @intCast(-idx)) <= s.len)
+                            s.len - @as(usize, @intCast(-idx))
+                        else
+                            null;
+                        if (resolved) |ri| {
+                            self.push(.{ .string = s[ri..][0..1] });
                         } else {
                             self.push(.null);
                         }
@@ -1703,6 +1744,18 @@ pub const VM = struct {
                         });
                         const gop2 = try self.capture_index.getOrPut(self.allocator, closure_name);
                         gop2.value_ptr.len += 1;
+                    } else if (!gop.found_existing) {
+                        // first capture for this closure - check if we're in a static class method
+                        const scope = self.currentFrame().called_class orelse self.currentDefiningClass();
+                        if (scope) |class_name| {
+                            try self.captures.append(self.allocator, .{
+                                .closure_name = closure_name,
+                                .var_name = "$__closure_scope",
+                                .value = .{ .string = class_name },
+                            });
+                            const gop2 = try self.capture_index.getOrPut(self.allocator, closure_name);
+                            gop2.value_ptr.len += 1;
+                        }
                     }
                 },
 
@@ -3252,7 +3305,25 @@ pub const VM = struct {
                     class_name = self.resolveStaticClassName(class_name);
 
                     const val = try self.copyValue(self.peek());
+                    var target: ?*ClassDef = null;
                     if (self.classes.getPtr(class_name)) |cls| {
+                        if (cls.static_props.contains(prop_name)) {
+                            target = cls;
+                        } else {
+                            var parent: ?[]const u8 = cls.parent;
+                            while (parent) |p| {
+                                if (self.classes.getPtr(p)) |pcls| {
+                                    if (pcls.static_props.contains(prop_name)) {
+                                        target = pcls;
+                                        break;
+                                    }
+                                    parent = pcls.parent;
+                                } else break;
+                            }
+                            if (target == null) target = cls;
+                        }
+                    }
+                    if (target) |cls| {
                         try cls.static_props.put(self.allocator, prop_name, val);
                     }
                 },
@@ -3583,10 +3654,10 @@ pub const VM = struct {
         }
 
         const prop_count = self.readByte();
-        var prop_names: [32][]const u8 = undefined;
-        var prop_has_default: [32]u8 = undefined;
-        var prop_vis: [32]ClassDef.Visibility = undefined;
-        var prop_readonly: [32]bool = .{false} ** 32;
+        var prop_names: [128][]const u8 = undefined;
+        var prop_has_default: [128]u8 = undefined;
+        var prop_vis: [128]ClassDef.Visibility = undefined;
+        var prop_readonly: [128]bool = .{false} ** 128;
         for (0..prop_count) |pi| {
             const pname_idx = self.readU16();
             prop_names[pi] = self.currentChunk().constants.items[pname_idx].string;
@@ -3597,8 +3668,8 @@ pub const VM = struct {
         }
 
         const static_prop_count = self.readByte();
-        var sprop_names: [32][]const u8 = undefined;
-        var sprop_has_default: [32]u8 = undefined;
+        var sprop_names: [128][]const u8 = undefined;
+        var sprop_has_default: [128]u8 = undefined;
         for (0..static_prop_count) |pi| {
             const pname_idx = self.readU16();
             sprop_names[pi] = self.currentChunk().constants.items[pname_idx].string;
@@ -3606,8 +3677,8 @@ pub const VM = struct {
             _ = self.readByte();
         }
 
-        const sdefaults = self.popDefaults(32, sprop_has_default[0..static_prop_count]);
-        const defaults = self.popDefaults(32, prop_has_default[0..prop_count]);
+        const sdefaults = self.popDefaults(128, sprop_has_default[0..static_prop_count]);
+        const defaults = self.popDefaults(128, prop_has_default[0..prop_count]);
 
         var dj: usize = 0;
         for (0..prop_count) |pi| {
@@ -4054,7 +4125,7 @@ pub const VM = struct {
                 self.saveFrameArgs(arg_count);
                 self.sp -= ac;
                 try self.fillDefaults(&new_vars, func, bind_count);
-                const inherit_cc = self.currentFrame().called_class;
+                const inherit_cc = self.closureScopeByName(name) orelse self.currentFrame().called_class;
                 self.frames[self.frame_count] = .{ .chunk = &func.chunk, .ip = 0, .vars = new_vars, .locals = try self.allocLocals(func, &new_vars), .func = func, .ref_slots = closure_refs, .called_class = inherit_cc };
                 self.setFrameArgCount(arg_count);
                 self.frame_count += 1;
@@ -4101,7 +4172,7 @@ pub const VM = struct {
             }
         }
 
-        self.frames[self.frame_count] = .{ .chunk = &func.chunk, .ip = 0, .vars = .{}, .locals = locals, .func = func, .called_class = self.currentFrame().called_class };
+        self.frames[self.frame_count] = .{ .chunk = &func.chunk, .ip = 0, .vars = .{}, .locals = locals, .func = func, .called_class = self.closureScopeByName(name) orelse self.currentFrame().called_class };
         self.setFrameArgCount(arg_count);
         self.frame_count += 1;
         try self.fastLoop();
@@ -4406,7 +4477,7 @@ pub const VM = struct {
 
     fn checkVisibility(self: *VM, target_class: []const u8, vis: ClassDef.Visibility) bool {
         if (vis == .public) return true;
-        const caller_class = self.currentDefiningClass() orelse return false;
+        const caller_class = self.currentFrame().called_class orelse self.currentDefiningClass() orelse return false;
         if (vis == .private) return std.mem.eql(u8, caller_class, target_class);
         // protected: caller must be same class or in inheritance chain
         return self.isInstanceOf(caller_class, target_class) or self.isInstanceOf(target_class, caller_class);
@@ -4464,6 +4535,17 @@ pub const VM = struct {
                         }
                     }
                 }
+            }
+        }
+        return null;
+    }
+
+    fn closureScopeByName(self: *VM, name: []const u8) ?[]const u8 {
+        if (self.capture_index.get(name)) |cr| {
+            const caps = self.captures.items[cr.start .. cr.start + cr.len];
+            for (caps) |cap| {
+                if (std.mem.eql(u8, cap.var_name, "$__closure_scope") and cap.value == .string)
+                    return cap.value.string;
             }
         }
         return null;
@@ -4898,7 +4980,7 @@ pub const VM = struct {
 
     fn callNamedFunction(self: *VM, name: []const u8, arg_count: u8) RuntimeError!void {
         if (self.native_fns.get(name)) |native| {
-            var args: [16]Value = undefined;
+            var args: [64]Value = undefined;
             const ac: usize = arg_count;
             for (0..ac) |i| args[i] = self.stack[self.sp - ac + i];
             self.sp -= ac;
@@ -4995,7 +5077,10 @@ pub const VM = struct {
                 try self.generators.append(self.allocator, gen);
                 self.push(.{ .generator = gen });
             } else {
-                const inherit_cc = if (std.mem.startsWith(u8, name, "__closure_")) self.currentFrame().called_class else null;
+                const inherit_cc = if (std.mem.startsWith(u8, name, "__closure_"))
+                    self.closureScopeByName(name) orelse self.currentFrame().called_class
+                else
+                    null;
                 self.frames[self.frame_count] = .{ .chunk = &func.chunk, .ip = 0, .vars = new_vars, .locals = try self.allocLocals(func, &new_vars), .func = func, .ref_slots = callee_refs, .called_class = inherit_cc };
                 self.setFrameArgCount(arg_count);
                 self.frame_count += 1;
@@ -5142,7 +5227,7 @@ pub const VM = struct {
                 }
             }
         }
-        self.frames[self.frame_count] = .{ .chunk = &func.chunk, .ip = 0, .vars = .{}, .locals = locals, .func = func, .called_class = self.currentFrame().called_class };
+        self.frames[self.frame_count] = .{ .chunk = &func.chunk, .ip = 0, .vars = .{}, .locals = locals, .func = func, .called_class = self.closureScopeByName(name) orelse self.currentFrame().called_class };
         self.consumePendingArgCount();
         self.frame_count += 1;
         try self.fastLoop();

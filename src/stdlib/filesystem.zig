@@ -58,6 +58,12 @@ pub const entries = .{
     .{ "chdir", native_chdir },
     .{ "stream_resolve_include_path", native_stream_resolve_include_path },
     .{ "stream_isatty", native_stream_isatty },
+    .{ "clearstatcache", native_clearstatcache },
+    .{ "tempnam", native_tempnam },
+    .{ "umask", native_umask },
+    .{ "fileperms", native_fileperms },
+    .{ "is_link", native_is_link },
+    .{ "readlink", native_readlink },
 };
 
 // file handle management - store handles in PhpObjects with class "FileHandle"
@@ -325,9 +331,8 @@ fn native_is_readable(_: *NativeContext, args: []const Value) RuntimeError!Value
 
 fn native_is_writable(_: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len == 0 or args[0] != .string) return .{ .bool = false };
-    // try opening for write to check
-    const file = std.fs.cwd().openFile(args[0].string, .{ .mode = .read_write }) catch return Value{ .bool = false };
-    file.close();
+    const path = args[0].string;
+    std.posix.access(path, std.posix.W_OK) catch return Value{ .bool = false };
     return .{ .bool = true };
 }
 
@@ -861,5 +866,51 @@ fn native_stream_isatty(_: *NativeContext, args: []const Value) RuntimeError!Val
     if (fd_val != .int) return .{ .bool = false };
     const fd: std.posix.fd_t = @intCast(fd_val.int);
     return .{ .bool = std.posix.isatty(fd) };
+}
+
+fn native_clearstatcache(_: *NativeContext, _: []const Value) RuntimeError!Value {
+    return .null;
+}
+
+fn native_umask(_: *NativeContext, args: []const Value) RuntimeError!Value {
+    const c = @cImport(@cInclude("sys/stat.h"));
+    if (args.len > 0 and args[0] == .int) {
+        const old = c.umask(@intCast(args[0].int));
+        return .{ .int = @intCast(old) };
+    }
+    const current = c.umask(0o022);
+    _ = c.umask(current);
+    return .{ .int = @intCast(current) };
+}
+
+fn native_fileperms(_: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len == 0 or args[0] != .string) return .{ .bool = false };
+    const c = @cImport(@cInclude("sys/stat.h"));
+    var s: c.struct_stat = undefined;
+    if (c.stat(args[0].string.ptr, &s) != 0) return .{ .bool = false };
+    return .{ .int = @intCast(s.st_mode) };
+}
+
+fn native_is_link(_: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len == 0 or args[0] != .string) return .{ .bool = false };
+    const stat = std.fs.cwd().statFile(args[0].string) catch return Value{ .bool = false };
+    return .{ .bool = stat.kind == .sym_link };
+}
+
+fn native_readlink(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len == 0 or args[0] != .string) return .{ .bool = false };
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    const target = std.fs.cwd().readLink(args[0].string, &buf) catch return Value{ .bool = false };
+    const result = ctx.vm.allocator.dupe(u8, target) catch return .{ .bool = false };
+    try ctx.vm.strings.append(ctx.vm.allocator, result);
+    return .{ .string = result };
+}
+
+fn native_tempnam(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    const dir = if (args.len > 0 and args[0] == .string) args[0].string else "/tmp";
+    const prefix = if (args.len > 1 and args[1] == .string) args[1].string else "tmp";
+    const result = std.fmt.allocPrint(ctx.vm.allocator, "{s}/{s}{d}", .{ dir, prefix, std.time.nanoTimestamp() }) catch return .{ .bool = false };
+    try ctx.vm.strings.append(ctx.vm.allocator, result);
+    return .{ .string = result };
 }
 

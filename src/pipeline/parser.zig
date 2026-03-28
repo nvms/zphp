@@ -1709,7 +1709,12 @@ const Parser = struct {
 
             // infix
             const prec = infixPrec(self.peek());
-            if (prec == 0 or prec <= min_prec) break;
+            if (prec == 0 or prec <= min_prec) {
+                // php allows assignment as rhs of any operator: false === $x = expr
+                if (prec == 4 and isAssignTarget(self.nodes.items[left].tag)) {
+                    // fall through to parse the assignment
+                } else break;
+            }
 
             const op_tok = self.advance();
             const op_tag = self.tokens[op_tok].tag;
@@ -2126,6 +2131,13 @@ const Parser = struct {
             .kw_instanceof => 17,
             .star_star => 19,
             else => 0,
+        };
+    }
+
+    fn isAssignTarget(tag: NodeTag) bool {
+        return switch (tag) {
+            .variable, .variable_variable, .array_access, .property_access, .nullsafe_property_access, .static_prop_access => true,
+            else => false,
         };
     }
 

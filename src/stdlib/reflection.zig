@@ -68,6 +68,8 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try rm_def.methods.put(a, "isConstructor", .{ .name = "isConstructor", .arity = 0 });
     try rm_def.methods.put(a, "getNumberOfParameters", .{ .name = "getNumberOfParameters", .arity = 0 });
     try rm_def.methods.put(a, "getNumberOfRequiredParameters", .{ .name = "getNumberOfRequiredParameters", .arity = 0 });
+    try rm_def.methods.put(a, "setAccessible", .{ .name = "setAccessible", .arity = 1 });
+    try rm_def.methods.put(a, "invoke", .{ .name = "invoke", .arity = 1 });
     try vm.classes.put(a, "ReflectionMethod", rm_def);
 
     try vm.native_fns.put(a, "ReflectionMethod::getName", rmGetName);
@@ -81,6 +83,8 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try vm.native_fns.put(a, "ReflectionMethod::isConstructor", rmIsConstructor);
     try vm.native_fns.put(a, "ReflectionMethod::getNumberOfParameters", rmGetNumberOfParameters);
     try vm.native_fns.put(a, "ReflectionMethod::getNumberOfRequiredParameters", rmGetNumberOfRequiredParameters);
+    try vm.native_fns.put(a, "ReflectionMethod::setAccessible", reflectionNoop);
+    try vm.native_fns.put(a, "ReflectionMethod::invoke", rmInvoke);
 
     // ReflectionParameter
     var rp_def = ClassDef{ .name = "ReflectionParameter" };
@@ -136,6 +140,8 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try rf_def.methods.put(a, "getReturnType", .{ .name = "getReturnType", .arity = 0 });
     try rf_def.methods.put(a, "getNumberOfParameters", .{ .name = "getNumberOfParameters", .arity = 0 });
     try rf_def.methods.put(a, "getNumberOfRequiredParameters", .{ .name = "getNumberOfRequiredParameters", .arity = 0 });
+    try rf_def.methods.put(a, "isAnonymous", .{ .name = "isAnonymous", .arity = 0 });
+    try rf_def.methods.put(a, "getClosureScopeClass", .{ .name = "getClosureScopeClass", .arity = 0 });
     try vm.classes.put(a, "ReflectionFunction", rf_def);
 
     try vm.native_fns.put(a, "ReflectionFunction::__construct", rfConstruct);
@@ -144,6 +150,23 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try vm.native_fns.put(a, "ReflectionFunction::getReturnType", rfGetReturnType);
     try vm.native_fns.put(a, "ReflectionFunction::getNumberOfParameters", rfGetNumberOfParameters);
     try vm.native_fns.put(a, "ReflectionFunction::getNumberOfRequiredParameters", rfGetNumberOfRequiredParameters);
+    try vm.native_fns.put(a, "ReflectionFunction::isAnonymous", rfIsAnonymous);
+    try vm.native_fns.put(a, "ReflectionFunction::getClosureScopeClass", rfGetClosureScopeClass);
+
+    // ReflectionProperty
+    var rprop_def = ClassDef{ .name = "ReflectionProperty" };
+    try rprop_def.properties.append(a, .{ .name = "name", .default = .{ .string = "" } });
+    try rprop_def.properties.append(a, .{ .name = "class", .default = .{ .string = "" } });
+    try rprop_def.methods.put(a, "__construct", .{ .name = "__construct", .arity = 2 });
+    try rprop_def.methods.put(a, "setAccessible", .{ .name = "setAccessible", .arity = 1 });
+    try rprop_def.methods.put(a, "getValue", .{ .name = "getValue", .arity = 1 });
+    try rprop_def.methods.put(a, "setValue", .{ .name = "setValue", .arity = 2 });
+    try vm.classes.put(a, "ReflectionProperty", rprop_def);
+
+    try vm.native_fns.put(a, "ReflectionProperty::__construct", rpConstruct);
+    try vm.native_fns.put(a, "ReflectionProperty::setAccessible", reflectionNoop);
+    try vm.native_fns.put(a, "ReflectionProperty::getValue", rpGetValue);
+    try vm.native_fns.put(a, "ReflectionProperty::setValue", rpSetValue);
 
     // ReflectionAttribute
     var ra_def = ClassDef{ .name = "ReflectionAttribute" };
@@ -627,15 +650,34 @@ fn rntAllowsNull(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
 // --- ReflectionFunction ---
 
 fn rfConstruct(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len < 1 or args[0] != .string) return throwReflection(ctx, "ReflectionFunction::__construct() expects a function name");
-    const func_name = args[0].string;
+    if (args.len < 1) return throwReflection(ctx, "ReflectionFunction::__construct() expects a function name");
     const this = getThis(ctx) orelse return .null;
 
-    // check user functions first, then natives
-    if (ctx.vm.functions.get(func_name) == null and ctx.vm.native_fns.get(func_name) == null)
-        return throwReflection(ctx, "Function does not exist");
-
-    try this.set(ctx.allocator, "name", .{ .string = func_name });
+    if (args[0] == .string) {
+        const func_name = args[0].string;
+        if (ctx.vm.functions.get(func_name) == null and ctx.vm.native_fns.get(func_name) == null)
+            return throwReflection(ctx, "Function does not exist");
+        try this.set(ctx.allocator, "name", .{ .string = func_name });
+    } else if (args[0] == .array) {
+        // array callable [$obj, 'method'] - store as method reference
+        const arr = args[0].array;
+        if (arr.entries.items.len == 2 and arr.entries.items[1].value == .string) {
+            const method = arr.entries.items[1].value.string;
+            const target = arr.entries.items[0].value;
+            const class_name = if (target == .object) target.object.class_name else if (target == .string) target.string else "";
+            const full = std.fmt.allocPrint(ctx.allocator, "{s}::{s}", .{ class_name, method }) catch return .null;
+            try ctx.strings.append(ctx.allocator, full);
+            try this.set(ctx.allocator, "name", .{ .string = full });
+            try this.set(ctx.allocator, "__is_method_ref", .{ .bool = true });
+            if (target == .object) {
+                try this.set(ctx.allocator, "__scope_class", .{ .string = class_name });
+            }
+        } else {
+            return throwReflection(ctx, "ReflectionFunction::__construct() expects a function name");
+        }
+    } else {
+        return throwReflection(ctx, "ReflectionFunction::__construct() expects a function name");
+    }
     return .null;
 }
 
@@ -675,6 +717,25 @@ fn rfGetNumberOfRequiredParameters(ctx: *NativeContext, _: []const Value) Runtim
     const func_name = if (this.get("name") == .string) this.get("name").string else return .{ .int = 0 };
     const func = ctx.vm.functions.get(func_name) orelse return .{ .int = 0 };
     return .{ .int = func.required_params };
+}
+
+fn rfIsAnonymous(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const this = getThis(ctx) orelse return .{ .bool = false };
+    const name = if (this.get("name") == .string) this.get("name").string else return .{ .bool = false };
+    return .{ .bool = std.mem.startsWith(u8, name, "__closure_") };
+}
+
+fn rfGetClosureScopeClass(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const this = getThis(ctx) orelse return .null;
+    const name = if (this.get("name") == .string) this.get("name").string else return .null;
+    if (this.get("__scope_class") == .string) {
+        const scope_name = this.get("__scope_class").string;
+        const obj = try ctx.createObject("ReflectionClass");
+        try obj.set(ctx.allocator, "name", .{ .string = scope_name });
+        return .{ .object = obj };
+    }
+    _ = name;
+    return .null;
 }
 
 // --- shared helpers ---
@@ -785,4 +846,51 @@ fn closureFromCallable(ctx: *NativeContext, args: []const Value) RuntimeError!Va
         }
     }
     return callable;
+}
+
+fn reflectionNoop(_: *NativeContext, _: []const Value) RuntimeError!Value {
+    return .null;
+}
+
+// --- ReflectionProperty ---
+
+fn rpConstruct(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len < 2) return throwReflection(ctx, "ReflectionProperty::__construct() expects class and property name");
+    const this = getThis(ctx) orelse return .null;
+
+    const class_name = if (args[0] == .string) args[0].string else if (args[0] == .object) args[0].object.class_name else return throwReflection(ctx, "ReflectionProperty::__construct() expects a class name");
+    const prop_name = if (args[1] == .string) args[1].string else return throwReflection(ctx, "ReflectionProperty::__construct() expects a property name");
+
+    try this.set(ctx.allocator, "name", .{ .string = prop_name });
+    try this.set(ctx.allocator, "class", .{ .string = class_name });
+    return .null;
+}
+
+fn rpGetValue(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    const this = getThis(ctx) orelse return .null;
+    const prop_name = if (this.get("name") == .string) this.get("name").string else return .null;
+    if (args.len > 0 and args[0] == .object) {
+        return args[0].object.get(prop_name);
+    }
+    return .null;
+}
+
+fn rpSetValue(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    const this = getThis(ctx) orelse return .null;
+    const prop_name = if (this.get("name") == .string) this.get("name").string else return .null;
+    if (args.len >= 2 and args[0] == .object) {
+        try args[0].object.set(ctx.allocator, prop_name, args[1]);
+    }
+    return .null;
+}
+
+// --- ReflectionMethod::invoke ---
+
+fn rmInvoke(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    const this = getThis(ctx) orelse return .null;
+    const method_name = if (this.get("name") == .string) this.get("name").string else return .null;
+    if (args.len > 0 and args[0] == .object) {
+        return ctx.invokeCallable(.{ .string = method_name }, args[1..]) catch .null;
+    }
+    return .null;
 }
