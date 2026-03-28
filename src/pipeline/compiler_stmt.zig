@@ -562,6 +562,7 @@ pub fn compileStaticVar(self: *Compiler, node: Ast.Node) Error!void {
 
     try self.emitOp(.set_var);
     try self.emitU16(var_idx);
+    try self.emitOp(.pop);
 }
 
 pub fn compileNamespace(self: *Compiler, node: Ast.Node) Error!void {

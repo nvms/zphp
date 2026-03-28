@@ -1730,6 +1730,12 @@ const Parser = struct {
                 const operand = try self.parseExprPrec(18);
                 return self.addNode(.{ .tag = .prefix_op, .main_token = tok, .data = .{ .lhs = operand } });
             },
+            .amp => {
+                // reference expression (&$var) - consume & and treat as value
+                // zphp has limited reference semantics so &$x degrades to $x
+                _ = self.advance();
+                return self.parseExprPrec(18);
+            },
             .plus_plus, .minus_minus => {
                 const tok = self.advance();
                 const operand = try self.parseExprPrec(18);
@@ -1777,7 +1783,6 @@ const Parser = struct {
             .kw_array => self.parseArrayKw(),
             .kw_static => if (self.peekAt(1) == .kw_function) self.parseClosureExpr() else if (self.peekAt(1) == .kw_fn) self.parseStaticArrowFunc() else self.addLiteral(.identifier),
             .kw_self, .kw_parent => self.addLiteral(.identifier),
-            // TODO: &$var reference expressions - causes bytecode corruption in some cases
             else => {
                 try self.addError(.expected_expression);
                 return error.ParseError;

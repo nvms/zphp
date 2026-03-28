@@ -1154,7 +1154,10 @@ fn native_is_resource(_: *NativeContext, args: []const Value) RuntimeError!Value
 
 fn native_get_resource_type(_: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len < 1) return .{ .bool = false };
-    if (args[0] == .object) return .{ .string = args[0].object.class_name };
+    if (args[0] == .object) {
+        if (std.mem.eql(u8, args[0].object.class_name, "FileHandle")) return .{ .string = "stream" };
+        return .{ .string = args[0].object.class_name };
+    }
     return .{ .bool = false };
 }
 

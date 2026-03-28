@@ -3972,6 +3972,12 @@ pub const VM = struct {
         try self.writebackGlobals();
         try self.writebackRefs();
         self.frame_count -= 1;
+        // prune exception handlers that belonged to the popped frame
+        while (self.handler_count > self.handler_floor and
+            self.exception_handlers[self.handler_count - 1].frame_count > self.frame_count)
+        {
+            self.handler_count -= 1;
+        }
         self.frames[self.frame_count].ref_slots.deinit(self.allocator);
         self.frames[self.frame_count].vars.deinit(self.allocator);
         if (self.frames[self.frame_count].locals.len > 0) {
@@ -4533,6 +4539,9 @@ pub const VM = struct {
         if (std.mem.eql(u8, type_name, "object")) return val == .object;
         if (std.mem.eql(u8, type_name, "iterable")) return val == .array or val == .generator;
         if (std.mem.eql(u8, type_name, "self") or std.mem.eql(u8, type_name, "static") or std.mem.eql(u8, type_name, "parent")) return val == .object;
+        if (std.mem.eql(u8, type_name, "Traversable") or std.mem.eql(u8, type_name, "Iterator") or std.mem.eql(u8, type_name, "IteratorAggregate")) {
+            return val == .object or val == .array or val == .generator;
+        }
         if (std.mem.eql(u8, type_name, "Generator")) return val == .generator;
         if (std.mem.eql(u8, type_name, "Fiber")) return val == .fiber;
         if (std.mem.eql(u8, type_name, "Closure")) return val == .string and if (val.string.len > 10) std.mem.startsWith(u8, val.string, "__closure_") else false;

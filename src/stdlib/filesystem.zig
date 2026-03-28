@@ -57,6 +57,7 @@ pub const entries = .{
     .{ "stat", native_stat },
     .{ "chdir", native_chdir },
     .{ "stream_resolve_include_path", native_stream_resolve_include_path },
+    .{ "stream_isatty", native_stream_isatty },
 };
 
 // file handle management - store handles in PhpObjects with class "FileHandle"
@@ -395,6 +396,34 @@ fn native_fopen(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len < 2 or args[0] != .string or args[1] != .string) return .{ .bool = false };
     const path = args[0].string;
     const mode = args[1].string;
+
+    if (std.mem.eql(u8, path, "php://stdout") or std.mem.eql(u8, path, "php://output")) {
+        const obj = try ctx.allocator.create(PhpObject);
+        obj.* = .{ .class_name = "FileHandle" };
+        try obj.set(ctx.allocator, "__fd", .{ .int = 1 });
+        try obj.set(ctx.allocator, "__open", .{ .bool = true });
+        try obj.set(ctx.allocator, "__mode", .{ .string = "w" });
+        try ctx.vm.objects.append(ctx.allocator, obj);
+        return .{ .object = obj };
+    }
+    if (std.mem.eql(u8, path, "php://stderr")) {
+        const obj = try ctx.allocator.create(PhpObject);
+        obj.* = .{ .class_name = "FileHandle" };
+        try obj.set(ctx.allocator, "__fd", .{ .int = 2 });
+        try obj.set(ctx.allocator, "__open", .{ .bool = true });
+        try obj.set(ctx.allocator, "__mode", .{ .string = "w" });
+        try ctx.vm.objects.append(ctx.allocator, obj);
+        return .{ .object = obj };
+    }
+    if (std.mem.eql(u8, path, "php://stdin")) {
+        const obj = try ctx.allocator.create(PhpObject);
+        obj.* = .{ .class_name = "FileHandle" };
+        try obj.set(ctx.allocator, "__fd", .{ .int = 0 });
+        try obj.set(ctx.allocator, "__open", .{ .bool = true });
+        try obj.set(ctx.allocator, "__mode", .{ .string = "r" });
+        try ctx.vm.objects.append(ctx.allocator, obj);
+        return .{ .object = obj };
+    }
 
     const file = if (std.mem.eql(u8, path, "php://temp") or std.mem.eql(u8, path, "php://memory")) blk: {
         const tmp = std.fmt.allocPrint(ctx.allocator, "/tmp/zphp_{d}", .{@as(u64, @truncate(@as(u128, @bitCast(std.time.nanoTimestamp()))))}) catch return Value{ .bool = false };
@@ -822,5 +851,15 @@ fn native_stream_resolve_include_path(_: *NativeContext, args: []const Value) Ru
     const path = args[0].string;
     std.fs.cwd().access(path, .{}) catch return .{ .bool = false };
     return .{ .string = path };
+}
+
+fn native_stream_isatty(_: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len == 0 or args[0] != .object) return .{ .bool = false };
+    const obj = args[0].object;
+    if (!std.mem.eql(u8, obj.class_name, "FileHandle")) return .{ .bool = false };
+    const fd_val = obj.get("__fd");
+    if (fd_val != .int) return .{ .bool = false };
+    const fd: std.posix.fd_t = @intCast(fd_val.int);
+    return .{ .bool = std.posix.isatty(fd) };
 }
 
