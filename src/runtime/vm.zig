@@ -389,7 +389,9 @@ pub const VM = struct {
         try c.put(a, "PHP_INT_SIZE", .{ .int = 8 });
         try c.put(a, "PHP_MAJOR_VERSION", .{ .int = 8 });
         try c.put(a, "PHP_MINOR_VERSION", .{ .int = 4 });
+        try c.put(a, "PHP_RELEASE_VERSION", .{ .int = 0 });
         try c.put(a, "PHP_VERSION", .{ .string = "8.4.0" });
+        try c.put(a, "PHP_VERSION_ID", .{ .int = 80400 });
         try c.put(a, "PHP_SAPI", .{ .string = "cli" });
         try c.put(a, "PHP_OS", .{ .string = if (@import("builtin").os.tag == .macos) "Darwin" else "Linux" });
         try c.put(a, "DIRECTORY_SEPARATOR", .{ .string = "/" });
@@ -598,6 +600,12 @@ pub const VM = struct {
         while (it.next()) |entry| {
             try vars.put(self.allocator, entry.key_ptr.*, entry.value_ptr.*);
         }
+        if (!vars.contains("$GLOBALS")) {
+            const globals_arr = try self.allocator.create(PhpArray);
+            globals_arr.* = .{};
+            try self.arrays.append(self.allocator, globals_arr);
+            try vars.put(self.allocator, "$GLOBALS", .{ .array = globals_arr });
+        }
         var locals: []Value = &.{};
         if (result.local_count > 0) {
             locals = try self.allocator.alloc(Value, result.local_count);
@@ -617,11 +625,7 @@ pub const VM = struct {
     }
 
     pub fn registerFunction(self: *VM, func: *const ObjFunction) RuntimeError!void {
-        if (self.functions.contains(func.name)) {
-            const msg = std.fmt.allocPrint(self.allocator, "PHP Fatal error:  Cannot redeclare {s}()\n", .{func.name}) catch return error.RuntimeError;
-            self.error_msg = msg;
-            return error.RuntimeError;
-        }
+        if (self.functions.contains(func.name)) return;
         try self.functions.put(self.allocator, func.name, func);
     }
 
@@ -1745,8 +1749,8 @@ pub const VM = struct {
                                         try g_type_info.put(self.allocator, th.name, .{ .param_types = th.param_types, .return_type = th.return_type });
                                     }
 
-                                    // execute via runUntilFrame so halt pops back here
                                     const return_frame = self.frame_count;
+                                    const sp_before = self.sp;
                                     self.frames[self.frame_count] = .{
                                         .chunk = &result.chunk,
                                         .ip = 0,
@@ -1763,7 +1767,6 @@ pub const VM = struct {
                                         self.push(.{ .bool = false });
                                         continue;
                                     };
-                                    // clean up the included file's frame if halt left it
                                     while (self.frame_count > return_frame) {
                                         self.frame_count -= 1;
                                         self.frames[self.frame_count].vars.deinit(self.allocator);
@@ -1772,7 +1775,8 @@ pub const VM = struct {
                                             self.frames[self.frame_count].locals = &.{};
                                         }
                                     }
-                                    self.push(.{ .bool = true });
+                                    // if the file used 'return', the value is already on the stack
+                                    if (self.sp <= sp_before) self.push(.{ .bool = true });
                                 } else {
                                     if (is_require) {
                                         self.error_msg = std.fmt.allocPrint(self.allocator, "Fatal error: require(): Failed opening required '{s}'", .{path}) catch null;

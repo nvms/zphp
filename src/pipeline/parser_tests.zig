@@ -457,16 +457,26 @@ fn renderNode(ast: *const Ast, idx: u32, buf: *Buf) !void {
             }
             try w.writeByte(')');
         },
-        .use_stmt => {
-            try w.writeAll("(use ");
+        .use_stmt, .use_fn_stmt => {
+            if (node.tag == .use_fn_stmt) try w.writeAll("(use function ") else try w.writeAll("(use ");
             for (ast.extraSlice(node.data.lhs), 0..) |tok_idx, i| {
                 if (i > 0) try w.writeByte('\\');
                 try w.writeAll(ast.tokenSlice(tok_idx));
             }
-            if (node.data.rhs != 0) {
+            if (node.tag == .use_stmt and node.data.rhs != 0) {
                 try w.writeAll(" as ");
                 try w.writeAll(ast.tokenSlice(node.data.rhs));
             }
+            try w.writeByte(')');
+        },
+        .goto_stmt => {
+            try w.writeAll("(goto ");
+            try w.writeAll(ast.tokenSlice(node.main_token));
+            try w.writeByte(')');
+        },
+        .label_stmt => {
+            try w.writeAll("(label ");
+            try w.writeAll(ast.tokenSlice(node.main_token));
             try w.writeByte(')');
         },
         .enum_decl => {

@@ -125,8 +125,8 @@ fn resolvePath(allocator: std.mem.Allocator, path: []const u8) []const u8 {
 }
 
 fn loadFile(path: []const u8, allocator: std.mem.Allocator) ?*CompileResult {
-    const source = std.fs.cwd().readFileAlloc(allocator, path, max_source_size) catch return null;
     const abs_path = std.fs.cwd().realpathAlloc(allocator, path) catch allocator.dupe(u8, path) catch return null;
+    const source = std.fs.cwd().readFileAlloc(allocator, abs_path, max_source_size) catch return null;
 
     var ast = parser.parse(allocator, source) catch {
         allocator.free(source);

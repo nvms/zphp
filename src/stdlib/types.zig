@@ -69,6 +69,7 @@ pub const entries = .{
     .{ "class_alias", native_class_alias },
     .{ "spl_autoload_register", native_spl_autoload_register },
     .{ "spl_autoload_unregister", native_spl_autoload_unregister },
+    .{ "spl_autoload_functions", native_spl_autoload_functions },
     .{ "is_scalar", is_scalar },
     .{ "is_iterable", is_iterable },
     .{ "is_countable", is_countable },
@@ -820,23 +821,45 @@ fn native_spl_autoload_register(ctx: *NativeContext, args: []const Value) Runtim
     return .{ .bool = true };
 }
 
+fn native_spl_autoload_functions(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    var arr = try ctx.allocator.create(PhpArray);
+    arr.* = .{};
+    try ctx.vm.arrays.append(ctx.allocator, arr);
+    for (ctx.vm.autoload_callbacks.items) |cb| {
+        try arr.append(ctx.allocator, cb);
+    }
+    return .{ .array = arr };
+}
+
 fn native_spl_autoload_unregister(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len == 0) return .{ .bool = false };
     const target = args[0];
     var i: usize = 0;
     while (i < ctx.vm.autoload_callbacks.items.len) {
         const cb = ctx.vm.autoload_callbacks.items[i];
-        const match = if (cb == .string and target == .string)
-            std.mem.eql(u8, cb.string, target.string)
-        else
-            false;
-        if (match) {
+        if (callablesEqual(cb, target)) {
             _ = ctx.vm.autoload_callbacks.orderedRemove(i);
         } else {
             i += 1;
         }
     }
     return .{ .bool = true };
+}
+
+fn callablesEqual(a: Value, b: Value) bool {
+    if (a == .string and b == .string) return std.mem.eql(u8, a.string, b.string);
+    if (a == .array and b == .array) {
+        const aa = a.array;
+        const ba = b.array;
+        if (aa.entries.items.len != ba.entries.items.len) return false;
+        for (aa.entries.items, ba.entries.items) |ae, be| {
+            if (ae.value == .string and be.value == .string) {
+                if (!std.mem.eql(u8, ae.value.string, be.value.string)) return false;
+            } else return false;
+        }
+        return true;
+    }
+    return false;
 }
 
 fn getFrameParamValue(frame: anytype, slot_names: []const []const u8, param: []const u8) Value {

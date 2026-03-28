@@ -129,6 +129,7 @@ pub fn compileFunction(self: *Compiler, node: Ast.Node) Error!void {
         .file_path = self.file_path,
         .namespace = self.namespace,
         .use_aliases = self.use_aliases,
+        .use_fn_aliases = self.use_fn_aliases,
     };
     errdefer {
         sub.chunk.deinit(self.allocator);
@@ -137,6 +138,8 @@ pub fn compileFunction(self: *Compiler, node: Ast.Node) Error!void {
         sub.string_allocs.deinit(self.allocator);
         sub.local_slots.deinit(self.allocator);
         sub.type_hints.deinit(self.allocator);
+        sub.pending_gotos.deinit(self.allocator);
+        sub.labels.deinit(self.allocator);
     }
 
     for (param_nodes, 0..) |_, i| {
@@ -146,6 +149,13 @@ pub fn compileFunction(self: *Compiler, node: Ast.Node) Error!void {
 
     const body_idx = node.data.rhs & 0x7FFFFFFF;
     try sub.compileNode(body_idx);
+    for (sub.pending_gotos.items) |pg| {
+        if (sub.labels.get(pg.label)) |target| {
+            sub.patchJumpTo(pg.offset, target);
+        }
+    }
+    sub.pending_gotos.deinit(self.allocator);
+    sub.labels.deinit(self.allocator);
     try sub.emitOp(.op_null);
     try sub.emitOp(if (gen) .generator_return else .return_val);
     sub.break_jumps.deinit(self.allocator);
@@ -258,6 +268,7 @@ pub fn compileClosure(self: *Compiler, node: Ast.Node) Error!void {
         .file_path = self.file_path,
         .namespace = self.namespace,
         .use_aliases = self.use_aliases,
+        .use_fn_aliases = self.use_fn_aliases,
     };
     errdefer {
         sub.chunk.deinit(self.allocator);
@@ -266,6 +277,8 @@ pub fn compileClosure(self: *Compiler, node: Ast.Node) Error!void {
         sub.string_allocs.deinit(self.allocator);
         sub.local_slots.deinit(self.allocator);
         sub.type_hints.deinit(self.allocator);
+        sub.pending_gotos.deinit(self.allocator);
+        sub.labels.deinit(self.allocator);
     }
 
     for (param_nodes, 0..) |_, i| {
@@ -293,6 +306,13 @@ pub fn compileClosure(self: *Compiler, node: Ast.Node) Error!void {
     }
 
     try sub.compileNode(body_node);
+    for (sub.pending_gotos.items) |pg| {
+        if (sub.labels.get(pg.label)) |target| {
+            sub.patchJumpTo(pg.offset, target);
+        }
+    }
+    sub.pending_gotos.deinit(self.allocator);
+    sub.labels.deinit(self.allocator);
     try sub.emitOp(.op_null);
     try sub.emitOp(if (gen) .generator_return else .return_val);
     sub.break_jumps.deinit(self.allocator);
@@ -1120,6 +1140,7 @@ fn compileClassMethodBody(self: *Compiler, class_name: []const u8, member: Ast.N
         .file_path = self.file_path,
         .namespace = self.namespace,
         .use_aliases = self.use_aliases,
+        .use_fn_aliases = self.use_fn_aliases,
     };
     errdefer {
         sub.chunk.deinit(self.allocator);
@@ -1128,6 +1149,8 @@ fn compileClassMethodBody(self: *Compiler, class_name: []const u8, member: Ast.N
         sub.string_allocs.deinit(self.allocator);
         sub.local_slots.deinit(self.allocator);
         sub.type_hints.deinit(self.allocator);
+        sub.pending_gotos.deinit(self.allocator);
+        sub.labels.deinit(self.allocator);
     }
 
     // slot 0 = $this for instance methods
@@ -1160,6 +1183,13 @@ fn compileClassMethodBody(self: *Compiler, class_name: []const u8, member: Ast.N
     // mask out visibility (bits 30-31) and generator flag (bit 29)
     const body_idx = member.data.rhs & 0x1FFFFFFF;
     try sub.compileNode(body_idx);
+    for (sub.pending_gotos.items) |pg| {
+        if (sub.labels.get(pg.label)) |target| {
+            sub.patchJumpTo(pg.offset, target);
+        }
+    }
+    sub.pending_gotos.deinit(self.allocator);
+    sub.labels.deinit(self.allocator);
     try sub.emitOp(.op_null);
     try sub.emitOp(if (method_gen) .generator_return else .return_val);
     sub.break_jumps.deinit(self.allocator);

@@ -77,12 +77,22 @@ pub fn compileWithPath(ast: *const Ast, allocator: Allocator, file_path: []const
         c.break_jumps.deinit(allocator);
         c.continue_jumps.deinit(allocator);
         c.use_aliases.deinit(allocator);
+        c.use_fn_aliases.deinit(allocator);
+        c.pending_gotos.deinit(allocator);
+        c.labels.deinit(allocator);
     }
 
     const root = ast.nodes[0];
     for (ast.extraSlice(root.data.lhs)) |stmt| {
         try c.compileNode(stmt);
     }
+    for (c.pending_gotos.items) |pg| {
+        if (c.labels.get(pg.label)) |target| {
+            c.patchJumpTo(pg.offset, target);
+        }
+    }
+    c.pending_gotos.deinit(allocator);
+    c.labels.deinit(allocator);
     try c.emitOp(.halt);
 
     c.break_jumps.deinit(allocator);
@@ -91,6 +101,7 @@ pub fn compileWithPath(ast: *const Ast, allocator: Allocator, file_path: []const
     while (tp_iter.next()) |v| allocator.free(v.*);
     c.trait_properties.deinit(allocator);
     c.use_aliases.deinit(allocator);
+    c.use_fn_aliases.deinit(allocator);
     const slot_names = try c.buildSlotNames();
     const local_count = c.next_slot;
     c.local_slots.deinit(allocator);
@@ -116,6 +127,9 @@ pub const Compiler = struct {
     is_generator: bool = false,
     namespace: []const u8 = "",
     use_aliases: std.StringHashMapUnmanaged([]const u8) = .{},
+    use_fn_aliases: std.StringHashMapUnmanaged([]const u8) = .{},
+    labels: std.StringHashMapUnmanaged(usize) = .{},
+    pending_gotos: std.ArrayListUnmanaged(PendingGoto) = .{},
     file_path: []const u8 = "",
     trait_properties: std.StringHashMapUnmanaged([]const u32) = .{},
     local_slots: std.StringHashMapUnmanaged(u16) = .{},
@@ -126,6 +140,12 @@ pub const Compiler = struct {
     pub const LoopJump = struct {
         offset: usize,
         depth: u32,
+    };
+
+    pub const PendingGoto = struct {
+        offset: usize,
+        label: []const u8,
+        source_offset: usize,
     };
 
     // ==================================================================
@@ -299,6 +319,19 @@ pub const Compiler = struct {
             .require_expr => try compiler_stmt.compileRequire(self, node),
             .namespace_decl => try compiler_stmt.compileNamespace(self, node),
             .use_stmt => try compiler_stmt.compileUse(self, node),
+            .use_fn_stmt => try compiler_stmt.compileUseFn(self, node),
+            .label_stmt => {
+                try self.labels.put(self.allocator, self.ast.tokenSlice(node.main_token), self.chunk.offset());
+            },
+            .goto_stmt => {
+                const label = self.ast.tokenSlice(node.main_token);
+                if (self.labels.get(label)) |target| {
+                    try self.emitLoop(target);
+                } else {
+                    const j = try self.emitJump(.jump);
+                    try self.pending_gotos.append(self.allocator, .{ .offset = j, .label = label, .source_offset = self.current_source_offset });
+                }
+            },
             .qualified_name => {
                 const parts = self.ast.extraSlice(node.data.lhs);
                 const fqn = try self.buildQualifiedString(parts);
@@ -507,6 +540,15 @@ pub const Compiler = struct {
         return qualified;
     }
 
+    pub fn resolveFunctionName(self: *Compiler, name: []const u8) []const u8 {
+        if (name.len > 0 and name[0] == '\\') return name[1..];
+        if (self.use_fn_aliases.get(name)) |fqn| return fqn;
+        if (self.namespace.len == 0) return name;
+        const qualified = std.fmt.allocPrint(self.allocator, "{s}\\{s}", .{ self.namespace, name }) catch return name;
+        self.string_allocs.append(self.allocator, qualified) catch return name;
+        return qualified;
+    }
+
     pub fn buildQualifiedString(self: *Compiler, parts: []const u32) Error![]const u8 {
         if (parts.len == 1) return self.ast.tokenSlice(parts[0]);
         var buf = std.ArrayListUnmanaged(u8){};
@@ -528,6 +570,7 @@ pub const Compiler = struct {
     }
 
     pub fn isDynamicProp(self: *Compiler, node: Ast.Node) bool {
+        if (node.main_token == 0) return true;
         const prop_node = self.ast.nodes[node.data.rhs];
         return self.ast.tokens[prop_node.main_token].tag == .variable;
     }
@@ -673,6 +716,12 @@ pub const Compiler = struct {
 
     pub fn patchJump(self: *Compiler, offset: usize) void {
         const dist = self.chunk.offset() - offset - 2;
+        self.chunk.code.items[offset] = @intCast(dist >> 8);
+        self.chunk.code.items[offset + 1] = @intCast(dist & 0xff);
+    }
+
+    pub fn patchJumpTo(self: *Compiler, offset: usize, target: usize) void {
+        const dist = target -| offset -| 2;
         self.chunk.code.items[offset] = @intCast(dist >> 8);
         self.chunk.code.items[offset + 1] = @intCast(dist & 0xff);
     }

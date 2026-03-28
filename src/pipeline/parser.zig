@@ -149,11 +149,18 @@ const Parser = struct {
             .kw_static => self.parseStaticVarStmt(),
             .kw_namespace => self.parseNamespaceDecl(),
             .kw_use => self.parseUseStmt(),
+            .kw_goto => self.parseGotoStmt(),
             .kw_require, .kw_require_once, .kw_include, .kw_include_once => self.parseRequireStmt(),
             .l_brace => self.parseBlock(),
             .semicolon => {
                 _ = self.advance();
                 return self.parseStatement();
+            },
+            .identifier => {
+                if (self.pos + 1 < self.tokens.len and self.tokens[self.pos + 1].tag == .colon) {
+                    return self.parseLabelStmt();
+                }
+                return self.parseExpressionStmt();
             },
             else => self.parseExpressionStmt(),
         };
@@ -176,6 +183,19 @@ const Parser = struct {
         }
         if (self.peek() == .semicolon) _ = self.advance();
         return self.parseStatement();
+    }
+
+    fn parseGotoStmt(self: *Parser) Error!u32 {
+        _ = self.advance(); // goto
+        const label_tok = try self.expect(.identifier);
+        _ = try self.expect(.semicolon);
+        return self.addNode(.{ .tag = .goto_stmt, .main_token = label_tok, .data = .{} });
+    }
+
+    fn parseLabelStmt(self: *Parser) Error!u32 {
+        const label_tok = self.advance(); // identifier
+        _ = self.advance(); // colon
+        return self.addNode(.{ .tag = .label_stmt, .main_token = label_tok, .data = .{} });
     }
 
     fn parseGlobalStmt(self: *Parser) Error!u32 {
@@ -235,11 +255,9 @@ const Parser = struct {
     fn parseUseStmt(self: *Parser) Error!u32 {
         const tok = self.advance(); // use
 
-        // use function Foo\bar; / use const Foo\BAR; - consume the keyword
-        if (self.peek() == .kw_function or self.peek() == .kw_const) _ = self.advance();
+        const is_fn = self.peek() == .kw_function;
+        if (is_fn or self.peek() == .kw_const) _ = self.advance();
 
-        // use App\Models\User;
-        // use App\Models\User as Alias;
         var parts = std.ArrayListUnmanaged(u32){};
         defer parts.deinit(self.allocator);
 
@@ -260,7 +278,8 @@ const Parser = struct {
         _ = try self.expect(.semicolon);
 
         const extra = try self.addExtraList(parts.items);
-        return self.addNode(.{ .tag = .use_stmt, .main_token = tok, .data = .{ .lhs = extra, .rhs = alias } });
+        const tag: Ast.Node.Tag = if (is_fn) .use_fn_stmt else .use_stmt;
+        return self.addNode(.{ .tag = tag, .main_token = tok, .data = .{ .lhs = extra, .rhs = alias } });
     }
 
     fn parseRequireStmt(self: *Parser) Error!u32 {
@@ -942,6 +961,7 @@ const Parser = struct {
 
     fn parseClassDecl(self: *Parser) Error!u32 {
         if (self.peek() == .kw_abstract or self.peek() == .kw_final) _ = self.advance();
+        if (self.peek() == .kw_readonly) _ = self.advance();
         _ = self.advance(); // class
         const name_tok = try self.expect(.identifier);
 
@@ -1484,14 +1504,20 @@ const Parser = struct {
 
     // parse a qualified name like App\Models\User or just User
     // returns an identifier node for simple names, qualified_name node for multi-part
+    // data.rhs = 1 means absolute (had leading \)
     fn parseQualifiedName(self: *Parser) Error!u32 {
-        // optional leading backslash for fully-qualified names
         const has_leading = self.peek() == .backslash;
         if (has_leading) _ = self.advance();
 
         const first_tok = try self.expect(.identifier);
         if (self.peek() != .backslash) {
-            // simple name - return as plain identifier
+            if (has_leading) {
+                var parts = std.ArrayListUnmanaged(u32){};
+                defer parts.deinit(self.allocator);
+                try parts.append(self.allocator, first_tok);
+                const extra = try self.addExtraList(parts.items);
+                return self.addNode(.{ .tag = .qualified_name, .main_token = first_tok, .data = .{ .lhs = extra, .rhs = 1 } });
+            }
             return self.addNode(.{ .tag = .identifier, .main_token = first_tok, .data = .{} });
         }
 
@@ -1503,7 +1529,7 @@ const Parser = struct {
             try parts.append(self.allocator, try self.expect(.identifier));
         }
         const extra = try self.addExtraList(parts.items);
-        return self.addNode(.{ .tag = .qualified_name, .main_token = first_tok, .data = .{ .lhs = extra } });
+        return self.addNode(.{ .tag = .qualified_name, .main_token = first_tok, .data = .{ .lhs = extra, .rhs = if (has_leading) 1 else 0 } });
     }
 
     fn isTypeName(self: *Parser) bool {
@@ -1936,6 +1962,17 @@ const Parser = struct {
 
     fn parsePropExpr(self: *Parser, object: u32, nullsafe: bool) Error!u32 {
         _ = self.advance(); // -> or ?->
+
+        // dynamic property: $obj->{expr}
+        if (self.peek() == .l_brace) {
+            _ = self.advance();
+            const expr = try self.parseExpression();
+            _ = try self.expect(.r_brace);
+
+            const tag: Ast.Node.Tag = if (nullsafe) .nullsafe_property_access else .property_access;
+            return self.addNode(.{ .tag = tag, .main_token = 0, .data = .{ .lhs = object, .rhs = expr } });
+        }
+
         if (self.peek() != .identifier and self.peek() != .variable and !isSemiReserved(self.peek())) {
             try self.addError(.expected_identifier);
             return error.ParseError;
@@ -1945,6 +1982,15 @@ const Parser = struct {
         // method call: $obj->method(...) or $obj?->method(...)
         if (self.peek() == .l_paren) {
             _ = self.advance(); // (
+
+            // first-class callable: $obj->method(...)
+            if (self.peek() == .ellipsis and self.peekAt(1) == .r_paren) {
+                _ = self.advance(); // ...
+                _ = self.advance(); // )
+                const method_node = try self.addNode(.{ .tag = .method_call, .main_token = name_tok, .data = .{ .lhs = object, .rhs = 0 } });
+                return self.addNode(.{ .tag = .callable_ref, .main_token = name_tok, .data = .{ .lhs = method_node } });
+            }
+
             var args = std.ArrayListUnmanaged(u32){};
             defer args.deinit(self.allocator);
 
@@ -1990,6 +2036,15 @@ const Parser = struct {
 
         if (self.peek() == .l_paren) {
             _ = self.advance();
+
+            // first-class callable: ClassName::method(...)
+            if (self.peek() == .ellipsis and self.peekAt(1) == .r_paren) {
+                _ = self.advance(); // ...
+                _ = self.advance(); // )
+                const static_node = try self.addNode(.{ .tag = .static_call, .main_token = name_tok, .data = .{ .lhs = class_node, .rhs = 0 } });
+                return self.addNode(.{ .tag = .callable_ref, .main_token = name_tok, .data = .{ .lhs = static_node } });
+            }
+
             var args = std.ArrayListUnmanaged(u32){};
             defer args.deinit(self.allocator);
 

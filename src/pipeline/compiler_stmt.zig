@@ -583,6 +583,18 @@ pub fn compileUse(self: *Compiler, node: Ast.Node) Error!void {
     try self.use_aliases.put(self.allocator, alias, fqn);
 }
 
+pub fn compileUseFn(self: *Compiler, node: Ast.Node) Error!void {
+    const parts = self.ast.extraSlice(node.data.lhs);
+    const fqn = try self.buildQualifiedString(parts);
+
+    const alias = if (node.data.rhs != 0)
+        self.ast.tokenSlice(node.data.rhs)
+    else
+        self.ast.tokenSlice(parts[parts.len - 1]);
+
+    try self.use_fn_aliases.put(self.allocator, alias, fqn);
+}
+
 pub fn compileRequire(self: *Compiler, node: Ast.Node) Error!void {
     try self.compileNode(node.data.lhs);
     const tok_tag = self.ast.tokens[node.main_token].tag;

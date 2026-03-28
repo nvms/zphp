@@ -56,20 +56,27 @@ pub fn compileAssign(self: *Compiler, node: Ast.Node) Error!void {
 
     if (target.tag == .property_access) {
         if (self.isDynamicProp(target)) {
-            const prop_node = self.ast.nodes[target.data.rhs];
-            const var_name = self.ast.tokenSlice(prop_node.main_token);
-            // stack order for set_prop_dynamic: obj, value, prop_name
             try self.compileNode(target.data.lhs);
             if (op_tag != .equal) {
                 try self.emitOp(.dup);
-                try self.emitGetVar(var_name);
+                if (target.main_token == 0) {
+                    try self.compileNode(target.data.rhs);
+                } else {
+                    const prop_node = self.ast.nodes[target.data.rhs];
+                    try self.emitGetVar(self.ast.tokenSlice(prop_node.main_token));
+                }
                 try self.emitOp(.get_prop_dynamic);
             }
             try self.compileNode(node.data.rhs);
             if (op_tag != .equal) {
                 try emitCompoundOp(self, op_tag);
             }
-            try self.emitGetVar(var_name);
+            if (target.main_token == 0) {
+                try self.compileNode(target.data.rhs);
+            } else {
+                const prop_node = self.ast.nodes[target.data.rhs];
+                try self.emitGetVar(self.ast.tokenSlice(prop_node.main_token));
+            }
             try self.emitOp(.set_prop_dynamic);
             return;
         }
@@ -77,6 +84,19 @@ pub fn compileAssign(self: *Compiler, node: Ast.Node) Error!void {
         var prop_name = self.ast.tokenSlice(prop_node.main_token);
         if (prop_name.len > 0 and prop_name[0] == '$') prop_name = prop_name[1..];
         const name_idx = try self.addConstant(.{ .string = prop_name });
+        if (op_tag == .question_question_equal) {
+            try self.compileNode(target.data.lhs);
+            try self.emitOp(.dup);
+            try self.emitOp(.get_prop);
+            try self.emitU16(name_idx);
+            const skip_jump = try self.emitJump(.jump_if_not_null);
+            try self.emitOp(.pop);
+            try self.compileNode(node.data.rhs);
+            try self.emitOp(.set_prop);
+            try self.emitU16(name_idx);
+            self.patchJump(skip_jump);
+            return;
+        }
         try self.compileNode(target.data.lhs);
         if (op_tag != .equal) {
             try self.emitOp(.dup);
@@ -99,6 +119,19 @@ pub fn compileAssign(self: *Compiler, node: Ast.Node) Error!void {
         if (prop_name.len > 0 and prop_name[0] == '$') prop_name = prop_name[1..];
         const class_idx = try self.addConstant(.{ .string = class_name });
         const prop_idx = try self.addConstant(.{ .string = prop_name });
+        if (op_tag == .question_question_equal) {
+            try self.emitOp(.get_static_prop);
+            try self.emitU16(class_idx);
+            try self.emitU16(prop_idx);
+            const skip_jump = try self.emitJump(.jump_if_not_null);
+            try self.emitOp(.pop);
+            try self.compileNode(node.data.rhs);
+            try self.emitOp(.set_static_prop);
+            try self.emitU16(class_idx);
+            try self.emitU16(prop_idx);
+            self.patchJump(skip_jump);
+            return;
+        }
         if (op_tag != .equal) {
             try self.emitOp(.get_static_prop);
             try self.emitU16(class_idx);
@@ -454,7 +487,7 @@ pub fn compileCall(self: *Compiler, node: Ast.Node) Error!void {
         try emitSpreadArgs(self, args);
         if (callee.tag == .identifier) {
             const raw_name = self.ast.tokenSlice(callee.main_token);
-            const name = self.resolveClassName(raw_name);
+            const name = self.resolveFunctionName(raw_name);
             const idx = try self.addConstant(.{ .string = name });
             try self.emitOp(.call_spread);
             try self.emitU16(idx);
@@ -468,7 +501,7 @@ pub fn compileCall(self: *Compiler, node: Ast.Node) Error!void {
         for (args) |arg| try self.compileNode(arg);
         self.current_source_offset = call_offset;
         const raw_name = self.ast.tokenSlice(callee.main_token);
-        const name = self.resolveClassName(raw_name);
+        const name = self.resolveFunctionName(raw_name);
         const idx = try self.addConstant(.{ .string = name });
         try self.emitOp(.call);
         try self.emitU16(idx);
@@ -568,8 +601,31 @@ pub fn compileCallableRef(self: *Compiler, node: Ast.Node) Error!void {
         const idx = try self.addConstant(.{ .string = name });
         try self.emitOp(.constant);
         try self.emitU16(idx);
+    } else if (callee.tag == .method_call) {
+        // $obj->method(...) => [$obj, 'method']
+        try self.emitOp(.array_new);
+        try self.compileNode(callee.data.lhs);
+        try self.emitOp(.array_push);
+        const method_name = self.ast.tokenSlice(callee.main_token);
+        const method_idx = try self.addConstant(.{ .string = method_name });
+        try self.emitOp(.constant);
+        try self.emitU16(method_idx);
+        try self.emitOp(.array_push);
+    } else if (callee.tag == .static_call) {
+        // ClassName::method(...) => ['ClassName', 'method']
+        const class_node = self.ast.nodes[callee.data.lhs];
+        const class_name = try resolveNodeClassName(self, class_node);
+        const method_name = self.ast.tokenSlice(callee.main_token);
+        try self.emitOp(.array_new);
+        const class_idx = try self.addConstant(.{ .string = class_name });
+        try self.emitOp(.constant);
+        try self.emitU16(class_idx);
+        try self.emitOp(.array_push);
+        const method_idx = try self.addConstant(.{ .string = method_name });
+        try self.emitOp(.constant);
+        try self.emitU16(method_idx);
+        try self.emitOp(.array_push);
     } else {
-        // fallback: compile the expression directly
         try self.compileNode(node.data.lhs);
     }
 }
@@ -612,10 +668,15 @@ pub fn compileArrayLiteral(self: *Compiler, node: Ast.Node) Error!void {
 pub fn compilePropertyAccess(self: *Compiler, node: Ast.Node) Error!void {
     try self.compileNode(node.data.lhs);
     if (self.isDynamicProp(node)) {
-        // $obj->$field: load variable value as property name
-        const prop_node = self.ast.nodes[node.data.rhs];
-        const var_name = self.ast.tokenSlice(prop_node.main_token);
-        try self.emitGetVar(var_name);
+        if (node.main_token == 0) {
+            // $obj->{expr}: compile the expression as property name
+            try self.compileNode(node.data.rhs);
+        } else {
+            // $obj->$field: load variable value as property name
+            const prop_node = self.ast.nodes[node.data.rhs];
+            const var_name = self.ast.tokenSlice(prop_node.main_token);
+            try self.emitGetVar(var_name);
+        }
         try self.emitOp(.get_prop_dynamic);
     } else {
         const name_idx = try self.addConstant(.{ .string = self.propName(node) });
@@ -723,7 +784,12 @@ pub fn compileStaticPropAccess(self: *Compiler, node: Ast.Node) Error!void {
 fn resolveNodeClassName(self: *Compiler, class_node: Ast.Node) ![]const u8 {
     if (class_node.tag == .qualified_name) {
         const parts = self.ast.extraSlice(class_node.data.lhs);
-        return try self.buildQualifiedString(parts);
+        const name = try self.buildQualifiedString(parts);
+        if (class_node.data.rhs == 1) return name;
+        if (self.namespace.len == 0) return name;
+        const qualified = std.fmt.allocPrint(self.allocator, "{s}\\{s}", .{ self.namespace, name }) catch return name;
+        self.string_allocs.append(self.allocator, qualified) catch return name;
+        return qualified;
     }
     return self.resolveClassName(self.ast.tokenSlice(class_node.main_token));
 }

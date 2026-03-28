@@ -322,7 +322,17 @@ const Formatter = struct {
             .try_catch => self.formatTryCatch(node),
             .throw_expr => self.formatThrow(node),
             .namespace_decl => self.formatNamespaceDecl(node),
-            .use_stmt => self.formatUseStmt(node),
+            .use_stmt => self.formatUseStmt(node, false),
+            .use_fn_stmt => self.formatUseStmt(node, true),
+            .goto_stmt => {
+                self.write("goto ");
+                self.write(self.ast.tokens[node.main_token].lexeme(self.source));
+                self.write(";");
+            },
+            .label_stmt => {
+                self.write(self.ast.tokens[node.main_token].lexeme(self.source));
+                self.write(":");
+            },
             .require_expr => self.formatRequire(node),
             .global_stmt => self.formatGlobalStmt(node),
             .static_var => self.formatStaticVar(node),
@@ -822,8 +832,8 @@ const Formatter = struct {
         self.write(";");
     }
 
-    fn formatUseStmt(self: *Formatter, node: Ast.Node) void {
-        self.write("use ");
+    fn formatUseStmt(self: *Formatter, node: Ast.Node, is_fn: bool) void {
+        if (is_fn) self.write("use function ") else self.write("use ");
         const parts = self.ast.extraSlice(node.data.lhs);
         for (parts, 0..) |tok_idx, i| {
             if (i > 0) self.write("\\");
