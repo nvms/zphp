@@ -336,8 +336,9 @@ pub const Compiler = struct {
             .qualified_name => {
                 const parts = self.ast.extraSlice(node.data.lhs);
                 const fqn = try self.buildQualifiedString(parts);
-                const ci = try self.addConstant(.{ .string = fqn });
-                try self.emitConstant(ci);
+                // strip leading backslash for root-namespace constant lookup
+                const name = if (fqn.len > 0 and fqn[0] == '\\') fqn[1..] else fqn;
+                try self.emitGetVar(name);
             },
             .root => {},
         }

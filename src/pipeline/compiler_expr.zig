@@ -504,9 +504,15 @@ pub fn compileCall(self: *Compiler, node: Ast.Node) Error!void {
             const idx = try self.addConstant(.{ .string = name });
             try self.emitOp(.call_spread);
             try self.emitU16(idx);
+        } else if (callee.tag == .qualified_name) {
+            const parts = self.ast.extraSlice(callee.data.lhs);
+            const fqn = try self.buildQualifiedString(parts);
+            const name = if (fqn.len > 0 and fqn[0] == '\\') fqn[1..] else fqn;
+            const idx = try self.addConstant(.{ .string = name });
+            try self.emitOp(.call_spread);
+            try self.emitU16(idx);
         } else {
             try self.compileNode(node.data.lhs);
-            // swap so function name is below args array
             try self.emitOp(.call_indirect_spread);
         }
     } else if (callee.tag == .identifier) {
@@ -515,6 +521,17 @@ pub fn compileCall(self: *Compiler, node: Ast.Node) Error!void {
         self.current_source_offset = call_offset;
         const raw_name = self.ast.tokenSlice(callee.main_token);
         const name = self.resolveFunctionName(raw_name);
+        const idx = try self.addConstant(.{ .string = name });
+        try self.emitOp(.call);
+        try self.emitU16(idx);
+        try self.emitByte(@intCast(args.len));
+    } else if (callee.tag == .qualified_name) {
+        const call_offset = self.current_source_offset;
+        for (args) |arg| try self.compileNode(arg);
+        self.current_source_offset = call_offset;
+        const parts = self.ast.extraSlice(callee.data.lhs);
+        const fqn = try self.buildQualifiedString(parts);
+        const name = if (fqn.len > 0 and fqn[0] == '\\') fqn[1..] else fqn;
         const idx = try self.addConstant(.{ .string = name });
         try self.emitOp(.call);
         try self.emitU16(idx);
