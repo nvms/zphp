@@ -786,6 +786,15 @@ fn resolveNodeClassName(self: *Compiler, class_node: Ast.Node) ![]const u8 {
         const parts = self.ast.extraSlice(class_node.data.lhs);
         const name = try self.buildQualifiedString(parts);
         if (class_node.data.rhs == 1) return name;
+        // check if the first segment is a use alias
+        if (std.mem.indexOf(u8, name, "\\")) |sep| {
+            const first_segment = name[0..sep];
+            if (self.use_aliases.get(first_segment)) |alias_fqn| {
+                const qualified = std.fmt.allocPrint(self.allocator, "{s}{s}", .{ alias_fqn, name[sep..] }) catch return name;
+                self.string_allocs.append(self.allocator, qualified) catch return name;
+                return qualified;
+            }
+        }
         if (self.namespace.len == 0) return name;
         const qualified = std.fmt.allocPrint(self.allocator, "{s}\\{s}", .{ self.namespace, name }) catch return name;
         self.string_allocs.append(self.allocator, qualified) catch return name;
@@ -794,10 +803,12 @@ fn resolveNodeClassName(self: *Compiler, class_node: Ast.Node) ![]const u8 {
     return self.resolveClassName(self.ast.tokenSlice(class_node.main_token));
 }
 
-fn resolveQualifiedNewName(self: *Compiler, node: Ast.Node) ![]const u8 {
+fn resolveQualifiedNewName(self: *Compiler, node: Ast.Node) !struct { name: []const u8, is_absolute: bool } {
     const first = self.ast.tokenSlice(node.main_token);
-    if (node.data.rhs == 0) return first;
-    const parts = self.ast.extraSlice(node.data.rhs);
+    const rhs_raw = node.data.rhs & ~(@as(u32, 1) << 31);
+    const is_absolute = (node.data.rhs & (1 << 31)) != 0;
+    if (rhs_raw == 0) return .{ .name = first, .is_absolute = is_absolute };
+    const parts = self.ast.extraSlice(rhs_raw);
     var buf = std.ArrayListUnmanaged(u8){};
     try buf.appendSlice(self.allocator, first);
     for (parts[1..]) |part_tok| {
@@ -806,12 +817,29 @@ fn resolveQualifiedNewName(self: *Compiler, node: Ast.Node) ![]const u8 {
     }
     const owned = try buf.toOwnedSlice(self.allocator);
     try self.string_allocs.append(self.allocator, owned);
-    return owned;
+    return .{ .name = owned, .is_absolute = is_absolute };
 }
 
 pub fn compileNewExpr(self: *Compiler, node: Ast.Node) Error!void {
-    const raw_name = try resolveQualifiedNewName(self, node);
-    const class_name = if (std.mem.indexOf(u8, raw_name, "\\") != null) raw_name else self.resolveClassName(raw_name);
+    const resolved = try resolveQualifiedNewName(self, node);
+    const raw_name = resolved.name;
+    const class_name = if (resolved.is_absolute)
+        raw_name
+    else if (std.mem.indexOf(u8, raw_name, "\\")) |sep| blk: {
+        // check if the first segment is a use alias
+        const first_segment = raw_name[0..sep];
+        if (self.use_aliases.get(first_segment)) |alias_fqn| {
+            const qualified = std.fmt.allocPrint(self.allocator, "{s}{s}", .{ alias_fqn, raw_name[sep..] }) catch return error.CompileError;
+            self.string_allocs.append(self.allocator, qualified) catch return error.CompileError;
+            break :blk qualified;
+        }
+        if (self.namespace.len > 0) {
+            const qualified = std.fmt.allocPrint(self.allocator, "{s}\\{s}", .{ self.namespace, raw_name }) catch return error.CompileError;
+            self.string_allocs.append(self.allocator, qualified) catch return error.CompileError;
+            break :blk qualified;
+        }
+        break :blk raw_name;
+    } else self.resolveClassName(raw_name);
     const args = self.ast.extraSlice(node.data.lhs);
     for (args) |arg| try self.compileNode(arg);
     const name_idx = try self.addConstant(.{ .string = class_name });

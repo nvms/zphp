@@ -749,7 +749,8 @@ const Parser = struct {
             return self.addNode(.{ .tag = .new_expr_dynamic, .main_token = new_tok, .data = .{ .lhs = class_expr, .rhs = extra } });
         }
 
-        if (self.peek() == .backslash) _ = self.advance();
+        const is_absolute = self.peek() == .backslash;
+        if (is_absolute) _ = self.advance();
         const name_tok = if (self.peek() == .kw_self or self.peek() == .kw_static or self.peek() == .kw_parent)
             self.advance()
         else
@@ -806,10 +807,11 @@ const Parser = struct {
         }
 
         const extra = try self.addExtraList(args.items);
-        const name_extra = if (name_parts.items.len > 1)
+        var name_extra: u32 = if (name_parts.items.len > 1)
             try self.addExtraList(name_parts.items)
         else
             @as(u32, 0);
+        if (is_absolute) name_extra |= (1 << 31);
         return self.addNode(.{ .tag = .new_expr, .main_token = name_tok, .data = .{ .lhs = extra, .rhs = name_extra } });
     }
 
@@ -1502,6 +1504,11 @@ const Parser = struct {
         return self.addNode(.{ .tag = .closure_expr, .main_token = fn_tok, .data = .{ .lhs = param_extra, .rhs = rhs_extra } });
     }
 
+    fn parseStaticArrowFunc(self: *Parser) Error!u32 {
+        _ = self.advance(); // static
+        return self.parseArrowFunc();
+    }
+
     // parse a qualified name like App\Models\User or just User
     // returns an identifier node for simple names, qualified_name node for multi-part
     // data.rhs = 1 means absolute (had leading \)
@@ -1768,7 +1775,7 @@ const Parser = struct {
             .l_paren => if (self.isCastExpr()) self.parseCastExpr() else self.parseGroupedExpr(),
             .l_bracket => self.parseArrayLiteral(),
             .kw_array => self.parseArrayKw(),
-            .kw_static => if (self.peekAt(1) == .kw_function) self.parseClosureExpr() else self.addLiteral(.identifier),
+            .kw_static => if (self.peekAt(1) == .kw_function) self.parseClosureExpr() else if (self.peekAt(1) == .kw_fn) self.parseStaticArrowFunc() else self.addLiteral(.identifier),
             .kw_self, .kw_parent => self.addLiteral(.identifier),
             else => {
                 try self.addError(.expected_expression);

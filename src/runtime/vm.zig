@@ -2709,6 +2709,10 @@ pub const VM = struct {
                     if (this_val) |tv| {
                         if (tv == .object) {
                             if (self.functions.get(full_name)) |func| {
+                                if (func.is_generator) {
+                                    try self.callNamedFunction(full_name, arg_count);
+                                    self.frames[self.frame_count - 1].called_class = class_name;
+                                } else {
                                 const ac: usize = arg_count;
                                 var new_vars: std.StringHashMapUnmanaged(Value) = .{};
                                 try new_vars.put(self.allocator, "$this", tv);
@@ -2718,6 +2722,7 @@ pub const VM = struct {
                                 self.sp -= ac;
                                 self.frames[self.frame_count] = .{ .chunk = &func.chunk, .ip = 0, .vars = new_vars, .locals = try self.allocLocals(func, &new_vars), .func = func, .called_class = class_name };
                                 self.frame_count += 1;
+                                }
                             } else if (self.native_fns.get(full_name)) |native| {
                                 const ac: usize = arg_count;
                                 var args_buf: [16]Value = undefined;
@@ -2790,6 +2795,10 @@ pub const VM = struct {
                     if (this_val) |tv| {
                         if (tv == .object) {
                             if (self.functions.get(full_name)) |func| {
+                                if (func.is_generator) {
+                                    try self.callNamedFunction(full_name, @intCast(ac));
+                                    self.frames[self.frame_count - 1].called_class = class_name;
+                                } else {
                                 var new_vars: std.StringHashMapUnmanaged(Value) = .{};
                                 try new_vars.put(self.allocator, "$this", tv);
                                 if (func.is_variadic) {
@@ -2813,6 +2822,7 @@ pub const VM = struct {
                                 self.sp -= ac;
                                 self.frames[self.frame_count] = .{ .chunk = &func.chunk, .ip = 0, .vars = new_vars, .locals = try self.allocLocals(func, &new_vars), .func = func };
                                 self.frame_count += 1;
+                                }
                             } else {
                                 self.error_msg = std.fmt.allocPrint(self.allocator, "Fatal error: Uncaught Error: Call to undefined method {s}::{s}()", .{ class_name, method_name }) catch null;
                                 return error.RuntimeError;
@@ -3024,10 +3034,12 @@ pub const VM = struct {
 
     fn resolveStaticClassName(self: *VM, name: []const u8) []const u8 {
         if (std.mem.eql(u8, name, "static")) {
-            if (self.currentFrame().vars.get("$this")) |this_val| {
+            const f = self.currentFrame();
+            // called_class takes priority - set by explicit static calls like Base::get()
+            if (f.called_class) |cc| return cc;
+            if (f.vars.get("$this")) |this_val| {
                 if (this_val == .object) return this_val.object.class_name;
             }
-            const f = self.currentFrame();
             if (f.func) |fn_info| {
                 if (fn_info.locals_only) {
                     for (fn_info.slot_names, 0..) |sn, si| {
@@ -3037,7 +3049,6 @@ pub const VM = struct {
                     }
                 }
             }
-            if (f.called_class) |cc| return cc;
             if (self.currentDefiningClass()) |dc| return dc;
         } else if (std.mem.eql(u8, name, "self")) {
             if (self.currentDefiningClass()) |dc| return dc;
