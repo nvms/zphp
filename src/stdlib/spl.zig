@@ -24,6 +24,20 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try array_access.methods.append(a, "offsetUnset");
     try vm.interfaces.put(a, "ArrayAccess", array_access);
 
+    // Iterator interface
+    var iterator = vm_mod.InterfaceDef{ .name = "Iterator" };
+    try iterator.methods.append(a, "current");
+    try iterator.methods.append(a, "key");
+    try iterator.methods.append(a, "next");
+    try iterator.methods.append(a, "rewind");
+    try iterator.methods.append(a, "valid");
+    try vm.interfaces.put(a, "Iterator", iterator);
+
+    // IteratorAggregate interface
+    var iter_agg = vm_mod.InterfaceDef{ .name = "IteratorAggregate" };
+    try iter_agg.methods.append(a, "getIterator");
+    try vm.interfaces.put(a, "IteratorAggregate", iter_agg);
+
     // SplStack
     var stack_def = ClassDef{ .name = "SplStack" };
     try stack_def.interfaces.append(a, "Countable");

@@ -1127,10 +1127,26 @@ pub const VM = struct {
                 },
 
                 .iter_begin => {
-                    const iterable = self.stack[self.sp - 1];
+                    var iterable = self.stack[self.sp - 1];
                     if (iterable == .generator) {
                         try self.resumeGenerator(iterable.generator, .null);
                         self.push(.{ .int = -1 }); // sentinel: -1 means generator iteration
+                    } else if (iterable == .object) {
+                        // IteratorAggregate: replace iterable with getIterator() result
+                        if (self.hasMethod(iterable.object.class_name, "getIterator")) {
+                            const inner = self.callMethod(iterable.object, "getIterator", &.{}) catch .null;
+                            self.stack[self.sp - 1] = inner;
+                            iterable = inner;
+                        }
+                        // Iterator protocol
+                        if (iterable == .object and self.hasMethod(iterable.object.class_name, "rewind")) {
+                            _ = self.callMethod(iterable.object, "rewind", &.{}) catch {};
+                            self.push(.{ .int = -2 }); // sentinel: -2 means Iterator
+                        } else if (iterable == .array) {
+                            self.push(.{ .int = 0 });
+                        } else {
+                            self.push(.{ .int = 0 });
+                        }
                     } else {
                         self.push(.{ .int = 0 });
                     }
@@ -1147,6 +1163,17 @@ pub const VM = struct {
                         } else {
                             self.push(gen.current_key);
                             self.push(gen.current_value);
+                        }
+                    } else if (Value.toInt(idx_val) == -2 and iterable == .object) {
+                        // Iterator protocol
+                        const valid = self.callMethod(iterable.object, "valid", &.{}) catch Value{ .bool = false };
+                        if (!valid.isTruthy()) {
+                            self.currentFrame().ip += offset;
+                        } else {
+                            const key = self.callMethod(iterable.object, "key", &.{}) catch .null;
+                            const current = self.callMethod(iterable.object, "current", &.{}) catch .null;
+                            self.push(key);
+                            self.push(current);
                         }
                     } else if (iterable == .array) {
                         const idx = Value.toInt(idx_val);
@@ -1169,6 +1196,8 @@ pub const VM = struct {
                     const iterable = self.stack[self.sp - 2];
                     if (iterable == .generator) {
                         try self.resumeGenerator(iterable.generator, .null);
+                    } else if (Value.toInt(self.stack[self.sp - 1]) == -2 and iterable == .object) {
+                        _ = self.callMethod(iterable.object, "next", &.{}) catch {};
                     } else {
                         const idx = self.pop();
                         self.push(.{ .int = Value.toInt(idx) + 1 });
