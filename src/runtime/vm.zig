@@ -235,7 +235,7 @@ pub const InterfaceDef = struct {
 };
 
 pub const VM = struct {
-    frames: [64]CallFrame = undefined,
+    frames: [256]CallFrame = undefined,
     frame_count: usize = 0,
     stack: [256]Value = undefined,
     sp: usize = 0,
@@ -274,7 +274,7 @@ pub const VM = struct {
     prev_error_handler: ?Value = null,
     ob_stack: std.ArrayListUnmanaged(usize) = .{},
     request_vars: std.StringHashMapUnmanaged(Value) = .{},
-    exception_handlers: [32]ExceptionHandler = undefined,
+    exception_handlers: [128]ExceptionHandler = undefined,
     handler_count: usize = 0,
     handler_floor: usize = 0,
     pending_exception: ?Value = null,
@@ -1817,6 +1817,11 @@ pub const VM = struct {
                     const obj_val = self.pop();
                     if (obj_val == .object and class_name_val == .string) {
                         self.push(.{ .bool = self.isInstanceOf(obj_val.object.class_name, class_name_val.string) });
+                    } else if (obj_val == .string and class_name_val == .string and
+                        std.mem.eql(u8, class_name_val.string, "Closure") and
+                        std.mem.startsWith(u8, obj_val.string, "__closure_"))
+                    {
+                        self.push(.{ .bool = true });
                     } else {
                         self.push(.{ .bool = false });
                     }
@@ -1877,7 +1882,18 @@ pub const VM = struct {
 
                 .new_obj => {
                     const name_idx = self.readU16();
-                    const arg_count = self.readByte();
+                    var arg_count = self.readByte();
+                    // 0xFF signals spread args: top of stack is an array to unpack
+                    if (arg_count == 0xFF) {
+                        const arr_val = self.pop();
+                        if (arr_val == .array) {
+                            const entries = arr_val.array.entries.items;
+                            for (entries) |entry| self.push(entry.value);
+                            arg_count = @intCast(entries.len);
+                        } else {
+                            arg_count = 0;
+                        }
+                    }
                     var class_name = self.currentChunk().constants.items[name_idx].string;
                     if (std.mem.eql(u8, class_name, "static")) {
                         class_name = self.resolveStaticClassName(class_name);
@@ -2001,7 +2017,18 @@ pub const VM = struct {
                 },
 
                 .new_obj_dynamic => {
-                    const arg_count = self.readByte();
+                    var arg_count = self.readByte();
+                    // 0xFF signals spread args: top of stack is an array to unpack
+                    if (arg_count == 0xFF) {
+                        const arr_val = self.pop();
+                        if (arr_val == .array) {
+                            const entries = arr_val.array.entries.items;
+                            for (entries) |entry| self.push(entry.value);
+                            arg_count = @intCast(entries.len);
+                        } else {
+                            arg_count = 0;
+                        }
+                    }
                     const ac: usize = arg_count;
                     const name_val = self.stack[self.sp - ac - 1];
                     const class_name = if (name_val == .string) name_val.string else if (name_val == .object) name_val.object.class_name else {
@@ -3531,6 +3558,10 @@ pub const VM = struct {
     const AliasRule = struct { method: []const u8, trait: []const u8, alias: []const u8 };
 
     fn applyTrait(self: *VM, def: *ClassDef, class_name: []const u8, trait_name: []const u8, alias_rules: []const AliasRule, insteadof_rules: []const InsteadofRule) !void {
+        // autoload the trait if it hasn't been loaded yet
+        if (!self.traits.contains(trait_name)) {
+            try self.tryAutoload(trait_name);
+        }
         // recursively apply sub-traits first
         if (self.trait_uses.get(trait_name)) |subs| {
             for (subs) |sub| {
@@ -3539,7 +3570,7 @@ pub const VM = struct {
         }
 
         const TraitMethod = struct { name: []const u8, func: *const ObjFunction };
-        var pending: [64]TraitMethod = undefined;
+        var pending: [256]TraitMethod = undefined;
         var pending_count: usize = 0;
         {
             var fn_iter = self.functions.iterator();

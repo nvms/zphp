@@ -841,19 +841,32 @@ pub fn compileNewExpr(self: *Compiler, node: Ast.Node) Error!void {
         break :blk raw_name;
     } else self.resolveClassName(raw_name);
     const args = self.ast.extraSlice(node.data.lhs);
-    for (args) |arg| try self.compileNode(arg);
     const name_idx = try self.addConstant(.{ .string = class_name });
-    try self.emitOp(.new_obj);
-    try self.emitU16(name_idx);
-    try self.emitByte(@intCast(args.len));
+    if (hasSplatOrNamed(self.ast, args)) {
+        try emitSpreadArgs(self, args);
+        try self.emitOp(.new_obj);
+        try self.emitU16(name_idx);
+        try self.emitByte(0xFF);
+    } else {
+        for (args) |arg| try self.compileNode(arg);
+        try self.emitOp(.new_obj);
+        try self.emitU16(name_idx);
+        try self.emitByte(@intCast(args.len));
+    }
 }
 
 pub fn compileNewExprDynamic(self: *Compiler, node: Ast.Node) Error!void {
     try self.compileNode(node.data.lhs);
     const args = self.ast.extraSlice(node.data.rhs);
-    for (args) |arg| try self.compileNode(arg);
-    try self.emitOp(.new_obj_dynamic);
-    try self.emitByte(@intCast(args.len));
+    if (hasSplatOrNamed(self.ast, args)) {
+        try emitSpreadArgs(self, args);
+        try self.emitOp(.new_obj_dynamic);
+        try self.emitByte(0xFF);
+    } else {
+        for (args) |arg| try self.compileNode(arg);
+        try self.emitOp(.new_obj_dynamic);
+        try self.emitByte(@intCast(args.len));
+    }
 }
 
 pub fn compileYield(self: *Compiler, node: Ast.Node) Error!void {

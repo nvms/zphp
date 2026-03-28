@@ -70,6 +70,7 @@ pub const entries = .{
     .{ "spl_autoload_register", native_spl_autoload_register },
     .{ "spl_autoload_unregister", native_spl_autoload_unregister },
     .{ "spl_autoload_functions", native_spl_autoload_functions },
+    .{ "spl_object_hash", native_spl_object_hash },
     .{ "is_scalar", is_scalar },
     .{ "is_iterable", is_iterable },
     .{ "is_countable", is_countable },
@@ -161,7 +162,7 @@ fn gettype(_: *NativeContext, args: []const Value) RuntimeError!Value {
         .bool => "boolean",
         .int => "integer",
         .float => "double",
-        .string => "string",
+        .string => |s| if (std.mem.startsWith(u8, s, "__closure_")) "object" else "string",
         .array => "array",
         .object, .generator, .fiber => "object",
     } };
@@ -184,7 +185,9 @@ fn is_float(_: *NativeContext, args: []const Value) RuntimeError!Value {
 }
 
 fn is_string(_: *NativeContext, args: []const Value) RuntimeError!Value {
-    return .{ .bool = args.len > 0 and args[0] == .string };
+    if (args.len == 0) return .{ .bool = false };
+    if (args[0] != .string) return .{ .bool = false };
+    return .{ .bool = !std.mem.startsWith(u8, args[0].string, "__closure_") };
 }
 
 fn is_bool(_: *NativeContext, args: []const Value) RuntimeError!Value {
@@ -235,7 +238,10 @@ fn boolval(_: *NativeContext, args: []const Value) RuntimeError!Value {
 }
 
 fn is_object(_: *NativeContext, args: []const Value) RuntimeError!Value {
-    return .{ .bool = args.len > 0 and args[0] == .object };
+    if (args.len == 0) return .{ .bool = false };
+    if (args[0] == .object) return .{ .bool = true };
+    if (args[0] == .string and std.mem.startsWith(u8, args[0].string, "__closure_")) return .{ .bool = true };
+    return .{ .bool = false };
 }
 
 fn is_scalar(_: *NativeContext, args: []const Value) RuntimeError!Value {
@@ -317,8 +323,9 @@ fn get_class(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
         if (this_val != .object) return .{ .bool = false };
         return .{ .string = this_val.object.class_name };
     }
-    if (args[0] != .object) return .{ .bool = false };
-    return .{ .string = args[0].object.class_name };
+    if (args[0] == .object) return .{ .string = args[0].object.class_name };
+    if (args[0] == .string and std.mem.startsWith(u8, args[0].string, "__closure_")) return .{ .string = "Closure" };
+    return .{ .bool = false };
 }
 
 fn get_called_class(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
@@ -1156,4 +1163,11 @@ fn isResourceObject(name: []const u8) bool {
         std.mem.eql(u8, name, "__file") or
         std.mem.eql(u8, name, "__curl") or
         std.mem.eql(u8, name, "FileHandle");
+}
+
+fn native_spl_object_hash(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len == 0 or args[0] != .object) return .{ .bool = false };
+    const ptr = @intFromPtr(args[0].object);
+    const hash = std.fmt.allocPrint(ctx.allocator, "{x:0>32}", .{ptr}) catch return .{ .bool = false };
+    return .{ .string = hash };
 }

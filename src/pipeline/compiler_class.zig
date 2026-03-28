@@ -605,7 +605,12 @@ pub fn compileClassDecl(self: *Compiler, node: Ast.Node) Error!void {
         const member = self.ast.nodes[member_idx];
         if (member.tag == .trait_use) {
             for (self.ast.extraSlice(member.data.lhs)) |tn| {
-                try all_traits.append(self.allocator, self.ast.tokenSlice(self.ast.nodes[tn].main_token));
+                const tn_node = self.ast.nodes[tn];
+                const raw_name = if (tn_node.tag == .qualified_name) blk: {
+                    const parts = self.ast.extraSlice(tn_node.data.lhs);
+                    break :blk try self.buildQualifiedString(parts);
+                } else self.ast.tokenSlice(tn_node.main_token);
+                try all_traits.append(self.allocator, self.resolveClassName(raw_name));
             }
         }
     }
@@ -847,7 +852,12 @@ pub fn compileAnonymousClass(self: *Compiler, node: Ast.Node) Error!void {
         const member = self.ast.nodes[member_idx];
         if (member.tag == .trait_use) {
             for (self.ast.extraSlice(member.data.lhs)) |tn| {
-                try all_traits.append(self.allocator, self.ast.tokenSlice(self.ast.nodes[tn].main_token));
+                const tn_node = self.ast.nodes[tn];
+                const raw_name = if (tn_node.tag == .qualified_name) blk: {
+                    const parts = self.ast.extraSlice(tn_node.data.lhs);
+                    break :blk try self.buildQualifiedString(parts);
+                } else self.ast.tokenSlice(tn_node.main_token);
+                try all_traits.append(self.allocator, self.resolveClassName(raw_name));
             }
         }
     }
@@ -956,7 +966,7 @@ pub fn compileInterfaceDecl(self: *Compiler, node: Ast.Node) Error!void {
 }
 
 pub fn compileTraitDecl(self: *Compiler, node: Ast.Node) Error!void {
-    const trait_name = self.ast.tokenSlice(node.main_token);
+    const trait_name = self.resolveClassName(self.ast.tokenSlice(node.main_token));
     const members = self.ast.extraSlice(node.data.lhs);
 
     // compile trait methods as TraitName::methodName functions
@@ -974,7 +984,12 @@ pub fn compileTraitDecl(self: *Compiler, node: Ast.Node) Error!void {
         const member = self.ast.nodes[member_idx];
         if (member.tag == .trait_use) {
             for (self.ast.extraSlice(member.data.lhs)) |tn| {
-                try sub_traits.append(self.allocator, self.ast.tokenSlice(self.ast.nodes[tn].main_token));
+                const tn_node = self.ast.nodes[tn];
+                const raw_name = if (tn_node.tag == .qualified_name) blk: {
+                    const parts = self.ast.extraSlice(tn_node.data.lhs);
+                    break :blk try self.buildQualifiedString(parts);
+                } else self.ast.tokenSlice(tn_node.main_token);
+                try sub_traits.append(self.allocator, self.resolveClassName(raw_name));
             }
         }
     }
