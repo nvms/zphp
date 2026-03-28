@@ -38,6 +38,16 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try iter_agg.methods.append(a, "getIterator");
     try vm.interfaces.put(a, "IteratorAggregate", iter_agg);
 
+    // JsonSerializable interface
+    var json_ser = vm_mod.InterfaceDef{ .name = "JsonSerializable" };
+    try json_ser.methods.append(a, "jsonSerialize");
+    try vm.interfaces.put(a, "JsonSerializable", json_ser);
+
+    // Stringable interface
+    var stringable = vm_mod.InterfaceDef{ .name = "Stringable" };
+    try stringable.methods.append(a, "__toString");
+    try vm.interfaces.put(a, "Stringable", stringable);
+
     // SplStack
     var stack_def = ClassDef{ .name = "SplStack" };
     try stack_def.interfaces.append(a, "Countable");
