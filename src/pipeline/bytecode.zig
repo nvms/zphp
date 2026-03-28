@@ -93,7 +93,7 @@ pub const OpCode = enum(u8) {
     static_call_spread, // u16: class name, u16: method name (args array on stack)
     static_call_dynamic, // u16: method name, u8: arg count (class name string on stack before args)
     interface_decl, // u16: name, u8: method count, then method_count * u16 method name, u16: parent (0xffff = none)
-    trait_decl, // u16: name (just registers the trait exists)
+    trait_decl, // u16: name, u8: sub_trait_count, then sub_trait_count * u16 sub_trait_name
     enum_decl, // u16: enum name, u8: backed_type (0=none, 1=int, 2=string), u8: case_count, then case_count * (u16 name, u8 has_value), then method/implements like class_decl
     get_static_prop, // u16: class name, u16: property name
     set_static_prop, // u16: class name, u16: property name
@@ -155,7 +155,7 @@ pub const OpCode = enum(u8) {
             .jump_if_not_null, .push_handler, .get_prop, .set_prop, .get_local, .set_local,
             .get_global, .concat_assign, .unset_var, .unset_prop, .isset_prop,
             .closure_bind, .closure_bind_ref, .define_const,
-            .iter_check, .inc_local, .dec_local, .trait_decl,
+            .iter_check, .inc_local, .dec_local,
             => 3,
             .call, .call_spread, .new_obj, .method_call, .method_call_spread => 4,
             .get_static_prop, .set_static_prop, .get_static, .set_static,
@@ -164,7 +164,7 @@ pub const OpCode = enum(u8) {
             .static_call => 6,
             .less_local_local_jif => 7,
             .require, .call_indirect, .call_indirect_spread => 2,
-            .class_decl, .interface_decl, .enum_decl => 1,
+            .class_decl, .interface_decl, .enum_decl, .trait_decl => 1,
             else => 1,
         };
     }

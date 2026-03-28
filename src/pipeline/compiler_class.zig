@@ -923,8 +923,25 @@ pub fn compileTraitDecl(self: *Compiler, node: Ast.Node) Error!void {
         }
     }
 
-    // store property member indices for classes that use this trait
+    // collect sub-trait names from trait_use members
+    var sub_traits = std.ArrayListUnmanaged([]const u8){};
+    defer sub_traits.deinit(self.allocator);
+    for (members) |member_idx| {
+        const member = self.ast.nodes[member_idx];
+        if (member.tag == .trait_use) {
+            for (self.ast.extraSlice(member.data.lhs)) |tn| {
+                try sub_traits.append(self.allocator, self.ast.tokenSlice(self.ast.nodes[tn].main_token));
+            }
+        }
+    }
+
+    // store property member indices (own + sub-trait properties)
     var prop_indices = std.ArrayListUnmanaged(u32){};
+    for (sub_traits.items) |st| {
+        if (self.trait_properties.get(st)) |sub_props| {
+            for (sub_props) |pi| try prop_indices.append(self.allocator, pi);
+        }
+    }
     for (members) |member_idx| {
         const member = self.ast.nodes[member_idx];
         if (member.tag == .class_property) {
@@ -941,6 +958,11 @@ pub fn compileTraitDecl(self: *Compiler, node: Ast.Node) Error!void {
     const name_idx = try self.addConstant(.{ .string = trait_name });
     try self.emitOp(.trait_decl);
     try self.emitU16(name_idx);
+    try self.emitByte(@intCast(sub_traits.items.len));
+    for (sub_traits.items) |st| {
+        const st_idx = try self.addConstant(.{ .string = st });
+        try self.emitU16(st_idx);
+    }
 }
 
 pub fn compileEnumDecl(self: *Compiler, node: Ast.Node) Error!void {

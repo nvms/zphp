@@ -256,6 +256,7 @@ pub const VM = struct {
     classes: std.StringHashMapUnmanaged(ClassDef) = .{},
     interfaces: std.StringHashMapUnmanaged(InterfaceDef) = .{},
     traits: std.StringHashMapUnmanaged(void) = .{},
+    trait_uses: std.StringHashMapUnmanaged([]const []const u8) = .{},
     statics: std.StringHashMapUnmanaged(Value) = .{},
     static_vars: std.ArrayListUnmanaged(StaticEntry) = .{},
     global_vars: std.ArrayListUnmanaged(StaticEntry) = .{},
@@ -541,6 +542,9 @@ pub const VM = struct {
         while (iface_iter.next()) |i| i.deinit(self.allocator);
         self.interfaces.deinit(self.allocator);
         self.traits.deinit(self.allocator);
+        var tu_iter = self.trait_uses.valueIterator();
+        while (tu_iter.next()) |subs| self.allocator.free(subs.*);
+        self.trait_uses.deinit(self.allocator);
         self.statics.deinit(self.allocator);
         self.static_vars.deinit(self.allocator);
         self.global_vars.deinit(self.allocator);
@@ -1820,6 +1824,15 @@ pub const VM = struct {
                     const name_idx = self.readU16();
                     const trait_name = self.currentChunk().constants.items[name_idx].string;
                     try self.traits.put(self.allocator, trait_name, {});
+                    const sub_count = self.readByte();
+                    if (sub_count > 0) {
+                        const subs = try self.allocator.alloc([]const u8, sub_count);
+                        for (0..sub_count) |i| {
+                            const si = self.readU16();
+                            subs[i] = self.currentChunk().constants.items[si].string;
+                        }
+                        try self.trait_uses.put(self.allocator, trait_name, subs);
+                    }
                 },
 
                 .enum_decl => try self.handleEnumDecl(),
@@ -3469,6 +3482,13 @@ pub const VM = struct {
     const AliasRule = struct { method: []const u8, trait: []const u8, alias: []const u8 };
 
     fn applyTrait(self: *VM, def: *ClassDef, class_name: []const u8, trait_name: []const u8, alias_rules: []const AliasRule, insteadof_rules: []const InsteadofRule) !void {
+        // recursively apply sub-traits first
+        if (self.trait_uses.get(trait_name)) |subs| {
+            for (subs) |sub| {
+                try self.applyTrait(def, class_name, sub, &.{}, &.{});
+            }
+        }
+
         const TraitMethod = struct { name: []const u8, func: *const ObjFunction };
         var pending: [64]TraitMethod = undefined;
         var pending_count: usize = 0;
