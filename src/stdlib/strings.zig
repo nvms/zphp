@@ -45,6 +45,17 @@ pub const entries = .{
     .{ "mb_strlen", native_mb_strlen },
     .{ "mb_strtolower", native_mb_strtolower },
     .{ "mb_strtoupper", native_mb_strtoupper },
+    .{ "mb_detect_encoding", native_mb_detect_encoding },
+    .{ "mb_convert_encoding", native_mb_convert_encoding },
+    .{ "iconv", native_iconv },
+    .{ "iconv_strlen", native_mb_strlen },
+    .{ "iconv_strpos", native_mb_strpos },
+    .{ "iconv_substr", native_mb_substr },
+    .{ "mb_strpos", native_mb_strpos },
+    .{ "mb_strrpos", native_mb_strrpos },
+    .{ "mb_substr_count", native_mb_substr_count },
+    .{ "mb_internal_encoding", native_mb_internal_encoding },
+    .{ "mb_substitute_character", native_mb_substitute_character },
     .{ "str_getcsv", native_str_getcsv },
     .{ "base64_encode", native_base64_encode },
     .{ "base64_decode", native_base64_decode },
@@ -1001,6 +1012,98 @@ fn native_mb_strtolower(ctx: *NativeContext, args: []const Value) RuntimeError!V
 
 fn native_mb_strtoupper(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     return strtoupper(ctx, args);
+}
+
+fn native_mb_detect_encoding(_: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len == 0 or args[0] != .string) return .{ .bool = false };
+    return .{ .string = "UTF-8" };
+}
+
+fn native_mb_convert_encoding(_: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len < 2 or args[0] != .string) return .{ .bool = false };
+    return args[0];
+}
+
+fn native_iconv(_: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len < 3 or args[2] != .string) return .{ .bool = false };
+    return args[2];
+}
+
+fn native_mb_strpos(_: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len < 2 or args[0] != .string or args[1] != .string) return .{ .bool = false };
+    const haystack = args[0].string;
+    const needle = args[1].string;
+    const byte_offset: usize = if (args.len >= 3) blk: {
+        const off = Value.toInt(args[2]);
+        if (off < 0) break :blk 0;
+        var bo: usize = 0;
+        var chars: usize = 0;
+        while (bo < haystack.len and chars < @as(usize, @intCast(off))) {
+            bo += utf8CharLen(haystack[bo]);
+            chars += 1;
+        }
+        break :blk bo;
+    } else 0;
+    if (byte_offset >= haystack.len) return .{ .bool = false };
+    if (std.mem.indexOf(u8, haystack[byte_offset..], needle)) |pos| {
+        var char_pos: i64 = 0;
+        var j: usize = 0;
+        while (j < byte_offset + pos) {
+            j += utf8CharLen(haystack[j]);
+            char_pos += 1;
+        }
+        return .{ .int = char_pos };
+    }
+    return .{ .bool = false };
+}
+
+fn native_mb_strrpos(_: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len < 2 or args[0] != .string or args[1] != .string) return .{ .bool = false };
+    const haystack = args[0].string;
+    const needle = args[1].string;
+    if (std.mem.lastIndexOf(u8, haystack, needle)) |pos| {
+        var char_pos: i64 = 0;
+        var j: usize = 0;
+        while (j < pos) {
+            j += utf8CharLen(haystack[j]);
+            char_pos += 1;
+        }
+        return .{ .int = char_pos };
+    }
+    return .{ .bool = false };
+}
+
+fn native_mb_substr_count(_: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len < 2 or args[0] != .string or args[1] != .string) return .{ .int = 0 };
+    const haystack = args[0].string;
+    const needle = args[1].string;
+    if (needle.len == 0) return .{ .int = 0 };
+    var count: i64 = 0;
+    var i: usize = 0;
+    while (i + needle.len <= haystack.len) {
+        if (std.mem.eql(u8, haystack[i .. i + needle.len], needle)) {
+            count += 1;
+            i += needle.len;
+        } else {
+            i += 1;
+        }
+    }
+    return .{ .int = count };
+}
+
+fn native_mb_internal_encoding(_: *NativeContext, _: []const Value) RuntimeError!Value {
+    return .{ .string = "UTF-8" };
+}
+
+fn native_mb_substitute_character(_: *NativeContext, _: []const Value) RuntimeError!Value {
+    return .{ .bool = true };
+}
+
+fn utf8CharLen(byte: u8) usize {
+    if (byte < 0x80) return 1;
+    if (byte < 0xE0) return 2;
+    if (byte < 0xF0) return 3;
+    return 4;
 }
 
 fn native_str_getcsv(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
