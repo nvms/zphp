@@ -264,6 +264,7 @@ pub const Compiler = struct {
             .false_literal => try self.emitOp(.op_false),
             .null_literal => try self.emitOp(.op_null),
             .variable => try self.compileGetVar(node),
+            .variable_variable => try self.compileVariableVariable(node),
             .identifier => try self.compileGetVar(node),
             .binary_op => try compiler_expr.compileBinaryOp(self, node),
             .assign => try compiler_expr.compileAssign(self, node),
@@ -381,6 +382,16 @@ pub const Compiler = struct {
         }
 
         try self.emitGetVar(name);
+    }
+
+    pub fn compileVariableVariable(self: *Compiler, node: Ast.Node) Error!void {
+        const inner = self.ast.nodes[node.data.lhs];
+        try self.compileNode(node.data.lhs);
+        if (inner.tag == .variable) {
+            // $$var - the inner variable's value is a string with the $ prefix, strip it
+            // get_var_var expects the name with $ prefix (matching PHP convention)
+        }
+        try self.emitOp(.get_var_var);
     }
 
     fn getFileDir(self: *Compiler) []const u8 {

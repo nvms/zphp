@@ -172,6 +172,19 @@ pub fn compileAssign(self: *Compiler, node: Ast.Node) Error!void {
         return;
     }
 
+    if (target.tag == .variable_variable) {
+        if (op_tag != .equal) {
+            try self.compileVariableVariable(target);
+        }
+        try self.compileNode(node.data.rhs);
+        if (op_tag != .equal) {
+            try emitCompoundOp(self, op_tag);
+        }
+        try self.compileNode(target.data.lhs);
+        try self.emitOp(.set_var_var);
+        return;
+    }
+
     if (op_tag != .equal) {
         try self.compileGetVar(target);
     }

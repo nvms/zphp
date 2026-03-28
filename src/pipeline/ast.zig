@@ -69,6 +69,7 @@ pub const Ast = struct {
             false_literal,
             null_literal,
             variable,
+            variable_variable, // lhs = inner expression ($$var, ${expr})
             identifier,
 
             // binary (non-short-circuit, main_token = operator)

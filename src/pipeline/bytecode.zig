@@ -12,6 +12,8 @@ pub const OpCode = enum(u8) {
 
     get_var, // u16: name constant index
     set_var, // u16: name constant index
+    get_var_var, // dynamic: pop name string, push value
+    set_var_var, // dynamic: peek value, pop name string, set variable
 
     add,
     subtract,

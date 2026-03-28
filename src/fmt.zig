@@ -349,6 +349,10 @@ const Formatter = struct {
             .false_literal => self.write("false"),
             .null_literal => self.write("null"),
             .variable => self.write(self.ast.tokens[node.main_token].lexeme(self.source)),
+            .variable_variable => {
+                self.write("$");
+                self.formatNode(node.data.lhs);
+            },
             .identifier => self.write(self.ast.tokens[node.main_token].lexeme(self.source)),
 
             .binary_op => self.formatBinaryOp(node),

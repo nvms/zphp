@@ -688,6 +688,69 @@ pub const VM = struct {
                     }
                 },
 
+                .get_var_var => {
+                    const name_val = self.pop();
+                    const raw_name = if (name_val == .string) name_val.string else "";
+                    if (raw_name.len == 0) {
+                        self.push(.null);
+                    } else {
+                        var buf: [256]u8 = undefined;
+                        const dollar_name = varVarName(raw_name, &buf);
+                        if (self.currentFrame().ref_slots.get(dollar_name)) |cell| {
+                            self.push(cell.*);
+                        } else {
+                            // check locals first (via slot_names) since vars can have stale entries
+                            const sn = if (self.currentFrame().func) |func| func.slot_names else self.global_slot_names;
+                            var found = false;
+                            for (sn, 0..) |s, si| {
+                                if (std.mem.eql(u8, s, dollar_name)) {
+                                    if (si < self.currentFrame().locals.len) {
+                                        self.push(self.currentFrame().locals[si]);
+                                    } else {
+                                        self.push(.null);
+                                    }
+                                    found = true;
+                                    break;
+                                }
+                            }
+                            if (!found) {
+                                if (self.currentFrame().vars.get(dollar_name)) |val| {
+                                    self.push(val);
+                                } else {
+                                    self.push(.null);
+                                }
+                            }
+                        }
+                    }
+                },
+                .set_var_var => {
+                    const name_val = self.pop();
+                    const raw_name = if (name_val == .string) name_val.string else "";
+                    const val = try self.copyValue(self.peek());
+                    if (raw_name.len > 0) {
+                        var buf: [256]u8 = undefined;
+                        const dollar_name = varVarName(raw_name, &buf);
+                        if (self.currentFrame().ref_slots.get(dollar_name)) |cell| {
+                            cell.* = val;
+                        } else {
+                            const sn = if (self.currentFrame().func) |func| func.slot_names else self.global_slot_names;
+                            var found_slot = false;
+                            for (sn, 0..) |s, si| {
+                                if (std.mem.eql(u8, s, dollar_name)) {
+                                    if (si < self.currentFrame().locals.len) self.currentFrame().locals[si] = val;
+                                    found_slot = true;
+                                    break;
+                                }
+                            }
+                            if (!found_slot) {
+                                const stable_key = try std.fmt.allocPrint(self.allocator, "${s}", .{raw_name});
+                                try self.strings.append(self.allocator, stable_key);
+                                try self.currentFrame().vars.put(self.allocator, stable_key, val);
+                            }
+                        }
+                    }
+                },
+
                 .add => {
                     const b = self.pop();
                     const a = self.pop();
@@ -4508,6 +4571,14 @@ pub const VM = struct {
         self.frame_count += 1;
         try self.runUntilFrame(base_frame);
         return self.pop();
+    }
+
+    fn varVarName(raw_name: []const u8, buf: *[256]u8) []const u8 {
+        if (raw_name.len > 0 and raw_name[0] == '$') return raw_name;
+        if (raw_name.len + 1 > buf.len) return raw_name;
+        buf[0] = '$';
+        @memcpy(buf[1 .. 1 + raw_name.len], raw_name);
+        return buf[0 .. 1 + raw_name.len];
     }
 
     noinline fn valueTypeName(val: Value) []const u8 {

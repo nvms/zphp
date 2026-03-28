@@ -1771,6 +1771,7 @@ const Parser = struct {
             .kw_false => self.addLiteral(.false_literal),
             .kw_null => self.addLiteral(.null_literal),
             .variable => self.addLiteral(.variable),
+            .dollar => self.parseVariableVariable(),
             .identifier => if (self.peekAt(1) == .backslash) self.parseQualifiedName() else self.addLiteral(.identifier),
             .backslash => self.parseQualifiedName(),
             .kw_isset, .kw_empty, .kw_unset, .kw_eval, .kw_exit, .kw_die => self.addLiteral(.identifier),
@@ -1788,6 +1789,12 @@ const Parser = struct {
                 return error.ParseError;
             },
         };
+    }
+
+    fn parseVariableVariable(self: *Parser) Error!u32 {
+        const dollar_tok = self.advance(); // $
+        const inner = try self.parsePrimaryExpr();
+        return self.addNode(.{ .tag = .variable_variable, .main_token = dollar_tok, .data = .{ .lhs = inner } });
     }
 
     fn isCastExpr(self: *const Parser) bool {

@@ -45,6 +45,11 @@ fn renderNode(ast: *const Ast, idx: u32, buf: *Buf) !void {
     const w = buf.writer();
     switch (node.tag) {
         .integer_literal, .float_literal, .string_literal, .variable, .identifier => try w.writeAll(ast.tokenSlice(node.main_token)),
+        .variable_variable => {
+            try w.writeAll("($$");
+            try renderNode(ast, node.data.lhs, buf);
+            try w.writeByte(')');
+        },
         .true_literal => try w.writeAll("true"),
         .false_literal => try w.writeAll("false"),
         .null_literal => try w.writeAll("null"),
