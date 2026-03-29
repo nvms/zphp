@@ -187,6 +187,14 @@ pub fn register(vm: *VM, a: Allocator) !void {
 
     try vm.native_fns.put(a, "Closure::bind", closureBind);
     try vm.native_fns.put(a, "Closure::fromCallable", closureFromCallable);
+
+    var rref_def = ClassDef{ .name = "ReflectionReference" };
+    try rref_def.methods.put(a, "fromArrayElement", .{ .name = "fromArrayElement", .arity = 2, .is_static = true });
+    try rref_def.methods.put(a, "getId", .{ .name = "getId", .arity = 0 });
+    try vm.classes.put(a, "ReflectionReference", rref_def);
+
+    try vm.native_fns.put(a, "ReflectionReference::fromArrayElement", rrefFromArrayElement);
+    try vm.native_fns.put(a, "ReflectionReference::getId", rrefGetId);
 }
 
 fn getThis(ctx: *NativeContext) ?*PhpObject {
@@ -291,9 +299,16 @@ fn rcConstruct(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
         return throwReflection(ctx, "ReflectionClass::__construct() expects a class name or object");
     const this = getThis(ctx) orelse return .null;
 
-    _ = resolveClassName(ctx.vm, class_name) catch return throwReflection(ctx, "Class does not exist");
-    if (ctx.vm.classes.get(class_name) == null and ctx.vm.interfaces.get(class_name) == null)
-        return throwReflection(ctx, "Class does not exist");
+    _ = resolveClassName(ctx.vm, class_name) catch {
+        const msg = std.fmt.allocPrint(ctx.allocator, "Class \"{s}\" does not exist", .{class_name}) catch return throwReflection(ctx, "Class does not exist");
+        try ctx.strings.append(ctx.allocator, msg);
+        return throwReflection(ctx, msg);
+    };
+    if (ctx.vm.classes.get(class_name) == null and ctx.vm.interfaces.get(class_name) == null) {
+        const msg = std.fmt.allocPrint(ctx.allocator, "Class \"{s}\" does not exist", .{class_name}) catch return throwReflection(ctx, "Class does not exist");
+        try ctx.strings.append(ctx.allocator, msg);
+        return throwReflection(ctx, msg);
+    }
 
     try this.set(ctx.allocator, "name", .{ .string = class_name });
     try this.set(ctx.allocator, "_is_interface", .{ .bool = ctx.vm.interfaces.contains(class_name) });
@@ -966,6 +981,14 @@ fn closureFromCallable(ctx: *NativeContext, args: []const Value) RuntimeError!Va
 }
 
 fn reflectionNoop(_: *NativeContext, _: []const Value) RuntimeError!Value {
+    return .null;
+}
+
+fn rrefFromArrayElement(_: *NativeContext, _: []const Value) RuntimeError!Value {
+    return .null;
+}
+
+fn rrefGetId(_: *NativeContext, _: []const Value) RuntimeError!Value {
     return .null;
 }
 
