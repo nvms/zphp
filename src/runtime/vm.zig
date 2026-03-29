@@ -237,7 +237,7 @@ pub const InterfaceDef = struct {
 };
 
 pub const VM = struct {
-    frames: [512]CallFrame = undefined,
+    frames: [1024]CallFrame = undefined,
     frame_count: usize = 0,
     stack: [2048]Value = undefined,
     sp: usize = 0,
@@ -280,7 +280,7 @@ pub const VM = struct {
     prev_error_handler: ?Value = null,
     ob_stack: std.ArrayListUnmanaged(usize) = .{},
     request_vars: std.StringHashMapUnmanaged(Value) = .{},
-    exception_handlers: [128]ExceptionHandler = undefined,
+    exception_handlers: [512]ExceptionHandler = undefined,
     handler_count: usize = 0,
     handler_floor: usize = 0,
     pending_exception: ?Value = null,
@@ -307,12 +307,12 @@ pub const VM = struct {
         fn_cache_name: []const u8 = "",
         fn_cache_func: ?*const ObjFunction = null,
         // per-frame sp save for inline call/ret in fastLoop
-        sp_save: [512]usize = undefined,
+        sp_save: [1024]usize = undefined,
         // per-frame actual arg count for func_get_args
-        arg_counts: [512]u8 = [_]u8{0xFF} ** 512,
+        arg_counts: [1024]u8 = [_]u8{0xFF} ** 1024,
         // per-frame saved arg values for func_get_args (flat buffer indexed by frame)
-        fga_buf: [512]Value = @splat(.null),
-        fga_offsets: [512]u16 = @splat(0),
+        fga_buf: [1024]Value = @splat(.null),
+        fga_offsets: [1024]u16 = @splat(0),
         fga_sp: u16 = 0,
         // set before pushing a frame, consumed by executeFunction et al
         pending_arg_count: u8 = 0xFF,
@@ -1195,7 +1195,10 @@ pub const VM = struct {
                     if (arr_val == .array) {
                         try arr_val.array.append(self.allocator, val);
                     } else if (arr_val == .object and self.hasMethod(arr_val.object.class_name, "offsetSet")) {
-                        _ = self.callMethod(arr_val.object, "offsetSet", &.{ .null, val }) catch {};
+                        _ = self.callMethod(arr_val.object, "offsetSet", &.{ .null, val }) catch {
+                            if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
+                            return error.RuntimeError;
+                        };
                     }
                 },
                 .array_set_elem => {
@@ -1205,7 +1208,10 @@ pub const VM = struct {
                     if (arr_val == .array) {
                         try arr_val.array.set(self.allocator, Value.toArrayKey(key), val);
                     } else if (arr_val == .object and self.hasMethod(arr_val.object.class_name, "offsetSet")) {
-                        _ = self.callMethod(arr_val.object, "offsetSet", &.{ key, val }) catch {};
+                        _ = self.callMethod(arr_val.object, "offsetSet", &.{ key, val }) catch {
+                            if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
+                            return error.RuntimeError;
+                        };
                     }
                 },
                 .array_get => {
@@ -1214,7 +1220,10 @@ pub const VM = struct {
                     if (arr_val == .array) {
                         self.push(arr_val.array.get(Value.toArrayKey(key)));
                     } else if (arr_val == .object and self.hasMethod(arr_val.object.class_name, "offsetGet")) {
-                        const result = self.callMethod(arr_val.object, "offsetGet", &.{key}) catch .null;
+                        const result = self.callMethod(arr_val.object, "offsetGet", &.{key}) catch {
+                            if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
+                            return error.RuntimeError;
+                        };
                         self.push(result);
                     } else if (arr_val == .string) {
                         const s = arr_val.string;
@@ -1260,7 +1269,10 @@ pub const VM = struct {
                             self.push(new_val);
                         }
                     } else if (arr_val == .object and self.hasMethod(arr_val.object.class_name, "offsetGet")) {
-                        const result = self.callMethod(arr_val.object, "offsetGet", &.{key}) catch .null;
+                        const result = self.callMethod(arr_val.object, "offsetGet", &.{key}) catch {
+                            if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
+                            return error.RuntimeError;
+                        };
                         self.push(result);
                     } else {
                         self.push(.null);
@@ -1273,7 +1285,10 @@ pub const VM = struct {
                     if (arr_val == .array) {
                         try arr_val.array.set(self.allocator, Value.toArrayKey(key), val);
                     } else if (arr_val == .object and self.hasMethod(arr_val.object.class_name, "offsetSet")) {
-                        _ = self.callMethod(arr_val.object, "offsetSet", &.{ key, val }) catch {};
+                        _ = self.callMethod(arr_val.object, "offsetSet", &.{ key, val }) catch {
+                            if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
+                            return error.RuntimeError;
+                        };
                     }
                     self.push(val);
                 },
@@ -1399,7 +1414,10 @@ pub const VM = struct {
                         arr_val.array.remove(Value.toArrayKey(key));
                     } else if (arr_val == .object) {
                         if (self.hasMethod(arr_val.object.class_name, "offsetUnset")) {
-                            _ = self.callMethod(arr_val.object, "offsetUnset", &.{key}) catch {};
+                            _ = self.callMethod(arr_val.object, "offsetUnset", &.{key}) catch {
+                                if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
+                                return error.RuntimeError;
+                            };
                         }
                     }
                 },
@@ -1642,7 +1660,10 @@ pub const VM = struct {
                     const key = self.pop();
                     const arr_val = self.pop();
                     if (arr_val == .object and self.hasMethod(arr_val.object.class_name, "offsetExists")) {
-                        const result = self.callMethod(arr_val.object, "offsetExists", &.{key}) catch Value{ .bool = false };
+                        const result = self.callMethod(arr_val.object, "offsetExists", &.{key}) catch {
+                            if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
+                            return error.RuntimeError;
+                        };
                         self.push(.{ .bool = result.isTruthy() });
                     } else if (arr_val == .array) {
                         const v = arr_val.array.get(Value.toArrayKey(key));
@@ -1923,6 +1944,10 @@ pub const VM = struct {
                                     }
 
                                     const return_frame = self.frame_count;
+                                    if (self.frame_count >= 1023) {
+                                        self.error_msg = "Fatal error: maximum call stack depth exceeded";
+                                        return error.RuntimeError;
+                                    }
                                     const sp_before = self.sp;
                                     var req_locals: []Value = &.{};
                                     if (result.local_count > 0) {
@@ -3692,6 +3717,107 @@ pub const VM = struct {
                     self.frames[self.frame_count - 1].called_class = class_name;
                 },
 
+                .static_call_dyn_both => {
+                    const arg_count = self.readByte();
+                    const ac: usize = arg_count;
+                    const method_val = self.stack[self.sp - ac - 1];
+                    const class_val = self.stack[self.sp - ac - 2];
+                    const method_name = if (method_val == .string) method_val.string else {
+                        self.error_msg = std.fmt.allocPrint(self.allocator, "Fatal error: dynamic method name must be a string", .{}) catch null;
+                        return error.RuntimeError;
+                    };
+                    var class_name = if (class_val == .string) class_val.string else if (class_val == .object) class_val.object.class_name else {
+                        self.error_msg = std.fmt.allocPrint(self.allocator, "Fatal error: dynamic class name must be a string", .{}) catch null;
+                        return error.RuntimeError;
+                    };
+                    if (std.mem.eql(u8, class_name, "static")) {
+                        class_name = self.resolveStaticClassName(class_name);
+                    } else if (std.mem.eql(u8, class_name, "parent") or std.mem.eql(u8, class_name, "self")) {
+                        const defining_class = self.currentDefiningClass();
+                        if (std.mem.eql(u8, class_name, "parent")) {
+                            if (defining_class) |dc| {
+                                if (self.classes.get(dc)) |cls| {
+                                    if (cls.parent) |p| class_name = p;
+                                }
+                            }
+                        } else {
+                            if (defining_class) |dc| class_name = dc;
+                        }
+                    }
+                    if (!self.classes.contains(class_name)) {
+                        try self.tryAutoload(class_name);
+                    }
+                    const full_name = self.resolveMethod(class_name, method_name) catch {
+                        if (self.hasMethod(class_name, "__callStatic")) {
+                            var args_arr = try self.allocator.create(PhpArray);
+                            args_arr.* = .{};
+                            try self.arrays.append(self.allocator, args_arr);
+                            for (0..ac) |i| try args_arr.append(self.allocator, self.stack[self.sp - ac + i]);
+                            self.sp -= ac + 2;
+                            const cs_name = try self.resolveMethod(class_name, "__callStatic");
+                            self.push(.{ .string = method_name });
+                            self.push(.{ .array = args_arr });
+                            try self.callNamedFunction(cs_name, 2);
+                            self.frames[self.frame_count - 1].called_class = class_name;
+                            continue;
+                        }
+                        const msg = std.fmt.allocPrint(self.allocator, "Call to undefined method {s}::{s}()", .{ class_name, method_name }) catch "Call to undefined method";
+                        try self.strings.append(self.allocator, msg);
+                        if (try self.throwBuiltinException("Error", msg)) continue;
+                        self.error_msg = std.fmt.allocPrint(self.allocator, "Fatal error: Uncaught Error: {s}", .{msg}) catch null;
+                        return error.RuntimeError;
+                    };
+                    // remove class name and method name from stack (shift args down by 2)
+                    var i: usize = 0;
+                    while (i < ac) : (i += 1) {
+                        self.stack[self.sp - ac - 2 + i] = self.stack[self.sp - ac + i];
+                    }
+                    self.sp -= 2;
+                    try self.callNamedFunction(full_name, arg_count);
+                    self.frames[self.frame_count - 1].called_class = class_name;
+                },
+
+                .static_call_dyn_both_spread => {
+                    // stack: [class_name, method_name, args_array]
+                    const args_val = self.pop();
+                    const method_val = self.pop();
+                    const class_val = self.pop();
+                    if (args_val != .array) {
+                        self.error_msg = "Fatal error: argument unpacking requires an array";
+                        return error.RuntimeError;
+                    }
+                    const method_name = if (method_val == .string) method_val.string else {
+                        self.error_msg = "Fatal error: dynamic method name must be a string";
+                        return error.RuntimeError;
+                    };
+                    var class_name = if (class_val == .string) class_val.string else if (class_val == .object) class_val.object.class_name else {
+                        self.error_msg = "Fatal error: dynamic class name must be a string";
+                        return error.RuntimeError;
+                    };
+                    class_name = self.resolveStaticClassName(class_name);
+                    if (!self.classes.contains(class_name)) try self.tryAutoload(class_name);
+                    const arr = args_val.array;
+                    const full_name = self.resolveMethod(class_name, method_name) catch {
+                        if (self.hasMethod(class_name, "__callStatic")) {
+                            const cs_name = try self.resolveMethod(class_name, "__callStatic");
+                            self.push(.{ .string = method_name });
+                            self.push(args_val);
+                            try self.callNamedFunction(cs_name, 2);
+                            self.frames[self.frame_count - 1].called_class = class_name;
+                            continue;
+                        }
+                        const msg = std.fmt.allocPrint(self.allocator, "Call to undefined method {s}::{s}()", .{ class_name, method_name }) catch "Call to undefined method";
+                        try self.strings.append(self.allocator, msg);
+                        if (try self.throwBuiltinException("Error", msg)) continue;
+                        self.error_msg = std.fmt.allocPrint(self.allocator, "Fatal error: Uncaught Error: {s}", .{msg}) catch null;
+                        return error.RuntimeError;
+                    };
+                    for (arr.entries.items) |entry| self.push(entry.value);
+                    const ac: u8 = @intCast(arr.entries.items.len);
+                    try self.callNamedFunction(full_name, ac);
+                    self.frames[self.frame_count - 1].called_class = class_name;
+                },
+
                 .get_static_prop => {
                     const class_idx = self.readU16();
                     const prop_idx = self.readU16();
@@ -4780,7 +4906,7 @@ pub const VM = struct {
     }
 
     fn executeFunctionLocalsOnly(self: *VM, func: *const ObjFunction, args: []const Value) RuntimeError!Value {
-        if (self.frame_count >= 511) {
+        if (self.frame_count >= 1023) {
             self.error_msg = "Fatal error: maximum call stack depth exceeded";
             return error.RuntimeError;
         }
@@ -5419,7 +5545,7 @@ pub const VM = struct {
     }
 
     fn executeFunction(self: *VM, func: *const ObjFunction, vars: std.StringHashMapUnmanaged(Value)) RuntimeError!Value {
-        if (self.frame_count >= 511) {
+        if (self.frame_count >= 1023) {
             self.error_msg = "Fatal error: maximum call stack depth exceeded";
             return error.RuntimeError;
         }
@@ -5441,7 +5567,7 @@ pub const VM = struct {
     }
 
     pub fn executeFunctionWithRefs(self: *VM, func: *const ObjFunction, vars: std.StringHashMapUnmanaged(Value), ref_slots: std.StringHashMapUnmanaged(*Value)) RuntimeError!Value {
-        if (self.frame_count >= 511) {
+        if (self.frame_count >= 1023) {
             self.error_msg = "Fatal error: maximum call stack depth exceeded";
             return error.RuntimeError;
         }
@@ -5692,7 +5818,7 @@ pub const VM = struct {
     }
 
     pub fn callMethod(self: *VM, obj: *PhpObject, method_name: []const u8, args: []const Value) RuntimeError!Value {
-        if (self.frame_count >= 511) {
+        if (self.frame_count >= 1023) {
             self.error_msg = "Fatal error: maximum call stack depth exceeded";
             return error.RuntimeError;
         }

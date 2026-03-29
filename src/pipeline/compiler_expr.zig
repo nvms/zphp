@@ -488,21 +488,33 @@ pub fn compileCall(self: *Compiler, node: Ast.Node) Error!void {
 
     if (callee.tag == .identifier and std.mem.eql(u8, self.ast.tokenSlice(callee.main_token), "isset")) {
         if (args.len > 0) {
-            const arg = self.ast.nodes[args[0]];
-            if (arg.tag == .property_access) {
-                try self.compileNode(arg.data.lhs);
-                const prop_name = self.propName(arg);
-                const prop_idx = try self.addConstant(.{ .string = prop_name });
-                try self.emitOp(.isset_prop);
-                try self.emitU16(prop_idx);
-                return;
+            var end_jumps: [16]usize = undefined;
+            var jump_count: usize = 0;
+            for (args, 0..) |arg_idx, i| {
+                const arg = self.ast.nodes[arg_idx];
+                if (arg.tag == .property_access) {
+                    try self.compileNode(arg.data.lhs);
+                    const prop_name = self.propName(arg);
+                    const prop_idx = try self.addConstant(.{ .string = prop_name });
+                    try self.emitOp(.isset_prop);
+                    try self.emitU16(prop_idx);
+                } else if (arg.tag == .array_access) {
+                    try self.compileNode(arg.data.lhs);
+                    try self.compileNode(arg.data.rhs);
+                    try self.emitOp(.isset_index);
+                } else {
+                    try self.compileNode(arg_idx);
+                    try self.emitOp(.op_null);
+                    try self.emitOp(.not_equal);
+                }
+                if (i < args.len - 1 and jump_count < end_jumps.len) {
+                    end_jumps[jump_count] = try self.emitJump(.jump_if_false);
+                    jump_count += 1;
+                    try self.emitOp(.pop);
+                }
             }
-            if (arg.tag == .array_access) {
-                try self.compileNode(arg.data.lhs);
-                try self.compileNode(arg.data.rhs);
-                try self.emitOp(.isset_index);
-                return;
-            }
+            for (end_jumps[0..jump_count]) |j| self.patchJump(j);
+            return;
         }
     }
 
@@ -533,6 +545,20 @@ pub fn compileCall(self: *Compiler, node: Ast.Node) Error!void {
                 const idx = try self.addConstant(.{ .string = name });
                 try self.emitOp(.call_spread);
                 try self.emitU16(idx);
+            } else if (callee.tag == .static_prop_access and callee.main_token != 0 and self.ast.tokens[callee.main_token].tag == .variable) {
+                const class_node = self.ast.nodes[callee.data.lhs];
+                const var_name = self.ast.tokenSlice(callee.main_token);
+                if (class_node.tag == .variable) {
+                    try self.compileNode(callee.data.lhs);
+                } else {
+                    const class_name = try resolveNodeClassName(self, class_node);
+                    const cn_idx = try self.addConstant(.{ .string = class_name });
+                    try self.emitOp(.constant);
+                    try self.emitU16(cn_idx);
+                }
+                try self.emitGetVar(var_name);
+                try emitSpreadArgs(self, args);
+                try self.emitOp(.static_call_dyn_both_spread);
             } else {
                 try self.compileNode(node.data.lhs);
                 try self.emitOp(.call_indirect_spread);
@@ -573,6 +599,27 @@ pub fn compileCall(self: *Compiler, node: Ast.Node) Error!void {
         self.current_source_offset = call_offset;
         try self.emitOp(.method_call_dynamic);
         try self.emitByte(@intCast(args.len));
+    } else if (callee.tag == .static_prop_access and callee.main_token != 0 and self.ast.tokens[callee.main_token].tag == .variable) {
+        const call_offset = self.current_source_offset;
+        const class_node = self.ast.nodes[callee.data.lhs];
+        const var_name = self.ast.tokenSlice(callee.main_token);
+        if (class_node.tag == .variable) {
+            try self.compileNode(callee.data.lhs);
+            try self.emitGetVar(var_name);
+            for (args) |arg| try self.compileNode(arg);
+            self.current_source_offset = call_offset;
+            try self.emitOp(.static_call_dyn_both);
+            try self.emitByte(@intCast(args.len));
+        } else {
+            const class_name = try resolveNodeClassName(self, class_node);
+            const class_idx = try self.addConstant(.{ .string = class_name });
+            try self.emitGetVar(var_name);
+            for (args) |arg| try self.compileNode(arg);
+            self.current_source_offset = call_offset;
+            try self.emitOp(.static_call_dyn_method);
+            try self.emitU16(class_idx);
+            try self.emitByte(@intCast(args.len));
+        }
     } else {
         const call_offset = self.current_source_offset;
         try self.compileNode(node.data.lhs);
@@ -853,18 +900,25 @@ pub fn compileStaticCall(self: *Compiler, node: Ast.Node) Error!void {
 
 pub fn compileDynamicStaticCall(self: *Compiler, node: Ast.Node) Error!void {
     const class_node = self.ast.nodes[node.data.lhs];
-    const class_name = try resolveNodeClassName(self, class_node);
-    const class_idx = try self.addConstant(.{ .string = class_name });
-
     const extra = self.ast.extraSlice(node.data.rhs);
     const method_expr = extra[0];
     const args = extra[1..];
 
-    try self.compileNode(method_expr);
-    for (args) |arg| try self.compileNode(arg);
-    try self.emitOp(.static_call_dyn_method);
-    try self.emitU16(class_idx);
-    try self.emitByte(@intCast(args.len));
+    if (class_node.tag == .variable) {
+        try self.compileNode(node.data.lhs);
+        try self.compileNode(method_expr);
+        for (args) |arg| try self.compileNode(arg);
+        try self.emitOp(.static_call_dyn_both);
+        try self.emitByte(@intCast(args.len));
+    } else {
+        const class_name = try resolveNodeClassName(self, class_node);
+        const class_idx = try self.addConstant(.{ .string = class_name });
+        try self.compileNode(method_expr);
+        for (args) |arg| try self.compileNode(arg);
+        try self.emitOp(.static_call_dyn_method);
+        try self.emitU16(class_idx);
+        try self.emitByte(@intCast(args.len));
+    }
 }
 
 pub fn compileStaticPropAccess(self: *Compiler, node: Ast.Node) Error!void {

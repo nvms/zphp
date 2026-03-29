@@ -359,7 +359,7 @@ fn class_exists(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
 
 fn method_exists(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len < 2 or args[1] != .string) return .{ .bool = false };
-    const class_name = if (args[0] == .object)
+    var current: ?[]const u8 = if (args[0] == .object)
         args[0].object.class_name
     else if (args[0] == .string)
         args[0].string
@@ -367,14 +367,17 @@ fn method_exists(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
         return Value{ .bool = false };
     const method_name = args[1].string;
     var buf: [256]u8 = undefined;
-    const full = std.fmt.bufPrint(&buf, "{s}::{s}", .{ class_name, method_name }) catch return Value{ .bool = false };
-    if (ctx.vm.native_fns.contains(full)) return .{ .bool = true };
-    if (ctx.vm.functions.contains(full)) return .{ .bool = true };
-    if (ctx.vm.classes.get(class_name)) |cls| {
-        if (cls.parent) |parent| {
-            const parent_full = std.fmt.bufPrint(&buf, "{s}::{s}", .{ parent, method_name }) catch return Value{ .bool = false };
-            if (ctx.vm.native_fns.contains(parent_full)) return .{ .bool = true };
-            if (ctx.vm.functions.contains(parent_full)) return .{ .bool = true };
+    while (current) |cn| {
+        const full = std.fmt.bufPrint(&buf, "{s}::{s}", .{ cn, method_name }) catch return Value{ .bool = false };
+        if (ctx.vm.native_fns.contains(full)) return .{ .bool = true };
+        if (ctx.vm.functions.contains(full)) return .{ .bool = true };
+        if (ctx.vm.classes.get(cn)) |cls| {
+            current = cls.parent;
+        } else {
+            ctx.vm.tryAutoload(cn) catch {};
+            if (ctx.vm.classes.get(cn)) |cls| {
+                current = cls.parent;
+            } else break;
         }
     }
     return .{ .bool = false };

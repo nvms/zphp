@@ -153,6 +153,8 @@ pub const OpCode = enum(u8) {
     sub_local_to_local, // u16: src slot, u16: dst slot - locals[dst] -= locals[src], no stack effect
     mul_local_to_local, // u16: src slot, u16: dst slot - locals[dst] *= locals[src], no stack effect
     less_local_local_jif, // u16: slot_a, u16: slot_b, u16: jump offset - if !(locals[a] < locals[b]) jump
+    static_call_dyn_both, // u8: arg count (class name string and method name string on stack below args)
+    static_call_dyn_both_spread, // no operands (class name, method name, and args array on stack)
 
     pub fn width(self: OpCode) usize {
         return switch (self) {
@@ -168,7 +170,7 @@ pub const OpCode = enum(u8) {
             => 5,
             .static_call => 6,
             .less_local_local_jif => 7,
-            .require, .call_indirect, .call_indirect_spread, .method_call_dynamic => 2,
+            .require, .call_indirect, .call_indirect_spread, .method_call_dynamic, .static_call_dyn_both => 2,
             .class_decl, .interface_decl, .enum_decl, .trait_decl => 1,
             else => 1,
         };
