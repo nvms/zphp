@@ -280,6 +280,7 @@ pub fn compileClosure(self: *Compiler, node: Ast.Node) Error!void {
         .use_aliases = self.use_aliases,
         .use_fn_aliases = self.use_fn_aliases,
         .current_class = self.current_class,
+        .current_parent = self.current_parent,
         .in_trait = self.in_trait,
     };
     errdefer {
@@ -433,6 +434,13 @@ pub fn compileClassDecl(self: *Compiler, node: Ast.Node) Error!void {
         const impl_node = self.ast.nodes[self.ast.extra_data[rhs_base + 2 + i]];
         impl_names[i] = if (impl_node.tag == .qualified_name) (self.buildQualifiedString(self.ast.extraSlice(impl_node.data.lhs)) catch self.ast.tokenSlice(impl_node.main_token)) else self.resolveClassName(self.ast.tokenSlice(impl_node.main_token));
     }
+
+    const prev_parent = self.current_parent;
+    self.current_parent = if (parent_node != 0) blk: {
+        const pnode = self.ast.nodes[parent_node];
+        break :blk if (pnode.tag == .qualified_name) (self.buildQualifiedString(self.ast.extraSlice(pnode.data.lhs)) catch self.ast.tokenSlice(pnode.main_token)) else self.resolveClassName(self.ast.tokenSlice(pnode.main_token));
+    } else "";
+    defer self.current_parent = prev_parent;
 
     var method_count: u16 = 0;
     for (members) |member_idx| {

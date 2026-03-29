@@ -2196,7 +2196,7 @@ pub const VM = struct {
                     } else if (std.mem.eql(u8, class_name, "self")) {
                         if (self.currentDefiningClass()) |dc| class_name = dc;
                     } else if (std.mem.eql(u8, class_name, "parent")) {
-                        if (self.currentDefiningClass()) |dc| {
+                        if (self.parentResolvingClass()) |dc| {
                             if (self.classes.get(dc)) |cls| {
                                 if (cls.parent) |p| class_name = p;
                             }
@@ -3457,21 +3457,25 @@ pub const VM = struct {
                         }
                         break :blk null;
                     };
+                    var lsb_class: ?[]const u8 = null;
                     if (std.mem.eql(u8, class_name, "static")) {
                         class_name = self.resolveStaticClassName(class_name);
                     } else if (std.mem.eql(u8, class_name, "parent") or std.mem.eql(u8, class_name, "self")) {
                         if (std.mem.eql(u8, class_name, "parent")) {
-                            const defining_class = self.currentFrame().called_class orelse self.currentDefiningClass();
-                            if (defining_class) |dc| {
-                                if (self.classes.get(dc)) |cls| {
+                            const dc = self.parentResolvingClass();
+                            if (dc) |defining| {
+                                if (self.classes.get(defining)) |cls| {
                                     if (cls.parent) |p| class_name = p;
                                 }
+                                lsb_class = self.currentFrame().called_class orelse defining;
                             }
                         } else {
                             const defining_class = self.currentFrame().called_class orelse self.currentDefiningClass();
                             if (defining_class) |dc| class_name = dc;
                         }
                     }
+
+                    const effective_called = lsb_class orelse class_name;
 
                     const full_name = self.resolveMethod(class_name, method_name) catch {
                         if (self.hasMethod(class_name, "__callStatic")) {
@@ -3484,7 +3488,7 @@ pub const VM = struct {
                             const cs_name = try self.resolveMethod(class_name, "__callStatic");
                             self.push(.{ .string = method_name });
                             self.push(.{ .array = args_arr });
-                            try self.callStaticFunction(cs_name, 2, class_name);
+                            try self.callStaticFunction(cs_name, 2, effective_called);
                             continue;
                         }
                         const msg = std.fmt.allocPrint(self.allocator, "Call to undefined method {s}::{s}()", .{ class_name, method_name }) catch "Call to undefined method";
@@ -3499,7 +3503,7 @@ pub const VM = struct {
                         if (tv == .object) {
                             if (self.functions.get(full_name)) |func| {
                                 if (func.is_generator) {
-                                    try self.callStaticFunction(full_name, arg_count, class_name);
+                                    try self.callStaticFunction(full_name, arg_count, effective_called);
                                 } else {
                                 const ac: usize = arg_count;
                                 var new_vars: std.StringHashMapUnmanaged(Value) = .{};
@@ -3519,7 +3523,7 @@ pub const VM = struct {
                                 self.saveFrameArgs(arg_count);
                                 self.sp -= ac;
                                 try self.fillDefaults(&new_vars, func, ac);
-                                self.frames[self.frame_count] = .{ .chunk = &func.chunk, .ip = 0, .vars = new_vars, .locals = try self.allocLocals(func, &new_vars), .func = func, .called_class = class_name };
+                                self.frames[self.frame_count] = .{ .chunk = &func.chunk, .ip = 0, .vars = new_vars, .locals = try self.allocLocals(func, &new_vars), .func = func, .called_class = effective_called };
                                 self.setFrameArgCount(arg_count);
                                 self.frame_count += 1;
                                 }
@@ -3530,7 +3534,7 @@ pub const VM = struct {
                                 self.sp -= ac;
                                 var tmp_vars: std.StringHashMapUnmanaged(Value) = .{};
                                 try tmp_vars.put(self.allocator, "$this", tv);
-                                self.frames[self.frame_count] = .{ .chunk = self.currentChunk(), .ip = self.currentFrame().ip, .vars = tmp_vars, .called_class = class_name };
+                                self.frames[self.frame_count] = .{ .chunk = self.currentChunk(), .ip = self.currentFrame().ip, .vars = tmp_vars, .called_class = effective_called };
                                 const sc_saved_fc = self.frame_count;
                                 self.frame_count += 1;
                                 var ctx = self.makeContext(null);
@@ -3570,10 +3574,10 @@ pub const VM = struct {
                                 return error.RuntimeError;
                             }
                         } else {
-                            try self.callStaticFunction(full_name, arg_count, class_name);
+                            try self.callStaticFunction(full_name, arg_count, effective_called);
                         }
                     } else {
-                        try self.callStaticFunction(full_name, arg_count, class_name);
+                        try self.callStaticFunction(full_name, arg_count, effective_called);
                     }
                 },
 
@@ -3591,15 +3595,15 @@ pub const VM = struct {
                     const ac = arr.entries.items.len;
 
                     const this_val = self.currentFrame().vars.get("$this");
+                    var lsb_class: ?[]const u8 = null;
                     if (std.mem.eql(u8, class_name, "parent") or std.mem.eql(u8, class_name, "self")) {
                         if (std.mem.eql(u8, class_name, "parent")) {
-                            // parent:: always uses the defining class - the class
-                            // where the code is written, not the called class
-                            const defining_class = self.currentDefiningClass();
-                            if (defining_class) |dc| {
-                                if (self.classes.get(dc)) |cls| {
+                            const dc = self.parentResolvingClass();
+                            if (dc) |defining| {
+                                if (self.classes.get(defining)) |cls| {
                                     if (cls.parent) |p| class_name = p;
                                 }
+                                lsb_class = self.currentFrame().called_class orelse defining;
                             }
                         } else {
                             // self:: prefers called_class for trait disambiguation
@@ -3608,12 +3612,14 @@ pub const VM = struct {
                         }
                     }
 
+                    const effective_called = lsb_class orelse class_name;
+
                     const full_name = self.resolveMethod(class_name, method_name) catch {
                         if (self.hasMethod(class_name, "__callStatic")) {
                             const cs_name = try self.resolveMethod(class_name, "__callStatic");
                             self.push(.{ .string = method_name });
                             self.push(.{ .array = arr });
-                            try self.callStaticFunction(cs_name, 2, class_name);
+                            try self.callStaticFunction(cs_name, 2, effective_called);
                             continue;
                         }
                         self.error_msg = std.fmt.allocPrint(self.allocator, "Fatal error: Uncaught Error: Call to undefined method {s}::{s}()", .{ class_name, method_name }) catch null;
@@ -3625,7 +3631,7 @@ pub const VM = struct {
                         if (tv == .object) {
                             if (self.functions.get(full_name)) |func| {
                                 if (func.is_generator) {
-                                    try self.callStaticFunction(full_name, @intCast(ac), class_name);
+                                    try self.callStaticFunction(full_name, @intCast(ac), effective_called);
                                 } else {
                                 var new_vars: std.StringHashMapUnmanaged(Value) = .{};
                                 try new_vars.put(self.allocator, "$this", tv);
@@ -3648,7 +3654,7 @@ pub const VM = struct {
                                     }
                                 }
                                 self.sp -= ac;
-                                self.frames[self.frame_count] = .{ .chunk = &func.chunk, .ip = 0, .vars = new_vars, .locals = try self.allocLocals(func, &new_vars), .func = func };
+                                self.frames[self.frame_count] = .{ .chunk = &func.chunk, .ip = 0, .vars = new_vars, .locals = try self.allocLocals(func, &new_vars), .func = func, .called_class = effective_called };
                                 self.frame_count += 1;
                                 }
                             } else {
@@ -3712,17 +3718,17 @@ pub const VM = struct {
                     const class_idx = self.readU16();
                     const arg_count = self.readByte();
                     var class_name = self.currentChunk().constants.items[class_idx].string;
+                    var lsb_class: ?[]const u8 = null;
                     if (std.mem.eql(u8, class_name, "static")) {
                         class_name = self.resolveStaticClassName(class_name);
                     } else if (std.mem.eql(u8, class_name, "parent") or std.mem.eql(u8, class_name, "self")) {
                         if (std.mem.eql(u8, class_name, "parent")) {
-                            // parent:: always uses the defining class - the class
-                            // where the code is written, not the called class
-                            const defining_class = self.currentDefiningClass();
-                            if (defining_class) |dc| {
-                                if (self.classes.get(dc)) |cls| {
+                            const dc = self.parentResolvingClass();
+                            if (dc) |defining| {
+                                if (self.classes.get(defining)) |cls| {
                                     if (cls.parent) |p| class_name = p;
                                 }
+                                lsb_class = self.currentFrame().called_class orelse defining;
                             }
                         } else {
                             // self:: prefers called_class for trait disambiguation
@@ -3730,6 +3736,7 @@ pub const VM = struct {
                             if (defining_class) |dc| class_name = dc;
                         }
                     }
+                    const effective_called = lsb_class orelse class_name;
                     if (!self.classes.contains(class_name)) {
                         try self.tryAutoload(class_name);
                     }
@@ -3749,7 +3756,7 @@ pub const VM = struct {
                             const cs_name = try self.resolveMethod(class_name, "__callStatic");
                             self.push(.{ .string = method_name });
                             self.push(.{ .array = args_arr });
-                            try self.callStaticFunction(cs_name, 2, class_name);
+                            try self.callStaticFunction(cs_name, 2, effective_called);
                             continue;
                         }
                         const msg = std.fmt.allocPrint(self.allocator, "Call to undefined method {s}::{s}()", .{ class_name, method_name }) catch "Call to undefined method";
@@ -3763,7 +3770,7 @@ pub const VM = struct {
                         self.stack[self.sp - ac - 1 + i] = self.stack[self.sp - ac + i];
                     }
                     self.sp -= 1;
-                    try self.callStaticFunction(full_name, arg_count, class_name);
+                    try self.callStaticFunction(full_name, arg_count, effective_called);
                 },
 
                 .static_call_dyn_both => {
@@ -3779,17 +3786,17 @@ pub const VM = struct {
                         self.error_msg = std.fmt.allocPrint(self.allocator, "Fatal error: dynamic class name must be a string", .{}) catch null;
                         return error.RuntimeError;
                     };
+                    var lsb_class: ?[]const u8 = null;
                     if (std.mem.eql(u8, class_name, "static")) {
                         class_name = self.resolveStaticClassName(class_name);
                     } else if (std.mem.eql(u8, class_name, "parent") or std.mem.eql(u8, class_name, "self")) {
                         if (std.mem.eql(u8, class_name, "parent")) {
-                            // parent:: always uses the defining class - the class
-                            // where the code is written, not the called class
-                            const defining_class = self.currentDefiningClass();
-                            if (defining_class) |dc| {
-                                if (self.classes.get(dc)) |cls| {
+                            const dc = self.parentResolvingClass();
+                            if (dc) |defining| {
+                                if (self.classes.get(defining)) |cls| {
                                     if (cls.parent) |p| class_name = p;
                                 }
+                                lsb_class = self.currentFrame().called_class orelse defining;
                             }
                         } else {
                             // self:: prefers called_class for trait disambiguation
@@ -3797,6 +3804,7 @@ pub const VM = struct {
                             if (defining_class) |dc| class_name = dc;
                         }
                     }
+                    const effective_called = lsb_class orelse class_name;
                     if (!self.classes.contains(class_name)) {
                         try self.tryAutoload(class_name);
                     }
@@ -3810,7 +3818,7 @@ pub const VM = struct {
                             const cs_name = try self.resolveMethod(class_name, "__callStatic");
                             self.push(.{ .string = method_name });
                             self.push(.{ .array = args_arr });
-                            try self.callStaticFunction(cs_name, 2, class_name);
+                            try self.callStaticFunction(cs_name, 2, effective_called);
                             continue;
                         }
                         const msg = std.fmt.allocPrint(self.allocator, "Call to undefined method {s}::{s}()", .{ class_name, method_name }) catch "Call to undefined method";
@@ -3825,7 +3833,7 @@ pub const VM = struct {
                         self.stack[self.sp - ac - 2 + i] = self.stack[self.sp - ac + i];
                     }
                     self.sp -= 2;
-                    try self.callStaticFunction(full_name, arg_count, class_name);
+                    try self.callStaticFunction(full_name, arg_count, effective_called);
                 },
 
                 .static_call_dyn_both_spread => {
@@ -4067,7 +4075,7 @@ pub const VM = struct {
         } else if (std.mem.eql(u8, name, "self")) {
             if (self.currentDefiningClass()) |dc| return dc;
         } else if (std.mem.eql(u8, name, "parent")) {
-            if (self.currentDefiningClass()) |dc| {
+            if (self.parentResolvingClass()) |dc| {
                 if (self.classes.get(dc)) |cls| {
                     if (cls.parent) |p| return p;
                 }
@@ -5219,9 +5227,18 @@ pub const VM = struct {
 
     fn checkVisibility(self: *VM, target_class: []const u8, vis: ClassDef.Visibility) bool {
         if (vis == .public) return true;
-        const caller_class = self.currentFrame().called_class orelse self.currentDefiningClass() orelse return false;
-        if (vis == .private) return std.mem.eql(u8, caller_class, target_class);
+        if (vis == .private) {
+            // for private, check defining class first so parent::__construct()
+            // can access its own private properties
+            const defining = self.currentDefiningClass();
+            if (defining) |dc| {
+                if (std.mem.eql(u8, dc, target_class)) return true;
+            }
+            const caller_class = self.currentFrame().called_class orelse defining orelse return false;
+            return std.mem.eql(u8, caller_class, target_class);
+        }
         // protected: caller must be same class or in inheritance chain
+        const caller_class = self.currentFrame().called_class orelse self.currentDefiningClass() orelse return false;
         return self.isInstanceOf(caller_class, target_class) or self.isInstanceOf(target_class, caller_class);
     }
 
@@ -5289,6 +5306,59 @@ pub const VM = struct {
                 if (std.mem.eql(u8, cap.var_name, "$__closure_scope") and cap.value == .string)
                     return cap.value.string;
             }
+        }
+        return null;
+    }
+
+    fn parentResolvingClass(self: *VM) ?[]const u8 {
+        // like currentDefiningClass but skips closure scope check and uses
+        // called_class as disambiguator fallback for parent:: resolution
+        var fi: usize = self.frame_count;
+        while (fi > 0) {
+            fi -= 1;
+            const frame = &self.frames[fi];
+            const frame_chunk_ptr = frame.chunk;
+            var best: ?[]const u8 = null;
+            const disambig: ?[]const u8 = blk: {
+                if (frame.func != null and frame.locals.len > 0 and frame.locals[0] == .object)
+                    break :blk frame.locals[0].object.class_name;
+                const this_val = frame.vars.get("$this") orelse break :blk frame.called_class;
+                if (this_val == .object) break :blk this_val.object.class_name;
+                break :blk frame.called_class;
+            };
+            var iter = self.functions.iterator();
+            while (iter.next()) |entry| {
+                if (frame_chunk_ptr == &entry.value_ptr.*.chunk) {
+                    const name = entry.key_ptr.*;
+                    if (std.mem.indexOf(u8, name, "::")) |sep| {
+                        const class_part = name[0..sep];
+                        if (self.traits.contains(class_part)) {
+                            if (best == null) best = class_part;
+                            continue;
+                        }
+                        if (disambig) |tc| {
+                            if (std.mem.eql(u8, class_part, tc))
+                                return class_part;
+                            if (self.isInstanceOf(tc, class_part)) {
+                                if (best) |b| {
+                                    if (self.traits.contains(b)) {
+                                        best = class_part;
+                                    } else if (self.isInstanceOf(b, class_part)) {
+                                        best = class_part;
+                                    } else if (!self.isInstanceOf(tc, b)) {
+                                        best = class_part;
+                                    }
+                                } else best = class_part;
+                            } else if (best == null) {
+                                best = class_part;
+                            }
+                        } else {
+                            return class_part;
+                        }
+                    }
+                }
+            }
+            if (best) |b| return b;
         }
         return null;
     }
@@ -5753,6 +5823,12 @@ pub const VM = struct {
 
     fn callStaticFunction(self: *VM, name: []const u8, arg_count: u8, class_name: []const u8) RuntimeError!void {
         const fc_before = self.frame_count;
+        // for native functions, temporarily set called_class on current frame
+        // so LSB frame walks inside the native find the right class
+        const prev_cc = self.currentFrame().called_class;
+        if (self.native_fns.contains(name))
+            self.currentFrame().called_class = class_name;
+        defer self.frames[fc_before - 1].called_class = prev_cc;
         try self.callNamedFunction(name, arg_count);
         if (self.frame_count > fc_before)
             self.frames[self.frame_count - 1].called_class = class_name;

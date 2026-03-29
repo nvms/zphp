@@ -137,6 +137,7 @@ pub const Compiler = struct {
     type_hints: std.ArrayListUnmanaged(TypeHint) = .{},
     current_source_offset: u32 = 0,
     current_class: []const u8 = "",
+    current_parent: []const u8 = "",
     in_trait: bool = false,
 
     pub const LoopJump = struct {
@@ -551,7 +552,11 @@ pub const Compiler = struct {
             if (self.current_class.len > 0 and !self.in_trait) return self.current_class;
             return name;
         }
-        if (std.mem.eql(u8, name, "static") or std.mem.eql(u8, name, "parent")) return name;
+        if (std.mem.eql(u8, name, "parent")) {
+            if (self.current_parent.len > 0 and !self.in_trait) return self.current_parent;
+            return name;
+        }
+        if (std.mem.eql(u8, name, "static")) return name;
         if (self.use_aliases.get(name)) |fqn| return fqn;
         if (self.namespace.len == 0) return name;
         const qualified = std.fmt.allocPrint(self.allocator, "{s}\\{s}", .{ self.namespace, name }) catch return name;
