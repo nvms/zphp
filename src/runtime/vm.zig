@@ -647,7 +647,17 @@ pub const VM = struct {
 
     fn runUntilFrame(self: *VM, base_frame: usize) RuntimeError!void {
         if (self.frame_count <= base_frame) return;
-        return self.runLoop(base_frame);
+        self.runLoop(base_frame) catch {
+            // if throw set pending_exception because the handler was in an outer runLoop,
+            // try to dispatch it now that we're returning to the caller's context
+            if (self.pending_exception != null) {
+                if (self.dispatchPendingException(self.run_base_frame)) {
+                    // dispatched - let outer runLoop continue from catch_ip
+                    return;
+                }
+            }
+            return error.RuntimeError;
+        };
     }
 
     pub fn run(self: *VM) RuntimeError!void {
@@ -2168,8 +2178,35 @@ pub const VM = struct {
                             self.frames[self.frame_count] = .{ .chunk = self.currentChunk(), .ip = self.currentFrame().ip, .vars = tmp_vars };
                             self.frame_count += 1;
 
+                            const saved_fc = self.frame_count;
                             var ctx = self.makeContext(null);
-                            _ = try native(&ctx, args_buf[0..ac]);
+                            _ = native(&ctx, args_buf[0..ac]) catch {
+                                // clean up temp frame if throwBuiltinException didn't already unwind past it
+                                if (self.frame_count >= saved_fc) {
+                                    self.frame_count -= 1;
+                                    self.frames[self.frame_count].vars.deinit(self.allocator);
+                                }
+                                if (self.pending_exception) |exc| {
+                                    self.pending_exception = null;
+                                    if (self.handler_count > self.handler_floor) {
+                                        const handler = self.exception_handlers[self.handler_count - 1];
+                                        self.handler_count -= 1;
+                                        while (self.frame_count > handler.frame_count) {
+                                            self.frame_count -= 1;
+                                            self.frames[self.frame_count].vars.deinit(self.allocator);
+                                        }
+                                        self.sp = handler.sp;
+                                        self.push(exc);
+                                        self.currentFrame().ip = handler.catch_ip;
+                                        continue;
+                                    }
+                                    self.pending_exception = exc;
+                                } else {
+                                    // throwBuiltinException already dispatched to handler
+                                    continue;
+                                }
+                                return error.RuntimeError;
+                            };
 
                             self.frame_count -= 1;
                             self.frames[self.frame_count].vars.deinit(self.allocator);
@@ -2270,7 +2307,29 @@ pub const VM = struct {
                             self.frames[self.frame_count] = .{ .chunk = self.currentChunk(), .ip = self.currentFrame().ip, .vars = tmp_vars };
                             self.frame_count += 1;
                             var ctx = self.makeContext(null);
-                            _ = try native(&ctx, args_buf[0..ac]);
+                            _ = native(&ctx, args_buf[0..ac]) catch {
+                                self.frame_count -= 1;
+                                self.frames[self.frame_count].vars.deinit(self.allocator);
+                                if (self.pending_exception) |exc| {
+                                    self.pending_exception = null;
+                                    if (self.handler_count > self.handler_floor) {
+                                        const handler = self.exception_handlers[self.handler_count - 1];
+                                        self.handler_count -= 1;
+                                        while (self.frame_count > handler.frame_count) {
+                                            self.frame_count -= 1;
+                                            self.frames[self.frame_count].vars.deinit(self.allocator);
+                                        }
+                                        self.sp = handler.sp;
+                                        self.push(exc);
+                                        self.currentFrame().ip = handler.catch_ip;
+                                        continue;
+                                    }
+                                    self.pending_exception = exc;
+                                } else {
+                                    continue;
+                                }
+                                return error.RuntimeError;
+                            };
                             self.frame_count -= 1;
                             self.frames[self.frame_count].vars.deinit(self.allocator);
                         } else if (self.functions.get(cn)) |func| {
@@ -2751,7 +2810,31 @@ pub const VM = struct {
                         const saved_fc = self.frame_count;
 
                         var ctx = self.makeContext(null);
-                        const result = try native(&ctx, args_buf[0..ac]);
+                        const result = native(&ctx, args_buf[0..ac]) catch {
+                            if (self.frame_count >= saved_fc) {
+                                self.frame_count -= 1;
+                                self.frames[self.frame_count].vars.deinit(self.allocator);
+                            }
+                            if (self.pending_exception) |exc| {
+                                self.pending_exception = null;
+                                if (self.handler_count > self.handler_floor) {
+                                    const handler = self.exception_handlers[self.handler_count - 1];
+                                    self.handler_count -= 1;
+                                    while (self.frame_count > handler.frame_count) {
+                                        self.frame_count -= 1;
+                                        self.frames[self.frame_count].vars.deinit(self.allocator);
+                                    }
+                                    self.sp = handler.sp;
+                                    self.push(exc);
+                                    self.currentFrame().ip = handler.catch_ip;
+                                    continue;
+                                }
+                                self.pending_exception = exc;
+                            } else {
+                                continue;
+                            }
+                            return error.RuntimeError;
+                        };
 
                         // if throwBuiltinException unwound frames, skip cleanup
                         if (self.frame_count >= saved_fc) {
@@ -2869,7 +2952,31 @@ pub const VM = struct {
                         self.frame_count += 1;
                         const saved_fc = self.frame_count;
                         var ctx = self.makeContext(null);
-                        const result = try native(&ctx, args_buf[0..ac]);
+                        const result = native(&ctx, args_buf[0..ac]) catch {
+                            if (self.frame_count >= saved_fc) {
+                                self.frame_count -= 1;
+                                self.frames[self.frame_count].vars.deinit(self.allocator);
+                            }
+                            if (self.pending_exception) |exc| {
+                                self.pending_exception = null;
+                                if (self.handler_count > self.handler_floor) {
+                                    const handler = self.exception_handlers[self.handler_count - 1];
+                                    self.handler_count -= 1;
+                                    while (self.frame_count > handler.frame_count) {
+                                        self.frame_count -= 1;
+                                        self.frames[self.frame_count].vars.deinit(self.allocator);
+                                    }
+                                    self.sp = handler.sp;
+                                    self.push(exc);
+                                    self.currentFrame().ip = handler.catch_ip;
+                                    continue;
+                                }
+                                self.pending_exception = exc;
+                            } else {
+                                continue;
+                            }
+                            return error.RuntimeError;
+                        };
                         if (self.frame_count >= saved_fc) {
                             self.frame_count -= 1;
                             self.frames[self.frame_count].vars.deinit(self.allocator);
@@ -3009,9 +3116,34 @@ pub const VM = struct {
                                 var tmp_vars: std.StringHashMapUnmanaged(Value) = .{};
                                 try tmp_vars.put(self.allocator, "$this", tv);
                                 self.frames[self.frame_count] = .{ .chunk = self.currentChunk(), .ip = self.currentFrame().ip, .vars = tmp_vars };
+                                const sc_saved_fc = self.frame_count;
                                 self.frame_count += 1;
                                 var ctx = self.makeContext(null);
-                                const result = try native(&ctx, args_buf[0..ac]);
+                                const result = native(&ctx, args_buf[0..ac]) catch {
+                                    if (self.frame_count > sc_saved_fc) {
+                                        self.frame_count -= 1;
+                                        self.frames[self.frame_count].vars.deinit(self.allocator);
+                                    }
+                                    if (self.pending_exception) |exc| {
+                                        self.pending_exception = null;
+                                        if (self.handler_count > self.handler_floor) {
+                                            const handler = self.exception_handlers[self.handler_count - 1];
+                                            self.handler_count -= 1;
+                                            while (self.frame_count > handler.frame_count) {
+                                                self.frame_count -= 1;
+                                                self.frames[self.frame_count].vars.deinit(self.allocator);
+                                            }
+                                            self.sp = handler.sp;
+                                            self.push(exc);
+                                            self.currentFrame().ip = handler.catch_ip;
+                                            continue;
+                                        }
+                                        self.pending_exception = exc;
+                                    } else {
+                                        continue;
+                                    }
+                                    return error.RuntimeError;
+                                };
                                 self.frame_count -= 1;
                                 self.frames[self.frame_count].vars.deinit(self.allocator);
                                 self.push(result);
