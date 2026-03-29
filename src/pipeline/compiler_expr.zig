@@ -745,6 +745,21 @@ pub fn compilePropertyAccess(self: *Compiler, node: Ast.Node) Error!void {
 pub fn compileMethodCall(self: *Compiler, node: Ast.Node) Error!void {
     try self.compileNode(node.data.lhs);
     const args = self.ast.extraSlice(node.data.rhs);
+
+    if (self.ast.tokens[node.main_token].tag == .variable) {
+        const var_name = self.ast.tokenSlice(node.main_token);
+        try self.emitGetVar(var_name);
+        if (hasSplatOrNamed(self.ast, args)) {
+            try emitSpreadArgs(self, args);
+            try self.emitOp(.method_call_dynamic_spread);
+        } else {
+            for (args) |arg| try self.compileNode(arg);
+            try self.emitOp(.method_call_dynamic);
+            try self.emitByte(@intCast(args.len));
+        }
+        return;
+    }
+
     const method_name = self.ast.tokenSlice(node.main_token);
     const name_idx = try self.addConstant(.{ .string = method_name });
 

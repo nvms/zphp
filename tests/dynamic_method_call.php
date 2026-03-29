@@ -1,5 +1,5 @@
 <?php
-// covers: dynamic method calls ($obj->{$method}()), __call fallback, spread args
+// covers: dynamic method calls ($obj->{$method}(), $obj->$method()), __call fallback, spread args
 
 class Greeter {
     public function hello($name) { return "hello $name"; }
@@ -14,6 +14,19 @@ echo $obj->{$m}('world') . "\n"; // hello world
 
 $m = 'goodbye';
 echo $obj->{$m}('world') . "\n"; // goodbye world
+
+// $obj->$method() syntax (no braces)
+$m2 = 'hello';
+echo $obj->$m2('zphp') . "\n"; // hello zphp
+
+// $obj->$method() with spread
+class SpreadTest {
+    public function add($a, $b) { return $a + $b; }
+}
+$st = new SpreadTest();
+$m3 = 'add';
+$args = [3, 4];
+echo $st->$m3(...$args) . "\n"; // 7
 
 // dynamic method call with spread
 class Proxy {
