@@ -137,6 +137,7 @@ pub const OpCode = enum(u8) {
 
     // isset on property - dispatches to __isset magic method
     isset_prop, // u16: prop name - pop object, push bool
+    isset_prop_dynamic, // pop prop name, pop object, push bool
     isset_index, // pop key, pop array/object, push bool (offsetExists for objects)
 
     // optimized concat-assign: $var .= expr without full copy
@@ -191,6 +192,7 @@ pub const OpCode = enum(u8) {
             .get_static_prop, .array_new, .clone_obj, .isset_prop, .isset_index,
             => 1,
             // binary ops: pop 2, push 1
+            .isset_prop_dynamic,
             .add, .subtract, .multiply, .divide, .modulo, .power, .concat,
             .bit_and, .bit_or, .bit_xor, .shift_left, .shift_right,
             .equal, .not_equal, .identical, .not_identical,

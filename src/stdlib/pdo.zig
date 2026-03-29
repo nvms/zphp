@@ -24,7 +24,6 @@ const sqlite = struct {
     const BLOB: c_int = 4;
     const NULL: c_int = 5;
 
-
     extern "sqlite3" fn sqlite3_open(filename: [*:0]const u8, ppDb: *?*Db) callconv(.c) c_int;
     extern "sqlite3" fn sqlite3_close_v2(db: *Db) callconv(.c) c_int;
     extern "sqlite3" fn sqlite3_exec(db: *Db, sql: [*:0]const u8, callback: ?*anyopaque, arg: ?*anyopaque, errmsg: ?*[*:0]u8) callconv(.c) c_int;
@@ -125,6 +124,8 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try stmt_def.methods.put(a, "rowCount", .{ .name = "rowCount", .arity = 0 });
     try stmt_def.methods.put(a, "columnCount", .{ .name = "columnCount", .arity = 0 });
     try stmt_def.methods.put(a, "closeCursor", .{ .name = "closeCursor", .arity = 0 });
+    try stmt_def.methods.put(a, "setFetchMode", .{ .name = "setFetchMode", .arity = 1 });
+    try stmt_def.methods.put(a, "bindValue", .{ .name = "bindValue", .arity = 2 });
     try vm.classes.put(a, "PDOStatement", stmt_def);
 
     try vm.native_fns.put(a, "PDOStatement::execute", stmtExecute);
@@ -134,6 +135,8 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try vm.native_fns.put(a, "PDOStatement::rowCount", stmtRowCount);
     try vm.native_fns.put(a, "PDOStatement::columnCount", stmtColumnCount);
     try vm.native_fns.put(a, "PDOStatement::closeCursor", stmtCloseCursor);
+    try vm.native_fns.put(a, "PDOStatement::setFetchMode", stmtSetFetchMode);
+    try vm.native_fns.put(a, "PDOStatement::bindValue", stmtBindValue);
 }
 
 pub fn cleanupResources(objects: std.ArrayListUnmanaged(*PhpObject)) void {
@@ -407,7 +410,14 @@ fn stmtFetch(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
         return .{ .bool = false };
     }
 
-    const mode: i64 = if (args.len >= 1 and args[0] == .int) args[0].int else 4; // FETCH_BOTH
+    const mode: i64 = if (args.len >= 1 and args[0] == .int) args[0].int else getDefaultFetchMode(obj);
+
+    if (mode == 5) {
+        const row = try fetchRowAsObject(ctx, stmt);
+        const next_rc = sqlite.sqlite3_step(stmt);
+        try obj.set(ctx.allocator, "__has_row", .{ .bool = next_rc == sqlite.ROW });
+        return row;
+    }
 
     const row = try fetchRow(ctx, stmt, mode);
 
@@ -425,15 +435,20 @@ fn stmtFetchAll(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (std.mem.eql(u8, drv, "pgsql")) return pdo_pgsql.stmtFetchAll(ctx, obj, args);
     const stmt = getStmtPtr(obj) orelse return .{ .bool = false };
 
-    const mode: i64 = if (args.len >= 1 and args[0] == .int) args[0].int else 4;
+    const mode: i64 = if (args.len >= 1 and args[0] == .int) args[0].int else getDefaultFetchMode(obj);
 
     var result = try ctx.createArray();
+
+    if (mode == 5) {
+        try fetchAllAsObjects(ctx, stmt, result, obj);
+        try obj.set(ctx.allocator, "__has_row", .{ .bool = false });
+        return .{ .array = result };
+    }
 
     const has_row = obj.get("__has_row");
     const stepped = obj.get("__stepped");
 
     if (stepped != .bool or !stepped.bool) {
-        // need to step first
         var rc = sqlite.sqlite3_step(stmt);
         while (rc == sqlite.ROW) {
             const row = try fetchRow(ctx, stmt, mode);
@@ -441,7 +456,6 @@ fn stmtFetchAll(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
             rc = sqlite.sqlite3_step(stmt);
         }
     } else {
-        // already stepped - fetch current row if available, then continue
         if (has_row == .bool and has_row.bool) {
             const row = try fetchRow(ctx, stmt, mode);
             try result.append(ctx.allocator, .{ .array = row });
@@ -516,7 +530,86 @@ fn stmtCloseCursor(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
     return .{ .bool = true };
 }
 
+fn stmtSetFetchMode(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    const obj = getThis(ctx) orelse return .{ .bool = false };
+    const mode: Value = if (args.len >= 1) args[0] else .{ .int = 4 };
+    try obj.set(ctx.allocator, "__fetch_mode", mode);
+    return .{ .bool = true };
+}
+
+fn stmtBindValue(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    const obj = getThis(ctx) orelse return .{ .bool = false };
+    if (args.len < 2) return .{ .bool = false };
+    const drv = getDriver(obj);
+    if (std.mem.eql(u8, drv, "mysql") or std.mem.eql(u8, drv, "pgsql")) return .{ .bool = true };
+    const stmt = getStmtPtr(obj) orelse return .{ .bool = false };
+    const param = args[0];
+    const val = args[1];
+    const idx: c_int = if (param == .int) @intCast(param.int) else blk: {
+        if (param != .string) break :blk @as(c_int, 0);
+        const name = param.string;
+        break :blk sqlite.sqlite3_bind_parameter_index(stmt, @ptrCast(name.ptr));
+    };
+    if (idx == 0) return .{ .bool = false };
+    const rc = switch (val) {
+        .int => sqlite.sqlite3_bind_int64(stmt, idx, val.int),
+        .float => sqlite.sqlite3_bind_double(stmt, idx, val.float),
+        .string => sqlite.sqlite3_bind_text(stmt, idx, @ptrCast(val.string.ptr), @intCast(val.string.len), null),
+        .null => sqlite.sqlite3_bind_null(stmt, idx),
+        .bool => sqlite.sqlite3_bind_int64(stmt, idx, if (val.bool) 1 else 0),
+        else => sqlite.sqlite3_bind_null(stmt, idx),
+    };
+    return .{ .bool = rc == sqlite.OK };
+}
+
+fn getDefaultFetchMode(obj: *PhpObject) i64 {
+    const mode = obj.get("__fetch_mode");
+    if (mode == .int) return mode.int;
+    return 4; // FETCH_BOTH
+}
+
 // helpers
+
+fn fetchRowAsObject(ctx: *NativeContext, stmt: *sqlite.Stmt) !Value {
+    const obj = try ctx.vm.allocator.create(PhpObject);
+    obj.* = .{ .class_name = "stdClass" };
+    try ctx.vm.objects.append(ctx.vm.allocator, obj);
+    const col_count = sqlite.sqlite3_column_count(stmt);
+    var i: c_int = 0;
+    while (i < col_count) : (i += 1) {
+        const val = try columnToValue(ctx, stmt, i);
+        if (sqlite.sqlite3_column_name(stmt, i)) |name_ptr| {
+            const name = std.mem.span(name_ptr);
+            try obj.set(ctx.allocator, try ctx.createString(name), val);
+        }
+    }
+    return .{ .object = obj };
+}
+
+fn fetchAllAsObjects(ctx: *NativeContext, stmt: *sqlite.Stmt, result: *PhpArray, obj_parent: *PhpObject) !void {
+    const has_row = obj_parent.get("__has_row");
+    const stepped = obj_parent.get("__stepped");
+
+    if (stepped != .bool or !stepped.bool) {
+        var rc = sqlite.sqlite3_step(stmt);
+        while (rc == sqlite.ROW) {
+            const row = try fetchRowAsObject(ctx, stmt);
+            try result.append(ctx.allocator, row);
+            rc = sqlite.sqlite3_step(stmt);
+        }
+    } else {
+        if (has_row == .bool and has_row.bool) {
+            const row = try fetchRowAsObject(ctx, stmt);
+            try result.append(ctx.allocator, row);
+            var rc = sqlite.sqlite3_step(stmt);
+            while (rc == sqlite.ROW) {
+                const next_row = try fetchRowAsObject(ctx, stmt);
+                try result.append(ctx.allocator, next_row);
+                rc = sqlite.sqlite3_step(stmt);
+            }
+        }
+    }
+}
 
 fn fetchRow(ctx: *NativeContext, stmt: *sqlite.Stmt, mode: i64) !*PhpArray {
     var row = try ctx.createArray();

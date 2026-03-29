@@ -23,6 +23,8 @@ pub const entries = .{
     .{ "get_defined_vars", native_get_defined_vars },
     .{ "get_defined_classes", native_get_defined_classes },
     .{ "set_time_limit", native_set_time_limit },
+    .{ "request_parse_body", native_request_parse_body },
+    .{ "trait_exists", native_trait_exists },
 };
 
 fn native_sleep(_: *NativeContext, args: []const Value) RuntimeError!Value {
@@ -279,4 +281,25 @@ fn native_get_defined_classes(ctx: *NativeContext, _: []const Value) RuntimeErro
 
 fn native_set_time_limit(_: *NativeContext, _: []const Value) RuntimeError!Value {
     return .{ .bool = true };
+}
+
+fn native_request_parse_body(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    var post = try ctx.createArray();
+    var files = try ctx.createArray();
+    if (ctx.vm.request_vars.get("$_POST")) |post_val| {
+        if (post_val == .array) post = post_val.array;
+    }
+    if (ctx.vm.request_vars.get("$_FILES")) |files_val| {
+        if (files_val == .array) files = files_val.array;
+    }
+    var result = try ctx.createArray();
+    try result.append(ctx.allocator, .{ .array = post });
+    try result.append(ctx.allocator, .{ .array = files });
+    return .{ .array = result };
+}
+
+fn native_trait_exists(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len == 0 or args[0] != .string) return .{ .bool = false };
+    const name = args[0].string;
+    return .{ .bool = ctx.vm.traits.contains(name) };
 }

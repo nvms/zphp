@@ -1726,6 +1726,24 @@ pub const VM = struct {
                         self.push(.{ .bool = false });
                     }
                 },
+                .isset_prop_dynamic => {
+                    const prop_name_val = self.pop();
+                    const obj_val = self.pop();
+                    if (obj_val == .object and prop_name_val == .string) {
+                        const obj = obj_val.object;
+                        const prop_name = prop_name_val.string;
+                        if (obj.properties.contains(prop_name) or (obj.slots != null and obj.getSlotIndex(prop_name) != null)) {
+                            self.push(.{ .bool = obj.get(prop_name) != .null });
+                        } else if (self.hasMethod(obj.class_name, "__isset")) {
+                            const result = self.callMethod(obj, "__isset", &.{.{ .string = prop_name }}) catch Value{ .bool = false };
+                            self.push(.{ .bool = result.isTruthy() });
+                        } else {
+                            self.push(.{ .bool = false });
+                        }
+                    } else {
+                        self.push(.{ .bool = false });
+                    }
+                },
                 .isset_index => {
                     const key = self.pop();
                     const arr_val = self.pop();
@@ -3385,8 +3403,10 @@ pub const VM = struct {
                             for (0..@min(ac, func.arity)) |ai| {
                                 try new_vars.put(self.allocator, func.params[ai], self.stack[self.sp - ac + ai]);
                             }
-                            for (ac..func.arity) |ai| {
-                                if (ai < func.defaults.len) try new_vars.put(self.allocator, func.params[ai], try self.resolveDefault(func.defaults[ai]));
+                            if (ac < func.arity) {
+                                for (ac..func.arity) |ai| {
+                                    if (ai < func.defaults.len) try new_vars.put(self.allocator, func.params[ai], try self.resolveDefault(func.defaults[ai]));
+                                }
                             }
                         }
                         self.sp -= ac;
@@ -3521,8 +3541,10 @@ pub const VM = struct {
                             for (0..@min(ac, func.arity)) |ai| {
                                 try new_vars.put(self.allocator, func.params[ai], self.stack[self.sp - ac + ai]);
                             }
-                            for (ac..func.arity) |ai| {
-                                if (ai < func.defaults.len) try new_vars.put(self.allocator, func.params[ai], try self.resolveDefault(func.defaults[ai]));
+                            if (ac < func.arity) {
+                                for (ac..func.arity) |ai| {
+                                    if (ai < func.defaults.len) try new_vars.put(self.allocator, func.params[ai], try self.resolveDefault(func.defaults[ai]));
+                                }
                             }
                         }
                         self.sp -= ac;
@@ -5430,7 +5452,22 @@ pub const VM = struct {
             if (std.mem.eql(u8, name, target)) return true;
             if (self.interfaces.get(name)) |idef| {
                 current = idef.parent;
-            } else break;
+            } else {
+                if (!self.classes.contains(name)) {
+                    self.tryAutoload(name) catch {};
+                }
+                if (self.interfaces.get(name)) |idef| {
+                    current = idef.parent;
+                } else {
+                    // also check the ClassDef's interfaces list as fallback
+                    if (self.classes.get(name)) |cls| {
+                        for (cls.interfaces.items) |parent_iface| {
+                            if (self.implementsInterface(parent_iface, target)) return true;
+                        }
+                    }
+                    break;
+                }
+            }
         }
         return false;
     }

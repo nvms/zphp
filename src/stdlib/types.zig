@@ -95,6 +95,7 @@ pub const entries = .{
     .{ "func_num_args", native_func_num_args },
     .{ "func_get_arg", native_func_get_arg },
     .{ "interface_exists", native_interface_exists },
+    .{ "enum_exists", native_enum_exists },
     .{ "class_implements", native_class_implements },
     .{ "class_parents", native_class_parents },
     .{ "class_uses", native_class_uses },
@@ -1012,6 +1013,22 @@ fn native_interface_exists(ctx: *NativeContext, args: []const Value) RuntimeErro
     if (autoload) {
         ctx.vm.tryAutoload(name) catch {};
         return .{ .bool = ctx.vm.interfaces.contains(name) };
+    }
+    return .{ .bool = false };
+}
+
+fn native_enum_exists(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len == 0 or args[0] != .string) return .{ .bool = false };
+    const name = args[0].string;
+    if (ctx.vm.classes.get(name)) |cls| {
+        if (cls.is_enum) return .{ .bool = true };
+    }
+    const autoload = if (args.len > 1 and args[1] == .bool) args[1].bool else true;
+    if (autoload) {
+        ctx.vm.tryAutoload(name) catch {};
+        if (ctx.vm.classes.get(name)) |cls| {
+            return .{ .bool = cls.is_enum };
+        }
     }
     return .{ .bool = false };
 }

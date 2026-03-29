@@ -493,11 +493,17 @@ pub fn compileCall(self: *Compiler, node: Ast.Node) Error!void {
             for (args, 0..) |arg_idx, i| {
                 const arg = self.ast.nodes[arg_idx];
                 if (arg.tag == .property_access) {
-                    try self.compileNode(arg.data.lhs);
-                    const prop_name = self.propName(arg);
-                    const prop_idx = try self.addConstant(.{ .string = prop_name });
-                    try self.emitOp(.isset_prop);
-                    try self.emitU16(prop_idx);
+                    if (self.isDynamicProp(arg)) {
+                        try self.compileNode(arg.data.lhs);
+                        try self.compileNode(arg.data.rhs);
+                        try self.emitOp(.isset_prop_dynamic);
+                    } else {
+                        try self.compileNode(arg.data.lhs);
+                        const prop_name = self.propName(arg);
+                        const prop_idx = try self.addConstant(.{ .string = prop_name });
+                        try self.emitOp(.isset_prop);
+                        try self.emitU16(prop_idx);
+                    }
                 } else if (arg.tag == .array_access) {
                     try self.compileNode(arg.data.lhs);
                     try self.compileNode(arg.data.rhs);

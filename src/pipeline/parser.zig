@@ -612,6 +612,7 @@ const Parser = struct {
 
     fn parseFunctionDecl(self: *Parser) Error!u32 {
         _ = self.advance();
+        if (self.peek() == .amp) _ = self.advance();
         const name_tok = try self.expectFunctionName();
         _ = try self.expect(.l_paren);
 
@@ -1118,6 +1119,7 @@ const Parser = struct {
 
     fn parseInterfaceMethod(self: *Parser) Error!u32 {
         _ = self.advance(); // function
+        if (self.peek() == .amp) _ = self.advance();
         const name_tok = try self.expectFunctionName();
         _ = try self.expect(.l_paren);
 
@@ -1377,6 +1379,7 @@ const Parser = struct {
 
     fn parseClassMethod(self: *Parser) Error!u32 {
         _ = self.advance(); // function
+        if (self.peek() == .amp) _ = self.advance();
         const name_tok = try self.expectFunctionName();
         _ = try self.expect(.l_paren);
 
