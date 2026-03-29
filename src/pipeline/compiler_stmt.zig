@@ -282,9 +282,17 @@ pub fn compileForeach(self: *Compiler, node: Ast.Node) Error!void {
 
 pub fn compileSwitch(self: *Compiler, node: Ast.Node) Error!void {
     const prev_start = self.loop_start;
-    const prev_breaks = self.break_jumps;
+    var prev_breaks = self.break_jumps;
+    var prev_continue_jumps = self.continue_jumps;
+    const prev_use_continue = self.use_continue_jumps;
     self.break_jumps = .{};
-    self.loop_start = null;
+    self.continue_jumps = .{};
+    self.use_continue_jumps = true;
+    // set loop_start to current position so continue is recognized
+    // (continue 1 in a switch acts like break, continue N targets outer loop)
+    self.loop_start = self.chunk.offset();
+    if (self.loop_depth < 32) self.loop_is_foreach[self.loop_depth] = false;
+    self.loop_depth += 1;
 
     try self.compileNode(node.data.lhs);
     const temp_name = try std.fmt.allocPrint(self.allocator, "__switch_{d}", .{self.closure_count});
@@ -356,9 +364,27 @@ pub fn compileSwitch(self: *Compiler, node: Ast.Node) Error!void {
     }
 
     if (end_no_match) |j| self.patchJump(j);
-    for (self.break_jumps.items) |bj| self.patchJump(bj.offset);
+    self.loop_depth -= 1;
+    const switch_depth = self.loop_depth;
+    for (self.break_jumps.items) |bj| {
+        if (bj.depth > switch_depth) {
+            self.patchJump(bj.offset);
+        } else {
+            try prev_breaks.append(self.allocator, bj);
+        }
+    }
+    for (self.continue_jumps.items) |cj| {
+        if (cj.depth > switch_depth) {
+            self.patchJump(cj.offset);
+        } else {
+            try prev_continue_jumps.append(self.allocator, cj);
+        }
+    }
     self.break_jumps.deinit(self.allocator);
+    self.continue_jumps.deinit(self.allocator);
     self.break_jumps = prev_breaks;
+    self.continue_jumps = prev_continue_jumps;
+    self.use_continue_jumps = prev_use_continue;
     self.loop_start = prev_start;
 }
 

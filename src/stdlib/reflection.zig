@@ -44,6 +44,11 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try rc_def.methods.put(a, "getTraitNames", .{ .name = "getTraitNames", .arity = 0 });
     try rc_def.methods.put(a, "isEnum", .{ .name = "isEnum", .arity = 0 });
     try rc_def.methods.put(a, "getConstants", .{ .name = "getConstants", .arity = 0 });
+    try rc_def.methods.put(a, "isInternal", .{ .name = "isInternal", .arity = 0 });
+    try rc_def.methods.put(a, "isUserDefined", .{ .name = "isUserDefined", .arity = 0 });
+    try rc_def.methods.put(a, "getFileName", .{ .name = "getFileName", .arity = 0 });
+    try rc_def.methods.put(a, "getStartLine", .{ .name = "getStartLine", .arity = 0 });
+    try rc_def.methods.put(a, "getDefaultProperties", .{ .name = "getDefaultProperties", .arity = 0 });
     try vm.classes.put(a, "ReflectionClass", rc_def);
 
     try vm.native_fns.put(a, "ReflectionClass::__construct", rcConstruct);
@@ -70,6 +75,11 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try vm.native_fns.put(a, "ReflectionClass::getTraitNames", rcGetTraitNames);
     try vm.native_fns.put(a, "ReflectionClass::isEnum", rcIsEnum);
     try vm.native_fns.put(a, "ReflectionClass::getConstants", rcGetConstants);
+    try vm.native_fns.put(a, "ReflectionClass::isInternal", rcIsInternal);
+    try vm.native_fns.put(a, "ReflectionClass::isUserDefined", rcIsUserDefined);
+    try vm.native_fns.put(a, "ReflectionClass::getFileName", rcGetFileName);
+    try vm.native_fns.put(a, "ReflectionClass::getStartLine", rcGetStartLine);
+    try vm.native_fns.put(a, "ReflectionClass::getDefaultProperties", rcGetDefaultProperties);
 
     // ReflectionMethod
     var rm_def = ClassDef{ .name = "ReflectionMethod" };
@@ -206,6 +216,13 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try rprop_def.methods.put(a, "isDefault", .{ .name = "isDefault", .arity = 0 });
     try rprop_def.methods.put(a, "isReadOnly", .{ .name = "isReadOnly", .arity = 0 });
     try rprop_def.methods.put(a, "setValue", .{ .name = "setValue", .arity = 2 });
+    try rprop_def.methods.put(a, "isStatic", .{ .name = "isStatic", .arity = 0 });
+    try rprop_def.methods.put(a, "isPromoted", .{ .name = "isPromoted", .arity = 0 });
+    try rprop_def.methods.put(a, "hasType", .{ .name = "hasType", .arity = 0 });
+    try rprop_def.methods.put(a, "getModifiers", .{ .name = "getModifiers", .arity = 0 });
+    try rprop_def.methods.put(a, "getAttributes", .{ .name = "getAttributes", .arity = 0 });
+    try rprop_def.methods.put(a, "getDocComment", .{ .name = "getDocComment", .arity = 0 });
+    try rprop_def.methods.put(a, "isVirtual", .{ .name = "isVirtual", .arity = 0 });
     try vm.classes.put(a, "ReflectionProperty", rprop_def);
 
     try vm.native_fns.put(a, "ReflectionProperty::__construct", rpConstruct);
@@ -223,6 +240,13 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try vm.native_fns.put(a, "ReflectionProperty::getDeclaringClass", rpropGetDeclaringClass);
     try vm.native_fns.put(a, "ReflectionProperty::isDefault", rpropIsDefault);
     try vm.native_fns.put(a, "ReflectionProperty::isReadOnly", rpropIsReadOnly);
+    try vm.native_fns.put(a, "ReflectionProperty::isStatic", rpropIsStatic);
+    try vm.native_fns.put(a, "ReflectionProperty::isPromoted", rpropIsPromoted);
+    try vm.native_fns.put(a, "ReflectionProperty::hasType", rpropHasType);
+    try vm.native_fns.put(a, "ReflectionProperty::getModifiers", rpropGetModifiers);
+    try vm.native_fns.put(a, "ReflectionProperty::getAttributes", rpropGetAttributes);
+    try vm.native_fns.put(a, "ReflectionProperty::getDocComment", rpropGetDocComment);
+    try vm.native_fns.put(a, "ReflectionProperty::isVirtual", rpropIsVirtual);
 
     // ReflectionAttribute
     var ra_def = ClassDef{ .name = "ReflectionAttribute" };
@@ -689,6 +713,33 @@ fn rcGetConstants(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
             try arr.set(ctx.allocator, .{ .string = entry.key_ptr.* }, entry.value_ptr.*);
         }
         current = cls.parent;
+    }
+    return .{ .array = arr };
+}
+
+fn rcIsInternal(_: *NativeContext, _: []const Value) RuntimeError!Value {
+    return .{ .bool = false };
+}
+
+fn rcIsUserDefined(_: *NativeContext, _: []const Value) RuntimeError!Value {
+    return .{ .bool = true };
+}
+
+fn rcGetFileName(_: *NativeContext, _: []const Value) RuntimeError!Value {
+    return .{ .bool = false };
+}
+
+fn rcGetStartLine(_: *NativeContext, _: []const Value) RuntimeError!Value {
+    return .{ .bool = false };
+}
+
+fn rcGetDefaultProperties(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const this = getThis(ctx) orelse return .null;
+    const class_name = if (this.get("name") == .string) this.get("name").string else return .null;
+    const arr = try ctx.createArray();
+    const cls = ctx.vm.classes.get(class_name) orelse return .{ .array = arr };
+    for (cls.properties.items) |prop| {
+        try arr.set(ctx.allocator, .{ .string = prop.name }, prop.default);
     }
     return .{ .array = arr };
 }
@@ -1303,6 +1354,47 @@ fn rpropIsReadOnly(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
     const this = getThis(ctx) orelse return .{ .bool = false };
     const v = this.get("_is_readonly");
     return .{ .bool = v == .bool and v.bool };
+}
+
+fn rpropIsStatic(_: *NativeContext, _: []const Value) RuntimeError!Value {
+    return .{ .bool = false };
+}
+
+fn rpropIsPromoted(_: *NativeContext, _: []const Value) RuntimeError!Value {
+    return .{ .bool = false };
+}
+
+fn rpropHasType(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const this = getThis(ctx) orelse return .{ .bool = false };
+    const t = this.get("_type");
+    return .{ .bool = t != .null };
+}
+
+fn rpropGetModifiers(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const this = getThis(ctx) orelse return .{ .int = 0 };
+    const vis = this.get("_visibility");
+    if (vis == .int) {
+        return switch (vis.int) {
+            0 => .{ .int = 1 },
+            1 => .{ .int = 2 },
+            2 => .{ .int = 4 },
+            else => .{ .int = 1 },
+        };
+    }
+    return .{ .int = 1 };
+}
+
+fn rpropGetAttributes(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const arr = try ctx.createArray();
+    return .{ .array = arr };
+}
+
+fn rpropGetDocComment(_: *NativeContext, _: []const Value) RuntimeError!Value {
+    return .{ .bool = false };
+}
+
+fn rpropIsVirtual(_: *NativeContext, _: []const Value) RuntimeError!Value {
+    return .{ .bool = false };
 }
 
 // --- ReflectionMethod::invoke ---

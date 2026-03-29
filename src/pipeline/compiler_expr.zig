@@ -923,6 +923,15 @@ pub fn compileDynamicStaticCall(self: *Compiler, node: Ast.Node) Error!void {
 
 pub fn compileStaticPropAccess(self: *Compiler, node: Ast.Node) Error!void {
     const class_node = self.ast.nodes[node.data.lhs];
+
+    if (node.main_token != 0 and self.ast.tokens[node.main_token].tag == .kw_class and
+        class_node.tag != .identifier and class_node.tag != .qualified_name)
+    {
+        try self.compileNode(node.data.lhs);
+        try self.emitOp(.get_obj_class);
+        return;
+    }
+
     const class_name = try resolveNodeClassName(self, class_node);
     var prop_name = self.ast.tokenSlice(node.main_token);
     if (prop_name.len > 0 and prop_name[0] == '$') prop_name = prop_name[1..];

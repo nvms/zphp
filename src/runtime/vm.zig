@@ -1350,6 +1350,26 @@ pub const VM = struct {
                             self.push(.{ .int = -2 }); // sentinel: -2 means Iterator
                         } else if (iterable == .array) {
                             self.push(.{ .int = 0 });
+                        } else if (iterable == .object) {
+                            const obj = iterable.object;
+                            const arr = try self.allocator.create(PhpArray);
+                            arr.* = .{};
+                            try self.arrays.append(self.allocator, arr);
+                            if (obj.slots) |slots| {
+                                if (obj.slot_layout) |layout| {
+                                    for (layout.names, 0..) |name, i| {
+                                        if (i < slots.len) {
+                                            try arr.set(self.allocator, .{ .string = name }, slots[i]);
+                                        }
+                                    }
+                                }
+                            }
+                            var it = obj.properties.iterator();
+                            while (it.next()) |entry| {
+                                try arr.set(self.allocator, .{ .string = entry.key_ptr.* }, entry.value_ptr.*);
+                            }
+                            self.stack[self.sp - 1] = .{ .array = arr };
+                            self.push(.{ .int = 0 });
                         } else {
                             self.push(.{ .int = 0 });
                         }
@@ -1739,6 +1759,16 @@ pub const VM = struct {
                     }
                 },
 
+                .get_obj_class => {
+                    const v = self.pop();
+                    if (v == .object) {
+                        self.push(.{ .string = v.object.class_name });
+                    } else {
+                        self.error_msg = std.fmt.allocPrint(self.allocator, "Fatal error: Cannot use \"::class\" on non-object", .{}) catch null;
+                        return error.RuntimeError;
+                    }
+                },
+
                 .cast_int => {
                     const v = self.pop();
                     self.push(.{ .int = Value.toInt(v) });
@@ -1770,6 +1800,30 @@ pub const VM = struct {
                     const v = self.pop();
                     if (v == .array) {
                         self.push(v);
+                    } else if (v == .object) {
+                        const obj = v.object;
+                        const arr = try self.allocator.create(PhpArray);
+                        arr.* = .{};
+                        try self.arrays.append(self.allocator, arr);
+                        if (obj.slots) |slots| {
+                            if (obj.slot_layout) |layout| {
+                                for (layout.names, 0..) |name, i| {
+                                    if (i < slots.len) {
+                                        try arr.set(self.allocator, .{ .string = name }, slots[i]);
+                                    }
+                                }
+                            }
+                        }
+                        var it = obj.properties.iterator();
+                        while (it.next()) |entry| {
+                            try arr.set(self.allocator, .{ .string = entry.key_ptr.* }, entry.value_ptr.*);
+                        }
+                        self.push(.{ .array = arr });
+                    } else if (v == .null) {
+                        const arr = try self.allocator.create(PhpArray);
+                        arr.* = .{};
+                        try self.arrays.append(self.allocator, arr);
+                        self.push(.{ .array = arr });
                     } else {
                         const arr = try self.allocator.create(PhpArray);
                         arr.* = .{};
@@ -5811,7 +5865,7 @@ pub const VM = struct {
         if (std.mem.eql(u8, type_name, "void")) return val == .null;
         if (std.mem.eql(u8, type_name, "int") or std.mem.eql(u8, type_name, "integer")) return val == .int;
         if (std.mem.eql(u8, type_name, "float") or std.mem.eql(u8, type_name, "double")) return val == .float or val == .int;
-        if (std.mem.eql(u8, type_name, "bool") or std.mem.eql(u8, type_name, "boolean")) return val == .bool;
+        if (std.mem.eql(u8, type_name, "bool") or std.mem.eql(u8, type_name, "boolean")) return val == .bool or val == .int;
         if (std.mem.eql(u8, type_name, "string")) return val == .string;
         if (std.mem.eql(u8, type_name, "array")) return val == .array;
         if (std.mem.eql(u8, type_name, "callable")) return val == .string or val == .array or val == .object;

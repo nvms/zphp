@@ -9,6 +9,7 @@ pub const entries = .{
     .{ "array_pop", array_pop },
     .{ "array_shift", array_shift },
     .{ "array_keys", array_keys },
+    .{ "array_is_list", array_is_list },
     .{ "array_values", array_values },
     .{ "in_array", in_array },
     .{ "array_key_exists", array_key_exists },
@@ -112,6 +113,20 @@ fn array_keys(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
         try arr.append(ctx.allocator, key_val);
     }
     return .{ .array = arr };
+}
+
+fn array_is_list(_: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len == 0 or args[0] != .array) return .{ .bool = false };
+    const arr = args[0].array;
+    for (arr.entries.items, 0..) |entry, i| {
+        switch (entry.key) {
+            .int => |k| {
+                if (k != @as(i64, @intCast(i))) return .{ .bool = false };
+            },
+            .string => return .{ .bool = false },
+        }
+    }
+    return .{ .bool = true };
 }
 
 fn array_values(ctx: *NativeContext, args: []const Value) RuntimeError!Value {

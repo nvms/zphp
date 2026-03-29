@@ -97,6 +97,7 @@ pub const entries = .{
     .{ "interface_exists", native_interface_exists },
     .{ "class_implements", native_class_implements },
     .{ "class_parents", native_class_parents },
+    .{ "class_uses", native_class_uses },
     .{ "iterator_to_array", native_iterator_to_array },
     .{ "iterator_count", native_iterator_count },
     .{ "filter_var", native_filter_var },
@@ -1069,6 +1070,28 @@ fn native_class_parents(ctx: *NativeContext, args: []const Value) RuntimeError!V
         parent = pcls.parent;
     }
 
+    return .{ .array = result };
+}
+
+fn native_class_uses(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len == 0) return .{ .bool = false };
+    const class_name = if (args[0] == .object)
+        args[0].object.class_name
+    else if (args[0] == .string)
+        args[0].string
+    else
+        return Value{ .bool = false };
+
+    const cls = ctx.vm.classes.get(class_name) orelse {
+        try ctx.vm.tryAutoload(class_name);
+        if (ctx.vm.classes.get(class_name) == null) return Value{ .bool = false };
+        return native_class_uses(ctx, args);
+    };
+
+    var result = try ctx.createArray();
+    for (cls.used_traits.items) |trait| {
+        try result.set(ctx.allocator, .{ .string = trait }, .{ .string = trait });
+    }
     return .{ .array = result };
 }
 

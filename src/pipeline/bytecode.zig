@@ -155,6 +155,7 @@ pub const OpCode = enum(u8) {
     less_local_local_jif, // u16: slot_a, u16: slot_b, u16: jump offset - if !(locals[a] < locals[b]) jump
     static_call_dyn_both, // u8: arg count (class name string and method name string on stack below args)
     static_call_dyn_both_spread, // no operands (class name, method name, and args array on stack)
+    get_obj_class, // pop value, push its class name string (for $var::class)
 
     pub fn width(self: OpCode) usize {
         return switch (self) {
@@ -198,7 +199,7 @@ pub const OpCode = enum(u8) {
             => -1,
             // unary ops: pop 1, push 1
             .negate, .bit_not, .not, .cast_int, .cast_float, .cast_string,
-            .cast_bool, .cast_array,
+            .cast_bool, .cast_array, .get_obj_class,
             => 0,
             else => 0,
         };
