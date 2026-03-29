@@ -497,23 +497,36 @@ pub fn compileCall(self: *Compiler, node: Ast.Node) Error!void {
     }
 
     if (hasSplatOrNamed(self.ast, args)) {
-        try emitSpreadArgs(self, args);
-        if (callee.tag == .identifier) {
-            const raw_name = self.ast.tokenSlice(callee.main_token);
-            const name = self.resolveFunctionName(raw_name);
-            const idx = try self.addConstant(.{ .string = name });
-            try self.emitOp(.call_spread);
-            try self.emitU16(idx);
-        } else if (callee.tag == .qualified_name) {
-            const parts = self.ast.extraSlice(callee.data.lhs);
-            const fqn = try self.buildQualifiedString(parts);
-            const name = if (fqn.len > 0 and fqn[0] == '\\') fqn[1..] else fqn;
-            const idx = try self.addConstant(.{ .string = name });
-            try self.emitOp(.call_spread);
-            try self.emitU16(idx);
+        if (callee.tag == .property_access and self.isDynamicProp(callee)) {
+            try self.compileNode(callee.data.lhs);
+            if (callee.main_token == 0) {
+                try self.compileNode(callee.data.rhs);
+            } else {
+                const prop_node = self.ast.nodes[callee.data.rhs];
+                const var_name = self.ast.tokenSlice(prop_node.main_token);
+                try self.emitGetVar(var_name);
+            }
+            try emitSpreadArgs(self, args);
+            try self.emitOp(.method_call_dynamic_spread);
         } else {
-            try self.compileNode(node.data.lhs);
-            try self.emitOp(.call_indirect_spread);
+            try emitSpreadArgs(self, args);
+            if (callee.tag == .identifier) {
+                const raw_name = self.ast.tokenSlice(callee.main_token);
+                const name = self.resolveFunctionName(raw_name);
+                const idx = try self.addConstant(.{ .string = name });
+                try self.emitOp(.call_spread);
+                try self.emitU16(idx);
+            } else if (callee.tag == .qualified_name) {
+                const parts = self.ast.extraSlice(callee.data.lhs);
+                const fqn = try self.buildQualifiedString(parts);
+                const name = if (fqn.len > 0 and fqn[0] == '\\') fqn[1..] else fqn;
+                const idx = try self.addConstant(.{ .string = name });
+                try self.emitOp(.call_spread);
+                try self.emitU16(idx);
+            } else {
+                try self.compileNode(node.data.lhs);
+                try self.emitOp(.call_indirect_spread);
+            }
         }
     } else if (callee.tag == .identifier) {
         const call_offset = self.current_source_offset;
@@ -535,6 +548,20 @@ pub fn compileCall(self: *Compiler, node: Ast.Node) Error!void {
         const idx = try self.addConstant(.{ .string = name });
         try self.emitOp(.call);
         try self.emitU16(idx);
+        try self.emitByte(@intCast(args.len));
+    } else if (callee.tag == .property_access and self.isDynamicProp(callee)) {
+        const call_offset = self.current_source_offset;
+        try self.compileNode(callee.data.lhs);
+        if (callee.main_token == 0) {
+            try self.compileNode(callee.data.rhs);
+        } else {
+            const prop_node = self.ast.nodes[callee.data.rhs];
+            const var_name = self.ast.tokenSlice(prop_node.main_token);
+            try self.emitGetVar(var_name);
+        }
+        for (args) |arg| try self.compileNode(arg);
+        self.current_source_offset = call_offset;
+        try self.emitOp(.method_call_dynamic);
         try self.emitByte(@intCast(args.len));
     } else {
         const call_offset = self.current_source_offset;

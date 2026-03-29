@@ -124,6 +124,10 @@ const Parser = struct {
     // ======================================================================
 
     fn parseStatement(self: *Parser) Error!u32 {
+        if (self.peek() == .hash_bracket) {
+            self.skipAttributes();
+            return self.parseStatement();
+        }
         return switch (self.peek()) {
             .kw_echo => self.parseEchoStmt(),
             .kw_print => self.parsePrintStmt(),
@@ -990,6 +994,7 @@ const Parser = struct {
         defer members.deinit(self.allocator);
 
         while (self.peek() != .r_brace and self.peek() != .eof) {
+            self.skipAttributes();
             var is_static = false;
             var is_abstract = false;
             var is_readonly = false;
@@ -1079,6 +1084,7 @@ const Parser = struct {
         defer methods.deinit(self.allocator);
 
         while (self.peek() != .r_brace and self.peek() != .eof) {
+            self.skipAttributes();
             while (self.peek() == .kw_public or self.peek() == .kw_protected or
                 self.peek() == .kw_private or self.peek() == .kw_static or
                 self.peek() == .kw_abstract)
@@ -1137,6 +1143,7 @@ const Parser = struct {
         defer members.deinit(self.allocator);
 
         while (self.peek() != .r_brace and self.peek() != .eof) {
+            self.skipAttributes();
             var is_static = false;
             var is_abstract = false;
             while (self.peek() == .kw_public or self.peek() == .kw_protected or
@@ -1216,6 +1223,7 @@ const Parser = struct {
         defer members.deinit(self.allocator);
 
         while (self.peek() != .r_brace and self.peek() != .eof) {
+            self.skipAttributes();
             if (self.peek() == .kw_case) {
                 _ = self.advance();
                 const case_name = try self.expect(.identifier);
@@ -1618,7 +1626,20 @@ const Parser = struct {
         return .{ start, self.pos };
     }
 
+    fn skipAttributes(self: *Parser) void {
+        while (self.peek() == .hash_bracket) {
+            _ = self.advance();
+            var depth: u32 = 1;
+            while (depth > 0 and self.peek() != .eof) {
+                const tok = self.advance();
+                if (self.tokens[tok].tag == .l_bracket) depth += 1
+                else if (self.tokens[tok].tag == .r_bracket) depth -= 1;
+            }
+        }
+    }
+
     fn parseParam(self: *Parser) Error!u32 {
+        self.skipAttributes();
         // constructor property promotion: visibility keyword before param
         // 0 = none, 1 = public, 2 = protected, 3 = private
         var promotion: u32 = 0;

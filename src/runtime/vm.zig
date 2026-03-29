@@ -3015,6 +3015,237 @@ pub const VM = struct {
                     }
                 },
 
+                .method_call_dynamic => {
+                    const arg_count = self.readByte();
+                    const ac: usize = arg_count;
+                    // stack: [object, method_name, arg1, ..., argN]
+                    const method_name_val = self.stack[self.sp - ac - 1];
+                    const obj_val = self.stack[self.sp - ac - 2];
+                    if (method_name_val != .string) {
+                        self.sp -= ac + 2;
+                        const msg = std.fmt.allocPrint(self.allocator, "Fatal error: Uncaught TypeError: Method name must be a string", .{}) catch null;
+                        self.error_msg = msg;
+                        return error.RuntimeError;
+                    }
+                    const method_name = method_name_val.string;
+                    if (obj_val != .object) {
+                        self.sp -= ac + 2;
+                        self.error_msg = std.fmt.allocPrint(self.allocator, "Fatal error: Uncaught Error: Call to a member function {s}() on {s}", .{ method_name, valueTypeName(obj_val) }) catch null;
+                        return error.RuntimeError;
+                    }
+                    const obj = obj_val.object;
+                    // shift args down by 1 to remove method_name from stack, leaving [object, arg1, ..., argN]
+                    var i: usize = 0;
+                    while (i < ac) : (i += 1) {
+                        self.stack[self.sp - ac - 1 + i] = self.stack[self.sp - ac + i];
+                    }
+                    self.sp -= 1;
+                    // now stack is [object, arg1, ..., argN] - same layout as method_call
+                    const full_name = self.resolveMethod(obj.class_name, method_name) catch {
+                        if (self.hasMethod(obj.class_name, "__call")) {
+                            var args_arr = try self.allocator.create(PhpArray);
+                            args_arr.* = .{};
+                            try self.arrays.append(self.allocator, args_arr);
+                            for (0..ac) |ai| try args_arr.append(self.allocator, self.stack[self.sp - ac + ai]);
+                            self.sp -= ac;
+                            self.sp -= 1;
+                            const result = try self.callMethod(obj, "__call", &.{ .{ .string = method_name }, .{ .array = args_arr } });
+                            self.push(result);
+                            continue;
+                        }
+                        self.sp -= ac + 1;
+                        self.error_msg = std.fmt.allocPrint(self.allocator, "Fatal error: Uncaught Error: Call to undefined method {s}::{s}()", .{ obj.class_name, method_name }) catch null;
+                        return error.RuntimeError;
+                    };
+                    if (self.native_fns.get(full_name)) |native| {
+                        var args_buf: [16]Value = undefined;
+                        for (0..ac) |ai| args_buf[ai] = self.stack[self.sp - ac + ai];
+                        self.sp -= ac;
+                        self.sp -= 1;
+                        var tmp_vars: std.StringHashMapUnmanaged(Value) = .{};
+                        try tmp_vars.put(self.allocator, "$this", .{ .object = obj });
+                        self.frames[self.frame_count] = .{ .chunk = self.currentChunk(), .ip = self.currentFrame().ip, .vars = tmp_vars };
+                        self.frame_count += 1;
+                        const saved_fc = self.frame_count;
+                        var ctx = self.makeContext(null);
+                        const result = native(&ctx, args_buf[0..ac]) catch {
+                            if (self.frame_count >= saved_fc) {
+                                self.frame_count -= 1;
+                                self.frames[self.frame_count].vars.deinit(self.allocator);
+                            }
+                            if (self.pending_exception) |exc| {
+                                self.pending_exception = null;
+                                if (self.handler_count > self.handler_floor) {
+                                    const handler = self.exception_handlers[self.handler_count - 1];
+                                    self.handler_count -= 1;
+                                    while (self.frame_count > handler.frame_count) {
+                                        self.frame_count -= 1;
+                                        self.frames[self.frame_count].vars.deinit(self.allocator);
+                                    }
+                                    self.sp = handler.sp;
+                                    self.push(exc);
+                                    self.currentFrame().ip = handler.catch_ip;
+                                    continue;
+                                }
+                                self.pending_exception = exc;
+                            } else {
+                                continue;
+                            }
+                            return error.RuntimeError;
+                        };
+                        if (self.frame_count >= saved_fc) {
+                            self.frame_count -= 1;
+                            self.frames[self.frame_count].vars.deinit(self.allocator);
+                            self.push(result);
+                        } else continue;
+                    } else if (self.functions.get(full_name)) |func| {
+                        var new_vars: std.StringHashMapUnmanaged(Value) = .{};
+                        try new_vars.put(self.allocator, "$this", .{ .object = obj });
+                        try self.bindClosures(&new_vars, null, full_name);
+                        if (func.is_variadic) {
+                            const fixed: usize = func.arity - 1;
+                            for (0..@min(ac, fixed)) |ai| {
+                                try new_vars.put(self.allocator, func.params[ai], self.stack[self.sp - ac + ai]);
+                            }
+                            const rest_arr = try self.allocator.create(PhpArray);
+                            rest_arr.* = .{};
+                            try self.arrays.append(self.allocator, rest_arr);
+                            for (fixed..ac) |ai| try rest_arr.append(self.allocator, self.stack[self.sp - ac + ai]);
+                            try new_vars.put(self.allocator, func.params[fixed], .{ .array = rest_arr });
+                        } else {
+                            for (0..@min(ac, func.arity)) |ai| {
+                                try new_vars.put(self.allocator, func.params[ai], self.stack[self.sp - ac + ai]);
+                            }
+                            for (ac..func.arity) |ai| {
+                                if (ai < func.defaults.len) try new_vars.put(self.allocator, func.params[ai], try self.resolveDefault(func.defaults[ai]));
+                            }
+                        }
+                        self.sp -= ac;
+                        self.sp -= 1;
+                        self.frames[self.frame_count] = .{ .chunk = &func.chunk, .ip = 0, .vars = new_vars, .locals = try self.allocLocals(func, &new_vars), .func = func };
+                        self.frame_count += 1;
+                    } else {
+                        self.sp -= ac + 1;
+                        self.error_msg = std.fmt.allocPrint(self.allocator, "Fatal error: Uncaught Error: Call to undefined method {s}::{s}()", .{ obj.class_name, method_name }) catch null;
+                        return error.RuntimeError;
+                    }
+                },
+
+                .method_call_dynamic_spread => {
+                    // stack: [object, method_name, args_array]
+                    const args_val = self.pop();
+                    const method_name_val = self.pop();
+                    const obj_val = self.pop();
+                    if (args_val != .array) {
+                        self.error_msg = std.fmt.allocPrint(self.allocator, "Fatal error: Uncaught TypeError: Argument unpacking requires an array", .{}) catch null;
+                        return error.RuntimeError;
+                    }
+                    if (method_name_val != .string) {
+                        self.error_msg = std.fmt.allocPrint(self.allocator, "Fatal error: Uncaught TypeError: Method name must be a string", .{}) catch null;
+                        return error.RuntimeError;
+                    }
+                    if (obj_val != .object) {
+                        self.error_msg = std.fmt.allocPrint(self.allocator, "Fatal error: Uncaught Error: Call to a member function {s}() on {s}", .{ method_name_val.string, valueTypeName(obj_val) }) catch null;
+                        return error.RuntimeError;
+                    }
+                    const method_name = method_name_val.string;
+                    const obj = obj_val.object;
+                    const arr = args_val.array;
+                    const ac = arr.entries.items.len;
+                    // push object and args back in method_call layout
+                    self.push(obj_val);
+                    for (arr.entries.items) |entry| self.push(entry.value);
+                    // reuse method_call logic
+                    const full_name = self.resolveMethod(obj.class_name, method_name) catch {
+                        if (self.hasMethod(obj.class_name, "__call")) {
+                            var call_args_arr = try self.allocator.create(PhpArray);
+                            call_args_arr.* = .{};
+                            try self.arrays.append(self.allocator, call_args_arr);
+                            for (0..ac) |ai| try call_args_arr.append(self.allocator, self.stack[self.sp - ac + ai]);
+                            self.sp -= ac;
+                            self.sp -= 1;
+                            const result = try self.callMethod(obj, "__call", &.{ .{ .string = method_name }, .{ .array = call_args_arr } });
+                            self.push(result);
+                            continue;
+                        }
+                        self.sp -= ac + 1;
+                        self.error_msg = std.fmt.allocPrint(self.allocator, "Fatal error: Uncaught Error: Call to undefined method {s}::{s}()", .{ obj.class_name, method_name }) catch null;
+                        return error.RuntimeError;
+                    };
+                    if (self.native_fns.get(full_name)) |native| {
+                        var args_buf: [16]Value = undefined;
+                        for (0..ac) |ai| args_buf[ai] = self.stack[self.sp - ac + ai];
+                        self.sp -= ac;
+                        self.sp -= 1;
+                        var tmp_vars: std.StringHashMapUnmanaged(Value) = .{};
+                        try tmp_vars.put(self.allocator, "$this", .{ .object = obj });
+                        self.frames[self.frame_count] = .{ .chunk = self.currentChunk(), .ip = self.currentFrame().ip, .vars = tmp_vars };
+                        self.frame_count += 1;
+                        const saved_fc = self.frame_count;
+                        var ctx = self.makeContext(null);
+                        const result = native(&ctx, args_buf[0..ac]) catch {
+                            if (self.frame_count >= saved_fc) {
+                                self.frame_count -= 1;
+                                self.frames[self.frame_count].vars.deinit(self.allocator);
+                            }
+                            if (self.pending_exception) |exc| {
+                                self.pending_exception = null;
+                                if (self.handler_count > self.handler_floor) {
+                                    const handler = self.exception_handlers[self.handler_count - 1];
+                                    self.handler_count -= 1;
+                                    while (self.frame_count > handler.frame_count) {
+                                        self.frame_count -= 1;
+                                        self.frames[self.frame_count].vars.deinit(self.allocator);
+                                    }
+                                    self.sp = handler.sp;
+                                    self.push(exc);
+                                    self.currentFrame().ip = handler.catch_ip;
+                                    continue;
+                                }
+                                self.pending_exception = exc;
+                            } else {
+                                continue;
+                            }
+                            return error.RuntimeError;
+                        };
+                        if (self.frame_count >= saved_fc) {
+                            self.frame_count -= 1;
+                            self.frames[self.frame_count].vars.deinit(self.allocator);
+                            self.push(result);
+                        } else continue;
+                    } else if (self.functions.get(full_name)) |func| {
+                        var new_vars: std.StringHashMapUnmanaged(Value) = .{};
+                        try new_vars.put(self.allocator, "$this", .{ .object = obj });
+                        try self.bindClosures(&new_vars, null, full_name);
+                        if (func.is_variadic) {
+                            const fixed: usize = func.arity - 1;
+                            for (0..@min(ac, fixed)) |ai| {
+                                try new_vars.put(self.allocator, func.params[ai], self.stack[self.sp - ac + ai]);
+                            }
+                            const rest_arr = try self.allocator.create(PhpArray);
+                            rest_arr.* = .{};
+                            try self.arrays.append(self.allocator, rest_arr);
+                            for (fixed..ac) |ai| try rest_arr.append(self.allocator, self.stack[self.sp - ac + ai]);
+                            try new_vars.put(self.allocator, func.params[fixed], .{ .array = rest_arr });
+                        } else {
+                            for (0..@min(ac, func.arity)) |ai| {
+                                try new_vars.put(self.allocator, func.params[ai], self.stack[self.sp - ac + ai]);
+                            }
+                            for (ac..func.arity) |ai| {
+                                if (ai < func.defaults.len) try new_vars.put(self.allocator, func.params[ai], try self.resolveDefault(func.defaults[ai]));
+                            }
+                        }
+                        self.sp -= ac;
+                        self.sp -= 1;
+                        self.frames[self.frame_count] = .{ .chunk = &func.chunk, .ip = 0, .vars = new_vars, .locals = try self.allocLocals(func, &new_vars), .func = func };
+                        self.frame_count += 1;
+                    } else {
+                        self.sp -= ac + 1;
+                        self.error_msg = std.fmt.allocPrint(self.allocator, "Fatal error: Uncaught Error: Call to undefined method {s}::{s}()", .{ obj.class_name, method_name }) catch null;
+                        return error.RuntimeError;
+                    }
+                },
+
                 .static_call => {
                     const class_idx = self.readU16();
                     const method_idx = self.readU16();

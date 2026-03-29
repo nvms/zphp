@@ -1330,7 +1330,7 @@ fn opcodeWidth(b: u8) usize {
         // 1 + u16 + u16 + u16 = 7 bytes
         .less_local_local_jif => 7,
         // 1 + u8 = 2 bytes
-        .require, .call_indirect, .call_indirect_spread => 2,
+        .require, .call_indirect, .call_indirect_spread, .method_call_dynamic => 2,
         // variable-length: scan past inline operands
         .class_decl, .interface_decl, .enum_decl => 1,
         // all other opcodes are 1 byte (no operands)

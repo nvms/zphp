@@ -118,6 +118,44 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try vm.native_fns.put(a, "ArrayObject::getIterator", aoGetIterator);
     try vm.native_fns.put(a, "ArrayObject::setFlags", aoSetFlags);
     try vm.native_fns.put(a, "ArrayObject::getFlags", aoGetFlags);
+
+    // ArrayIterator
+    var ai_def = ClassDef{ .name = "ArrayIterator" };
+    try ai_def.interfaces.append(a, "Iterator");
+    try ai_def.interfaces.append(a, "Countable");
+    try ai_def.interfaces.append(a, "ArrayAccess");
+    try ai_def.methods.put(a, "__construct", .{ .name = "__construct", .arity = 1 });
+    try ai_def.methods.put(a, "rewind", .{ .name = "rewind", .arity = 0 });
+    try ai_def.methods.put(a, "current", .{ .name = "current", .arity = 0 });
+    try ai_def.methods.put(a, "key", .{ .name = "key", .arity = 0 });
+    try ai_def.methods.put(a, "next", .{ .name = "next", .arity = 0 });
+    try ai_def.methods.put(a, "valid", .{ .name = "valid", .arity = 0 });
+    try ai_def.methods.put(a, "count", .{ .name = "count", .arity = 0 });
+    try ai_def.methods.put(a, "offsetGet", .{ .name = "offsetGet", .arity = 1 });
+    try ai_def.methods.put(a, "offsetSet", .{ .name = "offsetSet", .arity = 2 });
+    try ai_def.methods.put(a, "offsetExists", .{ .name = "offsetExists", .arity = 1 });
+    try ai_def.methods.put(a, "offsetUnset", .{ .name = "offsetUnset", .arity = 1 });
+    try ai_def.methods.put(a, "getArrayCopy", .{ .name = "getArrayCopy", .arity = 0 });
+    try ai_def.methods.put(a, "append", .{ .name = "append", .arity = 1 });
+    try ai_def.methods.put(a, "getFlags", .{ .name = "getFlags", .arity = 0 });
+    try ai_def.methods.put(a, "setFlags", .{ .name = "setFlags", .arity = 1 });
+    try vm.classes.put(a, "ArrayIterator", ai_def);
+
+    try vm.native_fns.put(a, "ArrayIterator::__construct", aiConstruct);
+    try vm.native_fns.put(a, "ArrayIterator::rewind", aiRewind);
+    try vm.native_fns.put(a, "ArrayIterator::current", aiCurrent);
+    try vm.native_fns.put(a, "ArrayIterator::key", aiKey);
+    try vm.native_fns.put(a, "ArrayIterator::next", aiNext);
+    try vm.native_fns.put(a, "ArrayIterator::valid", aiValid);
+    try vm.native_fns.put(a, "ArrayIterator::count", aiCount);
+    try vm.native_fns.put(a, "ArrayIterator::offsetGet", aiOffsetGet);
+    try vm.native_fns.put(a, "ArrayIterator::offsetSet", aiOffsetSet);
+    try vm.native_fns.put(a, "ArrayIterator::offsetExists", aiOffsetExists);
+    try vm.native_fns.put(a, "ArrayIterator::offsetUnset", aiOffsetUnset);
+    try vm.native_fns.put(a, "ArrayIterator::getArrayCopy", aiGetArrayCopy);
+    try vm.native_fns.put(a, "ArrayIterator::append", aiAppend);
+    try vm.native_fns.put(a, "ArrayIterator::getFlags", aiGetFlags);
+    try vm.native_fns.put(a, "ArrayIterator::setFlags", aiSetFlags);
 }
 
 fn getThis(ctx: *NativeContext) ?*PhpObject {
@@ -379,4 +417,143 @@ fn aoSetFlags(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
 fn aoGetFlags(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
     const obj = getThis(ctx) orelse return .{ .int = 0 };
     return .{ .int = Value.toInt(obj.get("__flags")) };
+}
+
+// --- ArrayIterator ---
+
+fn aiConstruct(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    const obj = getThis(ctx) orelse return .null;
+    if (args.len >= 1 and args[0] == .array) {
+        try obj.set(ctx.allocator, "__data", args[0]);
+    } else {
+        _ = try ensureData(ctx, obj);
+    }
+    try obj.set(ctx.allocator, "__cursor", .{ .int = 0 });
+    try obj.set(ctx.allocator, "__flags", .{ .int = 0 });
+    return .null;
+}
+
+fn aiRewind(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const obj = getThis(ctx) orelse return .null;
+    try obj.set(ctx.allocator, "__cursor", .{ .int = 0 });
+    return .null;
+}
+
+fn aiCurrent(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const obj = getThis(ctx) orelse return .null;
+    const arr = getData(obj) orelse return .{ .bool = false };
+    const cursor: usize = @intCast(@max(Value.toInt(obj.get("__cursor")), 0));
+    if (cursor >= arr.entries.items.len) return .{ .bool = false };
+    return arr.entries.items[cursor].value;
+}
+
+fn aiKey(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const obj = getThis(ctx) orelse return .null;
+    const arr = getData(obj) orelse return .null;
+    const cursor: usize = @intCast(@max(Value.toInt(obj.get("__cursor")), 0));
+    if (cursor >= arr.entries.items.len) return .null;
+    const key = arr.entries.items[cursor].key;
+    return switch (key) {
+        .int => |i| .{ .int = i },
+        .string => |s| .{ .string = s },
+    };
+}
+
+fn aiNext(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const obj = getThis(ctx) orelse return .null;
+    const cursor = Value.toInt(obj.get("__cursor"));
+    try obj.set(ctx.allocator, "__cursor", .{ .int = cursor + 1 });
+    return .null;
+}
+
+fn aiValid(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const obj = getThis(ctx) orelse return .{ .bool = false };
+    const arr = getData(obj) orelse return .{ .bool = false };
+    const cursor = Value.toInt(obj.get("__cursor"));
+    return .{ .bool = cursor >= 0 and cursor < arr.length() };
+}
+
+fn aiCount(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const obj = getThis(ctx) orelse return .{ .int = 0 };
+    const arr = getData(obj) orelse return .{ .int = 0 };
+    return .{ .int = arr.length() };
+}
+
+fn aiOffsetGet(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    const obj = getThis(ctx) orelse return .null;
+    const arr = getData(obj) orelse return .null;
+    if (args.len == 0) return .null;
+    return arr.get(args[0].toArrayKey());
+}
+
+fn aiOffsetSet(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    const obj = getThis(ctx) orelse return .null;
+    const arr = try ensureData(ctx, obj);
+    if (args.len < 2) return .null;
+    if (args[0] == .null) {
+        try arr.append(ctx.allocator, args[1]);
+    } else {
+        try arr.set(ctx.allocator, args[0].toArrayKey(), args[1]);
+    }
+    return .null;
+}
+
+fn aiOffsetExists(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    const obj = getThis(ctx) orelse return .{ .bool = false };
+    const arr = getData(obj) orelse return .{ .bool = false };
+    if (args.len == 0) return .{ .bool = false };
+    const key = args[0].toArrayKey();
+    for (arr.entries.items) |entry| {
+        if (entry.key.eql(key)) return .{ .bool = true };
+    }
+    return .{ .bool = false };
+}
+
+fn aiOffsetUnset(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    const obj = getThis(ctx) orelse return .null;
+    const arr = getData(obj) orelse return .null;
+    if (args.len == 0) return .null;
+    const key = args[0].toArrayKey();
+    for (arr.entries.items, 0..) |entry, i| {
+        if (entry.key.eql(key)) {
+            _ = arr.entries.orderedRemove(i);
+            return .null;
+        }
+    }
+    return .null;
+}
+
+fn aiGetArrayCopy(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const obj = getThis(ctx) orelse return .null;
+    const arr = getData(obj) orelse {
+        const empty = try ctx.allocator.create(PhpArray);
+        empty.* = .{};
+        try ctx.vm.arrays.append(ctx.allocator, empty);
+        return .{ .array = empty };
+    };
+    const copy = try ctx.allocator.create(PhpArray);
+    copy.* = .{};
+    try ctx.vm.arrays.append(ctx.allocator, copy);
+    for (arr.entries.items) |entry| {
+        try copy.set(ctx.allocator, entry.key, entry.value);
+    }
+    return .{ .array = copy };
+}
+
+fn aiAppend(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    const obj = getThis(ctx) orelse return .null;
+    const arr = try ensureData(ctx, obj);
+    if (args.len >= 1) try arr.append(ctx.allocator, args[0]);
+    return .null;
+}
+
+fn aiGetFlags(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const obj = getThis(ctx) orelse return .{ .int = 0 };
+    return .{ .int = Value.toInt(obj.get("__flags")) };
+}
+
+fn aiSetFlags(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    const obj = getThis(ctx) orelse return .null;
+    if (args.len >= 1) try obj.set(ctx.allocator, "__flags", .{ .int = Value.toInt(args[0]) });
+    return .null;
 }

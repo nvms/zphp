@@ -91,6 +91,8 @@ pub const OpCode = enum(u8) {
     set_prop_dynamic, // property name on stack, value on stack (from variable)
     method_call, // u16: method name constant, u8: arg count
     method_call_spread, // u16: method name constant (args array on stack above object)
+    method_call_dynamic, // u8: arg count (method name string on stack below args, object below that)
+    method_call_dynamic_spread, // no operands (method name string and args array on stack, object below)
     static_call, // u16: class name, u16: method name, u8: arg count
     static_call_spread, // u16: class name, u16: method name (args array on stack)
     static_call_dynamic, // u16: method name, u8: arg count (class name string on stack before args)
@@ -165,7 +167,7 @@ pub const OpCode = enum(u8) {
             => 5,
             .static_call => 6,
             .less_local_local_jif => 7,
-            .require, .call_indirect, .call_indirect_spread => 2,
+            .require, .call_indirect, .call_indirect_spread, .method_call_dynamic => 2,
             .class_decl, .interface_decl, .enum_decl, .trait_decl => 1,
             else => 1,
         };

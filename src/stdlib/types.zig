@@ -53,6 +53,7 @@ pub const entries = .{
     .{ "php_version", native_php_version },
     .{ "phpversion", native_php_version },
     .{ "ini_get", native_ini_get },
+    .{ "get_cfg_var", native_get_cfg_var },
     .{ "ini_set", native_ini_set },
     .{ "extension_loaded", native_extension_loaded },
     .{ "get_included_files", native_get_included_files },
@@ -700,6 +701,10 @@ fn native_php_sapi_name(_: *NativeContext, _: []const Value) RuntimeError!Value 
 
 fn native_php_version(_: *NativeContext, _: []const Value) RuntimeError!Value {
     return .{ .string = "8.4.0" };
+}
+
+fn native_get_cfg_var(_: *NativeContext, _: []const Value) RuntimeError!Value {
+    return Value{ .bool = false };
 }
 
 fn native_ini_get(_: *NativeContext, args: []const Value) RuntimeError!Value {
