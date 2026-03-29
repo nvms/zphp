@@ -94,7 +94,12 @@ pub fn compileAssign(self: *Compiler, node: Ast.Node) Error!void {
             try self.compileNode(node.data.rhs);
             try self.emitOp(.set_prop);
             try self.emitU16(name_idx);
+            const end_jump = try self.emitJump(.jump);
             self.patchJump(skip_jump);
+            // not-null path: stack has [obj, prop_value], need to remove obj
+            try self.emitOp(.swap);
+            try self.emitOp(.pop);
+            self.patchJump(end_jump);
             return;
         }
         try self.compileNode(target.data.lhs);
@@ -446,20 +451,23 @@ pub fn compileTernary(self: *Compiler, node: Ast.Node) Error!void {
     const else_node = self.ast.extra_data[node.data.rhs + 1];
 
     try self.compileNode(node.data.lhs);
-    const else_jump = try self.emitJump(.jump_if_false);
-    try self.emitOp(.pop);
 
     if (then_node != 0) {
+        const else_jump = try self.emitJump(.jump_if_false);
+        try self.emitOp(.pop);
         try self.compileNode(then_node);
+        const end_jump = try self.emitJump(.jump);
+        self.patchJump(else_jump);
+        try self.emitOp(.pop);
+        try self.compileNode(else_node);
+        self.patchJump(end_jump);
     } else {
-        try self.compileNode(node.data.lhs);
+        // short ternary: $a ?: $b - reuse the condition value if truthy
+        const end_jump = try self.emitJump(.jump_if_true);
+        try self.emitOp(.pop);
+        try self.compileNode(else_node);
+        self.patchJump(end_jump);
     }
-
-    const end_jump = try self.emitJump(.jump);
-    self.patchJump(else_jump);
-    try self.emitOp(.pop);
-    try self.compileNode(else_node);
-    self.patchJump(end_jump);
 }
 
 pub fn compileCall(self: *Compiler, node: Ast.Node) Error!void {

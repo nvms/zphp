@@ -205,16 +205,13 @@ fn initCliServerVars(vm: *VM, a: std.mem.Allocator) !void {
     }
     try vm.request_vars.put(a, "$_SERVER", .{ .array = arr });
 
-    // empty superglobals
-    const empty_arr = try a.create(PhpArray);
-    empty_arr.* = .{};
-    try vm.arrays.append(a, empty_arr);
-    try vm.request_vars.put(a, "$_GET", .{ .array = empty_arr });
-    try vm.request_vars.put(a, "$_POST", .{ .array = empty_arr });
-    try vm.request_vars.put(a, "$_REQUEST", .{ .array = empty_arr });
-    try vm.request_vars.put(a, "$_COOKIE", .{ .array = empty_arr });
-    try vm.request_vars.put(a, "$_FILES", .{ .array = empty_arr });
-    try vm.request_vars.put(a, "$_ENV", .{ .array = empty_arr });
+    const superglobal_names = [_][]const u8{ "$_GET", "$_POST", "$_REQUEST", "$_COOKIE", "$_FILES", "$_ENV" };
+    inline for (superglobal_names) |sg_name| {
+        const sg_arr = try a.create(PhpArray);
+        sg_arr.* = .{};
+        try vm.arrays.append(a, sg_arr);
+        try vm.request_vars.put(a, sg_name, .{ .array = sg_arr });
+    }
 }
 
 fn runFile(allocator: std.mem.Allocator, path: []const u8) !void {

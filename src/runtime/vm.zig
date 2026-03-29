@@ -695,6 +695,8 @@ pub const VM = struct {
                         self.push(val);
                     } else if (self.php_constants.get(name)) |val| {
                         self.push(val);
+                    } else if (name.len > 2 and name[0] == '$' and name[1] == '_') {
+                        self.push(self.request_vars.get(name) orelse .null);
                     } else {
                         self.push(.null);
                     }
@@ -745,6 +747,8 @@ pub const VM = struct {
                             if (!found) {
                                 if (self.currentFrame().vars.get(dollar_name)) |val| {
                                     self.push(val);
+                                } else if (dollar_name.len > 2 and dollar_name[0] == '$' and dollar_name[1] == '_') {
+                                    self.push(self.request_vars.get(dollar_name) orelse .null);
                                 } else {
                                     self.push(.null);
                                 }
