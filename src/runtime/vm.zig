@@ -155,9 +155,16 @@ pub const NativeContext = struct {
         const method = method_val.string;
         if (target == .object) return self.vm.callMethod(target.object, method, args);
         if (target == .string) {
-            var buf: [256]u8 = undefined;
+            var buf: [512]u8 = undefined;
             const full = std.fmt.bufPrint(&buf, "{s}::{s}", .{ target.string, method }) catch return error.RuntimeError;
-            return self.vm.callByName(full, args);
+            return self.vm.callByName(full, args) catch |err| {
+                if (err == error.RuntimeError and self.vm.autoload_callbacks.items.len > 0) {
+                    try self.vm.tryAutoload(target.string);
+                    const full2 = std.fmt.bufPrint(&buf, "{s}::{s}", .{ target.string, method }) catch return error.RuntimeError;
+                    return self.vm.callByName(full2, args);
+                }
+                return err;
+            };
         }
         return error.RuntimeError;
     }
@@ -1049,9 +1056,16 @@ pub const VM = struct {
                         const result = if (target == .object)
                             try ctx.vm.callMethod(target.object, method, args_buf[0..ac])
                         else if (target == .string) blk: {
-                            var buf: [256]u8 = undefined;
+                            var buf: [512]u8 = undefined;
                             const full = std.fmt.bufPrint(&buf, "{s}::{s}", .{ target.string, method }) catch return error.RuntimeError;
-                            break :blk try ctx.vm.callByName(full, args_buf[0..ac]);
+                            break :blk ctx.vm.callByName(full, args_buf[0..ac]) catch |err| {
+                                if (err == error.RuntimeError and self.autoload_callbacks.items.len > 0) {
+                                    try self.tryAutoload(target.string);
+                                    const full2 = std.fmt.bufPrint(&buf, "{s}::{s}", .{ target.string, method }) catch return error.RuntimeError;
+                                    break :blk try ctx.vm.callByName(full2, args_buf[0..ac]);
+                                }
+                                return err;
+                            };
                         } else {
                             var buf2: [256]u8 = undefined;
                             const msg = std.fmt.bufPrint(&buf2, "Value of type {s} is not callable", .{valueTypeName(target)}) catch "Value is not callable";
@@ -1661,7 +1675,7 @@ pub const VM = struct {
                     if (src_slot < frame_al.locals.len and dst_slot < frame_al.locals.len) {
                         const src = frame_al.locals[src_slot];
                         const dst = frame_al.locals[dst_slot];
-                        frame_al.locals[dst_slot] = if (src == .int and dst == .int) Value.intAdd(dst.int, src.int) else if (src == .float and dst == .float) .{ .float = dst.float + src.float } else Value.add(dst, src);
+                        frame_al.locals[dst_slot] = if (src == .int and dst == .int) Value.intAdd(dst.int, src.int) else if (src == .float and dst == .float) .{ .float = dst.float + src.float } else if (src == .array and dst == .array) .{ .array = try self.arrayUnion(dst.array, src.array) } else Value.add(dst, src);
                     }
                 },
                 .sub_local_to_local => {
@@ -4487,6 +4501,25 @@ pub const VM = struct {
             try result.format(&buf, self.allocator);
             const s = try buf.toOwnedSlice(self.allocator);
             try self.strings.append(self.allocator, s);
+            return s;
+        }
+        if (self.native_fns.get(method_name)) |native| {
+            const prev_this = self.currentFrame().vars.get("$this");
+            self.currentFrame().vars.put(self.allocator, "$this", .{ .object = obj }) catch return "Object";
+            defer {
+                if (prev_this) |pt| {
+                    self.currentFrame().vars.put(self.allocator, "$this", pt) catch {};
+                } else {
+                    _ = self.currentFrame().vars.remove("$this");
+                }
+            }
+            var ctx = self.makeContext(null);
+            const result = native(&ctx, &.{}) catch return "Object";
+            if (result == .string) return result.string;
+            var buf = std.ArrayListUnmanaged(u8){};
+            result.format(&buf, self.allocator) catch return "Object";
+            const s = buf.toOwnedSlice(self.allocator) catch return "Object";
+            self.strings.append(self.allocator, s) catch return "Object";
             return s;
         }
         return "Object";

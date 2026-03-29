@@ -107,6 +107,7 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try vm.classes.put(a, "PDO", pdo_def);
 
     try vm.native_fns.put(a, "PDO::__construct", pdoConstruct);
+    try vm.native_fns.put(a, "PDO::connect", pdoConnect);
     try vm.native_fns.put(a, "PDO::exec", pdoExec);
     try vm.native_fns.put(a, "PDO::query", pdoQuery);
     try vm.native_fns.put(a, "PDO::prepare", pdoPrepare);
@@ -178,6 +179,21 @@ fn getDriver(obj: *PhpObject) []const u8 {
     const v = obj.get("__driver");
     if (v == .string) return v.string;
     return "sqlite";
+}
+
+fn pdoConnect(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    const obj = try ctx.createObject("PDO");
+    const prev_this = ctx.vm.currentFrame().vars.get("$this");
+    try ctx.vm.currentFrame().vars.put(ctx.vm.allocator, "$this", .{ .object = obj });
+    defer {
+        if (prev_this) |pt| {
+            ctx.vm.currentFrame().vars.put(ctx.vm.allocator, "$this", pt) catch {};
+        } else {
+            _ = ctx.vm.currentFrame().vars.remove("$this");
+        }
+    }
+    _ = try pdoConstruct(ctx, args);
+    return .{ .object = obj };
 }
 
 fn pdoConstruct(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
