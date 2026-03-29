@@ -368,6 +368,7 @@ pub const VM = struct {
         generator: ?*Generator = null,
         ref_slots: std.StringHashMapUnmanaged(*Value) = .{},
         called_class: ?[]const u8 = null,
+        entry_sp: usize = 0,
     };
 
     pub fn init(allocator: Allocator) RuntimeError!VM {
@@ -1181,12 +1182,16 @@ pub const VM = struct {
                     if (g_type_info.count() > 0) {
                         if (try self.checkReturnType(result)) continue;
                     }
+                    const saved_entry_sp = self.currentFrame().entry_sp;
                     try self.popFrame();
+                    if (saved_entry_sp > 0) self.sp = saved_entry_sp;
                     self.push(result);
                     if (self.frame_count <= base_frame) return;
                 },
                 .return_void => {
+                    const saved_entry_sp = self.currentFrame().entry_sp;
                     try self.popFrame();
+                    if (saved_entry_sp > 0) self.sp = saved_entry_sp;
                     self.push(.null);
                     if (self.frame_count <= base_frame) return;
                 },
@@ -1979,7 +1984,8 @@ pub const VM = struct {
                                         .vars = .{},
                                         .locals = req_locals,
                                     };
-                                    self.frame_count += 1;
+                                    self.frames[self.frame_count].entry_sp = self.sp;
+                    self.frame_count += 1;
                                     self.runUntilFrame(return_frame) catch {
                                         // clean up remaining inner frames including the require frame
                                         while (self.frame_count > return_frame) {
@@ -2261,7 +2267,8 @@ pub const VM = struct {
                             var tmp_vars: std.StringHashMapUnmanaged(Value) = .{};
                             try tmp_vars.put(self.allocator, "$this", .{ .object = obj });
                             self.frames[self.frame_count] = .{ .chunk = self.currentChunk(), .ip = self.currentFrame().ip, .vars = tmp_vars };
-                            self.frame_count += 1;
+                            self.frames[self.frame_count].entry_sp = self.sp;
+                    self.frame_count += 1;
 
                             const saved_fc = self.frame_count;
                             var ctx = self.makeContext(null);
@@ -2319,7 +2326,8 @@ pub const VM = struct {
                                 }
                                 self.sp -= ac;
                                 self.frames[self.frame_count] = .{ .chunk = &func.chunk, .ip = 0, .vars = .{}, .locals = ctor_locals, .func = func };
-                                self.frame_count += 1;
+                                self.frames[self.frame_count].entry_sp = self.sp;
+                    self.frame_count += 1;
                                 self.exception_dispatched = false;
                                 try self.fastLoop();
                                 const ctor_frame = &self.frames[self.frame_count - 1];
@@ -2344,7 +2352,8 @@ pub const VM = struct {
                                     try new_vars.put(self.allocator, func.params[i], default);
                                 }
                                 self.frames[self.frame_count] = .{ .chunk = &func.chunk, .ip = 0, .vars = new_vars, .locals = try self.allocLocals(func, &new_vars), .func = func };
-                                self.frame_count += 1;
+                                self.frames[self.frame_count].entry_sp = self.sp;
+                    self.frame_count += 1;
                                 self.exception_dispatched = false;
                                 const ctor_base = self.frame_count - 1;
                                 try self.runUntilFrame(ctor_base);
@@ -2399,7 +2408,8 @@ pub const VM = struct {
                             var tmp_vars: std.StringHashMapUnmanaged(Value) = .{};
                             try tmp_vars.put(self.allocator, "$this", .{ .object = obj });
                             self.frames[self.frame_count] = .{ .chunk = self.currentChunk(), .ip = self.currentFrame().ip, .vars = tmp_vars };
-                            self.frame_count += 1;
+                            self.frames[self.frame_count].entry_sp = self.sp;
+                    self.frame_count += 1;
                             var ctx = self.makeContext(null);
                             _ = native(&ctx, args_buf[0..ac]) catch {
                                 self.frame_count -= 1;
@@ -2438,7 +2448,8 @@ pub const VM = struct {
                                 try new_vars.put(self.allocator, func.params[i], default);
                             }
                             self.frames[self.frame_count] = .{ .chunk = &func.chunk, .ip = 0, .vars = new_vars, .locals = try self.allocLocals(func, &new_vars), .func = func };
-                            self.frame_count += 1;
+                            self.frames[self.frame_count].entry_sp = self.sp;
+                    self.frame_count += 1;
                             self.exception_dispatched = false;
                             const ctor_base = self.frame_count - 1;
                             try self.runUntilFrame(ctor_base);
@@ -2472,7 +2483,8 @@ pub const VM = struct {
                             if (gp_entry.key == gp_ip and gp_entry.chunk_key == gp_chunk_key and gp_entry.class_ptr == @intFromPtr(obj.class_name.ptr)) {
                                 if (gp_entry.slot_index != 0xFFFF) {
                                     if (obj.slots) |s| {
-                                        self.push(s[gp_entry.slot_index]);
+                                        const ic_val = s[gp_entry.slot_index];
+                                        self.push(ic_val);
                                         continue;
                                     }
                                 }
@@ -2832,7 +2844,8 @@ pub const VM = struct {
                                     }
                                     self.sp -= ac + 1;
                                     self.frames[self.frame_count] = .{ .chunk = &func.chunk, .ip = 0, .vars = .{}, .locals = mc_locals, .func = func };
-                                    self.frame_count += 1;
+                                    self.frames[self.frame_count].entry_sp = self.sp;
+                    self.frame_count += 1;
                                     try self.fastLoop();
                                     continue;
                                 }
@@ -2843,7 +2856,8 @@ pub const VM = struct {
                                 var tmp_vars: std.StringHashMapUnmanaged(Value) = .{};
                                 try tmp_vars.put(self.allocator, "$this", .{ .object = obj });
                                 self.frames[self.frame_count] = .{ .chunk = self.currentChunk(), .ip = self.currentFrame().ip, .vars = tmp_vars };
-                                self.frame_count += 1;
+                                self.frames[self.frame_count].entry_sp = self.sp;
+                    self.frame_count += 1;
                                 const saved_fc = self.frame_count;
                                 var ctx = self.makeContext(null);
                                 const result = try native(&ctx, args_buf[0..ac]);
@@ -2927,7 +2941,8 @@ pub const VM = struct {
                         var tmp_vars: std.StringHashMapUnmanaged(Value) = .{};
                         try tmp_vars.put(self.allocator, "$this", .{ .object = obj });
                         self.frames[self.frame_count] = .{ .chunk = self.currentChunk(), .ip = self.currentFrame().ip, .vars = tmp_vars };
-                        self.frame_count += 1;
+                        self.frames[self.frame_count].entry_sp = self.sp;
+                    self.frame_count += 1;
                         const saved_fc = self.frame_count;
 
                         var ctx = self.makeContext(null);
@@ -3027,7 +3042,8 @@ pub const VM = struct {
                             self.push(.{ .generator = gen });
                         } else {
                             self.frames[self.frame_count] = .{ .chunk = &func.chunk, .ip = 0, .vars = new_vars, .locals = try self.allocLocals(func, &new_vars), .func = func, .ref_slots = method_refs };
-                            self.frame_count += 1;
+                            self.frames[self.frame_count].entry_sp = self.sp;
+                    self.frame_count += 1;
                         }
                     } else {
                         self.sp -= ac + 1;
@@ -3119,7 +3135,8 @@ pub const VM = struct {
                         var tmp_vars: std.StringHashMapUnmanaged(Value) = .{};
                         try tmp_vars.put(self.allocator, "$this", .{ .object = obj });
                         self.frames[self.frame_count] = .{ .chunk = self.currentChunk(), .ip = self.currentFrame().ip, .vars = tmp_vars };
-                        self.frame_count += 1;
+                        self.frames[self.frame_count].entry_sp = self.sp;
+                    self.frame_count += 1;
                         const saved_fc = self.frame_count;
                         var ctx = self.makeContext(null);
                         const result = native(&ctx, args_buf[0..ac]) catch {
@@ -3177,7 +3194,8 @@ pub const VM = struct {
                         self.sp -= ac;
                         self.sp -= 1;
                         self.frames[self.frame_count] = .{ .chunk = &func.chunk, .ip = 0, .vars = new_vars, .locals = try self.allocLocals(func, &new_vars), .func = func };
-                        self.frame_count += 1;
+                        self.frames[self.frame_count].entry_sp = self.sp;
+                    self.frame_count += 1;
                     } else {
                         self.sp -= ac + 1;
                         self.error_msg = std.fmt.allocPrint(self.allocator, "Fatal error: Uncaught Error: Call to undefined method {s}::{s}()", .{ obj.class_name, method_name }) catch null;
@@ -3235,7 +3253,8 @@ pub const VM = struct {
                         var tmp_vars: std.StringHashMapUnmanaged(Value) = .{};
                         try tmp_vars.put(self.allocator, "$this", .{ .object = obj });
                         self.frames[self.frame_count] = .{ .chunk = self.currentChunk(), .ip = self.currentFrame().ip, .vars = tmp_vars };
-                        self.frame_count += 1;
+                        self.frames[self.frame_count].entry_sp = self.sp;
+                    self.frame_count += 1;
                         const saved_fc = self.frame_count;
                         var ctx = self.makeContext(null);
                         const result = native(&ctx, args_buf[0..ac]) catch {
@@ -3293,7 +3312,8 @@ pub const VM = struct {
                         self.sp -= ac;
                         self.sp -= 1;
                         self.frames[self.frame_count] = .{ .chunk = &func.chunk, .ip = 0, .vars = new_vars, .locals = try self.allocLocals(func, &new_vars), .func = func };
-                        self.frame_count += 1;
+                        self.frames[self.frame_count].entry_sp = self.sp;
+                    self.frame_count += 1;
                     } else {
                         self.sp -= ac + 1;
                         self.error_msg = std.fmt.allocPrint(self.allocator, "Fatal error: Uncaught Error: Call to undefined method {s}::{s}()", .{ obj.class_name, method_name }) catch null;
@@ -3369,7 +3389,8 @@ pub const VM = struct {
                         var tmp_vars: std.StringHashMapUnmanaged(Value) = .{};
                         try tmp_vars.put(self.allocator, "$this", .{ .object = obj });
                         self.frames[self.frame_count] = .{ .chunk = self.currentChunk(), .ip = self.currentFrame().ip, .vars = tmp_vars };
-                        self.frame_count += 1;
+                        self.frames[self.frame_count].entry_sp = self.sp;
+                    self.frame_count += 1;
                         const saved_fc = self.frame_count;
                         var ctx = self.makeContext(null);
                         const result = native(&ctx, args_buf[0..ac]) catch {
@@ -3427,7 +3448,8 @@ pub const VM = struct {
                         self.sp -= ac;
                         self.sp -= 1;
                         self.frames[self.frame_count] = .{ .chunk = &func.chunk, .ip = 0, .vars = new_vars, .locals = try self.allocLocals(func, &new_vars), .func = func };
-                        self.frame_count += 1;
+                        self.frames[self.frame_count].entry_sp = self.sp;
+                    self.frame_count += 1;
                     } else {
                         self.sp -= ac + 1;
                         self.error_msg = std.fmt.allocPrint(self.allocator, "Fatal error: Uncaught Error: Call to undefined method {s}::{s}()", .{ obj.class_name, method_name }) catch null;
@@ -3541,7 +3563,8 @@ pub const VM = struct {
                                 try self.fillDefaults(&new_vars, func, ac);
                                 self.frames[self.frame_count] = .{ .chunk = &func.chunk, .ip = 0, .vars = new_vars, .locals = try self.allocLocals(func, &new_vars), .func = func, .called_class = effective_called };
                                 self.setFrameArgCount(arg_count);
-                                self.frame_count += 1;
+                                self.frames[self.frame_count].entry_sp = self.sp;
+                    self.frame_count += 1;
                                 }
                             } else if (self.native_fns.get(full_name)) |native| {
                                 const ac: usize = arg_count;
@@ -3552,7 +3575,8 @@ pub const VM = struct {
                                 try tmp_vars.put(self.allocator, "$this", tv);
                                 self.frames[self.frame_count] = .{ .chunk = self.currentChunk(), .ip = self.currentFrame().ip, .vars = tmp_vars, .called_class = effective_called };
                                 const sc_saved_fc = self.frame_count;
-                                self.frame_count += 1;
+                                self.frames[self.frame_count].entry_sp = self.sp;
+                    self.frame_count += 1;
                                 var ctx = self.makeContext(null);
                                 const result = native(&ctx, args_buf[0..ac]) catch {
                                     if (self.frame_count > sc_saved_fc) {
@@ -3671,7 +3695,8 @@ pub const VM = struct {
                                 }
                                 self.sp -= ac;
                                 self.frames[self.frame_count] = .{ .chunk = &func.chunk, .ip = 0, .vars = new_vars, .locals = try self.allocLocals(func, &new_vars), .func = func, .called_class = effective_called };
-                                self.frame_count += 1;
+                                self.frames[self.frame_count].entry_sp = self.sp;
+                    self.frame_count += 1;
                                 }
                             } else {
                                 self.error_msg = std.fmt.allocPrint(self.allocator, "Fatal error: Uncaught Error: Call to undefined method {s}::{s}()", .{ class_name, method_name }) catch null;
