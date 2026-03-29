@@ -1269,6 +1269,8 @@ const Parser = struct {
                     }
                     self.nodes.items[method].data.rhs = self.nodes.items[method].data.rhs | (visibility << 30);
                     try members.append(self.allocator, method);
+                } else if (self.peek() == .kw_const) {
+                    try members.append(self.allocator, try self.parseConstDecl());
                 } else {
                     _ = self.advance();
                 }

@@ -4125,7 +4125,7 @@ pub const VM = struct {
         return name;
     }
 
-    fn getStaticProp(self: *VM, class_name: []const u8, prop_name: []const u8) ?Value {
+    pub fn getStaticProp(self: *VM, class_name: []const u8, prop_name: []const u8) ?Value {
         var current: ?[]const u8 = class_name;
         while (current) |cn| {
             if (self.classes.getPtr(cn)) |cls| {

@@ -138,6 +138,7 @@ pub const Compiler = struct {
     current_source_offset: u32 = 0,
     current_class: []const u8 = "",
     current_parent: []const u8 = "",
+    current_function: []const u8 = "",
     in_trait: bool = false,
 
     pub const LoopJump = struct {
@@ -385,6 +386,47 @@ pub const Compiler = struct {
             try self.emitConstant(idx);
             return;
         }
+        if (std.mem.eql(u8, name, "__FUNCTION__")) {
+            const idx = try self.addConstant(.{ .string = self.current_function });
+            try self.emitConstant(idx);
+            return;
+        }
+        if (std.mem.eql(u8, name, "__CLASS__")) {
+            const idx = try self.addConstant(.{ .string = self.current_class });
+            try self.emitConstant(idx);
+            return;
+        }
+        if (std.mem.eql(u8, name, "__METHOD__")) {
+            const val = if (self.current_class.len > 0 and self.current_function.len > 0) blk: {
+                const full = try std.fmt.allocPrint(self.allocator, "{s}::{s}", .{ self.current_class, self.current_function });
+                try self.string_allocs.append(self.allocator, full);
+                break :blk full;
+            } else if (self.current_function.len > 0)
+                self.current_function
+            else
+                @as([]const u8, "");
+            const idx = try self.addConstant(.{ .string = val });
+            try self.emitConstant(idx);
+            return;
+        }
+        if (std.mem.eql(u8, name, "__NAMESPACE__")) {
+            const ns = if (self.namespace.len > 0) self.namespace else "";
+            const idx = try self.addConstant(.{ .string = ns });
+            try self.emitConstant(idx);
+            return;
+        }
+        if (std.mem.eql(u8, name, "__TRAIT__")) {
+            const val = if (self.in_trait) self.current_class else "";
+            const idx = try self.addConstant(.{ .string = val });
+            try self.emitConstant(idx);
+            return;
+        }
+        if (std.mem.eql(u8, name, "__LINE__")) {
+            const line = self.getLineNumber();
+            const idx = try self.addConstant(.{ .int = @intCast(line) });
+            try self.emitConstant(idx);
+            return;
+        }
 
         try self.emitGetVar(name);
     }
@@ -397,6 +439,15 @@ pub const Compiler = struct {
             // get_var_var expects the name with $ prefix (matching PHP convention)
         }
         try self.emitOp(.get_var_var);
+    }
+
+    fn getLineNumber(self: *Compiler) u32 {
+        var line: u32 = 1;
+        const clamped = @min(self.current_source_offset, self.ast.source.len);
+        for (self.ast.source[0..clamped]) |c| {
+            if (c == '\n') line += 1;
+        }
+        return line;
     }
 
     fn getFileDir(self: *Compiler) []const u8 {

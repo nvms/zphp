@@ -140,6 +140,7 @@ pub fn compileFunction(self: *Compiler, node: Ast.Node) Error!void {
         .namespace = self.namespace,
         .use_aliases = self.use_aliases,
         .use_fn_aliases = self.use_fn_aliases,
+        .current_function = name,
     };
     errdefer {
         sub.chunk.deinit(self.allocator);
@@ -281,6 +282,7 @@ pub fn compileClosure(self: *Compiler, node: Ast.Node) Error!void {
         .use_fn_aliases = self.use_fn_aliases,
         .current_class = self.current_class,
         .current_parent = self.current_parent,
+        .current_function = "{closure}",
         .in_trait = self.in_trait,
     };
     errdefer {
@@ -1220,6 +1222,20 @@ pub fn compileEnumDecl(self: *Compiler, node: Ast.Node) Error!void {
         const iname_idx = try self.addConstant(.{ .string = self.ast.tokenSlice(impl_node.main_token) });
         try self.emitU16(iname_idx);
     }
+
+    const cname_idx = try self.addConstant(.{ .string = enum_name });
+    for (members) |member_idx| {
+        const member = self.ast.nodes[member_idx];
+        if (member.tag == .const_decl) {
+            try self.compileNode(member.data.lhs);
+            const const_name = self.ast.tokenSlice(member.main_token);
+            const cprop_idx = try self.addConstant(.{ .string = const_name });
+            try self.emitOp(.set_static_prop);
+            try self.emitU16(cname_idx);
+            try self.emitU16(cprop_idx);
+            try self.emitOp(.pop);
+        }
+    }
 }
 
 fn compileClassMethodBody(self: *Compiler, class_name: []const u8, member: Ast.Node) Error!void {
@@ -1282,6 +1298,7 @@ fn compileClassMethodBody(self: *Compiler, class_name: []const u8, member: Ast.N
         .use_aliases = self.use_aliases,
         .use_fn_aliases = self.use_fn_aliases,
         .current_class = class_name,
+        .current_function = method_name,
         .in_trait = self.in_trait,
     };
     errdefer {

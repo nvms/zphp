@@ -112,12 +112,26 @@ fn native_define(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
 
 fn native_defined(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len == 0 or args[0] != .string) return .{ .bool = false };
-    return .{ .bool = ctx.vm.php_constants.contains(args[0].string) };
+    const name = args[0].string;
+    if (ctx.vm.php_constants.contains(name)) return .{ .bool = true };
+    if (std.mem.indexOf(u8, name, "::")) |sep| {
+        const class_name = name[0..sep];
+        const prop_name = name[sep + 2 ..];
+        if (ctx.vm.getStaticProp(class_name, prop_name) != null) return .{ .bool = true };
+    }
+    return .{ .bool = false };
 }
 
 fn native_constant(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len == 0 or args[0] != .string) return .null;
-    return ctx.vm.php_constants.get(args[0].string) orelse .null;
+    const name = args[0].string;
+    if (ctx.vm.php_constants.get(name)) |v| return v;
+    if (std.mem.indexOf(u8, name, "::")) |sep| {
+        const class_name = name[0..sep];
+        const prop_name = name[sep + 2 ..];
+        if (ctx.vm.getStaticProp(class_name, prop_name)) |v| return v;
+    }
+    return .null;
 }
 
 fn count(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
