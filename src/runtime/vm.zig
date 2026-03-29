@@ -4807,10 +4807,19 @@ pub const VM = struct {
         for (bind_count..func.arity) |i| {
             if (i < func.defaults.len) locals[i] = try self.resolveDefault(func.defaults[i]);
         }
+        const base_handler = self.handler_count;
+        const prev_floor = self.handler_floor;
+        self.handler_floor = self.handler_count;
         self.frames[self.frame_count] = .{ .chunk = &func.chunk, .ip = 0, .vars = .{}, .locals = locals, .func = func };
         self.consumePendingArgCount();
         self.frame_count += 1;
-        try self.runUntilFrame(base_frame);
+        self.runUntilFrame(base_frame) catch |err| {
+            self.handler_count = base_handler;
+            self.handler_floor = prev_floor;
+            return err;
+        };
+        self.handler_count = base_handler;
+        self.handler_floor = prev_floor;
         return self.pop();
     }
 
@@ -5415,10 +5424,19 @@ pub const VM = struct {
             return error.RuntimeError;
         }
         const base_frame = self.frame_count;
+        const base_handler = self.handler_count;
+        const prev_floor = self.handler_floor;
+        self.handler_floor = self.handler_count;
         self.frames[self.frame_count] = .{ .chunk = &func.chunk, .ip = 0, .vars = vars, .locals = try self.allocLocals(func, &vars), .func = func };
         self.consumePendingArgCount();
         self.frame_count += 1;
-        try self.runUntilFrame(base_frame);
+        self.runUntilFrame(base_frame) catch |err| {
+            self.handler_count = base_handler;
+            self.handler_floor = prev_floor;
+            return err;
+        };
+        self.handler_count = base_handler;
+        self.handler_floor = prev_floor;
         return self.pop();
     }
 
@@ -5428,10 +5446,19 @@ pub const VM = struct {
             return error.RuntimeError;
         }
         const base_frame = self.frame_count;
+        const base_handler = self.handler_count;
+        const prev_floor = self.handler_floor;
+        self.handler_floor = self.handler_count;
         self.frames[self.frame_count] = .{ .chunk = &func.chunk, .ip = 0, .vars = vars, .locals = try self.allocLocals(func, &vars), .func = func, .ref_slots = ref_slots };
         self.consumePendingArgCount();
         self.frame_count += 1;
-        try self.runUntilFrame(base_frame);
+        self.runUntilFrame(base_frame) catch |err| {
+            self.handler_count = base_handler;
+            self.handler_floor = prev_floor;
+            return err;
+        };
+        self.handler_count = base_handler;
+        self.handler_floor = prev_floor;
         return self.pop();
     }
 
