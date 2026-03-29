@@ -1,0 +1,5 @@
+/vendor/
+/database/database.sqlite
+/storage/logs/
+/storage/framework/views/*.php
+/.env

@@ -3518,9 +3518,15 @@ pub const VM = struct {
                                 lsb_class = self.currentFrame().called_class orelse defining;
                             }
                         } else {
-                            const defining_class = self.currentFrame().called_class orelse self.currentDefiningClass();
-                            if (defining_class) |dc| class_name = dc;
+                            // self:: resolves to the defining class for method lookup,
+                            // but propagates called_class for LSB (new static() etc)
+                            lsb_class = self.currentFrame().called_class;
+                            if (self.currentDefiningClass()) |dc| class_name = dc;
                         }
+                    } else if (self.currentFrame().called_class) |cc| {
+                        // compiler resolved self:: to a concrete class at compile time;
+                        // propagate called_class if the target is an ancestor of it
+                        if (self.isAncestor(class_name, cc)) lsb_class = cc;
                     }
 
                     const effective_called = lsb_class orelse class_name;
@@ -3656,10 +3662,13 @@ pub const VM = struct {
                                 lsb_class = self.currentFrame().called_class orelse defining;
                             }
                         } else {
-                            // self:: prefers called_class for trait disambiguation
-                            const defining_class = self.currentFrame().called_class orelse self.currentDefiningClass();
-                            if (defining_class) |dc| class_name = dc;
+                            // self:: resolves to defining class for method lookup,
+                            // but propagates called_class for LSB
+                            lsb_class = self.currentFrame().called_class;
+                            if (self.currentDefiningClass()) |dc| class_name = dc;
                         }
+                    } else if (self.currentFrame().called_class) |cc| {
+                        if (self.isAncestor(class_name, cc)) lsb_class = cc;
                     }
 
                     const effective_called = lsb_class orelse class_name;
@@ -3782,10 +3791,13 @@ pub const VM = struct {
                                 lsb_class = self.currentFrame().called_class orelse defining;
                             }
                         } else {
-                            // self:: prefers called_class for trait disambiguation
-                            const defining_class = self.currentFrame().called_class orelse self.currentDefiningClass();
-                            if (defining_class) |dc| class_name = dc;
+                            // self:: resolves to defining class for method lookup,
+                            // but propagates called_class for LSB
+                            lsb_class = self.currentFrame().called_class;
+                            if (self.currentDefiningClass()) |dc| class_name = dc;
                         }
+                    } else if (self.currentFrame().called_class) |cc| {
+                        if (self.isAncestor(class_name, cc)) lsb_class = cc;
                     }
                     const effective_called = lsb_class orelse class_name;
                     if (!self.classes.contains(class_name)) {
@@ -3850,10 +3862,13 @@ pub const VM = struct {
                                 lsb_class = self.currentFrame().called_class orelse defining;
                             }
                         } else {
-                            // self:: prefers called_class for trait disambiguation
-                            const defining_class = self.currentFrame().called_class orelse self.currentDefiningClass();
-                            if (defining_class) |dc| class_name = dc;
+                            // self:: resolves to defining class for method lookup,
+                            // but propagates called_class for LSB
+                            lsb_class = self.currentFrame().called_class;
+                            if (self.currentDefiningClass()) |dc| class_name = dc;
                         }
+                    } else if (self.currentFrame().called_class) |cc| {
+                        if (self.isAncestor(class_name, cc)) lsb_class = cc;
                     }
                     const effective_called = lsb_class orelse class_name;
                     if (!self.classes.contains(class_name)) {
@@ -4997,7 +5012,7 @@ pub const VM = struct {
         }
         self.saveFrameArgs(arg_count);
         self.sp -= ac;
-        self.frames[self.frame_count] = .{ .chunk = &func.chunk, .ip = 0, .vars = .{}, .locals = locals, .func = func };
+        self.frames[self.frame_count] = .{ .chunk = &func.chunk, .ip = 0, .vars = .{}, .locals = locals, .func = func, .called_class = self.currentFrame().called_class };
         self.setFrameArgCount(arg_count);
         self.frame_count += 1;
         try self.fastLoop();
@@ -5873,13 +5888,26 @@ pub const VM = struct {
         return false;
     }
 
+    fn isAncestor(self: *VM, ancestor: []const u8, descendant: []const u8) bool {
+        if (std.mem.eql(u8, ancestor, descendant)) return true;
+        var current: ?[]const u8 = descendant;
+        while (current) |name| {
+            const cls = self.classes.get(name) orelse return false;
+            current = cls.parent;
+            if (current) |p| {
+                if (std.mem.eql(u8, p, ancestor)) return true;
+            }
+        }
+        return false;
+    }
+
     fn callStaticFunction(self: *VM, name: []const u8, arg_count: u8, class_name: []const u8) RuntimeError!void {
         const fc_before = self.frame_count;
-        // for native functions, temporarily set called_class on current frame
-        // so LSB frame walks inside the native find the right class
         const prev_cc = self.currentFrame().called_class;
-        if (self.native_fns.contains(name))
-            self.currentFrame().called_class = class_name;
+        // set called_class on current frame so both native fns and localsOnly
+        // paths can inherit it (localsOnly executes inline and won't be caught
+        // by the post-call fixup below)
+        self.currentFrame().called_class = class_name;
         defer self.frames[fc_before - 1].called_class = prev_cc;
         try self.callNamedFunction(name, arg_count);
         if (self.frame_count > fc_before)
