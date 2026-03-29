@@ -194,6 +194,7 @@ pub const ClassDef = struct {
     backed_type: enum(u8) { none = 0, int_type = 1, string_type = 2 } = .none,
     case_order: std.ArrayListUnmanaged([]const u8) = .{},
     slot_layout: ?*PhpObject.SlotLayout = null,
+    used_traits: std.ArrayListUnmanaged([]const u8) = .{},
 
     pub const Visibility = enum(u8) { public = 0, protected = 1, private = 2 };
 
@@ -204,7 +205,7 @@ pub const ClassDef = struct {
         visibility: Visibility = .public,
     };
 
-    const PropertyDef = struct {
+    pub const PropertyDef = struct {
         name: []const u8,
         default: Value,
         visibility: Visibility = .public,
@@ -216,6 +217,7 @@ pub const ClassDef = struct {
         self.properties.deinit(allocator);
         self.static_props.deinit(allocator);
         self.interfaces.deinit(allocator);
+        self.used_traits.deinit(allocator);
         self.case_order.deinit(allocator);
         if (self.slot_layout) |layout| {
             allocator.free(layout.names);
@@ -4528,6 +4530,7 @@ pub const VM = struct {
 
         for (trait_names[0..trait_count]) |trait_name| {
             try self.applyTrait(&def, class_name, trait_name, alias_rules[0..alias_count], insteadof_rules[0..insteadof_count]);
+            try def.used_traits.append(self.allocator, trait_name);
         }
 
         if (def.parent) |parent_name| {

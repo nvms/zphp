@@ -35,6 +35,15 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try rc_def.methods.put(a, "isInterface", .{ .name = "isInterface", .arity = 0 });
     try rc_def.methods.put(a, "getInterfaceNames", .{ .name = "getInterfaceNames", .arity = 0 });
     try rc_def.methods.put(a, "getAttributes", .{ .name = "getAttributes", .arity = 0 });
+    try rc_def.methods.put(a, "getProperties", .{ .name = "getProperties", .arity = 0 });
+    try rc_def.methods.put(a, "getProperty", .{ .name = "getProperty", .arity = 1 });
+    try rc_def.methods.put(a, "hasProperty", .{ .name = "hasProperty", .arity = 1 });
+    try rc_def.methods.put(a, "newInstanceWithoutConstructor", .{ .name = "newInstanceWithoutConstructor", .arity = 0 });
+    try rc_def.methods.put(a, "getShortName", .{ .name = "getShortName", .arity = 0 });
+    try rc_def.methods.put(a, "isTrait", .{ .name = "isTrait", .arity = 0 });
+    try rc_def.methods.put(a, "getTraitNames", .{ .name = "getTraitNames", .arity = 0 });
+    try rc_def.methods.put(a, "isEnum", .{ .name = "isEnum", .arity = 0 });
+    try rc_def.methods.put(a, "getConstants", .{ .name = "getConstants", .arity = 0 });
     try vm.classes.put(a, "ReflectionClass", rc_def);
 
     try vm.native_fns.put(a, "ReflectionClass::__construct", rcConstruct);
@@ -52,6 +61,15 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try vm.native_fns.put(a, "ReflectionClass::isInterface", rcIsInterface);
     try vm.native_fns.put(a, "ReflectionClass::getInterfaceNames", rcGetInterfaceNames);
     try vm.native_fns.put(a, "ReflectionClass::getAttributes", rcGetAttributes);
+    try vm.native_fns.put(a, "ReflectionClass::getProperties", rcGetProperties);
+    try vm.native_fns.put(a, "ReflectionClass::getProperty", rcGetProperty);
+    try vm.native_fns.put(a, "ReflectionClass::hasProperty", rcHasProperty);
+    try vm.native_fns.put(a, "ReflectionClass::newInstanceWithoutConstructor", rcNewInstanceWithoutConstructor);
+    try vm.native_fns.put(a, "ReflectionClass::getShortName", rcGetShortName);
+    try vm.native_fns.put(a, "ReflectionClass::isTrait", rcIsTrait);
+    try vm.native_fns.put(a, "ReflectionClass::getTraitNames", rcGetTraitNames);
+    try vm.native_fns.put(a, "ReflectionClass::isEnum", rcIsEnum);
+    try vm.native_fns.put(a, "ReflectionClass::getConstants", rcGetConstants);
 
     // ReflectionMethod
     var rm_def = ClassDef{ .name = "ReflectionMethod" };
@@ -72,6 +90,9 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try rm_def.methods.put(a, "setAccessible", .{ .name = "setAccessible", .arity = 1 });
     try rm_def.methods.put(a, "invoke", .{ .name = "invoke", .arity = 1 });
     try rm_def.methods.put(a, "hasReturnType", .{ .name = "hasReturnType", .arity = 0 });
+    try rm_def.methods.put(a, "invokeArgs", .{ .name = "invokeArgs", .arity = 2 });
+    try rm_def.methods.put(a, "isAbstract", .{ .name = "isAbstract", .arity = 0 });
+    try rm_def.methods.put(a, "getAttributes", .{ .name = "getAttributes", .arity = 0 });
     try vm.classes.put(a, "ReflectionMethod", rm_def);
 
     try vm.native_fns.put(a, "ReflectionMethod::__construct", rmConstruct);
@@ -89,6 +110,9 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try vm.native_fns.put(a, "ReflectionMethod::setAccessible", reflectionNoop);
     try vm.native_fns.put(a, "ReflectionMethod::invoke", rmInvoke);
     try vm.native_fns.put(a, "ReflectionMethod::hasReturnType", rmHasReturnType);
+    try vm.native_fns.put(a, "ReflectionMethod::invokeArgs", rmInvokeArgs);
+    try vm.native_fns.put(a, "ReflectionMethod::isAbstract", rmIsAbstract);
+    try vm.native_fns.put(a, "ReflectionMethod::getAttributes", rmGetAttributes);
 
     // ReflectionParameter
     var rp_def = ClassDef{ .name = "ReflectionParameter" };
@@ -105,6 +129,8 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try rp_def.methods.put(a, "getAttributes", .{ .name = "getAttributes", .arity = 0 });
     try rp_def.methods.put(a, "getDeclaringClass", .{ .name = "getDeclaringClass", .arity = 0 });
     try rp_def.methods.put(a, "isVariadic", .{ .name = "isVariadic", .arity = 0 });
+    try rp_def.methods.put(a, "isPromoted", .{ .name = "isPromoted", .arity = 0 });
+    try rp_def.methods.put(a, "getClass", .{ .name = "getClass", .arity = 0 });
     try vm.classes.put(a, "ReflectionParameter", rp_def);
 
     try vm.native_fns.put(a, "ReflectionParameter::getName", rpGetName);
@@ -119,6 +145,8 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try vm.native_fns.put(a, "ReflectionParameter::getAttributes", rpGetAttributes);
     try vm.native_fns.put(a, "ReflectionParameter::getDeclaringClass", rpGetDeclaringClass);
     try vm.native_fns.put(a, "ReflectionParameter::isVariadic", rpIsVariadic);
+    try vm.native_fns.put(a, "ReflectionParameter::isPromoted", rpIsPromoted);
+    try vm.native_fns.put(a, "ReflectionParameter::getClass", rpGetClass);
 
     // ReflectionNamedType
     var rnt_def = ClassDef{ .name = "ReflectionNamedType" };
@@ -166,6 +194,17 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try rprop_def.methods.put(a, "__construct", .{ .name = "__construct", .arity = 2 });
     try rprop_def.methods.put(a, "setAccessible", .{ .name = "setAccessible", .arity = 1 });
     try rprop_def.methods.put(a, "getValue", .{ .name = "getValue", .arity = 1 });
+    try rprop_def.methods.put(a, "getName", .{ .name = "getName", .arity = 0 });
+    try rprop_def.methods.put(a, "getType", .{ .name = "getType", .arity = 0 });
+    try rprop_def.methods.put(a, "isPublic", .{ .name = "isPublic", .arity = 0 });
+    try rprop_def.methods.put(a, "isProtected", .{ .name = "isProtected", .arity = 0 });
+    try rprop_def.methods.put(a, "isPrivate", .{ .name = "isPrivate", .arity = 0 });
+    try rprop_def.methods.put(a, "getDefaultValue", .{ .name = "getDefaultValue", .arity = 0 });
+    try rprop_def.methods.put(a, "hasDefaultValue", .{ .name = "hasDefaultValue", .arity = 0 });
+    try rprop_def.methods.put(a, "isInitialized", .{ .name = "isInitialized", .arity = 1 });
+    try rprop_def.methods.put(a, "getDeclaringClass", .{ .name = "getDeclaringClass", .arity = 0 });
+    try rprop_def.methods.put(a, "isDefault", .{ .name = "isDefault", .arity = 0 });
+    try rprop_def.methods.put(a, "isReadOnly", .{ .name = "isReadOnly", .arity = 0 });
     try rprop_def.methods.put(a, "setValue", .{ .name = "setValue", .arity = 2 });
     try vm.classes.put(a, "ReflectionProperty", rprop_def);
 
@@ -173,6 +212,17 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try vm.native_fns.put(a, "ReflectionProperty::setAccessible", reflectionNoop);
     try vm.native_fns.put(a, "ReflectionProperty::getValue", rpGetValue);
     try vm.native_fns.put(a, "ReflectionProperty::setValue", rpSetValue);
+    try vm.native_fns.put(a, "ReflectionProperty::getName", rpropGetName);
+    try vm.native_fns.put(a, "ReflectionProperty::getType", rpropGetType);
+    try vm.native_fns.put(a, "ReflectionProperty::isPublic", rpropIsPublic);
+    try vm.native_fns.put(a, "ReflectionProperty::isProtected", rpropIsProtected);
+    try vm.native_fns.put(a, "ReflectionProperty::isPrivate", rpropIsPrivate);
+    try vm.native_fns.put(a, "ReflectionProperty::getDefaultValue", rpropGetDefaultValue);
+    try vm.native_fns.put(a, "ReflectionProperty::hasDefaultValue", rpropHasDefaultValue);
+    try vm.native_fns.put(a, "ReflectionProperty::isInitialized", rpropIsInitialized);
+    try vm.native_fns.put(a, "ReflectionProperty::getDeclaringClass", rpropGetDeclaringClass);
+    try vm.native_fns.put(a, "ReflectionProperty::isDefault", rpropIsDefault);
+    try vm.native_fns.put(a, "ReflectionProperty::isReadOnly", rpropIsReadOnly);
 
     // ReflectionAttribute
     var ra_def = ClassDef{ .name = "ReflectionAttribute" };
@@ -276,6 +326,35 @@ fn findDeclaringClass(vm: *VM, class_name: []const u8, method_name: []const u8) 
     return declaring;
 }
 
+const PropertyDefResult = struct {
+    prop: ClassDef.PropertyDef,
+    declaring_class: []const u8,
+};
+
+fn findPropertyDef(vm: *VM, class_name: []const u8, prop_name: []const u8) ?PropertyDefResult {
+    var current: ?[]const u8 = class_name;
+    while (current) |name| {
+        const cls = vm.classes.get(name) orelse break;
+        for (cls.properties.items) |prop| {
+            if (std.mem.eql(u8, prop.name, prop_name)) return .{ .prop = prop, .declaring_class = name };
+        }
+        current = cls.parent;
+    }
+    return null;
+}
+
+fn buildPropertyObj(ctx: *NativeContext, class_name: []const u8, prop: ClassDef.PropertyDef, declaring_class: []const u8) !*PhpObject {
+    const obj = try ctx.createObject("ReflectionProperty");
+    try obj.set(ctx.allocator, "name", .{ .string = prop.name });
+    try obj.set(ctx.allocator, "class", .{ .string = class_name });
+    try obj.set(ctx.allocator, "_visibility", .{ .int = @intFromEnum(prop.visibility) });
+    try obj.set(ctx.allocator, "_has_default", .{ .bool = prop.default != .null });
+    try obj.set(ctx.allocator, "_default_value", prop.default);
+    try obj.set(ctx.allocator, "_declaring_class", .{ .string = declaring_class });
+    try obj.set(ctx.allocator, "_is_readonly", .{ .bool = prop.is_readonly });
+    return obj;
+}
+
 fn hasInterfaceMethod(vm: *VM, iface_name: []const u8, method_name: []const u8) bool {
     var buf: [256]u8 = undefined;
     const key = std.fmt.bufPrint(&buf, "{s}::{s}", .{ iface_name, method_name }) catch return false;
@@ -304,7 +383,7 @@ fn rcConstruct(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
         try ctx.strings.append(ctx.allocator, msg);
         return throwReflection(ctx, msg);
     };
-    if (ctx.vm.classes.get(class_name) == null and ctx.vm.interfaces.get(class_name) == null) {
+    if (ctx.vm.classes.get(class_name) == null and ctx.vm.interfaces.get(class_name) == null and !ctx.vm.traits.contains(class_name)) {
         const msg = std.fmt.allocPrint(ctx.allocator, "Class \"{s}\" does not exist", .{class_name}) catch return throwReflection(ctx, "Class does not exist");
         try ctx.strings.append(ctx.allocator, msg);
         return throwReflection(ctx, msg);
@@ -312,6 +391,7 @@ fn rcConstruct(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
 
     try this.set(ctx.allocator, "name", .{ .string = class_name });
     try this.set(ctx.allocator, "_is_interface", .{ .bool = ctx.vm.interfaces.contains(class_name) });
+    try this.set(ctx.allocator, "_is_trait", .{ .bool = ctx.vm.traits.contains(class_name) });
     return .null;
 }
 
@@ -492,6 +572,125 @@ fn rcGetInterfaceNames(ctx: *NativeContext, _: []const Value) RuntimeError!Value
 
 fn rcGetAttributes(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
     return .{ .array = try ctx.createArray() };
+}
+
+fn rcGetProperties(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const this = getThis(ctx) orelse return .null;
+    const class_name = if (this.get("name") == .string) this.get("name").string else return .null;
+
+    const arr = try ctx.createArray();
+    var seen = std.StringHashMapUnmanaged(void){};
+    defer seen.deinit(ctx.allocator);
+
+    var is_own = true;
+    var current: ?[]const u8 = class_name;
+    while (current) |name| {
+        const cls = ctx.vm.classes.get(name) orelse break;
+        for (cls.properties.items) |prop| {
+            if (!is_own and prop.visibility == .private) continue;
+            if (!seen.contains(prop.name)) {
+                try seen.put(ctx.allocator, prop.name, {});
+                const obj = try buildPropertyObj(ctx, class_name, prop, name);
+                try arr.append(ctx.allocator, .{ .object = obj });
+            }
+        }
+        current = cls.parent;
+        is_own = false;
+    }
+    return .{ .array = arr };
+}
+
+fn rcGetProperty(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len < 1 or args[0] != .string) return throwReflection(ctx, "ReflectionClass::getProperty() expects a property name");
+    const prop_name = args[0].string;
+    const this = getThis(ctx) orelse return .null;
+    const class_name = if (this.get("name") == .string) this.get("name").string else return .null;
+
+    if (findPropertyDef(ctx.vm, class_name, prop_name)) |result| {
+        const obj = try buildPropertyObj(ctx, class_name, result.prop, result.declaring_class);
+        return .{ .object = obj };
+    }
+    const msg = std.fmt.allocPrint(ctx.allocator, "Property {s}::${s} does not exist", .{ class_name, prop_name }) catch return error.OutOfMemory;
+    return throwReflection(ctx, msg);
+}
+
+fn rcHasProperty(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len < 1 or args[0] != .string) return .{ .bool = false };
+    const this = getThis(ctx) orelse return .{ .bool = false };
+    const class_name = if (this.get("name") == .string) this.get("name").string else return .{ .bool = false };
+    return .{ .bool = findPropertyDef(ctx.vm, class_name, args[0].string) != null };
+}
+
+fn rcNewInstanceWithoutConstructor(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const this = getThis(ctx) orelse return .null;
+    const class_name = if (this.get("name") == .string) this.get("name").string else return .null;
+
+    const obj = try ctx.vm.allocator.create(PhpObject);
+    obj.* = .{ .class_name = class_name };
+    try ctx.vm.objects.append(ctx.vm.allocator, obj);
+
+    var current: ?[]const u8 = class_name;
+    while (current) |name| {
+        const cls = ctx.vm.classes.get(name) orelse break;
+        for (cls.properties.items) |prop| {
+            if (obj.get(prop.name) == .null) {
+                try obj.set(ctx.vm.allocator, prop.name, prop.default);
+            }
+        }
+        current = cls.parent;
+    }
+    return .{ .object = obj };
+}
+
+fn rcGetShortName(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const this = getThis(ctx) orelse return .null;
+    const name = if (this.get("name") == .string) this.get("name").string else return .null;
+    if (std.mem.lastIndexOfScalar(u8, name, '\\')) |pos| {
+        return .{ .string = name[pos + 1 ..] };
+    }
+    return .{ .string = name };
+}
+
+fn rcIsTrait(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const this = getThis(ctx) orelse return .{ .bool = false };
+    const v = this.get("_is_trait");
+    return .{ .bool = v == .bool and v.bool };
+}
+
+fn rcGetTraitNames(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const this = getThis(ctx) orelse return .null;
+    const class_name = if (this.get("name") == .string) this.get("name").string else return .null;
+    const cls = ctx.vm.classes.get(class_name) orelse return .{ .array = try ctx.createArray() };
+
+    const arr = try ctx.createArray();
+    for (cls.used_traits.items) |name| {
+        try arr.append(ctx.allocator, .{ .string = name });
+    }
+    return .{ .array = arr };
+}
+
+fn rcIsEnum(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const this = getThis(ctx) orelse return .{ .bool = false };
+    const name = if (this.get("name") == .string) this.get("name").string else return .{ .bool = false };
+    const cls = ctx.vm.classes.get(name) orelse return .{ .bool = false };
+    return .{ .bool = cls.is_enum };
+}
+
+fn rcGetConstants(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const this = getThis(ctx) orelse return .null;
+    const class_name = if (this.get("name") == .string) this.get("name").string else return .null;
+
+    const arr = try ctx.createArray();
+    var current: ?[]const u8 = class_name;
+    while (current) |name| {
+        const cls = ctx.vm.classes.get(name) orelse break;
+        var it = cls.static_props.iterator();
+        while (it.next()) |entry| {
+            try arr.set(ctx.allocator, .{ .string = entry.key_ptr.* }, entry.value_ptr.*);
+        }
+        current = cls.parent;
+    }
+    return .{ .array = arr };
 }
 
 // --- ReflectionMethod ---
@@ -1003,6 +1202,19 @@ fn rpConstruct(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
 
     try this.set(ctx.allocator, "name", .{ .string = prop_name });
     try this.set(ctx.allocator, "class", .{ .string = class_name });
+
+    if (findPropertyDef(ctx.vm, class_name, prop_name)) |result| {
+        try this.set(ctx.allocator, "_visibility", .{ .int = @intFromEnum(result.prop.visibility) });
+        try this.set(ctx.allocator, "_has_default", .{ .bool = result.prop.default != .null });
+        try this.set(ctx.allocator, "_default_value", result.prop.default);
+        try this.set(ctx.allocator, "_declaring_class", .{ .string = result.declaring_class });
+        try this.set(ctx.allocator, "_is_readonly", .{ .bool = result.prop.is_readonly });
+    } else {
+        try this.set(ctx.allocator, "_visibility", .{ .int = 0 });
+        try this.set(ctx.allocator, "_has_default", .{ .bool = false });
+        try this.set(ctx.allocator, "_declaring_class", .{ .string = class_name });
+        try this.set(ctx.allocator, "_is_readonly", .{ .bool = false });
+    }
     return .null;
 }
 
@@ -1024,13 +1236,137 @@ fn rpSetValue(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     return .null;
 }
 
+fn rpropGetName(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const this = getThis(ctx) orelse return .null;
+    return this.get("name");
+}
+
+fn rpropGetType(_: *NativeContext, _: []const Value) RuntimeError!Value {
+    return .null;
+}
+
+fn rpropIsPublic(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const this = getThis(ctx) orelse return .{ .bool = true };
+    const vis = this.get("_visibility");
+    return .{ .bool = vis == .int and vis.int == 0 };
+}
+
+fn rpropIsProtected(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const this = getThis(ctx) orelse return .{ .bool = false };
+    const vis = this.get("_visibility");
+    return .{ .bool = vis == .int and vis.int == 1 };
+}
+
+fn rpropIsPrivate(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const this = getThis(ctx) orelse return .{ .bool = false };
+    const vis = this.get("_visibility");
+    return .{ .bool = vis == .int and vis.int == 2 };
+}
+
+fn rpropGetDefaultValue(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const this = getThis(ctx) orelse return .null;
+    const has_default = this.get("_has_default");
+    if (has_default != .bool or !has_default.bool) return throwReflection(ctx, "Property does not have a default value");
+    return this.get("_default_value");
+}
+
+fn rpropHasDefaultValue(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const this = getThis(ctx) orelse return .{ .bool = false };
+    const has_default = this.get("_has_default");
+    return .{ .bool = has_default == .bool and has_default.bool };
+}
+
+fn rpropIsInitialized(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    const this = getThis(ctx) orelse return .{ .bool = false };
+    const prop_name = if (this.get("name") == .string) this.get("name").string else return .{ .bool = false };
+    if (args.len > 0 and args[0] == .object) {
+        return .{ .bool = args[0].object.get(prop_name) != .null };
+    }
+    return .{ .bool = true };
+}
+
+fn rpropGetDeclaringClass(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const this = getThis(ctx) orelse return .null;
+    const declaring = if (this.get("_declaring_class") == .string) this.get("_declaring_class").string else return .null;
+
+    const obj = try ctx.createObject("ReflectionClass");
+    try obj.set(ctx.allocator, "name", .{ .string = declaring });
+    try obj.set(ctx.allocator, "_is_interface", .{ .bool = ctx.vm.interfaces.contains(declaring) });
+    return .{ .object = obj };
+}
+
+fn rpropIsDefault(_: *NativeContext, _: []const Value) RuntimeError!Value {
+    return .{ .bool = true };
+}
+
+fn rpropIsReadOnly(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const this = getThis(ctx) orelse return .{ .bool = false };
+    const v = this.get("_is_readonly");
+    return .{ .bool = v == .bool and v.bool };
+}
+
 // --- ReflectionMethod::invoke ---
 
 fn rmInvoke(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     const this = getThis(ctx) orelse return .null;
     const method_name = if (this.get("name") == .string) this.get("name").string else return .null;
     if (args.len > 0 and args[0] == .object) {
-        return ctx.invokeCallable(.{ .string = method_name }, args[1..]) catch .null;
+        return ctx.callMethod(args[0].object, method_name, args[1..]) catch .null;
+    }
+    return .null;
+}
+
+fn rmInvokeArgs(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    const this = getThis(ctx) orelse return .null;
+    const method_name = if (this.get("name") == .string) this.get("name").string else return .null;
+    if (args.len < 1) return .null;
+    const target = args[0];
+    if (target != .object) return .null;
+
+    if (args.len >= 2 and args[1] == .array) {
+        const arg_arr = args[1].array;
+        var call_args: [16]Value = undefined;
+        const count = @min(arg_arr.entries.items.len, 16);
+        for (0..count) |i| {
+            call_args[i] = arg_arr.entries.items[i].value;
+        }
+        return ctx.callMethod(target.object, method_name, call_args[0..count]) catch .null;
+    }
+    return ctx.callMethod(target.object, method_name, &.{}) catch .null;
+}
+
+fn rmIsAbstract(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const this = getThis(ctx) orelse return .{ .bool = false };
+    const method_name = if (this.get("name") == .string) this.get("name").string else return .{ .bool = false };
+    const declaring = if (this.get("_declaring_class") == .string) this.get("_declaring_class").string else return .{ .bool = false };
+
+    if (ctx.vm.interfaces.contains(declaring)) return .{ .bool = true };
+
+    var buf: [256]u8 = undefined;
+    const key = std.fmt.bufPrint(&buf, "{s}::{s}", .{ declaring, method_name }) catch return .{ .bool = false };
+    if (ctx.vm.functions.get(key) == null and ctx.vm.native_fns.get(key) == null) return .{ .bool = true };
+    return .{ .bool = false };
+}
+
+fn rmGetAttributes(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    return .{ .array = try ctx.createArray() };
+}
+
+fn rpIsPromoted(_: *NativeContext, _: []const Value) RuntimeError!Value {
+    return .{ .bool = false };
+}
+
+fn rpGetClass(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const this = getThis(ctx) orelse return .null;
+    const type_val = this.get("_type_name");
+    if (type_val != .string or type_val.string.len == 0) return .null;
+    if (isBuiltinType(type_val.string)) return .null;
+
+    if (ctx.vm.classes.contains(type_val.string) or ctx.vm.interfaces.contains(type_val.string)) {
+        const obj = try ctx.createObject("ReflectionClass");
+        try obj.set(ctx.allocator, "name", type_val);
+        try obj.set(ctx.allocator, "_is_interface", .{ .bool = ctx.vm.interfaces.contains(type_val.string) });
+        return .{ .object = obj };
     }
     return .null;
 }
