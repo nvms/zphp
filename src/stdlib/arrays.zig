@@ -75,6 +75,7 @@ pub const entries = .{
     .{ "array_multisort", array_multisort },
     .{ "array_diff_uassoc", array_diff_uassoc },
     .{ "array_diff_ukey", array_diff_ukey },
+    .{ "array_change_key_case", array_change_key_case },
 };
 
 fn array_push(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
@@ -1382,6 +1383,29 @@ fn array_diff_ukey(ctx: *NativeContext, args: []const Value) RuntimeError!Value 
             if (in_any) break;
         }
         if (!in_any) try result.set(ctx.allocator, entry.key, entry.value);
+    }
+    return .{ .array = result };
+}
+
+fn array_change_key_case(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len == 0 or args[0] != .array) return .null;
+    const src = args[0].array;
+    const case_upper = args.len >= 2 and args[1] == .int and args[1].int == 1;
+    const result = try ctx.createArray();
+
+    for (src.entries.items) |entry| {
+        const new_key: PhpArray.Key = switch (entry.key) {
+            .string => |s| blk: {
+                const buf = ctx.allocator.alloc(u8, s.len) catch break :blk .{ .string = s };
+                ctx.strings.append(ctx.allocator, buf) catch {};
+                for (s, 0..) |c, i| {
+                    buf[i] = if (case_upper) std.ascii.toUpper(c) else std.ascii.toLower(c);
+                }
+                break :blk .{ .string = buf };
+            },
+            .int => entry.key,
+        };
+        try result.set(ctx.allocator, new_key, entry.value);
     }
     return .{ .array = result };
 }
