@@ -70,6 +70,7 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try rm_def.methods.put(a, "getNumberOfRequiredParameters", .{ .name = "getNumberOfRequiredParameters", .arity = 0 });
     try rm_def.methods.put(a, "setAccessible", .{ .name = "setAccessible", .arity = 1 });
     try rm_def.methods.put(a, "invoke", .{ .name = "invoke", .arity = 1 });
+    try rm_def.methods.put(a, "hasReturnType", .{ .name = "hasReturnType", .arity = 0 });
     try vm.classes.put(a, "ReflectionMethod", rm_def);
 
     try vm.native_fns.put(a, "ReflectionMethod::getName", rmGetName);
@@ -85,6 +86,7 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try vm.native_fns.put(a, "ReflectionMethod::getNumberOfRequiredParameters", rmGetNumberOfRequiredParameters);
     try vm.native_fns.put(a, "ReflectionMethod::setAccessible", reflectionNoop);
     try vm.native_fns.put(a, "ReflectionMethod::invoke", rmInvoke);
+    try vm.native_fns.put(a, "ReflectionMethod::hasReturnType", rmHasReturnType);
 
     // ReflectionParameter
     var rp_def = ClassDef{ .name = "ReflectionParameter" };
@@ -142,6 +144,7 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try rf_def.methods.put(a, "getNumberOfRequiredParameters", .{ .name = "getNumberOfRequiredParameters", .arity = 0 });
     try rf_def.methods.put(a, "isAnonymous", .{ .name = "isAnonymous", .arity = 0 });
     try rf_def.methods.put(a, "getClosureScopeClass", .{ .name = "getClosureScopeClass", .arity = 0 });
+    try rf_def.methods.put(a, "hasReturnType", .{ .name = "hasReturnType", .arity = 0 });
     try vm.classes.put(a, "ReflectionFunction", rf_def);
 
     try vm.native_fns.put(a, "ReflectionFunction::__construct", rfConstruct);
@@ -152,6 +155,7 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try vm.native_fns.put(a, "ReflectionFunction::getNumberOfRequiredParameters", rfGetNumberOfRequiredParameters);
     try vm.native_fns.put(a, "ReflectionFunction::isAnonymous", rfIsAnonymous);
     try vm.native_fns.put(a, "ReflectionFunction::getClosureScopeClass", rfGetClosureScopeClass);
+    try vm.native_fns.put(a, "ReflectionFunction::hasReturnType", rfHasReturnType);
 
     // ReflectionProperty
     var rprop_def = ClassDef{ .name = "ReflectionProperty" };
@@ -525,6 +529,17 @@ fn rmGetReturnType(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
     return .{ .object = obj };
 }
 
+fn rmHasReturnType(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const this = getThis(ctx) orelse return .{ .bool = false };
+    const method_name = if (this.get("name") == .string) this.get("name").string else return .{ .bool = false };
+    const declaring = if (this.get("_declaring_class") == .string) this.get("_declaring_class").string else return .{ .bool = false };
+
+    var buf: [256]u8 = undefined;
+    const key = std.fmt.bufPrint(&buf, "{s}::{s}", .{ declaring, method_name }) catch return .{ .bool = false };
+    const type_info = vm_mod.getTypeInfo(key) orelse return .{ .bool = false };
+    return .{ .bool = type_info.return_type.len > 0 };
+}
+
 fn rmIsConstructor(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
     const this = getThis(ctx) orelse return .{ .bool = false };
     const name = this.get("name");
@@ -705,6 +720,14 @@ fn rfGetReturnType(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
     return .{ .object = obj };
 }
 
+fn rfHasReturnType(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const this = getThis(ctx) orelse return .{ .bool = false };
+    const func_name = if (this.get("name") == .string) this.get("name").string else return .{ .bool = false };
+
+    const type_info = vm_mod.getTypeInfo(func_name) orelse return .{ .bool = false };
+    return .{ .bool = type_info.return_type.len > 0 };
+}
+
 fn rfGetNumberOfParameters(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
     const this = getThis(ctx) orelse return .{ .int = 0 };
     const func_name = if (this.get("name") == .string) this.get("name").string else return .{ .int = 0 };
@@ -742,7 +765,14 @@ fn rfGetClosureScopeClass(ctx: *NativeContext, _: []const Value) RuntimeError!Va
 
 fn buildParamArray(ctx: *NativeContext, func: *const ObjFunction, type_key: []const u8) RuntimeError!Value {
     const arr = try ctx.createArray();
-    const type_info = vm_mod.getTypeInfo(type_key);
+    const effective_key = if (std.mem.startsWith(u8, type_key, "__closure_")) blk: {
+        const after_prefix = type_key["__closure_".len..];
+        if (std.mem.lastIndexOf(u8, after_prefix, "_")) |last_us| {
+            break :blk type_key[0 .. "__closure_".len + last_us];
+        }
+        break :blk type_key;
+    } else type_key;
+    const type_info = vm_mod.getTypeInfo(effective_key) orelse vm_mod.getTypeInfo(type_key);
 
     for (func.params, 0..) |param_name, i| {
         const obj = try ctx.createObject("ReflectionParameter");

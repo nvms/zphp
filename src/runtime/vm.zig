@@ -1542,7 +1542,7 @@ pub const VM = struct {
                             }
                         }
                     } else {
-                        self.setLocalGlobal(slot, val, frame);
+                        try self.setLocalGlobal(slot, val, frame);
                     }
                 },
                 .inc_local => {
@@ -2994,9 +2994,11 @@ pub const VM = struct {
                                 for (0..@min(ac, func.arity)) |i| {
                                     try new_vars.put(self.allocator, func.params[i], self.stack[self.sp - ac + i]);
                                 }
+                                self.saveFrameArgs(arg_count);
                                 self.sp -= ac;
                                 try self.fillDefaults(&new_vars, func, ac);
                                 self.frames[self.frame_count] = .{ .chunk = &func.chunk, .ip = 0, .vars = new_vars, .locals = try self.allocLocals(func, &new_vars), .func = func, .called_class = class_name };
+                                self.setFrameArgCount(arg_count);
                                 self.frame_count += 1;
                                 }
                             } else if (self.native_fns.get(full_name)) |native| {
@@ -3574,13 +3576,16 @@ pub const VM = struct {
         return .null;
     }
 
-    fn setLocalGlobal(self: *VM, slot: u16, val: Value, frame: *CallFrame) void {
+    fn setLocalGlobal(self: *VM, slot: u16, val: Value, frame: *CallFrame) !void {
         if (slot < self.global_slot_names.len) {
             const name = self.global_slot_names[slot];
-            if (name.len > 0 and frame.ref_slots.count() > 0) {
-                if (frame.ref_slots.get(name)) |cell| {
-                    cell.* = val;
+            if (name.len > 0) {
+                if (frame.ref_slots.count() > 0) {
+                    if (frame.ref_slots.get(name)) |cell| {
+                        cell.* = val;
+                    }
                 }
+                try frame.vars.put(self.allocator, name, val);
             }
         }
         self.global_vars_dirty = true;

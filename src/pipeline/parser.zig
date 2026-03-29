@@ -1730,7 +1730,13 @@ const Parser = struct {
 
     fn parsePrefixExpr(self: *Parser) Error!u32 {
         switch (self.peek()) {
-            .minus, .bang, .tilde, .at => {
+            .bang, .at => {
+                const tok = self.advance();
+                // ! and @ bind less tightly than instanceof (prec 17)
+                const operand = try self.parseExprPrec(16);
+                return self.addNode(.{ .tag = .prefix_op, .main_token = tok, .data = .{ .lhs = operand } });
+            },
+            .minus, .tilde => {
                 const tok = self.advance();
                 const operand = try self.parseExprPrec(18);
                 return self.addNode(.{ .tag = .prefix_op, .main_token = tok, .data = .{ .lhs = operand } });

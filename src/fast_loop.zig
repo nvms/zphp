@@ -357,6 +357,7 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                     .locals = ci_locals,
                     .func = ci_func,
                 };
+                ic.arg_counts[self.frame_count] = ci_ac;
                 self.frame_count += 1;
                 continue :reenter;
             },
@@ -451,6 +452,7 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                                 .locals = mc_locals,
                                 .func = mc_func,
                             };
+                            ic.arg_counts[self.frame_count] = mc_arg_count;
                             self.frame_count += 1;
                             continue :reenter;
                         }
@@ -525,6 +527,7 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                     .locals = new_locals,
                     .func = func,
                 };
+                ic.arg_counts[self.frame_count] = arg_count;
                 self.frame_count += 1;
                 continue :reenter;
             },
