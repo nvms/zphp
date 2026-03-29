@@ -57,6 +57,7 @@ pub fn register(vm: *VM, a: Allocator) !void {
     var rm_def = ClassDef{ .name = "ReflectionMethod" };
     try rm_def.properties.append(a, .{ .name = "name", .default = .{ .string = "" } });
     try rm_def.properties.append(a, .{ .name = "class", .default = .{ .string = "" } });
+    try rm_def.methods.put(a, "__construct", .{ .name = "__construct", .arity = 2 });
     try rm_def.methods.put(a, "getName", .{ .name = "getName", .arity = 0 });
     try rm_def.methods.put(a, "getParameters", .{ .name = "getParameters", .arity = 0 });
     try rm_def.methods.put(a, "isPublic", .{ .name = "isPublic", .arity = 0 });
@@ -73,6 +74,7 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try rm_def.methods.put(a, "hasReturnType", .{ .name = "hasReturnType", .arity = 0 });
     try vm.classes.put(a, "ReflectionMethod", rm_def);
 
+    try vm.native_fns.put(a, "ReflectionMethod::__construct", rmConstruct);
     try vm.native_fns.put(a, "ReflectionMethod::getName", rmGetName);
     try vm.native_fns.put(a, "ReflectionMethod::getParameters", rmGetParameters);
     try vm.native_fns.put(a, "ReflectionMethod::isPublic", rmIsPublic);
@@ -266,11 +268,25 @@ fn findDeclaringClass(vm: *VM, class_name: []const u8, method_name: []const u8) 
     return declaring;
 }
 
+fn hasInterfaceMethod(vm: *VM, iface_name: []const u8, method_name: []const u8) bool {
+    var buf: [256]u8 = undefined;
+    const key = std.fmt.bufPrint(&buf, "{s}::{s}", .{ iface_name, method_name }) catch return false;
+    if (vm.functions.get(key) != null or vm.native_fns.get(key) != null) return true;
+    const iface = vm.interfaces.get(iface_name) orelse return false;
+    _ = iface;
+    return false;
+}
+
 // --- ReflectionClass ---
 
 fn rcConstruct(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len < 1 or args[0] != .string) return throwReflection(ctx, "ReflectionClass::__construct() expects a class name");
-    const class_name = args[0].string;
+    if (args.len < 1) return throwReflection(ctx, "ReflectionClass::__construct() expects a class name");
+    const class_name = if (args[0] == .string)
+        args[0].string
+    else if (args[0] == .object)
+        args[0].object.class_name
+    else
+        return throwReflection(ctx, "ReflectionClass::__construct() expects a class name or object");
     const this = getThis(ctx) orelse return .null;
 
     _ = resolveClassName(ctx.vm, class_name) catch return throwReflection(ctx, "Class does not exist");
@@ -278,7 +294,6 @@ fn rcConstruct(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
         return throwReflection(ctx, "Class does not exist");
 
     try this.set(ctx.allocator, "name", .{ .string = class_name });
-    // track whether this is an interface
     try this.set(ctx.allocator, "_is_interface", .{ .bool = ctx.vm.interfaces.contains(class_name) });
     return .null;
 }
@@ -463,6 +478,76 @@ fn rcGetAttributes(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
 }
 
 // --- ReflectionMethod ---
+
+fn rmConstruct(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len < 1) return throwReflection(ctx, "ReflectionMethod::__construct() expects parameters");
+    const this = getThis(ctx) orelse return .null;
+
+    var class_name: []const u8 = undefined;
+    var method_name: []const u8 = undefined;
+
+    if (args.len >= 2 and args[1] == .string) {
+        method_name = args[1].string;
+        if (args[0] == .string) {
+            class_name = args[0].string;
+        } else if (args[0] == .object) {
+            class_name = args[0].object.class_name;
+        } else {
+            return throwReflection(ctx, "ReflectionMethod::__construct() expects a class name or object");
+        }
+    } else if (args[0] == .string) {
+        // "Class::method" string form
+        const s = args[0].string;
+        if (std.mem.indexOf(u8, s, "::")) |sep| {
+            class_name = s[0..sep];
+            method_name = s[sep + 2 ..];
+        } else {
+            return throwReflection(ctx, "ReflectionMethod::__construct() expects Class::method format");
+        }
+    } else {
+        return throwReflection(ctx, "ReflectionMethod::__construct() expects a class name or object");
+    }
+
+    if (!ctx.vm.hasMethod(class_name, method_name)) {
+        // class might not be loaded yet - try autoloading
+        if (ctx.vm.classes.get(class_name) == null and ctx.vm.interfaces.get(class_name) == null) {
+            try ctx.vm.tryAutoload(class_name);
+        }
+        if (!ctx.vm.hasMethod(class_name, method_name) and !hasInterfaceMethod(ctx.vm, class_name, method_name)) {
+            const msg = std.fmt.allocPrint(ctx.allocator, "Method {s}::{s}() does not exist", .{ class_name, method_name }) catch return error.OutOfMemory;
+            return throwReflection(ctx, msg);
+        }
+    }
+
+    const declaring = findDeclaringClass(ctx.vm, class_name, method_name);
+    const info = blk: {
+        if (ctx.vm.classes.get(declaring)) |cls| {
+            break :blk cls.methods.get(method_name) orelse ClassDef.MethodInfo{ .name = method_name, .arity = 0 };
+        } else if (ctx.vm.classes.get(class_name)) |cls| {
+            break :blk cls.methods.get(method_name) orelse ClassDef.MethodInfo{ .name = method_name, .arity = 0 };
+        } else {
+            break :blk ClassDef.MethodInfo{ .name = method_name, .arity = 0 };
+        }
+    };
+
+    try this.set(ctx.allocator, "name", .{ .string = method_name });
+    try this.set(ctx.allocator, "class", .{ .string = class_name });
+    try this.set(ctx.allocator, "_declaring_class", .{ .string = declaring });
+    try this.set(ctx.allocator, "_is_static", .{ .bool = info.is_static });
+    try this.set(ctx.allocator, "_visibility", .{ .int = @intFromEnum(info.visibility) });
+
+    var buf: [256]u8 = undefined;
+    const key = std.fmt.bufPrint(&buf, "{s}::{s}", .{ declaring, method_name }) catch return .null;
+    if (ctx.vm.functions.get(key)) |func| {
+        try this.set(ctx.allocator, "_arity", .{ .int = func.arity });
+        try this.set(ctx.allocator, "_required_params", .{ .int = func.required_params });
+    } else {
+        try this.set(ctx.allocator, "_arity", .{ .int = info.arity });
+        try this.set(ctx.allocator, "_required_params", .{ .int = info.arity });
+    }
+
+    return .null;
+}
 
 fn rmGetName(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
     const this = getThis(ctx) orelse return .null;

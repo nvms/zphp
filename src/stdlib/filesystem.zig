@@ -85,7 +85,10 @@ pub fn cleanupHandles(objects: std.ArrayListUnmanaged(*PhpObject)) void {
         if (std.mem.eql(u8, obj.class_name, "FileHandle")) {
             const open = obj.get("__open");
             if (open == .bool and open.bool) {
-                if (getFileHandle(obj)) |file| file.close();
+                if (getFileHandle(obj)) |file| {
+                    // use raw syscall to avoid panic on invalid fd
+                    _ = std.posix.system.close(file.handle);
+                }
                 obj.properties.put(std.heap.page_allocator, "__open", .{ .bool = false }) catch {};
             }
         }

@@ -2924,8 +2924,57 @@ pub const VM = struct {
                         return error.RuntimeError;
                     }
                     const arr = args_val.array;
-                    const ac = arr.entries.items.len;
-                    for (arr.entries.items) |entry| self.push(entry.value);
+
+                    // check for named args
+                    var has_named = false;
+                    for (arr.entries.items) |entry| {
+                        if (entry.key == .string) { has_named = true; break; }
+                    }
+
+                    var resolved_buf: [16]Value = .{.null} ** 16;
+                    var ac = arr.entries.items.len;
+
+                    if (has_named) {
+                        const obj_peek = self.stack[self.sp - 1];
+                        if (obj_peek == .object) {
+                            const full = self.resolveMethod(obj_peek.object.class_name, method_name) catch null;
+                            if (full) |fn_name| {
+                                if (self.functions.get(fn_name)) |func| {
+                                    var pos: usize = 0;
+                                    for (arr.entries.items) |entry| {
+                                        if (entry.key == .string) {
+                                            for (func.params, 0..) |p, pi| {
+                                                if (std.mem.eql(u8, p[1..], entry.key.string) or std.mem.eql(u8, p, entry.key.string)) {
+                                                    resolved_buf[pi] = entry.value;
+                                                    if (pi >= pos) pos = pi + 1;
+                                                    break;
+                                                }
+                                            }
+                                        } else {
+                                            resolved_buf[pos] = entry.value;
+                                            pos += 1;
+                                        }
+                                    }
+                                    // fill defaults
+                                    ac = @max(pos, func.required_params);
+                                    for (0..ac) |i| {
+                                        if (resolved_buf[i] == .null and i < func.defaults.len) {
+                                            resolved_buf[i] = try self.resolveDefault(func.defaults[i]);
+                                        }
+                                    }
+                                    for (0..ac) |i| self.push(resolved_buf[i]);
+                                } else {
+                                    for (arr.entries.items) |entry| self.push(entry.value);
+                                }
+                            } else {
+                                for (arr.entries.items) |entry| self.push(entry.value);
+                            }
+                        } else {
+                            for (arr.entries.items) |entry| self.push(entry.value);
+                        }
+                    } else {
+                        for (arr.entries.items) |entry| self.push(entry.value);
+                    }
                     const obj_val = self.stack[self.sp - ac - 1];
                     if (obj_val != .object) {
                         self.sp -= ac + 1;
@@ -3754,6 +3803,13 @@ pub const VM = struct {
         obj.* = .{ .class_name = class_name };
         try obj.set(self.allocator, "message", .{ .string = message });
         try obj.set(self.allocator, "code", .{ .int = 0 });
+        try obj.set(self.allocator, "file", .{ .string = self.file_path });
+        const ip = if (self.frame_count > 0) self.currentFrame().ip else 0;
+        const line: i64 = if (self.frame_count > 0)
+            if (self.currentChunk().getSourceLocation(if (ip > 0) ip - 1 else 0, self.source)) |loc| @intCast(loc.line) else 0
+        else
+            0;
+        try obj.set(self.allocator, "line", .{ .int = line });
         try self.objects.append(self.allocator, obj);
 
         if (self.handler_count <= self.handler_floor) {
