@@ -1145,6 +1145,10 @@ pub fn compileEnumDecl(self: *Compiler, node: Ast.Node) Error!void {
 }
 
 fn compileClassMethodBody(self: *Compiler, class_name: []const u8, member: Ast.Node) Error!void {
+    const prev_class = self.current_class;
+    self.current_class = class_name;
+    defer self.current_class = prev_class;
+
     const method_name = self.ast.tokenSlice(member.main_token);
     const full_name = try std.fmt.allocPrint(self.allocator, "{s}::{s}", .{ class_name, method_name });
     try self.string_allocs.append(self.allocator, full_name);

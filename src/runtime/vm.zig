@@ -5257,7 +5257,12 @@ pub const VM = struct {
                 if (std.mem.indexOfScalar(u8, rest, 0)) |sep| {
                     const class_name = rest[0..sep];
                     const const_name = rest[sep + 1 ..];
-                    return self.getStaticProp(class_name, const_name) orelse .null;
+                    if (self.getStaticProp(class_name, const_name)) |v| return v;
+                    // fall back to class constants (ClassName::CONST_NAME)
+                    var buf: [512]u8 = undefined;
+                    const full = std.fmt.bufPrint(&buf, "{s}::{s}", .{ class_name, const_name }) catch return .null;
+                    if (self.php_constants.get(full)) |v| return v;
+                    return .null;
                 }
             }
         }

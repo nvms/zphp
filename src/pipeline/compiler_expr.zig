@@ -428,6 +428,7 @@ pub fn compileLogicalAnd(self: *Compiler, node: Ast.Node) Error!void {
     try self.emitOp(.pop);
     try self.compileNode(node.data.rhs);
     self.patchJump(end_jump);
+    try self.emitOp(.cast_bool);
 }
 
 pub fn compileLogicalOr(self: *Compiler, node: Ast.Node) Error!void {
@@ -436,6 +437,7 @@ pub fn compileLogicalOr(self: *Compiler, node: Ast.Node) Error!void {
     try self.emitOp(.pop);
     try self.compileNode(node.data.rhs);
     self.patchJump(end_jump);
+    try self.emitOp(.cast_bool);
 }
 
 pub fn compileNullCoalesce(self: *Compiler, node: Ast.Node) Error!void {
