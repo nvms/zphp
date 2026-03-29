@@ -374,6 +374,18 @@ fn renderNode(ast: *const Ast, idx: u32, buf: *Buf) !void {
             }
             try w.writeByte(')');
         },
+        .dynamic_static_call => {
+            try w.writeAll("(::{} ");
+            try renderNode(ast, node.data.lhs, buf);
+            const extra = ast.extraSlice(node.data.rhs);
+            try w.writeByte(' ');
+            try renderNode(ast, extra[0], buf);
+            for (extra[1..]) |arg| {
+                try w.writeByte(' ');
+                try renderNode(ast, arg, buf);
+            }
+            try w.writeByte(')');
+        },
         .static_prop_access => {
             try w.writeAll("(::$ ");
             try renderNode(ast, node.data.lhs, buf);

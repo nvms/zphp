@@ -851,6 +851,22 @@ pub fn compileStaticCall(self: *Compiler, node: Ast.Node) Error!void {
     }
 }
 
+pub fn compileDynamicStaticCall(self: *Compiler, node: Ast.Node) Error!void {
+    const class_node = self.ast.nodes[node.data.lhs];
+    const class_name = try resolveNodeClassName(self, class_node);
+    const class_idx = try self.addConstant(.{ .string = class_name });
+
+    const extra = self.ast.extraSlice(node.data.rhs);
+    const method_expr = extra[0];
+    const args = extra[1..];
+
+    try self.compileNode(method_expr);
+    for (args) |arg| try self.compileNode(arg);
+    try self.emitOp(.static_call_dyn_method);
+    try self.emitU16(class_idx);
+    try self.emitByte(@intCast(args.len));
+}
+
 pub fn compileStaticPropAccess(self: *Compiler, node: Ast.Node) Error!void {
     const class_node = self.ast.nodes[node.data.lhs];
     const class_name = try resolveNodeClassName(self, class_node);

@@ -285,7 +285,7 @@ const Formatter = struct {
             .array_access, .array_push_target => self.findFirstToken(node.data.lhs),
             .list_destructure, .named_arg => node.main_token,
             .postfix_op => self.findFirstToken(node.data.lhs),
-            .static_call => self.findFirstToken(node.data.lhs),
+            .static_call, .dynamic_static_call => self.findFirstToken(node.data.lhs),
             .static_prop_access => self.findFirstToken(node.data.lhs),
             else => node.main_token,
         };
@@ -378,6 +378,7 @@ const Formatter = struct {
             .method_call => self.formatMethodCall(node, false),
             .nullsafe_method_call => self.formatMethodCall(node, true),
             .static_call => self.formatStaticCall(node),
+            .dynamic_static_call => self.formatDynamicStaticCall(node),
             .static_prop_access => self.formatStaticPropAccess(node),
             .new_expr => self.formatNewExpr(node),
             .new_expr_dynamic => {
@@ -1271,6 +1272,19 @@ const Formatter = struct {
         self.write("(");
         const args = self.ast.extraSlice(node.data.rhs);
         for (args, 0..) |arg, i| {
+            if (i > 0) self.write(", ");
+            self.formatNode(arg);
+        }
+        self.write(")");
+    }
+
+    fn formatDynamicStaticCall(self: *Formatter, node: Ast.Node) void {
+        self.formatNode(node.data.lhs);
+        self.write("::{");
+        const extra = self.ast.extraSlice(node.data.rhs);
+        self.formatNode(extra[0]);
+        self.write("}(");
+        for (extra[1..], 0..) |arg, i| {
             if (i > 0) self.write(", ");
             self.formatNode(arg);
         }

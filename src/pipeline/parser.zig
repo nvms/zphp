@@ -2081,6 +2081,32 @@ const Parser = struct {
             return self.addNode(.{ .tag = .static_prop_access, .main_token = class_tok, .data = .{ .lhs = class_node } });
         }
 
+        // dynamic static call: Class::{expr}()
+        if (self.peek() == .l_brace) {
+            _ = self.advance(); // {
+            const method_expr = try self.parseExpression();
+            _ = try self.expect(.r_brace);
+            if (self.peek() == .l_paren) {
+                _ = self.advance(); // (
+                var args = std.ArrayListUnmanaged(u32){};
+                defer args.deinit(self.allocator);
+                try args.append(self.allocator, method_expr);
+                if (self.peek() != .r_paren) {
+                    try args.append(self.allocator, try self.parseCallArg());
+                    while (self.peek() == .comma) {
+                        _ = self.advance();
+                        if (self.peek() == .r_paren) break;
+                        try args.append(self.allocator, try self.parseCallArg());
+                    }
+                }
+                _ = try self.expect(.r_paren);
+                const extra = try self.addExtraList(args.items);
+                return self.addNode(.{ .tag = .dynamic_static_call, .main_token = 0, .data = .{ .lhs = class_node, .rhs = extra } });
+            }
+            // dynamic static property: Class::{expr} (no call)
+            return self.addNode(.{ .tag = .static_prop_access, .main_token = 0, .data = .{ .lhs = class_node, .rhs = method_expr } });
+        }
+
         const name_tok = if (self.peek() == .identifier or isSemiReserved(self.peek()))
             self.advance()
         else

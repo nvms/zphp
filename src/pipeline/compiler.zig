@@ -301,6 +301,7 @@ pub const Compiler = struct {
             .anonymous_class => try compiler_class.compileAnonymousClass(self, node),
             .method_call => try compiler_expr.compileMethodCall(self, node),
             .static_call => try compiler_expr.compileStaticCall(self, node),
+            .dynamic_static_call => try compiler_expr.compileDynamicStaticCall(self, node),
             .static_prop_access => try compiler_expr.compileStaticPropAccess(self, node),
             .yield_expr => try compiler_expr.compileYield(self, node),
             .yield_pair_expr => try compiler_expr.compileYieldPair(self, node),

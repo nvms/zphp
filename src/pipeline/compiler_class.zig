@@ -1039,8 +1039,26 @@ pub fn compileTraitDecl(self: *Compiler, node: Ast.Node) Error!void {
         }
     }
 
+    // collect static property members
+    var static_props = std.ArrayListUnmanaged(u32){};
+    defer static_props.deinit(self.allocator);
+    for (members) |member_idx| {
+        const member = self.ast.nodes[member_idx];
+        if (member.tag == .static_class_property) {
+            try static_props.append(self.allocator, member_idx);
+        }
+    }
+
     // compile defaults for own properties
     for (own_props.items) |pi| {
+        const pmember = self.ast.nodes[pi];
+        if (pmember.data.lhs != 0) {
+            try self.compileNode(pmember.data.lhs);
+        }
+    }
+
+    // compile defaults for static properties
+    for (static_props.items) |pi| {
         const pmember = self.ast.nodes[pi];
         if (pmember.data.lhs != 0) {
             try self.compileNode(pmember.data.lhs);
@@ -1057,6 +1075,16 @@ pub fn compileTraitDecl(self: *Compiler, node: Ast.Node) Error!void {
     }
     try self.emitByte(@intCast(own_props.items.len));
     for (own_props.items) |pi| {
+        const pmember = self.ast.nodes[pi];
+        var pname = self.ast.tokenSlice(pmember.main_token);
+        if (pname.len > 0 and pname[0] == '$') pname = pname[1..];
+        const pname_idx = try self.addConstant(.{ .string = pname });
+        try self.emitU16(pname_idx);
+        try self.emitByte(if (pmember.data.lhs != 0) @as(u8, 1) else @as(u8, 0));
+        try self.emitByte(@intCast(pmember.data.rhs));
+    }
+    try self.emitByte(@intCast(static_props.items.len));
+    for (static_props.items) |pi| {
         const pmember = self.ast.nodes[pi];
         var pname = self.ast.tokenSlice(pmember.main_token);
         if (pname.len > 0 and pname[0] == '$') pname = pname[1..];
@@ -1322,7 +1350,7 @@ fn opcodeWidth(b: u8) usize {
         .iter_check, .inc_local, .dec_local, .trait_decl,
         => 3,
         // 1 + u16 + u8 = 4 bytes
-        .call, .call_spread, .new_obj, .method_call, .method_call_spread => 4,
+        .call, .call_spread, .new_obj, .method_call, .method_call_spread, .static_call_dyn_method => 4,
         // 1 + u16 + u16 = 5 bytes
         .get_static_prop, .set_static_prop,
         .get_static, .set_static,

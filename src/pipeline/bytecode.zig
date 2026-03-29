@@ -96,6 +96,7 @@ pub const OpCode = enum(u8) {
     static_call, // u16: class name, u16: method name, u8: arg count
     static_call_spread, // u16: class name, u16: method name (args array on stack)
     static_call_dynamic, // u16: method name, u8: arg count (class name string on stack before args)
+    static_call_dyn_method, // u16: class name, u8: arg count (method name string on stack below args)
     interface_decl, // u16: name, u8: method count, then method_count * u16 method name, u16: parent (0xffff = none)
     trait_decl, // u16: name, u8: sub_trait_count, then sub_trait_count * u16 sub_trait_name
     enum_decl, // u16: enum name, u8: backed_type (0=none, 1=int, 2=string), u8: case_count, then case_count * (u16 name, u8 has_value), then method/implements like class_decl
@@ -161,7 +162,7 @@ pub const OpCode = enum(u8) {
             .closure_bind, .closure_bind_ref, .define_const,
             .iter_check, .inc_local, .dec_local,
             => 3,
-            .call, .call_spread, .new_obj, .method_call, .method_call_spread => 4,
+            .call, .call_spread, .new_obj, .method_call, .method_call_spread, .static_call_dyn_method => 4,
             .get_static_prop, .set_static_prop, .get_static, .set_static,
             .static_call_spread, .add_local_to_local, .sub_local_to_local, .mul_local_to_local,
             => 5,

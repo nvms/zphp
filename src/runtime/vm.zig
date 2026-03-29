@@ -224,6 +224,8 @@ pub const ClassDef = struct {
     }
 };
 
+const TraitStaticProp = struct { name: []const u8, value: Value };
+
 pub const InterfaceDef = struct {
     name: []const u8,
     methods: std.ArrayListUnmanaged([]const u8) = .{},
@@ -260,6 +262,7 @@ pub const VM = struct {
     traits: std.StringHashMapUnmanaged(void) = .{},
     trait_uses: std.StringHashMapUnmanaged([]const []const u8) = .{},
     trait_props: std.StringHashMapUnmanaged([]const ClassDef.PropertyDef) = .{},
+    trait_static_props: std.StringHashMapUnmanaged([]const TraitStaticProp) = .{},
     statics: std.StringHashMapUnmanaged(Value) = .{},
     static_vars: std.ArrayListUnmanaged(StaticEntry) = .{},
     global_vars: std.ArrayListUnmanaged(StaticEntry) = .{},
@@ -565,6 +568,9 @@ pub const VM = struct {
         var tp_iter = self.trait_props.valueIterator();
         while (tp_iter.next()) |props| self.allocator.free(props.*);
         self.trait_props.deinit(self.allocator);
+        var tsp_iter = self.trait_static_props.valueIterator();
+        while (tsp_iter.next()) |props| self.allocator.free(props.*);
+        self.trait_static_props.deinit(self.allocator);
         self.statics.deinit(self.allocator);
         self.static_vars.deinit(self.allocator);
         self.global_vars.deinit(self.allocator);
@@ -2106,6 +2112,28 @@ pub const VM = struct {
                         }
                         try self.trait_props.put(self.allocator, trait_name, props);
                     }
+                    const sp_count = self.readByte();
+                    if (sp_count > 0) {
+                        var sp_names: [32][]const u8 = undefined;
+                        var sp_has_default: [32]u8 = undefined;
+                        for (0..sp_count) |pi| {
+                            sp_names[pi] = self.currentChunk().constants.items[self.readU16()].string;
+                            sp_has_default[pi] = self.readByte();
+                            _ = self.readByte(); // visibility
+                        }
+                        const sp_defaults = self.popDefaults(32, sp_has_default[0..sp_count]);
+                        const sprops = try self.allocator.alloc(TraitStaticProp, sp_count);
+                        var sj: usize = 0;
+                        for (0..sp_count) |pi| {
+                            const sval = if (sp_has_default[pi] == 1) blk: {
+                                const v = sp_defaults[sj];
+                                sj += 1;
+                                break :blk v;
+                            } else Value{ .null = {} };
+                            sprops[pi] = .{ .name = sp_names[pi], .value = sval };
+                        }
+                        try self.trait_static_props.put(self.allocator, trait_name, sprops);
+                    }
                 },
 
                 .enum_decl => try self.handleEnumDecl(),
@@ -3598,6 +3626,62 @@ pub const VM = struct {
                     self.frames[self.frame_count - 1].called_class = class_name;
                 },
 
+                .static_call_dyn_method => {
+                    const class_idx = self.readU16();
+                    const arg_count = self.readByte();
+                    var class_name = self.currentChunk().constants.items[class_idx].string;
+                    if (std.mem.eql(u8, class_name, "static")) {
+                        class_name = self.resolveStaticClassName(class_name);
+                    } else if (std.mem.eql(u8, class_name, "parent") or std.mem.eql(u8, class_name, "self")) {
+                        const defining_class = self.currentDefiningClass();
+                        if (std.mem.eql(u8, class_name, "parent")) {
+                            if (defining_class) |dc| {
+                                if (self.classes.get(dc)) |cls| {
+                                    if (cls.parent) |p| class_name = p;
+                                }
+                            }
+                        } else {
+                            if (defining_class) |dc| class_name = dc;
+                        }
+                    }
+                    if (!self.classes.contains(class_name)) {
+                        try self.tryAutoload(class_name);
+                    }
+                    const ac: usize = arg_count;
+                    const method_val = self.stack[self.sp - ac - 1];
+                    const method_name = if (method_val == .string) method_val.string else {
+                        self.error_msg = std.fmt.allocPrint(self.allocator, "Fatal error: dynamic method name must be a string", .{}) catch null;
+                        return error.RuntimeError;
+                    };
+                    const full_name = self.resolveMethod(class_name, method_name) catch {
+                        if (self.hasMethod(class_name, "__callStatic")) {
+                            var args_arr = try self.allocator.create(PhpArray);
+                            args_arr.* = .{};
+                            try self.arrays.append(self.allocator, args_arr);
+                            for (0..ac) |i| try args_arr.append(self.allocator, self.stack[self.sp - ac + i]);
+                            self.sp -= ac + 1;
+                            const cs_name = try self.resolveMethod(class_name, "__callStatic");
+                            self.push(.{ .string = method_name });
+                            self.push(.{ .array = args_arr });
+                            try self.callNamedFunction(cs_name, 2);
+                            self.frames[self.frame_count - 1].called_class = class_name;
+                            continue;
+                        }
+                        const msg = std.fmt.allocPrint(self.allocator, "Call to undefined method {s}::{s}()", .{ class_name, method_name }) catch "Call to undefined method";
+                        try self.strings.append(self.allocator, msg);
+                        if (try self.throwBuiltinException("Error", msg)) continue;
+                        self.error_msg = std.fmt.allocPrint(self.allocator, "Fatal error: Uncaught Error: {s}", .{msg}) catch null;
+                        return error.RuntimeError;
+                    };
+                    var i: usize = 0;
+                    while (i < ac) : (i += 1) {
+                        self.stack[self.sp - ac - 1 + i] = self.stack[self.sp - ac + i];
+                    }
+                    self.sp -= 1;
+                    try self.callNamedFunction(full_name, arg_count);
+                    self.frames[self.frame_count - 1].called_class = class_name;
+                },
+
                 .get_static_prop => {
                     const class_idx = self.readU16();
                     const prop_idx = self.readU16();
@@ -4382,6 +4466,14 @@ pub const VM = struct {
                 }
                 if (!exists) {
                     try def.properties.append(self.allocator, prop);
+                }
+            }
+        }
+
+        if (self.trait_static_props.get(trait_name)) |sprops| {
+            for (sprops) |sp| {
+                if (!def.static_props.contains(sp.name)) {
+                    try def.static_props.put(self.allocator, sp.name, sp.value);
                 }
             }
         }
