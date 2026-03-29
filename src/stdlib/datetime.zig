@@ -90,9 +90,15 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try di_def.properties.append(a, .{ .name = "h", .default = .{ .int = 0 } });
     try di_def.properties.append(a, .{ .name = "i", .default = .{ .int = 0 } });
     try di_def.properties.append(a, .{ .name = "s", .default = .{ .int = 0 } });
+    try di_def.properties.append(a, .{ .name = "f", .default = .{ .float = 0.0 } });
     try di_def.properties.append(a, .{ .name = "days", .default = .{ .int = 0 } });
     try di_def.properties.append(a, .{ .name = "invert", .default = .{ .int = 0 } });
+    try di_def.methods.put(a, "__construct", .{ .name = "__construct", .arity = 1 });
+    try di_def.methods.put(a, "invert", .{ .name = "invert", .arity = 1 });
     try vm.classes.put(a, "DateInterval", di_def);
+
+    try vm.native_fns.put(a, "DateInterval::__construct", diConstruct);
+    try vm.native_fns.put(a, "DateInterval::invert", diInvert);
 }
 
 fn dtGetLastErrors(_: *NativeContext, _: []const Value) RuntimeError!Value {
@@ -1255,4 +1261,76 @@ fn native_tz_set(_: *NativeContext, _: []const Value) RuntimeError!Value {
 fn native_tz_get(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
     _ = ctx;
     return .{ .string = "UTC" };
+}
+
+const IsoDuration = struct { y: i64, m: i64, d: i64, h: i64, mi: i64, s: i64, f: f64 };
+
+fn parseIsoDuration(spec: []const u8) IsoDuration {
+    var result = IsoDuration{ .y = 0, .m = 0, .d = 0, .h = 0, .mi = 0, .s = 0, .f = 0 };
+    if (spec.len == 0 or spec[0] != 'P') return result;
+    var in_time = false;
+    var num_start: ?usize = null;
+    for (spec[1..], 1..) |c, idx| {
+        if (c >= '0' and c <= '9' or c == '.') {
+            if (num_start == null) num_start = idx;
+        } else if (c == 'T') {
+            in_time = true;
+            num_start = null;
+        } else if (num_start) |ns| {
+            const num_str = spec[ns..idx];
+            if (std.mem.indexOf(u8, num_str, ".")) |_| {
+                const val = std.fmt.parseFloat(f64, num_str) catch 0.0;
+                if (in_time and c == 'S') {
+                    result.s = @intFromFloat(val);
+                    result.f = val - @as(f64, @floatFromInt(result.s));
+                }
+            } else {
+                const val = std.fmt.parseInt(i64, num_str, 10) catch 0;
+                if (!in_time) {
+                    switch (c) {
+                        'Y' => result.y = val,
+                        'M' => result.m = val,
+                        'D' => result.d = val,
+                        'W' => result.d = val * 7,
+                        else => {},
+                    }
+                } else {
+                    switch (c) {
+                        'H' => result.h = val,
+                        'M' => result.mi = val,
+                        'S' => result.s = val,
+                        else => {},
+                    }
+                }
+            }
+            num_start = null;
+        }
+    }
+    return result;
+}
+
+fn diConstruct(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    const obj = getThis(ctx) orelse return .null;
+    if (args.len > 0 and args[0] == .string) {
+        const dur = parseIsoDuration(args[0].string);
+        try obj.set(ctx.allocator, "y", .{ .int = dur.y });
+        try obj.set(ctx.allocator, "m", .{ .int = dur.m });
+        try obj.set(ctx.allocator, "d", .{ .int = dur.d });
+        try obj.set(ctx.allocator, "h", .{ .int = dur.h });
+        try obj.set(ctx.allocator, "i", .{ .int = dur.mi });
+        try obj.set(ctx.allocator, "s", .{ .int = dur.s });
+        try obj.set(ctx.allocator, "f", .{ .float = dur.f });
+    }
+    return .null;
+}
+
+fn diInvert(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    const obj = getThis(ctx) orelse return .null;
+    if (args.len > 0) {
+        const invert = if (args[0] == .bool) (if (args[0].bool) @as(i64, 1) else @as(i64, 0))
+        else if (args[0] == .int) (if (args[0].int != 0) @as(i64, 1) else @as(i64, 0))
+        else @as(i64, 0);
+        try obj.set(ctx.allocator, "invert", .{ .int = invert });
+    }
+    return .{ .object = obj };
 }
