@@ -2238,6 +2238,7 @@ pub const VM = struct {
                                 self.sp -= ac;
                                 self.frames[self.frame_count] = .{ .chunk = &func.chunk, .ip = 0, .vars = .{}, .locals = ctor_locals, .func = func };
                                 self.frame_count += 1;
+                                self.exception_dispatched = false;
                                 try self.fastLoop();
                                 const ctor_frame = &self.frames[self.frame_count - 1];
                                 if (ctor_frame.chunk == &func.chunk) {
@@ -2262,6 +2263,7 @@ pub const VM = struct {
                                 }
                                 self.frames[self.frame_count] = .{ .chunk = &func.chunk, .ip = 0, .vars = new_vars, .locals = try self.allocLocals(func, &new_vars), .func = func };
                                 self.frame_count += 1;
+                                self.exception_dispatched = false;
                                 const ctor_base = self.frame_count - 1;
                                 try self.runUntilFrame(ctor_base);
                                 if (self.exception_dispatched) {
@@ -2355,6 +2357,7 @@ pub const VM = struct {
                             }
                             self.frames[self.frame_count] = .{ .chunk = &func.chunk, .ip = 0, .vars = new_vars, .locals = try self.allocLocals(func, &new_vars), .func = func };
                             self.frame_count += 1;
+                            self.exception_dispatched = false;
                             const ctor_base = self.frame_count - 1;
                             try self.runUntilFrame(ctor_base);
                             if (self.exception_dispatched) {
@@ -4170,7 +4173,7 @@ pub const VM = struct {
         }
 
         const trait_count = self.readByte();
-        var trait_names: [16][]const u8 = undefined;
+        var trait_names: [64][]const u8 = undefined;
         for (0..trait_count) |ti| {
             trait_names[ti] = self.currentChunk().constants.items[self.readU16()].string;
         }

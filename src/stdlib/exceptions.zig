@@ -14,6 +14,8 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try throwable.methods.append(a, "getMessage");
     try throwable.methods.append(a, "getCode");
     try throwable.methods.append(a, "getPrevious");
+    try throwable.methods.append(a, "getTrace");
+    try throwable.methods.append(a, "getTraceAsString");
     try vm.interfaces.put(a, "Throwable", throwable);
 
     var exc_def = ClassDef{ .name = "Exception" };
@@ -29,6 +31,8 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try exc_def.methods.put(a, "getPrevious", .{ .name = "getPrevious", .arity = 0 });
     try exc_def.methods.put(a, "getFile", .{ .name = "getFile", .arity = 0 });
     try exc_def.methods.put(a, "getLine", .{ .name = "getLine", .arity = 0 });
+    try exc_def.methods.put(a, "getTrace", .{ .name = "getTrace", .arity = 0 });
+    try exc_def.methods.put(a, "getTraceAsString", .{ .name = "getTraceAsString", .arity = 0 });
     try vm.classes.put(a, "Exception", exc_def);
 
     try vm.native_fns.put(a, "Exception::__construct", exceptionConstruct);
@@ -37,6 +41,8 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try vm.native_fns.put(a, "Exception::getPrevious", exceptionGetPrevious);
     try vm.native_fns.put(a, "Exception::getFile", exceptionGetFile);
     try vm.native_fns.put(a, "Exception::getLine", exceptionGetLine);
+    try vm.native_fns.put(a, "Exception::getTrace", exceptionGetTrace);
+    try vm.native_fns.put(a, "Exception::getTraceAsString", exceptionGetTraceAsString);
 
     var err_def = ClassDef{ .name = "Error" };
     try err_def.properties.append(a, .{ .name = "message", .default = .{ .string = "" } });
@@ -51,6 +57,8 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try err_def.methods.put(a, "getPrevious", .{ .name = "getPrevious", .arity = 0 });
     try err_def.methods.put(a, "getFile", .{ .name = "getFile", .arity = 0 });
     try err_def.methods.put(a, "getLine", .{ .name = "getLine", .arity = 0 });
+    try err_def.methods.put(a, "getTrace", .{ .name = "getTrace", .arity = 0 });
+    try err_def.methods.put(a, "getTraceAsString", .{ .name = "getTraceAsString", .arity = 0 });
     try vm.classes.put(a, "Error", err_def);
 
     try vm.native_fns.put(a, "Error::__construct", exceptionConstruct);
@@ -59,6 +67,8 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try vm.native_fns.put(a, "Error::getPrevious", exceptionGetPrevious);
     try vm.native_fns.put(a, "Error::getFile", exceptionGetFile);
     try vm.native_fns.put(a, "Error::getLine", exceptionGetLine);
+    try vm.native_fns.put(a, "Error::getTrace", exceptionGetTrace);
+    try vm.native_fns.put(a, "Error::getTraceAsString", exceptionGetTraceAsString);
 
     const subclasses = .{
         .{ "RuntimeException", "Exception" },
@@ -140,4 +150,16 @@ fn exceptionGetLine(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
     if (this_val != .object) return .null;
     const v = this_val.object.get("line");
     return if (v == .int) v else .{ .int = 0 };
+}
+
+fn exceptionGetTrace(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const PhpArray = @import("../runtime/value.zig").PhpArray;
+    const arr = try ctx.vm.allocator.create(PhpArray);
+    arr.* = .{};
+    try ctx.vm.arrays.append(ctx.vm.allocator, arr);
+    return .{ .array = arr };
+}
+
+fn exceptionGetTraceAsString(_: *NativeContext, _: []const Value) RuntimeError!Value {
+    return .{ .string = "" };
 }
