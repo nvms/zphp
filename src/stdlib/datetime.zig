@@ -47,6 +47,8 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try dt_def.methods.put(a, "getMicrosecond", .{ .name = "getMicrosecond", .arity = 0 });
     try dt_def.methods.put(a, "setMicrosecond", .{ .name = "setMicrosecond", .arity = 1 });
     try dt_def.methods.put(a, "getLastErrors", .{ .name = "getLastErrors", .arity = 0, .is_static = true });
+    try dt_def.methods.put(a, "getTimezone", .{ .name = "getTimezone", .arity = 0 });
+    try dt_def.methods.put(a, "setTimezone", .{ .name = "setTimezone", .arity = 1 });
     try vm.classes.put(a, "DateTime", dt_def);
 
     try vm.native_fns.put(a, "DateTime::__construct", dtConstruct);
@@ -64,6 +66,8 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try vm.native_fns.put(a, "DateTime::getMicrosecond", dtGetMicrosecond);
     try vm.native_fns.put(a, "DateTime::setMicrosecond", dtSetMicrosecond);
     try vm.native_fns.put(a, "DateTime::getLastErrors", dtGetLastErrors);
+    try vm.native_fns.put(a, "DateTime::getTimezone", dtGetTimezone);
+    try vm.native_fns.put(a, "DateTime::setTimezone", dtSetTimezone);
 
     // DateTimeImmutable
     var dti_def = ClassDef{ .name = "DateTimeImmutable" };
@@ -79,6 +83,9 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try dti_def.methods.put(a, "createFromTimestamp", .{ .name = "createFromTimestamp", .arity = 1, .is_static = true });
     try dti_def.methods.put(a, "getMicrosecond", .{ .name = "getMicrosecond", .arity = 0 });
     try dti_def.methods.put(a, "getLastErrors", .{ .name = "getLastErrors", .arity = 0, .is_static = true });
+    try dti_def.methods.put(a, "getTimezone", .{ .name = "getTimezone", .arity = 0 });
+    try dti_def.methods.put(a, "setTimezone", .{ .name = "setTimezone", .arity = 1 });
+    try dti_def.methods.put(a, "createFromFormat", .{ .name = "createFromFormat", .arity = 2, .is_static = true });
     try vm.classes.put(a, "DateTimeImmutable", dti_def);
 
     try vm.native_fns.put(a, "DateTimeImmutable::__construct", dtConstruct);
@@ -91,6 +98,23 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try vm.native_fns.put(a, "DateTimeImmutable::createFromTimestamp", dtiCreateFromTimestamp);
     try vm.native_fns.put(a, "DateTimeImmutable::getMicrosecond", dtGetMicrosecond);
     try vm.native_fns.put(a, "DateTimeImmutable::getLastErrors", dtGetLastErrors);
+    try vm.native_fns.put(a, "DateTimeImmutable::getTimezone", dtGetTimezone);
+    try vm.native_fns.put(a, "DateTimeImmutable::setTimezone", dtiSetTimezone);
+    try vm.native_fns.put(a, "DateTimeImmutable::createFromFormat", dtiCreateFromFormat);
+
+    // DateTimeZone class
+    var dtz_def = ClassDef{ .name = "DateTimeZone" };
+    try dtz_def.properties.append(a, .{ .name = "timezone", .default = .{ .string = "UTC" }, .visibility = .private });
+    try dtz_def.methods.put(a, "__construct", .{ .name = "__construct", .arity = 1 });
+    try dtz_def.methods.put(a, "getName", .{ .name = "getName", .arity = 0 });
+    try dtz_def.methods.put(a, "getOffset", .{ .name = "getOffset", .arity = 1 });
+    try dtz_def.methods.put(a, "__toString", .{ .name = "__toString", .arity = 0 });
+    try vm.classes.put(a, "DateTimeZone", dtz_def);
+
+    try vm.native_fns.put(a, "DateTimeZone::__construct", dtzConstruct);
+    try vm.native_fns.put(a, "DateTimeZone::getName", dtzGetName);
+    try vm.native_fns.put(a, "DateTimeZone::getOffset", dtzGetOffset);
+    try vm.native_fns.put(a, "DateTimeZone::__toString", dtzGetName);
 
     // DateInterval
     var di_def = ClassDef{ .name = "DateInterval" };
@@ -367,6 +391,8 @@ pub fn formatTimestamp(ctx: *NativeContext, timestamp: i64, format: []const u8) 
                 };
                 try buf.appendSlice(a, suffix);
             },
+            'u' => try buf.appendSlice(a, "000000"),
+            'v' => try buf.appendSlice(a, "000"),
             'Z' => try buf.append(a, '0'),
             'e', 'T' => try buf.appendSlice(a, "UTC"),
             'P' => try buf.appendSlice(a, "+00:00"),
@@ -534,7 +560,18 @@ fn dtCreateFromFormat(ctx: *NativeContext, args: []const Value) RuntimeError!Val
     const format = args[0].string;
     const datetime = args[1].string;
 
-    const obj = try ctx.createObject("DateTime");
+    // late static binding: if called from a subclass (e.g. Carbon), create that class
+    const class_name = blk: {
+        var fi: usize = ctx.vm.frame_count;
+        while (fi > 0) {
+            fi -= 1;
+            if (ctx.vm.frames[fi].called_class) |cc| {
+                if (ctx.vm.classes.contains(cc)) break :blk cc;
+            }
+        }
+        break :blk "DateTime";
+    };
+    const obj = try ctx.createObject(class_name);
 
     // handle the most common format Carbon uses: "U.u" (unix timestamp with microseconds)
     if (std.mem.eql(u8, format, "U.u") or std.mem.eql(u8, format, "U")) {
@@ -561,6 +598,45 @@ fn dtCreateFromFormat(ctx: *NativeContext, args: []const Value) RuntimeError!Val
     return .{ .object = obj };
 }
 
+fn dtiCreateFromFormat(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len < 2 or args[0] != .string or args[1] != .string) return .{ .bool = false };
+    const format = args[0].string;
+    const datetime = args[1].string;
+
+    const class_name = blk: {
+        var fi: usize = ctx.vm.frame_count;
+        while (fi > 0) {
+            fi -= 1;
+            if (ctx.vm.frames[fi].called_class) |cc| {
+                if (ctx.vm.classes.contains(cc)) break :blk cc;
+            }
+        }
+        break :blk "DateTimeImmutable";
+    };
+    const obj = try ctx.createObject(class_name);
+
+    if (std.mem.eql(u8, format, "U.u") or std.mem.eql(u8, format, "U")) {
+        var ts: i64 = 0;
+        var neg = false;
+        var i: usize = 0;
+        if (i < datetime.len and datetime[i] == '-') { neg = true; i += 1; }
+        while (i < datetime.len and datetime[i] >= '0' and datetime[i] <= '9') : (i += 1) {
+            ts = ts * 10 + @as(i64, datetime[i] - '0');
+        }
+        if (neg) ts = -ts;
+        try obj.set(ctx.allocator, "timestamp", .{ .int = ts });
+        return .{ .object = obj };
+    }
+
+    const parsed = parseRelativeTime(datetime, std.time.timestamp());
+    if (parsed == .int) {
+        try obj.set(ctx.allocator, "timestamp", parsed);
+    } else {
+        try obj.set(ctx.allocator, "timestamp", .{ .int = std.time.timestamp() });
+    }
+    return .{ .object = obj };
+}
+
 fn dtiCreateFromTimestamp(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len == 0) return .null;
     const obj = try ctx.createObject("DateTimeImmutable");
@@ -577,6 +653,60 @@ fn dtSetMicrosecond(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
     // no-op since we don't store microseconds, return $this
     const obj = getThis(ctx) orelse return .null;
     return .{ .object = obj };
+}
+
+fn dtGetTimezone(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const obj = getThis(ctx) orelse return .null;
+    const tz_val = obj.get("__timezone");
+    const tz_name = if (tz_val == .string) tz_val.string else "UTC";
+    const tz_obj = try ctx.createObject("DateTimeZone");
+    try tz_obj.set(ctx.allocator, "timezone", .{ .string = tz_name });
+    return .{ .object = tz_obj };
+}
+
+fn dtSetTimezone(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    const obj = getThis(ctx) orelse return .null;
+    const tz_name = extractTimezoneName(args);
+    try obj.set(ctx.allocator, "__timezone", .{ .string = tz_name });
+    return .{ .object = obj };
+}
+
+fn dtiSetTimezone(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    const obj = getThis(ctx) orelse return .null;
+    const tz_name = extractTimezoneName(args);
+    const new_obj = try ctx.createObject("DateTimeImmutable");
+    const ts = obj.get("timestamp");
+    try new_obj.set(ctx.allocator, "timestamp", if (ts == .null) .{ .int = 0 } else ts);
+    try new_obj.set(ctx.allocator, "__timezone", .{ .string = tz_name });
+    return .{ .object = new_obj };
+}
+
+fn extractTimezoneName(args: []const Value) []const u8 {
+    if (args.len == 0) return "UTC";
+    if (args[0] == .string) return args[0].string;
+    if (args[0] == .object) {
+        const tz_val = args[0].object.get("timezone");
+        if (tz_val == .string) return tz_val.string;
+    }
+    return "UTC";
+}
+
+fn dtzConstruct(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    const obj = getThis(ctx) orelse return .null;
+    if (args.len >= 1 and args[0] == .string) {
+        try obj.set(ctx.allocator, "timezone", .{ .string = args[0].string });
+    }
+    return .null;
+}
+
+fn dtzGetName(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const obj = getThis(ctx) orelse return .{ .string = "UTC" };
+    const tz_val = obj.get("timezone");
+    return if (tz_val == .string) tz_val else .{ .string = "UTC" };
+}
+
+fn dtzGetOffset(_: *NativeContext, _: []const Value) RuntimeError!Value {
+    return .{ .int = 0 };
 }
 
 // standalone PHP functions: date(), mktime(), strtotime(), time(), microtime()

@@ -259,11 +259,13 @@ fn unserializeValue(ctx: *NativeContext, s: []const u8, pos: usize) !ParseResult
             p = count_end + 2;
 
             const obj = try ctx.createObject(class_name);
-            if (ctx.vm.classes.get(class_name)) |cls| {
-                if (cls.slot_layout) |layout| {
-                    obj.slots = try ctx.allocator.alloc(Value, layout.names.len);
-                    for (layout.defaults, 0..) |def, i| obj.slots.?[i] = def;
-                    obj.slot_layout = layout;
+            if (obj.slots == null) {
+                if (ctx.vm.classes.get(class_name)) |cls| {
+                    if (cls.slot_layout) |layout| {
+                        obj.slots = try ctx.allocator.alloc(Value, layout.names.len);
+                        for (layout.defaults, 0..) |def, i| obj.slots.?[i] = def;
+                        obj.slot_layout = layout;
+                    }
                 }
             }
 

@@ -51,6 +51,7 @@ pub const NativeContext = struct {
         const obj = try self.allocator.create(PhpObject);
         obj.* = .{ .class_name = class_name };
         try self.vm.objects.append(self.allocator, obj);
+        try self.vm.initObjectProperties(obj, class_name);
         return obj;
     }
 
@@ -237,7 +238,7 @@ pub const InterfaceDef = struct {
 };
 
 pub const VM = struct {
-    frames: [1024]CallFrame = undefined,
+    frames: [2048]CallFrame = undefined,
     frame_count: usize = 0,
     stack: [2048]Value = undefined,
     sp: usize = 0,
@@ -276,11 +277,12 @@ pub const VM = struct {
     autoload_callbacks: std.ArrayListUnmanaged(Value) = .{},
     autoload_depth: u8 = 0,
     magic_get_guard: std.ArrayListUnmanaged(struct { obj_ptr: usize, prop_name: []const u8 }) = .{},
+    magic_call_guard: std.ArrayListUnmanaged(struct { obj_ptr: usize, method_name: []const u8 }) = .{},
     user_error_handler: ?Value = null,
     prev_error_handler: ?Value = null,
     ob_stack: std.ArrayListUnmanaged(usize) = .{},
     request_vars: std.StringHashMapUnmanaged(Value) = .{},
-    exception_handlers: [512]ExceptionHandler = undefined,
+    exception_handlers: [1024]ExceptionHandler = undefined,
     handler_count: usize = 0,
     handler_floor: usize = 0,
     pending_exception: ?Value = null,
@@ -307,12 +309,12 @@ pub const VM = struct {
         fn_cache_name: []const u8 = "",
         fn_cache_func: ?*const ObjFunction = null,
         // per-frame sp save for inline call/ret in fastLoop
-        sp_save: [1024]usize = undefined,
+        sp_save: [2048]usize = undefined,
         // per-frame actual arg count for func_get_args
-        arg_counts: [1024]u8 = [_]u8{0xFF} ** 1024,
+        arg_counts: [2048]u8 = [_]u8{0xFF} ** 2048,
         // per-frame saved arg values for func_get_args (flat buffer indexed by frame)
-        fga_buf: [1024]Value = @splat(.null),
-        fga_offsets: [1024]u16 = @splat(0),
+        fga_buf: [2048]Value = @splat(.null),
+        fga_offsets: [2048]u16 = @splat(0),
         fga_sp: u16 = 0,
         // set before pushing a frame, consumed by executeFunction et al
         pending_arg_count: u8 = 0xFF,
@@ -580,6 +582,7 @@ pub const VM = struct {
         self.request_vars.deinit(self.allocator);
         self.autoload_callbacks.deinit(self.allocator);
         self.magic_get_guard.deinit(self.allocator);
+        self.magic_call_guard.deinit(self.allocator);
     }
 
     pub fn reset(self: *VM) void {
@@ -1944,7 +1947,7 @@ pub const VM = struct {
                                     }
 
                                     const return_frame = self.frame_count;
-                                    if (self.frame_count >= 1023) {
+                                    if (self.frame_count >= 2047) {
                                         self.error_msg = "Fatal error: maximum call stack depth exceeded";
                                         return error.RuntimeError;
                                     }
@@ -2855,14 +2858,33 @@ pub const VM = struct {
                     // look up method in class hierarchy
                     const full_name = self.resolveMethod(obj.class_name, method_name) catch {
                         if (self.hasMethod(obj.class_name, "__call")) {
-                            var args_arr = try self.allocator.create(PhpArray);
-                            args_arr.* = .{};
-                            try self.arrays.append(self.allocator, args_arr);
-                            for (0..ac) |i| try args_arr.append(self.allocator, self.stack[self.sp - ac + i]);
-                            self.sp -= ac + 1;
-                            const result = try self.callMethod(obj, "__call", &.{ .{ .string = method_name }, .{ .array = args_arr } });
-                            self.push(result);
-                            continue;
+                            const obj_id = @intFromPtr(obj);
+                            var in_call = false;
+                            var call_depth: usize = 0;
+                            for (self.magic_call_guard.items) |e| {
+                                if (e.obj_ptr == obj_id) {
+                                    call_depth += 1;
+                                    if (std.mem.eql(u8, e.method_name, method_name)) {
+                                        in_call = true;
+                                        break;
+                                    }
+                                }
+                            }
+                            if (!in_call and call_depth < 16) {
+                                try self.magic_call_guard.append(self.allocator, .{ .obj_ptr = obj_id, .method_name = method_name });
+                                var args_arr = try self.allocator.create(PhpArray);
+                                args_arr.* = .{};
+                                try self.arrays.append(self.allocator, args_arr);
+                                for (0..ac) |i| try args_arr.append(self.allocator, self.stack[self.sp - ac + i]);
+                                self.sp -= ac + 1;
+                                const result = self.callMethod(obj, "__call", &.{ .{ .string = method_name }, .{ .array = args_arr } }) catch |err| {
+                                    self.removeCallGuard(obj_id, method_name);
+                                    return err;
+                                };
+                                self.removeCallGuard(obj_id, method_name);
+                                self.push(result);
+                                continue;
+                            }
                         }
                         self.sp -= ac + 1;
                         const msg = std.fmt.allocPrint(self.allocator, "Call to undefined method {s}::{s}()", .{ obj.class_name, method_name }) catch "Call to undefined method";
@@ -3290,15 +3312,34 @@ pub const VM = struct {
                     // reuse method_call logic
                     const full_name = self.resolveMethod(obj.class_name, method_name) catch {
                         if (self.hasMethod(obj.class_name, "__call")) {
-                            var call_args_arr = try self.allocator.create(PhpArray);
-                            call_args_arr.* = .{};
-                            try self.arrays.append(self.allocator, call_args_arr);
-                            for (0..ac) |ai| try call_args_arr.append(self.allocator, self.stack[self.sp - ac + ai]);
-                            self.sp -= ac;
-                            self.sp -= 1;
-                            const result = try self.callMethod(obj, "__call", &.{ .{ .string = method_name }, .{ .array = call_args_arr } });
-                            self.push(result);
-                            continue;
+                            const obj_id = @intFromPtr(obj);
+                            var in_call = false;
+                            var call_depth: usize = 0;
+                            for (self.magic_call_guard.items) |e| {
+                                if (e.obj_ptr == obj_id) {
+                                    call_depth += 1;
+                                    if (std.mem.eql(u8, e.method_name, method_name)) {
+                                        in_call = true;
+                                        break;
+                                    }
+                                }
+                            }
+                            if (!in_call and call_depth < 16) {
+                                try self.magic_call_guard.append(self.allocator, .{ .obj_ptr = obj_id, .method_name = method_name });
+                                var call_args_arr = try self.allocator.create(PhpArray);
+                                call_args_arr.* = .{};
+                                try self.arrays.append(self.allocator, call_args_arr);
+                                for (0..ac) |ai| try call_args_arr.append(self.allocator, self.stack[self.sp - ac + ai]);
+                                self.sp -= ac;
+                                self.sp -= 1;
+                                const result = self.callMethod(obj, "__call", &.{ .{ .string = method_name }, .{ .array = call_args_arr } }) catch |err| {
+                                    self.removeCallGuard(obj_id, method_name);
+                                    return err;
+                                };
+                                self.removeCallGuard(obj_id, method_name);
+                                self.push(result);
+                                continue;
+                            }
                         }
                         self.sp -= ac + 1;
                         self.error_msg = std.fmt.allocPrint(self.allocator, "Fatal error: Uncaught Error: Call to undefined method {s}::{s}()", .{ obj.class_name, method_name }) catch null;
@@ -3419,14 +3460,15 @@ pub const VM = struct {
                     if (std.mem.eql(u8, class_name, "static")) {
                         class_name = self.resolveStaticClassName(class_name);
                     } else if (std.mem.eql(u8, class_name, "parent") or std.mem.eql(u8, class_name, "self")) {
-                        const defining_class = self.currentDefiningClass();
                         if (std.mem.eql(u8, class_name, "parent")) {
+                            const defining_class = self.currentFrame().called_class orelse self.currentDefiningClass();
                             if (defining_class) |dc| {
                                 if (self.classes.get(dc)) |cls| {
                                     if (cls.parent) |p| class_name = p;
                                 }
                             }
                         } else {
+                            const defining_class = self.currentFrame().called_class orelse self.currentDefiningClass();
                             if (defining_class) |dc| class_name = dc;
                         }
                     }
@@ -3442,8 +3484,7 @@ pub const VM = struct {
                             const cs_name = try self.resolveMethod(class_name, "__callStatic");
                             self.push(.{ .string = method_name });
                             self.push(.{ .array = args_arr });
-                            try self.callNamedFunction(cs_name, 2);
-                            self.frames[self.frame_count - 1].called_class = class_name;
+                            try self.callStaticFunction(cs_name, 2, class_name);
                             continue;
                         }
                         const msg = std.fmt.allocPrint(self.allocator, "Call to undefined method {s}::{s}()", .{ class_name, method_name }) catch "Call to undefined method";
@@ -3458,14 +3499,22 @@ pub const VM = struct {
                         if (tv == .object) {
                             if (self.functions.get(full_name)) |func| {
                                 if (func.is_generator) {
-                                    try self.callNamedFunction(full_name, arg_count);
-                                    self.frames[self.frame_count - 1].called_class = class_name;
+                                    try self.callStaticFunction(full_name, arg_count, class_name);
                                 } else {
                                 const ac: usize = arg_count;
                                 var new_vars: std.StringHashMapUnmanaged(Value) = .{};
                                 try new_vars.put(self.allocator, "$this", tv);
                                 for (0..@min(ac, func.arity)) |i| {
                                     try new_vars.put(self.allocator, func.params[i], self.stack[self.sp - ac + i]);
+                                }
+                                if (self.frame_count >= 2047) {
+                                    self.sp -= ac;
+                                    new_vars.deinit(self.allocator);
+                                    const msg = std.fmt.allocPrint(self.allocator, "Fatal error: maximum call stack depth exceeded in {s}::{s}()", .{ class_name, method_name }) catch "Fatal error: maximum call stack depth exceeded";
+                                    try self.strings.append(self.allocator, msg);
+                                    if (try self.throwBuiltinException("Error", msg)) continue;
+                                    self.error_msg = msg;
+                                    return error.RuntimeError;
                                 }
                                 self.saveFrameArgs(arg_count);
                                 self.sp -= ac;
@@ -3481,7 +3530,7 @@ pub const VM = struct {
                                 self.sp -= ac;
                                 var tmp_vars: std.StringHashMapUnmanaged(Value) = .{};
                                 try tmp_vars.put(self.allocator, "$this", tv);
-                                self.frames[self.frame_count] = .{ .chunk = self.currentChunk(), .ip = self.currentFrame().ip, .vars = tmp_vars };
+                                self.frames[self.frame_count] = .{ .chunk = self.currentChunk(), .ip = self.currentFrame().ip, .vars = tmp_vars, .called_class = class_name };
                                 const sc_saved_fc = self.frame_count;
                                 self.frame_count += 1;
                                 var ctx = self.makeContext(null);
@@ -3521,12 +3570,10 @@ pub const VM = struct {
                                 return error.RuntimeError;
                             }
                         } else {
-                            try self.callNamedFunction(full_name, arg_count);
-                            self.frames[self.frame_count - 1].called_class = class_name;
+                            try self.callStaticFunction(full_name, arg_count, class_name);
                         }
                     } else {
-                        try self.callNamedFunction(full_name, arg_count);
-                        self.frames[self.frame_count - 1].called_class = class_name;
+                        try self.callStaticFunction(full_name, arg_count, class_name);
                     }
                 },
 
@@ -3545,14 +3592,18 @@ pub const VM = struct {
 
                     const this_val = self.currentFrame().vars.get("$this");
                     if (std.mem.eql(u8, class_name, "parent") or std.mem.eql(u8, class_name, "self")) {
-                        const defining_class = self.currentDefiningClass();
                         if (std.mem.eql(u8, class_name, "parent")) {
+                            // parent:: always uses the defining class - the class
+                            // where the code is written, not the called class
+                            const defining_class = self.currentDefiningClass();
                             if (defining_class) |dc| {
                                 if (self.classes.get(dc)) |cls| {
                                     if (cls.parent) |p| class_name = p;
                                 }
                             }
                         } else {
+                            // self:: prefers called_class for trait disambiguation
+                            const defining_class = self.currentFrame().called_class orelse self.currentDefiningClass();
                             if (defining_class) |dc| class_name = dc;
                         }
                     }
@@ -3562,8 +3613,7 @@ pub const VM = struct {
                             const cs_name = try self.resolveMethod(class_name, "__callStatic");
                             self.push(.{ .string = method_name });
                             self.push(.{ .array = arr });
-                            try self.callNamedFunction(cs_name, 2);
-                            self.frames[self.frame_count - 1].called_class = class_name;
+                            try self.callStaticFunction(cs_name, 2, class_name);
                             continue;
                         }
                         self.error_msg = std.fmt.allocPrint(self.allocator, "Fatal error: Uncaught Error: Call to undefined method {s}::{s}()", .{ class_name, method_name }) catch null;
@@ -3575,8 +3625,7 @@ pub const VM = struct {
                         if (tv == .object) {
                             if (self.functions.get(full_name)) |func| {
                                 if (func.is_generator) {
-                                    try self.callNamedFunction(full_name, @intCast(ac));
-                                    self.frames[self.frame_count - 1].called_class = class_name;
+                                    try self.callStaticFunction(full_name, @intCast(ac), class_name);
                                 } else {
                                 var new_vars: std.StringHashMapUnmanaged(Value) = .{};
                                 try new_vars.put(self.allocator, "$this", tv);
@@ -3641,8 +3690,7 @@ pub const VM = struct {
                             const cs_name = try self.resolveMethod(class_name, "__callStatic");
                             self.push(.{ .string = method_name });
                             self.push(.{ .array = args_arr });
-                            try self.callNamedFunction(cs_name, 2);
-                            self.frames[self.frame_count - 1].called_class = class_name;
+                            try self.callStaticFunction(cs_name, 2, class_name);
                             continue;
                         }
                         const msg = std.fmt.allocPrint(self.allocator, "Call to undefined method {s}::{s}()", .{ class_name, method_name }) catch "Call to undefined method";
@@ -3657,8 +3705,7 @@ pub const VM = struct {
                         self.stack[self.sp - ac - 1 + i] = self.stack[self.sp - ac + i];
                     }
                     self.sp -= 1;
-                    try self.callNamedFunction(full_name, arg_count);
-                    self.frames[self.frame_count - 1].called_class = class_name;
+                    try self.callStaticFunction(full_name, arg_count, class_name);
                 },
 
                 .static_call_dyn_method => {
@@ -3668,14 +3715,18 @@ pub const VM = struct {
                     if (std.mem.eql(u8, class_name, "static")) {
                         class_name = self.resolveStaticClassName(class_name);
                     } else if (std.mem.eql(u8, class_name, "parent") or std.mem.eql(u8, class_name, "self")) {
-                        const defining_class = self.currentDefiningClass();
                         if (std.mem.eql(u8, class_name, "parent")) {
+                            // parent:: always uses the defining class - the class
+                            // where the code is written, not the called class
+                            const defining_class = self.currentDefiningClass();
                             if (defining_class) |dc| {
                                 if (self.classes.get(dc)) |cls| {
                                     if (cls.parent) |p| class_name = p;
                                 }
                             }
                         } else {
+                            // self:: prefers called_class for trait disambiguation
+                            const defining_class = self.currentFrame().called_class orelse self.currentDefiningClass();
                             if (defining_class) |dc| class_name = dc;
                         }
                     }
@@ -3698,8 +3749,7 @@ pub const VM = struct {
                             const cs_name = try self.resolveMethod(class_name, "__callStatic");
                             self.push(.{ .string = method_name });
                             self.push(.{ .array = args_arr });
-                            try self.callNamedFunction(cs_name, 2);
-                            self.frames[self.frame_count - 1].called_class = class_name;
+                            try self.callStaticFunction(cs_name, 2, class_name);
                             continue;
                         }
                         const msg = std.fmt.allocPrint(self.allocator, "Call to undefined method {s}::{s}()", .{ class_name, method_name }) catch "Call to undefined method";
@@ -3713,8 +3763,7 @@ pub const VM = struct {
                         self.stack[self.sp - ac - 1 + i] = self.stack[self.sp - ac + i];
                     }
                     self.sp -= 1;
-                    try self.callNamedFunction(full_name, arg_count);
-                    self.frames[self.frame_count - 1].called_class = class_name;
+                    try self.callStaticFunction(full_name, arg_count, class_name);
                 },
 
                 .static_call_dyn_both => {
@@ -3733,14 +3782,18 @@ pub const VM = struct {
                     if (std.mem.eql(u8, class_name, "static")) {
                         class_name = self.resolveStaticClassName(class_name);
                     } else if (std.mem.eql(u8, class_name, "parent") or std.mem.eql(u8, class_name, "self")) {
-                        const defining_class = self.currentDefiningClass();
                         if (std.mem.eql(u8, class_name, "parent")) {
+                            // parent:: always uses the defining class - the class
+                            // where the code is written, not the called class
+                            const defining_class = self.currentDefiningClass();
                             if (defining_class) |dc| {
                                 if (self.classes.get(dc)) |cls| {
                                     if (cls.parent) |p| class_name = p;
                                 }
                             }
                         } else {
+                            // self:: prefers called_class for trait disambiguation
+                            const defining_class = self.currentFrame().called_class orelse self.currentDefiningClass();
                             if (defining_class) |dc| class_name = dc;
                         }
                     }
@@ -3757,8 +3810,7 @@ pub const VM = struct {
                             const cs_name = try self.resolveMethod(class_name, "__callStatic");
                             self.push(.{ .string = method_name });
                             self.push(.{ .array = args_arr });
-                            try self.callNamedFunction(cs_name, 2);
-                            self.frames[self.frame_count - 1].called_class = class_name;
+                            try self.callStaticFunction(cs_name, 2, class_name);
                             continue;
                         }
                         const msg = std.fmt.allocPrint(self.allocator, "Call to undefined method {s}::{s}()", .{ class_name, method_name }) catch "Call to undefined method";
@@ -3773,8 +3825,7 @@ pub const VM = struct {
                         self.stack[self.sp - ac - 2 + i] = self.stack[self.sp - ac + i];
                     }
                     self.sp -= 2;
-                    try self.callNamedFunction(full_name, arg_count);
-                    self.frames[self.frame_count - 1].called_class = class_name;
+                    try self.callStaticFunction(full_name, arg_count, class_name);
                 },
 
                 .static_call_dyn_both_spread => {
@@ -3802,8 +3853,7 @@ pub const VM = struct {
                             const cs_name = try self.resolveMethod(class_name, "__callStatic");
                             self.push(.{ .string = method_name });
                             self.push(args_val);
-                            try self.callNamedFunction(cs_name, 2);
-                            self.frames[self.frame_count - 1].called_class = class_name;
+                            try self.callStaticFunction(cs_name, 2, class_name);
                             continue;
                         }
                         const msg = std.fmt.allocPrint(self.allocator, "Call to undefined method {s}::{s}()", .{ class_name, method_name }) catch "Call to undefined method";
@@ -3814,8 +3864,7 @@ pub const VM = struct {
                     };
                     for (arr.entries.items) |entry| self.push(entry.value);
                     const ac: u8 = @intCast(arr.entries.items.len);
-                    try self.callNamedFunction(full_name, ac);
-                    self.frames[self.frame_count - 1].called_class = class_name;
+                    try self.callStaticFunction(full_name, ac, class_name);
                 },
 
                 .get_static_prop => {
@@ -4906,7 +4955,7 @@ pub const VM = struct {
     }
 
     fn executeFunctionLocalsOnly(self: *VM, func: *const ObjFunction, args: []const Value) RuntimeError!Value {
-        if (self.frame_count >= 1023) {
+        if (self.frame_count >= 2047) {
             self.error_msg = "Fatal error: maximum call stack depth exceeded";
             return error.RuntimeError;
         }
@@ -5277,13 +5326,21 @@ pub const VM = struct {
                             if (best == null) best = class_part;
                             continue;
                         }
-                        // if we have $this, prefer the class that matches $this
-                        // or is in $this's inheritance chain
                         if (this_class) |tc| {
-                            if (std.mem.eql(u8, class_part, tc) or self.isInstanceOf(tc, class_part))
+                            if (std.mem.eql(u8, class_part, tc))
                                 return class_part;
-                            // non-trait but doesn't match $this - keep looking
-                            if (best == null) best = class_part;
+                            if (self.isInstanceOf(tc, class_part)) {
+                                if (best) |b| {
+                                    // always prefer a non-trait class over a trait
+                                    if (self.traits.contains(b)) {
+                                        best = class_part;
+                                    } else if (self.isInstanceOf(b, class_part)) {
+                                        best = class_part;
+                                    }
+                                } else best = class_part;
+                            } else if (best == null) {
+                                best = class_part;
+                            }
                         } else {
                             return class_part;
                         }
@@ -5545,7 +5602,7 @@ pub const VM = struct {
     }
 
     fn executeFunction(self: *VM, func: *const ObjFunction, vars: std.StringHashMapUnmanaged(Value)) RuntimeError!Value {
-        if (self.frame_count >= 1023) {
+        if (self.frame_count >= 2047) {
             self.error_msg = "Fatal error: maximum call stack depth exceeded";
             return error.RuntimeError;
         }
@@ -5567,7 +5624,7 @@ pub const VM = struct {
     }
 
     pub fn executeFunctionWithRefs(self: *VM, func: *const ObjFunction, vars: std.StringHashMapUnmanaged(Value), ref_slots: std.StringHashMapUnmanaged(*Value)) RuntimeError!Value {
-        if (self.frame_count >= 1023) {
+        if (self.frame_count >= 2047) {
             self.error_msg = "Fatal error: maximum call stack depth exceeded";
             return error.RuntimeError;
         }
@@ -5694,6 +5751,13 @@ pub const VM = struct {
         return false;
     }
 
+    fn callStaticFunction(self: *VM, name: []const u8, arg_count: u8, class_name: []const u8) RuntimeError!void {
+        const fc_before = self.frame_count;
+        try self.callNamedFunction(name, arg_count);
+        if (self.frame_count > fc_before)
+            self.frames[self.frame_count - 1].called_class = class_name;
+    }
+
     fn callNamedFunction(self: *VM, name: []const u8, arg_count: u8) RuntimeError!void {
         if (self.native_fns.get(name)) |native| {
             var args: [64]Value = undefined;
@@ -5818,7 +5882,7 @@ pub const VM = struct {
     }
 
     pub fn callMethod(self: *VM, obj: *PhpObject, method_name: []const u8, args: []const Value) RuntimeError!Value {
-        if (self.frame_count >= 1023) {
+        if (self.frame_count >= 2047) {
             self.error_msg = "Fatal error: maximum call stack depth exceeded";
             return error.RuntimeError;
         }
@@ -5864,6 +5928,17 @@ pub const VM = struct {
             i -= 1;
             if (self.magic_get_guard.items[i].obj_ptr == obj_id and std.mem.eql(u8, self.magic_get_guard.items[i].prop_name, prop_name)) {
                 _ = self.magic_get_guard.swapRemove(i);
+                return;
+            }
+        }
+    }
+
+    fn removeCallGuard(self: *VM, obj_id: usize, method_name: []const u8) void {
+        var i: usize = self.magic_call_guard.items.len;
+        while (i > 0) {
+            i -= 1;
+            if (self.magic_call_guard.items[i].obj_ptr == obj_id and std.mem.eql(u8, self.magic_call_guard.items[i].method_name, method_name)) {
+                _ = self.magic_call_guard.swapRemove(i);
                 return;
             }
         }
@@ -6160,6 +6235,7 @@ pub const VM = struct {
 
     fn saveFrameArgs(self: *VM, arg_count: u8) void {
         const ic = self.ic orelse return;
+        if (self.frame_count >= 2048) return;
         const ac: usize = arg_count;
         if (ac == 0) {
             ic.fga_offsets[self.frame_count] = ic.fga_sp;
