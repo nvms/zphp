@@ -281,6 +281,7 @@ pub const VM = struct {
     handler_count: usize = 0,
     handler_floor: usize = 0,
     pending_exception: ?Value = null,
+    exception_dispatched: bool = false,
     run_base_frame: usize = 0,
     allocator: Allocator,
     global_slot_names: []const []const u8 = &.{},
@@ -648,11 +649,9 @@ pub const VM = struct {
     fn runUntilFrame(self: *VM, base_frame: usize) RuntimeError!void {
         if (self.frame_count <= base_frame) return;
         self.runLoop(base_frame) catch {
-            // if throw set pending_exception because the handler was in an outer runLoop,
-            // try to dispatch it now that we're returning to the caller's context
             if (self.pending_exception != null) {
                 if (self.dispatchPendingException(self.run_base_frame)) {
-                    // dispatched - let outer runLoop continue from catch_ip
+                    self.exception_dispatched = true;
                     return;
                 }
             }
@@ -2242,9 +2241,12 @@ pub const VM = struct {
                                 try self.fastLoop();
                                 const ctor_frame = &self.frames[self.frame_count - 1];
                                 if (ctor_frame.chunk == &func.chunk) {
-                                    // fastLoop bailed, finish in runLoop
                                     const ctor_base = self.frame_count - 1;
                                     try self.runUntilFrame(ctor_base);
+                                    if (self.exception_dispatched) {
+                                        self.exception_dispatched = false;
+                                        continue;
+                                    }
                                 }
                                 _ = self.pop();
                             } else {
@@ -2262,6 +2264,10 @@ pub const VM = struct {
                                 self.frame_count += 1;
                                 const ctor_base = self.frame_count - 1;
                                 try self.runUntilFrame(ctor_base);
+                                if (self.exception_dispatched) {
+                                    self.exception_dispatched = false;
+                                    continue;
+                                }
                                 _ = self.pop();
                             }
                         } else {
@@ -2351,6 +2357,10 @@ pub const VM = struct {
                             self.frame_count += 1;
                             const ctor_base = self.frame_count - 1;
                             try self.runUntilFrame(ctor_base);
+                            if (self.exception_dispatched) {
+                                self.exception_dispatched = false;
+                                continue;
+                            }
                             _ = self.pop();
                         } else {
                             self.sp -= ac + 1;
@@ -2789,7 +2799,10 @@ pub const VM = struct {
                             continue;
                         }
                         self.sp -= ac + 1;
-                        self.error_msg = std.fmt.allocPrint(self.allocator, "Fatal error: Uncaught Error: Call to undefined method {s}::{s}()", .{ obj.class_name, method_name }) catch null;
+                        const msg = std.fmt.allocPrint(self.allocator, "Call to undefined method {s}::{s}()", .{ obj.class_name, method_name }) catch "Call to undefined method";
+                        try self.strings.append(self.allocator, msg);
+                        if (try self.throwBuiltinException("Error", msg)) continue;
+                        self.error_msg = std.fmt.allocPrint(self.allocator, "Fatal error: Uncaught Error: {s}", .{msg}) catch null;
                         return error.RuntimeError;
                     };
                     if (self.native_fns.get(full_name)) |native| {
@@ -3367,7 +3380,10 @@ pub const VM = struct {
                             self.frames[self.frame_count - 1].called_class = class_name;
                             continue;
                         }
-                        self.error_msg = std.fmt.allocPrint(self.allocator, "Fatal error: Uncaught Error: Call to undefined method {s}::{s}()", .{ class_name, method_name }) catch null;
+                        const msg = std.fmt.allocPrint(self.allocator, "Call to undefined method {s}::{s}()", .{ class_name, method_name }) catch "Call to undefined method";
+                        try self.strings.append(self.allocator, msg);
+                        if (try self.throwBuiltinException("Error", msg)) continue;
+                        self.error_msg = std.fmt.allocPrint(self.allocator, "Fatal error: Uncaught Error: {s}", .{msg}) catch null;
                         return error.RuntimeError;
                     };
 
@@ -3432,7 +3448,10 @@ pub const VM = struct {
                                 self.frames[self.frame_count].vars.deinit(self.allocator);
                                 self.push(result);
                             } else {
-                                self.error_msg = std.fmt.allocPrint(self.allocator, "Fatal error: Uncaught Error: Call to undefined method {s}::{s}()", .{ class_name, method_name }) catch null;
+                                const msg = std.fmt.allocPrint(self.allocator, "Call to undefined method {s}::{s}()", .{ class_name, method_name }) catch "Call to undefined method";
+                                try self.strings.append(self.allocator, msg);
+                                if (try self.throwBuiltinException("Error", msg)) continue;
+                                self.error_msg = std.fmt.allocPrint(self.allocator, "Fatal error: Uncaught Error: {s}", .{msg}) catch null;
                                 return error.RuntimeError;
                             }
                         } else {
@@ -3535,11 +3554,14 @@ pub const VM = struct {
                     const method_name = self.currentChunk().constants.items[method_idx].string;
                     const ac: usize = arg_count;
                     const class_val = self.stack[self.sp - ac - 1];
-                    if (class_val != .string) {
+                    const class_name = if (class_val == .string)
+                        class_val.string
+                    else if (class_val == .object)
+                        class_val.object.class_name
+                    else {
                         self.error_msg = std.fmt.allocPrint(self.allocator, "Fatal error: Uncaught TypeError: {s}::method() requires a class name string", .{method_name}) catch null;
                         return error.RuntimeError;
-                    }
-                    const class_name = class_val.string;
+                    };
                     if (!self.classes.contains(class_name)) {
                         try self.tryAutoload(class_name);
                     }
@@ -3557,7 +3579,10 @@ pub const VM = struct {
                             self.frames[self.frame_count - 1].called_class = class_name;
                             continue;
                         }
-                        self.error_msg = std.fmt.allocPrint(self.allocator, "Fatal error: Uncaught Error: Call to undefined method {s}::{s}()", .{ class_name, method_name }) catch null;
+                        const msg = std.fmt.allocPrint(self.allocator, "Call to undefined method {s}::{s}()", .{ class_name, method_name }) catch "Call to undefined method";
+                        try self.strings.append(self.allocator, msg);
+                        if (try self.throwBuiltinException("Error", msg)) continue;
+                        self.error_msg = std.fmt.allocPrint(self.allocator, "Fatal error: Uncaught Error: {s}", .{msg}) catch null;
                         return error.RuntimeError;
                     };
                     // remove class name from stack (shift args down)
@@ -5441,7 +5466,10 @@ pub const VM = struct {
         } else if (self.functions.get(name)) |func| {
             const ac: usize = arg_count;
             if (ac < func.required_params) {
-                self.error_msg = std.fmt.allocPrint(self.allocator, "Fatal error: Too few arguments to function {s}(), {d} passed, {d} required\n", .{ name, ac, func.required_params }) catch null;
+                const msg = std.fmt.allocPrint(self.allocator, "Too few arguments to function {s}(), {d} passed, {d} required", .{ name, ac, func.required_params }) catch "Too few arguments";
+                try self.strings.append(self.allocator, msg);
+                if (try self.throwBuiltinException("ArgumentCountError", msg)) return;
+                self.error_msg = std.fmt.allocPrint(self.allocator, "Fatal error: Uncaught ArgumentCountError: {s}\n", .{msg}) catch null;
                 return error.RuntimeError;
             }
             if (g_type_info.count() > 0) {
@@ -5523,7 +5551,10 @@ pub const VM = struct {
                 const base = name[pos + 1 ..];
                 if (base.len > 0) return self.callNamedFunction(base, arg_count);
             }
-            self.error_msg = std.fmt.allocPrint(self.allocator, "Fatal error: Uncaught Error: Call to undefined function {s}()\n", .{name}) catch null;
+            const msg = std.fmt.allocPrint(self.allocator, "Call to undefined function {s}()", .{name}) catch "Call to undefined function";
+            try self.strings.append(self.allocator, msg);
+            if (try self.throwBuiltinException("Error", msg)) return;
+            self.error_msg = std.fmt.allocPrint(self.allocator, "Fatal error: Uncaught Error: {s}\n", .{msg}) catch null;
             return error.RuntimeError;
         }
     }

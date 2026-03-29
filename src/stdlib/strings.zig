@@ -114,7 +114,7 @@ fn substr(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (start >= slen) return .{ .string = "" };
     const ustart: usize = @intCast(start);
 
-    if (args.len >= 3) {
+    if (args.len >= 3 and args[2] != .null) {
         var length = Value.toInt(args[2]);
         if (length < 0) {
             length = @max(0, slen - @as(i64, @intCast(ustart)) + length);
@@ -1357,7 +1357,7 @@ fn native_mb_substr(ctx: *NativeContext, args: []const Value) RuntimeError!Value
     if (start < 0) start = @max(0, char_count + start);
     if (start >= char_count) return .{ .string = "" };
 
-    var length = if (args.len >= 3) Value.toInt(args[2]) else char_count - start;
+    var length = if (args.len >= 3 and args[2] != .null) Value.toInt(args[2]) else char_count - start;
     if (length < 0) length = @max(0, char_count - start + length);
     if (length <= 0) return .{ .string = "" };
 
