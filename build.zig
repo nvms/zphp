@@ -39,6 +39,7 @@ pub fn build(b: *std.Build) void {
         .name = "zphp",
         .root_module = exe_mod,
     });
+    exe.stack_size = 64 * 1024 * 1024;
     b.installArtifact(exe);
 
     const run_cmd = b.addRunArtifact(exe);
@@ -75,6 +76,7 @@ pub fn build(b: *std.Build) void {
     const unit_tests = b.addTest(.{
         .root_module = test_mod,
     });
+    unit_tests.stack_size = 64 * 1024 * 1024;
 
     const run_unit_tests = b.addRunArtifact(unit_tests);
     const test_step = b.step("test", "Run unit tests");

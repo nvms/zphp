@@ -249,17 +249,20 @@ fn runBytecode(allocator: std.mem.Allocator, bc: []const u8) !void {
 }
 
 fn runWithVM(allocator: std.mem.Allocator, result: *CompileResult) !void {
-    var vm = VM.init(allocator) catch {
+    const vm = VM.initOnHeap(allocator) catch {
         try writeStderr("vm init error\n");
         std.process.exit(1);
     };
-    defer vm.deinit();
+    defer {
+        vm.deinit();
+        allocator.destroy(vm);
+    }
     vm.file_loader = &loadFile;
-    try initCliServerVars(&vm, allocator);
+    try initCliServerVars(vm, allocator);
     vm.interpret(result) catch {
         if (vm.output.items.len > 0) try writeStdout(vm.output.items);
         if (vm.exit_requested) std.process.exit(0);
-        const msg = error_format.formatRuntimeError(allocator, &vm);
+        const msg = error_format.formatRuntimeError(allocator, vm);
         if (msg.len > 0) {
             try writeStderr(msg);
         } else {

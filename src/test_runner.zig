@@ -109,11 +109,11 @@ fn runTestFile(allocator: Allocator, path: []const u8) TestResult {
     if (test_fns.items.len == 0) {
         // no test_ functions - run the whole file as a single test
         tui.step("run", path);
-        var vm = VM.init(allocator) catch {
+        const vm = VM.initOnHeap(allocator) catch {
             result.failed = 1;
             return result;
         };
-        defer vm.deinit();
+        defer { vm.deinit(); allocator.destroy(vm); }
 
         vm.interpret(&compile_result) catch {
             printFail(path, if (vm.error_msg) |m| m else "runtime error");
@@ -128,8 +128,8 @@ fn runTestFile(allocator: Allocator, path: []const u8) TestResult {
     // run each test_ function individually
     tui.step("file", path);
     for (test_fns.items) |func| {
-        var vm = VM.init(allocator) catch continue;
-        defer vm.deinit();
+        const vm = VM.initOnHeap(allocator) catch continue;
+        defer { vm.deinit(); allocator.destroy(vm); }
 
         // register all functions from the compile result (without executing top-level code)
         for (compile_result.functions.items) |*f| {

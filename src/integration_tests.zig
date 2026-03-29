@@ -11,8 +11,8 @@ fn expectOutput(source: []const u8, expected: []const u8) !void {
     var result = try @import("pipeline/compiler.zig").compile(&ast, alloc);
     defer result.deinit();
 
-    var vm = try VM.init(alloc);
-    defer vm.deinit();
+    const vm = try VM.initOnHeap(alloc);
+    defer { vm.deinit(); alloc.destroy(vm); }
     vm.interpret(&result) catch |err| {
         if (!vm.exit_requested) return err;
     };

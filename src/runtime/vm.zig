@@ -371,23 +371,39 @@ pub const VM = struct {
     };
 
     pub fn init(allocator: Allocator) RuntimeError!VM {
+        return initInPlace(allocator);
+    }
+
+    pub fn initInPlace(allocator: Allocator) RuntimeError!VM {
         var vm = VM{ .allocator = allocator };
+        try initVm(&vm, allocator);
+        return vm;
+    }
+
+    pub fn initOnHeap(allocator: Allocator) RuntimeError!*VM {
+        const vm = try allocator.create(VM);
+        @memset(std.mem.asBytes(vm), 0);
+        vm.allocator = allocator;
+        try initVm(vm, allocator);
+        return vm;
+    }
+
+    fn initVm(vm: *VM, allocator: Allocator) RuntimeError!void {
         try @import("../stdlib/registry.zig").register(&vm.native_fns, allocator);
         try initConstants(&vm.php_constants, allocator);
-        try @import("../stdlib/exceptions.zig").register(&vm, allocator);
-        try @import("../stdlib/datetime.zig").register(&vm, allocator);
-        try @import("../stdlib/spl.zig").register(&vm, allocator);
-        try @import("../stdlib/spl_iterators.zig").register(&vm, allocator);
-        try @import("../stdlib/pdo.zig").register(&vm, allocator);
-        try @import("../stdlib/websocket.zig").register(&vm, allocator);
-        try @import("../stdlib/filesystem.zig").register(&vm, allocator);
-        try @import("../stdlib/reflection.zig").register(&vm, allocator);
+        try @import("../stdlib/exceptions.zig").register(vm, allocator);
+        try @import("../stdlib/datetime.zig").register(vm, allocator);
+        try @import("../stdlib/spl.zig").register(vm, allocator);
+        try @import("../stdlib/spl_iterators.zig").register(vm, allocator);
+        try @import("../stdlib/pdo.zig").register(vm, allocator);
+        try @import("../stdlib/websocket.zig").register(vm, allocator);
+        try @import("../stdlib/filesystem.zig").register(vm, allocator);
+        try @import("../stdlib/reflection.zig").register(vm, allocator);
         vm.ic = try allocator.create(InlineCache);
         vm.ic.?.* = .{};
         const locals_buf = try allocator.alloc(Value, 8192);
         vm.ic.?.locals_buf = locals_buf.ptr;
         vm.ic.?.locals_cap = 8192;
-        return vm;
     }
 
     fn initConstants(c: *std.StringHashMapUnmanaged(Value), a: Allocator) !void {
