@@ -6141,14 +6141,27 @@ pub const VM = struct {
                 }
             }
         }
+        const base_handler = self.handler_count;
+        const prev_floor = self.handler_floor;
+        self.handler_floor = self.handler_count;
         self.frames[self.frame_count] = .{ .chunk = &func.chunk, .ip = 0, .vars = .{}, .locals = locals, .func = func, .called_class = self.closureScopeByName(name) orelse self.currentFrame().called_class };
         self.consumePendingArgCount();
         self.frame_count += 1;
-        try self.fastLoop();
+        self.fastLoop() catch |err| {
+            self.handler_count = base_handler;
+            self.handler_floor = prev_floor;
+            return err;
+        };
         const fl_frame = &self.frames[self.frame_count - 1];
         if (fl_frame.chunk == &func.chunk) {
-            try self.runUntilFrame(base_frame);
+            self.runUntilFrame(base_frame) catch |err| {
+                self.handler_count = base_handler;
+                self.handler_floor = prev_floor;
+                return err;
+            };
         }
+        self.handler_count = base_handler;
+        self.handler_floor = prev_floor;
         return self.pop();
     }
 
