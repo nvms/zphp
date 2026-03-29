@@ -273,7 +273,9 @@ fn hasInterfaceMethod(vm: *VM, iface_name: []const u8, method_name: []const u8) 
     const key = std.fmt.bufPrint(&buf, "{s}::{s}", .{ iface_name, method_name }) catch return false;
     if (vm.functions.get(key) != null or vm.native_fns.get(key) != null) return true;
     const iface = vm.interfaces.get(iface_name) orelse return false;
-    _ = iface;
+    for (iface.methods.items) |m| {
+        if (std.mem.eql(u8, m, method_name)) return true;
+    }
     return false;
 }
 

@@ -420,6 +420,10 @@ pub fn compileClassDecl(self: *Compiler, node: Ast.Node) Error!void {
     const class_name = self.resolveClassName(self.ast.tokenSlice(node.main_token));
     const members = self.ast.extraSlice(node.data.lhs);
 
+    const prev_class = self.current_class;
+    self.current_class = class_name;
+    defer self.current_class = prev_class;
+
     // decode rhs: {parent_node, implements_count, impl_nodes...}
     const rhs_base = node.data.rhs;
     const parent_node = self.ast.extra_data[rhs_base];
@@ -514,7 +518,8 @@ pub fn compileClassDecl(self: *Compiler, node: Ast.Node) Error!void {
                 try self.compileNode(member.data.lhs);
             }
         } else if (member.tag == .const_decl) {
-            try self.compileNode(member.data.lhs);
+            // push null placeholder - real values set after class_decl so self:: resolves
+            try self.emitOp(.op_null);
         }
     }
 
@@ -666,6 +671,21 @@ pub fn compileClassDecl(self: *Compiler, node: Ast.Node) Error!void {
             const alias = self.ast.tokenSlice(cr.node.data.rhs);
             const aidx = try self.addConstant(.{ .string = alias });
             try self.emitU16(aidx);
+        }
+    }
+
+    // set class constants after class_decl so self:: references resolve
+    const cname_idx = try self.addConstant(.{ .string = class_name });
+    for (members) |member_idx| {
+        const member = self.ast.nodes[member_idx];
+        if (member.tag == .const_decl) {
+            try self.compileNode(member.data.lhs);
+            const const_name = self.ast.tokenSlice(member.main_token);
+            const cprop_idx = try self.addConstant(.{ .string = const_name });
+            try self.emitOp(.set_static_prop);
+            try self.emitU16(cname_idx);
+            try self.emitU16(cprop_idx);
+            try self.emitOp(.pop);
         }
     }
 }
@@ -928,6 +948,10 @@ pub fn compileInterfaceDecl(self: *Compiler, node: Ast.Node) Error!void {
     const iface_name = self.resolveClassName(self.ast.tokenSlice(node.main_token));
     const members = self.ast.extraSlice(node.data.lhs);
 
+    const prev_class = self.current_class;
+    self.current_class = iface_name;
+    defer self.current_class = prev_class;
+
     var method_count: u16 = 0;
     var const_count: u8 = 0;
     for (members) |m| {
@@ -935,11 +959,11 @@ pub fn compileInterfaceDecl(self: *Compiler, node: Ast.Node) Error!void {
         if (self.ast.nodes[m].tag == .const_decl) const_count += 1;
     }
 
-    // compile const default values onto stack
+    // push null placeholders - real values set after interface_decl so self:: resolves
     for (members) |m| {
         const member = self.ast.nodes[m];
         if (member.tag == .const_decl) {
-            try self.compileNode(member.data.lhs);
+            try self.emitOp(.op_null);
         }
     }
 
@@ -958,12 +982,16 @@ pub fn compileInterfaceDecl(self: *Compiler, node: Ast.Node) Error!void {
     }
 
     if (node.data.rhs != 0) {
-        const ipnode = self.ast.nodes[node.data.rhs];
-        const parent_name = if (ipnode.tag == .qualified_name) try self.buildQualifiedString(self.ast.extraSlice(ipnode.data.lhs)) else self.resolveClassName(self.ast.tokenSlice(ipnode.main_token));
-        const pidx = try self.addConstant(.{ .string = parent_name });
-        try self.emitU16(pidx);
+        const parent_count = self.ast.extra_data[node.data.rhs];
+        try self.emitByte(@intCast(parent_count));
+        for (0..parent_count) |i| {
+            const pnode = self.ast.nodes[self.ast.extra_data[node.data.rhs + 1 + i]];
+            const parent_name = if (pnode.tag == .qualified_name) try self.buildQualifiedString(self.ast.extraSlice(pnode.data.lhs)) else self.resolveClassName(self.ast.tokenSlice(pnode.main_token));
+            const pidx = try self.addConstant(.{ .string = parent_name });
+            try self.emitU16(pidx);
+        }
     } else {
-        try self.emitU16(0xffff);
+        try self.emitByte(0);
     }
 
     try self.emitByte(const_count);
@@ -973,6 +1001,20 @@ pub fn compileInterfaceDecl(self: *Compiler, node: Ast.Node) Error!void {
             const cname = self.ast.tokenSlice(member.main_token);
             const cname_idx = try self.addConstant(.{ .string = cname });
             try self.emitU16(cname_idx);
+        }
+    }
+
+    // set interface constants after interface_decl so self:: references resolve
+    for (members) |m| {
+        const member = self.ast.nodes[m];
+        if (member.tag == .const_decl) {
+            try self.compileNode(member.data.lhs);
+            const cname = self.ast.tokenSlice(member.main_token);
+            const cprop_idx = try self.addConstant(.{ .string = cname });
+            try self.emitOp(.set_static_prop);
+            try self.emitU16(name_idx);
+            try self.emitU16(cprop_idx);
+            try self.emitOp(.pop);
         }
     }
 }

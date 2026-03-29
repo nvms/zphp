@@ -97,7 +97,7 @@ pub const OpCode = enum(u8) {
     static_call_spread, // u16: class name, u16: method name (args array on stack)
     static_call_dynamic, // u16: method name, u8: arg count (class name string on stack before args)
     static_call_dyn_method, // u16: class name, u8: arg count (method name string on stack below args)
-    interface_decl, // u16: name, u8: method count, then method_count * u16 method name, u16: parent (0xffff = none)
+    interface_decl, // u16: name, u16: method count, then method_count * u16 method name, u8: parent_count, then parent_count * u16 parent name, u8: const_count, then const_count * u16 const name
     trait_decl, // u16: name, u8: sub_trait_count, then sub_trait_count * u16 sub_trait_name
     enum_decl, // u16: enum name, u8: backed_type (0=none, 1=int, 2=string), u8: case_count, then case_count * (u16 name, u8 has_value), then method/implements like class_decl
     get_static_prop, // u16: class name, u16: property name

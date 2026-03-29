@@ -1050,8 +1050,14 @@ const Formatter = struct {
         self.write("interface ");
         self.write(self.ast.tokens[node.main_token].lexeme(self.source));
         if (node.data.rhs != 0) {
-            self.write(" extends ");
-            self.formatNode(node.data.rhs);
+            const parent_count = self.ast.extra_data[node.data.rhs];
+            if (parent_count > 0) {
+                self.write(" extends ");
+                for (0..parent_count) |i| {
+                    if (i > 0) self.write(", ");
+                    self.formatNode(self.ast.extra_data[node.data.rhs + 1 + i]);
+                }
+            }
         }
         self.write(" {");
         const methods = self.ast.extraSlice(node.data.lhs);

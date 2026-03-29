@@ -37,10 +37,13 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try dt_def.methods.put(a, "getTimestamp", .{ .name = "getTimestamp", .arity = 0 });
     try dt_def.methods.put(a, "setTimestamp", .{ .name = "setTimestamp", .arity = 1 });
     try dt_def.methods.put(a, "modify", .{ .name = "modify", .arity = 1 });
+    try dt_def.methods.put(a, "add", .{ .name = "add", .arity = 1 });
+    try dt_def.methods.put(a, "sub", .{ .name = "sub", .arity = 1 });
     try dt_def.methods.put(a, "diff", .{ .name = "diff", .arity = 1 });
     try dt_def.methods.put(a, "setDate", .{ .name = "setDate", .arity = 3 });
     try dt_def.methods.put(a, "setTime", .{ .name = "setTime", .arity = 2 });
     try dt_def.methods.put(a, "createFromTimestamp", .{ .name = "createFromTimestamp", .arity = 1, .is_static = true });
+    try dt_def.methods.put(a, "createFromFormat", .{ .name = "createFromFormat", .arity = 2, .is_static = true });
     try dt_def.methods.put(a, "getMicrosecond", .{ .name = "getMicrosecond", .arity = 0 });
     try dt_def.methods.put(a, "setMicrosecond", .{ .name = "setMicrosecond", .arity = 1 });
     try dt_def.methods.put(a, "getLastErrors", .{ .name = "getLastErrors", .arity = 0, .is_static = true });
@@ -51,10 +54,13 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try vm.native_fns.put(a, "DateTime::getTimestamp", dtGetTimestamp);
     try vm.native_fns.put(a, "DateTime::setTimestamp", dtSetTimestamp);
     try vm.native_fns.put(a, "DateTime::modify", dtModify);
+    try vm.native_fns.put(a, "DateTime::add", dtAdd);
+    try vm.native_fns.put(a, "DateTime::sub", dtSub);
     try vm.native_fns.put(a, "DateTime::diff", dtDiff);
     try vm.native_fns.put(a, "DateTime::setDate", dtSetDate);
     try vm.native_fns.put(a, "DateTime::setTime", dtSetTime);
     try vm.native_fns.put(a, "DateTime::createFromTimestamp", dtCreateFromTimestamp);
+    try vm.native_fns.put(a, "DateTime::createFromFormat", dtCreateFromFormat);
     try vm.native_fns.put(a, "DateTime::getMicrosecond", dtGetMicrosecond);
     try vm.native_fns.put(a, "DateTime::setMicrosecond", dtSetMicrosecond);
     try vm.native_fns.put(a, "DateTime::getLastErrors", dtGetLastErrors);
@@ -67,6 +73,8 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try dti_def.methods.put(a, "format", .{ .name = "format", .arity = 1 });
     try dti_def.methods.put(a, "getTimestamp", .{ .name = "getTimestamp", .arity = 0 });
     try dti_def.methods.put(a, "modify", .{ .name = "modify", .arity = 1 });
+    try dti_def.methods.put(a, "add", .{ .name = "add", .arity = 1 });
+    try dti_def.methods.put(a, "sub", .{ .name = "sub", .arity = 1 });
     try dti_def.methods.put(a, "diff", .{ .name = "diff", .arity = 1 });
     try dti_def.methods.put(a, "createFromTimestamp", .{ .name = "createFromTimestamp", .arity = 1, .is_static = true });
     try dti_def.methods.put(a, "getMicrosecond", .{ .name = "getMicrosecond", .arity = 0 });
@@ -77,6 +85,8 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try vm.native_fns.put(a, "DateTimeImmutable::format", dtFormat);
     try vm.native_fns.put(a, "DateTimeImmutable::getTimestamp", dtGetTimestamp);
     try vm.native_fns.put(a, "DateTimeImmutable::modify", dtiModify);
+    try vm.native_fns.put(a, "DateTimeImmutable::add", dtiAdd);
+    try vm.native_fns.put(a, "DateTimeImmutable::sub", dtiSub);
     try vm.native_fns.put(a, "DateTimeImmutable::diff", dtDiff);
     try vm.native_fns.put(a, "DateTimeImmutable::createFromTimestamp", dtiCreateFromTimestamp);
     try vm.native_fns.put(a, "DateTimeImmutable::getMicrosecond", dtGetMicrosecond);
@@ -407,6 +417,56 @@ fn dtiModify(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     return .{ .object = new_obj };
 }
 
+fn intervalToSeconds(interval: *PhpObject) i64 {
+    const y = Value.toInt(interval.get("y"));
+    const m = Value.toInt(interval.get("m"));
+    const d = Value.toInt(interval.get("d"));
+    const h = Value.toInt(interval.get("h"));
+    const i = Value.toInt(interval.get("i"));
+    const s = Value.toInt(interval.get("s"));
+    const invert = Value.toInt(interval.get("invert"));
+    const total = y * 365 * 86400 + m * 30 * 86400 + d * 86400 + h * 3600 + i * 60 + s;
+    return if (invert != 0) -total else total;
+}
+
+fn dtAdd(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    const obj = getThis(ctx) orelse return .null;
+    if (args.len == 0 or args[0] != .object) return .{ .object = obj };
+    const ts = getTimestamp(obj);
+    const delta = intervalToSeconds(args[0].object);
+    try obj.set(ctx.allocator, "timestamp", .{ .int = ts + delta });
+    return .{ .object = obj };
+}
+
+fn dtSub(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    const obj = getThis(ctx) orelse return .null;
+    if (args.len == 0 or args[0] != .object) return .{ .object = obj };
+    const ts = getTimestamp(obj);
+    const delta = intervalToSeconds(args[0].object);
+    try obj.set(ctx.allocator, "timestamp", .{ .int = ts - delta });
+    return .{ .object = obj };
+}
+
+fn dtiAdd(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    const obj = getThis(ctx) orelse return .null;
+    if (args.len == 0 or args[0] != .object) return .{ .object = obj };
+    const ts = getTimestamp(obj);
+    const delta = intervalToSeconds(args[0].object);
+    const new_obj = try ctx.createObject("DateTimeImmutable");
+    try new_obj.set(ctx.allocator, "timestamp", .{ .int = ts + delta });
+    return .{ .object = new_obj };
+}
+
+fn dtiSub(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    const obj = getThis(ctx) orelse return .null;
+    if (args.len == 0 or args[0] != .object) return .{ .object = obj };
+    const ts = getTimestamp(obj);
+    const delta = intervalToSeconds(args[0].object);
+    const new_obj = try ctx.createObject("DateTimeImmutable");
+    try new_obj.set(ctx.allocator, "timestamp", .{ .int = ts - delta });
+    return .{ .object = new_obj };
+}
+
 fn dtDiff(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     const obj = getThis(ctx) orelse return .null;
     if (args.len == 0 or args[0] != .object) return .null;
@@ -466,6 +526,38 @@ fn dtCreateFromTimestamp(ctx: *NativeContext, args: []const Value) RuntimeError!
     if (args.len == 0) return .null;
     const obj = try ctx.createObject("DateTime");
     try obj.set(ctx.allocator, "timestamp", .{ .int = Value.toInt(args[0]) });
+    return .{ .object = obj };
+}
+
+fn dtCreateFromFormat(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len < 2 or args[0] != .string or args[1] != .string) return .{ .bool = false };
+    const format = args[0].string;
+    const datetime = args[1].string;
+
+    const obj = try ctx.createObject("DateTime");
+
+    // handle the most common format Carbon uses: "U.u" (unix timestamp with microseconds)
+    if (std.mem.eql(u8, format, "U.u") or std.mem.eql(u8, format, "U")) {
+        // parse timestamp from string like "1234567890.123456" or "1234567890"
+        var ts: i64 = 0;
+        var neg = false;
+        var i: usize = 0;
+        if (i < datetime.len and datetime[i] == '-') { neg = true; i += 1; }
+        while (i < datetime.len and datetime[i] >= '0' and datetime[i] <= '9') : (i += 1) {
+            ts = ts * 10 + @as(i64, datetime[i] - '0');
+        }
+        if (neg) ts = -ts;
+        try obj.set(ctx.allocator, "timestamp", .{ .int = ts });
+        return .{ .object = obj };
+    }
+
+    // for other formats, try parsing the datetime string as a general date
+    const parsed = parseRelativeTime(datetime, std.time.timestamp());
+    if (parsed == .int) {
+        try obj.set(ctx.allocator, "timestamp", parsed);
+    } else {
+        try obj.set(ctx.allocator, "timestamp", .{ .int = std.time.timestamp() });
+    }
     return .{ .object = obj };
 }
 
@@ -1321,6 +1413,8 @@ fn diConstruct(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
         try obj.set(ctx.allocator, "s", .{ .int = dur.s });
         try obj.set(ctx.allocator, "f", .{ .float = dur.f });
     }
+    try obj.set(ctx.allocator, "invert", .{ .int = 0 });
+    try obj.set(ctx.allocator, "days", .{ .int = 0 });
     return .null;
 }
 

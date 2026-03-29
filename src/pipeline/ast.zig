@@ -115,7 +115,7 @@ pub const Ast = struct {
             class_property, // main_token = property variable, lhs = default value (0 = none)
             static_class_method, // same as class_method but static
             static_class_property, // same as class_property but static
-            interface_decl, // main_token = interface name, lhs = extra index -> {count, method_nodes...}, rhs = parent interface node (0 = none)
+            interface_decl, // main_token = interface name, lhs = extra index -> {count, method_nodes...}, rhs = extra index -> {parent_count, parent_nodes...} (0 = no parents)
             interface_method, // main_token = method name, lhs = extra index -> {count, param...}
             trait_decl, // main_token = trait name, lhs = extra index -> {count, member_nodes...}
             trait_use, // main_token = use keyword, lhs = extra index -> {count, trait_name_nodes...}, rhs = extra index -> {count, conflict_nodes...} (0 = none)

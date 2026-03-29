@@ -1072,10 +1072,15 @@ const Parser = struct {
         _ = self.advance(); // interface
         const name_tok = try self.expect(.identifier);
 
-        var parent: u32 = 0;
+        var parents = std.ArrayListUnmanaged(u32){};
+        defer parents.deinit(self.allocator);
         if (self.peek() == .kw_extends) {
             _ = self.advance();
-            parent = try self.parseQualifiedName();
+            try parents.append(self.allocator, try self.parseQualifiedName());
+            while (self.peek() == .comma) {
+                _ = self.advance();
+                try parents.append(self.allocator, try self.parseQualifiedName());
+            }
         }
 
         _ = try self.expect(.l_brace);
@@ -1102,7 +1107,13 @@ const Parser = struct {
         _ = try self.expect(.r_brace);
 
         const extra = try self.addExtraList(methods.items);
-        return self.addNode(.{ .tag = .interface_decl, .main_token = name_tok, .data = .{ .lhs = extra, .rhs = parent } });
+        var parent_extra: u32 = 0;
+        if (parents.items.len > 0) {
+            parent_extra = @intCast(self.extra_data.items.len);
+            try self.extra_data.append(self.allocator, @intCast(parents.items.len));
+            try self.extra_data.appendSlice(self.allocator, parents.items);
+        }
+        return self.addNode(.{ .tag = .interface_decl, .main_token = name_tok, .data = .{ .lhs = extra, .rhs = parent_extra } });
     }
 
     fn parseInterfaceMethod(self: *Parser) Error!u32 {

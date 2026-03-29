@@ -239,7 +239,7 @@ pub const InterfaceDef = struct {
 pub const VM = struct {
     frames: [512]CallFrame = undefined,
     frame_count: usize = 0,
-    stack: [512]Value = undefined,
+    stack: [2048]Value = undefined,
     sp: usize = 0,
     functions: std.StringHashMapUnmanaged(*const ObjFunction) = .{},
     native_fns: std.StringHashMapUnmanaged(NativeFn) = .{},
@@ -2053,14 +2053,19 @@ pub const VM = struct {
                         try idef.methods.append(self.allocator, method_name);
                     }
 
-                    const parent_idx = self.readU16();
-                    if (parent_idx != 0xffff) {
-                        idef.parent = self.currentChunk().constants.items[parent_idx].string;
+                    const parent_count = self.readByte();
+                    var parent_names: [16][]const u8 = undefined;
+                    for (0..parent_count) |pi| {
+                        const pidx = self.readU16();
+                        parent_names[pi] = self.currentChunk().constants.items[pidx].string;
+                    }
+                    if (parent_count > 0) {
+                        idef.parent = parent_names[0];
                     }
 
                     const const_count = self.readByte();
+                    var def = ClassDef{ .name = iface_name };
                     if (const_count > 0) {
-                        var def = ClassDef{ .name = iface_name };
                         var ci: usize = const_count;
                         while (ci > 0) : (ci -= 1) {
                             const cname_idx = self.readU16();
@@ -2069,8 +2074,13 @@ pub const VM = struct {
                             try def.static_props.put(self.allocator, cname, cval);
                         }
                         self.sp -= const_count;
-                        try self.classes.put(self.allocator, iface_name, def);
+                    } else {
+                        // read const names even when 0 (shouldn't have any)
                     }
+                    for (0..parent_count) |pi| {
+                        try def.interfaces.append(self.allocator, parent_names[pi]);
+                    }
+                    try self.classes.put(self.allocator, iface_name, def);
 
                     try self.interfaces.put(self.allocator, iface_name, idef);
                 },
