@@ -2038,7 +2038,7 @@ pub const VM = struct {
                 .interface_decl => {
                     const name_idx = self.readU16();
                     const iface_name = self.currentChunk().constants.items[name_idx].string;
-                    const method_count = self.readByte();
+                    const method_count = self.readU16();
 
                     var idef = InterfaceDef{ .name = iface_name };
                     for (0..method_count) |_| {
@@ -4100,7 +4100,7 @@ pub const VM = struct {
     fn handleClassDecl(self: *VM) RuntimeError!void {
         const name_idx = self.readU16();
         const class_name = self.currentChunk().constants.items[name_idx].string;
-        const method_count = self.readByte();
+        const method_count = self.readU16();
 
         var def = ClassDef{ .name = class_name };
 
@@ -4109,11 +4109,11 @@ pub const VM = struct {
             try def.methods.put(self.allocator, mi[0], mi[1]);
         }
 
-        const prop_count = self.readByte();
-        var prop_names: [128][]const u8 = undefined;
-        var prop_has_default: [128]u8 = undefined;
-        var prop_vis: [128]ClassDef.Visibility = undefined;
-        var prop_readonly: [128]bool = .{false} ** 128;
+        const prop_count = self.readU16();
+        var prop_names: [256][]const u8 = undefined;
+        var prop_has_default: [256]u8 = undefined;
+        var prop_vis: [256]ClassDef.Visibility = undefined;
+        var prop_readonly: [256]bool = .{false} ** 256;
         for (0..prop_count) |pi| {
             const pname_idx = self.readU16();
             prop_names[pi] = self.currentChunk().constants.items[pname_idx].string;
@@ -4123,9 +4123,9 @@ pub const VM = struct {
             prop_readonly[pi] = (vis_byte & 0x04) != 0;
         }
 
-        const static_prop_count = self.readByte();
-        var sprop_names: [128][]const u8 = undefined;
-        var sprop_has_default: [128]u8 = undefined;
+        const static_prop_count = self.readU16();
+        var sprop_names: [256][]const u8 = undefined;
+        var sprop_has_default: [256]u8 = undefined;
         for (0..static_prop_count) |pi| {
             const pname_idx = self.readU16();
             sprop_names[pi] = self.currentChunk().constants.items[pname_idx].string;
@@ -4133,8 +4133,8 @@ pub const VM = struct {
             _ = self.readByte();
         }
 
-        const sdefaults = self.popDefaults(128, sprop_has_default[0..static_prop_count]);
-        const defaults = self.popDefaults(128, prop_has_default[0..prop_count]);
+        const sdefaults = self.popDefaults(256, sprop_has_default[0..static_prop_count]);
+        const defaults = self.popDefaults(256, prop_has_default[0..prop_count]);
 
         var dj: usize = 0;
         for (0..prop_count) |pi| {
@@ -4243,7 +4243,7 @@ pub const VM = struct {
             try def.case_order.append(self.allocator, case_names[ci]);
         }
 
-        const method_count = self.readByte();
+        const method_count = self.readU16();
         for (0..method_count) |_| {
             const mi = self.readMethodInfo();
             try def.methods.put(self.allocator, mi[0], mi[1]);

@@ -430,7 +430,7 @@ pub fn compileClassDecl(self: *Compiler, node: Ast.Node) Error!void {
         impl_names[i] = if (impl_node.tag == .qualified_name) (self.buildQualifiedString(self.ast.extraSlice(impl_node.data.lhs)) catch self.ast.tokenSlice(impl_node.main_token)) else self.resolveClassName(self.ast.tokenSlice(impl_node.main_token));
     }
 
-    var method_count: u8 = 0;
+    var method_count: u16 = 0;
     for (members) |member_idx| {
         const member = self.ast.nodes[member_idx];
         if (member.tag == .class_method or member.tag == .static_class_method) {
@@ -440,7 +440,7 @@ pub fn compileClassDecl(self: *Compiler, node: Ast.Node) Error!void {
     }
 
     // count promoted constructor params
-    var promoted_count: u8 = 0;
+    var promoted_count: u16 = 0;
     var constructor_params: []const u32 = &.{};
     for (members) |member_idx| {
         const member = self.ast.nodes[member_idx];
@@ -470,7 +470,7 @@ pub fn compileClassDecl(self: *Compiler, node: Ast.Node) Error!void {
     }
 
     // compile instance property defaults (push onto stack)
-    var prop_count: u8 = 0;
+    var prop_count: u16 = 0;
     for (members) |member_idx| {
         const member = self.ast.nodes[member_idx];
         if (member.tag == .class_property) prop_count += 1;
@@ -502,7 +502,7 @@ pub fn compileClassDecl(self: *Compiler, node: Ast.Node) Error!void {
 
     // compile static property defaults (push onto stack after instance props)
     // class constants (const_decl) are treated as static props
-    var static_prop_count: u8 = 0;
+    var static_prop_count: u16 = 0;
     for (members) |member_idx| {
         const member = self.ast.nodes[member_idx];
         if (member.tag == .static_class_property or member.tag == .const_decl) static_prop_count += 1;
@@ -521,7 +521,7 @@ pub fn compileClassDecl(self: *Compiler, node: Ast.Node) Error!void {
     const name_idx = try self.addConstant(.{ .string = class_name });
     try self.emitOp(.class_decl);
     try self.emitU16(name_idx);
-    try self.emitByte(method_count);
+    try self.emitU16(method_count);
 
     for (members) |member_idx| {
         const member = self.ast.nodes[member_idx];
@@ -537,7 +537,7 @@ pub fn compileClassDecl(self: *Compiler, node: Ast.Node) Error!void {
         }
     }
 
-    try self.emitByte(prop_count);
+    try self.emitU16(prop_count);
     for (members) |member_idx| {
         const member = self.ast.nodes[member_idx];
         if (member.tag == .class_property) {
@@ -575,7 +575,7 @@ pub fn compileClassDecl(self: *Compiler, node: Ast.Node) Error!void {
         }
     }
 
-    try self.emitByte(static_prop_count);
+    try self.emitU16(static_prop_count);
     for (members) |member_idx| {
         const member = self.ast.nodes[member_idx];
         if (member.tag == .static_class_property) {
@@ -689,7 +689,7 @@ pub fn compileAnonymousClass(self: *Compiler, node: Ast.Node) Error!void {
         impl_names[i] = if (impl_node.tag == .qualified_name) (self.buildQualifiedString(self.ast.extraSlice(impl_node.data.lhs)) catch self.ast.tokenSlice(impl_node.main_token)) else self.resolveClassName(self.ast.tokenSlice(impl_node.main_token));
     }
 
-    var method_count: u8 = 0;
+    var method_count: u16 = 0;
     for (members) |member_idx| {
         const member = self.ast.nodes[member_idx];
         if (member.tag == .class_method or member.tag == .static_class_method) {
@@ -698,7 +698,7 @@ pub fn compileAnonymousClass(self: *Compiler, node: Ast.Node) Error!void {
         }
     }
 
-    var promoted_count: u8 = 0;
+    var promoted_count: u16 = 0;
     var constructor_params: []const u32 = &.{};
     for (members) |member_idx| {
         const member = self.ast.nodes[member_idx];
@@ -726,7 +726,7 @@ pub fn compileAnonymousClass(self: *Compiler, node: Ast.Node) Error!void {
         }
     }
 
-    var prop_count: u8 = 0;
+    var prop_count: u16 = 0;
     for (members) |member_idx| {
         const member = self.ast.nodes[member_idx];
         if (member.tag == .class_property) prop_count += 1;
@@ -754,7 +754,7 @@ pub fn compileAnonymousClass(self: *Compiler, node: Ast.Node) Error!void {
         }
     }
 
-    var static_prop_count: u8 = 0;
+    var static_prop_count: u16 = 0;
     for (members) |member_idx| {
         const member = self.ast.nodes[member_idx];
         if (member.tag == .static_class_property or member.tag == .const_decl) static_prop_count += 1;
@@ -773,7 +773,7 @@ pub fn compileAnonymousClass(self: *Compiler, node: Ast.Node) Error!void {
     const name_idx = try self.addConstant(.{ .string = anon_name });
     try self.emitOp(.class_decl);
     try self.emitU16(name_idx);
-    try self.emitByte(method_count);
+    try self.emitU16(method_count);
 
     for (members) |member_idx| {
         const member = self.ast.nodes[member_idx];
@@ -789,7 +789,7 @@ pub fn compileAnonymousClass(self: *Compiler, node: Ast.Node) Error!void {
         }
     }
 
-    try self.emitByte(prop_count);
+    try self.emitU16(prop_count);
     for (members) |member_idx| {
         const member = self.ast.nodes[member_idx];
         if (member.tag == .class_property) {
@@ -824,7 +824,7 @@ pub fn compileAnonymousClass(self: *Compiler, node: Ast.Node) Error!void {
         }
     }
 
-    try self.emitByte(static_prop_count);
+    try self.emitU16(static_prop_count);
     for (members) |member_idx| {
         const member = self.ast.nodes[member_idx];
         if (member.tag == .static_class_property) {
@@ -928,7 +928,7 @@ pub fn compileInterfaceDecl(self: *Compiler, node: Ast.Node) Error!void {
     const iface_name = self.resolveClassName(self.ast.tokenSlice(node.main_token));
     const members = self.ast.extraSlice(node.data.lhs);
 
-    var method_count: u8 = 0;
+    var method_count: u16 = 0;
     var const_count: u8 = 0;
     for (members) |m| {
         if (self.ast.nodes[m].tag == .interface_method) method_count += 1;
@@ -946,7 +946,7 @@ pub fn compileInterfaceDecl(self: *Compiler, node: Ast.Node) Error!void {
     const name_idx = try self.addConstant(.{ .string = iface_name });
     try self.emitOp(.interface_decl);
     try self.emitU16(name_idx);
-    try self.emitByte(method_count);
+    try self.emitU16(method_count);
 
     for (members) |m| {
         const member = self.ast.nodes[m];
@@ -1085,7 +1085,7 @@ pub fn compileEnumDecl(self: *Compiler, node: Ast.Node) Error!void {
         }
     }
 
-    var method_count: u8 = 0;
+    var method_count: u16 = 0;
     for (members) |member_idx| {
         const member = self.ast.nodes[member_idx];
         if (member.tag == .class_method or member.tag == .static_class_method) {
@@ -1121,7 +1121,7 @@ pub fn compileEnumDecl(self: *Compiler, node: Ast.Node) Error!void {
         }
     }
 
-    try self.emitByte(method_count);
+    try self.emitU16(method_count);
     for (members) |member_idx| {
         const member = self.ast.nodes[member_idx];
         if (member.tag == .class_method or member.tag == .static_class_method) {

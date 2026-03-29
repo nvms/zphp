@@ -23,7 +23,9 @@ pub const entries = .{
     .{ "lcfirst", lcfirst },
     .{ "str_pad", str_pad },
     .{ "strcmp", native_strcmp },
+    .{ "strcasecmp", native_strcasecmp },
     .{ "strncmp", native_strncmp },
+    .{ "strncasecmp", native_strncasecmp },
     .{ "ord", native_ord },
     .{ "chr", native_chr },
     .{ "str_split", native_str_split },
@@ -367,6 +369,37 @@ fn native_strcmp(_: *NativeContext, args: []const Value) RuntimeError!Value {
         if (a[i] != b[i]) return .{ .int = @as(i64, a[i]) - @as(i64, b[i]) };
     }
     if (a.len != b.len) return .{ .int = @as(i64, @intCast(a.len)) - @as(i64, @intCast(b.len)) };
+    return .{ .int = 0 };
+}
+
+fn native_strcasecmp(_: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len < 2) return .{ .int = 0 };
+    const a = if (args[0] == .string) args[0].string else "";
+    const b = if (args[1] == .string) args[1].string else "";
+    const min_len = @min(a.len, b.len);
+    for (0..min_len) |i| {
+        const ca = std.ascii.toLower(a[i]);
+        const cb = std.ascii.toLower(b[i]);
+        if (ca != cb) return .{ .int = @as(i64, ca) - @as(i64, cb) };
+    }
+    if (a.len != b.len) return .{ .int = @as(i64, @intCast(a.len)) - @as(i64, @intCast(b.len)) };
+    return .{ .int = 0 };
+}
+
+fn native_strncasecmp(_: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len < 3) return .{ .int = 0 };
+    const a = if (args[0] == .string) args[0].string else "";
+    const b = if (args[1] == .string) args[1].string else "";
+    const n: usize = @intCast(@max(0, Value.toInt(args[2])));
+    const sa = a[0..@min(n, a.len)];
+    const sb = b[0..@min(n, b.len)];
+    const min_len = @min(sa.len, sb.len);
+    for (0..min_len) |i| {
+        const ca = std.ascii.toLower(sa[i]);
+        const cb = std.ascii.toLower(sb[i]);
+        if (ca != cb) return .{ .int = @as(i64, ca) - @as(i64, cb) };
+    }
+    if (sa.len != sb.len) return .{ .int = @as(i64, @intCast(sa.len)) - @as(i64, @intCast(sb.len)) };
     return .{ .int = 0 };
 }
 
@@ -991,6 +1024,12 @@ fn native_bin2hex(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
 fn native_mb_strlen(_: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len == 0) return .{ .int = 0 };
     const s = if (args[0] == .string) args[0].string else return Value{ .int = 0 };
+    if (args.len >= 2 and args[1] == .string) {
+        const enc = args[1].string;
+        if (std.ascii.eqlIgnoreCase(enc, "8bit") or std.ascii.eqlIgnoreCase(enc, "binary")) {
+            return .{ .int = @intCast(s.len) };
+        }
+    }
     var count: i64 = 0;
     var j: usize = 0;
     while (j < s.len) {
