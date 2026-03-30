@@ -215,12 +215,22 @@ fn array_slice(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
         return .{ .array = try ctx.createArray() };
     }
     const uoffset: usize = @intCast(offset);
-    const length: usize = if (args.len >= 3) @intCast(@max(0, @min(slen - offset, Value.toInt(args[2])))) else @intCast(slen - offset);
+    var raw_length: i64 = if (args.len >= 3 and args[2] != .null) Value.toInt(args[2]) else slen - offset;
+    if (raw_length < 0) raw_length = @max(0, slen - offset + raw_length);
+    const length: usize = @intCast(@max(0, @min(slen - offset, raw_length)));
     const end = @min(src.entries.items.len, uoffset + length);
+    const preserve_keys = args.len >= 4 and args[3].isTruthy();
 
     var arr = try ctx.createArray();
     for (src.entries.items[uoffset..end]) |entry| {
-        try arr.append(ctx.allocator, entry.value);
+        switch (entry.key) {
+            .string => try arr.set(ctx.allocator, entry.key, entry.value),
+            .int => if (preserve_keys) {
+                try arr.set(ctx.allocator, entry.key, entry.value);
+            } else {
+                try arr.append(ctx.allocator, entry.value);
+            },
+        }
     }
     return .{ .array = arr };
 }

@@ -5,6 +5,7 @@ const Chunk = @import("bytecode.zig").Chunk;
 const OpCode = @import("bytecode.zig").OpCode;
 const ObjFunction = @import("bytecode.zig").ObjFunction;
 const Value = @import("../runtime/value.zig").Value;
+const PhpArray = @import("../runtime/value.zig").PhpArray;
 
 const compiler_strings = @import("compiler_strings.zig");
 const compiler_expr = @import("compiler_expr.zig");
@@ -565,7 +566,30 @@ pub const Compiler = struct {
                 }
                 break :blk .null;
             },
-            .array_literal => Value.empty_array_default,
+            .array_literal => blk: {
+                const elems = self.ast.extraSlice(n.data.lhs);
+                if (elems.len == 0) break :blk Value.empty_array_default;
+                const arr = self.allocator.create(PhpArray) catch break :blk Value.empty_array_default;
+                arr.* = .{};
+                for (elems) |elem_idx| {
+                    const elem = self.ast.nodes[elem_idx];
+                    if (elem.tag == .array_element) {
+                        const val = self.evalConstExpr(elem.data.lhs);
+                        if (val == .null and elem.data.lhs != 0 and self.ast.nodes[elem.data.lhs].tag != .null_literal) break :blk Value.empty_array_default;
+                        if (elem.data.rhs != 0) {
+                            const key = self.evalConstExpr(elem.data.rhs);
+                            if (key == .string) {
+                                arr.set(self.allocator, .{ .string = key.string }, val) catch break :blk Value.empty_array_default;
+                            } else {
+                                arr.set(self.allocator, .{ .int = Value.toInt(key) }, val) catch break :blk Value.empty_array_default;
+                            }
+                        } else {
+                            arr.append(self.allocator, val) catch break :blk Value.empty_array_default;
+                        }
+                    }
+                }
+                break :blk .{ .array = arr };
+            },
             .static_prop_access => blk: {
                 const class_node = self.ast.nodes[n.data.lhs];
                 var class_name = self.ast.tokenSlice(class_node.main_token);

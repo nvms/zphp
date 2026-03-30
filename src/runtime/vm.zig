@@ -2156,17 +2156,56 @@ pub const VM = struct {
                 },
 
                 .array_spread => {
-                    const src = self.pop();
+                    var src = self.pop();
+                    const target = self.peek();
+                    if (target != .array) continue;
+
+                    if (src == .object and self.hasMethod(src.object.class_name, "getIterator")) {
+                        src = self.callMethod(src.object, "getIterator", &.{}) catch .null;
+                    }
+
                     if (src == .array) {
-                        const target = self.peek();
-                        if (target == .array) {
-                            for (src.array.entries.items) |entry| {
-                                if (entry.key == .string) {
-                                    try target.array.set(self.allocator, entry.key, entry.value);
-                                } else {
-                                    try target.array.append(self.allocator, entry.value);
-                                }
+                        for (src.array.entries.items) |entry| {
+                            if (entry.key == .string) {
+                                try target.array.set(self.allocator, entry.key, entry.value);
+                            } else {
+                                try target.array.append(self.allocator, entry.value);
                             }
+                        }
+                    } else if (src == .generator) {
+                        const gen = src.generator;
+                        if (gen.state == .created) {
+                            self.resumeGenerator(gen, .null) catch {
+                                if (self.dispatchPendingException(base_frame)) continue;
+                                return error.RuntimeError;
+                            };
+                        }
+                        while (gen.state != .completed) {
+                            if (gen.current_key == .string) {
+                                try target.array.set(self.allocator, .{ .string = gen.current_key.string }, gen.current_value);
+                            } else {
+                                try target.array.append(self.allocator, gen.current_value);
+                            }
+                            self.resumeGenerator(gen, .null) catch {
+                                if (self.dispatchPendingException(base_frame)) continue;
+                                return error.RuntimeError;
+                            };
+                        }
+                    } else if (src == .object and self.hasMethod(src.object.class_name, "current")) {
+                        if (self.hasMethod(src.object.class_name, "rewind")) {
+                            _ = self.callMethod(src.object, "rewind", &.{}) catch {};
+                        }
+                        while (true) {
+                            const valid = self.callMethod(src.object, "valid", &.{}) catch Value{ .bool = false };
+                            if (!valid.isTruthy()) break;
+                            const key = self.callMethod(src.object, "key", &.{}) catch .null;
+                            const val = self.callMethod(src.object, "current", &.{}) catch .null;
+                            if (key == .string) {
+                                try target.array.set(self.allocator, .{ .string = key.string }, val);
+                            } else {
+                                try target.array.append(self.allocator, val);
+                            }
+                            _ = self.callMethod(src.object, "next", &.{}) catch {};
                         }
                     }
                 },
@@ -2416,11 +2455,27 @@ pub const VM = struct {
                                     break :blk s;
                                 };
                                 ctor_locals[0] = .{ .object = obj };
-                                for (0..@min(ac, func.arity)) |i| {
-                                    ctor_locals[i + 1] = self.stack[self.sp - ac + i];
-                                }
-                                for (@min(ac, func.arity)..func.arity) |i| {
-                                    if (i < func.defaults.len) ctor_locals[i + 1] = try self.resolveDefault(func.defaults[i]);
+                                if (func.is_variadic) {
+                                    const fixed: usize = func.arity - 1;
+                                    for (0..@min(ac, fixed)) |i| {
+                                        ctor_locals[i + 1] = self.stack[self.sp - ac + i];
+                                    }
+                                    const rest_arr = try self.allocator.create(PhpArray);
+                                    rest_arr.* = .{};
+                                    try self.arrays.append(self.allocator, rest_arr);
+                                    if (ac > fixed) {
+                                        for (fixed..ac) |i| {
+                                            try rest_arr.append(self.allocator, self.stack[self.sp - ac + i]);
+                                        }
+                                    }
+                                    ctor_locals[fixed + 1] = .{ .array = rest_arr };
+                                } else {
+                                    for (0..@min(ac, func.arity)) |i| {
+                                        ctor_locals[i + 1] = self.stack[self.sp - ac + i];
+                                    }
+                                    for (@min(ac, func.arity)..func.arity) |i| {
+                                        if (i < func.defaults.len) ctor_locals[i + 1] = try self.resolveDefault(func.defaults[i]);
+                                    }
                                 }
                                 self.sp -= ac;
                                 self.frames[self.frame_count] = .{ .chunk = &func.chunk, .ip = 0, .vars = .{}, .locals = ctor_locals, .func = func };
@@ -2441,14 +2496,31 @@ pub const VM = struct {
                             } else {
                                 var new_vars: std.StringHashMapUnmanaged(Value) = .{};
                                 try new_vars.put(self.allocator, "$this", .{ .object = obj });
-                                for (0..ac) |i| {
-                                    try new_vars.put(self.allocator, func.params[i], self.stack[self.sp - ac + i]);
+                                if (func.is_variadic) {
+                                    const fixed: usize = func.arity - 1;
+                                    for (0..@min(ac, fixed)) |i| {
+                                        try new_vars.put(self.allocator, func.params[i], self.stack[self.sp - ac + i]);
+                                    }
+                                    const rest_arr = try self.allocator.create(PhpArray);
+                                    rest_arr.* = .{};
+                                    try self.arrays.append(self.allocator, rest_arr);
+                                    if (ac > fixed) {
+                                        for (fixed..ac) |i| {
+                                            try rest_arr.append(self.allocator, self.stack[self.sp - ac + i]);
+                                        }
+                                    }
+                                    try new_vars.put(self.allocator, func.params[func.arity - 1], .{ .array = rest_arr });
+                                } else {
+                                    const copy_count = @min(ac, func.params.len);
+                                    for (0..copy_count) |i| {
+                                        try new_vars.put(self.allocator, func.params[i], self.stack[self.sp - ac + i]);
+                                    }
                                 }
                                 self.sp -= ac;
-                                for (ac..func.arity) |i| {
+                                if (!func.is_variadic and ac < func.arity) for (ac..func.arity) |i| {
                                     const default = if (i < func.defaults.len) try self.resolveDefault(func.defaults[i]) else Value.null;
                                     try new_vars.put(self.allocator, func.params[i], default);
-                                }
+                                };
                                 self.frames[self.frame_count] = .{ .chunk = &func.chunk, .ip = 0, .vars = new_vars, .locals = try self.allocLocals(func, &new_vars), .func = func };
                                 self.frames[self.frame_count].entry_sp = self.sp;
                     self.frame_count += 1;
@@ -5832,6 +5904,15 @@ pub const VM = struct {
             const arr = try self.allocator.create(PhpArray);
             arr.* = .{};
             try self.arrays.append(self.allocator, arr);
+            return .{ .array = arr };
+        }
+        if (val == .array) {
+            const arr = try self.allocator.create(PhpArray);
+            arr.* = .{};
+            try self.arrays.append(self.allocator, arr);
+            for (val.array.entries.items) |entry| {
+                try arr.set(self.allocator, entry.key, entry.value);
+            }
             return .{ .array = arr };
         }
         if (val == .string) {

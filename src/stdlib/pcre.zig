@@ -63,6 +63,10 @@ const pcre2 = struct {
         where: *anyopaque,
     ) callconv(.c) c_int;
 
+    extern "pcre2-8" fn pcre2_get_mark_8(
+        match_data: *MatchData,
+    ) callconv(.c) ?[*:0]const u8;
+
     extern "pcre2-8" fn pcre2_substitute_8(
         code: *const Code,
         subject: [*]const u8,
@@ -178,6 +182,12 @@ fn preg_match(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
             }
         }
         try addNamedGroups(ctx, matches_arr, code, ovector, subject, count);
+        if (pcre2.pcre2_get_mark_8(match_data)) |mark_ptr| {
+            const mark = std.mem.sliceTo(mark_ptr, 0);
+            if (mark.len > 0) {
+                try matches_arr.set(ctx.allocator, .{ .string = try ctx.createString("MARK") }, .{ .string = try ctx.createString(mark) });
+            }
+        }
         if (args[2] != .array) {
             ctx.setCallerVar(2, args.len, .{ .array = matches_arr });
         }

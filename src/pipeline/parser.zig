@@ -768,6 +768,12 @@ const Parser = struct {
             while (self.peek() == .colon_colon) {
                 class_expr = try self.parseStaticAccess(class_expr);
             }
+            while (self.peek() == .l_bracket) {
+                _ = self.advance();
+                const idx = try self.parseExpression();
+                _ = try self.expect(.r_bracket);
+                class_expr = try self.addNode(.{ .tag = .array_access, .main_token = 0, .data = .{ .lhs = class_expr, .rhs = idx } });
+            }
             var dyn_args = std.ArrayListUnmanaged(u32){};
             defer dyn_args.deinit(self.allocator);
             if (self.peek() == .l_paren) {
