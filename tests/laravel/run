@@ -31,8 +31,6 @@ errors=""
 for f in "$SCRIPT_DIR"/harness/test-*.php; do
     name="$(basename "$f" .php)"
     php_out="$(php -d error_reporting=E_ALL\&~E_DEPRECATED\&~E_WARNING "$f" 2>&1)" || true
-    # clear compiled blade views between runs to avoid stale cache issues
-    rm -f "$APP_DIR/storage/framework/views/"*.php
     TIMEOUT_CMD=""
     if command -v timeout &>/dev/null; then
         TIMEOUT_CMD="timeout 60"
