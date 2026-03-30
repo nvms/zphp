@@ -4235,6 +4235,30 @@ pub const VM = struct {
                     }
                 },
 
+                .get_static_prop_dynamic => {
+                    const prop_idx = self.readU16();
+                    const prop_name = self.currentChunk().constants.items[prop_idx].string;
+                    const class_val = self.pop();
+                    const class_name = if (class_val == .string) class_val.string else "";
+
+                    if (class_name.len == 0) {
+                        self.push(.null);
+                    } else if (self.getStaticProp(class_name, prop_name)) |val| {
+                        self.push(val);
+                    } else {
+                        if (!self.classes.contains(class_name) and !self.interfaces.contains(class_name)) {
+                            try self.tryAutoload(class_name);
+                            if (self.getStaticProp(class_name, prop_name)) |val| {
+                                self.push(val);
+                            } else {
+                                self.push(.null);
+                            }
+                        } else {
+                            self.push(.null);
+                        }
+                    }
+                },
+
                 .yield_value => {
                     const val = self.pop();
                     const gen = self.currentFrame().generator orelse {
@@ -4389,6 +4413,14 @@ pub const VM = struct {
     }
 
     fn resolveStaticClassName(self: *VM, name: []const u8) []const u8 {
+        if (name.len > 0 and name[0] == '$') {
+            const local_val = self.getLocalByName(name);
+            if (local_val == .string) return local_val.string;
+            if (self.currentFrame().vars.get(name)) |val| {
+                if (val == .string) return val.string;
+            }
+            return name;
+        }
         if (std.mem.eql(u8, name, "static")) {
             const f = self.currentFrame();
             // called_class takes priority - set by explicit static calls like Base::get()
@@ -6502,8 +6534,7 @@ pub const VM = struct {
             self.handler_floor = prev_floor;
             return err;
         };
-        const fl_frame = &self.frames[self.frame_count - 1];
-        if (fl_frame.chunk == &func.chunk) {
+        if (self.frame_count > base_frame) {
             self.runUntilFrame(base_frame) catch |err| {
                 self.handler_count = base_handler;
                 self.handler_floor = prev_floor;

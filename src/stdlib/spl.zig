@@ -156,6 +156,25 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try vm.native_fns.put(a, "ArrayIterator::append", aiAppend);
     try vm.native_fns.put(a, "ArrayIterator::getFlags", aiGetFlags);
     try vm.native_fns.put(a, "ArrayIterator::setFlags", aiSetFlags);
+
+    // WeakMap (simplified - uses spl_object_id as key, no weak reference semantics)
+    var wm_def = ClassDef{ .name = "WeakMap" };
+    try wm_def.interfaces.append(a, "ArrayAccess");
+    try wm_def.interfaces.append(a, "Countable");
+    try wm_def.methods.put(a, "__construct", .{ .name = "__construct", .arity = 0 });
+    try wm_def.methods.put(a, "offsetExists", .{ .name = "offsetExists", .arity = 1 });
+    try wm_def.methods.put(a, "offsetGet", .{ .name = "offsetGet", .arity = 1 });
+    try wm_def.methods.put(a, "offsetSet", .{ .name = "offsetSet", .arity = 2 });
+    try wm_def.methods.put(a, "offsetUnset", .{ .name = "offsetUnset", .arity = 1 });
+    try wm_def.methods.put(a, "count", .{ .name = "count", .arity = 0 });
+    try vm.classes.put(a, "WeakMap", wm_def);
+
+    try vm.native_fns.put(a, "WeakMap::__construct", wmConstruct);
+    try vm.native_fns.put(a, "WeakMap::offsetExists", wmOffsetExists);
+    try vm.native_fns.put(a, "WeakMap::offsetGet", wmOffsetGet);
+    try vm.native_fns.put(a, "WeakMap::offsetSet", wmOffsetSet);
+    try vm.native_fns.put(a, "WeakMap::offsetUnset", wmOffsetUnset);
+    try vm.native_fns.put(a, "WeakMap::count", wmCount);
 }
 
 fn getThis(ctx: *NativeContext) ?*PhpObject {
@@ -556,4 +575,58 @@ fn aiSetFlags(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     const obj = getThis(ctx) orelse return .null;
     if (args.len >= 1) try obj.set(ctx.allocator, "__flags", .{ .int = Value.toInt(args[0]) });
     return .null;
+}
+
+// --- WeakMap ---
+
+fn wmObjKey(arg: Value) ?i64 {
+    if (arg == .object) return @intCast(@intFromPtr(arg.object));
+    return null;
+}
+
+fn wmConstruct(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const obj = getThis(ctx) orelse return .null;
+    _ = try ensureData(ctx, obj);
+    return .null;
+}
+
+fn wmOffsetExists(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    const obj = getThis(ctx) orelse return .{ .bool = false };
+    const arr = getData(obj) orelse return .{ .bool = false };
+    if (args.len == 0) return .{ .bool = false };
+    const key = wmObjKey(args[0]) orelse return .{ .bool = false };
+    const k = PhpArray.Key{ .int = key };
+    return .{ .bool = arr.get(k) != .null };
+}
+
+fn wmOffsetGet(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    const obj = getThis(ctx) orelse return .null;
+    const arr = getData(obj) orelse return .null;
+    if (args.len == 0) return .null;
+    const key = wmObjKey(args[0]) orelse return .null;
+    return arr.get(.{ .int = key });
+}
+
+fn wmOffsetSet(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    const obj = getThis(ctx) orelse return .null;
+    const arr = try ensureData(ctx, obj);
+    if (args.len < 2) return .null;
+    const key = wmObjKey(args[0]) orelse return .null;
+    try arr.set(ctx.allocator, .{ .int = key }, args[1]);
+    return .null;
+}
+
+fn wmOffsetUnset(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    const obj = getThis(ctx) orelse return .null;
+    const arr = getData(obj) orelse return .null;
+    if (args.len == 0) return .null;
+    const key = wmObjKey(args[0]) orelse return .null;
+    arr.remove(.{ .int = key });
+    return .null;
+}
+
+fn wmCount(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const obj = getThis(ctx) orelse return .{ .int = 0 };
+    const arr = getData(obj) orelse return .{ .int = 0 };
+    return .{ .int = @intCast(arr.entries.items.len) };
 }

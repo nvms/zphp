@@ -103,6 +103,7 @@ pub const OpCode = enum(u8) {
     enum_decl, // u16: enum name, u8: backed_type (0=none, 1=int, 2=string), u8: case_count, then case_count * (u16 name, u8 has_value), then method/implements like class_decl
     get_static_prop, // u16: class name, u16: property name
     set_static_prop, // u16: class name, u16: property name
+    get_static_prop_dynamic, // u16: property name (class name on stack)
 
     // scope
     get_global, // u16: var name constant (copy from frame 0)
@@ -166,6 +167,7 @@ pub const OpCode = enum(u8) {
             .get_global, .concat_assign, .unset_var, .unset_prop, .isset_prop,
             .closure_bind, .closure_bind_ref, .define_const,
             .iter_check, .inc_local, .dec_local,
+            .get_static_prop_dynamic,
             => 3,
             .call, .call_spread, .new_obj, .method_call, .method_call_spread, .static_call_dyn_method => 4,
             .get_static_prop, .set_static_prop, .get_static, .set_static,
