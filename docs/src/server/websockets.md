@@ -1,10 +1,10 @@
 # WebSockets
 
-zphp has built-in WebSocket support. No extensions, no third-party libraries. Define three handler functions in your PHP file and you have a WebSocket server.
+zphp has built-in WebSocket support. No extensions, no third-party libraries. Define three handler functions and you have a WebSocket server.
 
 ## Handler functions
 
-zphp looks for three functions in your entry point:
+zphp looks for three globally registered functions by name:
 
 ```php
 <?php
@@ -24,7 +24,9 @@ function ws_onClose($conn) {
 }
 ```
 
-That's it. Serve it:
+These can be defined anywhere - in your entry point, in a required file, wherever. As long as they're registered as global functions by the time the server starts handling connections, they'll be found.
+
+Serve it:
 
 ```
 $ zphp serve ws_app.php --port 8080

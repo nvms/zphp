@@ -26,7 +26,7 @@ $ zphp serve app.php --port 3000 --workers 8
 
 ## Request handling
 
-Each request executes your PHP file from the top. The standard `$_SERVER`, `$_GET`, `$_POST`, `$_COOKIE`, and `$_FILES` superglobals are populated from the incoming request, just like php-fpm.
+Each request executes your PHP file from the top. The standard `$_SERVER`, `$_GET`, `$_POST`, `$_COOKIE`, and `$_FILES` superglobals are populated from the incoming request, just like PHP.
 
 ```php
 <?php

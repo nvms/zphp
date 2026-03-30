@@ -15,7 +15,36 @@ In practice, this rarely matters. The semantics are identical from your code's p
 
 ## Global variables
 
-The `global $var` keyword works for simple cases: reading and writing global variables from inside functions. However, zphp doesn't support full reference semantics for globals. Changes to a global inside a function are written back, but creating a reference alias between a local and a global isn't supported.
+The `global` keyword works for reading and writing:
+
+```php
+$counter = 0;
+
+function increment() {
+    global $counter;
+    $counter++;  // this works in zphp
+}
+
+increment();
+echo $counter; // 1
+```
+
+What doesn't work is creating a reference alias between a local and a global:
+
+```php
+$value = 10;
+
+function modify() {
+    global $value;
+    $ref = &$value;  // reference aliasing - not supported in zphp
+    $ref = 20;
+}
+
+modify();
+echo $value; // PHP: 20. zphp: 10.
+```
+
+Direct reads and writes through the `global` keyword work. Indirect modification through reference aliases does not.
 
 ## Pass-by-reference
 
@@ -31,7 +60,14 @@ increment($x);
 echo $x; // 6
 ```
 
-Passing expressions or nested access paths by reference (e.g., `foo($arr['key'])` with a `&$param`) is not supported.
+Passing expressions or nested access paths by reference is not currently supported:
+
+```php
+function modify(&$val) { $val = 'changed'; }
+
+$arr = ['key' => 'original'];
+modify($arr['key']); // not supported in zphp
+```
 
 ## Type hint enforcement
 
@@ -48,9 +84,41 @@ $x[] = 1; // PHP 8.4: TypeError
 
 In zphp, this silently fails - the assignment is a no-op. Nested auto-vivification of missing keys (creating intermediate arrays) works correctly.
 
-## require scope
+## require and include scope
 
-`require` and `include` execute the included file in an isolated scope. Functions and classes defined in the included file are registered globally (as in PHP), but local variables from the included file don't leak into the calling scope.
+In PHP, `require` shares the calling scope. Variables defined in the required file are visible in the caller, and vice versa:
+
+```php
+// config.php
+$db_host = 'localhost';
+
+// app.php
+require 'config.php';
+echo $db_host; // PHP: 'localhost'
+```
+
+In zphp, `require` executes in an isolated scope. Functions and classes are registered globally (as in PHP), but local variables don't cross the boundary. The example above would not work - `$db_host` would be undefined in `app.php`.
+
+**What still works:**
+
+```php
+// config.php
+return ['host' => 'localhost', 'port' => 3306];
+
+// app.php
+$config = require 'config.php'; // return values work fine
+```
+
+```php
+// helpers.php
+function formatDate($ts) { return date('Y-m-d', $ts); }
+
+// app.php
+require 'helpers.php';
+echo formatDate(time()); // globally registered functions work
+```
+
+Most modern PHP frameworks (Laravel, Symfony, etc.) use return-based config files and autoloaded classes, both of which work correctly.
 
 ## strtotime
 
