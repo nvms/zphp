@@ -120,6 +120,8 @@ jobs:
         with:
           php-version: '8.4'
       - run: zig build
+      - name: smoke test
+        run: echo '<?php echo "ok\n";' > /tmp/smoke.php && ./zig-out/bin/zphp run /tmp/smoke.php
       - run: ./tests/laravel/setup
       - run: ./tests/laravel/run
 
