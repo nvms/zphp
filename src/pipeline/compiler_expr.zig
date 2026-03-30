@@ -1073,5 +1073,7 @@ pub fn compileCast(self: *Compiler, node: Ast.Node) Error!void {
         try self.emitOp(.cast_bool);
     } else if (std.mem.eql(u8, type_name, "array")) {
         try self.emitOp(.cast_array);
+    } else if (std.mem.eql(u8, type_name, "object")) {
+        try self.emitOp(.cast_object);
     }
 }

@@ -61,6 +61,7 @@ pub const OpCode = enum(u8) {
     cast_string,
     cast_bool,
     cast_array,
+    cast_object,
     return_val,
     return_void,
 
@@ -201,7 +202,7 @@ pub const OpCode = enum(u8) {
             => -1,
             // unary ops: pop 1, push 1
             .negate, .bit_not, .not, .cast_int, .cast_float, .cast_string,
-            .cast_bool, .cast_array, .get_obj_class,
+            .cast_bool, .cast_array, .cast_object, .get_obj_class,
             => 0,
             else => 0,
         };

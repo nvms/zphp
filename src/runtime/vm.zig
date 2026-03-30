@@ -1879,6 +1879,40 @@ pub const VM = struct {
                     }
                 },
 
+                .cast_object => {
+                    const v = self.pop();
+                    if (v == .object) {
+                        self.push(v);
+                    } else if (v == .array) {
+                        const obj = try self.allocator.create(PhpObject);
+                        obj.* = .{ .class_name = "stdClass" };
+                        try self.objects.append(self.allocator, obj);
+                        for (v.array.entries.items) |entry| {
+                            const key_str: []const u8 = switch (entry.key) {
+                                .string => |s| s,
+                                .int => |i| blk: {
+                                    const s = try std.fmt.allocPrint(self.allocator, "{d}", .{i});
+                                    try self.strings.append(self.allocator, s);
+                                    break :blk s;
+                                },
+                            };
+                            try obj.set(self.allocator, key_str, entry.value);
+                        }
+                        self.push(.{ .object = obj });
+                    } else if (v == .null) {
+                        const obj = try self.allocator.create(PhpObject);
+                        obj.* = .{ .class_name = "stdClass" };
+                        try self.objects.append(self.allocator, obj);
+                        self.push(.{ .object = obj });
+                    } else {
+                        const obj = try self.allocator.create(PhpObject);
+                        obj.* = .{ .class_name = "stdClass" };
+                        try self.objects.append(self.allocator, obj);
+                        try obj.set(self.allocator, "scalar", v);
+                        self.push(.{ .object = obj });
+                    }
+                },
+
                 .define_const => {
                     const name_idx = self.readU16();
                     const name = self.currentChunk().constants.items[name_idx].string;

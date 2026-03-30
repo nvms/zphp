@@ -73,6 +73,7 @@ pub const entries = .{
     .{ "trigger_error", native_trigger_error },
     .{ "user_error", native_trigger_error },
     .{ "class_alias", native_class_alias },
+    .{ "assert", native_assert },
     .{ "spl_autoload_register", native_spl_autoload_register },
     .{ "spl_autoload_unregister", native_spl_autoload_unregister },
     .{ "spl_autoload_functions", native_spl_autoload_functions },
@@ -798,6 +799,11 @@ fn native_restore_error_handler(ctx: *NativeContext, _: []const Value) RuntimeEr
     ctx.vm.user_error_handler = ctx.vm.prev_error_handler;
     ctx.vm.prev_error_handler = null;
     return .{ .bool = true };
+}
+
+fn native_assert(_: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len == 0) return .{ .bool = true };
+    return .{ .bool = args[0].isTruthy() };
 }
 
 fn native_noop_true(_: *NativeContext, _: []const Value) RuntimeError!Value {
