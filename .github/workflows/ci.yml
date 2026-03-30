@@ -124,10 +124,22 @@ jobs:
       - run: ./tests/laravel/setup
       - name: debug laravel
         run: |
-          echo '<?php echo "smoke ok\n";' > /tmp/smoke.php
-          ./zig-out/bin/zphp run /tmp/smoke.php
-          echo '<?php require __DIR__ . "/../app/vendor/autoload.php"; echo "autoload ok\n";' > tests/laravel/harness/debug.php
-          timeout 15 ./zig-out/bin/zphp run tests/laravel/harness/debug.php 2>&1 || echo "autoload exit: $?"
+          cat > tests/laravel/harness/debug.php << 'DEBUGEOF'
+          <?php
+          echo "step1: autoload\n";
+          define('LARAVEL_START', microtime(true));
+          require __DIR__ . '/../app/vendor/autoload.php';
+          echo "step2: bootstrap\n";
+          $app = require_once __DIR__ . '/../app/bootstrap/app.php';
+          echo "step3: kernel\n";
+          $kernel = $app->make(Illuminate\Contracts\Http\Kernel::class);
+          echo "step4: request\n";
+          $request = Illuminate\Http\Request::create('/', 'GET');
+          echo "step5: handle\n";
+          $response = $kernel->handle($request);
+          echo "step6: status=" . $response->getStatusCode() . "\n";
+          DEBUGEOF
+          timeout 30 ./zig-out/bin/zphp run tests/laravel/harness/debug.php 2>&1; echo "debug exit: $?"
       - run: ./tests/laravel/run
 
   pdo:
