@@ -55,4 +55,4 @@ $ curl http://localhost:3000/api/hello
 {"method":"GET","path":"\/api\/hello","message":"Hello from zphp"}
 ```
 
-That's a production-capable HTTP server. No nginx, no php-fpm, no configuration files. See [Serving an Application](../server/serving.md) for the full details.
+That's a production HTTP server running from a single command. See [Serving an Application](../server/serving.md) for the full details.

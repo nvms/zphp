@@ -9,7 +9,7 @@ Download the latest release for your platform from [GitHub Releases](https://git
 | Linux x86_64 | `zphp-linux-x86_64` |
 | Linux ARM64 | `zphp-linux-aarch64` |
 | macOS Apple Silicon | `zphp-macos-aarch64` |
-| macOS Intel | `zphp-macos-x86_64` |
+
 
 Move it somewhere in your PATH:
 

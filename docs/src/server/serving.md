@@ -1,6 +1,6 @@
 # Serving an Application
 
-`zphp serve` is a production HTTP server built into the runtime. It handles everything you'd normally need nginx + php-fpm for: keep-alive connections, gzip compression, static file serving, worker pooling, and graceful shutdown.
+`zphp serve` is a production HTTP server built into the runtime. It replaces the nginx + php-fpm stack with a single process that handles keep-alive, gzip, static files, worker pooling, and graceful shutdown.
 
 ## Basic usage
 

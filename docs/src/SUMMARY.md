@@ -33,3 +33,7 @@
 # Performance
 
 - [Benchmarks](./performance/benchmarks.md)
+
+# Internals
+
+- [Memory Model](./internals/memory-model.md)

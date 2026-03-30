@@ -17,7 +17,7 @@ Hello from my PHP application
 
 ## What this means for deployment
 
-Your PHP application becomes a single file you can copy to a server and run. No PHP installation, no dependency management on the target machine, no configuration.
+The target machine doesn't need PHP or zphp installed. Copy the binary, run it.
 
 ```
 $ scp app server:/usr/local/bin/

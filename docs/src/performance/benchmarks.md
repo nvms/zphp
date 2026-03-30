@@ -29,7 +29,7 @@ Measured with [wrk](https://github.com/wg/wrk): 4 threads, 100 connections, 10 s
 | zphp serve | 92,343 | 1.12 ms |
 | nginx + php-fpm (128 workers) | 42,088 | 50.37 ms |
 
-zphp serve delivers 2.2x higher throughput and 45x lower latency than the traditional nginx + php-fpm stack.
+2.2x throughput, 45x lower latency compared to nginx + php-fpm.
 
 ```
 zig build -Doptimize=ReleaseFast

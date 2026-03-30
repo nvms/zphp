@@ -1,6 +1,6 @@
 # WebSockets
 
-zphp has built-in WebSocket support. No extensions, no third-party libraries. Define three handler functions and you have a WebSocket server.
+zphp has built-in WebSocket support. Define three handler functions and you have a WebSocket server.
 
 ## Handler functions
 
