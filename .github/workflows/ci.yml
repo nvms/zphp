@@ -119,9 +119,8 @@ jobs:
       - uses: shivammathur/setup-php@v2
         with:
           php-version: '8.4'
+          extensions: mbstring, xml, sqlite3, curl, tokenizer
       - run: zig build
-      - name: smoke test
-        run: echo '<?php echo "ok\n";' > /tmp/smoke.php && ./zig-out/bin/zphp run /tmp/smoke.php
       - run: ./tests/laravel/setup
       - run: ./tests/laravel/run
 
