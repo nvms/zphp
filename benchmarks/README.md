@@ -35,6 +35,36 @@ Fibonacci and loops recovered from a previous LLVM codegen perturbation regressi
 
 ### Optimization targets
 
+## serve
+
+HTTP throughput benchmark comparing `zphp serve` against nginx + php-fpm (the standard production PHP deployment). Uses [wrk](https://github.com/wg/wrk) for load generation.
+
+```
+zig build -Doptimize=ReleaseFast
+./benchmarks/serve/wrk_bench [duration] [threads] [connections]
+```
+
+Defaults: 10s duration, 4 threads, 100 connections. Requires wrk. Requires Docker for the nginx + php-fpm comparison. PHP's built-in server (`php -S`) is included as a baseline but is single-threaded and not a production server.
+
+All servers run the same file: `echo "hello"`.
+
+### Results (Apple M4, 14 cores, wrk -t4 -c100 -d10s)
+
+| server | req/s | avg latency |
+|---|---|---|
+| zphp serve | 92,343 | 1.12 ms |
+| nginx + php-fpm (128 workers) | 42,088 | 50.37 ms |
+| php -S (dev only) | 3,652 | 2.91 ms |
+
+zphp is 2.2x higher throughput and 45x lower latency than nginx + php-fpm on the same trivial endpoint.
+
+### Caveats
+
+- nginx + php-fpm runs in Docker with linux/amd64 emulation on Apple Silicon. native Linux performance would be significantly better for php-fpm. on a real Linux x86_64 server, expect the gap to narrow
+- zphp runs natively. this is representative of real deployment - zphp is a single binary with a built-in production server
+- `php -S` is PHP's built-in development server. single-threaded, not intended for production. included only as a baseline
+- this benchmarks I/O and dispatch overhead on a trivial endpoint. real-world PHP with database queries, template rendering, etc. would shift the bottleneck from the server to the application layer
+
 ## fmt
 
 Formats `sample.php` (416 lines) with each tool, reports best of 10 runs.

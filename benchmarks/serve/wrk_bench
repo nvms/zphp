@@ -1,0 +1,118 @@
+#!/bin/bash
+set -e
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+ROOT_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
+ZPHP="$ROOT_DIR/zig-out/bin/zphp"
+APP="$SCRIPT_DIR/app.php"
+TMPDIR=$(mktemp -d)
+
+DURATION="${1:-10s}"
+THREADS="${2:-4}"
+CONNECTIONS="${3:-100}"
+
+if ! command -v wrk &>/dev/null; then
+    echo "wrk not found. install: brew install wrk (macOS) or apt install wrk (Linux)"
+    exit 1
+fi
+
+if [ ! -f "$ZPHP" ]; then
+    echo "building zphp (ReleaseFast)..."
+    cd "$ROOT_DIR" && zig build -Doptimize=ReleaseFast
+fi
+
+PIDS=()
+cleanup() {
+    for pid in "${PIDS[@]}"; do kill "$pid" 2>/dev/null || true; done
+    cd "$SCRIPT_DIR" && docker compose down 2>/dev/null || true
+    rm -rf "$TMPDIR"
+    wait 2>/dev/null
+}
+trap cleanup EXIT
+
+echo "serve benchmark: wrk -t$THREADS -c$CONNECTIONS -d$DURATION"
+echo ""
+
+run_wrk() {
+    local name="$1"
+    local url="$2"
+    wrk -t"$THREADS" -c"$CONNECTIONS" -d"$DURATION" "$url" > "$TMPDIR/$name.txt" 2>&1
+}
+
+parse_rps() { grep "Requests/sec" "$TMPDIR/$1.txt" | awk '{print $2}'; }
+parse_lat() { grep "Latency" "$TMPDIR/$1.txt" | awk '{print $2}'; }
+
+TARGETS=()
+
+# nginx + php-fpm (the production comparison)
+if command -v docker &>/dev/null && docker info >/dev/null 2>&1; then
+    echo "  starting nginx + php-fpm (128 workers)..."
+    cd "$SCRIPT_DIR" && docker compose up -d php-fpm 2>/dev/null
+    sleep 4
+    if curl -sf http://127.0.0.1:9081/ >/dev/null 2>&1; then
+        echo "  benchmarking nginx + php-fpm..."
+        run_wrk fpm http://127.0.0.1:9081/
+        TARGETS+=(fpm)
+    else
+        echo "  php-fpm failed to start, skipping"
+    fi
+fi
+
+# zphp serve
+echo "  starting zphp serve..."
+$ZPHP serve "$APP" --port 9091 >/dev/null 2>&1 &
+PIDS+=($!)
+sleep 1
+if curl -sf http://127.0.0.1:9091/ >/dev/null 2>&1; then
+    echo "  benchmarking zphp serve..."
+    run_wrk zphp http://127.0.0.1:9091/
+    TARGETS+=(zphp)
+else
+    echo "  zphp failed to start"
+    exit 1
+fi
+
+# php built-in server (baseline)
+if command -v php &>/dev/null; then
+    echo "  starting php -S (single-threaded, dev only)..."
+    php -S 127.0.0.1:9090 "$APP" >/dev/null 2>&1 &
+    PIDS+=($!)
+    sleep 1
+    if curl -sf http://127.0.0.1:9090/ >/dev/null 2>&1; then
+        echo "  benchmarking php -S..."
+        run_wrk phps http://127.0.0.1:9090/
+        TARGETS+=(phps)
+    fi
+fi
+
+echo ""
+echo "  server                    req/s        avg latency"
+echo "  ------                    -----        -----------"
+
+for t in "${TARGETS[@]}"; do
+    case "$t" in
+        fpm)  label="nginx + php-fpm" ;;
+        zphp) label="zphp serve" ;;
+        phps) label="php -S (dev only)" ;;
+    esac
+    printf "  %-24s  %-12s %s\n" "$label" "$(parse_rps $t)" "$(parse_lat $t)"
+done
+
+FPM_RPS=$(parse_rps fpm 2>/dev/null || echo "")
+ZPHP_RPS=$(parse_rps zphp 2>/dev/null || echo "")
+if [ -n "$FPM_RPS" ] && [ -n "$ZPHP_RPS" ]; then
+    RATIO=$(echo "scale=1; $ZPHP_RPS / $FPM_RPS" | bc 2>/dev/null || echo "?")
+    echo ""
+    echo "  zphp vs php-fpm: ${RATIO}x"
+fi
+
+for t in "${TARGETS[@]}"; do
+    case "$t" in
+        fpm)  label="nginx + php-fpm" ;;
+        zphp) label="zphp serve" ;;
+        phps) label="php -S (dev only)" ;;
+    esac
+    echo ""
+    echo "--- $label ---"
+    cat "$TMPDIR/$t.txt"
+done

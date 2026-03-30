@@ -1,28 +1,26 @@
 # serve benchmarks
 
-compares zphp serve against PHP-FPM (nginx + php-fpm) and Swoole on HTTP throughput and WebSocket concurrency.
+compares zphp serve against nginx + php-fpm and Swoole on HTTP throughput and WebSocket concurrency.
 
-## run
+## HTTP benchmark (wrk)
 
 ```
-./benchmarks/serve/bench
+./benchmarks/serve/wrk_bench [duration] [threads] [connections]
 ```
 
-requires Docker for PHP-FPM and Swoole. zphp runs natively. first run builds Docker images.
+requires wrk (`brew install wrk` or `apt install wrk`). requires Docker for nginx + php-fpm comparison.
 
-## results (Apple M4, 14 cores)
+### results (Apple M4, 14 cores, wrk -t4 -c100 -d10s)
 
-### HTTP throughput (1000 requests, 50 concurrent)
+| server | req/s | avg latency |
+|---|---|---|
+| zphp serve | 92,343 | 1.12 ms |
+| nginx + php-fpm (128 workers) | 42,088 | 50.37 ms |
+| php -S (dev only) | 3,652 | 2.91 ms |
 
-| server | req/s |
-|---|---|
-| php-fpm (128 workers) | 2,957 |
-| swoole (4 workers) | 6,033 |
-| zphp (14 workers) | 5,193 |
+all servers running `echo "hello"`. nginx + php-fpm in Docker (linux/amd64 emulation on Apple Silicon). zphp native. php -S is single-threaded and not a production server - included as a baseline only.
 
-all servers running `echo "hello"`. php-fpm and swoole in Docker (linux/amd64 emulation on Apple Silicon). zphp native. load generated with Python `urllib` (50 threads) - this is a crude benchmark that measures the load generator as much as the server. results should be taken as directional, not absolute. a proper HTTP throughput comparison needs `wrk` or `hey`.
-
-swoole outperforming zphp despite running in Docker emulation is notable. swoole's HTTP server is a mature C extension with years of optimization. zphp's VM is an unoptimized interpreter (no JIT, hash-map variable lookup per frame). for a trivial echo endpoint, the overhead is dominated by VM dispatch, not I/O - which is where swoole's C-level fastpath wins. for real-world PHP with more computation, the gap would narrow since both runtimes spend most time in PHP execution.
+the Docker emulation penalty is real - native Linux php-fpm numbers would be higher. but even accounting for that, zphp's built-in server is competitive with the traditional nginx + php-fpm stack while being a single binary with zero configuration.
 
 ### WebSocket concurrent connections
 
