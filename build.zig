@@ -16,6 +16,7 @@ pub fn build(b: *std.Build) void {
     const fast_loop_obj = b.addObject(.{
         .name = "fast_loop",
         .root_module = fast_loop_mod,
+        .use_llvm = true,
     });
 
     const exe_mod = b.createModule(.{
@@ -38,6 +39,7 @@ pub fn build(b: *std.Build) void {
     const exe = b.addExecutable(.{
         .name = "zphp",
         .root_module = exe_mod,
+        .use_llvm = true,
     });
     exe.stack_size = 64 * 1024 * 1024;
     b.installArtifact(exe);
@@ -54,6 +56,7 @@ pub fn build(b: *std.Build) void {
     const fast_loop_test_obj = b.addObject(.{
         .name = "fast_loop_test",
         .root_module = fast_loop_mod,
+        .use_llvm = true,
     });
 
     const test_mod = b.createModule(.{
@@ -75,6 +78,7 @@ pub fn build(b: *std.Build) void {
 
     const unit_tests = b.addTest(.{
         .root_module = test_mod,
+        .use_llvm = true,
     });
     unit_tests.stack_size = 64 * 1024 * 1024;
 

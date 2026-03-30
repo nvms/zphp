@@ -107,7 +107,7 @@ jobs:
       - run: zig build
       - run: ./tests/examples_test
 
-  laravel-debug:
+  laravel:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -120,23 +120,9 @@ jobs:
         with:
           php-version: '8.4'
           extensions: mbstring, xml, sqlite3, curl, tokenizer
-      - name: build default
-        run: zig build
-      - name: setup laravel
-        run: ./tests/laravel/setup
-      - name: bisect with default build
-        continue-on-error: true
-        run: timeout 120 ./zig-out/bin/zphp run tests/laravel/harness/bisect.php
-      - name: build ReleaseSafe
-        run: zig build -Doptimize=ReleaseSafe
-      - name: bisect with ReleaseSafe build
-        continue-on-error: true
-        run: timeout 120 ./zig-out/bin/zphp run tests/laravel/harness/bisect.php
-      - name: build Debug
-        run: zig build -Doptimize=Debug
-      - name: bisect with Debug build
-        continue-on-error: true
-        run: timeout 120 ./zig-out/bin/zphp run tests/laravel/harness/bisect.php
+      - run: zig build
+      - run: ./tests/laravel/setup
+      - run: ./tests/laravel/run
 
   pdo:
     runs-on: ubuntu-latest

@@ -1,32 +1,38 @@
 <?php
 // bisection test to find where the x86_64 segfault occurs during Laravel bootstrap
+// uses file_put_contents to php://stderr for unbuffered output (survives crash)
 
-echo "BISECT: starting\n";
+function bisect_log($msg) {
+    file_put_contents('php://stderr', "BISECT: $msg\n");
+}
 
-echo "BISECT: defining LARAVEL_START\n";
+bisect_log("starting");
+
+bisect_log("defining LARAVEL_START");
 define('LARAVEL_START', microtime(true));
 
-echo "BISECT: requiring autoload\n";
+bisect_log("requiring autoload");
 require __DIR__ . '/../app/vendor/autoload.php';
-echo "BISECT: autoload done\n";
+bisect_log("autoload done");
 
-echo "BISECT: requiring bootstrap/app.php\n";
+bisect_log("requiring bootstrap/app.php");
 $app = require_once __DIR__ . '/../app/bootstrap/app.php';
-echo "BISECT: bootstrap done, app class: " . get_class($app) . "\n";
+bisect_log("bootstrap done, app class: " . get_class($app));
 
-echo "BISECT: making kernel\n";
+bisect_log("making kernel");
 $kernel = $app->make(Illuminate\Contracts\Http\Kernel::class);
-echo "BISECT: kernel created, class: " . get_class($kernel) . "\n";
+bisect_log("kernel created, class: " . get_class($kernel));
 
-echo "BISECT: setting up SERVER vars\n";
+bisect_log("setting up SERVER vars");
 $_SERVER['REQUEST_URI'] = '/';
 $_SERVER['REQUEST_METHOD'] = 'GET';
 $_SERVER['HTTP_HOST'] = 'localhost';
 
-echo "BISECT: capturing request\n";
+bisect_log("capturing request");
 $request = Illuminate\Http\Request::capture();
-echo "BISECT: request captured\n";
+bisect_log("request captured");
 
-echo "BISECT: handling request\n";
+bisect_log("handling request");
 $response = $kernel->handle($request);
-echo "BISECT: response received, status: " . $response->getStatusCode() . "\n";
+bisect_log("response received, status: " . $response->getStatusCode());
+echo "status: " . $response->getStatusCode() . "\n";
