@@ -104,12 +104,16 @@ pub const NativeContext = struct {
             scan_idx -= 1;
             var depth: i32 = 0;
             const arg_end = i;
+            var bad_op = false;
             while (i > 0 and depth < 1) {
                 i -= 1;
-                const op: OpCode = @enumFromInt(code[instrs[i]]);
+                const op: OpCode = std.meta.intToEnum(OpCode, code[instrs[i]]) catch {
+                    bad_op = true;
+                    break;
+                };
                 depth += @as(i32, op.stackEffect());
             }
-            if (depth < 1) break;
+            if (bad_op or depth < 1) break;
 
             const arg_ic = arg_end - i;
 
@@ -5681,12 +5685,16 @@ pub const VM = struct {
             scan_idx -= 1;
             var depth: i32 = 0;
             const arg_end = i;
+            var bad_op = false;
             while (i > 0 and depth < 1) {
                 i -= 1;
-                const op: OpCode = @enumFromInt(code[instrs[i]]);
+                const op: OpCode = std.meta.intToEnum(OpCode, code[instrs[i]]) catch {
+                    bad_op = true;
+                    break;
+                };
                 depth += @as(i32, op.stackEffect());
             }
-            if (depth < 1) break;
+            if (bad_op or depth < 1) break;
 
             const arg_instr_count = arg_end - i;
 
