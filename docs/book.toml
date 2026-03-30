@@ -1,0 +1,9 @@
+[book]
+title = "zphp"
+description = "A Zig-based PHP runtime"
+authors = ["nvms"]
+language = "en"
+src = "src"
+
+[output.html]
+git-repository-url = "https://github.com/nvms/zphp"

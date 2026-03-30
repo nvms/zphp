@@ -5,3 +5,4 @@ test_compress
 /*.md
 !README.md
 .handoff/
+docs/book/
