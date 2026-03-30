@@ -49,6 +49,10 @@ pub const EnvSnapshot = struct {
     }
 
     pub fn deinit(self: *EnvSnapshot) void {
+        for (self.env_arr.entries.items) |entry| {
+            if (entry.key == .string) self.allocator.free(entry.key.string);
+            if (entry.value == .string) self.allocator.free(entry.value.string);
+        }
         self.env_arr.deinit(self.allocator);
         self.allocator.destroy(self.env_arr);
     }
