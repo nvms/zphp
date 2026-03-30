@@ -619,7 +619,7 @@ const Formatter = struct {
         self.formatParamList(node.data.lhs);
         self.write(")");
         self.formatReturnType(node.main_token);
-        self.formatBlockInline(node.data.rhs);
+        self.formatBlockInline(node.data.rhs & 0x7FFFFFFF);
     }
 
     fn formatReturnType(self: *Formatter, name_tok: u32) void {
@@ -930,7 +930,7 @@ const Formatter = struct {
 
     fn formatClassMethod(self: *Formatter, node: Ast.Node) void {
         const visibility = (node.data.rhs >> 30) & 0x3;
-        const body_idx = node.data.rhs & 0x3FFFFFFF;
+        const body_idx = node.data.rhs & 0x1FFFFFFF;
         switch (visibility) {
             0 => self.write("public "),
             1 => self.write("protected "),
@@ -1305,9 +1305,11 @@ const Formatter = struct {
 
     fn formatNewExpr(self: *Formatter, node: Ast.Node) void {
         self.write("new ");
-        if (node.data.rhs != 0) {
-            // qualified name from extra
-            const parts = self.ast.extraSlice(node.data.rhs);
+        const is_absolute = (node.data.rhs & (1 << 31)) != 0;
+        const name_extra = node.data.rhs & 0x7FFFFFFF;
+        if (is_absolute) self.write("\\");
+        if (name_extra != 0) {
+            const parts = self.ast.extraSlice(name_extra);
             for (parts, 0..) |tok_idx, i| {
                 if (i > 0) self.write("\\");
                 self.write(self.ast.tokens[tok_idx].lexeme(self.source));
@@ -1341,8 +1343,8 @@ const Formatter = struct {
         self.formatParamList(node.data.lhs);
         self.write(")");
 
-        // rhs -> {body, use_count, use_vars...}
-        const body = self.ast.extra_data[node.data.rhs];
+        // rhs -> {body (bit 31 = generator), use_count, use_vars...}
+        const body = self.ast.extra_data[node.data.rhs] & 0x7FFFFFFF;
         const use_count = self.ast.extra_data[node.data.rhs + 1];
 
         if (!is_arrow and use_count > 0) {
