@@ -741,6 +741,11 @@ fn processHttpRead(w: *Worker, c: *Connection) void {
     } else {
         if (req.getHeader("Content-Length")) |cl| {
             body_len = std.fmt.parseInt(usize, cl, 10) catch 0;
+            if (body_len > 64 * 1024 * 1024) {
+                writeResponse(c, 413, "text/plain", null, "Request body too large", false, false, w.allocator) catch {};
+                c.state = .closing;
+                return;
+            }
         }
         consumed = header_end + body_len;
         if (c.buffered < consumed) return;
@@ -1442,7 +1447,8 @@ fn writeResponse(conn: *Connection, code: i64, content_type: []const u8, extra_h
         200 => "200 OK", 201 => "201 Created", 204 => "204 No Content",
         301 => "301 Moved Permanently", 302 => "302 Found", 304 => "304 Not Modified",
         400 => "400 Bad Request", 401 => "401 Unauthorized", 403 => "403 Forbidden",
-        404 => "404 Not Found", 405 => "405 Method Not Allowed", 500 => "500 Internal Server Error",
+        404 => "404 Not Found", 405 => "405 Method Not Allowed",
+        413 => "413 Content Too Large", 500 => "500 Internal Server Error",
         else => "200 OK",
     };
 

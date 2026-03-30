@@ -190,7 +190,7 @@ fn native_hash(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len < 2 or args[0] != .string or args[1] != .string) return Value{ .bool = false };
     const algo_name = args[0].string;
     const data = args[1].string;
-    const raw_output = args.len >= 3 and args[2] == .bool and args[2].bool;
+    const raw_output = args.len >= 3 and args[2].isTruthy();
 
     const algo = HashAlgo.fromString(algo_name) orelse return Value{ .bool = false };
     var digest: [64]u8 = undefined;
@@ -208,7 +208,7 @@ fn native_hash_hmac(ctx: *NativeContext, args: []const Value) RuntimeError!Value
     const algo_name = args[0].string;
     const data = args[1].string;
     const key = args[2].string;
-    const raw_output = args.len >= 4 and args[3] == .bool and args[3].bool;
+    const raw_output = args.len >= 4 and args[3].isTruthy();
 
     const algo = HashAlgo.fromString(algo_name) orelse return Value{ .bool = false };
     if (algo == .crc32) return Value{ .bool = false };
@@ -236,7 +236,7 @@ fn native_hash_file(ctx: *NativeContext, args: []const Value) RuntimeError!Value
     if (args.len < 2 or args[0] != .string or args[1] != .string) return Value{ .bool = false };
     const algo_name = args[0].string;
     const filename = args[1].string;
-    const raw_output = args.len >= 3 and args[2] == .bool and args[2].bool;
+    const raw_output = args.len >= 3 and args[2].isTruthy();
     const algo = HashAlgo.fromString(algo_name) orelse return Value{ .bool = false };
     const data = std.fs.cwd().readFileAlloc(ctx.allocator, filename, 10 * 1024 * 1024) catch return Value{ .bool = false };
     var digest: [64]u8 = undefined;

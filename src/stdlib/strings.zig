@@ -2066,7 +2066,7 @@ fn native_strstr(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     const needle = if (args[1] == .string) args[1].string else return Value{ .bool = false };
     if (needle.len == 0) return Value{ .bool = false };
 
-    const before_needle: bool = args.len >= 3 and args[2] == .bool and args[2].bool;
+    const before_needle: bool = args.len >= 3 and args[2].isTruthy();
 
     if (std.mem.indexOf(u8, haystack, needle)) |pos| {
         if (before_needle) {

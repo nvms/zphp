@@ -170,7 +170,7 @@ fn native_session_regenerate_id(ctx: *NativeContext, args: []const Value) Runtim
     const old_sid_val = getSessionVar(ctx, "__session_id") orelse return .{ .bool = false };
     if (old_sid_val != .string) return .{ .bool = false };
 
-    const delete_old = args.len >= 1 and args[0] == .bool and args[0].bool;
+    const delete_old = args.len >= 1 and args[0].isTruthy();
     if (delete_old) {
         const path = try sessionPath(ctx.allocator, old_sid_val.string);
         defer ctx.allocator.free(path);

@@ -146,8 +146,8 @@ fn appendCookieOptionsPositional(buf: *std.ArrayListUnmanaged(u8), a: std.mem.Al
         try buf.appendSlice(a, "; Domain=");
         try buf.appendSlice(a, args[4].string);
     }
-    if (args.len >= 6 and args[5] == .bool and args[5].bool) try buf.appendSlice(a, "; Secure");
-    if (args.len >= 7 and args[6] == .bool and args[6].bool) try buf.appendSlice(a, "; HttpOnly");
+    if (args.len >= 6 and args[5].isTruthy()) try buf.appendSlice(a, "; Secure");
+    if (args.len >= 7 and args[6].isTruthy()) try buf.appendSlice(a, "; HttpOnly");
 }
 
 fn appendMaxAge(buf: *std.ArrayListUnmanaged(u8), a: std.mem.Allocator, expires: i64) !void {

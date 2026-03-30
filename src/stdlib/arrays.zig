@@ -281,6 +281,64 @@ fn reindexArray(arr: *PhpArray) void {
     arr.next_int_key = @intCast(arr.entries.items.len);
 }
 
+const SortField = enum { value, key };
+
+fn mergeSort(comptime T: type, items: []T, ctx: *NativeContext, callback: Value, comptime field: SortField) RuntimeError!void {
+    if (items.len <= 1) return;
+    if (items.len <= 16) {
+        // insertion sort for small slices
+        for (1..items.len) |i| {
+            const tmp = items[i];
+            var j: usize = i;
+            while (j > 0) {
+                const cmp = try invokeSortCmp(T, items[j - 1], tmp, ctx, callback, field);
+                if (Value.toInt(cmp) <= 0) break;
+                items[j] = items[j - 1];
+                j -= 1;
+            }
+            items[j] = tmp;
+        }
+        return;
+    }
+    const mid = items.len / 2;
+    try mergeSort(T, items[0..mid], ctx, callback, field);
+    try mergeSort(T, items[mid..], ctx, callback, field);
+    const buf = ctx.allocator.alloc(T, items.len) catch return;
+    defer ctx.allocator.free(buf);
+    var l: usize = 0;
+    var r: usize = mid;
+    var k: usize = 0;
+    while (l < mid and r < items.len) {
+        const cmp = try invokeSortCmp(T, items[l], items[r], ctx, callback, field);
+        if (Value.toInt(cmp) <= 0) {
+            buf[k] = items[l];
+            l += 1;
+        } else {
+            buf[k] = items[r];
+            r += 1;
+        }
+        k += 1;
+    }
+    while (l < mid) : (l += 1) { buf[k] = items[l]; k += 1; }
+    while (r < items.len) : (r += 1) { buf[k] = items[r]; k += 1; }
+    @memcpy(items, buf[0..items.len]);
+}
+
+fn invokeSortCmp(comptime T: type, a: T, b: T, ctx: *NativeContext, callback: Value, comptime field: SortField) RuntimeError!Value {
+    if (field == .key) {
+        const ak: Value = switch (a.key) {
+            .int => |ki| .{ .int = ki },
+            .string => |ks| .{ .string = ks },
+        };
+        const bk: Value = switch (b.key) {
+            .int => |ki| .{ .int = ki },
+            .string => |ks| .{ .string = ks },
+        };
+        return ctx.invokeCallable(callback, &.{ ak, bk });
+    }
+    return ctx.invokeCallable(callback, &.{ a.value, b.value });
+}
+
 fn array_map(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len < 2) return .null;
     const callback = args[0];
@@ -309,11 +367,11 @@ fn array_map(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args[1] != .array) return .null;
     const src = args[1].array;
 
-    // null callback with single array returns a copy
+    // null callback with single array returns a copy preserving keys
     if (callback == .null) {
         var result = try ctx.createArray();
         for (src.entries.items) |entry| {
-            try result.append(ctx.allocator, entry.value);
+            try result.set(ctx.allocator, entry.key, entry.value);
         }
         return .{ .array = result };
     }
@@ -380,24 +438,7 @@ fn native_usort(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len < 2 or args[0] != .array) return .{ .bool = false };
     const arr = args[0].array;
     const callback = args[1];
-
-    var n = arr.entries.items.len;
-    while (n > 1) {
-        var swapped = false;
-        for (0..n - 1) |i| {
-            const a_val = arr.entries.items[i].value;
-            const b_val = arr.entries.items[i + 1].value;
-            const cmp = try ctx.invokeCallable(callback, &.{ a_val, b_val });
-            if (Value.toInt(cmp) > 0) {
-                const tmp = arr.entries.items[i];
-                arr.entries.items[i] = arr.entries.items[i + 1];
-                arr.entries.items[i + 1] = tmp;
-                swapped = true;
-            }
-        }
-        if (!swapped) break;
-        n -= 1;
-    }
+    try mergeSort(PhpArray.Entry, arr.entries.items, ctx, callback, .value);
     reindexArray(arr);
     return .{ .bool = true };
 }
@@ -948,22 +989,7 @@ fn native_uasort(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len < 2 or args[0] != .array) return .{ .bool = false };
     const arr = args[0].array;
     const callback = args[1];
-    const items = arr.entries.items;
-    var n = items.len;
-    while (n > 1) {
-        var swapped = false;
-        for (0..n - 1) |i| {
-            const cmp = try ctx.invokeCallable(callback, &.{ items[i].value, items[i + 1].value });
-            if (Value.toInt(cmp) > 0) {
-                const tmp = items[i];
-                items[i] = items[i + 1];
-                items[i + 1] = tmp;
-                swapped = true;
-            }
-        }
-        if (!swapped) break;
-        n -= 1;
-    }
+    try mergeSort(PhpArray.Entry, arr.entries.items, ctx, callback, .value);
     return .{ .bool = true };
 }
 
@@ -971,30 +997,7 @@ fn native_uksort(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len < 2 or args[0] != .array) return .{ .bool = false };
     const arr = args[0].array;
     const callback = args[1];
-    const items = arr.entries.items;
-    var n = items.len;
-    while (n > 1) {
-        var swapped = false;
-        for (0..n - 1) |i| {
-            const a_key: Value = switch (items[i].key) {
-                .int => |ki| .{ .int = ki },
-                .string => |ks| .{ .string = ks },
-            };
-            const b_key: Value = switch (items[i + 1].key) {
-                .int => |ki| .{ .int = ki },
-                .string => |ks| .{ .string = ks },
-            };
-            const cmp = try ctx.invokeCallable(callback, &.{ a_key, b_key });
-            if (Value.toInt(cmp) > 0) {
-                const tmp = items[i];
-                items[i] = items[i + 1];
-                items[i + 1] = tmp;
-                swapped = true;
-            }
-        }
-        if (!swapped) break;
-        n -= 1;
-    }
+    try mergeSort(PhpArray.Entry, arr.entries.items, ctx, callback, .key);
     return .{ .bool = true };
 }
 

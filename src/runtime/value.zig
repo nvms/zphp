@@ -271,7 +271,11 @@ pub const Value = union(enum) {
 
     pub fn divide(a: Value, b: Value) Value {
         const bv = toFloat(b);
-        if (bv == 0.0) return .{ .int = 0 };
+        if (bv == 0.0) {
+            const av = toFloat(a);
+            if (av == 0.0) return .{ .float = std.math.nan(f64) };
+            return .{ .float = if (av > 0.0) std.math.inf(f64) else -std.math.inf(f64) };
+        }
         const av = toFloat(a);
         const result = av / bv;
         if (result == @trunc(result)) return .{ .int = @intFromFloat(result) };
@@ -280,7 +284,7 @@ pub const Value = union(enum) {
 
     pub fn modulo(a: Value, b: Value) Value {
         const bi = toInt(b);
-        if (bi == 0) return .{ .int = 0 };
+        if (bi == 0) return .{ .float = std.math.nan(f64) };
         return .{ .int = @rem(toInt(a), bi) };
     }
 

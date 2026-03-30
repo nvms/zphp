@@ -775,6 +775,8 @@ pub const VM = struct {
         self.static_vars.clearRetainingCapacity();
         self.global_vars.clearRetainingCapacity();
         self.loaded_files.clearRetainingCapacity();
+        self.magic_get_guard.clearRetainingCapacity();
+        self.magic_call_guard.clearRetainingCapacity();
         if (self.serve_mode) {
             self.functions.clearRetainingCapacity();
             self.php_constants.clearRetainingCapacity();
