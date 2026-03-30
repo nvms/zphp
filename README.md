@@ -4,37 +4,20 @@
 
 <h1 align="center">zphp</h1>
 
-<p align="center">A PHP runtime written in Zig. Single binary. No dependencies.</p>
+<p align="center">A PHP runtime. Single binary.</p>
 
 ---
 
-zphp is a from-scratch PHP runtime with near-complete PHP 8.x feature parity. It ships as a single binary under 5MB with no external dependencies - no php-fpm, no nginx, no extensions to install. The runtime includes a built-in HTTP server, WebSocket support, and database drivers for SQLite, MySQL, and PostgreSQL.
+zphp is a from-scratch PHP runtime with broad PHP 8.x compatibility. It ships as a single binary with a built-in HTTP server, WebSocket support, TLS, HTTP/2, and database drivers for SQLite, MySQL, and PostgreSQL.
 
 ```sh
-# run PHP
-zphp run app.php
-
-# start an HTTP server with worker pooling
-zphp serve app.php --workers 4
-
-# compile to pre-built bytecode (skips parse/compile on subsequent runs)
-zphp build app.php
-
-# compile to a standalone executable - runtime, C libs, and bytecode in one file
-zphp build --compile app.php
+zphp run app.php                    # run a script
+zphp serve app.php --port 8080      # start an HTTP server
+zphp build --compile app.php        # compile to a standalone executable
+zphp test                           # run tests
+zphp fmt src/*.php                  # format code
+zphp install                        # install packages from composer.json
 ```
-
-## Features
-
-**Runtime** - classes, interfaces, traits, abstract classes, enums (pure and backed), generators, fibers, closures, arrow functions, match expressions, named arguments, union/intersection/nullable types, readonly properties, constructor promotion, first-class callable syntax, array destructuring, spread operator, try/catch/finally, namespaces, autoloading.
-
-**HTTP Server** - pre-compiled bytecode, VM pooling across requests, keep-alive connections, gzip compression, static file serving with ETag/304, multipart form data and file uploads, chunked transfer encoding, graceful shutdown.
-
-**WebSocket** - RFC 6455, convention-based routing (`ws_onOpen`, `ws_onMessage`, `ws_onClose`), persistent VM state across messages, poll-based event loop multiplexing HTTP and WebSocket connections concurrently.
-
-**Database** - PDO with SQLite, MySQL, and PostgreSQL drivers. Prepared statements, named and positional parameters, transactions, FETCH_ASSOC/NUM/BOTH.
-
-**Tooling** - package manager (reads `composer.json`, resolves from Packagist), test runner, opinionated code formatter, AOT bytecode compiler, standalone binary compiler.
 
 ## Quick comparison
 
@@ -46,48 +29,23 @@ zphp build --compile app.php
 | Add a package | `composer require pkg` | `zphp add pkg` |
 | Run tests | `phpunit` | `zphp test` |
 | Format code | `php-cs-fixer fix` | `zphp fmt` |
-| Compile to bytecode | opcache (runtime) | `zphp build app.php` |
 | Standalone binary | - | `zphp build --compile app.php` |
-
-## Standalone executables
-
-`zphp build --compile` produces a self-contained binary that bundles the runtime, all linked C libraries (pcre2, sqlite3, zlib, mysql, postgres), and your application bytecode into a single file. The result runs without zphp or any system dependencies installed on the target machine.
-
-```sh
-zphp build --compile server.php   # produces ./server (4-5MB)
-./server                           # run - no zphp needed
-```
 
 ## Use cases
 
-**CLI tools as single binaries** - write a data migration script, a log parser, a CI/CD utility in PHP. Compile it with `zphp build --compile`. Distribute one file. No "install PHP" step for the person running it. PHP is good at string manipulation, file processing, and data transformation - now you can ship that as a binary.
+**CLI tools as single binaries** - write a data migration script, a log parser, a CI/CD utility in PHP. Compile it with `zphp build --compile`. Distribute one file. No "install PHP" step for the person running it.
 
-**Edge and embedded** - the full runtime with HTTP, WebSocket, SQLite, and a scripting language in under 5MB. Runs on a Raspberry Pi, a $5 VPS, a minimal container. Places where nginx + php-fpm + extensions won't fit or aren't worth the complexity.
+**Edge and embedded** - the full runtime with HTTP, WebSocket, and SQLite in under 8MB. Runs on a Raspberry Pi, a $5 VPS, a minimal container.
 
-**Microservices** - one process, one port, one file. `zphp serve` with worker pooling and pre-compiled bytecode. No orchestration layer between your code and the network. Standalone binaries make container images trivial - `FROM scratch`, `COPY`, `ENTRYPOINT`.
+**Microservices** - one process, one port, one file. `zphp serve` with worker pooling and pre-compiled bytecode. Standalone binaries make container images trivial - `FROM scratch`, `COPY`, `ENTRYPOINT`.
 
-**WebSocket servers** - VM state persists across messages without external storage. No Redis for session state, no polling workarounds. The same connection-level persistence model that makes Node.js natural for real-time - chat, live dashboards, multiplayer - but in PHP.
+**WebSocket servers** - native WebSocket support with persistent connection state. No Redis for session data, no polling workarounds. Define `ws_onOpen`, `ws_onMessage`, `ws_onClose` and you have a real-time server.
 
-**Prototyping** - zero-install PHP. Download one binary, write code, run it. Formatter, test runner, and package manager included. No homebrew, no apt, no Docker, no XAMPP.
+**Prototyping** - zero-install PHP. Download one binary, write code, run it. Formatter, test runner, and package manager included.
 
 ## Installation
 
-Prebuilt binaries for Linux and macOS will be available via GitHub releases.
-
-## Building from source
-
-Requires Zig 0.15.x and system libraries for pcre2, sqlite3, zlib, and optionally mysql-client and libpq.
-
-```sh
-# Ubuntu/Debian
-apt install libpcre2-dev libsqlite3-dev zlib1g-dev libmysqlclient-dev libpq-dev
-
-# macOS
-brew install pcre2 mysql-client libpq
-
-make build    # build
-make test     # run tests
-```
+Download prebuilt binaries from [GitHub Releases](https://github.com/nvms/zphp/releases). See the [documentation](https://nvms.github.io/zphp/) for building from source and detailed guides.
 
 ---
 
