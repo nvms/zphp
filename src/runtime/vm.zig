@@ -616,10 +616,6 @@ pub const VM = struct {
             if (ic_ptr.locals_cap > 0) self.allocator.free(ic_ptr.locals_buf[0..ic_ptr.locals_cap]);
             self.allocator.destroy(ic_ptr);
         }
-        var ti_iter = g_type_info.valueIterator();
-        while (ti_iter.next()) |ti| {
-            if (ti.param_types.len > 0) self.allocator.free(ti.param_types);
-        }
         g_type_info.deinit(self.allocator);
         g_type_info = .{};
         self.functions.deinit(self.allocator);

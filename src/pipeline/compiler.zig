@@ -46,6 +46,9 @@ pub const CompileResult = struct {
         self.functions.deinit(self.allocator);
         for (self.string_allocs.items) |s| self.allocator.free(s);
         self.string_allocs.deinit(self.allocator);
+        for (self.type_hints.items) |th| {
+            if (th.param_types.len > 0) self.allocator.free(th.param_types);
+        }
         self.type_hints.deinit(self.allocator);
         if (self.slot_names.len > 0) self.allocator.free(self.slot_names);
     }
