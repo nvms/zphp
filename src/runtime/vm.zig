@@ -4,6 +4,7 @@ const PhpArray = @import("value.zig").PhpArray;
 const PhpObject = @import("value.zig").PhpObject;
 const Generator = @import("value.zig").Generator;
 const Fiber = @import("value.zig").Fiber;
+const ArrayRefBinding = @import("value.zig").ArrayRefBinding;
 const Chunk = @import("../pipeline/bytecode.zig").Chunk;
 const OpCode = @import("../pipeline/bytecode.zig").OpCode;
 const ObjFunction = @import("../pipeline/bytecode.zig").ObjFunction;
@@ -64,7 +65,7 @@ pub const NativeContext = struct {
     }
 
     // write a value back to the caller's variable at the given argument position.
-    // uses bytecode scan to find the variable name (best-effort, works for simple variable args)
+    // uses bytecode scan to find the variable name or array access path
     pub fn setCallerVar(self: *NativeContext, arg_index: usize, arg_count: usize, value: Value) void {
         const vm = self.vm;
         if (vm.frame_count == 0) return;
@@ -74,12 +75,9 @@ pub const NativeContext = struct {
         const call_pos = caller.ip - 4;
         const code = chunk.code.items;
 
-        // forward-scan to find instruction boundaries leading to the call
-        // argument expressions don't contain variable-length instructions
         const max_scan = arg_count * 12;
         const region_start = if (call_pos > max_scan) call_pos - max_scan else 0;
 
-        // try alignments until forward scan lands exactly on call_pos
         var instrs: [128]usize = undefined;
         var instr_count: usize = 0;
         var try_start = region_start;
@@ -98,8 +96,7 @@ pub const NativeContext = struct {
         }
         if (instr_count == 0) return;
 
-        // walk backward through instructions using stack simulation to group into args
-        var arg_vars: [16]?[]const u8 = .{null} ** 16;
+        var arg_sources: [16]RefSource = .{.none} ** 16;
         var scan_idx: usize = arg_count;
         var i = instr_count;
 
@@ -114,33 +111,98 @@ pub const NativeContext = struct {
             }
             if (depth < 1) break;
 
-            // single-instruction variable arg: exactly one instruction that's get_var/get_local
-            if (arg_end - i == 1) {
+            const arg_ic = arg_end - i;
+
+            if (arg_ic == 1) {
                 const ip = instrs[i];
                 if (code[ip] == @intFromEnum(OpCode.get_var)) {
                     const const_idx = (@as(u16, code[ip + 1]) << 8) | code[ip + 2];
                     if (const_idx < chunk.constants.items.len) {
-                        arg_vars[scan_idx] = chunk.constants.items[const_idx].string;
+                        arg_sources[scan_idx] = .{ .simple = chunk.constants.items[const_idx].string };
                     }
                 } else if (code[ip] == @intFromEnum(OpCode.get_local)) {
                     const slot = (@as(u16, code[ip + 1]) << 8) | code[ip + 2];
                     const sn = if (caller.func) |func| func.slot_names else vm.global_slot_names;
                     if (slot < sn.len) {
-                        arg_vars[scan_idx] = sn[slot];
+                        arg_sources[scan_idx] = .{ .simple = sn[slot] };
+                    }
+                }
+            } else if (arg_ic == 3) {
+                const last_ip = instrs[i + 2];
+                if (code[last_ip] == @intFromEnum(OpCode.array_get)) {
+                    const first_ip = instrs[i];
+                    const mid_ip = instrs[i + 1];
+                    var var_name: ?[]const u8 = null;
+                    var is_local = false;
+                    var slot: u16 = 0;
+                    if (code[first_ip] == @intFromEnum(OpCode.get_var)) {
+                        const ci = (@as(u16, code[first_ip + 1]) << 8) | code[first_ip + 2];
+                        if (ci < chunk.constants.items.len) var_name = chunk.constants.items[ci].string;
+                    } else if (code[first_ip] == @intFromEnum(OpCode.get_local)) {
+                        slot = (@as(u16, code[first_ip + 1]) << 8) | code[first_ip + 2];
+                        const sn = if (caller.func) |func| func.slot_names else vm.global_slot_names;
+                        if (slot < sn.len) {
+                            var_name = sn[slot];
+                            is_local = true;
+                        }
+                    }
+                    if (var_name) |vn| {
+                        var key_val: ?Value = null;
+                        if (code[mid_ip] == @intFromEnum(OpCode.constant)) {
+                            const ci = (@as(u16, code[mid_ip + 1]) << 8) | code[mid_ip + 2];
+                            if (ci < chunk.constants.items.len) key_val = chunk.constants.items[ci];
+                        } else if (code[mid_ip] == @intFromEnum(OpCode.get_var)) {
+                            const ci = (@as(u16, code[mid_ip + 1]) << 8) | code[mid_ip + 2];
+                            if (ci < chunk.constants.items.len) {
+                                if (chunk.constants.items[ci] == .string) {
+                                    const kname = chunk.constants.items[ci].string;
+                                    key_val = caller.vars.get(kname);
+                                    if (key_val == null and caller.locals.len > 0) {
+                                        const sn = if (caller.func) |func| func.slot_names else vm.global_slot_names;
+                                        for (sn, 0..) |sn_name, si| {
+                                            if (std.mem.eql(u8, sn_name, kname)) {
+                                                if (si < caller.locals.len) key_val = caller.locals[si];
+                                                break;
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        } else if (code[mid_ip] == @intFromEnum(OpCode.get_local)) {
+                            const kslot = (@as(u16, code[mid_ip + 1]) << 8) | code[mid_ip + 2];
+                            if (kslot < caller.locals.len) key_val = caller.locals[kslot];
+                        }
+                        if (key_val) |kv| {
+                            arg_sources[scan_idx] = .{ .array_elem = .{
+                                .var_name = vn,
+                                .is_local = is_local,
+                                .slot = slot,
+                                .key = kv,
+                            } };
+                        }
                     }
                 }
             }
         }
 
-        if (arg_vars[arg_index]) |var_name| {
-            caller.vars.put(vm.allocator, var_name, value) catch return;
-            const sn2 = if (caller.func) |func| func.slot_names else vm.global_slot_names;
-            for (sn2, 0..) |sn_name, si| {
-                if (std.mem.eql(u8, sn_name, var_name)) {
-                    if (si < caller.locals.len) caller.locals[si] = value;
-                    break;
+        switch (arg_sources[arg_index]) {
+            .simple => |var_name| {
+                caller.vars.put(vm.allocator, var_name, value) catch return;
+                const sn2 = if (caller.func) |func| func.slot_names else vm.global_slot_names;
+                for (sn2, 0..) |sn_name, si| {
+                    if (std.mem.eql(u8, sn_name, var_name)) {
+                        if (si < caller.locals.len) caller.locals[si] = value;
+                        break;
+                    }
                 }
-            }
+            },
+            .array_elem => |ae| {
+                const arr_val = vm.resolveCallerVar(ae.var_name, ae.is_local, ae.slot);
+                if (arr_val == .array) {
+                    arr_val.array.set(vm.allocator, Value.toArrayKey(ae.key), value) catch return;
+                }
+            },
+            .none => {},
         }
     }
 
@@ -182,6 +244,17 @@ pub const CaptureEntry = struct {
     var_name: []const u8,
     value: Value,
     ref_cell: ?*Value = null,
+};
+
+const RefSource = union(enum) {
+    none,
+    simple: []const u8,
+    array_elem: struct {
+        var_name: []const u8,
+        is_local: bool,
+        slot: u16,
+        key: Value,
+    },
 };
 
 pub const CaptureRange = struct {
@@ -379,6 +452,7 @@ pub const VM = struct {
         func: ?*const ObjFunction = null,
         generator: ?*Generator = null,
         ref_slots: std.StringHashMapUnmanaged(*Value) = .{},
+        ref_array_bindings: std.ArrayListUnmanaged(ArrayRefBinding) = .{},
         called_class: ?[]const u8 = null,
         entry_sp: usize = 0,
     };
@@ -600,6 +674,7 @@ pub const VM = struct {
     fn releaseFrames(self: *VM) void {
         for (0..self.frame_count) |i| {
             self.frames[i].ref_slots.deinit(self.allocator);
+            self.frames[i].ref_array_bindings.deinit(self.allocator);
             self.frames[i].vars.deinit(self.allocator);
             if (self.frames[i].locals.len > 0) {
                 self.freeLocals(self.frames[i].locals);
@@ -3305,22 +3380,39 @@ pub const VM = struct {
                         }
                         // set up ref cells for by-ref params
                         var method_refs: std.StringHashMapUnmanaged(*Value) = .{};
+                        var method_array_bindings: std.ArrayListUnmanaged(ArrayRefBinding) = .{};
                         if (func.ref_params.len > 0) {
-                            // method_call opcode is 4 bytes: opcode(1) + name(2) + argc(1)
-                            const arg_vars = self.scanCallerVarNames(ac);
+                            const arg_sources = self.scanCallerArgSources(ac);
                             for (0..@min(ac, func.ref_params.len)) |ri| {
                                 if (func.ref_params[ri]) {
-                                    if (arg_vars[ri]) |caller_var| {
-                                        if (self.currentFrame().ref_slots.get(caller_var)) |existing_cell| {
-                                            existing_cell.* = new_vars.get(func.params[ri]) orelse .null;
-                                            try method_refs.put(self.allocator, func.params[ri], existing_cell);
-                                        } else {
-                                            const cell = try self.allocator.create(Value);
-                                            cell.* = new_vars.get(func.params[ri]) orelse .null;
-                                            try self.ref_cells.append(self.allocator, cell);
-                                            try self.currentFrame().ref_slots.put(self.allocator, caller_var, cell);
-                                            try method_refs.put(self.allocator, func.params[ri], cell);
-                                        }
+                                    switch (arg_sources[ri]) {
+                                        .simple => |caller_var| {
+                                            if (self.currentFrame().ref_slots.get(caller_var)) |existing_cell| {
+                                                existing_cell.* = new_vars.get(func.params[ri]) orelse .null;
+                                                try method_refs.put(self.allocator, func.params[ri], existing_cell);
+                                            } else {
+                                                const cell = try self.allocator.create(Value);
+                                                cell.* = new_vars.get(func.params[ri]) orelse .null;
+                                                try self.ref_cells.append(self.allocator, cell);
+                                                try self.currentFrame().ref_slots.put(self.allocator, caller_var, cell);
+                                                try method_refs.put(self.allocator, func.params[ri], cell);
+                                            }
+                                        },
+                                        .array_elem => |ae| {
+                                            const arr_val = self.resolveCallerVar(ae.var_name, ae.is_local, ae.slot);
+                                            if (arr_val == .array) {
+                                                const cell = try self.allocator.create(Value);
+                                                cell.* = new_vars.get(func.params[ri]) orelse .null;
+                                                try self.ref_cells.append(self.allocator, cell);
+                                                try method_refs.put(self.allocator, func.params[ri], cell);
+                                                try method_array_bindings.append(self.allocator, .{
+                                                    .cell = cell,
+                                                    .array = arr_val.array,
+                                                    .key = Value.toArrayKey(ae.key),
+                                                });
+                                            }
+                                        },
+                                        .none => {},
                                     }
                                 }
                             }
@@ -3330,12 +3422,13 @@ pub const VM = struct {
                         self.sp -= 1;
                         if (func.is_generator) {
                             method_refs.deinit(self.allocator);
+                            method_array_bindings.deinit(self.allocator);
                             const gen = try self.allocator.create(Generator);
                             gen.* = .{ .func = func, .vars = new_vars };
                             try self.generators.append(self.allocator, gen);
                             self.push(.{ .generator = gen });
                         } else {
-                            self.frames[self.frame_count] = .{ .chunk = &func.chunk, .ip = 0, .vars = new_vars, .locals = try self.allocLocals(func, &new_vars), .func = func, .ref_slots = method_refs };
+                            self.frames[self.frame_count] = .{ .chunk = &func.chunk, .ip = 0, .vars = new_vars, .locals = try self.allocLocals(func, &new_vars), .func = func, .ref_slots = method_refs, .ref_array_bindings = method_array_bindings };
                             self.setFrameArgCount(arg_count);
                             self.frames[self.frame_count].entry_sp = self.sp;
                     self.frame_count += 1;
@@ -5462,6 +5555,7 @@ pub const VM = struct {
             self.handler_count -= 1;
         }
         self.frames[self.frame_count].ref_slots.deinit(self.allocator);
+        self.frames[self.frame_count].ref_array_bindings.deinit(self.allocator);
         self.frames[self.frame_count].vars.deinit(self.allocator);
         if (self.frames[self.frame_count].locals.len > 0) {
             self.freeLocals(self.frames[self.frame_count].locals);
@@ -5485,13 +5579,16 @@ pub const VM = struct {
         for (fiber.saved_frames.items) |*f| {
             f.vars.deinit(self.allocator);
             f.ref_slots.deinit(self.allocator);
+            f.ref_array_bindings.deinit(self.allocator);
             if (f.locals.len > 0) self.freeLocals(f.locals);
         }
         fiber.saved_frames.clearRetainingCapacity();
     }
 
     fn writebackRefs(self: *VM) !void {
-        _ = self;
+        for (self.currentFrame().ref_array_bindings.items) |binding| {
+            try binding.array.set(self.allocator, binding.key, binding.cell.*);
+        }
     }
 
     fn scanCallerVarNames(self: *VM, ac: usize) [16]?[]const u8 {
@@ -5535,6 +5632,137 @@ pub const VM = struct {
             }
         }
         return arg_vars;
+    }
+
+    fn resolveCallerVar(self: *VM, var_name: []const u8, is_local: bool, slot: u16) Value {
+        const frame = self.currentFrame();
+        if (is_local and slot < frame.locals.len) {
+            return frame.locals[slot];
+        }
+        if (frame.ref_slots.get(var_name)) |cell| return cell.*;
+        return frame.vars.get(var_name) orelse .null;
+    }
+
+    fn scanCallerArgSources(self: *VM, ac: usize) [16]RefSource {
+        var sources: [16]RefSource = .{.none} ** 16;
+        if (ac == 0) return sources;
+        const caller = self.currentFrame();
+        const chunk = caller.chunk;
+        const ip = caller.ip;
+        if (ip < 4) return sources;
+        const call_pos = ip - 4;
+        const code = chunk.code.items;
+
+        const max_scan = ac * 12;
+        const region_start = if (call_pos > max_scan) call_pos - max_scan else 0;
+
+        var instrs: [128]usize = undefined;
+        var instr_count: usize = 0;
+        var try_start = region_start;
+        while (try_start < call_pos) : (try_start += 1) {
+            var pos = try_start;
+            var count: usize = 0;
+            while (pos < call_pos and count < 128) {
+                instrs[count] = pos;
+                count += 1;
+                pos += OpCode.widthFromByte(code[pos]);
+            }
+            if (pos == call_pos) {
+                instr_count = count;
+                break;
+            }
+        }
+        if (instr_count == 0) return sources;
+
+        var scan_idx: usize = ac;
+        var i = instr_count;
+
+        while (scan_idx > 0 and i > 0) {
+            scan_idx -= 1;
+            var depth: i32 = 0;
+            const arg_end = i;
+            while (i > 0 and depth < 1) {
+                i -= 1;
+                const op: OpCode = @enumFromInt(code[instrs[i]]);
+                depth += @as(i32, op.stackEffect());
+            }
+            if (depth < 1) break;
+
+            const arg_instr_count = arg_end - i;
+
+            if (arg_instr_count == 1) {
+                const aip = instrs[i];
+                if (code[aip] == @intFromEnum(OpCode.get_var)) {
+                    const ci = (@as(u16, code[aip + 1]) << 8) | code[aip + 2];
+                    if (ci < chunk.constants.items.len) {
+                        sources[scan_idx] = .{ .simple = chunk.constants.items[ci].string };
+                    }
+                } else if (code[aip] == @intFromEnum(OpCode.get_local)) {
+                    const slot = (@as(u16, code[aip + 1]) << 8) | code[aip + 2];
+                    const sn = if (caller.func) |func| func.slot_names else self.global_slot_names;
+                    if (slot < sn.len) {
+                        sources[scan_idx] = .{ .simple = sn[slot] };
+                    }
+                }
+            } else if (arg_instr_count == 3) {
+                // get_var/get_local + constant/get_var/get_local + array_get
+                const last_ip = instrs[i + 2];
+                if (code[last_ip] == @intFromEnum(OpCode.array_get)) {
+                    const first_ip = instrs[i];
+                    const mid_ip = instrs[i + 1];
+                    var var_name: ?[]const u8 = null;
+                    var is_local = false;
+                    var slot: u16 = 0;
+                    if (code[first_ip] == @intFromEnum(OpCode.get_var)) {
+                        const ci = (@as(u16, code[first_ip + 1]) << 8) | code[first_ip + 2];
+                        if (ci < chunk.constants.items.len) var_name = chunk.constants.items[ci].string;
+                    } else if (code[first_ip] == @intFromEnum(OpCode.get_local)) {
+                        slot = (@as(u16, code[first_ip + 1]) << 8) | code[first_ip + 2];
+                        const sn = if (caller.func) |func| func.slot_names else self.global_slot_names;
+                        if (slot < sn.len) {
+                            var_name = sn[slot];
+                            is_local = true;
+                        }
+                    }
+                    if (var_name) |vn| {
+                        var key_val: ?Value = null;
+                        if (code[mid_ip] == @intFromEnum(OpCode.constant)) {
+                            const ci = (@as(u16, code[mid_ip + 1]) << 8) | code[mid_ip + 2];
+                            if (ci < chunk.constants.items.len) key_val = chunk.constants.items[ci];
+                        } else if (code[mid_ip] == @intFromEnum(OpCode.get_var)) {
+                            const ci = (@as(u16, code[mid_ip + 1]) << 8) | code[mid_ip + 2];
+                            if (ci < chunk.constants.items.len) {
+                                if (chunk.constants.items[ci] == .string) {
+                                    const kname = chunk.constants.items[ci].string;
+                                    key_val = caller.vars.get(kname);
+                                    if (key_val == null and caller.locals.len > 0) {
+                                        const sn = if (caller.func) |func| func.slot_names else self.global_slot_names;
+                                        for (sn, 0..) |sn_name, si| {
+                                            if (std.mem.eql(u8, sn_name, kname)) {
+                                                if (si < caller.locals.len) key_val = caller.locals[si];
+                                                break;
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        } else if (code[mid_ip] == @intFromEnum(OpCode.get_local)) {
+                            const kslot = (@as(u16, code[mid_ip + 1]) << 8) | code[mid_ip + 2];
+                            if (kslot < caller.locals.len) key_val = caller.locals[kslot];
+                        }
+                        if (key_val) |kv| {
+                            sources[scan_idx] = .{ .array_elem = .{
+                                .var_name = vn,
+                                .is_local = is_local,
+                                .slot = slot,
+                                .key = kv,
+                            } };
+                        }
+                    }
+                }
+            }
+        }
+        return sources;
     }
 
     fn writebackStatics(self: *VM) !void {
@@ -6375,22 +6603,39 @@ pub const VM = struct {
             // set up shared ref cells for by-ref params
             // start with any closure ref captures
             var callee_refs = closure_refs;
+            var callee_array_bindings: std.ArrayListUnmanaged(ArrayRefBinding) = .{};
             if (func.ref_params.len > 0) {
-                const arg_vars = self.scanCallerVarNames(ac);
+                const arg_sources = self.scanCallerArgSources(ac);
                 for (0..@min(ac, func.ref_params.len)) |ri| {
                     if (func.ref_params[ri]) {
-                        if (arg_vars[ri]) |caller_var| {
-                            // check if caller already has a ref cell for this var
-                            if (self.currentFrame().ref_slots.get(caller_var)) |existing_cell| {
-                                existing_cell.* = new_vars.get(func.params[ri]) orelse .null;
-                                try callee_refs.put(self.allocator, func.params[ri], existing_cell);
-                            } else {
-                                const cell = try self.allocator.create(Value);
-                                cell.* = new_vars.get(func.params[ri]) orelse .null;
-                                try self.ref_cells.append(self.allocator, cell);
-                                try self.currentFrame().ref_slots.put(self.allocator, caller_var, cell);
-                                try callee_refs.put(self.allocator, func.params[ri], cell);
-                            }
+                        switch (arg_sources[ri]) {
+                            .simple => |caller_var| {
+                                if (self.currentFrame().ref_slots.get(caller_var)) |existing_cell| {
+                                    existing_cell.* = new_vars.get(func.params[ri]) orelse .null;
+                                    try callee_refs.put(self.allocator, func.params[ri], existing_cell);
+                                } else {
+                                    const cell = try self.allocator.create(Value);
+                                    cell.* = new_vars.get(func.params[ri]) orelse .null;
+                                    try self.ref_cells.append(self.allocator, cell);
+                                    try self.currentFrame().ref_slots.put(self.allocator, caller_var, cell);
+                                    try callee_refs.put(self.allocator, func.params[ri], cell);
+                                }
+                            },
+                            .array_elem => |ae| {
+                                const arr_val = self.resolveCallerVar(ae.var_name, ae.is_local, ae.slot);
+                                if (arr_val == .array) {
+                                    const cell = try self.allocator.create(Value);
+                                    cell.* = new_vars.get(func.params[ri]) orelse .null;
+                                    try self.ref_cells.append(self.allocator, cell);
+                                    try callee_refs.put(self.allocator, func.params[ri], cell);
+                                    try callee_array_bindings.append(self.allocator, .{
+                                        .cell = cell,
+                                        .array = arr_val.array,
+                                        .key = Value.toArrayKey(ae.key),
+                                    });
+                                }
+                            },
+                            .none => {},
                         }
                     }
                 }
@@ -6398,6 +6643,7 @@ pub const VM = struct {
 
             if (func.is_generator) {
                 callee_refs.deinit(self.allocator);
+                callee_array_bindings.deinit(self.allocator);
                 const gen = try self.allocator.create(Generator);
                 gen.* = .{ .func = func, .vars = new_vars };
                 try self.generators.append(self.allocator, gen);
@@ -6407,7 +6653,7 @@ pub const VM = struct {
                     self.closureScopeByName(name) orelse self.currentFrame().called_class
                 else
                     null;
-                self.frames[self.frame_count] = .{ .chunk = &func.chunk, .ip = 0, .vars = new_vars, .locals = try self.allocLocals(func, &new_vars), .func = func, .ref_slots = callee_refs, .called_class = inherit_cc };
+                self.frames[self.frame_count] = .{ .chunk = &func.chunk, .ip = 0, .vars = new_vars, .locals = try self.allocLocals(func, &new_vars), .func = func, .ref_slots = callee_refs, .ref_array_bindings = callee_array_bindings, .called_class = inherit_cc };
                 self.setFrameArgCount(arg_count);
                 self.frame_count += 1;
             }
@@ -6651,6 +6897,7 @@ pub const VM = struct {
             while (self.frame_count > base_frame) {
                 self.frame_count -= 1;
                 self.frames[self.frame_count].ref_slots.deinit(self.allocator);
+                self.frames[self.frame_count].ref_array_bindings.deinit(self.allocator);
                 self.frames[self.frame_count].vars.deinit(self.allocator);
                 if (self.frames[self.frame_count].locals.len > 0) {
                     self.freeLocals(self.frames[self.frame_count].locals);
@@ -6688,6 +6935,7 @@ pub const VM = struct {
                 .locals = frame.locals,
                 .generator = frame.generator,
                 .ref_slots = frame.ref_slots,
+                .ref_array_bindings = frame.ref_array_bindings,
             });
         }
         self.frame_count = base_frame;
@@ -6720,6 +6968,7 @@ pub const VM = struct {
                 .locals = frame.locals,
                 .generator = frame.generator,
                 .ref_slots = frame.ref_slots,
+                .ref_array_bindings = frame.ref_array_bindings,
             };
         }
         self.frame_count = base_frame + fiber.saved_frames.items.len;

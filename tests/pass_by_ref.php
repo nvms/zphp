@@ -184,4 +184,33 @@ foreach ($nums as $n) {
 }
 echo $sum . "\n"; // 15
 
+// === array element ref ===
+
+function inc_element(array &$arr, string $key) { $arr[$key]++; }
+$data = ['count' => 5];
+inc_element($data, 'count');
+echo $data['count'] . "\n"; // 6
+
+// nested array ref
+function set_nested(array &$arr) { $arr['a']['b'] = 99; }
+$x = ['a' => ['b' => 1]];
+set_nested($x);
+echo $x['a']['b'] . "\n"; // 99
+
+// array element with integer key
+function double_elem(&$arr, $idx) { $arr[$idx] *= 2; }
+$nums2 = [10, 20, 30];
+double_elem($nums2, 1);
+echo $nums2[1] . "\n"; // 40
+
+// multiple array element refs
+function swap_elems(&$arr, $i, $j) {
+    $tmp = $arr[$i];
+    $arr[$i] = $arr[$j];
+    $arr[$j] = $tmp;
+}
+$items2 = ['a', 'b', 'c'];
+swap_elems($items2, 0, 2);
+echo implode(",", $items2) . "\n"; // c,b,a
+
 echo "done\n";

@@ -95,6 +95,12 @@ pub const PhpArray = struct {
 const Chunk = @import("../pipeline/bytecode.zig").Chunk;
 const ObjFunction = @import("../pipeline/bytecode.zig").ObjFunction;
 
+pub const ArrayRefBinding = struct {
+    cell: *Value,
+    array: *PhpArray,
+    key: PhpArray.Key,
+};
+
 pub const Generator = struct {
     state: State = .created,
     func: *const ObjFunction,
@@ -151,6 +157,7 @@ pub const Fiber = struct {
         locals: []Value = &.{},
         generator: ?*Generator = null,
         ref_slots: std.StringHashMapUnmanaged(*Value),
+        ref_array_bindings: std.ArrayListUnmanaged(ArrayRefBinding) = .{},
     };
 
     pub const SavedHandler = struct {
@@ -164,6 +171,7 @@ pub const Fiber = struct {
         for (self.saved_frames.items) |*f| {
             f.vars.deinit(allocator);
             f.ref_slots.deinit(allocator);
+            f.ref_array_bindings.deinit(allocator);
             if (f.locals.len > 0) allocator.free(f.locals);
         }
         self.saved_frames.deinit(allocator);

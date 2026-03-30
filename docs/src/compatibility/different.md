@@ -48,26 +48,16 @@ Direct reads and writes through the `global` keyword work. Indirect modification
 
 ## Pass-by-reference
 
-Pass-by-reference works for simple variable arguments:
-
-```php
-function increment(&$val) {
-    $val++;
-}
-
-$x = 5;
-increment($x);
-echo $x; // 6
-```
-
-Passing expressions or nested access paths by reference is not currently supported:
+Pass-by-reference works for variables and array element access, matching PHP. The limitation is with object property access as ref arguments:
 
 ```php
 function modify(&$val) { $val = 'changed'; }
 
-$arr = ['key' => 'original'];
-modify($arr['key']); // not supported in zphp
+modify($obj->prop);          // not supported - property access as ref arg
+modify($obj->items['key']);   // not supported - property + array access
 ```
+
+Simple variables, array elements with string/integer/variable keys, and native functions that modify args in-place (like `sort()` and `preg_match()`) all work as expected.
 
 ## Type hint enforcement
 
