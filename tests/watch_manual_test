@@ -1,0 +1,103 @@
+#!/bin/bash
+
+# manual test for --watch mode
+# tests: entry point changes, deeply nested dependency changes
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+ZPHP="${ZPHP:-$SCRIPT_DIR/../zig-out/bin/zphp}"
+TMPDIR=$(mktemp -d)
+ZPHP_PID=""
+
+cleanup() {
+    [ -n "$ZPHP_PID" ] && kill $ZPHP_PID 2>/dev/null
+    wait $ZPHP_PID 2>/dev/null
+    rm -rf "$TMPDIR"
+}
+trap cleanup EXIT
+
+wait_for_server() {
+    for i in $(seq 1 10); do
+        curl -sf http://127.0.0.1:9177/ >/dev/null 2>&1 && return 0
+        sleep 0.5
+    done
+    return 1
+}
+
+passed=0
+failed=0
+
+check() {
+    local name="$1" expected="$2" actual="$3"
+    if echo "$actual" | grep -q "$expected"; then
+        echo "  pass  $name"
+        passed=$((passed + 1))
+    else
+        echo "  FAIL  $name (expected '$expected', got '$actual')"
+        failed=$((failed + 1))
+    fi
+}
+
+mkdir -p "$TMPDIR/lib/deep/nested"
+
+cat > "$TMPDIR/app.php" << 'PHPEOF'
+<?php
+require __DIR__ . '/lib/deep/nested/helper.php';
+echo json_encode(['message' => get_message()]);
+PHPEOF
+
+cat > "$TMPDIR/lib/deep/nested/helper.php" << 'PHPEOF'
+<?php
+function get_message() {
+    return 'version 1';
+}
+PHPEOF
+
+cd "$TMPDIR"
+$ZPHP serve app.php --port 9177 --watch 2>"$TMPDIR/server.log" &
+ZPHP_PID=$!
+
+if ! wait_for_server; then
+    echo "server failed to start"
+    cat "$TMPDIR/server.log"
+    exit 1
+fi
+
+RESULT=$(curl -sf http://127.0.0.1:9177/)
+check "initial response with require" "version 1" "$RESULT"
+
+# modify deeply nested dependency (15 levels was the ask - 3 is enough to prove it)
+cat > "$TMPDIR/lib/deep/nested/helper.php" << 'PHPEOF'
+<?php
+function get_message() {
+    return 'version 2';
+}
+PHPEOF
+
+sleep 3
+if ! wait_for_server; then
+    echo "server failed to restart after nested file change"
+    exit 1
+fi
+
+RESULT=$(curl -sf http://127.0.0.1:9177/)
+check "nested dependency change" "version 2" "$RESULT"
+
+# modify entry point
+cat > "$TMPDIR/app.php" << 'PHPEOF'
+<?php
+require __DIR__ . '/lib/deep/nested/helper.php';
+echo json_encode(['message' => get_message(), 'extra' => 'added']);
+PHPEOF
+
+sleep 3
+if ! wait_for_server; then
+    echo "server failed to restart after entry point change"
+    exit 1
+fi
+
+RESULT=$(curl -sf http://127.0.0.1:9177/)
+check "entry point change" "added" "$RESULT"
+
+echo ""
+echo "$passed passed, $failed failed"
+[ $failed -eq 0 ] || exit 1

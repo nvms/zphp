@@ -18,6 +18,22 @@ const ws_proto = @import("websocket.zig");
 
 var signal_pipe: [2]posix.fd_t = .{ -1, -1 };
 
+fn maxPhpMtime(dir_path: []const u8) i128 {
+    var max: i128 = 0;
+    var dir = std.fs.cwd().openDir(dir_path, .{ .iterate = true }) catch return 0;
+    defer dir.close();
+    var walker = dir.walk(std.heap.page_allocator) catch return 0;
+    defer walker.deinit();
+    while (walker.next() catch null) |entry| {
+        if (entry.kind != .file) continue;
+        if (!std.mem.endsWith(u8, entry.basename, ".php")) continue;
+        if (std.mem.indexOf(u8, entry.path, "vendor/") != null) continue;
+        const stat = entry.dir.statFile(entry.basename) catch continue;
+        if (stat.mtime > max) max = stat.mtime;
+    }
+    return max;
+}
+
 fn signalHandler(_: c_int) callconv(.c) void {
     _ = posix.write(signal_pipe[1], &[_]u8{1}) catch {};
 }
@@ -29,6 +45,7 @@ pub const ServeConfig = struct {
     document_root: []const u8 = "",
     tls_cert: ?[]const u8 = null,
     tls_key: ?[]const u8 = null,
+    watch: bool = false,
 };
 
 const Request = struct {
@@ -155,6 +172,15 @@ fn WorkQueue(comptime capacity: usize) type {
             self.not_empty.broadcast();
             self.not_full.broadcast();
         }
+
+        fn reset(self: *Self) void {
+            self.mutex.lock();
+            defer self.mutex.unlock();
+            self.shutdown = false;
+            self.head = 0;
+            self.tail = 0;
+            self.count = 0;
+        }
     };
 }
 
@@ -179,11 +205,66 @@ const Worker = struct {
     n_fds: usize,
 };
 
+fn loadFile(path: []const u8, allocator: Allocator) ?*CompileResult {
+    const abs_path = std.fs.cwd().realpathAlloc(allocator, path) catch allocator.dupe(u8, path) catch return null;
+    const source = std.fs.cwd().readFileAlloc(allocator, abs_path, 1024 * 1024 * 10) catch {
+        allocator.free(abs_path);
+        return null;
+    };
+
+    var ast = parser.parse(allocator, source) catch {
+        allocator.free(source);
+        allocator.free(abs_path);
+        return null;
+    };
+
+    if (ast.errors.len > 0) {
+        ast.deinit();
+        allocator.free(source);
+        allocator.free(abs_path);
+        return null;
+    }
+
+    var result = compiler.compileWithPath(&ast, allocator, abs_path) catch {
+        ast.deinit();
+        allocator.free(source);
+        allocator.free(abs_path);
+        return null;
+    };
+
+    const heap_result = allocator.create(CompileResult) catch {
+        result.deinit();
+        ast.deinit();
+        allocator.free(source);
+        return null;
+    };
+    heap_result.* = result;
+    ast.deinit();
+
+    heap_result.string_allocs.append(allocator, source) catch {
+        allocator.free(source);
+        allocator.free(abs_path);
+        heap_result.deinit();
+        allocator.destroy(heap_result);
+        return null;
+    };
+    heap_result.string_allocs.append(allocator, abs_path) catch {
+        allocator.free(abs_path);
+        heap_result.deinit();
+        allocator.destroy(heap_result);
+        return null;
+    };
+
+    return heap_result;
+}
+
 fn initWorker(allocator: Allocator, result: *const CompileResult, doc_root: []const u8, port: u16, ws_enabled: bool, tls_ctx: ?*tls.SSL_CTX) !Worker {
+    var vm = try VM.init(allocator);
+    vm.file_loader = &loadFile;
     return .{
         .allocator = allocator,
         .result = result,
-        .vm = try VM.init(allocator),
+        .vm = vm,
         .doc_root = doc_root,
         .port = port,
         .ws_enabled = ws_enabled,
@@ -226,40 +307,6 @@ fn certMtime(path: []const u8) i128 {
 
 pub fn serve(allocator: Allocator, config: ServeConfig) !void {
     env.loadEnvFile(allocator);
-    const source = std.fs.cwd().readFileAlloc(allocator, config.file, 1024 * 1024 * 10) catch |err| {
-        try writeStderr("error: could not read '");
-        try writeStderr(config.file);
-        try writeStderr("'\n");
-        return err;
-    };
-    defer allocator.free(source);
-
-    const abs_path = std.fs.cwd().realpathAlloc(allocator, config.file) catch
-        try allocator.dupe(u8, config.file);
-    defer allocator.free(abs_path);
-
-    var ast = try parser.parse(allocator, source);
-    defer ast.deinit();
-
-    if (ast.errors.len > 0) {
-        try writeStderr("parse error in ");
-        try writeStderr(config.file);
-        try writeStderr("\n");
-        std.process.exit(1);
-    }
-
-    var result = compiler.compileWithPath(&ast, allocator, abs_path) catch {
-        try writeStderr("compile error\n");
-        std.process.exit(1);
-    };
-    defer result.deinit();
-
-    const ws_enabled = blk: {
-        for (result.functions.items) |*f| {
-            if (std.mem.eql(u8, f.name, "ws_onMessage")) break :blk true;
-        }
-        break :blk false;
-    };
 
     const worker_count: usize = if (config.workers > 0)
         config.workers
@@ -308,6 +355,10 @@ pub fn serve(allocator: Allocator, config: ServeConfig) !void {
     var server = try addr.listen(.{ .reuse_address = true });
     defer server.deinit();
 
+    const abs_path = std.fs.cwd().realpathAlloc(allocator, config.file) catch
+        try allocator.dupe(u8, config.file);
+    defer allocator.free(abs_path);
+
     const doc_root = if (config.document_root.len > 0)
         try allocator.dupe(u8, config.document_root)
     else blk: {
@@ -318,71 +369,150 @@ pub fn serve(allocator: Allocator, config: ServeConfig) !void {
     };
     defer allocator.free(doc_root);
 
-    var port_buf: [8]u8 = undefined;
-    const port_str = std.fmt.bufPrint(&port_buf, "{d}", .{config.port}) catch "?";
-    try writeStderr("zphp serving ");
-    try writeStderr(config.file);
-    if (tls_ctx != null) try writeStderr(" (https) on :") else try writeStderr(" on :");
-    try writeStderr(port_str);
-    try writeStderr(" (");
-    var wc_buf: [8]u8 = undefined;
-    const wc_str = std.fmt.bufPrint(&wc_buf, "{d}", .{worker_count}) catch "?";
-    try writeStderr(wc_str);
-    try writeStderr(" workers)\n");
-
     const workers_data = try allocator.alloc(Worker, worker_count);
     defer allocator.free(workers_data);
     const threads = try allocator.alloc(std.Thread, worker_count);
     defer allocator.free(threads);
 
-    for (workers_data, threads) |*wd, *t| {
-        wd.* = initWorker(allocator, &result, doc_root, config.port, ws_enabled, tls_ctx) catch continue;
-        wd.poll_fds[0] = .{ .fd = wd.wake_pipe[0], .events = posix.POLL.IN, .revents = 0 };
-        t.* = try std.Thread.spawn(.{}, eventLoop, .{wd});
-    }
-
     setNonBlocking(server.stream.handle);
-    var main_poll: [2]posix.pollfd = .{
-        .{ .fd = server.stream.handle, .events = posix.POLL.IN, .revents = 0 },
-        .{ .fd = signal_pipe[0], .events = posix.POLL.IN, .revents = 0 },
-    };
 
-    const poll_timeout: i32 = if (tls_ctx != null) 30000 else -1;
-    var robin: usize = 0;
+    var watch_mtime: i128 = if (config.watch) maxPhpMtime(doc_root) else 0;
+    var first_run = true;
+
     while (true) {
-        _ = posix.poll(&main_poll, poll_timeout) catch continue;
+        const source = std.fs.cwd().readFileAlloc(allocator, config.file, 1024 * 1024 * 10) catch |err| {
+            try writeStderr("error: could not read '");
+            try writeStderr(config.file);
+            try writeStderr("'\n");
+            return err;
+        };
 
-        if (main_poll[1].revents & posix.POLL.IN != 0) {
-            try writeStderr("\nshutting down...\n");
-            break;
+        var ast = parser.parse(allocator, source) catch {
+            allocator.free(source);
+            if (config.watch) {
+                try writeStderr("parse error, waiting for fix...\n");
+                std.Thread.sleep(1_000_000_000);
+                continue;
+            }
+            std.process.exit(1);
+        };
+
+        if (ast.errors.len > 0) {
+            ast.deinit();
+            allocator.free(source);
+            if (config.watch) {
+                try writeStderr("parse error, waiting for fix...\n");
+                std.Thread.sleep(1_000_000_000);
+                continue;
+            }
+            try writeStderr("parse error in ");
+            try writeStderr(config.file);
+            try writeStderr("\n");
+            std.process.exit(1);
         }
 
-        if (main_poll[0].revents & posix.POLL.IN != 0) {
-            const conn = server.accept() catch continue;
-            queue.push(.{ .conn = conn });
-            _ = posix.write(workers_data[robin].wake_pipe[1], &[_]u8{1}) catch {};
-            robin = (robin + 1) % worker_count;
+        var result = compiler.compileWithPath(&ast, allocator, abs_path) catch {
+            ast.deinit();
+            allocator.free(source);
+            if (config.watch) {
+                try writeStderr("compile error, waiting for fix...\n");
+                std.Thread.sleep(1_000_000_000);
+                continue;
+            }
+            try writeStderr("compile error\n");
+            std.process.exit(1);
+        };
+
+        const ws_enabled = blk: {
+            for (result.functions.items) |*f| {
+                if (std.mem.eql(u8, f.name, "ws_onMessage")) break :blk true;
+            }
+            break :blk false;
+        };
+
+        if (first_run) {
+            var port_buf: [8]u8 = undefined;
+            const port_str = std.fmt.bufPrint(&port_buf, "{d}", .{config.port}) catch "?";
+            try writeStderr("zphp serving ");
+            try writeStderr(config.file);
+            if (tls_ctx != null) try writeStderr(" (https) on :") else try writeStderr(" on :");
+            try writeStderr(port_str);
+            try writeStderr(" (");
+            var wc_buf: [8]u8 = undefined;
+            const wc_str = std.fmt.bufPrint(&wc_buf, "{d}", .{worker_count}) catch "?";
+            try writeStderr(wc_str);
+            try writeStderr(" workers");
+            if (config.watch) try writeStderr(", watch");
+            try writeStderr(")\n");
+            first_run = false;
         }
 
-        if (tls_cert_z != null and tls_key_z != null) {
-            const new_mtime = certMtime(config.tls_cert.?);
-            if (new_mtime != tls_cert_mtime and new_mtime != 0) {
-                if (tls.initContext(tls_cert_z.?, tls_key_z.?)) |new_ctx| {
-                    tls_ctx = new_ctx;
-                    tls_cert_mtime = new_mtime;
-                    for (workers_data) |*wd| wd.tls_ctx = new_ctx;
-                    try writeStderr("tls: certificate reloaded\n");
+        queue.reset();
+        for (workers_data, threads) |*wd, *t| {
+            wd.* = initWorker(allocator, &result, doc_root, config.port, ws_enabled, tls_ctx) catch continue;
+            wd.poll_fds[0] = .{ .fd = wd.wake_pipe[0], .events = posix.POLL.IN, .revents = 0 };
+            t.* = try std.Thread.spawn(.{}, eventLoop, .{wd});
+        }
+
+        var main_poll: [2]posix.pollfd = .{
+            .{ .fd = server.stream.handle, .events = posix.POLL.IN, .revents = 0 },
+            .{ .fd = signal_pipe[0], .events = posix.POLL.IN, .revents = 0 },
+        };
+
+        const poll_timeout: i32 = if (config.watch or tls_ctx != null) 1000 else -1;
+        var robin: usize = 0;
+        var needs_restart = false;
+        while (true) {
+            _ = posix.poll(&main_poll, poll_timeout) catch continue;
+
+            if (main_poll[1].revents & posix.POLL.IN != 0) {
+                try writeStderr("\nshutting down...\n");
+                break;
+            }
+
+            if (main_poll[0].revents & posix.POLL.IN != 0) {
+                const conn = server.accept() catch continue;
+                queue.push(.{ .conn = conn });
+                _ = posix.write(workers_data[robin].wake_pipe[1], &[_]u8{1}) catch {};
+                robin = (robin + 1) % worker_count;
+            }
+
+            if (tls_cert_z != null and tls_key_z != null) {
+                const new_mtime = certMtime(config.tls_cert.?);
+                if (new_mtime != tls_cert_mtime and new_mtime != 0) {
+                    if (tls.initContext(tls_cert_z.?, tls_key_z.?)) |new_ctx| {
+                        tls_ctx = new_ctx;
+                        tls_cert_mtime = new_mtime;
+                        for (workers_data) |*wd| wd.tls_ctx = new_ctx;
+                        try writeStderr("tls: certificate reloaded\n");
+                    }
+                }
+            }
+
+            if (config.watch) {
+                const new_mtime = maxPhpMtime(doc_root);
+                if (new_mtime != watch_mtime and new_mtime != 0) {
+                    watch_mtime = new_mtime;
+                    needs_restart = true;
+                    try writeStderr("file change detected, reloading...\n");
+                    break;
                 }
             }
         }
-    }
 
-    queue.close();
-    for (workers_data) |*wd| {
-        _ = posix.write(wd.wake_pipe[1], &[_]u8{1}) catch {};
+        queue.close();
+        for (workers_data) |*wd| {
+            _ = posix.write(wd.wake_pipe[1], &[_]u8{1}) catch {};
+        }
+        for (threads) |t| t.join();
+        for (workers_data) |*wd| deinitWorker(wd);
+
+        result.deinit();
+        ast.deinit();
+        allocator.free(source);
+
+        if (!needs_restart) break;
     }
-    for (threads) |t| t.join();
-    for (workers_data) |*wd| deinitWorker(wd);
 }
 
 // event loop (runs on each worker thread)

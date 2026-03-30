@@ -37,7 +37,7 @@ fn dispatch(allocator: std.mem.Allocator, args: []const []const u8) !void {
         try requireArg(args, 3, "usage: zphp run <file>\n");
         try runFile(allocator, args[2]);
     } else if (std.mem.eql(u8, cmd, "serve")) {
-        try requireArg(args, 3, "usage: zphp serve <file> [--port 8080] [--workers N] [--tls-cert FILE --tls-key FILE]\n");
+        try requireArg(args, 3, "usage: zphp serve <file> [--port 8080] [--workers N] [--watch] [--tls-cert FILE --tls-key FILE]\n");
         var config = @import("serve.zig").ServeConfig{ .file = args[2] };
         var i: usize = 3;
         while (i < args.len) : (i += 1) {
@@ -53,6 +53,8 @@ fn dispatch(allocator: std.mem.Allocator, args: []const []const u8) !void {
             } else if (std.mem.eql(u8, args[i], "--tls-key") and i + 1 < args.len) {
                 config.tls_key = args[i + 1];
                 i += 1;
+            } else if (std.mem.eql(u8, args[i], "--watch")) {
+                config.watch = true;
             }
         }
         try @import("serve.zig").serve(allocator, config);
