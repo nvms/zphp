@@ -123,7 +123,7 @@ jobs:
       - run: zig build
       - run: ./tests/laravel/setup
       - name: debug laravel bootstrap
-        run: timeout 30 ./zig-out/bin/zphp run tests/laravel/harness/test-debug.php 2>&1 && echo "debug exit: 0" || echo "debug exit: $?"
+        run: timeout 30 ./zig-out/bin/zphp run tests/laravel/harness/test-debug.php 2>&1 || true
       - run: ./tests/laravel/run
 
   pdo:
