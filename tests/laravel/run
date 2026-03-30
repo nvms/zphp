@@ -31,8 +31,13 @@ errors=""
 for f in "$SCRIPT_DIR"/harness/test-*.php; do
     name="$(basename "$f" .php)"
     php_out="$(php -d error_reporting=E_ALL\&~E_DEPRECATED\&~E_WARNING "$f" 2>&1)" || true
-    zphp_out="$(timeout 30 "$ZPHP" run "$f" 2>&1)"
-    zphp_exit=$?
+    TIMEOUT_CMD=""
+    if command -v timeout &>/dev/null; then
+        TIMEOUT_CMD="timeout 30"
+    elif command -v gtimeout &>/dev/null; then
+        TIMEOUT_CMD="gtimeout 30"
+    fi
+    zphp_out="$($TIMEOUT_CMD "$ZPHP" run "$f" 2>&1)" && zphp_exit=0 || zphp_exit=$?
 
     if [ "$php_out" = "$zphp_out" ]; then
         passed=$((passed + 1))
