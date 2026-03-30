@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="logo.svg" width="140" style="border-radius: 12px;" />
+  <img src=".github/logo.svg" width="140" style="border-radius: 12px;" />
 </p>
 
 <h1 align="center">zphp</h1>
