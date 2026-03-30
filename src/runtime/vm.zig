@@ -654,12 +654,6 @@ pub const VM = struct {
         self.static_vars.deinit(self.allocator);
         self.global_vars.deinit(self.allocator);
         self.loaded_files.deinit(self.allocator);
-        self.compile_results.deinit(self.allocator);
-        self.ob_stack.deinit(self.allocator);
-        self.request_vars.deinit(self.allocator);
-        self.autoload_callbacks.deinit(self.allocator);
-        self.magic_get_guard.deinit(self.allocator);
-        self.magic_call_guard.deinit(self.allocator);
         if (self.serve_mode) {
             for (self.compile_results.items) |r| {
                 var result = r;
@@ -667,6 +661,12 @@ pub const VM = struct {
                 self.allocator.destroy(result);
             }
         }
+        self.compile_results.deinit(self.allocator);
+        self.ob_stack.deinit(self.allocator);
+        self.request_vars.deinit(self.allocator);
+        self.autoload_callbacks.deinit(self.allocator);
+        self.magic_get_guard.deinit(self.allocator);
+        self.magic_call_guard.deinit(self.allocator);
         for (self.serve_cache_keys.items) |k| self.allocator.free(k);
         self.serve_cache_keys.deinit(self.allocator);
         self.serve_compile_cache.deinit(self.allocator);
