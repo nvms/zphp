@@ -7,3 +7,5 @@ src = "src"
 
 [output.html]
 git-repository-url = "https://github.com/nvms/zphp"
+additional-css = ["theme/custom.css"]
+default-theme = "light"

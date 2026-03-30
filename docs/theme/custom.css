@@ -1,0 +1,58 @@
+.light, html:not(.js) {
+    --bg: #F2F1F0;
+    --fg: #2e2e2e;
+
+    --sidebar-bg: #E8E6E3;
+    --sidebar-fg: #2e2e2e;
+    --sidebar-non-existant: #9a9590;
+    --sidebar-active: #5a4f47;
+    --sidebar-spacer: #ddd9d5;
+
+    --scrollbar: #b0aaa4;
+
+    --icons: #7a756f;
+    --icons-hover: #2e2e2e;
+
+    --links: #6b5744;
+
+    --inline-code-color: #5a4032;
+
+    --theme-popup-bg: #E8E6E3;
+    --theme-popup-border: #c8c4bf;
+    --theme-hover: #ddd9d5;
+
+    --quote-bg: #EAE8E5;
+    --quote-border: #d5d1cc;
+
+    --warning-border: #c8903a;
+
+    --table-border-color: #ddd9d5;
+    --table-header-bg: #d5d1cc;
+    --table-alternate-bg: #ECEAE8;
+
+    --searchbar-border-color: #b0aaa4;
+    --searchbar-bg: #ECEAE8;
+    --searchbar-fg: #2e2e2e;
+    --searchbar-shadow-color: #b0aaa4;
+    --searchresults-header-fg: #7a756f;
+    --searchresults-border-color: #b0aaa4;
+    --searchresults-li-bg: #E8E6E3;
+    --search-mark-bg: #d4c4a8;
+
+    --color-scheme: light;
+
+    --copy-button-filter: invert(48%) sepia(5%) saturate(600%) hue-rotate(340deg) brightness(90%) contrast(90%);
+    --copy-button-filter-hover: invert(30%) sepia(10%) saturate(800%) hue-rotate(340deg) brightness(90%) contrast(90%);
+
+    --footnote-highlight: #8a7a6a;
+
+    --overlay-bg: rgba(180, 175, 170, 0.4);
+
+    --blockquote-note-color: #5a7a9a;
+    --blockquote-tip-color: #5a8a5a;
+    --blockquote-important-color: #7a6a9a;
+    --blockquote-warning-color: #8a7a3a;
+    --blockquote-caution-color: #9a4a4a;
+
+    --sidebar-header-border-color: #8a7a6a;
+}

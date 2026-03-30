@@ -31,7 +31,11 @@ laravel: build ## Run Laravel compatibility tests (requires PHP 8.4 + composer)
 	./tests/laravel/run
 
 .PHONY: all-tests
-all-tests: test compat pdo examples ## Run all tests
+all-tests: test compat examples laravel ## Run all tests
+
+.PHONY: docs
+docs: ## Serve docs locally with live reload
+	mdbook serve docs
 
 .PHONY: clean
 clean: ## Clean build artifacts
