@@ -19,6 +19,7 @@ Your `app.php` is compiled to bytecode once at startup. Each worker runs its own
 | `--workers <N>` | CPU count | Number of worker threads |
 | `--tls-cert <file>` | - | Path to TLS certificate (enables HTTPS) |
 | `--tls-key <file>` | - | Path to TLS private key |
+| `--watch` | off | Watch PHP files for changes and automatically reload workers |
 
 ```
 $ zphp serve app.php --port 3000 --workers 8
@@ -54,6 +55,10 @@ if ($method === 'GET' && $path === '/health') {
 
 **ETag and 304 responses** are handled automatically for static files. The server generates ETags and responds with `304 Not Modified` when the content hasn't changed.
 
+**`.env` auto-loading** at startup. If a `.env` file exists in the working directory, it's loaded automatically and the values are available via `$_ENV`.
+
+**File watching** with `--watch` reloads workers when PHP files change. Useful during development.
+
 **Graceful shutdown** on SIGTERM/SIGINT. Active requests complete before the server exits.
 
 ## Comparison to nginx + php-fpm
@@ -72,4 +77,4 @@ With zphp:
 zphp serve app.php --tls-cert cert.pem --tls-key key.pem
 ```
 
-One process, one command. TLS, static files, gzip, and HTTP/2 are all built in.
+TLS, static files, gzip, and HTTP/2 are all handled by the same process.
