@@ -304,6 +304,9 @@ pub const VM = struct {
     method_cache_method: []const u8 = "",
     method_cache_result: []const u8 = "",
     ic: ?*InlineCache = null,
+    serve_mode: bool = false,
+    serve_compile_cache: std.StringHashMapUnmanaged(*CompileResult) = .{},
+    serve_cache_keys: std.ArrayListUnmanaged([]const u8) = .{},
 
     pub const InlineCache = struct {
         // property access: keyed by (chunk_ptr ^ ip), stores class_ptr for visibility skip
@@ -566,11 +569,32 @@ pub const VM = struct {
         for (self.ref_cells.items) |c| self.allocator.destroy(c);
         var statics_iter = self.statics.keyIterator();
         while (statics_iter.next()) |k| self.allocator.free(k.*);
-        for (self.compile_results.items) |r| {
-            var result = r;
-            result.deinit();
-            self.allocator.destroy(result);
+        if (!self.serve_mode) {
+            for (self.compile_results.items) |r| {
+                var result = r;
+                result.deinit();
+                self.allocator.destroy(result);
+            }
         }
+    }
+
+    fn freeClassState(self: *VM) void {
+        var class_iter = self.classes.valueIterator();
+        while (class_iter.next()) |c| c.deinit(self.allocator);
+        self.classes.clearRetainingCapacity();
+        var iface_iter = self.interfaces.valueIterator();
+        while (iface_iter.next()) |i| i.deinit(self.allocator);
+        self.interfaces.clearRetainingCapacity();
+        self.traits.clearRetainingCapacity();
+        var tu_iter = self.trait_uses.valueIterator();
+        while (tu_iter.next()) |subs| self.allocator.free(subs.*);
+        self.trait_uses.clearRetainingCapacity();
+        var tp_iter = self.trait_props.valueIterator();
+        while (tp_iter.next()) |props| self.allocator.free(props.*);
+        self.trait_props.clearRetainingCapacity();
+        var tsp_iter = self.trait_static_props.valueIterator();
+        while (tsp_iter.next()) |props| self.allocator.free(props.*);
+        self.trait_static_props.clearRetainingCapacity();
     }
 
     fn releaseFrames(self: *VM) void {
@@ -636,11 +660,22 @@ pub const VM = struct {
         self.autoload_callbacks.deinit(self.allocator);
         self.magic_get_guard.deinit(self.allocator);
         self.magic_call_guard.deinit(self.allocator);
+        if (self.serve_mode) {
+            for (self.compile_results.items) |r| {
+                var result = r;
+                result.deinit();
+                self.allocator.destroy(result);
+            }
+        }
+        for (self.serve_cache_keys.items) |k| self.allocator.free(k);
+        self.serve_cache_keys.deinit(self.allocator);
+        self.serve_compile_cache.deinit(self.allocator);
     }
 
     pub fn reset(self: *VM) void {
         self.releaseFrames();
         self.freeHeapItems();
+        if (self.serve_mode) self.freeClassState();
         self.frame_count = 0;
         self.sp = 0;
         self.handler_count = 0;
@@ -649,6 +684,7 @@ pub const VM = struct {
         self.fiber_suspend_pending = false;
         self.fiber_suspend_value = .null;
         self.error_msg = null;
+        self.exit_requested = false;
         self.output.clearRetainingCapacity();
         self.strings.clearRetainingCapacity();
         self.arrays.clearRetainingCapacity();
@@ -664,7 +700,15 @@ pub const VM = struct {
         self.static_vars.clearRetainingCapacity();
         self.global_vars.clearRetainingCapacity();
         self.loaded_files.clearRetainingCapacity();
-        self.compile_results.clearRetainingCapacity();
+        if (self.serve_mode) {
+            self.functions.clearRetainingCapacity();
+            self.php_constants.clearRetainingCapacity();
+            initConstants(&self.php_constants, self.allocator) catch {};
+            self.autoload_callbacks.clearRetainingCapacity();
+            self.closure_instance_count = 0;
+        } else {
+            self.compile_results.clearRetainingCapacity();
+        }
     }
 
     pub fn interpret(self: *VM, result: *const CompileResult) RuntimeError!void {
@@ -2104,100 +2148,71 @@ pub const VM = struct {
                         if (is_once and self.loaded_files.contains(path)) {
                             self.push(.{ .bool = true });
                         } else {
-                            if (self.file_loader) |loader| {
-                                if (loader(path, self.allocator)) |result| {
-                                    try self.loaded_files.put(self.allocator, path, {});
-                                    try self.compile_results.append(self.allocator, result);
+                            const from_cache = self.serve_mode and self.serve_compile_cache.contains(path);
+                            const result: ?*CompileResult = if (from_cache)
+                                self.serve_compile_cache.get(path).?
+                            else if (self.file_loader) |loader|
+                                loader(path, self.allocator)
+                            else
+                                null;
 
-                                    for (result.functions.items) |*func| {
-                                        try self.registerFunction(func);
-                                    }
-                                    for (result.type_hints.items) |th| {
-                                        try g_type_info.put(self.allocator, th.name, .{ .param_types = th.param_types, .return_type = th.return_type });
-                                    }
+                            if (result) |r| {
+                                if (self.serve_mode and !from_cache) {
+                                    const duped = try self.allocator.dupe(u8, path);
+                                    try self.serve_cache_keys.append(self.allocator, duped);
+                                    try self.serve_compile_cache.put(self.allocator, duped, r);
+                                }
+                                try self.loaded_files.put(self.allocator, path, {});
+                                if (!from_cache) {
+                                    try self.compile_results.append(self.allocator, r);
+                                }
 
-                                    const return_frame = self.frame_count;
-                                    if (self.frame_count >= 2047) {
-                                        self.error_msg = "Fatal error: maximum call stack depth exceeded";
-                                        return error.RuntimeError;
-                                    }
-                                    const sp_before = self.sp;
-                                    var req_locals: []Value = &.{};
-                                    if (result.local_count > 0) {
-                                        req_locals = try self.allocator.alloc(Value, result.local_count);
-                                        @memset(req_locals, .null);
-                                    }
-                                    var inherited_vars: @TypeOf(self.frames[0].vars) = .{};
-                                    const caller = self.currentFrame();
-                                    if (caller.vars.count() > 0) {
-                                        var vit = caller.vars.iterator();
-                                        while (vit.next()) |entry| {
-                                            try inherited_vars.put(self.allocator, entry.key_ptr.*, entry.value_ptr.*);
-                                        }
-                                    }
-                                    const caller_sn = if (caller.func) |func| func.slot_names else self.global_slot_names;
-                                    for (caller_sn, 0..) |csn, ci| {
-                                        if (ci < caller.locals.len and csn.len > 0) {
-                                            const cval = caller.locals[ci];
-                                            if (cval != .null and !inherited_vars.contains(csn)) {
-                                                try inherited_vars.put(self.allocator, csn, cval);
-                                            }
-                                        }
-                                    }
-                                    const saved_slot_names = self.global_slot_names;
-                                    self.global_slot_names = result.slot_names;
-                                    self.frames[self.frame_count] = .{
-                                        .chunk = &result.chunk,
-                                        .ip = 0,
-                                        .vars = inherited_vars,
-                                        .locals = req_locals,
-                                    };
-                                    self.frames[self.frame_count].entry_sp = self.sp;
-                    self.frame_count += 1;
-                                    self.runUntilFrame(return_frame) catch {
-                                        // clean up remaining inner frames including the require frame
-                                        while (self.frame_count > return_frame) {
-                                            self.frame_count -= 1;
-                                            self.frames[self.frame_count].vars.deinit(self.allocator);
-                                            if (self.frames[self.frame_count].locals.len > 0) {
-                                                self.freeLocals(self.frames[self.frame_count].locals);
-                                                self.frames[self.frame_count].locals = &.{};
-                                            }
-                                        }
-                                        self.global_slot_names = saved_slot_names;
+                                for (r.functions.items) |*func| {
+                                    try self.registerFunction(func);
+                                }
+                                for (r.type_hints.items) |th| {
+                                    try g_type_info.put(self.allocator, th.name, .{ .param_types = th.param_types, .return_type = th.return_type });
+                                }
 
-                                        // dispatch pending exception to handler in this scope
-                                        if (self.pending_exception) |exc| {
-                                            if (self.handler_count > self.handler_floor) {
-                                                const handler = self.exception_handlers[self.handler_count - 1];
-                                                if (handler.frame_count > base_frame or base_frame == 0) {
-                                                    self.pending_exception = null;
-                                                    self.handler_count -= 1;
-                                                    while (self.frame_count > handler.frame_count) {
-                                                        self.frame_count -= 1;
-                                                        self.frames[self.frame_count].vars.deinit(self.allocator);
-                                                        if (self.frames[self.frame_count].locals.len > 0) {
-                                                            self.freeLocals(self.frames[self.frame_count].locals);
-                                                            self.frames[self.frame_count].locals = &.{};
-                                                        }
-                                                    }
-                                                    self.sp = handler.sp;
-                                                    self.push(exc);
-                                                    self.currentFrame().ip = handler.catch_ip;
-                                                    continue;
-                                                }
-                                            }
+                                const return_frame = self.frame_count;
+                                if (self.frame_count >= 2047) {
+                                    self.error_msg = "Fatal error: maximum call stack depth exceeded";
+                                    return error.RuntimeError;
+                                }
+                                const sp_before = self.sp;
+                                var req_locals: []Value = &.{};
+                                if (r.local_count > 0) {
+                                    req_locals = try self.allocator.alloc(Value, r.local_count);
+                                    @memset(req_locals, .null);
+                                }
+                                var inherited_vars: @TypeOf(self.frames[0].vars) = .{};
+                                const caller = self.currentFrame();
+                                if (caller.vars.count() > 0) {
+                                    var vit = caller.vars.iterator();
+                                    while (vit.next()) |entry| {
+                                        try inherited_vars.put(self.allocator, entry.key_ptr.*, entry.value_ptr.*);
+                                    }
+                                }
+                                const caller_sn = if (caller.func) |func| func.slot_names else self.global_slot_names;
+                                for (caller_sn, 0..) |csn, ci| {
+                                    if (ci < caller.locals.len and csn.len > 0) {
+                                        const cval = caller.locals[ci];
+                                        if (cval != .null and !inherited_vars.contains(csn)) {
+                                            try inherited_vars.put(self.allocator, csn, cval);
                                         }
-
-                                        if (is_require) {
-                                            if (self.error_msg == null and self.pending_exception == null) {
-                                                self.error_msg = std.fmt.allocPrint(self.allocator, "Fatal error: require(): Failed opening required '{s}'", .{path}) catch null;
-                                            }
-                                            return error.RuntimeError;
-                                        }
-                                        self.push(.{ .bool = false });
-                                        continue;
-                                    };
+                                    }
+                                }
+                                const saved_slot_names = self.global_slot_names;
+                                self.global_slot_names = r.slot_names;
+                                self.frames[self.frame_count] = .{
+                                    .chunk = &r.chunk,
+                                    .ip = 0,
+                                    .vars = inherited_vars,
+                                    .locals = req_locals,
+                                };
+                                self.frames[self.frame_count].entry_sp = self.sp;
+                                self.frame_count += 1;
+                                self.runUntilFrame(return_frame) catch {
                                     while (self.frame_count > return_frame) {
                                         self.frame_count -= 1;
                                         self.frames[self.frame_count].vars.deinit(self.allocator);
@@ -2207,15 +2222,48 @@ pub const VM = struct {
                                         }
                                     }
                                     self.global_slot_names = saved_slot_names;
-                                    // if the file used 'return', the value is already on the stack
-                                    if (self.sp <= sp_before) self.push(.{ .bool = true });
-                                } else {
+
+                                    if (self.pending_exception) |exc| {
+                                        if (self.handler_count > self.handler_floor) {
+                                            const handler = self.exception_handlers[self.handler_count - 1];
+                                            if (handler.frame_count > base_frame or base_frame == 0) {
+                                                self.pending_exception = null;
+                                                self.handler_count -= 1;
+                                                while (self.frame_count > handler.frame_count) {
+                                                    self.frame_count -= 1;
+                                                    self.frames[self.frame_count].vars.deinit(self.allocator);
+                                                    if (self.frames[self.frame_count].locals.len > 0) {
+                                                        self.freeLocals(self.frames[self.frame_count].locals);
+                                                        self.frames[self.frame_count].locals = &.{};
+                                                    }
+                                                }
+                                                self.sp = handler.sp;
+                                                self.push(exc);
+                                                self.currentFrame().ip = handler.catch_ip;
+                                                continue;
+                                            }
+                                        }
+                                    }
+
                                     if (is_require) {
-                                        self.error_msg = std.fmt.allocPrint(self.allocator, "Fatal error: require(): Failed opening required '{s}'", .{path}) catch null;
+                                        if (self.error_msg == null and self.pending_exception == null) {
+                                            self.error_msg = std.fmt.allocPrint(self.allocator, "Fatal error: require(): Failed opening required '{s}'", .{path}) catch null;
+                                        }
                                         return error.RuntimeError;
                                     }
                                     self.push(.{ .bool = false });
+                                    continue;
+                                };
+                                while (self.frame_count > return_frame) {
+                                    self.frame_count -= 1;
+                                    self.frames[self.frame_count].vars.deinit(self.allocator);
+                                    if (self.frames[self.frame_count].locals.len > 0) {
+                                        self.freeLocals(self.frames[self.frame_count].locals);
+                                        self.frames[self.frame_count].locals = &.{};
+                                    }
                                 }
+                                self.global_slot_names = saved_slot_names;
+                                if (self.sp <= sp_before) self.push(.{ .bool = true });
                             } else {
                                 if (is_require) {
                                     self.error_msg = std.fmt.allocPrint(self.allocator, "Fatal error: require(): Failed opening required '{s}'", .{path}) catch null;

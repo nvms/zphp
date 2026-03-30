@@ -261,6 +261,7 @@ fn loadFile(path: []const u8, allocator: Allocator) ?*CompileResult {
 fn initWorker(allocator: Allocator, result: *const CompileResult, doc_root: []const u8, port: u16, ws_enabled: bool, tls_ctx: ?*tls.SSL_CTX) !Worker {
     var vm = try VM.init(allocator);
     vm.file_loader = &loadFile;
+    vm.serve_mode = true;
     return .{
         .allocator = allocator,
         .result = result,
