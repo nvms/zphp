@@ -349,6 +349,7 @@ fn array_map(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
 fn array_filter(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len == 0 or args[0] != .array) return .null;
     const src = args[0].array;
+    const flag: i64 = if (args.len >= 3) Value.toInt(args[2]) else 0;
 
     var result = try ctx.createArray();
     if (args.len < 2) {
@@ -357,7 +358,18 @@ fn array_filter(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
         }
     } else {
         for (src.entries.items) |entry| {
-            const keep = try ctx.invokeCallable(args[1], &.{entry.value});
+            const key_val: Value = switch (entry.key) {
+                .int => |i| .{ .int = i },
+                .string => |s| .{ .string = s },
+            };
+            const keep = if (flag == 1)
+                // ARRAY_FILTER_USE_BOTH
+                try ctx.invokeCallable(args[1], &.{ entry.value, key_val })
+            else if (flag == 2)
+                // ARRAY_FILTER_USE_KEY
+                try ctx.invokeCallable(args[1], &.{key_val})
+            else
+                try ctx.invokeCallable(args[1], &.{entry.value});
             if (keep.isTruthy()) try result.set(ctx.allocator, entry.key, entry.value);
         }
     }

@@ -139,10 +139,21 @@ fn native_constant(ctx: *NativeContext, args: []const Value) RuntimeError!Value 
     return .null;
 }
 
+fn countRecursive(a: *const PhpArray) i64 {
+    var total: i64 = a.length();
+    for (a.entries.items) |entry| {
+        if (entry.value == .array) {
+            total += countRecursive(entry.value.array);
+        }
+    }
+    return total;
+}
+
 fn count(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len == 0) return .{ .int = 0 };
+    const recursive = args.len >= 2 and args[1] == .int and args[1].int == 1;
     return switch (args[0]) {
-        .array => |a| .{ .int = a.length() },
+        .array => |a| .{ .int = if (recursive) countRecursive(a) else a.length() },
         .object => |obj| {
             if (ctx.vm.hasMethod(obj.class_name, "count")) {
                 return ctx.vm.callMethod(obj, "count", &.{}) catch .{ .int = 1 };

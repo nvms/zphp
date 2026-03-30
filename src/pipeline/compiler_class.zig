@@ -1101,16 +1101,16 @@ pub fn compileTraitDecl(self: *Compiler, node: Ast.Node) Error!void {
         }
     }
 
-    // compile defaults for own properties
-    for (own_props.items) |pi| {
+    // compile defaults for static properties first (popped second by VM)
+    for (static_props.items) |pi| {
         const pmember = self.ast.nodes[pi];
         if (pmember.data.lhs != 0) {
             try self.compileNode(pmember.data.lhs);
         }
     }
 
-    // compile defaults for static properties
-    for (static_props.items) |pi| {
+    // compile defaults for own properties second (popped first by VM)
+    for (own_props.items) |pi| {
         const pmember = self.ast.nodes[pi];
         if (pmember.data.lhs != 0) {
             try self.compileNode(pmember.data.lhs);

@@ -572,6 +572,8 @@ fn preg_split(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     const limit: i64 = if (args.len >= 3 and args[2] != .null) Value.toInt(args[2]) else -1;
     const flags: i64 = if (args.len >= 4) Value.toInt(args[3]) else 0;
     const delim_capture = (flags & 2) != 0;
+    const no_empty = (flags & 1) != 0;
+    const offset_capture = (flags & 4) != 0;
 
     const code = compilePattern(info.pattern, info.flags) orelse return Value.null;
     defer pcre2.pcre2_code_free_8(code);
@@ -593,7 +595,17 @@ fn preg_split(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
         const match_start = ovector[0];
         const match_end = ovector[1];
 
-        try result.append(ctx.allocator, .{ .string = try ctx.createString(subject[offset..match_start]) });
+        const piece = try ctx.createString(subject[offset..match_start]);
+        if (!no_empty or piece.len > 0) {
+            if (offset_capture) {
+                var pair = try ctx.createArray();
+                try pair.append(ctx.allocator, .{ .string = piece });
+                try pair.append(ctx.allocator, .{ .int = @intCast(offset) });
+                try result.append(ctx.allocator, .{ .array = pair });
+            } else {
+                try result.append(ctx.allocator, .{ .string = piece });
+            }
+        }
         splits += 1;
 
         if (delim_capture and rc > 1) {
@@ -602,16 +614,43 @@ fn preg_split(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
                 const gs = ovector[2 * i];
                 const ge = ovector[2 * i + 1];
                 if (gs <= subject.len and ge <= subject.len) {
-                    try result.append(ctx.allocator, .{ .string = try ctx.createString(subject[gs..ge]) });
-                } else {
-                    try result.append(ctx.allocator, .{ .string = "" });
+                    const cap = try ctx.createString(subject[gs..ge]);
+                    if (!no_empty or cap.len > 0) {
+                        if (offset_capture) {
+                            var pair = try ctx.createArray();
+                            try pair.append(ctx.allocator, .{ .string = cap });
+                            try pair.append(ctx.allocator, .{ .int = @intCast(gs) });
+                            try result.append(ctx.allocator, .{ .array = pair });
+                        } else {
+                            try result.append(ctx.allocator, .{ .string = cap });
+                        }
+                    }
+                } else if (!no_empty) {
+                    if (offset_capture) {
+                        var pair = try ctx.createArray();
+                        try pair.append(ctx.allocator, .{ .string = "" });
+                        try pair.append(ctx.allocator, .{ .int = 0 });
+                        try result.append(ctx.allocator, .{ .array = pair });
+                    } else {
+                        try result.append(ctx.allocator, .{ .string = "" });
+                    }
                 }
             }
         }
 
         if (match_end == offset) {
             if (offset < subject.len) {
-                try result.append(ctx.allocator, .{ .string = try ctx.createString(subject[offset .. offset + 1]) });
+                const single = try ctx.createString(subject[offset .. offset + 1]);
+                if (!no_empty or single.len > 0) {
+                    if (offset_capture) {
+                        var pair = try ctx.createArray();
+                        try pair.append(ctx.allocator, .{ .string = single });
+                        try pair.append(ctx.allocator, .{ .int = @intCast(offset) });
+                        try result.append(ctx.allocator, .{ .array = pair });
+                    } else {
+                        try result.append(ctx.allocator, .{ .string = single });
+                    }
+                }
             }
             offset += 1;
         } else {
@@ -620,7 +659,17 @@ fn preg_split(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     }
 
     if (offset <= subject.len) {
-        try result.append(ctx.allocator, .{ .string = try ctx.createString(subject[offset..]) });
+        const tail = try ctx.createString(subject[offset..]);
+        if (!no_empty or tail.len > 0) {
+            if (offset_capture) {
+                var pair = try ctx.createArray();
+                try pair.append(ctx.allocator, .{ .string = tail });
+                try pair.append(ctx.allocator, .{ .int = @intCast(offset) });
+                try result.append(ctx.allocator, .{ .array = pair });
+            } else {
+                try result.append(ctx.allocator, .{ .string = tail });
+            }
+        }
     }
 
     return .{ .array = result };

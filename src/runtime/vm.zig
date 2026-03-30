@@ -446,6 +446,8 @@ pub const VM = struct {
         try c.put(a, "INI_SCANNER_TYPED", .{ .int = 2 });
         try c.put(a, "ARRAY_FILTER_USE_BOTH", .{ .int = 1 });
         try c.put(a, "ARRAY_FILTER_USE_KEY", .{ .int = 2 });
+        try c.put(a, "COUNT_NORMAL", .{ .int = 0 });
+        try c.put(a, "COUNT_RECURSIVE", .{ .int = 1 });
         try c.put(a, "CASE_LOWER", .{ .int = 0 });
         try c.put(a, "CASE_UPPER", .{ .int = 1 });
         try c.put(a, "JSON_PRETTY_PRINT", .{ .int = 128 });
@@ -490,6 +492,7 @@ pub const VM = struct {
         try c.put(a, "PREG_OFFSET_CAPTURE", .{ .int = 256 });
         try c.put(a, "PREG_SPLIT_DELIM_CAPTURE", .{ .int = 2 });
         try c.put(a, "PREG_SPLIT_NO_EMPTY", .{ .int = 1 });
+        try c.put(a, "PREG_SPLIT_OFFSET_CAPTURE", .{ .int = 4 });
         try c.put(a, "PREG_NO_ERROR", .{ .int = 0 });
         try c.put(a, "PREG_INTERNAL_ERROR", .{ .int = 1 });
         try c.put(a, "PREG_BACKTRACK_LIMIT_ERROR", .{ .int = 2 });
@@ -3152,6 +3155,7 @@ pub const VM = struct {
                                 self.sp -= ac + 1;
                                 const result = self.callMethod(obj, "__call", &.{ .{ .string = method_name }, .{ .array = args_arr } }) catch |err| {
                                     self.removeCallGuard(obj_id, method_name);
+                                    if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
                                     return err;
                                 };
                                 self.removeCallGuard(obj_id, method_name);
@@ -3489,7 +3493,10 @@ pub const VM = struct {
                             for (0..ac) |ai| try args_arr.append(self.allocator, self.stack[self.sp - ac + ai]);
                             self.sp -= ac;
                             self.sp -= 1;
-                            const result = try self.callMethod(obj, "__call", &.{ .{ .string = method_name }, .{ .array = args_arr } });
+                            const result = self.callMethod(obj, "__call", &.{ .{ .string = method_name }, .{ .array = args_arr } }) catch {
+                                if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
+                                return error.RuntimeError;
+                            };
                             self.push(result);
                             continue;
                         }
@@ -3628,6 +3635,7 @@ pub const VM = struct {
                                 self.sp -= 1;
                                 const result = self.callMethod(obj, "__call", &.{ .{ .string = method_name }, .{ .array = call_args_arr } }) catch |err| {
                                     self.removeCallGuard(obj_id, method_name);
+                                    if (err == error.RuntimeError and self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
                                     return err;
                                 };
                                 self.removeCallGuard(obj_id, method_name);
