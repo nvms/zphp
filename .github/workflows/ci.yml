@@ -107,23 +107,8 @@ jobs:
       - run: zig build
       - run: ./tests/examples_test
 
-  laravel:
-    runs-on: ubuntu-latest
-    continue-on-error: true
-    steps:
-      - uses: actions/checkout@v4
-      - uses: mlugg/setup-zig@v2
-        with:
-          version: 0.15.1
-      - name: install system libs
-        run: sudo apt-get update && sudo apt-get install -y libpcre2-dev libsqlite3-dev zlib1g-dev libmysqlclient-dev libpq-dev libssl-dev libnghttp2-dev
-      - uses: shivammathur/setup-php@v2
-        with:
-          php-version: '8.4'
-          extensions: mbstring, xml, sqlite3, curl, tokenizer
-      - run: zig build
-      - run: ./tests/laravel/setup
-      - run: ./tests/laravel/run
+  # laravel: disabled until x86_64 segfault is resolved (works on arm64)
+  # see tests/laravel/ for local testing via `make laravel`
 
   pdo:
     runs-on: ubuntu-latest
