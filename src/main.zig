@@ -216,7 +216,7 @@ fn initCliServerVars(vm: *VM, a: std.mem.Allocator) !void {
         try vm.arrays.append(a, sg_arr);
         try vm.request_vars.put(a, sg_name, .{ .array = sg_arr });
     }
-    try env.populateEnvSuperglobal(vm, a);
+    try env.populateEnvSuperglobal(vm, a, null);
 }
 
 fn runFile(allocator: std.mem.Allocator, path: []const u8) !void {

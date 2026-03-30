@@ -30,7 +30,36 @@ pub fn loadEnvFile(allocator: std.mem.Allocator) void {
     }
 }
 
-pub fn populateEnvSuperglobal(vm: *VM, a: std.mem.Allocator) !void {
+pub const EnvSnapshot = struct {
+    env_arr: *PhpArray,
+    allocator: std.mem.Allocator,
+
+    pub fn capture(a: std.mem.Allocator) ?EnvSnapshot {
+        const arr = a.create(PhpArray) catch return null;
+        arr.* = .{};
+        const env_map = std.process.getEnvMap(a) catch return .{ .env_arr = arr, .allocator = a };
+        defer @constCast(&env_map).deinit();
+        var iter = env_map.iterator();
+        while (iter.next()) |entry| {
+            const key = a.dupe(u8, entry.key_ptr.*) catch continue;
+            const val = a.dupe(u8, entry.value_ptr.*) catch continue;
+            arr.set(a, .{ .string = key }, .{ .string = val }) catch continue;
+        }
+        return .{ .env_arr = arr, .allocator = a };
+    }
+
+    pub fn deinit(self: *EnvSnapshot) void {
+        self.env_arr.deinit(self.allocator);
+        self.allocator.destroy(self.env_arr);
+    }
+};
+
+pub fn populateEnvSuperglobal(vm: *VM, a: std.mem.Allocator, snapshot: ?*const EnvSnapshot) !void {
+    if (snapshot) |snap| {
+        try vm.request_vars.put(a, "$_ENV", .{ .array = snap.env_arr });
+        return;
+    }
+
     const env_arr = try a.create(PhpArray);
     env_arr.* = .{};
     try vm.arrays.append(a, env_arr);
@@ -40,7 +69,6 @@ pub fn populateEnvSuperglobal(vm: *VM, a: std.mem.Allocator) !void {
         return;
     };
     defer @constCast(&env_map).deinit();
-
     var iter = env_map.iterator();
     while (iter.next()) |entry| {
         const key_owned = try a.dupe(u8, entry.key_ptr.*);

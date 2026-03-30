@@ -199,6 +199,7 @@ const Worker = struct {
     ws_enabled: bool,
     ws_initialized: bool,
     tls_ctx: ?*tls.SSL_CTX,
+    env_snapshot: ?env.EnvSnapshot,
     wake_pipe: [2]posix.fd_t,
     poll_fds: [MAX_CONNS + 1]posix.pollfd,
     conns: [MAX_CONNS + 1]?Connection,
@@ -271,6 +272,7 @@ fn initWorker(allocator: Allocator, result: *const CompileResult, doc_root: []co
         .ws_enabled = ws_enabled,
         .ws_initialized = false,
         .tls_ctx = tls_ctx,
+        .env_snapshot = env.EnvSnapshot.capture(allocator),
         .wake_pipe = try posix.pipe(),
         .poll_fds = [_]posix.pollfd{.{ .fd = -1, .events = 0, .revents = 0 }} ** (MAX_CONNS + 1),
         .conns = [_]?Connection{null} ** (MAX_CONNS + 1),
@@ -288,6 +290,7 @@ fn deinitWorker(w: *Worker) void {
     }
     posix.close(w.wake_pipe[0]);
     posix.close(w.wake_pipe[1]);
+    if (w.env_snapshot) |*s| @constCast(s).deinit();
     w.vm.deinit();
 }
 
@@ -773,7 +776,7 @@ fn processHttpRead(w: *Worker, c: *Connection) void {
         .stream = c.stream,
         .address = std.net.Address{ .in = .{ .sa = .{ .port = 0, .addr = c.addr_bytes, .zero = [_]u8{0} ** 8 } } },
     };
-    populateSuperglobals(&w.vm, &req, mock_conn, w.port) catch {
+    populateSuperglobals(&w.vm, &req, mock_conn, w.port, if (w.env_snapshot) |*s| s else null) catch {
         c.state = .closing;
         return;
     };
@@ -874,7 +877,7 @@ fn handleH2Request(w: *Worker, conn: *Connection, session: *h2.H2Session, stream
         .stream = conn.stream,
         .address = std.net.Address{ .in = .{ .sa = .{ .port = 0, .addr = conn.addr_bytes, .zero = [_]u8{0} ** 8 } } },
     };
-    populateSuperglobals(&w.vm, &req, mock_conn, w.port) catch {
+    populateSuperglobals(&w.vm, &req, mock_conn, w.port, if (w.env_snapshot) |*s| s else null) catch {
         session.submitResponse(stream_id, 500, "text/plain", "Internal Server Error");
         stream.resetRequest(w.allocator);
         return;
@@ -1073,7 +1076,7 @@ fn parseRequest(raw: []const u8) Request {
     return req;
 }
 
-fn populateSuperglobals(vm: *VM, req: *const Request, conn: std.net.Server.Connection, port: u16) !void {
+fn populateSuperglobals(vm: *VM, req: *const Request, conn: std.net.Server.Connection, port: u16, env_snapshot: ?*const env.EnvSnapshot) !void {
     const a = vm.allocator;
     const server_arr = try a.create(PhpArray);
     server_arr.* = .{};
@@ -1147,7 +1150,7 @@ fn populateSuperglobals(vm: *VM, req: *const Request, conn: std.net.Server.Conne
     if (req.getHeader("Cookie")) |cookies| parseCookies(a, vm, cookie_arr, cookies) catch {};
     try vm.request_vars.put(a, "$_COOKIE", .{ .array = cookie_arr });
 
-    try env.populateEnvSuperglobal(vm, a);
+    try env.populateEnvSuperglobal(vm, a, env_snapshot);
 
     // raw body for php://input
     if (req.body.len > 0) {
