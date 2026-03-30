@@ -23,7 +23,7 @@ pub fn main() !void {
     defer std.process.argsFree(allocator, args);
 
     if (args.len < 2) {
-        try writeStdout("zphp 0.5.2\n");
+        try writeStdout("zphp 0.5.3\n");
         return;
     }
 
@@ -77,7 +77,7 @@ fn dispatch(allocator: std.mem.Allocator, args: []const []const u8) !void {
         try requireArg(args, 3, "usage: zphp build [--compile] <file>\n");
         try buildFile(allocator, args[2..]);
     } else if (std.mem.eql(u8, cmd, "version") or std.mem.eql(u8, cmd, "--version")) {
-        try writeStdout("zphp 0.5.2\n");
+        try writeStdout("zphp 0.5.3\n");
     } else {
         try writeStderr("unknown command: ");
         try writeStderr(cmd);
