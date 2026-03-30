@@ -25,14 +25,14 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
 
-    exe_mod.linkSystemLibrary("pcre2-8", .{});
-    exe_mod.linkSystemLibrary("sqlite3", .{});
-    exe_mod.linkSystemLibrary("z", .{});
+    exe_mod.linkSystemLibrary("pcre2-8", .{ .preferred_link_mode = .static });
+    exe_mod.linkSystemLibrary("sqlite3", .{ .preferred_link_mode = .static });
+    exe_mod.linkSystemLibrary("z", .{ .preferred_link_mode = .static });
     exe_mod.linkSystemLibrary("mysqlclient", .{});
     exe_mod.linkSystemLibrary("pq", .{});
-    exe_mod.linkSystemLibrary("ssl", .{ .use_pkg_config = .no });
-    exe_mod.linkSystemLibrary("crypto", .{ .use_pkg_config = .no });
-    exe_mod.linkSystemLibrary("nghttp2", .{});
+    exe_mod.linkSystemLibrary("ssl", .{ .preferred_link_mode = .static, .use_pkg_config = .no });
+    exe_mod.linkSystemLibrary("crypto", .{ .preferred_link_mode = .static, .use_pkg_config = .no });
+    exe_mod.linkSystemLibrary("nghttp2", .{ .preferred_link_mode = .static });
     exe_mod.link_libc = true;
     exe_mod.addObject(fast_loop_obj);
 
@@ -65,14 +65,14 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
 
-    test_mod.linkSystemLibrary("pcre2-8", .{});
-    test_mod.linkSystemLibrary("sqlite3", .{});
-    test_mod.linkSystemLibrary("z", .{});
+    test_mod.linkSystemLibrary("pcre2-8", .{ .preferred_link_mode = .static });
+    test_mod.linkSystemLibrary("sqlite3", .{ .preferred_link_mode = .static });
+    test_mod.linkSystemLibrary("z", .{ .preferred_link_mode = .static });
     test_mod.linkSystemLibrary("mysqlclient", .{});
     test_mod.linkSystemLibrary("pq", .{});
-    test_mod.linkSystemLibrary("ssl", .{ .use_pkg_config = .no });
-    test_mod.linkSystemLibrary("crypto", .{ .use_pkg_config = .no });
-    test_mod.linkSystemLibrary("nghttp2", .{});
+    test_mod.linkSystemLibrary("ssl", .{ .preferred_link_mode = .static, .use_pkg_config = .no });
+    test_mod.linkSystemLibrary("crypto", .{ .preferred_link_mode = .static, .use_pkg_config = .no });
+    test_mod.linkSystemLibrary("nghttp2", .{ .preferred_link_mode = .static });
     test_mod.link_libc = true;
     test_mod.addObject(fast_loop_test_obj);
 
