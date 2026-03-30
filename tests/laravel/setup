@@ -4,22 +4,12 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 APP_DIR="$SCRIPT_DIR/app"
 
-if ! command -v composer &>/dev/null; then
-    echo "composer not found (install: https://getcomposer.org)"
-    exit 1
-fi
-
 if ! command -v php &>/dev/null; then
     echo "php not found in PATH"
     exit 1
 fi
 
 cd "$APP_DIR"
-
-if [ ! -d "vendor" ]; then
-    echo "installing dependencies..."
-    composer install --no-dev --no-interaction --quiet
-fi
 
 cp .env.testing .env
 touch database/database.sqlite
