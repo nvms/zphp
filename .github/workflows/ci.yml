@@ -107,8 +107,33 @@ jobs:
       - run: zig build
       - run: ./tests/examples_test
 
-  # laravel: disabled until x86_64 segfault is resolved (works on arm64)
-  # see tests/laravel/ for local testing via `make laravel`
+  laravel-debug:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.15.1
+      - name: install system libs
+        run: sudo apt-get update && sudo apt-get install -y libpcre2-dev libsqlite3-dev zlib1g-dev libmysqlclient-dev libpq-dev libssl-dev libnghttp2-dev
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.4'
+          extensions: mbstring, xml, sqlite3, curl, tokenizer
+      - name: build default
+        run: zig build
+      - name: setup laravel
+        run: ./tests/laravel/setup
+      - name: bisect with default build
+        run: timeout 120 ./zig-out/bin/zphp run tests/laravel/harness/bisect.php 2>&1 || echo "EXIT CODE: $?"
+      - name: build ReleaseSafe
+        run: zig build -Doptimize=ReleaseSafe
+      - name: bisect with ReleaseSafe build
+        run: timeout 120 ./zig-out/bin/zphp run tests/laravel/harness/bisect.php 2>&1 || echo "EXIT CODE: $?"
+      - name: build Debug
+        run: zig build -Doptimize=Debug
+      - name: bisect with Debug build
+        run: timeout 120 ./zig-out/bin/zphp run tests/laravel/harness/bisect.php 2>&1 || echo "EXIT CODE: $?"
 
   pdo:
     runs-on: ubuntu-latest
