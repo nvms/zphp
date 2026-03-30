@@ -125,15 +125,18 @@ jobs:
       - name: setup laravel
         run: ./tests/laravel/setup
       - name: bisect with default build
-        run: timeout 120 ./zig-out/bin/zphp run tests/laravel/harness/bisect.php 2>&1 || echo "EXIT CODE: $?"
+        continue-on-error: true
+        run: timeout 120 ./zig-out/bin/zphp run tests/laravel/harness/bisect.php
       - name: build ReleaseSafe
         run: zig build -Doptimize=ReleaseSafe
       - name: bisect with ReleaseSafe build
-        run: timeout 120 ./zig-out/bin/zphp run tests/laravel/harness/bisect.php 2>&1 || echo "EXIT CODE: $?"
+        continue-on-error: true
+        run: timeout 120 ./zig-out/bin/zphp run tests/laravel/harness/bisect.php
       - name: build Debug
         run: zig build -Doptimize=Debug
       - name: bisect with Debug build
-        run: timeout 120 ./zig-out/bin/zphp run tests/laravel/harness/bisect.php 2>&1 || echo "EXIT CODE: $?"
+        continue-on-error: true
+        run: timeout 120 ./zig-out/bin/zphp run tests/laravel/harness/bisect.php
 
   pdo:
     runs-on: ubuntu-latest
