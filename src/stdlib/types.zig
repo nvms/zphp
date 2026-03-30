@@ -104,6 +104,8 @@ pub const entries = .{
     .{ "filter_var", native_filter_var },
     .{ "is_resource", native_is_resource },
     .{ "get_resource_type", native_get_resource_type },
+    .{ "token_get_all", native_token_get_all },
+    .{ "token_name", native_token_name },
 };
 
 fn native_define(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
@@ -1276,4 +1278,163 @@ fn native_spl_object_hash(ctx: *NativeContext, args: []const Value) RuntimeError
     const hash = std.fmt.allocPrint(ctx.allocator, "{x:0>32}", .{ptr}) catch return .{ .bool = false };
     ctx.vm.strings.append(ctx.allocator, hash) catch {};
     return .{ .string = hash };
+}
+
+const T_INLINE_HTML: i64 = 312;
+const T_OPEN_TAG: i64 = 379;
+const T_OPEN_TAG_WITH_ECHO: i64 = 380;
+const T_CLOSE_TAG: i64 = 381;
+const T_WHITESPACE: i64 = 382;
+const T_VARIABLE: i64 = 309;
+const T_STRING: i64 = 310;
+const T_LNUMBER: i64 = 311;
+const T_DNUMBER: i64 = 313;
+const T_CONSTANT_ENCAPSED_STRING: i64 = 314;
+const T_COMMENT: i64 = 393;
+const T_DOC_COMMENT: i64 = 394;
+
+fn makeToken(ctx: *NativeContext, id: i64, text: []const u8, line: i64) RuntimeError!Value {
+    const arr = try ctx.createArray();
+    try arr.append(ctx.allocator, .{ .int = id });
+    const s = try std.fmt.allocPrint(ctx.allocator, "{s}", .{text});
+    try ctx.strings.append(ctx.allocator, s);
+    try arr.append(ctx.allocator, .{ .string = s });
+    try arr.append(ctx.allocator, .{ .int = line });
+    return .{ .array = arr };
+}
+
+fn native_token_get_all(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len == 0 or args[0] != .string) return .{ .array = try ctx.createArray() };
+    const input = args[0].string;
+    const result = try ctx.createArray();
+    var pos: usize = 0;
+    var line: i64 = 1;
+    var in_php = false;
+
+    while (pos < input.len) {
+        if (!in_php) {
+            if (std.mem.startsWith(u8, input[pos..], "<?=")) {
+                if (pos > 0) {
+                    const html_start = blk: {
+                        var s: usize = 0;
+                        var found_start = false;
+                        for (0..pos) |i| {
+                            if (!found_start) { s = i; found_start = true; }
+                        }
+                        break :blk if (found_start) s else 0;
+                    };
+                    _ = html_start;
+                }
+                try result.append(ctx.allocator, try makeToken(ctx, T_OPEN_TAG_WITH_ECHO, "<?=", line));
+                pos += 3;
+                in_php = true;
+            } else if (std.mem.startsWith(u8, input[pos..], "<?php")) {
+                const tag_end = pos + 5;
+                const has_ws = tag_end < input.len and (input[tag_end] == ' ' or input[tag_end] == '\n' or input[tag_end] == '\r' or input[tag_end] == '\t');
+                if (has_ws) {
+                    const tag_text = if (input[tag_end] == '\n') "<?php\n" else "<?php ";
+                    try result.append(ctx.allocator, try makeToken(ctx, T_OPEN_TAG, tag_text, line));
+                    if (input[tag_end] == '\n') line += 1;
+                    pos = tag_end + 1;
+                } else {
+                    try result.append(ctx.allocator, try makeToken(ctx, T_OPEN_TAG, "<?php ", line));
+                    pos = tag_end;
+                }
+                in_php = true;
+            } else {
+                // collect inline HTML until next <?
+                const start = pos;
+                while (pos < input.len) {
+                    if (std.mem.startsWith(u8, input[pos..], "<?")) break;
+                    if (input[pos] == '\n') line += 1;
+                    pos += 1;
+                }
+                if (pos > start) {
+                    try result.append(ctx.allocator, try makeToken(ctx, T_INLINE_HTML, input[start..pos], line));
+                }
+            }
+        } else {
+            // inside PHP code
+            if (std.mem.startsWith(u8, input[pos..], "?>")) {
+                try result.append(ctx.allocator, try makeToken(ctx, T_CLOSE_TAG, "?>", line));
+                pos += 2;
+                in_php = false;
+            } else if (input[pos] == ' ' or input[pos] == '\t' or input[pos] == '\n' or input[pos] == '\r') {
+                const start = pos;
+                while (pos < input.len and (input[pos] == ' ' or input[pos] == '\t' or input[pos] == '\n' or input[pos] == '\r')) {
+                    if (input[pos] == '\n') line += 1;
+                    pos += 1;
+                }
+                try result.append(ctx.allocator, try makeToken(ctx, T_WHITESPACE, input[start..pos], line));
+            } else if (input[pos] == '$' and pos + 1 < input.len and (std.ascii.isAlphabetic(input[pos + 1]) or input[pos + 1] == '_')) {
+                const start = pos;
+                pos += 1;
+                while (pos < input.len and (std.ascii.isAlphanumeric(input[pos]) or input[pos] == '_')) pos += 1;
+                try result.append(ctx.allocator, try makeToken(ctx, T_VARIABLE, input[start..pos], line));
+            } else if (input[pos] == '\'' or input[pos] == '"') {
+                const quote = input[pos];
+                const start = pos;
+                pos += 1;
+                while (pos < input.len) {
+                    if (input[pos] == '\\' and pos + 1 < input.len) {
+                        pos += 2;
+                        continue;
+                    }
+                    if (input[pos] == '\n') line += 1;
+                    if (input[pos] == quote) { pos += 1; break; }
+                    pos += 1;
+                }
+                try result.append(ctx.allocator, try makeToken(ctx, T_CONSTANT_ENCAPSED_STRING, input[start..pos], line));
+            } else if (input[pos] == '/' and pos + 1 < input.len and input[pos + 1] == '/') {
+                const start = pos;
+                while (pos < input.len and input[pos] != '\n') pos += 1;
+                try result.append(ctx.allocator, try makeToken(ctx, T_COMMENT, input[start..pos], line));
+            } else if (input[pos] == '/' and pos + 1 < input.len and input[pos + 1] == '*') {
+                const start = pos;
+                const is_doc = pos + 2 < input.len and input[pos + 2] == '*';
+                pos += 2;
+                while (pos + 1 < input.len) {
+                    if (input[pos] == '\n') line += 1;
+                    if (input[pos] == '*' and input[pos + 1] == '/') { pos += 2; break; }
+                    pos += 1;
+                }
+                try result.append(ctx.allocator, try makeToken(ctx, if (is_doc) T_DOC_COMMENT else T_COMMENT, input[start..pos], line));
+            } else if (std.ascii.isDigit(input[pos])) {
+                const start = pos;
+                while (pos < input.len and (std.ascii.isDigit(input[pos]) or input[pos] == '.')) pos += 1;
+                const has_dot = std.mem.indexOfScalar(u8, input[start..pos], '.') != null;
+                try result.append(ctx.allocator, try makeToken(ctx, if (has_dot) T_DNUMBER else T_LNUMBER, input[start..pos], line));
+            } else if (std.ascii.isAlphabetic(input[pos]) or input[pos] == '_') {
+                const start = pos;
+                while (pos < input.len and (std.ascii.isAlphanumeric(input[pos]) or input[pos] == '_')) pos += 1;
+                try result.append(ctx.allocator, try makeToken(ctx, T_STRING, input[start..pos], line));
+            } else {
+                // single character token returned as string
+                const s = try std.fmt.allocPrint(ctx.allocator, "{c}", .{input[pos]});
+                try ctx.strings.append(ctx.allocator, s);
+                try result.append(ctx.allocator, .{ .string = s });
+                pos += 1;
+            }
+        }
+    }
+    return .{ .array = result };
+}
+
+fn native_token_name(_: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len == 0 or args[0] != .int) return .{ .string = "UNKNOWN" };
+    return .{ .string = switch (args[0].int) {
+        312 => "T_INLINE_HTML",
+        379 => "T_OPEN_TAG",
+        380 => "T_OPEN_TAG_WITH_ECHO",
+        381 => "T_CLOSE_TAG",
+        382 => "T_WHITESPACE",
+        309 => "T_VARIABLE",
+        310 => "T_STRING",
+        311 => "T_LNUMBER",
+        313 => "T_DNUMBER",
+        314 => "T_CONSTANT_ENCAPSED_STRING",
+        393 => "T_COMMENT",
+        394 => "T_DOC_COMMENT",
+        else => "UNKNOWN",
+    } };
 }

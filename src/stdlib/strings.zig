@@ -756,15 +756,22 @@ fn sprintfImpl(ctx: *NativeContext, fmt_str: []const u8, args: []const Value) ![
             var tmp_buf = std.ArrayListUnmanaged(u8){};
             switch (spec) {
                 's' => {
-                    if (arg == .string) {
-                        const s = arg.string;
-                        if (precision) |p| {
-                            try tmp_buf.appendSlice(ctx.allocator, s[0..@min(p, s.len)]);
-                        } else {
-                            try tmp_buf.appendSlice(ctx.allocator, s);
+                    const s = blk: {
+                        if (arg == .string) break :blk arg.string;
+                        if (arg == .object) {
+                            if (ctx.vm.callMethod(arg.object, "__toString", &.{})) |ret| {
+                                if (ret == .string) break :blk ret.string;
+                            } else |_| {}
                         }
-                    } else {
                         try arg.format(&tmp_buf, ctx.allocator);
+                        break :blk @as(?[]const u8, null);
+                    };
+                    if (s) |str| {
+                        if (precision) |p| {
+                            try tmp_buf.appendSlice(ctx.allocator, str[0..@min(p, str.len)]);
+                        } else {
+                            try tmp_buf.appendSlice(ctx.allocator, str);
+                        }
                     }
                 },
                 'd' => {

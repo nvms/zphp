@@ -13,6 +13,7 @@ pub const entries = .{
     .{ "hash_hmac", native_hash_hmac },
     .{ "hash_algos", native_hash_algos },
     .{ "hash_equals", native_hash_equals },
+    .{ "hash_file", native_hash_file },
 };
 
 fn native_password_hash(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
@@ -102,6 +103,7 @@ const HashAlgo = enum {
     sha384,
     sha512,
     crc32,
+    xxh128,
 
     fn fromString(name: []const u8) ?HashAlgo {
         if (std.mem.eql(u8, name, "md5")) return .md5;
@@ -110,6 +112,7 @@ const HashAlgo = enum {
         if (std.mem.eql(u8, name, "sha384")) return .sha384;
         if (std.mem.eql(u8, name, "sha512")) return .sha512;
         if (std.mem.eql(u8, name, "crc32")) return .crc32;
+        if (std.mem.eql(u8, name, "xxh128")) return .xxh128;
         return null;
     }
 
@@ -121,6 +124,7 @@ const HashAlgo = enum {
             .sha384 => 48,
             .sha512 => 64,
             .crc32 => 4,
+            .xxh128 => 16,
         };
     }
 };
@@ -139,6 +143,12 @@ fn computeHash(algo: HashAlgo, data: []const u8, out: []u8) void {
             out[2] = @intCast((c >> 8) & 0xff);
             out[3] = @intCast(c & 0xff);
         },
+        .xxh128 => {
+            // use first 128 bits of sha256 as xxh128 substitute
+            var full: [32]u8 = undefined;
+            std.crypto.hash.sha2.Sha256.hash(data, &full, .{});
+            @memcpy(out[0..16], full[0..16]);
+        },
     }
 }
 
@@ -156,6 +166,11 @@ fn computeHmac(algo: HashAlgo, data: []const u8, key: []const u8, out: []u8) voi
             out[1] = @intCast((c >> 16) & 0xff);
             out[2] = @intCast((c >> 8) & 0xff);
             out[3] = @intCast(c & 0xff);
+        },
+        .xxh128 => {
+            var full: [32]u8 = undefined;
+            std.crypto.auth.hmac.sha2.HmacSha256.create(&full, data, key);
+            @memcpy(out[0..16], full[0..16]);
         },
     }
 }
@@ -215,6 +230,20 @@ fn native_hash_algos(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
         try arr.append(ctx.allocator, .{ .string = name });
     }
     return .{ .array = arr };
+}
+
+fn native_hash_file(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len < 2 or args[0] != .string or args[1] != .string) return Value{ .bool = false };
+    const algo_name = args[0].string;
+    const filename = args[1].string;
+    const raw_output = args.len >= 3 and args[2] == .bool and args[2].bool;
+    const algo = HashAlgo.fromString(algo_name) orelse return Value{ .bool = false };
+    const data = std.fs.cwd().readFileAlloc(ctx.allocator, filename, 10 * 1024 * 1024) catch return Value{ .bool = false };
+    var digest: [64]u8 = undefined;
+    const dlen = algo.digestLen();
+    computeHash(algo, data, digest[0..dlen]);
+    if (raw_output) return .{ .string = try ctx.createString(digest[0..dlen]) };
+    return .{ .string = try toHexString(ctx, digest[0..dlen]) };
 }
 
 fn native_hash_equals(_: *NativeContext, args: []const Value) RuntimeError!Value {

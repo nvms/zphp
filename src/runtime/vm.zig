@@ -523,6 +523,20 @@ pub const VM = struct {
         try c.put(a, "FILTER_FLAG_STRIP_LOW", .{ .int = 4 });
         try c.put(a, "FILTER_FLAG_STRIP_HIGH", .{ .int = 8 });
         try c.put(a, "FILTER_DEFAULT", .{ .int = 516 });
+        try c.put(a, "T_OPEN_TAG", .{ .int = 379 });
+        try c.put(a, "T_OPEN_TAG_WITH_ECHO", .{ .int = 380 });
+        try c.put(a, "T_CLOSE_TAG", .{ .int = 381 });
+        try c.put(a, "T_INLINE_HTML", .{ .int = 312 });
+        try c.put(a, "T_WHITESPACE", .{ .int = 382 });
+        try c.put(a, "T_VARIABLE", .{ .int = 309 });
+        try c.put(a, "T_STRING", .{ .int = 310 });
+        try c.put(a, "T_LNUMBER", .{ .int = 311 });
+        try c.put(a, "T_DNUMBER", .{ .int = 313 });
+        try c.put(a, "T_CONSTANT_ENCAPSED_STRING", .{ .int = 314 });
+        try c.put(a, "T_ENCAPSED_AND_WHITESPACE", .{ .int = 315 });
+        try c.put(a, "T_COMMENT", .{ .int = 393 });
+        try c.put(a, "T_DOC_COMMENT", .{ .int = 394 });
+        try c.put(a, "TOKEN_PARSE", .{ .int = 1 });
     }
 
     fn freeHeapItems(self: *VM) void {
@@ -3012,8 +3026,10 @@ pub const VM = struct {
                                     for (@min(ac, func.arity)..func.arity) |i| {
                                         if (i < func.defaults.len) mc_locals[i + 1] = try self.resolveDefault(func.defaults[i]);
                                     }
+                                    self.saveFrameArgs(arg_count);
                                     self.sp -= ac + 1;
                                     self.frames[self.frame_count] = .{ .chunk = &func.chunk, .ip = 0, .vars = .{}, .locals = mc_locals, .func = func };
+                                    self.setFrameArgCount(arg_count);
                                     self.frames[self.frame_count].entry_sp = self.sp;
                     self.frame_count += 1;
                                     try self.fastLoop();
@@ -3022,10 +3038,12 @@ pub const VM = struct {
                             } else if (mc_entry.native) |native| {
                                 var args_buf: [16]Value = undefined;
                                 for (0..ac) |i| args_buf[i] = self.stack[self.sp - ac + i];
+                                self.saveFrameArgs(arg_count);
                                 self.sp -= ac + 1;
                                 var tmp_vars: std.StringHashMapUnmanaged(Value) = .{};
                                 try tmp_vars.put(self.allocator, "$this", .{ .object = obj });
                                 self.frames[self.frame_count] = .{ .chunk = self.currentChunk(), .ip = self.currentFrame().ip, .vars = tmp_vars };
+                                self.setFrameArgCount(arg_count);
                                 self.frames[self.frame_count].entry_sp = self.sp;
                     self.frame_count += 1;
                                 const saved_fc = self.frame_count;
@@ -3104,6 +3122,7 @@ pub const VM = struct {
                         }
                         var args_buf: [16]Value = undefined;
                         for (0..ac) |i| args_buf[i] = self.stack[self.sp - ac + i];
+                        self.saveFrameArgs(arg_count);
                         self.sp -= ac;
                         self.sp -= 1;
 
@@ -3111,6 +3130,7 @@ pub const VM = struct {
                         var tmp_vars: std.StringHashMapUnmanaged(Value) = .{};
                         try tmp_vars.put(self.allocator, "$this", .{ .object = obj });
                         self.frames[self.frame_count] = .{ .chunk = self.currentChunk(), .ip = self.currentFrame().ip, .vars = tmp_vars };
+                        self.setFrameArgCount(arg_count);
                         self.frames[self.frame_count].entry_sp = self.sp;
                     self.frame_count += 1;
                         const saved_fc = self.frame_count;
@@ -3202,6 +3222,7 @@ pub const VM = struct {
                                 }
                             }
                         }
+                        self.saveFrameArgs(arg_count);
                         self.sp -= ac;
                         self.sp -= 1;
                         if (func.is_generator) {
@@ -3212,6 +3233,7 @@ pub const VM = struct {
                             self.push(.{ .generator = gen });
                         } else {
                             self.frames[self.frame_count] = .{ .chunk = &func.chunk, .ip = 0, .vars = new_vars, .locals = try self.allocLocals(func, &new_vars), .func = func, .ref_slots = method_refs };
+                            self.setFrameArgCount(arg_count);
                             self.frames[self.frame_count].entry_sp = self.sp;
                     self.frame_count += 1;
                         }
@@ -3296,15 +3318,18 @@ pub const VM = struct {
                         self.error_msg = msg;
                         return error.RuntimeError;
                     }
+                    const mcs_ac_u8: u8 = @intCast(@min(ac, 255));
                     const full_name = try self.resolveMethod(obj.class_name, method_name);
                     if (self.native_fns.get(full_name)) |native| {
                         var args_buf: [16]Value = undefined;
                         for (0..ac) |i| args_buf[i] = self.stack[self.sp - ac + i];
+                        self.saveFrameArgs(mcs_ac_u8);
                         self.sp -= ac;
                         self.sp -= 1;
                         var tmp_vars: std.StringHashMapUnmanaged(Value) = .{};
                         try tmp_vars.put(self.allocator, "$this", .{ .object = obj });
                         self.frames[self.frame_count] = .{ .chunk = self.currentChunk(), .ip = self.currentFrame().ip, .vars = tmp_vars };
+                        self.setFrameArgCount(mcs_ac_u8);
                         self.frames[self.frame_count].entry_sp = self.sp;
                     self.frame_count += 1;
                         const saved_fc = self.frame_count;
@@ -3361,9 +3386,11 @@ pub const VM = struct {
                                 if (i < func.defaults.len) try new_vars.put(self.allocator, func.params[i], try self.resolveDefault(func.defaults[i]));
                             }
                         }
+                        self.saveFrameArgs(mcs_ac_u8);
                         self.sp -= ac;
                         self.sp -= 1;
                         self.frames[self.frame_count] = .{ .chunk = &func.chunk, .ip = 0, .vars = new_vars, .locals = try self.allocLocals(func, &new_vars), .func = func };
+                        self.setFrameArgCount(mcs_ac_u8);
                         self.frames[self.frame_count].entry_sp = self.sp;
                     self.frame_count += 1;
                     } else {
@@ -3418,11 +3445,13 @@ pub const VM = struct {
                     if (self.native_fns.get(full_name)) |native| {
                         var args_buf: [16]Value = undefined;
                         for (0..ac) |ai| args_buf[ai] = self.stack[self.sp - ac + ai];
+                        self.saveFrameArgs(arg_count);
                         self.sp -= ac;
                         self.sp -= 1;
                         var tmp_vars: std.StringHashMapUnmanaged(Value) = .{};
                         try tmp_vars.put(self.allocator, "$this", .{ .object = obj });
                         self.frames[self.frame_count] = .{ .chunk = self.currentChunk(), .ip = self.currentFrame().ip, .vars = tmp_vars };
+                        self.setFrameArgCount(arg_count);
                         self.frames[self.frame_count].entry_sp = self.sp;
                     self.frame_count += 1;
                         const saved_fc = self.frame_count;
@@ -3481,9 +3510,11 @@ pub const VM = struct {
                                 }
                             }
                         }
+                        self.saveFrameArgs(arg_count);
                         self.sp -= ac;
                         self.sp -= 1;
                         self.frames[self.frame_count] = .{ .chunk = &func.chunk, .ip = 0, .vars = new_vars, .locals = try self.allocLocals(func, &new_vars), .func = func };
+                        self.setFrameArgCount(arg_count);
                         self.frames[self.frame_count].entry_sp = self.sp;
                     self.frame_count += 1;
                     } else {
@@ -3553,14 +3584,17 @@ pub const VM = struct {
                         self.error_msg = std.fmt.allocPrint(self.allocator, "Fatal error: Uncaught Error: Call to undefined method {s}::{s}()", .{ obj.class_name, method_name }) catch null;
                         return error.RuntimeError;
                     };
+                    const mcds_ac_u8: u8 = @intCast(@min(ac, 255));
                     if (self.native_fns.get(full_name)) |native| {
                         var args_buf: [16]Value = undefined;
                         for (0..ac) |ai| args_buf[ai] = self.stack[self.sp - ac + ai];
+                        self.saveFrameArgs(mcds_ac_u8);
                         self.sp -= ac;
                         self.sp -= 1;
                         var tmp_vars: std.StringHashMapUnmanaged(Value) = .{};
                         try tmp_vars.put(self.allocator, "$this", .{ .object = obj });
                         self.frames[self.frame_count] = .{ .chunk = self.currentChunk(), .ip = self.currentFrame().ip, .vars = tmp_vars };
+                        self.setFrameArgCount(mcds_ac_u8);
                         self.frames[self.frame_count].entry_sp = self.sp;
                     self.frame_count += 1;
                         const saved_fc = self.frame_count;
@@ -3619,9 +3653,11 @@ pub const VM = struct {
                                 }
                             }
                         }
+                        self.saveFrameArgs(mcds_ac_u8);
                         self.sp -= ac;
                         self.sp -= 1;
                         self.frames[self.frame_count] = .{ .chunk = &func.chunk, .ip = 0, .vars = new_vars, .locals = try self.allocLocals(func, &new_vars), .func = func };
+                        self.setFrameArgCount(mcds_ac_u8);
                         self.frames[self.frame_count].entry_sp = self.sp;
                     self.frame_count += 1;
                     } else {
@@ -3750,10 +3786,12 @@ pub const VM = struct {
                                 const ac: usize = arg_count;
                                 var args_buf: [16]Value = undefined;
                                 for (0..ac) |i| args_buf[i] = self.stack[self.sp - ac + i];
+                                self.saveFrameArgs(arg_count);
                                 self.sp -= ac;
                                 var tmp_vars: std.StringHashMapUnmanaged(Value) = .{};
                                 try tmp_vars.put(self.allocator, "$this", tv);
                                 self.frames[self.frame_count] = .{ .chunk = self.currentChunk(), .ip = self.currentFrame().ip, .vars = tmp_vars, .called_class = effective_called };
+                                self.setFrameArgCount(arg_count);
                                 const sc_saved_fc = self.frame_count;
                                 self.frames[self.frame_count].entry_sp = self.sp;
                     self.frame_count += 1;
@@ -3876,8 +3914,11 @@ pub const VM = struct {
                                         if (i < func.defaults.len) try new_vars.put(self.allocator, func.params[i], try self.resolveDefault(func.defaults[i]));
                                     }
                                 }
+                                const scs_ac: u8 = @intCast(@min(ac, 255));
+                                self.saveFrameArgs(scs_ac);
                                 self.sp -= ac;
                                 self.frames[self.frame_count] = .{ .chunk = &func.chunk, .ip = 0, .vars = new_vars, .locals = try self.allocLocals(func, &new_vars), .func = func, .called_class = effective_called };
+                                self.setFrameArgCount(scs_ac);
                                 self.frames[self.frame_count].entry_sp = self.sp;
                     self.frame_count += 1;
                                 }

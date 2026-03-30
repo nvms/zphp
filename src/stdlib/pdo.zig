@@ -92,12 +92,17 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try pdo_def.methods.put(a, "commit", .{ .name = "commit", .arity = 0 });
     try pdo_def.methods.put(a, "rollBack", .{ .name = "rollBack", .arity = 0 });
     try pdo_def.methods.put(a, "errorInfo", .{ .name = "errorInfo", .arity = 0 });
+    try pdo_def.methods.put(a, "setAttribute", .{ .name = "setAttribute", .arity = 2 });
+    try pdo_def.methods.put(a, "getAttribute", .{ .name = "getAttribute", .arity = 1 });
 
     // PDO constants as static properties
     try pdo_def.static_props.put(a, "FETCH_BOTH", .{ .int = 4 });
     try pdo_def.static_props.put(a, "FETCH_ASSOC", .{ .int = 2 });
     try pdo_def.static_props.put(a, "FETCH_NUM", .{ .int = 3 });
+    try pdo_def.static_props.put(a, "FETCH_OBJ", .{ .int = 5 });
+    try pdo_def.static_props.put(a, "FETCH_COLUMN", .{ .int = 7 });
     try pdo_def.static_props.put(a, "ATTR_ERRMODE", .{ .int = 3 });
+    try pdo_def.static_props.put(a, "ATTR_DEFAULT_FETCH_MODE", .{ .int = 19 });
     try pdo_def.static_props.put(a, "ERRMODE_EXCEPTION", .{ .int = 2 });
     try pdo_def.static_props.put(a, "PARAM_NULL", .{ .int = 0 });
     try pdo_def.static_props.put(a, "PARAM_INT", .{ .int = 1 });
@@ -115,6 +120,8 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try vm.native_fns.put(a, "PDO::commit", pdoCommit);
     try vm.native_fns.put(a, "PDO::rollBack", pdoRollBack);
     try vm.native_fns.put(a, "PDO::errorInfo", pdoErrorInfo);
+    try vm.native_fns.put(a, "PDO::setAttribute", pdoSetAttribute);
+    try vm.native_fns.put(a, "PDO::getAttribute", pdoGetAttribute);
 
     var stmt_def = ClassDef{ .name = "PDOStatement" };
     try stmt_def.methods.put(a, "execute", .{ .name = "execute", .arity = 1 });
@@ -348,6 +355,28 @@ fn pdoErrorInfo(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
     try arr.append(ctx.allocator, .null);
     try arr.append(ctx.allocator, .{ .string = try ctx.createString(msg) });
     return .{ .array = arr };
+}
+
+fn pdoSetAttribute(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    const obj = getThis(ctx) orelse return .{ .bool = false };
+    if (args.len < 2) return .{ .bool = false };
+    const attr = if (args[0] == .int) args[0].int else return .{ .bool = false };
+    if (attr == 19) {
+        try obj.set(ctx.allocator, "__default_fetch_mode", args[1]);
+    }
+    return .{ .bool = true };
+}
+
+fn pdoGetAttribute(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    const obj = getThis(ctx) orelse return .null;
+    if (args.len < 1 or args[0] != .int) return .null;
+    const attr = args[0].int;
+    if (attr == 19) {
+        const mode = obj.get("__default_fetch_mode");
+        if (mode == .int) return mode;
+        return .{ .int = 4 };
+    }
+    return .null;
 }
 
 // PDOStatement methods

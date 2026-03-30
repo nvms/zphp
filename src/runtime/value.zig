@@ -305,7 +305,13 @@ pub const Value = union(enum) {
     pub fn equal(a: Value, b: Value) bool {
         if (a == .object or b == .object or a == .fiber or b == .fiber) return false;
         if (a == .array and b == .array) return arrayEqual(a.array, b.array, false);
-        if (a == .array or b == .array) return a.isTruthy() == b.isTruthy();
+        if (a == .array or b == .array) {
+            const arr_side = if (a == .array) a else b;
+            const other = if (a == .array) b else a;
+            if (other == .null) return arr_side.array.length() == 0;
+            if (other == .bool) return arr_side.isTruthy() == other.bool;
+            return false;
+        }
         if (a == .null and b == .null) return true;
         if (a == .null) return !b.isTruthy();
         if (b == .null) return !a.isTruthy();

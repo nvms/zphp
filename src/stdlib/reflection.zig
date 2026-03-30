@@ -196,6 +196,8 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try vm.native_fns.put(a, "ReflectionFunction::isAnonymous", rfIsAnonymous);
     try vm.native_fns.put(a, "ReflectionFunction::getClosureScopeClass", rfGetClosureScopeClass);
     try vm.native_fns.put(a, "ReflectionFunction::hasReturnType", rfHasReturnType);
+    try vm.native_fns.put(a, "ReflectionFunction::getClosureUsedVariables", rfGetClosureUsedVariables);
+    try vm.native_fns.put(a, "ReflectionFunction::getClosureCalledClass", rfGetClosureCalledClass);
 
     // ReflectionProperty
     var rprop_def = ClassDef{ .name = "ReflectionProperty" };
@@ -1098,6 +1100,21 @@ fn rfIsAnonymous(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
     const this = getThis(ctx) orelse return .{ .bool = false };
     const name = if (this.get("name") == .string) this.get("name").string else return .{ .bool = false };
     return .{ .bool = std.mem.startsWith(u8, name, "__closure_") };
+}
+
+fn rfGetClosureUsedVariables(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    return .{ .array = try ctx.createArray() };
+}
+
+fn rfGetClosureCalledClass(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const this = getThis(ctx) orelse return .null;
+    if (this.get("__scope_class") == .string) {
+        const scope_name = this.get("__scope_class").string;
+        const obj = try ctx.createObject("ReflectionClass");
+        try obj.set(ctx.allocator, "name", .{ .string = scope_name });
+        return .{ .object = obj };
+    }
+    return .null;
 }
 
 fn rfGetClosureScopeClass(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
