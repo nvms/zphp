@@ -122,6 +122,12 @@ jobs:
           extensions: mbstring, xml, sqlite3, curl, tokenizer
       - run: zig build
       - run: ./tests/laravel/setup
+      - name: debug laravel
+        run: |
+          echo '<?php echo "smoke ok\n";' > /tmp/smoke.php
+          ./zig-out/bin/zphp run /tmp/smoke.php
+          echo '<?php require __DIR__ . "/../app/vendor/autoload.php"; echo "autoload ok\n";' > tests/laravel/harness/debug.php
+          timeout 15 ./zig-out/bin/zphp run tests/laravel/harness/debug.php 2>&1 || echo "autoload exit: $?"
       - run: ./tests/laravel/run
 
   pdo:
