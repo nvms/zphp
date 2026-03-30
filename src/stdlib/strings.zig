@@ -931,7 +931,14 @@ fn native_stripslashes(ctx: *NativeContext, args: []const Value) RuntimeError!Va
 
 fn native_htmlspecialchars(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len == 0) return .{ .string = "" };
-    const s = if (args[0] == .string) args[0].string else return Value{ .string = "" };
+    if (args[0] == .null) return .{ .string = "" };
+    const s = if (args[0] == .string) args[0].string else blk: {
+        var buf = std.ArrayListUnmanaged(u8){};
+        try args[0].format(&buf, ctx.allocator);
+        const converted = try buf.toOwnedSlice(ctx.allocator);
+        try ctx.strings.append(ctx.allocator, converted);
+        break :blk converted;
+    };
     var buf = std.ArrayListUnmanaged(u8){};
     for (s) |c| {
         switch (c) {

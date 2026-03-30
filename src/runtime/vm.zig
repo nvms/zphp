@@ -2090,10 +2090,29 @@ pub const VM = struct {
                                         req_locals = try self.allocator.alloc(Value, result.local_count);
                                         @memset(req_locals, .null);
                                     }
+                                    var inherited_vars: @TypeOf(self.frames[0].vars) = .{};
+                                    const caller = self.currentFrame();
+                                    if (caller.vars.count() > 0) {
+                                        var vit = caller.vars.iterator();
+                                        while (vit.next()) |entry| {
+                                            try inherited_vars.put(self.allocator, entry.key_ptr.*, entry.value_ptr.*);
+                                        }
+                                    }
+                                    const caller_sn = if (caller.func) |func| func.slot_names else self.global_slot_names;
+                                    for (caller_sn, 0..) |csn, ci| {
+                                        if (ci < caller.locals.len and csn.len > 0) {
+                                            const cval = caller.locals[ci];
+                                            if (cval != .null and !inherited_vars.contains(csn)) {
+                                                try inherited_vars.put(self.allocator, csn, cval);
+                                            }
+                                        }
+                                    }
+                                    const saved_slot_names = self.global_slot_names;
+                                    self.global_slot_names = result.slot_names;
                                     self.frames[self.frame_count] = .{
                                         .chunk = &result.chunk,
                                         .ip = 0,
-                                        .vars = .{},
+                                        .vars = inherited_vars,
                                         .locals = req_locals,
                                     };
                                     self.frames[self.frame_count].entry_sp = self.sp;
@@ -2108,6 +2127,7 @@ pub const VM = struct {
                                                 self.frames[self.frame_count].locals = &.{};
                                             }
                                         }
+                                        self.global_slot_names = saved_slot_names;
 
                                         // dispatch pending exception to handler in this scope
                                         if (self.pending_exception) |exc| {
@@ -2149,6 +2169,7 @@ pub const VM = struct {
                                             self.frames[self.frame_count].locals = &.{};
                                         }
                                     }
+                                    self.global_slot_names = saved_slot_names;
                                     // if the file used 'return', the value is already on the stack
                                     if (self.sp <= sp_before) self.push(.{ .bool = true });
                                 } else {

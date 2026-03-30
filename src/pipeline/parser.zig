@@ -175,6 +175,51 @@ const Parser = struct {
         return self.parseStatement();
     }
 
+    fn parseAltBlock(self: *Parser, terminators: []const Tag) Error!u32 {
+        const colon_tok = try self.expect(.colon);
+        var stmts = std.ArrayListUnmanaged(u32){};
+        defer stmts.deinit(self.allocator);
+
+        while (!self.isTerminator(terminators) and self.peek() != .eof) {
+            switch (self.peek()) {
+                .open_tag, .close_tag => {
+                    _ = self.advance();
+                    continue;
+                },
+                .open_tag_echo => {
+                    const node = self.parseOpenTagEcho() catch |err| switch (err) {
+                        error.ParseError => { self.synchronize(); continue; },
+                        error.OutOfMemory => return error.OutOfMemory,
+                    };
+                    try stmts.append(self.allocator, node);
+                },
+                .inline_html => {
+                    const tok = self.advance();
+                    const node = try self.addNode(.{ .tag = .inline_html, .main_token = tok, .data = .{} });
+                    try stmts.append(self.allocator, node);
+                },
+                else => {
+                    const stmt = self.parseStatement() catch |err| switch (err) {
+                        error.ParseError => { self.synchronize(); continue; },
+                        error.OutOfMemory => return error.OutOfMemory,
+                    };
+                    try stmts.append(self.allocator, stmt);
+                },
+            }
+        }
+
+        const extra = try self.addExtraList(stmts.items);
+        return self.addNode(.{ .tag = .block, .main_token = colon_tok, .data = .{ .lhs = extra } });
+    }
+
+    fn isTerminator(self: *Parser, terminators: []const Tag) bool {
+        const current = self.peek();
+        for (terminators) |t| {
+            if (current == t) return true;
+        }
+        return false;
+    }
+
     // declare(strict_types=1); - skip the entire directive
     fn skipDeclare(self: *Parser) Error!u32 {
         _ = self.advance(); // declare
@@ -378,10 +423,40 @@ const Parser = struct {
     // ======================================================================
 
     fn parseIfStmt(self: *Parser) Error!u32 {
+        return self.parseIfStmtInner(false);
+    }
+
+    fn parseIfStmtInner(self: *Parser, alt_mode: bool) Error!u32 {
         const if_tok = self.advance();
         _ = try self.expect(.l_paren);
         const cond = try self.parseExpression();
         _ = try self.expect(.r_paren);
+
+        const is_alt = alt_mode or self.peek() == .colon;
+
+        if (is_alt) {
+            const then_body = try self.parseAltBlock(&.{ .kw_elseif, .kw_else, .kw_endif });
+
+            if (self.peek() == .kw_elseif) {
+                const else_body = try self.parseIfStmtInner(true);
+                const extra = try self.addExtra(&.{ then_body, else_body });
+                return self.addNode(.{ .tag = .if_else, .main_token = if_tok, .data = .{ .lhs = cond, .rhs = extra } });
+            }
+
+            if (self.peek() == .kw_else) {
+                _ = self.advance();
+                const else_body = try self.parseAltBlock(&.{.kw_endif});
+                _ = try self.expect(.kw_endif);
+                _ = try self.expect(.semicolon);
+                const extra = try self.addExtra(&.{ then_body, else_body });
+                return self.addNode(.{ .tag = .if_else, .main_token = if_tok, .data = .{ .lhs = cond, .rhs = extra } });
+            }
+
+            _ = try self.expect(.kw_endif);
+            _ = try self.expect(.semicolon);
+            return self.addNode(.{ .tag = .if_simple, .main_token = if_tok, .data = .{ .lhs = cond, .rhs = then_body } });
+        }
+
         const then_body = try self.parseStatementOrBlock();
 
         if (self.peek() == .kw_elseif) {
@@ -405,6 +480,14 @@ const Parser = struct {
         _ = try self.expect(.l_paren);
         const cond = try self.parseExpression();
         _ = try self.expect(.r_paren);
+
+        if (self.peek() == .colon) {
+            const body = try self.parseAltBlock(&.{.kw_endwhile});
+            _ = try self.expect(.kw_endwhile);
+            _ = try self.expect(.semicolon);
+            return self.addNode(.{ .tag = .while_stmt, .main_token = tok, .data = .{ .lhs = cond, .rhs = body } });
+        }
+
         const body = try self.parseStatementOrBlock();
         return self.addNode(.{ .tag = .while_stmt, .main_token = tok, .data = .{ .lhs = cond, .rhs = body } });
     }
@@ -430,6 +513,14 @@ const Parser = struct {
         _ = try self.expect(.semicolon);
         const update = if (self.peek() != .r_paren) try self.parseForExprList() else @as(u32, 0);
         _ = try self.expect(.r_paren);
+
+        if (self.peek() == .colon) {
+            const body = try self.parseAltBlock(&.{.kw_endfor});
+            _ = try self.expect(.kw_endfor);
+            _ = try self.expect(.semicolon);
+            const extra = try self.addExtra(&.{ init, cond, update });
+            return self.addNode(.{ .tag = .for_stmt, .main_token = tok, .data = .{ .lhs = extra, .rhs = body } });
+        }
 
         const body = try self.parseStatementOrBlock();
         const extra = try self.addExtra(&.{ init, cond, update });
@@ -473,6 +564,15 @@ const Parser = struct {
         }
 
         _ = try self.expect(.r_paren);
+
+        if (self.peek() == .colon) {
+            const body = try self.parseAltBlock(&.{.kw_endforeach});
+            _ = try self.expect(.kw_endforeach);
+            _ = try self.expect(.semicolon);
+            const extra = try self.addExtra(&.{ iterable, value, key, val_by_ref });
+            return self.addNode(.{ .tag = .foreach_stmt, .main_token = tok, .data = .{ .lhs = extra, .rhs = body } });
+        }
+
         const body = try self.parseStatementOrBlock();
         const extra = try self.addExtra(&.{ iterable, value, key, val_by_ref });
         return self.addNode(.{ .tag = .foreach_stmt, .main_token = tok, .data = .{ .lhs = extra, .rhs = body } });

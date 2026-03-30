@@ -230,10 +230,14 @@ pub fn compileBinaryOp(self: *Compiler, node: Ast.Node) Error!void {
     if (op_tag == .kw_instanceof) {
         try self.compileNode(node.data.lhs);
         const rhs = self.ast.nodes[node.data.rhs];
-        const class_name = try resolveNodeClassName(self, rhs);
-        const idx = try self.addConstant(.{ .string = class_name });
-        try self.emitOp(.constant);
-        try self.emitU16(idx);
+        if (rhs.tag == .variable or rhs.tag == .variable_variable or rhs.tag == .property_access or rhs.tag == .array_access) {
+            try self.compileNode(node.data.rhs);
+        } else {
+            const class_name = try resolveNodeClassName(self, rhs);
+            const idx = try self.addConstant(.{ .string = class_name });
+            try self.emitOp(.constant);
+            try self.emitU16(idx);
+        }
         try self.emitOp(.instance_check);
         return;
     }
