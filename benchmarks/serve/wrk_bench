@@ -5,6 +5,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
 ZPHP="$ROOT_DIR/zig-out/bin/zphp"
 APP="$SCRIPT_DIR/app.php"
+NODE_APP="$SCRIPT_DIR/node_app.js"
 TMPDIR=$(mktemp -d)
 
 DURATION="${1:-10s}"
