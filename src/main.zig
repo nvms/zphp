@@ -177,6 +177,8 @@ fn loadFile(path: []const u8, allocator: std.mem.Allocator) ?*CompileResult {
 
 const PhpArray = @import("runtime/value.zig").PhpArray;
 
+const env = @import("env.zig");
+
 fn initCliServerVars(vm: *VM, a: std.mem.Allocator) !void {
     const arr = try a.create(PhpArray);
     arr.* = .{};
@@ -205,13 +207,14 @@ fn initCliServerVars(vm: *VM, a: std.mem.Allocator) !void {
     }
     try vm.request_vars.put(a, "$_SERVER", .{ .array = arr });
 
-    const superglobal_names = [_][]const u8{ "$_GET", "$_POST", "$_REQUEST", "$_COOKIE", "$_FILES", "$_ENV" };
+    const superglobal_names = [_][]const u8{ "$_GET", "$_POST", "$_REQUEST", "$_COOKIE", "$_FILES" };
     inline for (superglobal_names) |sg_name| {
         const sg_arr = try a.create(PhpArray);
         sg_arr.* = .{};
         try vm.arrays.append(a, sg_arr);
         try vm.request_vars.put(a, sg_name, .{ .array = sg_arr });
     }
+    try env.populateEnvSuperglobal(vm, a);
 }
 
 fn runFile(allocator: std.mem.Allocator, path: []const u8) !void {
@@ -249,6 +252,7 @@ fn runBytecode(allocator: std.mem.Allocator, bc: []const u8) !void {
 }
 
 fn runWithVM(allocator: std.mem.Allocator, result: *CompileResult) !void {
+    env.loadEnvFile(allocator);
     const vm = VM.initOnHeap(allocator) catch {
         try writeStderr("vm init error\n");
         std.process.exit(1);

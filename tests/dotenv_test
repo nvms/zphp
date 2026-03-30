@@ -1,0 +1,122 @@
+#!/bin/bash
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+ZPHP="${ZPHP:-$SCRIPT_DIR/../zig-out/bin/zphp}"
+TMPDIR=$(mktemp -d)
+
+cleanup() { rm -rf "$TMPDIR"; }
+trap cleanup EXIT
+
+passed=0
+failed=0
+
+assert_eq() {
+    local name="$1" expected="$2" actual="$3"
+    if [ "$expected" = "$actual" ]; then
+        echo "  pass  $name"
+        passed=$((passed + 1))
+    else
+        echo "  FAIL  $name"
+        echo "    expected: $expected"
+        echo "    got:      $actual"
+        failed=$((failed + 1))
+    fi
+}
+
+# test: basic key=value
+cat > "$TMPDIR/.env" << 'EOF'
+APP_NAME=myapp
+APP_DEBUG=true
+EOF
+cat > "$TMPDIR/test.php" << 'EOF'
+<?php
+echo getenv("APP_NAME") . "|" . getenv("APP_DEBUG");
+EOF
+result=$(cd "$TMPDIR" && "$ZPHP" run test.php 2>&1)
+assert_eq "basic key=value" "myapp|true" "$result"
+
+# test: double-quoted values
+cat > "$TMPDIR/.env" << 'EOF'
+DB_HOST="localhost"
+DB_NAME="my database"
+EOF
+cat > "$TMPDIR/test.php" << 'EOF'
+<?php
+echo getenv("DB_HOST") . "|" . getenv("DB_NAME");
+EOF
+result=$(cd "$TMPDIR" && "$ZPHP" run test.php 2>&1)
+assert_eq "double-quoted values" "localhost|my database" "$result"
+
+# test: single-quoted values
+cat > "$TMPDIR/.env" << 'EOF'
+SECRET='my secret key'
+EOF
+cat > "$TMPDIR/test.php" << 'EOF'
+<?php
+echo getenv("SECRET");
+EOF
+result=$(cd "$TMPDIR" && "$ZPHP" run test.php 2>&1)
+assert_eq "single-quoted values" "my secret key" "$result"
+
+# test: comments and blank lines
+cat > "$TMPDIR/.env" << 'EOF'
+# this is a comment
+FIRST=one
+
+# another comment
+SECOND=two
+EOF
+cat > "$TMPDIR/test.php" << 'EOF'
+<?php
+echo getenv("FIRST") . "|" . getenv("SECOND");
+EOF
+result=$(cd "$TMPDIR" && "$ZPHP" run test.php 2>&1)
+assert_eq "comments and blank lines" "one|two" "$result"
+
+# test: $_ENV superglobal populated from .env
+cat > "$TMPDIR/.env" << 'EOF'
+MY_VAR=from_dotenv
+EOF
+cat > "$TMPDIR/test.php" << 'EOF'
+<?php
+echo $_ENV["MY_VAR"];
+EOF
+result=$(cd "$TMPDIR" && "$ZPHP" run test.php 2>&1)
+assert_eq "\$_ENV from .env" "from_dotenv" "$result"
+
+# test: no .env file is not an error
+rm -f "$TMPDIR/.env"
+cat > "$TMPDIR/test.php" << 'EOF'
+<?php
+echo "ok";
+EOF
+result=$(cd "$TMPDIR" && "$ZPHP" run test.php 2>&1)
+assert_eq "no .env file" "ok" "$result"
+
+# test: .env does not override existing env vars
+cat > "$TMPDIR/.env" << 'EOF'
+PATH=/fake/path
+EOF
+cat > "$TMPDIR/test.php" << 'EOF'
+<?php
+$path = getenv("PATH");
+echo ($path !== "/fake/path") ? "preserved" : "overwritten";
+EOF
+result=$(cd "$TMPDIR" && "$ZPHP" run test.php 2>&1)
+assert_eq ".env does not override existing" "preserved" "$result"
+
+# test: values with equals signs
+cat > "$TMPDIR/.env" << 'EOF'
+CONNECTION_STRING=host=localhost;port=5432;db=mydb
+EOF
+cat > "$TMPDIR/test.php" << 'EOF'
+<?php
+echo getenv("CONNECTION_STRING");
+EOF
+result=$(cd "$TMPDIR" && "$ZPHP" run test.php 2>&1)
+assert_eq "values with equals signs" "host=localhost;port=5432;db=mydb" "$result"
+
+echo ""
+echo "$passed passed, $failed failed"
+[ $failed -eq 0 ] || exit 1

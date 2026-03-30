@@ -9,6 +9,7 @@ const PhpObject = @import("runtime/value.zig").PhpObject;
 
 const tls = @import("tls.zig");
 const h2 = @import("h2.zig");
+const env = @import("env.zig");
 
 const Allocator = std.mem.Allocator;
 const posix = std.posix;
@@ -224,6 +225,7 @@ fn certMtime(path: []const u8) i128 {
 // main serve entry point
 
 pub fn serve(allocator: Allocator, config: ServeConfig) !void {
+    env.loadEnvFile(allocator);
     const source = std.fs.cwd().readFileAlloc(allocator, config.file, 1024 * 1024 * 10) catch |err| {
         try writeStderr("error: could not read '");
         try writeStderr(config.file);
@@ -1013,6 +1015,8 @@ fn populateSuperglobals(vm: *VM, req: *const Request, conn: std.net.Server.Conne
     try vm.arrays.append(a, cookie_arr);
     if (req.getHeader("Cookie")) |cookies| parseCookies(a, vm, cookie_arr, cookies) catch {};
     try vm.request_vars.put(a, "$_COOKIE", .{ .array = cookie_arr });
+
+    try env.populateEnvSuperglobal(vm, a);
 
     // raw body for php://input
     if (req.body.len > 0) {
