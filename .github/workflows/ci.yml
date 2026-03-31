@@ -10,6 +10,9 @@ on:
     paths-ignore:
       - 'docs/**'
 
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
 jobs:
   test:
     strategy:
@@ -17,7 +20,7 @@ jobs:
         os: [ubuntu-latest, macos-latest]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: mlugg/setup-zig@v2
         with:
           version: 0.15.1
@@ -35,7 +38,7 @@ jobs:
   serve:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: mlugg/setup-zig@v2
         with:
           version: 0.15.1
@@ -47,7 +50,7 @@ jobs:
   test-runner:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: mlugg/setup-zig@v2
         with:
           version: 0.15.1
@@ -60,7 +63,7 @@ jobs:
   packages:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: mlugg/setup-zig@v2
         with:
           version: 0.15.1
@@ -72,7 +75,7 @@ jobs:
   fmt:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: mlugg/setup-zig@v2
         with:
           version: 0.15.1
@@ -84,7 +87,7 @@ jobs:
   php-compat:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: mlugg/setup-zig@v2
         with:
           version: 0.15.1
@@ -100,7 +103,7 @@ jobs:
   examples:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: mlugg/setup-zig@v2
         with:
           version: 0.15.1
@@ -115,7 +118,7 @@ jobs:
   laravel:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: mlugg/setup-zig@v2
         with:
           version: 0.15.1
@@ -149,7 +152,7 @@ jobs:
           - 5432:5432
         options: --health-cmd pg_isready --health-interval 10s --health-timeout 5s --health-retries 3
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: mlugg/setup-zig@v2
         with:
           version: 0.15.1
