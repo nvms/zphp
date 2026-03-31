@@ -874,6 +874,21 @@ pub const VM = struct {
                     if (self.currentFrame().ref_slots.get(name)) |cell| {
                         self.push(cell.*);
                     } else if (self.currentFrame().vars.get(name)) |val| {
+                        // if this variable is backed by the concat buffer,
+                        // materialize a stable copy so the buffer can safely
+                        // reallocate on future appends
+                        if (self.ic) |ic| {
+                            if (val == .string and val.string.len > 0 and
+                                ic.concat_buf.items.len > 0 and
+                                val.string.ptr == ic.concat_buf.items.ptr)
+                            {
+                                const stable = try self.allocator.alloc(u8, val.string.len);
+                                @memcpy(stable, val.string);
+                                try self.strings.append(self.allocator, stable);
+                                self.push(.{ .string = stable });
+                                continue;
+                            }
+                        }
                         self.push(val);
                     } else if (self.php_constants.get(name)) |val| {
                         self.push(val);
@@ -1555,7 +1570,7 @@ pub const VM = struct {
                         }
                     } else if (iterable == .array) {
                         const idx = Value.toInt(idx_val);
-                        if (idx >= iterable.array.length()) {
+                        if (idx < 0 or idx >= iterable.array.length()) {
                             self.currentFrame().ip += offset;
                         } else {
                             const entry = iterable.array.entries.items[@intCast(idx)];
