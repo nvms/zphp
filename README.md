@@ -1,12 +1,4 @@
-<p align="center">
-  <img src=".github/logo.svg" width="140" style="border-radius: 12px;" />
-</p>
-
-<h1 align="center">zphp</h1>
-
-<p align="center">A Zig-based PHP runtime</p>
-
----
+# zphp
 
 zphp is a PHP runtime written in Zig with PHP 8.x compatibility. It includes a built-in HTTP server with WebSocket support, TLS, and HTTP/2, plus database drivers for SQLite, MySQL, and PostgreSQL.
 
@@ -21,7 +13,7 @@ zphp install                        # install packages from composer.json
 
 ## Quick comparison
 
-| | Traditional PHP | zphp |
+| | PHP | zphp |
 |---|---|---|
 | Run a script | `php script.php` | `zphp run script.php` |
 | HTTP server | php-fpm + nginx | `zphp serve app.php` |
