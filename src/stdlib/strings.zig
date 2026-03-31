@@ -815,11 +815,29 @@ fn sprintfImpl(ctx: *NativeContext, fmt_str: []const u8, args: []const Value) ![
                     const v: u8 = @truncate(@as(u64, @bitCast(Value.toInt(arg))));
                     try tmp_buf.append(ctx.allocator, v);
                 },
+                'u' => {
+                    const v: u64 = @bitCast(Value.toInt(arg));
+                    var num_buf: [32]u8 = undefined;
+                    const s = std.fmt.bufPrint(&num_buf, "{d}", .{v}) catch "0";
+                    try tmp_buf.appendSlice(ctx.allocator, s);
+                },
                 'e' => {
                     const v = Value.toFloat(arg);
                     const prec = precision orelse 6;
                     if (show_sign and v >= 0) try tmp_buf.append(ctx.allocator, '+');
-                    try formatScientific(&tmp_buf, ctx.allocator, v, prec);
+                    try formatScientific(&tmp_buf, ctx.allocator, v, prec, 'e');
+                },
+                'E' => {
+                    const v = Value.toFloat(arg);
+                    const prec = precision orelse 6;
+                    if (show_sign and v >= 0) try tmp_buf.append(ctx.allocator, '+');
+                    try formatScientific(&tmp_buf, ctx.allocator, v, prec, 'E');
+                },
+                'g', 'G' => {
+                    const v = Value.toFloat(arg);
+                    const prec = if (precision) |p| @max(p, 1) else 6;
+                    if (show_sign and v >= 0) try tmp_buf.append(ctx.allocator, '+');
+                    try formatGeneral(&tmp_buf, ctx.allocator, v, prec, spec);
                 },
                 else => {
                     try buf.append(ctx.allocator, '%');
@@ -875,11 +893,12 @@ fn formatFixedFloat(buf: *std.ArrayListUnmanaged(u8), a: std.mem.Allocator, val:
     }
 }
 
-fn formatScientific(buf: *std.ArrayListUnmanaged(u8), a: std.mem.Allocator, val: f64, prec: usize) !void {
+fn formatScientific(buf: *std.ArrayListUnmanaged(u8), a: std.mem.Allocator, val: f64, prec: usize, e_char: u8) !void {
     if (val == 0) {
         try buf.appendSlice(a, "0.");
         for (0..prec) |_| try buf.append(a, '0');
-        try buf.appendSlice(a, "e+0");
+        try buf.append(a, e_char);
+        try buf.appendSlice(a, "+0");
         return;
     }
     const is_neg = val < 0;
@@ -889,12 +908,60 @@ fn formatScientific(buf: *std.ArrayListUnmanaged(u8), a: std.mem.Allocator, val:
 
     if (is_neg) try buf.append(a, '-');
     try formatFixedFloat(buf, a, mantissa, prec);
-    try buf.append(a, 'e');
+    try buf.append(a, e_char);
     try buf.append(a, if (exp_val >= 0) '+' else '-');
     var exp_buf: [16]u8 = undefined;
     const abs_exp: u32 = @intCast(if (exp_val < 0) -exp_val else exp_val);
     const exp_str = std.fmt.bufPrint(&exp_buf, "{d}", .{abs_exp}) catch "0";
     try buf.appendSlice(a, exp_str);
+}
+
+fn formatGeneral(buf: *std.ArrayListUnmanaged(u8), a: std.mem.Allocator, val: f64, prec: usize, g_char: u8) !void {
+    if (val == 0) {
+        try buf.append(a, '0');
+        return;
+    }
+    const is_neg = val < 0;
+    const abs_val = @abs(val);
+    const exp_val: i32 = @intFromFloat(@floor(std.math.log10(abs_val)));
+    const sig: i32 = @intCast(prec);
+
+    if (exp_val >= sig or exp_val < -4) {
+        if (is_neg) try buf.append(a, '-');
+        const mantissa = abs_val / std.math.pow(f64, 10.0, @as(f64, @floatFromInt(exp_val)));
+        const sci_prec = if (sig > 1) @as(usize, @intCast(sig - 1)) else 0;
+        try formatFixedFloat(buf, a, mantissa, sci_prec);
+        // strip trailing zeros after decimal point
+        stripTrailingZeros(buf);
+        const e_char: u8 = if (g_char == 'G') 'E' else 'e';
+        try buf.append(a, e_char);
+        try buf.append(a, if (exp_val >= 0) '+' else '-');
+        var exp_buf: [16]u8 = undefined;
+        const abs_exp: u32 = @intCast(if (exp_val < 0) -exp_val else exp_val);
+        const exp_str = std.fmt.bufPrint(&exp_buf, "{d}", .{abs_exp}) catch "0";
+        try buf.appendSlice(a, exp_str);
+    } else {
+        const fixed_prec = if (sig > exp_val + 1) @as(usize, @intCast(sig - exp_val - 1)) else 0;
+        const round_factor = std.math.pow(f64, 10.0, @as(f64, @floatFromInt(fixed_prec)));
+        const rounded = @round(abs_val * round_factor) / round_factor;
+        if (is_neg) try buf.append(a, '-');
+        try formatFixedFloat(buf, a, rounded, fixed_prec);
+        stripTrailingZeros(buf);
+    }
+}
+
+fn stripTrailingZeros(buf: *std.ArrayListUnmanaged(u8)) void {
+    var has_dot = false;
+    for (buf.items) |c| {
+        if (c == '.') { has_dot = true; break; }
+    }
+    if (!has_dot) return;
+    while (buf.items.len > 0 and buf.items[buf.items.len - 1] == '0') {
+        buf.items.len -= 1;
+    }
+    if (buf.items.len > 0 and buf.items[buf.items.len - 1] == '.') {
+        buf.items.len -= 1;
+    }
 }
 
 fn native_addslashes(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
