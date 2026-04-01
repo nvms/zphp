@@ -430,6 +430,9 @@ fn native_is_callable(ctx: *NativeContext, args: []const Value) RuntimeError!Val
         if (ctx.vm.functions.contains(name)) return .{ .bool = true };
         return .{ .bool = false };
     }
+    if (val == .object) {
+        return .{ .bool = ctx.vm.hasMethod(val.object.class_name, "__invoke") };
+    }
     if (val == .array) {
         const arr = val.array;
         if (arr.entries.items.len != 2) return .{ .bool = false };

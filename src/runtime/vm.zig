@@ -2602,8 +2602,56 @@ pub const VM = struct {
                         const arr_val = self.pop();
                         if (arr_val == .array) {
                             const entries = arr_val.array.entries.items;
-                            for (entries) |entry| self.push(entry.value);
-                            arg_count = @intCast(entries.len);
+                            var has_named = false;
+                            for (entries) |entry| {
+                                if (entry.key == .string) { has_named = true; break; }
+                            }
+                            if (has_named) {
+                                // resolve class name early to look up constructor params
+                                var cn = self.currentChunk().constants.items[name_idx].string;
+                                if (std.mem.eql(u8, cn, "static")) cn = self.resolveStaticClassName(cn)
+                                else if (std.mem.eql(u8, cn, "self")) { if (self.currentDefiningClass()) |dc| cn = dc; }
+                                else if (std.mem.eql(u8, cn, "parent")) { if (self.parentResolvingClass()) |dc| { if (self.classes.get(dc)) |cls| { if (cls.parent) |p| cn = p; } } }
+                                const ctor_name = self.resolveMethod(cn, "__construct") catch null;
+                                if (ctor_name) |ctn| {
+                                    if (self.functions.get(ctn)) |func| {
+                                        var resolved: [16]Value = .{.null} ** 16;
+                                        var pos: usize = 0;
+                                        for (entries) |entry| {
+                                            if (entry.key == .string) {
+                                                for (func.params, 0..) |p, pi| {
+                                                    const pname = if (p.len > 0 and p[0] == '$') p[1..] else p;
+                                                    if (std.mem.eql(u8, pname, entry.key.string) or std.mem.eql(u8, p, entry.key.string)) {
+                                                        resolved[pi] = entry.value;
+                                                        if (pi >= pos) pos = pi + 1;
+                                                        break;
+                                                    }
+                                                }
+                                            } else {
+                                                resolved[pos] = entry.value;
+                                                pos += 1;
+                                            }
+                                        }
+                                        const count = @max(pos, func.required_params);
+                                        for (0..count) |i| {
+                                            if (resolved[i] == .null and i < func.defaults.len) {
+                                                resolved[i] = try self.resolveDefault(func.defaults[i]);
+                                            }
+                                        }
+                                        for (0..count) |i| self.push(resolved[i]);
+                                        arg_count = @intCast(count);
+                                    } else {
+                                        for (entries) |entry| self.push(entry.value);
+                                        arg_count = @intCast(entries.len);
+                                    }
+                                } else {
+                                    for (entries) |entry| self.push(entry.value);
+                                    arg_count = @intCast(entries.len);
+                                }
+                            } else {
+                                for (entries) |entry| self.push(entry.value);
+                                arg_count = @intCast(entries.len);
+                            }
                         } else {
                             arg_count = 0;
                         }
