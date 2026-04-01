@@ -34,3 +34,18 @@ function bump() {
 bump();
 bump();
 echo $counter . "\n";
+
+// named args in constructor with promoted properties
+class Box {
+    public function __construct(
+        public int $width,
+        public int $height,
+        public string $color = 'red',
+    ) {}
+}
+
+$b = new Box(height: 20, width: 10, color: 'blue');
+echo "{$b->width}x{$b->height}:{$b->color}\n"; // 10x20:blue
+
+$b2 = new Box(height: 5, width: 3);
+echo "{$b2->width}x{$b2->height}:{$b2->color}\n"; // 3x5:red

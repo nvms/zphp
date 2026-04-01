@@ -53,6 +53,19 @@ echo var_export(is_callable(['MathHelper', 'triple']), true) . "\n"; // true
 echo var_export(is_callable('nonexistent'), true) . "\n"; // false
 echo var_export(is_callable([$helper, 'nonexistent']), true) . "\n"; // false
 
+// test 12b: is_callable with __invoke
+class Invokable {
+    public function __invoke(int $x): int { return $x * 2; }
+}
+$inv = new Invokable();
+echo var_export(is_callable($inv), true) . "\n"; // true
+echo $inv(5) . "\n"; // 10
+
+class NotInvokable {
+    public function run(): void {}
+}
+echo var_export(is_callable(new NotInvokable()), true) . "\n"; // false
+
 // test 13: array_reduce with closure
 $sum = array_reduce($nums, function($carry, $item) { return $carry + $item; }, 0);
 echo $sum . "\n"; // 10
