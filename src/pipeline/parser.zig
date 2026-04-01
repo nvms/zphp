@@ -128,6 +128,13 @@ const Parser = struct {
             self.skipAttributes();
             return self.parseStatement();
         }
+        // handle inline HTML tokens anywhere in statement context
+        while (self.peek() == .open_tag or self.peek() == .close_tag) _ = self.advance();
+        if (self.peek() == .inline_html) {
+            const tok = self.advance();
+            return self.addNode(.{ .tag = .inline_html, .main_token = tok, .data = .{} });
+        }
+        if (self.peek() == .open_tag_echo) return self.parseOpenTagEcho();
         return switch (self.peek()) {
             .kw_echo => self.parseEchoStmt(),
             .kw_print => self.parsePrintStmt(),
@@ -271,15 +278,34 @@ const Parser = struct {
 
     fn parseStaticVarStmt(self: *Parser) Error!u32 {
         if (self.pos + 1 < self.tokens.len and self.tokens[self.pos + 1].tag == .colon_colon) return self.parseExpressionStmt();
-        _ = self.advance(); // static
+        const static_tok = self.advance(); // static
         const var_tok = try self.expect(.variable);
         var default: u32 = 0;
         if (self.peek() == .equal) {
             _ = self.advance();
             default = try self.parseExpression();
         }
+        if (self.peek() != .comma) {
+            _ = try self.expect(.semicolon);
+            return self.addNode(.{ .tag = .static_var, .main_token = var_tok, .data = .{ .lhs = default } });
+        }
+        // multi-variable: static $a = x, $b = y;
+        var stmts = std.ArrayListUnmanaged(u32){};
+        defer stmts.deinit(self.allocator);
+        try stmts.append(self.allocator, try self.addNode(.{ .tag = .static_var, .main_token = var_tok, .data = .{ .lhs = default } }));
+        while (self.peek() == .comma) {
+            _ = self.advance(); // comma
+            const next_var = try self.expect(.variable);
+            var next_default: u32 = 0;
+            if (self.peek() == .equal) {
+                _ = self.advance();
+                next_default = try self.parseExpression();
+            }
+            try stmts.append(self.allocator, try self.addNode(.{ .tag = .static_var, .main_token = next_var, .data = .{ .lhs = next_default } }));
+        }
         _ = try self.expect(.semicolon);
-        return self.addNode(.{ .tag = .static_var, .main_token = var_tok, .data = .{ .lhs = default } });
+        const extra = try self.addExtraList(stmts.items);
+        return self.addNode(.{ .tag = .block, .main_token = static_tok, .data = .{ .lhs = extra } });
     }
 
     fn parseNamespaceDecl(self: *Parser) Error!u32 {
@@ -403,14 +429,34 @@ const Parser = struct {
         defer stmts.deinit(self.allocator);
 
         while (self.peek() != .r_brace and self.peek() != .eof) {
-            const stmt = self.parseStatement() catch |err| switch (err) {
-                error.ParseError => {
-                    self.synchronize();
+            switch (self.peek()) {
+                .open_tag, .close_tag => {
+                    _ = self.advance();
                     continue;
                 },
-                error.OutOfMemory => return error.OutOfMemory,
-            };
-            try stmts.append(self.allocator, stmt);
+                .open_tag_echo => {
+                    const node = self.parseOpenTagEcho() catch |err| switch (err) {
+                        error.ParseError => { self.synchronize(); continue; },
+                        error.OutOfMemory => return error.OutOfMemory,
+                    };
+                    try stmts.append(self.allocator, node);
+                },
+                .inline_html => {
+                    const tok = self.advance();
+                    const node = try self.addNode(.{ .tag = .inline_html, .main_token = tok, .data = .{} });
+                    try stmts.append(self.allocator, node);
+                },
+                else => {
+                    const stmt = self.parseStatement() catch |err| switch (err) {
+                        error.ParseError => {
+                            self.synchronize();
+                            continue;
+                        },
+                        error.OutOfMemory => return error.OutOfMemory,
+                    };
+                    try stmts.append(self.allocator, stmt);
+                },
+            }
         }
         _ = try self.expect(.r_brace);
 
@@ -602,6 +648,10 @@ const Parser = struct {
                 try cases.append(self.allocator, try self.parseSwitchCase());
             } else if (self.peek() == .kw_default) {
                 try cases.append(self.allocator, try self.parseSwitchDefault());
+            } else if (self.peek() == .open_tag or self.peek() == .close_tag) {
+                _ = self.advance();
+            } else if (self.peek() == .inline_html) {
+                _ = self.advance();
             } else {
                 self.synchronize();
             }
@@ -2385,6 +2435,8 @@ const Parser = struct {
 
     fn expectTag(self: *Parser, tag: Tag) Error!u32 {
         if (self.peek() == tag) return self.advance();
+        // ?> acts as implicit semicolon in PHP
+        if (tag == .semicolon and self.peek() == .close_tag) return self.advance();
         try self.addError(expectedError(tag));
         return error.ParseError;
     }

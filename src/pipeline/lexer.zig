@@ -425,7 +425,11 @@ pub const Lexer = struct {
     }
 
     fn skipLineComment(self: *Lexer) void {
-        while (self.pos < self.source.len and self.source[self.pos] != '\n') self.pos += 1;
+        while (self.pos < self.source.len and self.source[self.pos] != '\n') {
+            // ?> terminates a line comment in PHP
+            if (self.source[self.pos] == '?' and self.pos + 1 < self.source.len and self.source[self.pos + 1] == '>') return;
+            self.pos += 1;
+        }
     }
 
     fn skipBlockComment(self: *Lexer) void {
