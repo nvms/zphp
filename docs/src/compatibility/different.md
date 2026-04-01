@@ -48,23 +48,25 @@ Direct reads and writes through the `global` keyword work. Indirect modification
 
 ## Pass-by-reference
 
-Pass-by-reference works for variables, single-level array element access, and object property access, matching PHP. What doesn't work:
+Pass-by-reference works for simple variables, array element access (string, integer, and variable keys), object property access (`$obj->prop`), chained property access up to 4 levels (`$obj->a->b->c->d`), and dynamic property names (`$obj->$var`).
 
 ```php
 function modify(&$val) { $val = 'changed'; }
 
-modify($obj->items['key']);   // not supported - property + array access
-modify($arr['a']['b']);       // not supported - nested array access
-modify($obj->$dynamicProp);  // not supported - dynamic property names
+modify($x);                // works
+modify($arr['key']);       // works
+modify($obj->prop);       // works
+modify($obj->a->b);       // works
+modify($obj->$dynamicProp); // works
 ```
 
-Note that passing an entire array by reference and modifying nested keys inside the function works fine:
+Passing an entire array or object by reference and modifying nested keys inside the function also works:
 
 ```php
 function set_nested(array &$arr) { $arr['a']['b'] = 99; } // works
 ```
 
-The limitation is specifically about what you can pass as the ref argument, not what you can do inside the function.
+Chains deeper than 4 levels and combined property + array access (`$obj->items['key']`) are not yet supported.
 
 ## Type hint enforcement
 

@@ -42,4 +42,4 @@ Environment variables are captured once when each worker thread starts, stored a
 
 ## Stack and frame limits
 
-The value stack holds 8,192 entries. The call stack supports 256 nested frames. Both are fixed at compile time, and exceeding them produces a runtime error.
+The value stack holds 2,048 entries. The call stack supports 2,048 nested frames. Both are fixed at compile time, and exceeding them produces a runtime error.

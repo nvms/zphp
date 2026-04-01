@@ -47,6 +47,26 @@ if ($method === 'GET' && $path === '/health') {
 }
 ```
 
+## Response headers and status codes
+
+The standard PHP header functions work in serve mode:
+
+```php
+<?php
+header("Content-Type: application/json");
+header("X-Custom: value");
+header("X-Multi: one");
+header("X-Multi: two", false);  // append instead of replace
+header("Location: /other", true, 302);  // set status code as third arg
+http_response_code(201);
+setcookie("session", "abc123", ["path" => "/", "httponly" => true]);
+header_remove("X-Custom");  // remove a specific header
+header_remove();  // remove all custom headers
+headers_list();  // get array of all set headers
+```
+
+These functions work from any call depth - inside functions, methods, closures, included files.
+
 ## Features
 
 **Gzip compression** is applied automatically to compressible responses (text, JSON, SVG) when the client sends `Accept-Encoding: gzip`.
