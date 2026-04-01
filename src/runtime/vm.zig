@@ -347,6 +347,7 @@ pub const VM = struct {
 
         const MethodIC = struct {
             key: usize = 0,
+            chunk_key: usize = 0,
             class_ptr: usize = 0,
             func: ?*const ObjFunction = null,
             native: ?NativeFn = null,
@@ -3181,9 +3182,10 @@ pub const VM = struct {
                     // IC: skip visibility + resolve on cache hit
                     if (self.ic) |ic| {
                         const mc_ip = self.currentFrame().ip - 4;
-                        const mc_idx = InlineCache.methodIndex(@intFromPtr(self.currentChunk()), mc_ip);
+                        const mc_chunk_key = @intFromPtr(self.currentChunk());
+                        const mc_idx = InlineCache.methodIndex(mc_chunk_key, mc_ip);
                         const mc_entry = &ic.method[mc_idx];
-                        if (mc_entry.key == mc_ip and mc_entry.class_ptr == @intFromPtr(obj.class_name.ptr)) {
+                        if (mc_entry.key == mc_ip and mc_entry.chunk_key == mc_chunk_key and mc_entry.class_ptr == @intFromPtr(obj.class_name.ptr)) {
                             if (mc_entry.func) |func| {
                                 if (func.locals_only and self.captures.items.len == 0) {
                                     const lc: usize = func.local_count;
@@ -3295,9 +3297,10 @@ pub const VM = struct {
                         // populate IC
                         if (self.ic) |ic| {
                             const mc_ip2 = self.currentFrame().ip - 4;
-                            const mc_idx2 = InlineCache.methodIndex(@intFromPtr(self.currentChunk()), mc_ip2);
+                            const mc_chunk_key2 = @intFromPtr(self.currentChunk());
+                            const mc_idx2 = InlineCache.methodIndex(mc_chunk_key2, mc_ip2);
                             if (mvr.visibility == .public) {
-                                ic.method[mc_idx2] = .{ .key = mc_ip2, .class_ptr = @intFromPtr(obj.class_name.ptr), .native = native, .full_name = full_name };
+                                ic.method[mc_idx2] = .{ .key = mc_ip2, .chunk_key = mc_chunk_key2, .class_ptr = @intFromPtr(obj.class_name.ptr), .native = native, .full_name = full_name };
                             }
                         }
                         var args_buf: [16]Value = undefined;
@@ -3354,9 +3357,10 @@ pub const VM = struct {
                         // populate IC
                         if (self.ic) |ic| {
                             const mc_ip2 = self.currentFrame().ip - 4;
-                            const mc_idx2 = InlineCache.methodIndex(@intFromPtr(self.currentChunk()), mc_ip2);
+                            const mc_chunk_key2 = @intFromPtr(self.currentChunk());
+                            const mc_idx2 = InlineCache.methodIndex(mc_chunk_key2, mc_ip2);
                             if (mvr.visibility == .public) {
-                                ic.method[mc_idx2] = .{ .key = mc_ip2, .class_ptr = @intFromPtr(obj.class_name.ptr), .func = func, .full_name = full_name };
+                                ic.method[mc_idx2] = .{ .key = mc_ip2, .chunk_key = mc_chunk_key2, .class_ptr = @intFromPtr(obj.class_name.ptr), .func = func, .full_name = full_name };
                             }
                         }
                         var new_vars: std.StringHashMapUnmanaged(Value) = .{};

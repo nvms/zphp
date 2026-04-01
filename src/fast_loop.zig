@@ -419,9 +419,10 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                 }
                 const mc_obj = mc_obj_val.object;
                 const mc_ip = ip - 4;
-                const mc_idx = InlineCache.methodIndex(@intFromPtr(frame.chunk), mc_ip);
+                const mc_chunk_key = @intFromPtr(frame.chunk);
+                const mc_idx = InlineCache.methodIndex(mc_chunk_key, mc_ip);
                 const mc_entry = &ic.method[mc_idx];
-                if (mc_entry.key == mc_ip and mc_entry.class_ptr == @intFromPtr(mc_obj.class_name.ptr)) {
+                if (mc_entry.key == mc_ip and mc_entry.chunk_key == mc_chunk_key and mc_entry.class_ptr == @intFromPtr(mc_obj.class_name.ptr)) {
                     if (mc_entry.func) |mc_func| {
                         if (mc_func.locals_only and self.captures.items.len == 0) {
                             const mc_lc: usize = mc_func.local_count;
