@@ -35,6 +35,7 @@ pub const entries = .{
     .{ "filesize", native_filesize },
     .{ "filemtime", native_filemtime },
     .{ "filetype", native_filetype },
+    .{ "fileinode", native_fileinode },
     .{ "fopen", native_fopen },
     .{ "fclose", native_fclose },
     .{ "fread", native_fread },
@@ -58,6 +59,7 @@ pub const entries = .{
     .{ "chdir", native_chdir },
     .{ "stream_resolve_include_path", native_stream_resolve_include_path },
     .{ "stream_isatty", native_stream_isatty },
+    .{ "stream_set_chunk_size", native_stream_set_chunk_size },
     .{ "clearstatcache", native_clearstatcache },
     .{ "tempnam", native_tempnam },
     .{ "umask", native_umask },
@@ -349,6 +351,14 @@ fn native_filemtime(_: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len == 0 or args[0] != .string) return .{ .bool = false };
     const stat = std.fs.cwd().statFile(args[0].string) catch return Value{ .bool = false };
     return .{ .int = @intCast(@divFloor(stat.mtime, 1_000_000_000)) };
+}
+
+fn native_fileinode(_: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len == 0 or args[0] != .string) return .{ .bool = false };
+    const c = @cImport(@cInclude("sys/stat.h"));
+    var s: c.struct_stat = undefined;
+    if (c.stat(args[0].string.ptr, &s) != 0) return .{ .bool = false };
+    return .{ .int = @intCast(s.st_ino) };
 }
 
 fn native_filetype(_: *NativeContext, args: []const Value) RuntimeError!Value {
@@ -873,6 +883,10 @@ fn native_stream_isatty(_: *NativeContext, args: []const Value) RuntimeError!Val
 
 fn native_clearstatcache(_: *NativeContext, _: []const Value) RuntimeError!Value {
     return .null;
+}
+
+fn native_stream_set_chunk_size(_: *NativeContext, _: []const Value) RuntimeError!Value {
+    return .{ .int = 8192 };
 }
 
 fn native_umask(_: *NativeContext, args: []const Value) RuntimeError!Value {

@@ -4024,6 +4024,16 @@ pub const VM = struct {
                         return error.RuntimeError;
                     }
 
+                    if (std.mem.eql(u8, class_name, "Fiber") and std.mem.eql(u8, method_name, "getCurrent")) {
+                        self.sp -= @as(usize, arg_count);
+                        if (self.current_fiber) |fiber| {
+                            self.push(.{ .fiber = fiber });
+                        } else {
+                            self.push(.null);
+                        }
+                        continue;
+                    }
+
                     const this_val = self.currentFrame().vars.get("$this") orelse blk: {
                         const f = self.currentFrame();
                         if (f.func) |fn_info| {
