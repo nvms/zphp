@@ -323,6 +323,7 @@ pub const Value = union(enum) {
     }
 
     pub fn equal(a: Value, b: Value) bool {
+        if (a == .object and b == .object) return a.object == b.object;
         if (a == .object or b == .object or a == .fiber or b == .fiber) return false;
         if (a == .array and b == .array) return arrayEqual(a.array, b.array, false);
         if (a == .array or b == .array) {

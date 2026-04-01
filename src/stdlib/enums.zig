@@ -32,6 +32,15 @@ pub fn enumFrom(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
             if (Value.identical(case_val, args[0])) return entry.value_ptr.*;
         }
     }
+    const arg_str = if (args[0] == .string) args[0].string else if (args[0] == .int) "int" else "value";
+    const msg = std.fmt.allocPrint(ctx.allocator, "{s} is not a valid backing value for enum \"{s}\"", .{ arg_str, enum_name }) catch return error.RuntimeError;
+    try ctx.vm.strings.append(ctx.allocator, msg);
+    const obj = try ctx.allocator.create(@import("../runtime/value.zig").PhpObject);
+    obj.* = .{ .class_name = "ValueError" };
+    try obj.set(ctx.allocator, "message", .{ .string = msg });
+    try obj.set(ctx.allocator, "code", .{ .int = 0 });
+    try ctx.vm.objects.append(ctx.allocator, obj);
+    ctx.vm.pending_exception = .{ .object = obj };
     return error.RuntimeError;
 }
 

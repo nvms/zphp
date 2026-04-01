@@ -1224,6 +1224,9 @@ pub fn compileEnumDecl(self: *Compiler, node: Ast.Node) Error!void {
     }
 
     const cname_idx = try self.addConstant(.{ .string = enum_name });
+    const prev_class = self.current_class;
+    self.current_class = enum_name;
+    defer self.current_class = prev_class;
     for (members) |member_idx| {
         const member = self.ast.nodes[member_idx];
         if (member.tag == .const_decl) {

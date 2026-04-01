@@ -128,16 +128,19 @@ echo "Season name: " . $season->name . "\n";
 echo "Season value: " . $season->value . "\n";
 echo "Season description: " . $season->description() . "\n";
 
-// --- enum with multiple cases ---
+// --- enum constants ---
 
 enum Size {
     case Small;
     case Medium;
     case Large;
+
+    const STANDARD = self::Medium;
 }
 
-echo "Size Small name: " . Size::Small->name . "\n";
-echo "Size Large name: " . Size::Large->name . "\n";
+$default = Size::STANDARD;
+echo "Default size: " . $default->name . "\n";
+echo "STANDARD === Medium: " . ($default === Size::Medium ? "true" : "false") . "\n";
 
 // --- enum in match expressions ---
 
@@ -214,3 +217,15 @@ $c = Suit::Clubs;
 
 echo "Same case ===: " . ($a === $b ? "true" : "false") . "\n";
 echo "Different case ===: " . ($a === $c ? "true" : "false") . "\n";
+echo "Same case ==: " . ($a == $b ? "true" : "false") . "\n";
+echo "Different case ==: " . ($a == $c ? "true" : "false") . "\n";
+
+// --- enum from() with invalid value ---
+
+$caught = false;
+try {
+    Color::from('yellow');
+} catch (\ValueError $e) {
+    $caught = true;
+}
+echo "from() ValueError caught: " . ($caught ? "true" : "false") . "\n";

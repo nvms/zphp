@@ -282,7 +282,7 @@ $create = function(string $name, int $age, string $city = "unknown"): string {
     return "$name, age $age, from $city";
 };
 echo $create(name: "Alice", age: 30) . "\n";
-echo $create("Bob", 25, "Paris") . "\n";
+echo $create(age: 25, name: "Bob", city: "Paris") . "\n";
 
 $calc = fn(int $a, int $b, string $op = "add") => match($op) {
     "add" => $a + $b,

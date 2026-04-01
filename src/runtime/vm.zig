@@ -1263,9 +1263,41 @@ pub const VM = struct {
                     }
                     const arr = args_val.array;
                     if (name_val == .string) {
-                        for (arr.entries.items) |entry| self.push(entry.value);
-                        const ac: u8 = @intCast(arr.entries.items.len);
-                        try self.callNamedFunction(name_val.string, ac);
+                        var has_named_args = false;
+                        for (arr.entries.items) |entry| {
+                            if (entry.key == .string) { has_named_args = true; break; }
+                        }
+                        if (has_named_args) {
+                            if (self.functions.get(name_val.string)) |func| {
+                                var resolved: [16]Value = .{.null} ** 16;
+                                var pos: usize = 0;
+                                for (arr.entries.items) |entry| {
+                                    if (entry.key == .string) {
+                                        for (func.params, 0..) |p, pi| {
+                                            const pn = if (p.len > 0 and p[0] == '$') p[1..] else p;
+                                            if (std.mem.eql(u8, pn, entry.key.string)) {
+                                                resolved[pi] = entry.value;
+                                                if (pi >= pos) pos = pi + 1;
+                                                break;
+                                            }
+                                        }
+                                    } else {
+                                        resolved[pos] = entry.value;
+                                        pos += 1;
+                                    }
+                                }
+                                for (0..pos) |i| self.push(resolved[i]);
+                                try self.callNamedFunction(name_val.string, @intCast(pos));
+                            } else {
+                                for (arr.entries.items) |entry| self.push(entry.value);
+                                const ac2: u8 = @intCast(arr.entries.items.len);
+                                try self.callNamedFunction(name_val.string, ac2);
+                            }
+                        } else {
+                            for (arr.entries.items) |entry| self.push(entry.value);
+                            const ac: u8 = @intCast(arr.entries.items.len);
+                            try self.callNamedFunction(name_val.string, ac);
+                        }
                     } else if (name_val == .array) {
                         const cb_arr = name_val.array;
                         if (cb_arr.entries.items.len == 2) {
@@ -4048,7 +4080,19 @@ pub const VM = struct {
                     const arr = args_val.array;
                     const ac = arr.entries.items.len;
 
-                    const this_val = self.currentFrame().vars.get("$this");
+                    const this_val = self.currentFrame().vars.get("$this") orelse blk: {
+                        const f = self.currentFrame();
+                        if (f.func) |fn_info| {
+                            if (fn_info.locals_only) {
+                                for (fn_info.slot_names, 0..) |sn, si| {
+                                    if (std.mem.eql(u8, sn, "$this") and si < f.locals.len and f.locals[si] == .object) {
+                                        break :blk f.locals[si];
+                                    }
+                                }
+                            }
+                        }
+                        break :blk null;
+                    };
                     var lsb_class: ?[]const u8 = null;
                     if (std.mem.eql(u8, class_name, "parent") or std.mem.eql(u8, class_name, "self")) {
                         if (std.mem.eql(u8, class_name, "parent")) {
@@ -4082,37 +4126,69 @@ pub const VM = struct {
                         self.error_msg = std.fmt.allocPrint(self.allocator, "Fatal error: Uncaught Error: Call to undefined method {s}::{s}()", .{ class_name, method_name }) catch null;
                         return error.RuntimeError;
                     };
-                    for (arr.entries.items) |entry| self.push(entry.value);
+                    // resolve named args to positional order
+                    var has_named_sc = false;
+                    for (arr.entries.items) |entry| {
+                        if (entry.key == .string) { has_named_sc = true; break; }
+                    }
+                    var resolved_ac = ac;
+                    if (has_named_sc) {
+                        if (self.functions.get(full_name)) |func2| {
+                            var resolved: [16]Value = .{.null} ** 16;
+                            var pos: usize = 0;
+                            for (arr.entries.items) |entry| {
+                                if (entry.key == .string) {
+                                    for (func2.params, 0..) |p, pi| {
+                                        const pn = if (p.len > 0 and p[0] == '$') p[1..] else p;
+                                        if (std.mem.eql(u8, pn, entry.key.string)) {
+                                            resolved[pi] = entry.value;
+                                            if (pi >= pos) pos = pi + 1;
+                                            break;
+                                        }
+                                    }
+                                } else {
+                                    resolved[pos] = entry.value;
+                                    pos += 1;
+                                }
+                            }
+                            for (0..pos) |i| self.push(resolved[i]);
+                            resolved_ac = pos;
+                        } else {
+                            for (arr.entries.items) |entry| self.push(entry.value);
+                        }
+                    } else {
+                        for (arr.entries.items) |entry| self.push(entry.value);
+                    }
 
                     if (this_val) |tv| {
                         if (tv == .object) {
                             if (self.functions.get(full_name)) |func| {
                                 if (func.is_generator) {
-                                    try self.callStaticFunction(full_name, @intCast(ac), effective_called);
+                                    try self.callStaticFunction(full_name, @intCast(resolved_ac), effective_called);
                                 } else {
                                 var new_vars: std.StringHashMapUnmanaged(Value) = .{};
                                 try new_vars.put(self.allocator, "$this", tv);
                                 if (func.is_variadic) {
                                     const fixed: usize = func.arity - 1;
-                                    for (0..@min(ac, fixed)) |i| {
-                                        try new_vars.put(self.allocator, func.params[i], self.stack[self.sp - ac + i]);
+                                    for (0..@min(resolved_ac, fixed)) |i| {
+                                        try new_vars.put(self.allocator, func.params[i], self.stack[self.sp - resolved_ac + i]);
                                     }
                                     const rest_arr = try self.allocator.create(PhpArray);
                                     rest_arr.* = .{};
                                     try self.arrays.append(self.allocator, rest_arr);
-                                    for (fixed..ac) |i| try rest_arr.append(self.allocator, self.stack[self.sp - ac + i]);
+                                    for (fixed..resolved_ac) |i| try rest_arr.append(self.allocator, self.stack[self.sp - resolved_ac + i]);
                                     try new_vars.put(self.allocator, func.params[fixed], .{ .array = rest_arr });
                                 } else {
-                                    for (0..@min(ac, func.arity)) |i| {
-                                        try new_vars.put(self.allocator, func.params[i], self.stack[self.sp - ac + i]);
+                                    for (0..@min(resolved_ac, func.arity)) |i| {
+                                        try new_vars.put(self.allocator, func.params[i], self.stack[self.sp - resolved_ac + i]);
                                     }
-                                    for (ac..func.arity) |i| {
+                                    for (resolved_ac..func.arity) |i| {
                                         if (i < func.defaults.len) try new_vars.put(self.allocator, func.params[i], try self.resolveDefault(func.defaults[i]));
                                     }
                                 }
-                                const scs_ac: u8 = @intCast(@min(ac, 255));
+                                const scs_ac: u8 = @intCast(@min(resolved_ac, 255));
                                 self.saveFrameArgs(scs_ac);
-                                self.sp -= ac;
+                                self.sp -= resolved_ac;
                                 self.frames[self.frame_count] = .{ .chunk = &func.chunk, .ip = 0, .vars = new_vars, .locals = try self.allocLocals(func, &new_vars), .func = func, .called_class = effective_called };
                                 self.setFrameArgCount(scs_ac);
                                 self.frames[self.frame_count].entry_sp = self.sp;
@@ -4123,10 +4199,10 @@ pub const VM = struct {
                                 return error.RuntimeError;
                             }
                         } else {
-                            try self.callNamedFunction(full_name, @intCast(ac));
+                            try self.callNamedFunction(full_name, @intCast(resolved_ac));
                         }
                     } else {
-                        try self.callNamedFunction(full_name, @intCast(ac));
+                        try self.callNamedFunction(full_name, @intCast(resolved_ac));
                     }
                 },
 
