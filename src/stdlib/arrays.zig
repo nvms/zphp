@@ -1049,7 +1049,10 @@ fn native_next(_: *NativeContext, args: []const Value) RuntimeError!Value {
 fn native_prev(_: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len == 0 or args[0] != .array) return Value{ .bool = false };
     const arr = args[0].array;
-    if (arr.cursor == 0) return Value{ .bool = false };
+    if (arr.cursor == 0 or arr.cursor > arr.entries.items.len) {
+        arr.cursor = std.math.maxInt(usize);
+        return Value{ .bool = false };
+    }
     arr.cursor -= 1;
     return arr.entries.items[arr.cursor].value;
 }

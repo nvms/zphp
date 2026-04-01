@@ -1,159 +1,210 @@
 <?php
-// covers: nested try/catch/finally, custom exception hierarchies, re-throw,
-// exception chaining (getPrevious), multiple catch types, finally execution
-// order, catch without variable, exception in finally, string methods on
-// exception messages
+// covers: set_error_handler, set_exception_handler, restore_error_handler,
+//   restore_exception_handler, trigger_error, E_USER_WARNING, E_USER_NOTICE,
+//   error_reporting, nested try/catch/finally, exception chaining (getPrevious),
+//   custom exception classes, TypeError, ValueError, RuntimeException,
+//   LogicException, stacked error handlers, catch without variable
 
-class AppException extends RuntimeException {}
-class ValidationException extends AppException {
-    private array $errors;
-    public function __construct(string $message, array $errors, int $code = 0, ?\Throwable $previous = null) {
-        $this->errors = $errors;
+// --- custom exception classes ---
+class AppException extends RuntimeException {
+    private string $context;
+    public function __construct(string $message, string $context = '', int $code = 0, ?\Throwable $previous = null) {
+        $this->context = $context;
         parent::__construct($message, $code, $previous);
     }
-    public function getErrors(): array { return $this->errors; }
-}
-class DatabaseException extends AppException {}
-class NotFoundException extends AppException {}
-
-function riskyOperation(string $type): string {
-    switch ($type) {
-        case 'validate':
-            throw new ValidationException("Invalid input", ['name' => 'required', 'email' => 'invalid']);
-        case 'database':
-            throw new DatabaseException("Connection failed", 500);
-        case 'notfound':
-            throw new NotFoundException("Record not found", 404);
-        case 'runtime':
-            throw new RuntimeException("Something broke");
-        case 'ok':
-            return "success";
-        default:
-            throw new Exception("Unknown error type: $type");
-    }
+    public function getContext(): string { return $this->context; }
 }
 
-// test 1: basic try/catch/finally ordering
-echo "=== Test 1: Basic try/catch/finally ===\n";
+class ServiceException extends LogicException {}
+
+// --- test 1: stacked error handlers ---
+echo "=== Test 1: Stacked error handlers ===\n";
 $log = [];
-try {
-    $log[] = "try";
-    riskyOperation('validate');
-    $log[] = "after-throw";
-} catch (ValidationException $e) {
-    $log[] = "catch:" . $e->getMessage();
-    $errors = $e->getErrors();
-    $log[] = "errors:" . implode(',', array_keys($errors));
-} finally {
-    $log[] = "finally";
-}
-echo implode(' -> ', $log) . "\n";
 
-// test 2: finally runs even on success
-echo "\n=== Test 2: Finally on success ===\n";
-$log = [];
-try {
-    $log[] = "try";
-    $result = riskyOperation('ok');
-    $log[] = "result:$result";
-} catch (Exception $e) {
-    $log[] = "catch";
-} finally {
-    $log[] = "finally";
-}
-echo implode(' -> ', $log) . "\n";
+set_error_handler(function($errno, $errstr) use (&$log) {
+    $log[] = "handler1: $errstr";
+    return true;
+});
 
-// test 3: exception hierarchy - catch parent type
-echo "\n=== Test 3: Exception hierarchy ===\n";
-try {
-    riskyOperation('database');
-} catch (AppException $e) {
-    echo "Caught AppException: " . $e->getMessage() . " (code: " . $e->getCode() . ")\n";
-    echo "Is DatabaseException: " . ($e instanceof DatabaseException ? "yes" : "no") . "\n";
-    echo "Is AppException: " . ($e instanceof AppException ? "yes" : "no") . "\n";
-    echo "Is RuntimeException: " . ($e instanceof RuntimeException ? "yes" : "no") . "\n";
+trigger_error("first warning", E_USER_WARNING);
+
+set_error_handler(function($errno, $errstr) use (&$log) {
+    $log[] = "handler2: $errstr";
+    return true;
+});
+
+trigger_error("second warning", E_USER_WARNING);
+
+restore_error_handler();
+trigger_error("back to first", E_USER_WARNING);
+
+restore_error_handler();
+
+foreach ($log as $entry) {
+    echo "$entry\n";
 }
 
-// test 4: multiple catch blocks - first match wins
-echo "\n=== Test 4: Multiple catch blocks ===\n";
-$types = ['validate', 'database', 'notfound', 'runtime'];
-foreach ($types as $type) {
+// --- test 2: stacked exception handlers ---
+echo "\n=== Test 2: Stacked exception handlers ===\n";
+$ex_log = [];
+
+set_exception_handler(function($e) use (&$ex_log) {
+    $ex_log[] = "ex_handler1: " . $e->getMessage();
+});
+
+set_exception_handler(function($e) use (&$ex_log) {
+    $ex_log[] = "ex_handler2: " . $e->getMessage();
+});
+
+restore_exception_handler();
+echo "restored to handler1\n";
+restore_exception_handler();
+echo "restored to default\n";
+
+// --- test 3: error handler captures messages ---
+echo "\n=== Test 3: Error handler captures ===\n";
+$captured = [];
+set_error_handler(function($errno, $errstr) use (&$captured) {
+    $captured[] = $errstr;
+    return true;
+});
+
+trigger_error("notice msg", E_USER_NOTICE);
+trigger_error("warning msg", E_USER_WARNING);
+
+restore_error_handler();
+
+echo "count: " . count($captured) . "\n";
+foreach ($captured as $msg) {
+    echo "  $msg\n";
+}
+
+// --- test 4: error_reporting returns int ---
+echo "\n=== Test 4: Error reporting ===\n";
+$level = error_reporting();
+echo "is int: " . (is_int($level) ? 'yes' : 'no') . "\n";
+
+// --- test 5: nested try/catch/finally with chaining ---
+echo "\n=== Test 5: Nested try/catch/finally with chaining ===\n";
+$trace = [];
+try {
+    $trace[] = "outer-try";
     try {
-        riskyOperation($type);
-    } catch (ValidationException $e) {
-        echo "$type -> ValidationException\n";
-    } catch (DatabaseException $e) {
-        echo "$type -> DatabaseException\n";
-    } catch (NotFoundException $e) {
-        echo "$type -> NotFoundException\n";
+        $trace[] = "inner-try";
+        throw new RuntimeException("root failure");
     } catch (RuntimeException $e) {
-        echo "$type -> RuntimeException\n";
-    } catch (Exception $e) {
-        echo "$type -> Exception\n";
-    }
-}
-
-// test 5: nested try/catch
-echo "\n=== Test 5: Nested try/catch ===\n";
-$log = [];
-try {
-    $log[] = "outer-try";
-    try {
-        $log[] = "inner-try";
-        riskyOperation('database');
-    } catch (ValidationException $e) {
-        $log[] = "inner-catch-validation";
-    } finally {
-        $log[] = "inner-finally";
-    }
-} catch (DatabaseException $e) {
-    $log[] = "outer-catch-database";
-} finally {
-    $log[] = "outer-finally";
-}
-echo implode(' -> ', $log) . "\n";
-
-// test 6: re-throw with chaining
-echo "\n=== Test 6: Re-throw with chaining ===\n";
-try {
-    try {
-        riskyOperation('database');
-    } catch (DatabaseException $e) {
-        throw new AppException("Wrapped: " . $e->getMessage(), 0, $e);
+        $trace[] = "inner-catch";
+        throw new AppException("wrapped", "db-layer", 500, $e);
     }
 } catch (AppException $e) {
-    echo "Caught: " . $e->getMessage() . "\n";
+    $trace[] = "outer-catch";
     $prev = $e->getPrevious();
-    echo "Previous: " . ($prev ? $prev->getMessage() : "none") . "\n";
-    echo "Previous type: " . ($prev ? get_class($prev) : "none") . "\n";
+    echo "context: " . $e->getContext() . "\n";
+    echo "message: " . $e->getMessage() . "\n";
+    echo "code: " . $e->getCode() . "\n";
+    echo "previous: " . ($prev ? $prev->getMessage() : "none") . "\n";
+    echo "previous class: " . ($prev ? get_class($prev) : "none") . "\n";
+} finally {
+    $trace[] = "outer-finally";
+}
+echo "trace: " . implode(' -> ', $trace) . "\n";
+
+// --- test 6: exception hierarchy ---
+echo "\n=== Test 6: Exception hierarchy ===\n";
+$exceptions = [
+    new TypeError("bad type"),
+    new ValueError("bad value"),
+    new RuntimeException("runtime issue"),
+    new LogicException("logic issue"),
+    new ServiceException("service down"),
+    new AppException("app error", "auth"),
+];
+
+foreach ($exceptions as $ex) {
+    $types = [];
+    if ($ex instanceof TypeError) $types[] = 'TypeError';
+    if ($ex instanceof ValueError) $types[] = 'ValueError';
+    if ($ex instanceof RuntimeException) $types[] = 'RuntimeException';
+    if ($ex instanceof LogicException) $types[] = 'LogicException';
+    if ($ex instanceof ServiceException) $types[] = 'ServiceException';
+    if ($ex instanceof AppException) $types[] = 'AppException';
+    if ($ex instanceof Exception) $types[] = 'Exception';
+    if ($ex instanceof Throwable) $types[] = 'Throwable';
+    echo get_class($ex) . ": " . implode(', ', $types) . "\n";
 }
 
-// test 7: catch without variable (PHP 8.0+)
-echo "\n=== Test 7: Catch without variable ===\n";
-try {
-    riskyOperation('runtime');
-} catch (RuntimeException) {
-    echo "Caught RuntimeException (no variable)\n";
-}
+// --- test 7: multi-catch ---
+echo "\n=== Test 7: Multi-catch ===\n";
+$cases = [
+    fn() => throw new TypeError("t"),
+    fn() => throw new ValueError("v"),
+    fn() => throw new RuntimeException("r"),
+    fn() => throw new LogicException("l"),
+];
 
-// test 8: finally with return value
-echo "\n=== Test 8: Finally side effects ===\n";
-function withFinally(): string {
-    $result = "";
+foreach ($cases as $case) {
     try {
-        $result .= "try,";
-        throw new Exception("boom");
-    } catch (Exception $e) {
-        $result .= "catch,";
-    } finally {
-        $result .= "finally";
+        $case();
+    } catch (TypeError $e) {
+        echo "caught TypeError\n";
+    } catch (ValueError $e) {
+        echo "caught ValueError\n";
+    } catch (RuntimeException $e) {
+        echo "caught RuntimeException\n";
+    } catch (LogicException $e) {
+        echo "caught LogicException\n";
     }
-    return $result;
 }
-echo withFinally() . "\n";
 
-// test 9: exception in loop with continue
-echo "\n=== Test 9: Exception in loop ===\n";
+// --- test 8: double exception chaining ---
+echo "\n=== Test 8: Double exception chaining ===\n";
+try {
+    try {
+        try {
+            throw new RuntimeException("level1");
+        } catch (RuntimeException $e) {
+            throw new LogicException("level2", 0, $e);
+        }
+    } catch (LogicException $e) {
+        throw new AppException("level3", "chain-test", 0, $e);
+    }
+} catch (AppException $e) {
+    echo "caught: " . $e->getMessage() . "\n";
+    $p1 = $e->getPrevious();
+    echo "prev1: " . ($p1 ? $p1->getMessage() : "none") . "\n";
+    $p2 = $p1 ? $p1->getPrevious() : null;
+    echo "prev2: " . ($p2 ? $p2->getMessage() : "none") . "\n";
+    $p3 = $p2 ? $p2->getPrevious() : null;
+    echo "prev3: " . ($p3 ? $p3->getMessage() : "none") . "\n";
+}
+
+// --- test 9: finally always runs ---
+echo "\n=== Test 9: Finally always runs ===\n";
+function withFinally(bool $fail): string {
+    $r = "start";
+    try {
+        if ($fail) throw new Exception("boom");
+        $r .= " ok";
+    } catch (Exception $e) {
+        $r .= " caught";
+    } finally {
+        $r .= " finally";
+    }
+    return $r;
+}
+echo withFinally(false) . "\n";
+echo withFinally(true) . "\n";
+
+// --- test 10: catch without variable ---
+echo "\n=== Test 10: Catch without variable ===\n";
+try {
+    throw new RuntimeException("ignored");
+} catch (RuntimeException) {
+    echo "caught without variable\n";
+}
+
+// --- test 11: exception in loop ---
+echo "\n=== Test 11: Exception in loop ===\n";
 $results = [];
 for ($i = 0; $i < 5; $i++) {
     try {
@@ -167,95 +218,41 @@ for ($i = 0; $i < 5; $i++) {
 }
 echo implode(', ', $results) . "\n";
 
-// test 10: deeply nested finally chain
-echo "\n=== Test 10: Deep finally chain ===\n";
-$log = [];
+// --- test 12: custom exception properties ---
+echo "\n=== Test 12: Custom exception properties ===\n";
 try {
-    $log[] = "L1-try";
-    try {
-        $log[] = "L2-try";
-        try {
-            $log[] = "L3-try";
-            throw new Exception("deep");
-        } finally {
-            $log[] = "L3-finally";
-        }
-    } finally {
-        $log[] = "L2-finally";
-    }
-} catch (Exception $e) {
-    $log[] = "L1-catch:" . $e->getMessage();
-} finally {
-    $log[] = "L1-finally";
-}
-echo implode(' -> ', $log) . "\n";
-
-// test 11: exception message string operations
-echo "\n=== Test 11: Exception message manipulation ===\n";
-try {
-    throw new Exception("Error in module 'auth': invalid token (expired at 2024-01-01)");
-} catch (Exception $e) {
-    $msg = $e->getMessage();
-    echo "Length: " . strlen($msg) . "\n";
-    echo "Contains 'auth': " . (str_contains($msg, 'auth') ? 'yes' : 'no') . "\n";
-    echo "Upper: " . strtoupper(substr($msg, 0, 5)) . "\n";
-    $parts = explode(":", $msg);
-    echo "Parts: " . count($parts) . "\n";
+    throw new AppException("service unavailable", "payment-gateway", 503);
+} catch (AppException $e) {
+    echo "message: " . $e->getMessage() . "\n";
+    echo "context: " . $e->getContext() . "\n";
+    echo "code: " . $e->getCode() . "\n";
+    echo "is RuntimeException: " . ($e instanceof RuntimeException ? 'yes' : 'no') . "\n";
 }
 
-// test 12: custom exception with method chaining in catch
-echo "\n=== Test 12: Custom exception methods in catch ===\n";
-try {
-    throw new ValidationException("Form invalid", [
-        'username' => 'too short',
-        'password' => 'missing uppercase',
-        'email' => 'invalid format'
-    ]);
-} catch (ValidationException $e) {
-    echo "Message: " . $e->getMessage() . "\n";
-    $errors = $e->getErrors();
-    echo "Error count: " . count($errors) . "\n";
-    foreach ($errors as $field => $error) {
-        echo "  $field: $error\n";
+// --- test 13: error handler with trigger_error in functions ---
+echo "\n=== Test 13: Error handler across functions ===\n";
+$func_errors = [];
+set_error_handler(function($errno, $errstr) use (&$func_errors) {
+    $func_errors[] = $errstr;
+    return true;
+});
+
+function doWork($name) {
+    if (empty($name)) {
+        trigger_error("name is empty", E_USER_WARNING);
+        return false;
     }
+    return "done: $name";
 }
 
-// test 13: exception in array_map callback
-echo "\n=== Test 13: Exception in callback ===\n";
-function safeParseInt(string $val): int {
-    if (!is_numeric($val)) {
-        throw new InvalidArgumentException("Not numeric: $val");
-    }
-    return (int)$val;
+echo doWork("alice") . "\n";
+echo doWork("") ? "ok" : "failed" . "\n";
+echo doWork("bob") . "\n";
+echo "errors: " . count($func_errors) . "\n";
+foreach ($func_errors as $e) {
+    echo "  $e\n";
 }
-$inputs = ['1', '2', 'abc', '4'];
-$results = [];
-foreach ($inputs as $input) {
-    try {
-        $results[] = safeParseInt($input);
-    } catch (InvalidArgumentException $e) {
-        $results[] = -1;
-        echo "Skipped: " . $e->getMessage() . "\n";
-    }
-}
-echo "Results: " . implode(', ', $results) . "\n";
 
-// test 14: exception across function boundaries
-echo "\n=== Test 14: Cross-function exceptions ===\n";
-function inner(): void {
-    throw new RuntimeException("from inner");
-}
-function middle(): void {
-    inner();
-}
-function outer(): string {
-    try {
-        middle();
-        return "unreachable";
-    } catch (RuntimeException $e) {
-        return "caught at outer: " . $e->getMessage();
-    }
-}
-echo outer() . "\n";
+restore_error_handler();
 
 echo "\nAll error handling tests passed!\n";
