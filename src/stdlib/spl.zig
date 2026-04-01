@@ -329,6 +329,109 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try vm.native_fns.put(a, "SplQueue::next", sqNext);
     try vm.native_fns.put(a, "SplQueue::rewind", sqRewind);
     try vm.native_fns.put(a, "SplQueue::valid", sqValid);
+
+    // SplDoublyLinkedList
+    var dll_def = ClassDef{ .name = "SplDoublyLinkedList" };
+    try dll_def.interfaces.append(a, "Countable");
+    try dll_def.interfaces.append(a, "ArrayAccess");
+    try dll_def.methods.put(a, "__construct", .{ .name = "__construct", .arity = 0 });
+    try dll_def.methods.put(a, "push", .{ .name = "push", .arity = 1 });
+    try dll_def.methods.put(a, "pop", .{ .name = "pop", .arity = 0 });
+    try dll_def.methods.put(a, "unshift", .{ .name = "unshift", .arity = 1 });
+    try dll_def.methods.put(a, "shift", .{ .name = "shift", .arity = 0 });
+    try dll_def.methods.put(a, "top", .{ .name = "top", .arity = 0 });
+    try dll_def.methods.put(a, "bottom", .{ .name = "bottom", .arity = 0 });
+    try dll_def.methods.put(a, "count", .{ .name = "count", .arity = 0 });
+    try dll_def.methods.put(a, "isEmpty", .{ .name = "isEmpty", .arity = 0 });
+    try dll_def.methods.put(a, "setIteratorMode", .{ .name = "setIteratorMode", .arity = 1 });
+    try dll_def.methods.put(a, "getIteratorMode", .{ .name = "getIteratorMode", .arity = 0 });
+    try dll_def.methods.put(a, "rewind", .{ .name = "rewind", .arity = 0 });
+    try dll_def.methods.put(a, "current", .{ .name = "current", .arity = 0 });
+    try dll_def.methods.put(a, "key", .{ .name = "key", .arity = 0 });
+    try dll_def.methods.put(a, "next", .{ .name = "next", .arity = 0 });
+    try dll_def.methods.put(a, "prev", .{ .name = "prev", .arity = 0 });
+    try dll_def.methods.put(a, "valid", .{ .name = "valid", .arity = 0 });
+    try dll_def.methods.put(a, "offsetGet", .{ .name = "offsetGet", .arity = 1 });
+    try dll_def.methods.put(a, "offsetSet", .{ .name = "offsetSet", .arity = 2 });
+    try dll_def.methods.put(a, "offsetExists", .{ .name = "offsetExists", .arity = 1 });
+    try dll_def.methods.put(a, "offsetUnset", .{ .name = "offsetUnset", .arity = 1 });
+    try dll_def.methods.put(a, "add", .{ .name = "add", .arity = 2 });
+    try dll_def.methods.put(a, "toArray", .{ .name = "toArray", .arity = 0 });
+    try dll_def.static_props.put(a, "IT_MODE_LIFO", .{ .int = DLL_IT_MODE_LIFO });
+    try dll_def.static_props.put(a, "IT_MODE_FIFO", .{ .int = DLL_IT_MODE_FIFO });
+    try dll_def.static_props.put(a, "IT_MODE_DELETE", .{ .int = DLL_IT_MODE_DELETE });
+    try dll_def.static_props.put(a, "IT_MODE_KEEP", .{ .int = DLL_IT_MODE_KEEP });
+    try vm.classes.put(a, "SplDoublyLinkedList", dll_def);
+
+    try vm.native_fns.put(a, "SplDoublyLinkedList::__construct", dllConstruct);
+    try vm.native_fns.put(a, "SplDoublyLinkedList::push", dllPush);
+    try vm.native_fns.put(a, "SplDoublyLinkedList::pop", dllPop);
+    try vm.native_fns.put(a, "SplDoublyLinkedList::unshift", dllUnshift);
+    try vm.native_fns.put(a, "SplDoublyLinkedList::shift", dllShift);
+    try vm.native_fns.put(a, "SplDoublyLinkedList::top", dllTop);
+    try vm.native_fns.put(a, "SplDoublyLinkedList::bottom", dllBottom);
+    try vm.native_fns.put(a, "SplDoublyLinkedList::count", dllCount);
+    try vm.native_fns.put(a, "SplDoublyLinkedList::isEmpty", dllIsEmpty);
+    try vm.native_fns.put(a, "SplDoublyLinkedList::setIteratorMode", dllSetIteratorMode);
+    try vm.native_fns.put(a, "SplDoublyLinkedList::getIteratorMode", dllGetIteratorMode);
+    try vm.native_fns.put(a, "SplDoublyLinkedList::rewind", dllRewind);
+    try vm.native_fns.put(a, "SplDoublyLinkedList::current", dllCurrent);
+    try vm.native_fns.put(a, "SplDoublyLinkedList::key", dllKey);
+    try vm.native_fns.put(a, "SplDoublyLinkedList::next", dllNext);
+    try vm.native_fns.put(a, "SplDoublyLinkedList::prev", dllPrev);
+    try vm.native_fns.put(a, "SplDoublyLinkedList::valid", dllValid);
+    try vm.native_fns.put(a, "SplDoublyLinkedList::offsetGet", dllOffsetGet);
+    try vm.native_fns.put(a, "SplDoublyLinkedList::offsetSet", dllOffsetSet);
+    try vm.native_fns.put(a, "SplDoublyLinkedList::offsetExists", dllOffsetExists);
+    try vm.native_fns.put(a, "SplDoublyLinkedList::offsetUnset", dllOffsetUnset);
+    try vm.native_fns.put(a, "SplDoublyLinkedList::add", dllAdd);
+    try vm.native_fns.put(a, "SplDoublyLinkedList::toArray", dllToArray);
+
+    // SplObjectStorage
+    var sos_def = ClassDef{ .name = "SplObjectStorage" };
+    try sos_def.interfaces.append(a, "Countable");
+    try sos_def.methods.put(a, "__construct", .{ .name = "__construct", .arity = 0 });
+    try sos_def.methods.put(a, "attach", .{ .name = "attach", .arity = 2 });
+    try sos_def.methods.put(a, "detach", .{ .name = "detach", .arity = 1 });
+    try sos_def.methods.put(a, "contains", .{ .name = "contains", .arity = 1 });
+    try sos_def.methods.put(a, "count", .{ .name = "count", .arity = 0 });
+    try sos_def.methods.put(a, "getInfo", .{ .name = "getInfo", .arity = 0 });
+    try sos_def.methods.put(a, "setInfo", .{ .name = "setInfo", .arity = 1 });
+    try sos_def.methods.put(a, "getHash", .{ .name = "getHash", .arity = 1 });
+    try sos_def.methods.put(a, "rewind", .{ .name = "rewind", .arity = 0 });
+    try sos_def.methods.put(a, "current", .{ .name = "current", .arity = 0 });
+    try sos_def.methods.put(a, "key", .{ .name = "key", .arity = 0 });
+    try sos_def.methods.put(a, "next", .{ .name = "next", .arity = 0 });
+    try sos_def.methods.put(a, "valid", .{ .name = "valid", .arity = 0 });
+    try sos_def.methods.put(a, "removeAll", .{ .name = "removeAll", .arity = 1 });
+    try sos_def.methods.put(a, "removeAllExcept", .{ .name = "removeAllExcept", .arity = 1 });
+    try sos_def.methods.put(a, "addAll", .{ .name = "addAll", .arity = 1 });
+    try sos_def.methods.put(a, "offsetGet", .{ .name = "offsetGet", .arity = 1 });
+    try sos_def.methods.put(a, "offsetSet", .{ .name = "offsetSet", .arity = 2 });
+    try sos_def.methods.put(a, "offsetExists", .{ .name = "offsetExists", .arity = 1 });
+    try sos_def.methods.put(a, "offsetUnset", .{ .name = "offsetUnset", .arity = 1 });
+    try vm.classes.put(a, "SplObjectStorage", sos_def);
+
+    try vm.native_fns.put(a, "SplObjectStorage::__construct", sosConstruct);
+    try vm.native_fns.put(a, "SplObjectStorage::attach", sosAttach);
+    try vm.native_fns.put(a, "SplObjectStorage::detach", sosDetach);
+    try vm.native_fns.put(a, "SplObjectStorage::contains", sosContains);
+    try vm.native_fns.put(a, "SplObjectStorage::count", sosCount);
+    try vm.native_fns.put(a, "SplObjectStorage::getInfo", sosGetInfoMethod);
+    try vm.native_fns.put(a, "SplObjectStorage::setInfo", sosSetInfoMethod);
+    try vm.native_fns.put(a, "SplObjectStorage::getHash", sosGetHash);
+    try vm.native_fns.put(a, "SplObjectStorage::rewind", sosRewind);
+    try vm.native_fns.put(a, "SplObjectStorage::current", sosCurrent);
+    try vm.native_fns.put(a, "SplObjectStorage::key", sosKey);
+    try vm.native_fns.put(a, "SplObjectStorage::next", sosNext);
+    try vm.native_fns.put(a, "SplObjectStorage::valid", sosValid);
+    try vm.native_fns.put(a, "SplObjectStorage::removeAll", sosRemoveAll);
+    try vm.native_fns.put(a, "SplObjectStorage::removeAllExcept", sosRemoveAllExcept);
+    try vm.native_fns.put(a, "SplObjectStorage::addAll", sosAddAll);
+    try vm.native_fns.put(a, "SplObjectStorage::offsetGet", sosOffsetGet);
+    try vm.native_fns.put(a, "SplObjectStorage::offsetSet", sosOffsetSet);
+    try vm.native_fns.put(a, "SplObjectStorage::offsetExists", sosOffsetExists);
+    try vm.native_fns.put(a, "SplObjectStorage::offsetUnset", sosOffsetUnset);
 }
 
 fn getThis(ctx: *NativeContext) ?*PhpObject {
@@ -1244,4 +1347,457 @@ fn sqValid(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
     const arr = getData(obj) orelse return .{ .bool = false };
     const cursor = Value.toInt(obj.get("__cursor"));
     return .{ .bool = cursor >= 0 and cursor < @as(i64, @intCast(arr.entries.items.len)) };
+}
+
+// --- SplDoublyLinkedList ---
+
+const DLL_IT_MODE_LIFO: i64 = 2;
+const DLL_IT_MODE_FIFO: i64 = 0;
+const DLL_IT_MODE_DELETE: i64 = 1;
+const DLL_IT_MODE_KEEP: i64 = 0;
+
+fn dllConstruct(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const obj = getThis(ctx) orelse return .null;
+    _ = try ensureData(ctx, obj);
+    try obj.set(ctx.allocator, "__cursor", .{ .int = 0 });
+    try obj.set(ctx.allocator, "__it_mode", .{ .int = DLL_IT_MODE_FIFO | DLL_IT_MODE_KEEP });
+    return .null;
+}
+
+fn dllPush(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    const obj = getThis(ctx) orelse return .null;
+    const arr = try ensureData(ctx, obj);
+    if (args.len >= 1) try arr.append(ctx.allocator, args[0]);
+    return .null;
+}
+
+fn dllPop(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const obj = getThis(ctx) orelse return .null;
+    const arr = getData(obj) orelse return .null;
+    if (arr.entries.items.len == 0) return .null;
+    const last = arr.entries.items[arr.entries.items.len - 1].value;
+    arr.entries.items.len -= 1;
+    return last;
+}
+
+fn dllUnshift(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    const obj = getThis(ctx) orelse return .null;
+    const arr = try ensureData(ctx, obj);
+    if (args.len == 0) return .null;
+    try arr.entries.insert(ctx.allocator, 0, .{ .key = .{ .int = 0 }, .value = args[0] });
+    return .null;
+}
+
+fn dllShift(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const obj = getThis(ctx) orelse return .null;
+    const arr = getData(obj) orelse return .null;
+    if (arr.entries.items.len == 0) return .null;
+    const first = arr.entries.items[0].value;
+    std.mem.copyForwards(PhpArray.Entry, arr.entries.items[0 .. arr.entries.items.len - 1], arr.entries.items[1..arr.entries.items.len]);
+    arr.entries.items.len -= 1;
+    return first;
+}
+
+fn dllTop(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const obj = getThis(ctx) orelse return .null;
+    const arr = getData(obj) orelse return .null;
+    if (arr.entries.items.len == 0) return .null;
+    return arr.entries.items[arr.entries.items.len - 1].value;
+}
+
+fn dllBottom(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const obj = getThis(ctx) orelse return .null;
+    const arr = getData(obj) orelse return .null;
+    if (arr.entries.items.len == 0) return .null;
+    return arr.entries.items[0].value;
+}
+
+fn dllCount(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const obj = getThis(ctx) orelse return .{ .int = 0 };
+    const arr = getData(obj) orelse return .{ .int = 0 };
+    return .{ .int = arr.length() };
+}
+
+fn dllIsEmpty(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const obj = getThis(ctx) orelse return .{ .bool = true };
+    const arr = getData(obj) orelse return .{ .bool = true };
+    return .{ .bool = arr.entries.items.len == 0 };
+}
+
+fn dllSetIteratorMode(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    const obj = getThis(ctx) orelse return .null;
+    if (args.len >= 1 and args[0] == .int) {
+        try obj.set(ctx.allocator, "__it_mode", args[0]);
+    }
+    return .null;
+}
+
+fn dllGetIteratorMode(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const obj = getThis(ctx) orelse return .{ .int = 0 };
+    return obj.get("__it_mode");
+}
+
+fn dllRewind(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const obj = getThis(ctx) orelse return .null;
+    const mode = Value.toInt(obj.get("__it_mode"));
+    const is_lifo = (mode & DLL_IT_MODE_LIFO) != 0;
+    if (is_lifo) {
+        const arr = getData(obj) orelse {
+            try obj.set(ctx.allocator, "__cursor", .{ .int = 0 });
+            return .null;
+        };
+        try obj.set(ctx.allocator, "__cursor", .{ .int = @as(i64, @intCast(arr.entries.items.len)) - 1 });
+    } else {
+        try obj.set(ctx.allocator, "__cursor", .{ .int = 0 });
+    }
+    return .null;
+}
+
+fn dllCurrent(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const obj = getThis(ctx) orelse return .{ .bool = false };
+    const arr = getData(obj) orelse return .{ .bool = false };
+    const cursor = Value.toInt(obj.get("__cursor"));
+    if (cursor < 0 or cursor >= @as(i64, @intCast(arr.entries.items.len))) return .{ .bool = false };
+    return arr.entries.items[@intCast(cursor)].value;
+}
+
+fn dllKey(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const obj = getThis(ctx) orelse return .null;
+    return obj.get("__cursor");
+}
+
+fn dllNext(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const obj = getThis(ctx) orelse return .null;
+    const mode = Value.toInt(obj.get("__it_mode"));
+    const is_lifo = (mode & DLL_IT_MODE_LIFO) != 0;
+    const cursor = Value.toInt(obj.get("__cursor"));
+    if (is_lifo) {
+        try obj.set(ctx.allocator, "__cursor", .{ .int = cursor - 1 });
+    } else {
+        try obj.set(ctx.allocator, "__cursor", .{ .int = cursor + 1 });
+    }
+    return .null;
+}
+
+fn dllPrev(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const obj = getThis(ctx) orelse return .null;
+    const mode = Value.toInt(obj.get("__it_mode"));
+    const is_lifo = (mode & DLL_IT_MODE_LIFO) != 0;
+    const cursor = Value.toInt(obj.get("__cursor"));
+    if (is_lifo) {
+        try obj.set(ctx.allocator, "__cursor", .{ .int = cursor + 1 });
+    } else {
+        try obj.set(ctx.allocator, "__cursor", .{ .int = cursor - 1 });
+    }
+    return .null;
+}
+
+fn dllValid(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const obj = getThis(ctx) orelse return .{ .bool = false };
+    const arr = getData(obj) orelse return .{ .bool = false };
+    const cursor = Value.toInt(obj.get("__cursor"));
+    return .{ .bool = cursor >= 0 and cursor < @as(i64, @intCast(arr.entries.items.len)) };
+}
+
+fn dllOffsetGet(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    const obj = getThis(ctx) orelse return .null;
+    const arr = getData(obj) orelse return .null;
+    if (args.len == 0) return .null;
+    const idx = Value.toInt(args[0]);
+    if (idx < 0 or idx >= @as(i64, @intCast(arr.entries.items.len))) return .null;
+    return arr.entries.items[@intCast(idx)].value;
+}
+
+fn dllOffsetSet(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    const obj = getThis(ctx) orelse return .null;
+    const arr = try ensureData(ctx, obj);
+    if (args.len < 2) return .null;
+    if (args[0] == .null) {
+        try arr.append(ctx.allocator, args[1]);
+    } else {
+        const idx = Value.toInt(args[0]);
+        if (idx >= 0 and idx < @as(i64, @intCast(arr.entries.items.len))) {
+            arr.entries.items[@intCast(idx)].value = args[1];
+        }
+    }
+    return .null;
+}
+
+fn dllOffsetExists(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    const obj = getThis(ctx) orelse return .{ .bool = false };
+    const arr = getData(obj) orelse return .{ .bool = false };
+    if (args.len == 0) return .{ .bool = false };
+    const idx = Value.toInt(args[0]);
+    return .{ .bool = idx >= 0 and idx < @as(i64, @intCast(arr.entries.items.len)) };
+}
+
+fn dllOffsetUnset(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    const obj = getThis(ctx) orelse return .null;
+    const arr = getData(obj) orelse return .null;
+    if (args.len == 0) return .null;
+    const idx = Value.toInt(args[0]);
+    if (idx >= 0 and idx < @as(i64, @intCast(arr.entries.items.len))) {
+        _ = arr.entries.orderedRemove(@intCast(idx));
+    }
+    return .null;
+}
+
+fn dllAdd(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    const obj = getThis(ctx) orelse return .null;
+    const arr = try ensureData(ctx, obj);
+    if (args.len < 2) return .null;
+    const idx = Value.toInt(args[0]);
+    if (idx < 0) return .null;
+    const uidx: usize = @intCast(idx);
+    if (uidx > arr.entries.items.len) return .null;
+    try arr.entries.insert(ctx.allocator, uidx, .{ .key = .{ .int = idx }, .value = args[1] });
+    return .null;
+}
+
+fn dllToArray(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const obj = getThis(ctx) orelse return .null;
+    const arr = getData(obj) orelse {
+        const new_arr = try ctx.createArray();
+        return .{ .array = new_arr };
+    };
+    const result = try ctx.createArray();
+    for (arr.entries.items, 0..) |entry, i| {
+        try result.set(ctx.allocator, .{ .int = @intCast(i) }, entry.value);
+    }
+    return .{ .array = result };
+}
+
+// --- SplObjectStorage ---
+// stores objects keyed by pointer identity, each with optional associated data
+
+fn sosObjKey(obj: *PhpObject) i64 {
+    return @intCast(@intFromPtr(obj));
+}
+
+fn sosConstruct(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const obj = getThis(ctx) orelse return .null;
+    _ = try ensureData(ctx, obj);
+    try obj.set(ctx.allocator, "__cursor", .{ .int = 0 });
+    // __info stores associated data keyed by object pointer as string
+    const info_arr = try ctx.allocator.create(PhpArray);
+    info_arr.* = .{};
+    try ctx.vm.arrays.append(ctx.allocator, info_arr);
+    try obj.set(ctx.allocator, "__info", .{ .array = info_arr });
+    // __objs stores object references in insertion order for iteration
+    const objs_arr = try ctx.allocator.create(PhpArray);
+    objs_arr.* = .{};
+    try ctx.vm.arrays.append(ctx.allocator, objs_arr);
+    try obj.set(ctx.allocator, "__objs", .{ .array = objs_arr });
+    return .null;
+}
+
+fn sosGetObjs(obj: *PhpObject) ?*PhpArray {
+    const v = obj.get("__objs");
+    if (v != .array) return null;
+    return v.array;
+}
+
+fn sosGetInfo(obj: *PhpObject) ?*PhpArray {
+    const v = obj.get("__info");
+    if (v != .array) return null;
+    return v.array;
+}
+
+fn sosFindIndex(objs: *PhpArray, target: *PhpObject) ?usize {
+    const target_key = sosObjKey(target);
+    for (objs.entries.items, 0..) |entry, i| {
+        if (entry.value == .object and sosObjKey(entry.value.object) == target_key) return i;
+    }
+    return null;
+}
+
+fn sosAttach(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    const obj = getThis(ctx) orelse return .null;
+    if (args.len == 0 or args[0] != .object) return .null;
+    const target = args[0].object;
+    const data = if (args.len >= 2) args[1] else Value.null;
+    const objs = sosGetObjs(obj) orelse return .null;
+    const info = sosGetInfo(obj) orelse return .null;
+    const key: PhpArray.Key = .{ .int = sosObjKey(target) };
+
+    if (sosFindIndex(objs, target)) |_| {
+        try info.set(ctx.allocator, key, data);
+    } else {
+        try objs.append(ctx.allocator, .{ .object = target });
+        try info.set(ctx.allocator, key, data);
+    }
+    return .null;
+}
+
+fn sosDetach(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    const obj = getThis(ctx) orelse return .null;
+    if (args.len == 0 or args[0] != .object) return .null;
+    const target = args[0].object;
+    const objs = sosGetObjs(obj) orelse return .null;
+    const info = sosGetInfo(obj) orelse return .null;
+
+    if (sosFindIndex(objs, target)) |idx| {
+        _ = objs.entries.orderedRemove(idx);
+        info.remove(.{ .int = sosObjKey(target) });
+    }
+    return .null;
+}
+
+fn sosContains(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    const obj = getThis(ctx) orelse return .{ .bool = false };
+    if (args.len == 0 or args[0] != .object) return .{ .bool = false };
+    const objs = sosGetObjs(obj) orelse return .{ .bool = false };
+    return .{ .bool = sosFindIndex(objs, args[0].object) != null };
+}
+
+fn sosCount(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const obj = getThis(ctx) orelse return .{ .int = 0 };
+    const objs = sosGetObjs(obj) orelse return .{ .int = 0 };
+    return .{ .int = @intCast(objs.entries.items.len) };
+}
+
+fn sosGetInfoMethod(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const obj = getThis(ctx) orelse return .null;
+    const objs = sosGetObjs(obj) orelse return .null;
+    const info = sosGetInfo(obj) orelse return .null;
+    const cursor = Value.toInt(obj.get("__cursor"));
+    if (cursor < 0 or cursor >= @as(i64, @intCast(objs.entries.items.len))) return .null;
+    const cur_obj = objs.entries.items[@intCast(cursor)].value;
+    if (cur_obj != .object) return .null;
+    return info.get(.{ .int = sosObjKey(cur_obj.object) });
+}
+
+fn sosSetInfoMethod(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    const obj = getThis(ctx) orelse return .null;
+    if (args.len == 0) return .null;
+    const objs = sosGetObjs(obj) orelse return .null;
+    const info = sosGetInfo(obj) orelse return .null;
+    const cursor = Value.toInt(obj.get("__cursor"));
+    if (cursor < 0 or cursor >= @as(i64, @intCast(objs.entries.items.len))) return .null;
+    const cur_obj = objs.entries.items[@intCast(cursor)].value;
+    if (cur_obj != .object) return .null;
+    try info.set(ctx.allocator, .{ .int = sosObjKey(cur_obj.object) }, args[0]);
+    return .null;
+}
+
+fn sosGetHash(_: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len == 0 or args[0] != .object) return .null;
+    return .{ .int = sosObjKey(args[0].object) };
+}
+
+fn sosRewind(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const obj = getThis(ctx) orelse return .null;
+    try obj.set(ctx.allocator, "__cursor", .{ .int = 0 });
+    return .null;
+}
+
+fn sosCurrent(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const obj = getThis(ctx) orelse return .{ .bool = false };
+    const objs = sosGetObjs(obj) orelse return .{ .bool = false };
+    const cursor = Value.toInt(obj.get("__cursor"));
+    if (cursor < 0 or cursor >= @as(i64, @intCast(objs.entries.items.len))) return .{ .bool = false };
+    return objs.entries.items[@intCast(cursor)].value;
+}
+
+fn sosKey(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const obj = getThis(ctx) orelse return .null;
+    return obj.get("__cursor");
+}
+
+fn sosNext(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const obj = getThis(ctx) orelse return .null;
+    const cursor = Value.toInt(obj.get("__cursor"));
+    try obj.set(ctx.allocator, "__cursor", .{ .int = cursor + 1 });
+    return .null;
+}
+
+fn sosValid(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const obj = getThis(ctx) orelse return .{ .bool = false };
+    const objs = sosGetObjs(obj) orelse return .{ .bool = false };
+    const cursor = Value.toInt(obj.get("__cursor"));
+    return .{ .bool = cursor >= 0 and cursor < @as(i64, @intCast(objs.entries.items.len)) };
+}
+
+fn sosRemoveAll(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    const obj = getThis(ctx) orelse return .null;
+    if (args.len == 0 or args[0] != .object) return .null;
+    const other_this = args[0].object;
+    const other_objs = sosGetObjs(other_this) orelse return .null;
+    const objs = sosGetObjs(obj) orelse return .null;
+    const info = sosGetInfo(obj) orelse return .null;
+
+    var i: usize = 0;
+    while (i < objs.entries.items.len) {
+        const entry = objs.entries.items[i];
+        if (entry.value == .object and sosFindIndex(other_objs, entry.value.object) != null) {
+            info.remove(.{ .int = sosObjKey(entry.value.object) });
+            _ = objs.entries.orderedRemove(i);
+        } else {
+            i += 1;
+        }
+    }
+    return .null;
+}
+
+fn sosRemoveAllExcept(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    const obj = getThis(ctx) orelse return .null;
+    if (args.len == 0 or args[0] != .object) return .null;
+    const other_this = args[0].object;
+    const other_objs = sosGetObjs(other_this) orelse return .null;
+    const objs = sosGetObjs(obj) orelse return .null;
+    const info = sosGetInfo(obj) orelse return .null;
+
+    var i: usize = 0;
+    while (i < objs.entries.items.len) {
+        const entry = objs.entries.items[i];
+        if (entry.value == .object and sosFindIndex(other_objs, entry.value.object) == null) {
+            info.remove(.{ .int = sosObjKey(entry.value.object) });
+            _ = objs.entries.orderedRemove(i);
+        } else {
+            i += 1;
+        }
+    }
+    return .null;
+}
+
+fn sosAddAll(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    const obj = getThis(ctx) orelse return .null;
+    if (args.len == 0 or args[0] != .object) return .null;
+    const other_this = args[0].object;
+    const other_objs = sosGetObjs(other_this) orelse return .null;
+    const other_info = sosGetInfo(other_this) orelse return .null;
+    const objs = sosGetObjs(obj) orelse return .null;
+    const info = sosGetInfo(obj) orelse return .null;
+
+    for (other_objs.entries.items) |entry| {
+        if (entry.value == .object) {
+            const target = entry.value.object;
+            if (sosFindIndex(objs, target) == null) {
+                try objs.append(ctx.allocator, .{ .object = target });
+            }
+            const data = other_info.get(.{ .int = sosObjKey(target) });
+            try info.set(ctx.allocator, .{ .int = sosObjKey(target) }, data);
+        }
+    }
+    return .null;
+}
+
+fn sosOffsetGet(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    const obj = getThis(ctx) orelse return .null;
+    if (args.len == 0 or args[0] != .object) return .null;
+    const info = sosGetInfo(obj) orelse return .null;
+    return info.get(.{ .int = sosObjKey(args[0].object) });
+}
+
+fn sosOffsetSet(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    // offsetSet($obj, $data) is equivalent to attach($obj, $data)
+    return sosAttach(ctx, args);
+}
+
+fn sosOffsetExists(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    return sosContains(ctx, args);
+}
+
+fn sosOffsetUnset(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    return sosDetach(ctx, args);
 }
