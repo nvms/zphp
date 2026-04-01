@@ -288,6 +288,7 @@ pub const VM = struct {
     magic_call_guard: std.ArrayListUnmanaged(struct { obj_ptr: usize, method_name: []const u8 }) = .{},
     user_error_handler: ?Value = null,
     prev_error_handler: ?Value = null,
+    error_reporting_level: i64 = 32767,
     ob_stack: std.ArrayListUnmanaged(usize) = .{},
     request_vars: std.StringHashMapUnmanaged(Value) = .{},
     exception_handlers: [1024]ExceptionHandler = undefined,
@@ -418,6 +419,7 @@ pub const VM = struct {
         try @import("../stdlib/websocket.zig").register(vm, allocator);
         try @import("../stdlib/filesystem.zig").register(vm, allocator);
         try @import("../stdlib/reflection.zig").register(vm, allocator);
+        vm.error_reporting_level = 32767;
         vm.ic = try allocator.create(InlineCache);
         vm.ic.?.* = .{};
         const locals_buf = try allocator.alloc(Value, 8192);

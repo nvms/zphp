@@ -832,9 +832,12 @@ fn native_noop_zero(_: *NativeContext, _: []const Value) RuntimeError!Value {
     return .{ .int = 0 };
 }
 
-fn native_error_reporting(_: *NativeContext, args: []const Value) RuntimeError!Value {
-    _ = args;
-    return .{ .int = 32767 };
+fn native_error_reporting(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    const prev = ctx.vm.error_reporting_level;
+    if (args.len > 0) {
+        ctx.vm.error_reporting_level = Value.toInt(args[0]);
+    }
+    return .{ .int = prev };
 }
 
 fn native_trigger_error(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
