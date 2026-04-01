@@ -663,78 +663,48 @@ fn array_fill_keys(ctx: *NativeContext, args: []const Value) RuntimeError!Value 
     return .{ .array = result };
 }
 
-fn array_intersect(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len < 2 or args[0] != .array) return .null;
-    const src = args[0].array;
+const ArrayCmp = enum { values, keys, assoc };
 
-    var result = try ctx.createArray();
-    for (src.entries.items) |entry| {
-        var in_all = true;
-        for (args[1..]) |arg| {
-            if (arg != .array) {
-                in_all = false;
-                break;
+fn arraySetOp(comptime cmp: ArrayCmp, comptime keep_matches: bool) fn (*NativeContext, []const Value) RuntimeError!Value {
+    return struct {
+        fn f(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+            if (args.len < 2 or args[0] != .array) return .null;
+            const src = args[0].array;
+            var result = try ctx.createArray();
+            for (src.entries.items) |entry| {
+                const matched = matchesAll(entry, args[1..]);
+                if (matched == keep_matches) try result.set(ctx.allocator, entry.key, entry.value);
             }
-            var found = false;
-            for (arg.array.entries.items) |other| {
-                if (Value.equal(entry.value, other.value)) {
-                    found = true;
-                    break;
-                }
-            }
-            if (!found) {
-                in_all = false;
-                break;
-            }
+            return .{ .array = result };
         }
-        if (in_all) try result.set(ctx.allocator, entry.key, entry.value);
-    }
-    return .{ .array = result };
+        fn matchesAll(entry: PhpArray.Entry, others: []const Value) bool {
+            for (others) |arg| {
+                if (arg != .array) return if (keep_matches) false else continue;
+                var found = false;
+                for (arg.array.entries.items) |other| {
+                    const hit = switch (cmp) {
+                        .values => Value.equal(entry.value, other.value),
+                        .keys => entry.key.eql(other.key),
+                        .assoc => entry.key.eql(other.key) and Value.equal(entry.value, other.value),
+                    };
+                    if (hit) {
+                        found = true;
+                        break;
+                    }
+                }
+                if (!found) return false;
+            }
+            return true;
+        }
+    }.f;
 }
 
-fn array_diff(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len < 2 or args[0] != .array) return .null;
-    const src = args[0].array;
-
-    var result = try ctx.createArray();
-    for (src.entries.items) |entry| {
-        var in_any = false;
-        for (args[1..]) |arg| {
-            if (arg != .array) continue;
-            for (arg.array.entries.items) |other| {
-                if (Value.equal(entry.value, other.value)) {
-                    in_any = true;
-                    break;
-                }
-            }
-            if (in_any) break;
-        }
-        if (!in_any) try result.set(ctx.allocator, entry.key, entry.value);
-    }
-    return .{ .array = result };
-}
-
-fn array_diff_key(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len < 2 or args[0] != .array) return .null;
-    const src = args[0].array;
-
-    var result = try ctx.createArray();
-    for (src.entries.items) |entry| {
-        var in_any = false;
-        for (args[1..]) |arg| {
-            if (arg != .array) continue;
-            for (arg.array.entries.items) |other| {
-                if (entry.key.eql(other.key)) {
-                    in_any = true;
-                    break;
-                }
-            }
-            if (in_any) break;
-        }
-        if (!in_any) try result.set(ctx.allocator, entry.key, entry.value);
-    }
-    return .{ .array = result };
-}
+const array_intersect = arraySetOp(.values, true);
+const array_diff = arraySetOp(.values, false);
+const array_intersect_key = arraySetOp(.keys, true);
+const array_diff_key = arraySetOp(.keys, false);
+const array_intersect_assoc = arraySetOp(.assoc, true);
+const array_diff_assoc = arraySetOp(.assoc, false);
 
 fn array_count_values(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len == 0 or args[0] != .array) return .null;
@@ -1115,53 +1085,6 @@ fn native_sizeof(_: *NativeContext, args: []const Value) RuntimeError!Value {
     return .{ .int = args[0].array.length() };
 }
 
-fn array_intersect_key(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len < 2 or args[0] != .array) return .null;
-    const src = args[0].array;
-
-    var result = try ctx.createArray();
-    for (src.entries.items) |entry| {
-        var in_all = true;
-        for (args[1..]) |arg| {
-            if (arg != .array) continue;
-            var found = false;
-            for (arg.array.entries.items) |other| {
-                if (entry.key.eql(other.key)) {
-                    found = true;
-                    break;
-                }
-            }
-            if (!found) {
-                in_all = false;
-                break;
-            }
-        }
-        if (in_all) try result.set(ctx.allocator, entry.key, entry.value);
-    }
-    return .{ .array = result };
-}
-
-fn array_diff_assoc(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len < 2 or args[0] != .array) return .null;
-    const src = args[0].array;
-
-    var result = try ctx.createArray();
-    for (src.entries.items) |entry| {
-        var in_any = false;
-        for (args[1..]) |arg| {
-            if (arg != .array) continue;
-            for (arg.array.entries.items) |other| {
-                if (entry.key.eql(other.key) and Value.equal(entry.value, other.value)) {
-                    in_any = true;
-                    break;
-                }
-            }
-            if (in_any) break;
-        }
-        if (!in_any) try result.set(ctx.allocator, entry.key, entry.value);
-    }
-    return .{ .array = result };
-}
 
 fn deepReplace(ctx: *NativeContext, base: *PhpArray, overlay: *PhpArray) RuntimeError!*PhpArray {
     var result = try ctx.createArray();
@@ -1268,31 +1191,6 @@ fn array_merge_recursive(ctx: *NativeContext, args: []const Value) RuntimeError!
     return .{ .array = result };
 }
 
-fn array_intersect_assoc(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len < 2 or args[0] != .array) return .null;
-    const src = args[0].array;
-
-    var result = try ctx.createArray();
-    for (src.entries.items) |entry| {
-        var in_all = true;
-        for (args[1..]) |arg| {
-            if (arg != .array) continue;
-            var found = false;
-            for (arg.array.entries.items) |other| {
-                if (entry.key.eql(other.key) and Value.equal(entry.value, other.value)) {
-                    found = true;
-                    break;
-                }
-            }
-            if (!found) {
-                in_all = false;
-                break;
-            }
-        }
-        if (in_all) try result.set(ctx.allocator, entry.key, entry.value);
-    }
-    return .{ .array = result };
-}
 
 fn array_multisort(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len == 0 or args[0] != .array) return .{ .bool = false };
