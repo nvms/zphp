@@ -65,262 +65,17 @@ pub const NativeContext = struct {
         return self.vm.callMethod(obj, method, args);
     }
 
-    // write a value back to the caller's variable at the given argument position.
-    // uses bytecode scan to find the variable name or array access path
     pub fn setCallerVar(self: *NativeContext, arg_index: usize, arg_count: usize, value: Value) void {
         const vm = self.vm;
         if (vm.frame_count == 0) return;
-        const caller = &vm.frames[vm.frame_count - 1];
-        const chunk = caller.chunk;
-        if (caller.ip < 4) return;
-        const call_pos = caller.ip - 4;
-        const code = chunk.code.items;
-
-        const max_scan = arg_count * 12;
-        const region_start = if (call_pos > max_scan) call_pos - max_scan else 0;
-
-        var instrs: [128]usize = undefined;
-        var instr_count: usize = 0;
-        var try_start = region_start;
-        while (try_start < call_pos) : (try_start += 1) {
-            var pos = try_start;
-            var count: usize = 0;
-            while (pos < call_pos and count < 128) {
-                instrs[count] = pos;
-                count += 1;
-                pos += OpCode.widthFromByte(code[pos]);
-            }
-            if (pos == call_pos) {
-                instr_count = count;
-                break;
-            }
-        }
-        if (instr_count == 0) return;
-
-        var arg_sources: [16]RefSource = .{.none} ** 16;
-        var scan_idx: usize = arg_count;
-        var i = instr_count;
-
-        while (scan_idx > 0 and i > 0) {
-            scan_idx -= 1;
-            var depth: i32 = 0;
-            const arg_end = i;
-            var bad_op = false;
-            while (i > 0 and depth < 1) {
-                i -= 1;
-                const op: OpCode = std.meta.intToEnum(OpCode, code[instrs[i]]) catch {
-                    bad_op = true;
-                    break;
-                };
-                depth += @as(i32, op.stackEffect());
-            }
-            if (bad_op or depth < 1) break;
-
-            const arg_ic = arg_end - i;
-
-            if (arg_ic == 1) {
-                const ip = instrs[i];
-                if (code[ip] == @intFromEnum(OpCode.get_var)) {
-                    const const_idx = (@as(u16, code[ip + 1]) << 8) | code[ip + 2];
-                    if (const_idx < chunk.constants.items.len) {
-                        arg_sources[scan_idx] = .{ .simple = chunk.constants.items[const_idx].string };
-                    }
-                } else if (code[ip] == @intFromEnum(OpCode.get_local)) {
-                    const slot = (@as(u16, code[ip + 1]) << 8) | code[ip + 2];
-                    const sn = if (caller.func) |func| func.slot_names else vm.global_slot_names;
-                    if (slot < sn.len) {
-                        arg_sources[scan_idx] = .{ .simple = sn[slot] };
-                    }
-                }
-            } else if (arg_ic == 2) {
-                const first_ip = instrs[i];
-                const second_ip = instrs[i + 1];
-                if (code[second_ip] == @intFromEnum(OpCode.get_prop)) {
-                    var var_name: ?[]const u8 = null;
-                    var is_local = false;
-                    var slot: u16 = 0;
-                    if (code[first_ip] == @intFromEnum(OpCode.get_var)) {
-                        const ci = (@as(u16, code[first_ip + 1]) << 8) | code[first_ip + 2];
-                        if (ci < chunk.constants.items.len) var_name = chunk.constants.items[ci].string;
-                    } else if (code[first_ip] == @intFromEnum(OpCode.get_local)) {
-                        slot = (@as(u16, code[first_ip + 1]) << 8) | code[first_ip + 2];
-                        const sn = if (caller.func) |func| func.slot_names else vm.global_slot_names;
-                        if (slot < sn.len) {
-                            var_name = sn[slot];
-                            is_local = true;
-                        }
-                    }
-                    if (var_name) |vn| {
-                        const prop_ci = (@as(u16, code[second_ip + 1]) << 8) | code[second_ip + 2];
-                        if (prop_ci < chunk.constants.items.len) {
-                            if (chunk.constants.items[prop_ci] == .string) {
-                                arg_sources[scan_idx] = .{ .object_prop = .{
-                                    .var_name = vn,
-                                    .is_local = is_local,
-                                    .slot = slot,
-                                    .prop_name = chunk.constants.items[prop_ci].string,
-                                } };
-                            }
-                        }
-                    }
-                }
-            } else if (arg_ic >= 3) {
-                const first_ip = instrs[i];
-                const last_ip = instrs[i + arg_ic - 1];
-                if (arg_ic == 3 and code[last_ip] == @intFromEnum(OpCode.array_get)) {
-                    const mid_ip = instrs[i + 1];
-                    var var_name: ?[]const u8 = null;
-                    var is_local = false;
-                    var slot: u16 = 0;
-                    if (code[first_ip] == @intFromEnum(OpCode.get_var)) {
-                        const ci = (@as(u16, code[first_ip + 1]) << 8) | code[first_ip + 2];
-                        if (ci < chunk.constants.items.len) var_name = chunk.constants.items[ci].string;
-                    } else if (code[first_ip] == @intFromEnum(OpCode.get_local)) {
-                        slot = (@as(u16, code[first_ip + 1]) << 8) | code[first_ip + 2];
-                        const sn = if (caller.func) |func| func.slot_names else vm.global_slot_names;
-                        if (slot < sn.len) {
-                            var_name = sn[slot];
-                            is_local = true;
-                        }
-                    }
-                    if (var_name) |vn| {
-                        var key_val: ?Value = null;
-                        if (code[mid_ip] == @intFromEnum(OpCode.constant)) {
-                            const ci = (@as(u16, code[mid_ip + 1]) << 8) | code[mid_ip + 2];
-                            if (ci < chunk.constants.items.len) key_val = chunk.constants.items[ci];
-                        } else if (code[mid_ip] == @intFromEnum(OpCode.get_var)) {
-                            const ci = (@as(u16, code[mid_ip + 1]) << 8) | code[mid_ip + 2];
-                            if (ci < chunk.constants.items.len) {
-                                if (chunk.constants.items[ci] == .string) {
-                                    const kname = chunk.constants.items[ci].string;
-                                    key_val = caller.vars.get(kname);
-                                    if (key_val == null and caller.locals.len > 0) {
-                                        const sn = if (caller.func) |func| func.slot_names else vm.global_slot_names;
-                                        for (sn, 0..) |sn_name, si| {
-                                            if (std.mem.eql(u8, sn_name, kname)) {
-                                                if (si < caller.locals.len) key_val = caller.locals[si];
-                                                break;
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        } else if (code[mid_ip] == @intFromEnum(OpCode.get_local)) {
-                            const kslot = (@as(u16, code[mid_ip + 1]) << 8) | code[mid_ip + 2];
-                            if (kslot < caller.locals.len) key_val = caller.locals[kslot];
-                        }
-                        if (key_val) |kv| {
-                            arg_sources[scan_idx] = .{ .array_elem = .{
-                                .var_name = vn,
-                                .is_local = is_local,
-                                .slot = slot,
-                                .key = kv,
-                            } };
-                        }
-                    }
-                } else if (code[last_ip] == @intFromEnum(OpCode.get_prop) or code[last_ip] == @intFromEnum(OpCode.get_prop_dynamic)) {
-                    var var_name: ?[]const u8 = null;
-                    var is_local = false;
-                    var slot: u16 = 0;
-                    if (code[first_ip] == @intFromEnum(OpCode.get_var)) {
-                        const ci = (@as(u16, code[first_ip + 1]) << 8) | code[first_ip + 2];
-                        if (ci < chunk.constants.items.len) var_name = chunk.constants.items[ci].string;
-                    } else if (code[first_ip] == @intFromEnum(OpCode.get_local)) {
-                        slot = (@as(u16, code[first_ip + 1]) << 8) | code[first_ip + 2];
-                        const sn = if (caller.func) |func| func.slot_names else vm.global_slot_names;
-                        if (slot < sn.len) {
-                            var_name = sn[slot];
-                            is_local = true;
-                        }
-                    }
-                    if (var_name) |vn| {
-                        var props: [4]?[]const u8 = .{ null, null, null, null };
-                        var valid = true;
-                        var prop_count: usize = 0;
-                        const is_dynamic = code[last_ip] == @intFromEnum(OpCode.get_prop_dynamic);
-                        // for dynamic: skip the last two instructions (name_source + get_prop_dynamic)
-                        // for static: skip only the last instruction (handled below)
-                        const chain_end = if (is_dynamic) arg_ic - 2 else arg_ic - 1;
-                        for (1..chain_end) |pi| {
-                            const pip = instrs[i + pi];
-                            if (code[pip] == @intFromEnum(OpCode.get_prop)) {
-                                const pci = (@as(u16, code[pip + 1]) << 8) | code[pip + 2];
-                                if (pci < chunk.constants.items.len and chunk.constants.items[pci] == .string) {
-                                    if (prop_count < 4) {
-                                        props[prop_count] = chunk.constants.items[pci].string;
-                                        prop_count += 1;
-                                    }
-                                } else {
-                                    valid = false;
-                                    break;
-                                }
-                            } else {
-                                valid = false;
-                                break;
-                            }
-                        }
-                        if (valid and is_dynamic) {
-                            const name_ip = instrs[i + arg_ic - 2];
-                            var dyn_name: ?[]const u8 = null;
-                            if (code[name_ip] == @intFromEnum(OpCode.get_var)) {
-                                const nci = (@as(u16, code[name_ip + 1]) << 8) | code[name_ip + 2];
-                                if (nci < chunk.constants.items.len and chunk.constants.items[nci] == .string) {
-                                    const kname = chunk.constants.items[nci].string;
-                                    const resolved = caller.vars.get(kname) orelse blk: {
-                                        if (caller.locals.len > 0) {
-                                            const sn = if (caller.func) |func| func.slot_names else vm.global_slot_names;
-                                            for (sn, 0..) |sn_name, si| {
-                                                if (std.mem.eql(u8, sn_name, kname)) {
-                                                    if (si < caller.locals.len) break :blk caller.locals[si];
-                                                    break;
-                                                }
-                                            }
-                                        }
-                                        break :blk null;
-                                    };
-                                    if (resolved) |rv| {
-                                        if (rv == .string) dyn_name = rv.string;
-                                    }
-                                }
-                            } else if (code[name_ip] == @intFromEnum(OpCode.get_local)) {
-                                const ns = (@as(u16, code[name_ip + 1]) << 8) | code[name_ip + 2];
-                                if (ns < caller.locals.len) {
-                                    if (caller.locals[ns] == .string) dyn_name = caller.locals[ns].string;
-                                }
-                            }
-                            if (dyn_name) |dn| {
-                                if (prop_count < 4) {
-                                    props[prop_count] = dn;
-                                    prop_count += 1;
-                                }
-                            } else valid = false;
-                        } else if (valid) {
-                            const pci = (@as(u16, code[last_ip + 1]) << 8) | code[last_ip + 2];
-                            if (pci < chunk.constants.items.len and chunk.constants.items[pci] == .string) {
-                                if (prop_count < 4) {
-                                    props[prop_count] = chunk.constants.items[pci].string;
-                                    prop_count += 1;
-                                }
-                            } else valid = false;
-                        }
-                        if (valid and prop_count > 0) {
-                            arg_sources[scan_idx] = .{ .chained_prop = .{
-                                .var_name = vn,
-                                .is_local = is_local,
-                                .slot = slot,
-                                .props = props,
-                            } };
-                        }
-                    }
-                }
-            }
-        }
+        const arg_sources = vm.scanCallerArgSources(arg_count);
+        const caller = vm.currentFrame();
 
         switch (arg_sources[arg_index]) {
             .simple => |var_name| {
                 caller.vars.put(vm.allocator, var_name, value) catch return;
-                const sn2 = if (caller.func) |func| func.slot_names else vm.global_slot_names;
-                for (sn2, 0..) |sn_name, si| {
+                const sn = if (caller.func) |func| func.slot_names else vm.global_slot_names;
+                for (sn, 0..) |sn_name, si| {
                     if (std.mem.eql(u8, sn_name, var_name)) {
                         if (si < caller.locals.len) caller.locals[si] = value;
                         break;
@@ -340,21 +95,9 @@ pub const NativeContext = struct {
                 }
             },
             .chained_prop => |cp| {
-                var cur = vm.resolveCallerVar(cp.var_name, cp.is_local, cp.slot);
-                var last_prop: ?[]const u8 = null;
-                for (cp.props) |mp| {
-                    const pn = mp orelse break;
-                    if (last_prop) |lp| {
-                        if (cur == .object) {
-                            cur = cur.object.get(lp);
-                        } else break;
-                    }
-                    last_prop = pn;
-                }
-                if (last_prop) |lp| {
-                    if (cur == .object) {
-                        cur.object.set(vm.allocator, lp, value) catch return;
-                    }
+                const target = vm.resolveChainedProp(cp);
+                if (target) |t| {
+                    t.obj.set(vm.allocator, t.prop, value) catch return;
                 }
             },
             .none => {},
@@ -3612,86 +3355,10 @@ pub const VM = struct {
                             }
                             try self.fillDefaults(&new_vars, func, ac);
                         }
-                        // set up ref cells for by-ref params
                         var method_refs: std.StringHashMapUnmanaged(*Value) = .{};
                         var method_array_bindings: std.ArrayListUnmanaged(ArrayRefBinding) = .{};
                         var method_object_bindings: std.ArrayListUnmanaged(ObjectRefBinding) = .{};
-                        if (func.ref_params.len > 0) {
-                            const arg_sources = self.scanCallerArgSources(ac);
-                            for (0..@min(ac, func.ref_params.len)) |ri| {
-                                if (func.ref_params[ri]) {
-                                    switch (arg_sources[ri]) {
-                                        .simple => |caller_var| {
-                                            if (self.currentFrame().ref_slots.get(caller_var)) |existing_cell| {
-                                                existing_cell.* = new_vars.get(func.params[ri]) orelse .null;
-                                                try method_refs.put(self.allocator, func.params[ri], existing_cell);
-                                            } else {
-                                                const cell = try self.allocator.create(Value);
-                                                cell.* = new_vars.get(func.params[ri]) orelse .null;
-                                                try self.ref_cells.append(self.allocator, cell);
-                                                try self.currentFrame().ref_slots.put(self.allocator, caller_var, cell);
-                                                try method_refs.put(self.allocator, func.params[ri], cell);
-                                            }
-                                        },
-                                        .array_elem => |ae| {
-                                            const arr_val = self.resolveCallerVar(ae.var_name, ae.is_local, ae.slot);
-                                            if (arr_val == .array) {
-                                                const cell = try self.allocator.create(Value);
-                                                cell.* = new_vars.get(func.params[ri]) orelse .null;
-                                                try self.ref_cells.append(self.allocator, cell);
-                                                try method_refs.put(self.allocator, func.params[ri], cell);
-                                                try method_array_bindings.append(self.allocator, .{
-                                                    .cell = cell,
-                                                    .array = arr_val.array,
-                                                    .key = Value.toArrayKey(ae.key),
-                                                });
-                                            }
-                                        },
-                                        .object_prop => |obj_ref| {
-                                            const ref_obj_val = self.resolveCallerVar(obj_ref.var_name, obj_ref.is_local, obj_ref.slot);
-                                            if (ref_obj_val == .object) {
-                                                const cell = try self.allocator.create(Value);
-                                                cell.* = new_vars.get(func.params[ri]) orelse .null;
-                                                try self.ref_cells.append(self.allocator, cell);
-                                                try method_refs.put(self.allocator, func.params[ri], cell);
-                                                try method_object_bindings.append(self.allocator, .{
-                                                    .cell = cell,
-                                                    .object = ref_obj_val.object,
-                                                    .prop_name = obj_ref.prop_name,
-                                                });
-                                            }
-                                        },
-                                        .chained_prop => |cp| {
-                                            var cur = self.resolveCallerVar(cp.var_name, cp.is_local, cp.slot);
-                                            var last_prop: ?[]const u8 = null;
-                                            for (cp.props) |mp| {
-                                                const pn = mp orelse break;
-                                                if (last_prop) |lp| {
-                                                    if (cur == .object) {
-                                                        cur = cur.object.get(lp);
-                                                    } else break;
-                                                }
-                                                last_prop = pn;
-                                            }
-                                            if (last_prop) |lp| {
-                                                if (cur == .object) {
-                                                    const cell = try self.allocator.create(Value);
-                                                    cell.* = new_vars.get(func.params[ri]) orelse .null;
-                                                    try self.ref_cells.append(self.allocator, cell);
-                                                    try method_refs.put(self.allocator, func.params[ri], cell);
-                                                    try method_object_bindings.append(self.allocator, .{
-                                                        .cell = cell,
-                                                        .object = cur.object,
-                                                        .prop_name = lp,
-                                                    });
-                                                }
-                                            }
-                                        },
-                                        .none => {},
-                                    }
-                                }
-                            }
-                        }
+                        try self.bindRefParams(ac, func, &new_vars, &method_refs, &method_array_bindings, &method_object_bindings);
                         self.saveFrameArgs(arg_count);
                         self.sp -= ac;
                         self.sp -= 1;
@@ -6184,6 +5851,98 @@ pub const VM = struct {
         return sources;
     }
 
+    const ChainedPropTarget = struct { obj: *PhpObject, prop: []const u8 };
+
+    fn resolveChainedProp(self: *VM, cp: std.meta.TagPayload(RefSource, .chained_prop)) ?ChainedPropTarget {
+        var cur = self.resolveCallerVar(cp.var_name, cp.is_local, cp.slot);
+        var last_prop: ?[]const u8 = null;
+        for (cp.props) |mp| {
+            const pn = mp orelse break;
+            if (last_prop) |lp| {
+                if (cur == .object) {
+                    cur = cur.object.get(lp);
+                } else return null;
+            }
+            last_prop = pn;
+        }
+        if (last_prop) |lp| {
+            if (cur == .object) return .{ .obj = cur.object, .prop = lp };
+        }
+        return null;
+    }
+
+    fn bindRefParams(
+        self: *VM,
+        ac: usize,
+        func: *const ObjFunction,
+        new_vars: *std.StringHashMapUnmanaged(Value),
+        refs: *std.StringHashMapUnmanaged(*Value),
+        array_bindings: *std.ArrayListUnmanaged(ArrayRefBinding),
+        object_bindings: *std.ArrayListUnmanaged(ObjectRefBinding),
+    ) !void {
+        if (func.ref_params.len == 0) return;
+        const arg_sources = self.scanCallerArgSources(ac);
+        for (0..@min(ac, func.ref_params.len)) |ri| {
+            if (!func.ref_params[ri]) continue;
+            switch (arg_sources[ri]) {
+                .simple => |caller_var| {
+                    if (self.currentFrame().ref_slots.get(caller_var)) |existing_cell| {
+                        existing_cell.* = new_vars.get(func.params[ri]) orelse .null;
+                        try refs.put(self.allocator, func.params[ri], existing_cell);
+                    } else {
+                        const cell = try self.allocator.create(Value);
+                        cell.* = new_vars.get(func.params[ri]) orelse .null;
+                        try self.ref_cells.append(self.allocator, cell);
+                        try self.currentFrame().ref_slots.put(self.allocator, caller_var, cell);
+                        try refs.put(self.allocator, func.params[ri], cell);
+                    }
+                },
+                .array_elem => |ae| {
+                    const arr_val = self.resolveCallerVar(ae.var_name, ae.is_local, ae.slot);
+                    if (arr_val == .array) {
+                        const cell = try self.allocator.create(Value);
+                        cell.* = new_vars.get(func.params[ri]) orelse .null;
+                        try self.ref_cells.append(self.allocator, cell);
+                        try refs.put(self.allocator, func.params[ri], cell);
+                        try array_bindings.append(self.allocator, .{
+                            .cell = cell,
+                            .array = arr_val.array,
+                            .key = Value.toArrayKey(ae.key),
+                        });
+                    }
+                },
+                .object_prop => |obj_ref| {
+                    const obj_val = self.resolveCallerVar(obj_ref.var_name, obj_ref.is_local, obj_ref.slot);
+                    if (obj_val == .object) {
+                        const cell = try self.allocator.create(Value);
+                        cell.* = new_vars.get(func.params[ri]) orelse .null;
+                        try self.ref_cells.append(self.allocator, cell);
+                        try refs.put(self.allocator, func.params[ri], cell);
+                        try object_bindings.append(self.allocator, .{
+                            .cell = cell,
+                            .object = obj_val.object,
+                            .prop_name = obj_ref.prop_name,
+                        });
+                    }
+                },
+                .chained_prop => |cp| {
+                    if (self.resolveChainedProp(cp)) |target| {
+                        const cell = try self.allocator.create(Value);
+                        cell.* = new_vars.get(func.params[ri]) orelse .null;
+                        try self.ref_cells.append(self.allocator, cell);
+                        try refs.put(self.allocator, func.params[ri], cell);
+                        try object_bindings.append(self.allocator, .{
+                            .cell = cell,
+                            .object = target.obj,
+                            .prop_name = target.prop,
+                        });
+                    }
+                },
+                .none => {},
+            }
+        }
+    }
+
     fn writebackStatics(self: *VM) !void {
         var i: usize = 0;
         while (i < self.static_vars.items.len) {
@@ -7019,87 +6778,10 @@ pub const VM = struct {
             if (!func.is_variadic) {
                 try self.fillDefaults(&new_vars, func, @min(ac, func.arity));
             }
-            // set up shared ref cells for by-ref params
-            // start with any closure ref captures
             var callee_refs = closure_refs;
             var callee_array_bindings: std.ArrayListUnmanaged(ArrayRefBinding) = .{};
             var callee_object_bindings: std.ArrayListUnmanaged(ObjectRefBinding) = .{};
-            if (func.ref_params.len > 0) {
-                const arg_sources = self.scanCallerArgSources(ac);
-                for (0..@min(ac, func.ref_params.len)) |ri| {
-                    if (func.ref_params[ri]) {
-                        switch (arg_sources[ri]) {
-                            .simple => |caller_var| {
-                                if (self.currentFrame().ref_slots.get(caller_var)) |existing_cell| {
-                                    existing_cell.* = new_vars.get(func.params[ri]) orelse .null;
-                                    try callee_refs.put(self.allocator, func.params[ri], existing_cell);
-                                } else {
-                                    const cell = try self.allocator.create(Value);
-                                    cell.* = new_vars.get(func.params[ri]) orelse .null;
-                                    try self.ref_cells.append(self.allocator, cell);
-                                    try self.currentFrame().ref_slots.put(self.allocator, caller_var, cell);
-                                    try callee_refs.put(self.allocator, func.params[ri], cell);
-                                }
-                            },
-                            .array_elem => |ae| {
-                                const arr_val = self.resolveCallerVar(ae.var_name, ae.is_local, ae.slot);
-                                if (arr_val == .array) {
-                                    const cell = try self.allocator.create(Value);
-                                    cell.* = new_vars.get(func.params[ri]) orelse .null;
-                                    try self.ref_cells.append(self.allocator, cell);
-                                    try callee_refs.put(self.allocator, func.params[ri], cell);
-                                    try callee_array_bindings.append(self.allocator, .{
-                                        .cell = cell,
-                                        .array = arr_val.array,
-                                        .key = Value.toArrayKey(ae.key),
-                                    });
-                                }
-                            },
-                            .object_prop => |obj_ref| {
-                                const obj_val = self.resolveCallerVar(obj_ref.var_name, obj_ref.is_local, obj_ref.slot);
-                                if (obj_val == .object) {
-                                    const cell = try self.allocator.create(Value);
-                                    cell.* = new_vars.get(func.params[ri]) orelse .null;
-                                    try self.ref_cells.append(self.allocator, cell);
-                                    try callee_refs.put(self.allocator, func.params[ri], cell);
-                                    try callee_object_bindings.append(self.allocator, .{
-                                        .cell = cell,
-                                        .object = obj_val.object,
-                                        .prop_name = obj_ref.prop_name,
-                                    });
-                                }
-                            },
-                            .chained_prop => |cp| {
-                                var cur = self.resolveCallerVar(cp.var_name, cp.is_local, cp.slot);
-                                var last_prop: ?[]const u8 = null;
-                                for (cp.props) |mp| {
-                                    const pn = mp orelse break;
-                                    if (last_prop) |lp| {
-                                        if (cur == .object) {
-                                            cur = cur.object.get(lp);
-                                        } else break;
-                                    }
-                                    last_prop = pn;
-                                }
-                                if (last_prop) |lp| {
-                                    if (cur == .object) {
-                                        const cell = try self.allocator.create(Value);
-                                        cell.* = new_vars.get(func.params[ri]) orelse .null;
-                                        try self.ref_cells.append(self.allocator, cell);
-                                        try callee_refs.put(self.allocator, func.params[ri], cell);
-                                        try callee_object_bindings.append(self.allocator, .{
-                                            .cell = cell,
-                                            .object = cur.object,
-                                            .prop_name = lp,
-                                        });
-                                    }
-                                }
-                            },
-                            .none => {},
-                        }
-                    }
-                }
-            }
+            try self.bindRefParams(ac, func, &new_vars, &callee_refs, &callee_array_bindings, &callee_object_bindings);
 
             if (func.is_generator) {
                 callee_refs.deinit(self.allocator);
