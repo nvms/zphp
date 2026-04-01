@@ -164,10 +164,10 @@ pub const NativeContext = struct {
                         }
                     }
                 }
-            } else if (arg_ic == 3) {
-                const last_ip = instrs[i + 2];
-                if (code[last_ip] == @intFromEnum(OpCode.array_get)) {
-                    const first_ip = instrs[i];
+            } else if (arg_ic >= 3) {
+                const first_ip = instrs[i];
+                const last_ip = instrs[i + arg_ic - 1];
+                if (arg_ic == 3 and code[last_ip] == @intFromEnum(OpCode.array_get)) {
                     const mid_ip = instrs[i + 1];
                     var var_name: ?[]const u8 = null;
                     var is_local = false;
@@ -218,6 +218,100 @@ pub const NativeContext = struct {
                             } };
                         }
                     }
+                } else if (code[last_ip] == @intFromEnum(OpCode.get_prop) or code[last_ip] == @intFromEnum(OpCode.get_prop_dynamic)) {
+                    var var_name: ?[]const u8 = null;
+                    var is_local = false;
+                    var slot: u16 = 0;
+                    if (code[first_ip] == @intFromEnum(OpCode.get_var)) {
+                        const ci = (@as(u16, code[first_ip + 1]) << 8) | code[first_ip + 2];
+                        if (ci < chunk.constants.items.len) var_name = chunk.constants.items[ci].string;
+                    } else if (code[first_ip] == @intFromEnum(OpCode.get_local)) {
+                        slot = (@as(u16, code[first_ip + 1]) << 8) | code[first_ip + 2];
+                        const sn = if (caller.func) |func| func.slot_names else vm.global_slot_names;
+                        if (slot < sn.len) {
+                            var_name = sn[slot];
+                            is_local = true;
+                        }
+                    }
+                    if (var_name) |vn| {
+                        var props: [4]?[]const u8 = .{ null, null, null, null };
+                        var valid = true;
+                        var prop_count: usize = 0;
+                        const is_dynamic = code[last_ip] == @intFromEnum(OpCode.get_prop_dynamic);
+                        // for dynamic: skip the last two instructions (name_source + get_prop_dynamic)
+                        // for static: skip only the last instruction (handled below)
+                        const chain_end = if (is_dynamic) arg_ic - 2 else arg_ic - 1;
+                        for (1..chain_end) |pi| {
+                            const pip = instrs[i + pi];
+                            if (code[pip] == @intFromEnum(OpCode.get_prop)) {
+                                const pci = (@as(u16, code[pip + 1]) << 8) | code[pip + 2];
+                                if (pci < chunk.constants.items.len and chunk.constants.items[pci] == .string) {
+                                    if (prop_count < 4) {
+                                        props[prop_count] = chunk.constants.items[pci].string;
+                                        prop_count += 1;
+                                    }
+                                } else {
+                                    valid = false;
+                                    break;
+                                }
+                            } else {
+                                valid = false;
+                                break;
+                            }
+                        }
+                        if (valid and is_dynamic) {
+                            const name_ip = instrs[i + arg_ic - 2];
+                            var dyn_name: ?[]const u8 = null;
+                            if (code[name_ip] == @intFromEnum(OpCode.get_var)) {
+                                const nci = (@as(u16, code[name_ip + 1]) << 8) | code[name_ip + 2];
+                                if (nci < chunk.constants.items.len and chunk.constants.items[nci] == .string) {
+                                    const kname = chunk.constants.items[nci].string;
+                                    const resolved = caller.vars.get(kname) orelse blk: {
+                                        if (caller.locals.len > 0) {
+                                            const sn = if (caller.func) |func| func.slot_names else vm.global_slot_names;
+                                            for (sn, 0..) |sn_name, si| {
+                                                if (std.mem.eql(u8, sn_name, kname)) {
+                                                    if (si < caller.locals.len) break :blk caller.locals[si];
+                                                    break;
+                                                }
+                                            }
+                                        }
+                                        break :blk null;
+                                    };
+                                    if (resolved) |rv| {
+                                        if (rv == .string) dyn_name = rv.string;
+                                    }
+                                }
+                            } else if (code[name_ip] == @intFromEnum(OpCode.get_local)) {
+                                const ns = (@as(u16, code[name_ip + 1]) << 8) | code[name_ip + 2];
+                                if (ns < caller.locals.len) {
+                                    if (caller.locals[ns] == .string) dyn_name = caller.locals[ns].string;
+                                }
+                            }
+                            if (dyn_name) |dn| {
+                                if (prop_count < 4) {
+                                    props[prop_count] = dn;
+                                    prop_count += 1;
+                                }
+                            } else valid = false;
+                        } else if (valid) {
+                            const pci = (@as(u16, code[last_ip + 1]) << 8) | code[last_ip + 2];
+                            if (pci < chunk.constants.items.len and chunk.constants.items[pci] == .string) {
+                                if (prop_count < 4) {
+                                    props[prop_count] = chunk.constants.items[pci].string;
+                                    prop_count += 1;
+                                }
+                            } else valid = false;
+                        }
+                        if (valid and prop_count > 0) {
+                            arg_sources[scan_idx] = .{ .chained_prop = .{
+                                .var_name = vn,
+                                .is_local = is_local,
+                                .slot = slot,
+                                .props = props,
+                            } };
+                        }
+                    }
                 }
             }
         }
@@ -243,6 +337,24 @@ pub const NativeContext = struct {
                 const obj_val = vm.resolveCallerVar(op.var_name, op.is_local, op.slot);
                 if (obj_val == .object) {
                     obj_val.object.set(vm.allocator, op.prop_name, value) catch return;
+                }
+            },
+            .chained_prop => |cp| {
+                var cur = vm.resolveCallerVar(cp.var_name, cp.is_local, cp.slot);
+                var last_prop: ?[]const u8 = null;
+                for (cp.props) |mp| {
+                    const pn = mp orelse break;
+                    if (last_prop) |lp| {
+                        if (cur == .object) {
+                            cur = cur.object.get(lp);
+                        } else break;
+                    }
+                    last_prop = pn;
+                }
+                if (last_prop) |lp| {
+                    if (cur == .object) {
+                        cur.object.set(vm.allocator, lp, value) catch return;
+                    }
                 }
             },
             .none => {},
@@ -303,6 +415,12 @@ const RefSource = union(enum) {
         is_local: bool,
         slot: u16,
         prop_name: []const u8,
+    },
+    chained_prop: struct {
+        var_name: []const u8,
+        is_local: bool,
+        slot: u16,
+        props: [4]?[]const u8,
     },
 };
 
@@ -3543,6 +3661,32 @@ pub const VM = struct {
                                                 });
                                             }
                                         },
+                                        .chained_prop => |cp| {
+                                            var cur = self.resolveCallerVar(cp.var_name, cp.is_local, cp.slot);
+                                            var last_prop: ?[]const u8 = null;
+                                            for (cp.props) |mp| {
+                                                const pn = mp orelse break;
+                                                if (last_prop) |lp| {
+                                                    if (cur == .object) {
+                                                        cur = cur.object.get(lp);
+                                                    } else break;
+                                                }
+                                                last_prop = pn;
+                                            }
+                                            if (last_prop) |lp| {
+                                                if (cur == .object) {
+                                                    const cell = try self.allocator.create(Value);
+                                                    cell.* = new_vars.get(func.params[ri]) orelse .null;
+                                                    try self.ref_cells.append(self.allocator, cell);
+                                                    try method_refs.put(self.allocator, func.params[ri], cell);
+                                                    try method_object_bindings.append(self.allocator, .{
+                                                        .cell = cell,
+                                                        .object = cur.object,
+                                                        .prop_name = lp,
+                                                    });
+                                                }
+                                            }
+                                        },
                                         .none => {},
                                     }
                                 }
@@ -5888,11 +6032,10 @@ pub const VM = struct {
                         }
                     }
                 }
-            } else if (arg_instr_count == 3) {
-                // get_var/get_local + constant/get_var/get_local + array_get
-                const last_ip = instrs[i + 2];
-                if (code[last_ip] == @intFromEnum(OpCode.array_get)) {
-                    const first_ip = instrs[i];
+            } else if (arg_instr_count >= 3) {
+                const first_ip = instrs[i];
+                const last_ip = instrs[i + arg_instr_count - 1];
+                if (arg_instr_count == 3 and code[last_ip] == @intFromEnum(OpCode.array_get)) {
                     const mid_ip = instrs[i + 1];
                     var var_name: ?[]const u8 = null;
                     var is_local = false;
@@ -5940,6 +6083,98 @@ pub const VM = struct {
                                 .is_local = is_local,
                                 .slot = slot,
                                 .key = kv,
+                            } };
+                        }
+                    }
+                } else if (code[last_ip] == @intFromEnum(OpCode.get_prop) or code[last_ip] == @intFromEnum(OpCode.get_prop_dynamic)) {
+                    var var_name: ?[]const u8 = null;
+                    var is_local = false;
+                    var slot: u16 = 0;
+                    if (code[first_ip] == @intFromEnum(OpCode.get_var)) {
+                        const ci = (@as(u16, code[first_ip + 1]) << 8) | code[first_ip + 2];
+                        if (ci < chunk.constants.items.len) var_name = chunk.constants.items[ci].string;
+                    } else if (code[first_ip] == @intFromEnum(OpCode.get_local)) {
+                        slot = (@as(u16, code[first_ip + 1]) << 8) | code[first_ip + 2];
+                        const sn = if (caller.func) |func| func.slot_names else self.global_slot_names;
+                        if (slot < sn.len) {
+                            var_name = sn[slot];
+                            is_local = true;
+                        }
+                    }
+                    if (var_name) |vn| {
+                        var props: [4]?[]const u8 = .{ null, null, null, null };
+                        var valid = true;
+                        var prop_count: usize = 0;
+                        const is_dynamic = code[last_ip] == @intFromEnum(OpCode.get_prop_dynamic);
+                        const chain_end = if (is_dynamic) arg_instr_count - 2 else arg_instr_count - 1;
+                        for (1..chain_end) |pi| {
+                            const pip = instrs[i + pi];
+                            if (code[pip] == @intFromEnum(OpCode.get_prop)) {
+                                const pci = (@as(u16, code[pip + 1]) << 8) | code[pip + 2];
+                                if (pci < chunk.constants.items.len and chunk.constants.items[pci] == .string) {
+                                    if (prop_count < 4) {
+                                        props[prop_count] = chunk.constants.items[pci].string;
+                                        prop_count += 1;
+                                    }
+                                } else {
+                                    valid = false;
+                                    break;
+                                }
+                            } else {
+                                valid = false;
+                                break;
+                            }
+                        }
+                        if (valid and is_dynamic) {
+                            const name_ip = instrs[i + arg_instr_count - 2];
+                            var dyn_name: ?[]const u8 = null;
+                            if (code[name_ip] == @intFromEnum(OpCode.get_var)) {
+                                const nci = (@as(u16, code[name_ip + 1]) << 8) | code[name_ip + 2];
+                                if (nci < chunk.constants.items.len and chunk.constants.items[nci] == .string) {
+                                    const kname = chunk.constants.items[nci].string;
+                                    const resolved = caller.vars.get(kname) orelse blk: {
+                                        if (caller.locals.len > 0) {
+                                            const sn = if (caller.func) |func| func.slot_names else self.global_slot_names;
+                                            for (sn, 0..) |sn_name, si| {
+                                                if (std.mem.eql(u8, sn_name, kname)) {
+                                                    if (si < caller.locals.len) break :blk caller.locals[si];
+                                                    break;
+                                                }
+                                            }
+                                        }
+                                        break :blk null;
+                                    };
+                                    if (resolved) |rv| {
+                                        if (rv == .string) dyn_name = rv.string;
+                                    }
+                                }
+                            } else if (code[name_ip] == @intFromEnum(OpCode.get_local)) {
+                                const ns = (@as(u16, code[name_ip + 1]) << 8) | code[name_ip + 2];
+                                if (ns < caller.locals.len) {
+                                    if (caller.locals[ns] == .string) dyn_name = caller.locals[ns].string;
+                                }
+                            }
+                            if (dyn_name) |dn| {
+                                if (prop_count < 4) {
+                                    props[prop_count] = dn;
+                                    prop_count += 1;
+                                }
+                            } else valid = false;
+                        } else if (valid) {
+                            const pci = (@as(u16, code[last_ip + 1]) << 8) | code[last_ip + 2];
+                            if (pci < chunk.constants.items.len and chunk.constants.items[pci] == .string) {
+                                if (prop_count < 4) {
+                                    props[prop_count] = chunk.constants.items[pci].string;
+                                    prop_count += 1;
+                                }
+                            } else valid = false;
+                        }
+                        if (valid and prop_count > 0) {
+                            sources[scan_idx] = .{ .chained_prop = .{
+                                .var_name = vn,
+                                .is_local = is_local,
+                                .slot = slot,
+                                .props = props,
                             } };
                         }
                     }
@@ -6832,6 +7067,32 @@ pub const VM = struct {
                                         .object = obj_val.object,
                                         .prop_name = obj_ref.prop_name,
                                     });
+                                }
+                            },
+                            .chained_prop => |cp| {
+                                var cur = self.resolveCallerVar(cp.var_name, cp.is_local, cp.slot);
+                                var last_prop: ?[]const u8 = null;
+                                for (cp.props) |mp| {
+                                    const pn = mp orelse break;
+                                    if (last_prop) |lp| {
+                                        if (cur == .object) {
+                                            cur = cur.object.get(lp);
+                                        } else break;
+                                    }
+                                    last_prop = pn;
+                                }
+                                if (last_prop) |lp| {
+                                    if (cur == .object) {
+                                        const cell = try self.allocator.create(Value);
+                                        cell.* = new_vars.get(func.params[ri]) orelse .null;
+                                        try self.ref_cells.append(self.allocator, cell);
+                                        try callee_refs.put(self.allocator, func.params[ri], cell);
+                                        try callee_object_bindings.append(self.allocator, .{
+                                            .cell = cell,
+                                            .object = cur.object,
+                                            .prop_name = lp,
+                                        });
+                                    }
                                 }
                             },
                             .none => {},
