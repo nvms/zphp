@@ -213,4 +213,52 @@ $items2 = ['a', 'b', 'c'];
 swap_elems($items2, 0, 2);
 echo implode(",", $items2) . "\n"; // c,b,a
 
+// === object property ref ===
+
+class RefTarget {
+    public $count = 0;
+    public $name = "hello";
+}
+
+function inc_prop(&$x) { $x++; }
+$rt = new RefTarget();
+inc_prop($rt->count);
+inc_prop($rt->count);
+inc_prop($rt->count);
+echo $rt->count . "\n"; // 3
+
+// string property ref
+function append_prop(&$s, $suffix) { $s .= $suffix; }
+$rt2 = new RefTarget();
+append_prop($rt2->name, " world");
+echo $rt2->name . "\n"; // hello world
+
+// swap object prop with variable
+function swap_vals(&$a, &$b) { $temp = $a; $a = $b; $b = $temp; }
+$rt3 = new RefTarget();
+$rt3->count = 10;
+$other = 99;
+swap_vals($rt3->count, $other);
+echo $rt3->count . "\n"; // 99
+echo $other . "\n"; // 10
+
+// mixed object prop + simple var
+function add_to_ref(&$target, &$source) { $target += $source; $source = 0; }
+$rt4 = new RefTarget();
+$rt4->count = 5;
+$donor = 10;
+add_to_ref($rt4->count, $donor);
+echo $rt4->count . "\n"; // 15
+echo $donor . "\n"; // 0
+
+// object prop ref via method call
+class Modifier {
+    public function bump(&$val) { $val += 100; }
+}
+$rt5 = new RefTarget();
+$rt5->count = 1;
+$mod = new Modifier();
+$mod->bump($rt5->count);
+echo $rt5->count . "\n"; // 101
+
 echo "done\n";

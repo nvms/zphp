@@ -191,10 +191,14 @@ pub const OpCode = enum(u8) {
         return switch (self) {
             // push a value
             .constant, .op_null, .op_true, .op_false, .dup, .get_var, .get_local,
-            .get_global, .get_static, .get_prop, .get_prop_dynamic,
+            .get_global, .get_static,
             .get_static_prop, .array_new, .clone_obj, .isset_prop, .isset_index,
             => 1,
+            // pop object, push property value (net 0: pop obj, push val)
+            .get_prop,
+            => 0,
             // binary ops: pop 2, push 1
+            .get_prop_dynamic,
             .isset_prop_dynamic,
             .add, .subtract, .multiply, .divide, .modulo, .power, .concat,
             .bit_and, .bit_or, .bit_xor, .shift_left, .shift_right,

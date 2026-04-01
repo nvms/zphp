@@ -101,6 +101,12 @@ pub const ArrayRefBinding = struct {
     key: PhpArray.Key,
 };
 
+pub const ObjectRefBinding = struct {
+    cell: *Value,
+    object: *PhpObject,
+    prop_name: []const u8,
+};
+
 pub const Generator = struct {
     state: State = .created,
     func: *const ObjFunction,
@@ -158,6 +164,7 @@ pub const Fiber = struct {
         generator: ?*Generator = null,
         ref_slots: std.StringHashMapUnmanaged(*Value),
         ref_array_bindings: std.ArrayListUnmanaged(ArrayRefBinding) = .{},
+        ref_object_bindings: std.ArrayListUnmanaged(ObjectRefBinding) = .{},
     };
 
     pub const SavedHandler = struct {
@@ -172,6 +179,7 @@ pub const Fiber = struct {
             f.vars.deinit(allocator);
             f.ref_slots.deinit(allocator);
             f.ref_array_bindings.deinit(allocator);
+            f.ref_object_bindings.deinit(allocator);
             if (f.locals.len > 0) allocator.free(f.locals);
         }
         self.saved_frames.deinit(allocator);
