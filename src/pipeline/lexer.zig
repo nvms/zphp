@@ -282,6 +282,9 @@ pub const Lexer = struct {
         }
         if (self.match('>')) {
             self.state = .html;
+            // php eats the first newline after ?>
+            if (self.pos < self.source.len and self.source[self.pos] == '\r') self.pos += 1;
+            if (self.pos < self.source.len and self.source[self.pos] == '\n') self.pos += 1;
             return self.makeToken(.close_tag, start);
         }
         if (self.match('?')) {
