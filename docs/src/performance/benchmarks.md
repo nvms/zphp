@@ -8,12 +8,12 @@ Six compute-heavy benchmarks. Best of 5 runs. Startup overhead is subtracted to 
 
 | Benchmark | PHP | zphp | Ratio |
 |---|---|---|---|
-| string_ops | 96 ms | 26 ms | 0.27x |
-| array_ops | 87 ms | 29 ms | 0.33x |
-| objects | 103 ms | 36 ms | 0.35x |
-| closures | 96 ms | 80 ms | 0.83x |
-| loops | 132 ms | 119 ms | 0.90x |
-| fibonacci | 164 ms | 150 ms | 0.91x |
+| string_ops | 97 ms | 27 ms | 0.28x |
+| array_ops | 98 ms | 29 ms | 0.30x |
+| objects | 97 ms | 36 ms | 0.37x |
+| closures | 98 ms | 83 ms | 0.85x |
+| loops | 130 ms | 120 ms | 0.92x |
+| fibonacci | 161 ms | 157 ms | 0.97x |
 
 ```
 zig build -Doptimize=ReleaseFast

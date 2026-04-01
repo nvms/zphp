@@ -15,7 +15,7 @@ zphp aims to run standard PHP code as-is. The following all work the way you'd e
 - **Arrays**: both sequential and associative, nested arrays, array destructuring
 - **Superglobals**: `$_SERVER`, `$_GET`, `$_POST`, `$_COOKIE`, `$_FILES`, `$_ENV`, `$_REQUEST`, `$_SESSION` (in serve mode)
 - **Fibers**: `Fiber`, `Fiber::start`, `Fiber::resume`, `Fiber::suspend`, `Fiber::getReturn`, `Fiber::isRunning`, `Fiber::isTerminated`, `Fiber::isSuspended`, `Fiber::isStarted`, `Fiber::getCurrent`
-- **SPL**: `SplStack`, `SplQueue`, `SplPriorityQueue`, `SplFixedArray`, `SplMinHeap`, `SplMaxHeap`, `ArrayObject`, `ArrayIterator`, `WeakMap`
+- **SPL**: `SplStack`, `SplQueue`, `SplDoublyLinkedList`, `SplPriorityQueue`, `SplFixedArray`, `SplMinHeap`, `SplMaxHeap`, `SplObjectStorage`, `ArrayObject`, `ArrayIterator`, `WeakMap`
 - **Sessions**: `session_start`, `session_destroy`, `session_id`, `$_SESSION`
 - **HTTP functions**: `header()`, `header_remove()`, `http_response_code()`, `setcookie()`, `headers_sent()`, `headers_list()`
 - **Output buffering**: `ob_start`, `ob_get_clean`, `ob_end_clean`, `ob_get_contents`, `ob_get_level`
@@ -23,4 +23,4 @@ zphp aims to run standard PHP code as-is. The following all work the way you'd e
 
 ## Test suite
 
-zphp is validated against PHP 8.4 with 172 compatibility tests and 75 multi-file example projects. Each test runs the same PHP code in both zphp and PHP 8.4, comparing output exactly. A Laravel application (7 harness tests covering Eloquent, Blade, validation, JSON API, middleware, and error handling) is also tested against both runtimes. The test suite runs on every commit.
+zphp is validated against PHP 8.4 with 176 compatibility tests and 75 multi-file example projects. Each test runs the same PHP code in both zphp and PHP 8.4, comparing output exactly. A Laravel application (7 harness tests covering Eloquent, Blade, validation, JSON API, middleware, and error handling) is also tested against both runtimes. The test suite runs on every commit.

@@ -66,7 +66,13 @@ Passing an entire array or object by reference and modifying nested keys inside 
 function set_nested(array &$arr) { $arr['a']['b'] = 99; } // works
 ```
 
-Chains deeper than 4 levels and combined property + array access (`$obj->items['key']`) are not yet supported.
+Combined property + array access also works:
+
+```php
+modify($obj->items['key']); // works
+```
+
+Chains deeper than 4 levels silently skip writeback.
 
 ## Type hint enforcement
 
