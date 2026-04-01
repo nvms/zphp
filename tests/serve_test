@@ -79,6 +79,53 @@ headers=$(curl -si http://localhost:$PORT/headers 2>&1)
 check_contains "custom header X-Custom" "X-Custom: hello" "$headers"
 check_contains "custom header X-Another" "X-Another: world" "$headers"
 
+# test: header replace (default behavior - last value wins)
+replace_hdrs=$(curl -si http://localhost:$PORT/header-replace 2>&1)
+check_contains "header replace last wins" "X-Test: second" "$replace_hdrs"
+
+# test: header no-replace (append)
+noreplace_hdrs=$(curl -si http://localhost:$PORT/header-no-replace 2>&1)
+check_contains "header no-replace first" "X-Multi: one" "$noreplace_hdrs"
+check_contains "header no-replace second" "X-Multi: two" "$noreplace_hdrs"
+
+# test: header_remove specific
+remove_hdrs=$(curl -si http://localhost:$PORT/header-remove 2>&1)
+check_contains "header_remove keeps X-Keep" "X-Keep: yes" "$remove_hdrs"
+if echo "$remove_hdrs" | grep -q "X-Drop:"; then
+    failed=$((failed + 1))
+    echo "  FAIL  header_remove drops X-Drop"
+    errors="$errors\n--- header_remove drops X-Drop ---\nexpected X-Drop to be absent\ngot: $remove_hdrs\n"
+else
+    passed=$((passed + 1))
+    echo "  pass  header_remove drops X-Drop"
+fi
+
+# test: header_remove all
+removeall_hdrs=$(curl -si http://localhost:$PORT/header-remove-all 2>&1)
+if echo "$removeall_hdrs" | grep -q "X-A:\|X-B:"; then
+    failed=$((failed + 1))
+    echo "  FAIL  header_remove all"
+    errors="$errors\n--- header_remove all ---\nexpected no X-A/X-B headers\ngot: $removeall_hdrs\n"
+else
+    passed=$((passed + 1))
+    echo "  pass  header_remove all"
+fi
+
+# test: headers_list
+list_body=$(curl -s http://localhost:$PORT/header-list 2>&1)
+check_contains "headers_list contains X-Foo" "X-Foo: bar" "$list_body"
+check_contains "headers_list contains X-Baz" "X-Baz: qux" "$list_body"
+
+# test: header with status code arg
+hdr_status=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:$PORT/header-status)
+check "header status code arg" "202" "$hdr_status"
+
+# test: header() from inside a function (frames[0] fix)
+func_hdrs=$(curl -si http://localhost:$PORT/header-from-function 2>&1)
+check_contains "header from function" "X-From-Func: yes" "$func_hdrs"
+func_status=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:$PORT/header-from-function)
+check "response code from function" "203" "$func_status"
+
 # test: status code
 status=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:$PORT/status)
 check "status 201" "201" "$status"

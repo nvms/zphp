@@ -797,18 +797,9 @@ fn processHttpRead(w: *Worker, c: *Connection) void {
     var session_ctx = w.vm.makeContext(null);
     @import("stdlib/session.zig").finalizeSession(&session_ctx);
 
-    const ct: []const u8 = if (w.vm.frame_count > 0) blk: {
-        const v = w.vm.frames[0].vars.get("__response_content_type") orelse break :blk "text/html";
-        break :blk if (v == .string) v.string else "text/html";
-    } else "text/html";
-    const code: i64 = if (w.vm.frame_count > 0) blk: {
-        const v = w.vm.frames[0].vars.get("__response_code") orelse break :blk @as(i64, 200);
-        break :blk if (v == .int) v.int else 200;
-    } else 200;
-    const extra_headers: ?*PhpArray = if (w.vm.frame_count > 0) blk: {
-        const v = w.vm.frames[0].vars.get("__response_headers") orelse break :blk null;
-        break :blk if (v == .array) v.array else null;
-    } else null;
+    const ct = w.vm.response_content_type;
+    const code = w.vm.response_code;
+    const extra_headers = w.vm.response_headers;
 
     writeResponse(c, code, ct, extra_headers, w.vm.output.items, c.keep_alive, acceptsGzip(&req), w.allocator) catch {};
     shiftBuffer(c, consumed);
@@ -907,14 +898,8 @@ fn handleH2Request(w: *Worker, conn: *Connection, session: *h2.H2Session, stream
     var session_ctx = w.vm.makeContext(null);
     @import("stdlib/session.zig").finalizeSession(&session_ctx);
 
-    const ct: []const u8 = if (w.vm.frame_count > 0) blk: {
-        const v = w.vm.frames[0].vars.get("__response_content_type") orelse break :blk "text/html";
-        break :blk if (v == .string) v.string else "text/html";
-    } else "text/html";
-    const code: u16 = if (w.vm.frame_count > 0) blk: {
-        const v = w.vm.frames[0].vars.get("__response_code") orelse break :blk @as(u16, 200);
-        break :blk if (v == .int) std.math.cast(u16, v.int) orelse 200 else 200;
-    } else 200;
+    const ct = w.vm.response_content_type;
+    const code: u16 = std.math.cast(u16, w.vm.response_code) orelse 200;
 
     session.submitResponse(stream_id, code, ct, w.vm.output.items);
     stream.resetRequest(w.allocator);
@@ -1442,15 +1427,24 @@ fn mimeType(path: []const u8) []const u8 {
     return "application/octet-stream";
 }
 
-fn writeResponse(conn: *Connection, code: i64, content_type: []const u8, extra_headers: ?*PhpArray, body: []const u8, keep_alive: bool, use_gzip: bool, allocator: Allocator) !void {
-    const status_text = switch (code) {
-        200 => "200 OK", 201 => "201 Created", 204 => "204 No Content",
-        301 => "301 Moved Permanently", 302 => "302 Found", 304 => "304 Not Modified",
+fn statusText(code: i64, buf: *[32]u8) []const u8 {
+    return switch (code) {
+        200 => "200 OK", 201 => "201 Created", 202 => "202 Accepted",
+        203 => "203 Non-Authoritative Information", 204 => "204 No Content",
+        301 => "301 Moved Permanently", 302 => "302 Found", 303 => "303 See Other",
+        304 => "304 Not Modified", 307 => "307 Temporary Redirect", 308 => "308 Permanent Redirect",
         400 => "400 Bad Request", 401 => "401 Unauthorized", 403 => "403 Forbidden",
-        404 => "404 Not Found", 405 => "405 Method Not Allowed",
-        413 => "413 Content Too Large", 500 => "500 Internal Server Error",
-        else => "200 OK",
+        404 => "404 Not Found", 405 => "405 Method Not Allowed", 409 => "409 Conflict",
+        413 => "413 Content Too Large", 422 => "422 Unprocessable Entity",
+        429 => "429 Too Many Requests", 500 => "500 Internal Server Error",
+        502 => "502 Bad Gateway", 503 => "503 Service Unavailable",
+        else => std.fmt.bufPrint(buf, "{d} Unknown", .{code}) catch "500 Internal Server Error",
     };
+}
+
+fn writeResponse(conn: *Connection, code: i64, content_type: []const u8, extra_headers: ?*PhpArray, body: []const u8, keep_alive: bool, use_gzip: bool, allocator: Allocator) !void {
+    var status_buf: [32]u8 = undefined;
+    const status_text = statusText(code, &status_buf);
 
     const compressed = if (use_gzip and body.len > 0 and isCompressible(content_type)) gzipCompress(allocator, body) else null;
     defer if (compressed) |c| allocator.free(c);

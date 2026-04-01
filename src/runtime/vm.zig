@@ -290,6 +290,9 @@ pub const VM = struct {
     serve_mode: bool = false,
     serve_compile_cache: std.StringHashMapUnmanaged(*CompileResult) = .{},
     serve_cache_keys: std.ArrayListUnmanaged([]const u8) = .{},
+    response_code: i64 = 200,
+    response_content_type: []const u8 = "text/html",
+    response_headers: ?*PhpArray = null,
 
     pub const InlineCache = struct {
         // property access: keyed by (chunk_ptr ^ ip), stores class_ptr for visibility skip
@@ -679,6 +682,9 @@ pub const VM = struct {
         self.capture_index.clearRetainingCapacity();
         self.ob_stack.clearRetainingCapacity();
         self.request_vars.clearRetainingCapacity();
+        self.response_code = 200;
+        self.response_content_type = "text/html";
+        self.response_headers = null;
         self.statics.clearRetainingCapacity();
         self.static_vars.clearRetainingCapacity();
         self.global_vars.clearRetainingCapacity();

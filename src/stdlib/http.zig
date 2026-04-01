@@ -13,6 +13,7 @@ pub const entries = .{
     .{ "header", native_header },
     .{ "http_response_code", native_http_response_code },
     .{ "setcookie", native_setcookie },
+    .{ "header_remove", native_header_remove },
     .{ "headers_sent", native_headers_sent },
     .{ "headers_list", native_headers_list },
 };
@@ -50,30 +51,33 @@ fn native_ob_get_level(ctx: *NativeContext, _: []const Value) RuntimeError!Value
 fn native_header(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len == 0 or args[0] != .string) return .null;
     const hdr = args[0].string;
+    const replace = args.len < 2 or args[1] != .bool or args[1].bool;
 
     if (startsWithIgnoreCase(hdr, "Content-Type:")) {
         if (std.mem.indexOf(u8, hdr, ": ")) |sep| {
-            try ctx.vm.currentFrame().vars.put(ctx.allocator, "__response_content_type", .{ .string = hdr[sep + 2 ..] });
+            ctx.vm.response_content_type = hdr[sep + 2 ..];
         }
     }
 
-    const key = "__response_headers";
-    const existing = ctx.vm.currentFrame().vars.get(key);
-    if (existing != null and existing.? == .array) {
-        try existing.?.array.append(ctx.allocator, .{ .string = hdr });
-    } else {
-        const arr = try ctx.createArray();
-        try arr.append(ctx.allocator, .{ .string = hdr });
-        try ctx.vm.currentFrame().vars.put(ctx.allocator, key, .{ .array = arr });
+    if (args.len >= 3 and args[2] == .int) {
+        ctx.vm.response_code = args[2].int;
     }
+
+    if (replace) {
+        if (std.mem.indexOf(u8, hdr, ":")) |colon| {
+            removeHeaderByName(ctx, hdr[0..colon]);
+        }
+    }
+
+    try appendResponseHeader(ctx, hdr);
     return .null;
 }
 
 fn native_http_response_code(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len >= 1 and args[0] == .int) {
-        try ctx.vm.currentFrame().vars.put(ctx.allocator, "__response_code", args[0]);
+        ctx.vm.response_code = args[0].int;
     }
-    return ctx.vm.currentFrame().vars.get("__response_code") orelse Value{ .int = 200 };
+    return .{ .int = ctx.vm.response_code };
 }
 
 fn native_setcookie(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
@@ -97,6 +101,15 @@ fn native_setcookie(ctx: *NativeContext, args: []const Value) RuntimeError!Value
     try ctx.strings.append(ctx.allocator, hdr);
     try appendResponseHeader(ctx, hdr);
     return .{ .bool = true };
+}
+
+fn native_header_remove(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len == 0) {
+        if (getResponseHeaders(ctx)) |arr| arr.entries.clearRetainingCapacity();
+        return .null;
+    }
+    if (args[0] == .string) removeHeaderByName(ctx, args[0].string);
+    return .null;
 }
 
 fn native_headers_sent(_: *NativeContext, _: []const Value) RuntimeError!Value {
@@ -174,19 +187,32 @@ fn appendUrlEncoded(buf: *std.ArrayListUnmanaged(u8), a: std.mem.Allocator, s: [
 }
 
 fn getResponseHeaders(ctx: *NativeContext) ?*PhpArray {
-    const existing = ctx.vm.frames[0].vars.get("__response_headers");
-    if (existing != null and existing.? == .array) return existing.?.array;
-    return null;
+    return ctx.vm.response_headers;
 }
 
 fn appendResponseHeader(ctx: *NativeContext, hdr: []const u8) !void {
-    const key = "__response_headers";
-    if (getResponseHeaders(ctx)) |arr| {
+    if (ctx.vm.response_headers) |arr| {
         try arr.append(ctx.allocator, .{ .string = hdr });
     } else {
         const arr = try ctx.createArray();
         try arr.append(ctx.allocator, .{ .string = hdr });
-        try ctx.vm.frames[0].vars.put(ctx.allocator, key, .{ .array = arr });
+        ctx.vm.response_headers = arr;
+    }
+}
+
+fn removeHeaderByName(ctx: *NativeContext, name: []const u8) void {
+    const arr = getResponseHeaders(ctx) orelse return;
+    var i: usize = 0;
+    while (i < arr.entries.items.len) {
+        const entry = arr.entries.items[i];
+        if (entry.value == .string) {
+            const hdr = entry.value.string;
+            if (hdr.len > name.len and hdr[name.len] == ':' and std.ascii.eqlIgnoreCase(hdr[0..name.len], name)) {
+                _ = arr.entries.orderedRemove(i);
+                continue;
+            }
+        }
+        i += 1;
     }
 }
 

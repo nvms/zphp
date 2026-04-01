@@ -65,6 +65,38 @@ if ($path === "/health") {
     session_start();
     session_destroy();
     echo json_encode(["destroyed" => true]);
+} elseif ($path === "/header-replace") {
+    header("X-Test: first");
+    header("X-Test: second");
+    echo "replaced";
+} elseif ($path === "/header-no-replace") {
+    header("X-Multi: one");
+    header("X-Multi: two", false);
+    echo "appended";
+} elseif ($path === "/header-remove") {
+    header("X-Keep: yes");
+    header("X-Drop: no");
+    header_remove("X-Drop");
+    echo "removed";
+} elseif ($path === "/header-remove-all") {
+    header("X-A: 1");
+    header("X-B: 2");
+    header_remove();
+    echo "cleared";
+} elseif ($path === "/header-list") {
+    header("X-Foo: bar");
+    header("X-Baz: qux");
+    echo json_encode(headers_list());
+} elseif ($path === "/header-status") {
+    header("X-Info: test", true, 202);
+    echo "accepted";
+} elseif ($path === "/header-from-function") {
+    function setHeaders() {
+        header("X-From-Func: yes");
+        http_response_code(203);
+    }
+    setHeaders();
+    echo "from-func";
 } else {
     http_response_code(404);
     echo json_encode(["error" => "not found", "path" => $path]);
