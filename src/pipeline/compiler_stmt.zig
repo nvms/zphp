@@ -481,6 +481,15 @@ pub fn compileTryCatch(self: *Compiler, node: Ast.Node) Error!void {
     var end_jumps = std.ArrayListUnmanaged(usize){};
     defer end_jumps.deinit(self.allocator);
 
+    // when there's a finally block, push a handler around catch bodies
+    // so exceptions thrown inside catch also trigger finally
+    var finally_handler_offset: usize = 0;
+    if (finally_node != 0) {
+        try self.emitOp(.push_handler);
+        finally_handler_offset = self.chunk.offset();
+        try self.emitU16(0xffff);
+    }
+
     for (catch_nodes) |catch_idx| {
         const catch_node = self.ast.nodes[catch_idx];
         const types_extra = catch_node.data.lhs;
@@ -540,15 +549,25 @@ pub fn compileTryCatch(self: *Compiler, node: Ast.Node) Error!void {
     }
 
     if (finally_node != 0) {
-        // no catch matched: run finally then re-throw
-        // exception is still on the stack
+        // no catch matched: pop catch-body handler, run finally, re-throw
+        try self.emitOp(.pop_handler);
         try self.compileNode(finally_node);
         try self.emitOp(.throw);
 
-        self.patchJump(skip_catches);
+        // catch body completed normally: pop catch-body handler, jump to normal finally
         for (end_jumps.items) |ej| self.patchJump(ej);
+        try self.emitOp(.pop_handler);
+        const skip_to_normal = try self.emitJump(.jump);
 
-        // normal path: run finally after try or caught exception
+        // exception from catch body: patch the catch-body handler to here
+        // exception is on the stack, run finally then re-throw
+        self.patchJump(finally_handler_offset);
+        try self.compileNode(finally_node);
+        try self.emitOp(.throw);
+
+        // normal path: try completed or catch completed without throwing
+        self.patchJump(skip_catches);
+        self.patchJump(skip_to_normal);
         try self.compileNode(finally_node);
     } else {
         // no finally: just re-throw

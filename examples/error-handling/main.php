@@ -255,4 +255,35 @@ foreach ($func_errors as $e) {
 
 restore_error_handler();
 
+// --- test 14: trigger_error passes correct errno ---
+echo "\n=== Test 14: Error errno values ===\n";
+$errno_log = [];
+set_error_handler(function($errno, $errstr) use (&$errno_log) {
+    $errno_log[] = "$errno:$errstr";
+    return true;
+});
+trigger_error("warn", E_USER_WARNING);
+trigger_error("note", E_USER_NOTICE);
+restore_error_handler();
+foreach ($errno_log as $e) {
+    echo "  $e\n";
+}
+
+// --- test 15: finally runs when catch re-throws ---
+echo "\n=== Test 15: Finally with catch re-throw ===\n";
+$ft = [];
+try {
+    try {
+        throw new Exception("original");
+    } catch (Exception $e) {
+        $ft[] = "catch";
+        throw new RuntimeException("re-thrown");
+    } finally {
+        $ft[] = "inner-finally";
+    }
+} catch (RuntimeException $e) {
+    $ft[] = "outer:" . $e->getMessage();
+}
+echo implode(",", $ft) . "\n";
+
 echo "\nAll error handling tests passed!\n";
