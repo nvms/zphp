@@ -198,6 +198,7 @@ pub const OpCode = enum(u8) {
             .get_prop,
             => 0,
             // binary ops: pop 2, push 1
+            .array_get, .array_get_vivify,
             .get_prop_dynamic,
             .isset_prop_dynamic,
             .add, .subtract, .multiply, .divide, .modulo, .power, .concat,

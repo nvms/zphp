@@ -100,6 +100,15 @@ pub const NativeContext = struct {
                     t.obj.set(vm.allocator, t.prop, value) catch return;
                 }
             },
+            .prop_array_elem => |pae| {
+                const obj_val = vm.resolveCallerVar(pae.var_name, pae.is_local, pae.slot);
+                if (obj_val == .object) {
+                    const prop_val = obj_val.object.get(pae.prop_name);
+                    if (prop_val == .array) {
+                        prop_val.array.set(vm.allocator, Value.toArrayKey(pae.key), value) catch return;
+                    }
+                }
+            },
             .none => {},
         }
     }
@@ -164,6 +173,13 @@ const RefSource = union(enum) {
         is_local: bool,
         slot: u16,
         props: [4]?[]const u8,
+    },
+    prop_array_elem: struct {
+        var_name: []const u8,
+        is_local: bool,
+        slot: u16,
+        prop_name: []const u8,
+        key: Value,
     },
 };
 
@@ -5617,7 +5633,7 @@ pub const VM = struct {
         const call_pos = ip - 4;
         const code = chunk.code.items;
 
-        const max_scan = ac * 12;
+        const max_scan = ac * 16;
         const region_start = if (call_pos > max_scan) call_pos - max_scan else 0;
 
         var instrs: [128]usize = undefined;
@@ -5757,6 +5773,66 @@ pub const VM = struct {
                                 .slot = slot,
                                 .key = kv,
                             } };
+                        }
+                    }
+                } else if (arg_instr_count == 4 and code[last_ip] == @intFromEnum(OpCode.array_get)) {
+                    // $obj->prop['key'] pattern: get_var/get_local + get_prop + key + array_get
+                    const prop_ip = instrs[i + 1];
+                    const key_ip = instrs[i + 2];
+                    if (code[prop_ip] == @intFromEnum(OpCode.get_prop)) {
+                        var var_name: ?[]const u8 = null;
+                        var is_local = false;
+                        var slot: u16 = 0;
+                        if (code[first_ip] == @intFromEnum(OpCode.get_var)) {
+                            const ci = (@as(u16, code[first_ip + 1]) << 8) | code[first_ip + 2];
+                            if (ci < chunk.constants.items.len) var_name = chunk.constants.items[ci].string;
+                        } else if (code[first_ip] == @intFromEnum(OpCode.get_local)) {
+                            slot = (@as(u16, code[first_ip + 1]) << 8) | code[first_ip + 2];
+                            const sn = if (caller.func) |func| func.slot_names else self.global_slot_names;
+                            if (slot < sn.len) {
+                                var_name = sn[slot];
+                                is_local = true;
+                            }
+                        }
+                        if (var_name) |vn| {
+                            const pci = (@as(u16, code[prop_ip + 1]) << 8) | code[prop_ip + 2];
+                            if (pci < chunk.constants.items.len and chunk.constants.items[pci] == .string) {
+                                const prop_name = chunk.constants.items[pci].string;
+                                var key_val: ?Value = null;
+                                if (code[key_ip] == @intFromEnum(OpCode.constant)) {
+                                    const ci = (@as(u16, code[key_ip + 1]) << 8) | code[key_ip + 2];
+                                    if (ci < chunk.constants.items.len) key_val = chunk.constants.items[ci];
+                                } else if (code[key_ip] == @intFromEnum(OpCode.get_var)) {
+                                    const ci = (@as(u16, code[key_ip + 1]) << 8) | code[key_ip + 2];
+                                    if (ci < chunk.constants.items.len) {
+                                        if (chunk.constants.items[ci] == .string) {
+                                            const kname = chunk.constants.items[ci].string;
+                                            key_val = caller.vars.get(kname);
+                                            if (key_val == null and caller.locals.len > 0) {
+                                                const sn = if (caller.func) |func| func.slot_names else self.global_slot_names;
+                                                for (sn, 0..) |sn_name, si| {
+                                                    if (std.mem.eql(u8, sn_name, kname)) {
+                                                        if (si < caller.locals.len) key_val = caller.locals[si];
+                                                        break;
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                } else if (code[key_ip] == @intFromEnum(OpCode.get_local)) {
+                                    const kslot = (@as(u16, code[key_ip + 1]) << 8) | code[key_ip + 2];
+                                    if (kslot < caller.locals.len) key_val = caller.locals[kslot];
+                                }
+                                if (key_val) |kv| {
+                                    sources[scan_idx] = .{ .prop_array_elem = .{
+                                        .var_name = vn,
+                                        .is_local = is_local,
+                                        .slot = slot,
+                                        .prop_name = prop_name,
+                                        .key = kv,
+                                    } };
+                                }
+                            }
                         }
                     }
                 } else if (code[last_ip] == @intFromEnum(OpCode.get_prop) or code[last_ip] == @intFromEnum(OpCode.get_prop_dynamic)) {
@@ -5942,6 +6018,23 @@ pub const VM = struct {
                             .object = target.obj,
                             .prop_name = target.prop,
                         });
+                    }
+                },
+                .prop_array_elem => |pae| {
+                    const obj_val = self.resolveCallerVar(pae.var_name, pae.is_local, pae.slot);
+                    if (obj_val == .object) {
+                        const prop_val = obj_val.object.get(pae.prop_name);
+                        if (prop_val == .array) {
+                            const cell = try self.allocator.create(Value);
+                            cell.* = new_vars.get(func.params[ri]) orelse .null;
+                            try self.ref_cells.append(self.allocator, cell);
+                            try refs.put(self.allocator, func.params[ri], cell);
+                            try array_bindings.append(self.allocator, .{
+                                .cell = cell,
+                                .array = prop_val.array,
+                                .key = Value.toArrayKey(pae.key),
+                            });
+                        }
                     }
                 },
                 .none => {},
