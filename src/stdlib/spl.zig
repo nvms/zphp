@@ -175,6 +175,160 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try vm.native_fns.put(a, "WeakMap::offsetSet", wmOffsetSet);
     try vm.native_fns.put(a, "WeakMap::offsetUnset", wmOffsetUnset);
     try vm.native_fns.put(a, "WeakMap::count", wmCount);
+
+    // SplPriorityQueue
+    var pq_def = ClassDef{ .name = "SplPriorityQueue" };
+    try pq_def.interfaces.append(a, "Countable");
+    try pq_def.methods.put(a, "__construct", .{ .name = "__construct", .arity = 0 });
+    try pq_def.methods.put(a, "insert", .{ .name = "insert", .arity = 2 });
+    try pq_def.methods.put(a, "extract", .{ .name = "extract", .arity = 0 });
+    try pq_def.methods.put(a, "top", .{ .name = "top", .arity = 0 });
+    try pq_def.methods.put(a, "count", .{ .name = "count", .arity = 0 });
+    try pq_def.methods.put(a, "isEmpty", .{ .name = "isEmpty", .arity = 0 });
+    try pq_def.methods.put(a, "setExtractFlags", .{ .name = "setExtractFlags", .arity = 1 });
+    try pq_def.methods.put(a, "current", .{ .name = "current", .arity = 0 });
+    try pq_def.methods.put(a, "key", .{ .name = "key", .arity = 0 });
+    try pq_def.methods.put(a, "next", .{ .name = "next", .arity = 0 });
+    try pq_def.methods.put(a, "rewind", .{ .name = "rewind", .arity = 0 });
+    try pq_def.methods.put(a, "valid", .{ .name = "valid", .arity = 0 });
+    try pq_def.static_props.put(a, "EXTR_DATA", .{ .int = EXTR_DATA });
+    try pq_def.static_props.put(a, "EXTR_PRIORITY", .{ .int = EXTR_PRIORITY });
+    try pq_def.static_props.put(a, "EXTR_BOTH", .{ .int = EXTR_BOTH });
+    try vm.classes.put(a, "SplPriorityQueue", pq_def);
+
+    try vm.native_fns.put(a, "SplPriorityQueue::__construct", pqConstruct);
+    try vm.native_fns.put(a, "SplPriorityQueue::insert", pqInsert);
+    try vm.native_fns.put(a, "SplPriorityQueue::extract", pqExtract);
+    try vm.native_fns.put(a, "SplPriorityQueue::top", pqTop);
+    try vm.native_fns.put(a, "SplPriorityQueue::count", pqCount);
+    try vm.native_fns.put(a, "SplPriorityQueue::isEmpty", pqIsEmpty);
+    try vm.native_fns.put(a, "SplPriorityQueue::setExtractFlags", pqSetExtractFlags);
+    try vm.native_fns.put(a, "SplPriorityQueue::current", pqCurrent);
+    try vm.native_fns.put(a, "SplPriorityQueue::key", pqKey);
+    try vm.native_fns.put(a, "SplPriorityQueue::next", pqNext);
+    try vm.native_fns.put(a, "SplPriorityQueue::rewind", pqRewind);
+    try vm.native_fns.put(a, "SplPriorityQueue::valid", pqValid);
+
+    // SplMinHeap
+    var minh_def = ClassDef{ .name = "SplMinHeap" };
+    try minh_def.interfaces.append(a, "Countable");
+    try minh_def.methods.put(a, "__construct", .{ .name = "__construct", .arity = 0 });
+    try minh_def.methods.put(a, "insert", .{ .name = "insert", .arity = 1 });
+    try minh_def.methods.put(a, "extract", .{ .name = "extract", .arity = 0 });
+    try minh_def.methods.put(a, "top", .{ .name = "top", .arity = 0 });
+    try minh_def.methods.put(a, "count", .{ .name = "count", .arity = 0 });
+    try minh_def.methods.put(a, "isEmpty", .{ .name = "isEmpty", .arity = 0 });
+    try minh_def.methods.put(a, "current", .{ .name = "current", .arity = 0 });
+    try minh_def.methods.put(a, "key", .{ .name = "key", .arity = 0 });
+    try minh_def.methods.put(a, "next", .{ .name = "next", .arity = 0 });
+    try minh_def.methods.put(a, "rewind", .{ .name = "rewind", .arity = 0 });
+    try minh_def.methods.put(a, "valid", .{ .name = "valid", .arity = 0 });
+    try vm.classes.put(a, "SplMinHeap", minh_def);
+
+    try vm.native_fns.put(a, "SplMinHeap::__construct", heapConstruct);
+    try vm.native_fns.put(a, "SplMinHeap::insert", heapInsert);
+    try vm.native_fns.put(a, "SplMinHeap::extract", minHeapExtract);
+    try vm.native_fns.put(a, "SplMinHeap::top", minHeapTop);
+    try vm.native_fns.put(a, "SplMinHeap::count", heapCount);
+    try vm.native_fns.put(a, "SplMinHeap::isEmpty", heapIsEmpty);
+    try vm.native_fns.put(a, "SplMinHeap::current", heapCurrent);
+    try vm.native_fns.put(a, "SplMinHeap::key", heapKey);
+    try vm.native_fns.put(a, "SplMinHeap::next", heapNext);
+    try vm.native_fns.put(a, "SplMinHeap::rewind", heapRewind);
+    try vm.native_fns.put(a, "SplMinHeap::valid", heapValid);
+
+    // SplMaxHeap
+    var maxh_def = ClassDef{ .name = "SplMaxHeap" };
+    try maxh_def.interfaces.append(a, "Countable");
+    try maxh_def.methods.put(a, "__construct", .{ .name = "__construct", .arity = 0 });
+    try maxh_def.methods.put(a, "insert", .{ .name = "insert", .arity = 1 });
+    try maxh_def.methods.put(a, "extract", .{ .name = "extract", .arity = 0 });
+    try maxh_def.methods.put(a, "top", .{ .name = "top", .arity = 0 });
+    try maxh_def.methods.put(a, "count", .{ .name = "count", .arity = 0 });
+    try maxh_def.methods.put(a, "isEmpty", .{ .name = "isEmpty", .arity = 0 });
+    try maxh_def.methods.put(a, "current", .{ .name = "current", .arity = 0 });
+    try maxh_def.methods.put(a, "key", .{ .name = "key", .arity = 0 });
+    try maxh_def.methods.put(a, "next", .{ .name = "next", .arity = 0 });
+    try maxh_def.methods.put(a, "rewind", .{ .name = "rewind", .arity = 0 });
+    try maxh_def.methods.put(a, "valid", .{ .name = "valid", .arity = 0 });
+    try vm.classes.put(a, "SplMaxHeap", maxh_def);
+
+    try vm.native_fns.put(a, "SplMaxHeap::__construct", heapConstruct);
+    try vm.native_fns.put(a, "SplMaxHeap::insert", heapInsert);
+    try vm.native_fns.put(a, "SplMaxHeap::extract", maxHeapExtract);
+    try vm.native_fns.put(a, "SplMaxHeap::top", maxHeapTop);
+    try vm.native_fns.put(a, "SplMaxHeap::count", heapCount);
+    try vm.native_fns.put(a, "SplMaxHeap::isEmpty", heapIsEmpty);
+    try vm.native_fns.put(a, "SplMaxHeap::current", heapCurrent);
+    try vm.native_fns.put(a, "SplMaxHeap::key", heapKey);
+    try vm.native_fns.put(a, "SplMaxHeap::next", heapNext);
+    try vm.native_fns.put(a, "SplMaxHeap::rewind", heapRewind);
+    try vm.native_fns.put(a, "SplMaxHeap::valid", heapValid);
+
+    // SplFixedArray
+    var fa_def = ClassDef{ .name = "SplFixedArray" };
+    try fa_def.interfaces.append(a, "Countable");
+    try fa_def.interfaces.append(a, "ArrayAccess");
+    try fa_def.methods.put(a, "__construct", .{ .name = "__construct", .arity = 1 });
+    try fa_def.methods.put(a, "getSize", .{ .name = "getSize", .arity = 0 });
+    try fa_def.methods.put(a, "setSize", .{ .name = "setSize", .arity = 1 });
+    try fa_def.methods.put(a, "count", .{ .name = "count", .arity = 0 });
+    try fa_def.methods.put(a, "toArray", .{ .name = "toArray", .arity = 0 });
+    try fa_def.methods.put(a, "offsetGet", .{ .name = "offsetGet", .arity = 1 });
+    try fa_def.methods.put(a, "offsetSet", .{ .name = "offsetSet", .arity = 2 });
+    try fa_def.methods.put(a, "offsetExists", .{ .name = "offsetExists", .arity = 1 });
+    try fa_def.methods.put(a, "offsetUnset", .{ .name = "offsetUnset", .arity = 1 });
+    try fa_def.methods.put(a, "current", .{ .name = "current", .arity = 0 });
+    try fa_def.methods.put(a, "key", .{ .name = "key", .arity = 0 });
+    try fa_def.methods.put(a, "next", .{ .name = "next", .arity = 0 });
+    try fa_def.methods.put(a, "rewind", .{ .name = "rewind", .arity = 0 });
+    try fa_def.methods.put(a, "valid", .{ .name = "valid", .arity = 0 });
+    try vm.classes.put(a, "SplFixedArray", fa_def);
+
+    try vm.native_fns.put(a, "SplFixedArray::__construct", faConstruct);
+    try vm.native_fns.put(a, "SplFixedArray::getSize", faGetSize);
+    try vm.native_fns.put(a, "SplFixedArray::setSize", faSetSize);
+    try vm.native_fns.put(a, "SplFixedArray::count", faCount);
+    try vm.native_fns.put(a, "SplFixedArray::toArray", faToArray);
+    try vm.native_fns.put(a, "SplFixedArray::offsetGet", faOffsetGet);
+    try vm.native_fns.put(a, "SplFixedArray::offsetSet", faOffsetSet);
+    try vm.native_fns.put(a, "SplFixedArray::offsetExists", faOffsetExists);
+    try vm.native_fns.put(a, "SplFixedArray::offsetUnset", faOffsetUnset);
+    try vm.native_fns.put(a, "SplFixedArray::current", faCurrent);
+    try vm.native_fns.put(a, "SplFixedArray::key", faKey);
+    try vm.native_fns.put(a, "SplFixedArray::next", faNext);
+    try vm.native_fns.put(a, "SplFixedArray::rewind", faRewind);
+    try vm.native_fns.put(a, "SplFixedArray::valid", faValid);
+
+    // SplQueue
+    var sq_def = ClassDef{ .name = "SplQueue" };
+    try sq_def.interfaces.append(a, "Countable");
+    try sq_def.methods.put(a, "__construct", .{ .name = "__construct", .arity = 0 });
+    try sq_def.methods.put(a, "enqueue", .{ .name = "enqueue", .arity = 1 });
+    try sq_def.methods.put(a, "dequeue", .{ .name = "dequeue", .arity = 0 });
+    try sq_def.methods.put(a, "bottom", .{ .name = "bottom", .arity = 0 });
+    try sq_def.methods.put(a, "top", .{ .name = "top", .arity = 0 });
+    try sq_def.methods.put(a, "count", .{ .name = "count", .arity = 0 });
+    try sq_def.methods.put(a, "isEmpty", .{ .name = "isEmpty", .arity = 0 });
+    try sq_def.methods.put(a, "current", .{ .name = "current", .arity = 0 });
+    try sq_def.methods.put(a, "key", .{ .name = "key", .arity = 0 });
+    try sq_def.methods.put(a, "next", .{ .name = "next", .arity = 0 });
+    try sq_def.methods.put(a, "rewind", .{ .name = "rewind", .arity = 0 });
+    try sq_def.methods.put(a, "valid", .{ .name = "valid", .arity = 0 });
+    try vm.classes.put(a, "SplQueue", sq_def);
+
+    try vm.native_fns.put(a, "SplQueue::__construct", sqConstruct);
+    try vm.native_fns.put(a, "SplQueue::enqueue", sqEnqueue);
+    try vm.native_fns.put(a, "SplQueue::dequeue", sqDequeue);
+    try vm.native_fns.put(a, "SplQueue::bottom", sqBottom);
+    try vm.native_fns.put(a, "SplQueue::top", sqTop);
+    try vm.native_fns.put(a, "SplQueue::count", sqCount);
+    try vm.native_fns.put(a, "SplQueue::isEmpty", sqIsEmpty);
+    try vm.native_fns.put(a, "SplQueue::current", sqCurrent);
+    try vm.native_fns.put(a, "SplQueue::key", sqKey);
+    try vm.native_fns.put(a, "SplQueue::next", sqNext);
+    try vm.native_fns.put(a, "SplQueue::rewind", sqRewind);
+    try vm.native_fns.put(a, "SplQueue::valid", sqValid);
 }
 
 fn getThis(ctx: *NativeContext) ?*PhpObject {
@@ -629,4 +783,465 @@ fn wmCount(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
     const obj = getThis(ctx) orelse return .{ .int = 0 };
     const arr = getData(obj) orelse return .{ .int = 0 };
     return .{ .int = @intCast(arr.entries.items.len) };
+}
+
+// --- SplPriorityQueue ---
+// stores pairs as [value, priority] in __data, sorted by priority descending
+
+const EXTR_DATA: i64 = 1;
+const EXTR_PRIORITY: i64 = 2;
+const EXTR_BOTH: i64 = 3;
+
+fn pqConstruct(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const obj = getThis(ctx) orelse return .null;
+    _ = try ensureData(ctx, obj);
+    try obj.set(ctx.allocator, "__cursor", .{ .int = 0 });
+    try obj.set(ctx.allocator, "__flags", .{ .int = EXTR_DATA });
+    return .null;
+}
+
+fn pqInsert(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    const obj = getThis(ctx) orelse return .null;
+    const arr = try ensureData(ctx, obj);
+    if (args.len < 2) return .null;
+    const pair = try ctx.allocator.create(PhpArray);
+    pair.* = .{};
+    try ctx.vm.arrays.append(ctx.allocator, pair);
+    try pair.set(ctx.allocator, .{ .int = 0 }, args[0]);
+    try pair.set(ctx.allocator, .{ .int = 1 }, args[1]);
+
+    var pos: usize = 0;
+    for (arr.entries.items) |entry| {
+        if (entry.value != .array) break;
+        const ep = entry.value.array.get(.{ .int = 1 });
+        if (Value.compare(args[1], ep) > 0) break;
+        pos += 1;
+    }
+    try arr.entries.insert(ctx.allocator, pos, .{ .key = .{ .int = @intCast(arr.entries.items.len) }, .value = .{ .array = pair } });
+    return .null;
+}
+
+fn pqExtractValue(ctx: *NativeContext, obj: *PhpObject) RuntimeError!Value {
+    const arr = getData(obj) orelse return .null;
+    if (arr.entries.items.len == 0) return .null;
+    const entry = arr.entries.items[0].value;
+    std.mem.copyForwards(PhpArray.Entry, arr.entries.items[0 .. arr.entries.items.len - 1], arr.entries.items[1..arr.entries.items.len]);
+    arr.entries.items.len -= 1;
+    return pqFormatEntry(ctx, obj, entry);
+}
+
+fn pqFormatEntry(_: *NativeContext, obj: *PhpObject, entry: Value) Value {
+    const flags = Value.toInt(obj.get("__flags"));
+    if (entry != .array) return entry;
+    const pair = entry.array;
+    if (flags == EXTR_PRIORITY) return pair.get(.{ .int = 1 });
+    if (flags == EXTR_BOTH) return entry;
+    return pair.get(.{ .int = 0 });
+}
+
+fn pqExtract(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const obj = getThis(ctx) orelse return .null;
+    return pqExtractValue(ctx, obj);
+}
+
+fn pqTop(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const obj = getThis(ctx) orelse return .null;
+    const arr = getData(obj) orelse return .null;
+    if (arr.entries.items.len == 0) return .null;
+    return pqFormatEntry(ctx, obj, arr.entries.items[0].value);
+}
+
+fn pqCount(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const obj = getThis(ctx) orelse return .{ .int = 0 };
+    const arr = getData(obj) orelse return .{ .int = 0 };
+    return .{ .int = @intCast(arr.entries.items.len) };
+}
+
+fn pqIsEmpty(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const obj = getThis(ctx) orelse return .{ .bool = true };
+    const arr = getData(obj) orelse return .{ .bool = true };
+    return .{ .bool = arr.entries.items.len == 0 };
+}
+
+fn pqSetExtractFlags(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    const obj = getThis(ctx) orelse return .null;
+    if (args.len >= 1) try obj.set(ctx.allocator, "__flags", .{ .int = Value.toInt(args[0]) });
+    return .null;
+}
+
+fn pqCurrent(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const obj = getThis(ctx) orelse return .null;
+    const arr = getData(obj) orelse return .{ .bool = false };
+    const cursor: usize = @intCast(@max(Value.toInt(obj.get("__cursor")), 0));
+    if (cursor >= arr.entries.items.len) return .{ .bool = false };
+    return pqFormatEntry(ctx, obj, arr.entries.items[cursor].value);
+}
+
+fn pqKey(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const obj = getThis(ctx) orelse return .null;
+    const arr = getData(obj) orelse return .null;
+    const cursor = Value.toInt(obj.get("__cursor"));
+    if (cursor < 0 or cursor >= @as(i64, @intCast(arr.entries.items.len))) return .null;
+    return .{ .int = cursor };
+}
+
+fn pqNext(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const obj = getThis(ctx) orelse return .null;
+    const cursor = Value.toInt(obj.get("__cursor"));
+    try obj.set(ctx.allocator, "__cursor", .{ .int = cursor + 1 });
+    return .null;
+}
+
+fn pqRewind(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const obj = getThis(ctx) orelse return .null;
+    try obj.set(ctx.allocator, "__cursor", .{ .int = 0 });
+    return .null;
+}
+
+fn pqValid(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const obj = getThis(ctx) orelse return .{ .bool = false };
+    const arr = getData(obj) orelse return .{ .bool = false };
+    const cursor = Value.toInt(obj.get("__cursor"));
+    return .{ .bool = cursor >= 0 and cursor < @as(i64, @intCast(arr.entries.items.len)) };
+}
+
+// --- SplMinHeap / SplMaxHeap ---
+// stored as flat array in __data, heap-ordered
+
+fn heapConstruct(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const obj = getThis(ctx) orelse return .null;
+    _ = try ensureData(ctx, obj);
+    try obj.set(ctx.allocator, "__cursor", .{ .int = 0 });
+    return .null;
+}
+
+fn heapInsert(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    const obj = getThis(ctx) orelse return .null;
+    const arr = try ensureData(ctx, obj);
+    if (args.len == 0) return .null;
+    try arr.append(ctx.allocator, args[0]);
+    return .null;
+}
+
+fn findMinIdx(arr: *PhpArray) ?usize {
+    if (arr.entries.items.len == 0) return null;
+    var best: usize = 0;
+    for (arr.entries.items[1..], 1..) |entry, i| {
+        if (Value.compare(entry.value, arr.entries.items[best].value) < 0) best = i;
+    }
+    return best;
+}
+
+fn findMaxIdx(arr: *PhpArray) ?usize {
+    if (arr.entries.items.len == 0) return null;
+    var best: usize = 0;
+    for (arr.entries.items[1..], 1..) |entry, i| {
+        if (Value.compare(entry.value, arr.entries.items[best].value) > 0) best = i;
+    }
+    return best;
+}
+
+fn heapRemoveAt(arr: *PhpArray, idx: usize) Value {
+    const val = arr.entries.items[idx].value;
+    std.mem.copyForwards(PhpArray.Entry, arr.entries.items[idx .. arr.entries.items.len - 1], arr.entries.items[idx + 1 .. arr.entries.items.len]);
+    arr.entries.items.len -= 1;
+    return val;
+}
+
+fn minHeapExtract(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const obj = getThis(ctx) orelse return .null;
+    const arr = getData(obj) orelse return .null;
+    const idx = findMinIdx(arr) orelse return .null;
+    return heapRemoveAt(arr, idx);
+}
+
+fn minHeapTop(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const obj = getThis(ctx) orelse return .null;
+    const arr = getData(obj) orelse return .null;
+    const idx = findMinIdx(arr) orelse return .null;
+    return arr.entries.items[idx].value;
+}
+
+fn maxHeapExtract(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const obj = getThis(ctx) orelse return .null;
+    const arr = getData(obj) orelse return .null;
+    const idx = findMaxIdx(arr) orelse return .null;
+    return heapRemoveAt(arr, idx);
+}
+
+fn maxHeapTop(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const obj = getThis(ctx) orelse return .null;
+    const arr = getData(obj) orelse return .null;
+    const idx = findMaxIdx(arr) orelse return .null;
+    return arr.entries.items[idx].value;
+}
+
+fn heapCount(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const obj = getThis(ctx) orelse return .{ .int = 0 };
+    const arr = getData(obj) orelse return .{ .int = 0 };
+    return .{ .int = @intCast(arr.entries.items.len) };
+}
+
+fn heapIsEmpty(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const obj = getThis(ctx) orelse return .{ .bool = true };
+    const arr = getData(obj) orelse return .{ .bool = true };
+    return .{ .bool = arr.entries.items.len == 0 };
+}
+
+fn heapCurrent(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const obj = getThis(ctx) orelse return .null;
+    const arr = getData(obj) orelse return .{ .bool = false };
+    const cursor: usize = @intCast(@max(Value.toInt(obj.get("__cursor")), 0));
+    if (cursor >= arr.entries.items.len) return .{ .bool = false };
+    return arr.entries.items[cursor].value;
+}
+
+fn heapKey(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const obj = getThis(ctx) orelse return .null;
+    const arr = getData(obj) orelse return .null;
+    const cursor = Value.toInt(obj.get("__cursor"));
+    if (cursor < 0 or cursor >= @as(i64, @intCast(arr.entries.items.len))) return .null;
+    return .{ .int = cursor };
+}
+
+fn heapNext(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const obj = getThis(ctx) orelse return .null;
+    const cursor = Value.toInt(obj.get("__cursor"));
+    try obj.set(ctx.allocator, "__cursor", .{ .int = cursor + 1 });
+    return .null;
+}
+
+fn heapRewind(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const obj = getThis(ctx) orelse return .null;
+    try obj.set(ctx.allocator, "__cursor", .{ .int = 0 });
+    return .null;
+}
+
+fn heapValid(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const obj = getThis(ctx) orelse return .{ .bool = false };
+    const arr = getData(obj) orelse return .{ .bool = false };
+    const cursor = Value.toInt(obj.get("__cursor"));
+    return .{ .bool = cursor >= 0 and cursor < @as(i64, @intCast(arr.entries.items.len)) };
+}
+
+// --- SplFixedArray ---
+
+fn faConstruct(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    const obj = getThis(ctx) orelse return .null;
+    const arr = try ensureData(ctx, obj);
+    const size: usize = if (args.len >= 1) @intCast(@max(Value.toInt(args[0]), 0)) else 0;
+    var i: usize = 0;
+    while (i < size) : (i += 1) {
+        try arr.append(ctx.allocator, .null);
+    }
+    try obj.set(ctx.allocator, "__size", .{ .int = @intCast(size) });
+    try obj.set(ctx.allocator, "__cursor", .{ .int = 0 });
+    return .null;
+}
+
+fn faGetSize(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const obj = getThis(ctx) orelse return .{ .int = 0 };
+    return .{ .int = Value.toInt(obj.get("__size")) };
+}
+
+fn faSetSize(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    const obj = getThis(ctx) orelse return .null;
+    const arr = try ensureData(ctx, obj);
+    if (args.len == 0) return .null;
+    const new_size: usize = @intCast(@max(Value.toInt(args[0]), 0));
+    const cur_len = arr.entries.items.len;
+    if (new_size > cur_len) {
+        var i: usize = cur_len;
+        while (i < new_size) : (i += 1) {
+            try arr.append(ctx.allocator, .null);
+        }
+    } else {
+        arr.entries.items.len = new_size;
+    }
+    try obj.set(ctx.allocator, "__size", .{ .int = @intCast(new_size) });
+    return .null;
+}
+
+fn faCount(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const obj = getThis(ctx) orelse return .{ .int = 0 };
+    return .{ .int = Value.toInt(obj.get("__size")) };
+}
+
+fn faToArray(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const obj = getThis(ctx) orelse return .null;
+    const arr = getData(obj) orelse {
+        const empty = try ctx.allocator.create(PhpArray);
+        empty.* = .{};
+        try ctx.vm.arrays.append(ctx.allocator, empty);
+        return .{ .array = empty };
+    };
+    const copy = try ctx.allocator.create(PhpArray);
+    copy.* = .{};
+    try ctx.vm.arrays.append(ctx.allocator, copy);
+    for (arr.entries.items, 0..) |entry, i| {
+        try copy.set(ctx.allocator, .{ .int = @intCast(i) }, entry.value);
+    }
+    return .{ .array = copy };
+}
+
+fn faOffsetGet(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    const obj = getThis(ctx) orelse return .null;
+    const arr = getData(obj) orelse return .null;
+    if (args.len == 0) return .null;
+    const idx: usize = @intCast(@max(Value.toInt(args[0]), 0));
+    if (idx >= arr.entries.items.len) return .null;
+    return arr.entries.items[idx].value;
+}
+
+fn faOffsetSet(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    const obj = getThis(ctx) orelse return .null;
+    const arr = getData(obj) orelse return .null;
+    if (args.len < 2) return .null;
+    const idx: usize = @intCast(@max(Value.toInt(args[0]), 0));
+    if (idx >= arr.entries.items.len) return .null;
+    arr.entries.items[idx].value = args[1];
+    return .null;
+}
+
+fn faOffsetExists(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    const obj = getThis(ctx) orelse return .{ .bool = false };
+    const arr = getData(obj) orelse return .{ .bool = false };
+    if (args.len == 0) return .{ .bool = false };
+    const idx: usize = @intCast(@max(Value.toInt(args[0]), 0));
+    if (idx >= arr.entries.items.len) return .{ .bool = false };
+    return .{ .bool = arr.entries.items[idx].value != .null };
+}
+
+fn faOffsetUnset(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    const obj = getThis(ctx) orelse return .null;
+    const arr = getData(obj) orelse return .null;
+    if (args.len == 0) return .null;
+    const idx: usize = @intCast(@max(Value.toInt(args[0]), 0));
+    if (idx >= arr.entries.items.len) return .null;
+    arr.entries.items[idx].value = .null;
+    return .null;
+}
+
+fn faCurrent(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const obj = getThis(ctx) orelse return .null;
+    const arr = getData(obj) orelse return .{ .bool = false };
+    const cursor: usize = @intCast(@max(Value.toInt(obj.get("__cursor")), 0));
+    if (cursor >= arr.entries.items.len) return .{ .bool = false };
+    return arr.entries.items[cursor].value;
+}
+
+fn faKey(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const obj = getThis(ctx) orelse return .null;
+    const arr = getData(obj) orelse return .null;
+    const cursor = Value.toInt(obj.get("__cursor"));
+    if (cursor < 0 or cursor >= @as(i64, @intCast(arr.entries.items.len))) return .null;
+    return .{ .int = cursor };
+}
+
+fn faNext(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const obj = getThis(ctx) orelse return .null;
+    const cursor = Value.toInt(obj.get("__cursor"));
+    try obj.set(ctx.allocator, "__cursor", .{ .int = cursor + 1 });
+    return .null;
+}
+
+fn faRewind(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const obj = getThis(ctx) orelse return .null;
+    try obj.set(ctx.allocator, "__cursor", .{ .int = 0 });
+    return .null;
+}
+
+fn faValid(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const obj = getThis(ctx) orelse return .{ .bool = false };
+    const arr = getData(obj) orelse return .{ .bool = false };
+    const cursor = Value.toInt(obj.get("__cursor"));
+    return .{ .bool = cursor >= 0 and cursor < @as(i64, @intCast(arr.entries.items.len)) };
+}
+
+// --- SplQueue ---
+
+fn sqConstruct(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const obj = getThis(ctx) orelse return .null;
+    _ = try ensureData(ctx, obj);
+    try obj.set(ctx.allocator, "__cursor", .{ .int = 0 });
+    return .null;
+}
+
+fn sqEnqueue(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    const obj = getThis(ctx) orelse return .null;
+    const arr = try ensureData(ctx, obj);
+    if (args.len >= 1) try arr.append(ctx.allocator, args[0]);
+    return .null;
+}
+
+fn sqDequeue(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const obj = getThis(ctx) orelse return .null;
+    const arr = getData(obj) orelse return .null;
+    if (arr.entries.items.len == 0) return .null;
+    const first = arr.entries.items[0].value;
+    std.mem.copyForwards(PhpArray.Entry, arr.entries.items[0 .. arr.entries.items.len - 1], arr.entries.items[1..arr.entries.items.len]);
+    arr.entries.items.len -= 1;
+    return first;
+}
+
+fn sqBottom(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const obj = getThis(ctx) orelse return .null;
+    const arr = getData(obj) orelse return .null;
+    if (arr.entries.items.len == 0) return .null;
+    return arr.entries.items[0].value;
+}
+
+fn sqTop(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const obj = getThis(ctx) orelse return .null;
+    const arr = getData(obj) orelse return .null;
+    if (arr.entries.items.len == 0) return .null;
+    return arr.entries.items[arr.entries.items.len - 1].value;
+}
+
+fn sqCount(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const obj = getThis(ctx) orelse return .{ .int = 0 };
+    const arr = getData(obj) orelse return .{ .int = 0 };
+    return .{ .int = @intCast(arr.entries.items.len) };
+}
+
+fn sqIsEmpty(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const obj = getThis(ctx) orelse return .{ .bool = true };
+    const arr = getData(obj) orelse return .{ .bool = true };
+    return .{ .bool = arr.entries.items.len == 0 };
+}
+
+fn sqCurrent(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const obj = getThis(ctx) orelse return .null;
+    const arr = getData(obj) orelse return .{ .bool = false };
+    const cursor: usize = @intCast(@max(Value.toInt(obj.get("__cursor")), 0));
+    if (cursor >= arr.entries.items.len) return .{ .bool = false };
+    return arr.entries.items[cursor].value;
+}
+
+fn sqKey(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const obj = getThis(ctx) orelse return .null;
+    const arr = getData(obj) orelse return .null;
+    const cursor = Value.toInt(obj.get("__cursor"));
+    if (cursor < 0 or cursor >= @as(i64, @intCast(arr.entries.items.len))) return .null;
+    return .{ .int = cursor };
+}
+
+fn sqNext(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const obj = getThis(ctx) orelse return .null;
+    const cursor = Value.toInt(obj.get("__cursor"));
+    try obj.set(ctx.allocator, "__cursor", .{ .int = cursor + 1 });
+    return .null;
+}
+
+fn sqRewind(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const obj = getThis(ctx) orelse return .null;
+    try obj.set(ctx.allocator, "__cursor", .{ .int = 0 });
+    return .null;
+}
+
+fn sqValid(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const obj = getThis(ctx) orelse return .{ .bool = false };
+    const arr = getData(obj) orelse return .{ .bool = false };
+    const cursor = Value.toInt(obj.get("__cursor"));
+    return .{ .bool = cursor >= 0 and cursor < @as(i64, @intCast(arr.entries.items.len)) };
 }
