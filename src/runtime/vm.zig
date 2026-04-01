@@ -309,6 +309,7 @@ pub const VM = struct {
     response_code: i64 = 200,
     response_content_type: []const u8 = "text/html",
     response_headers: ?*PhpArray = null,
+    headers_sent: bool = false,
 
     pub const InlineCache = struct {
         // property access: keyed by (chunk_ptr ^ ip), stores class_ptr for visibility skip
@@ -701,6 +702,7 @@ pub const VM = struct {
         self.response_code = 200;
         self.response_content_type = "text/html";
         self.response_headers = null;
+        self.headers_sent = false;
         self.statics.clearRetainingCapacity();
         self.static_vars.clearRetainingCapacity();
         self.global_vars.clearRetainingCapacity();
@@ -1313,6 +1315,7 @@ pub const VM = struct {
                     } else {
                         try v.format(&self.output, self.allocator);
                     }
+                    if (self.ob_stack.items.len == 0) self.headers_sent = true;
                 },
                 .halt => return,
 

@@ -112,8 +112,8 @@ fn native_header_remove(ctx: *NativeContext, args: []const Value) RuntimeError!V
     return .null;
 }
 
-fn native_headers_sent(_: *NativeContext, _: []const Value) RuntimeError!Value {
-    return .{ .bool = false };
+fn native_headers_sent(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    return .{ .bool = ctx.vm.headers_sent };
 }
 
 fn native_headers_list(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
