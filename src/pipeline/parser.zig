@@ -638,16 +638,24 @@ const Parser = struct {
         _ = try self.expect(.l_paren);
         const cond = try self.parseExpression();
         _ = try self.expect(.r_paren);
-        _ = try self.expect(.l_brace);
+
+        const is_alt = self.peek() == .colon;
+        if (is_alt) {
+            _ = self.advance();
+        } else {
+            _ = try self.expect(.l_brace);
+        }
+
+        const end_tag: Tag = if (is_alt) .kw_endswitch else .r_brace;
 
         var cases = std.ArrayListUnmanaged(u32){};
         defer cases.deinit(self.allocator);
 
-        while (self.peek() != .r_brace and self.peek() != .eof) {
+        while (self.peek() != end_tag and self.peek() != .eof) {
             if (self.peek() == .kw_case) {
-                try cases.append(self.allocator, try self.parseSwitchCase());
+                try cases.append(self.allocator, try self.parseSwitchCase(is_alt));
             } else if (self.peek() == .kw_default) {
-                try cases.append(self.allocator, try self.parseSwitchDefault());
+                try cases.append(self.allocator, try self.parseSwitchDefault(is_alt));
             } else if (self.peek() == .open_tag or self.peek() == .close_tag) {
                 _ = self.advance();
             } else if (self.peek() == .inline_html) {
@@ -656,13 +664,19 @@ const Parser = struct {
                 self.synchronize();
             }
         }
-        _ = try self.expect(.r_brace);
+
+        if (is_alt) {
+            _ = try self.expect(.kw_endswitch);
+            _ = try self.expect(.semicolon);
+        } else {
+            _ = try self.expect(.r_brace);
+        }
 
         const extra = try self.addExtraList(cases.items);
         return self.addNode(.{ .tag = .switch_stmt, .main_token = switch_tok, .data = .{ .lhs = cond, .rhs = extra } });
     }
 
-    fn parseSwitchCase(self: *Parser) Error!u32 {
+    fn parseSwitchCase(self: *Parser, is_alt: bool) Error!u32 {
         const case_tok = self.advance(); // case
 
         var values = std.ArrayListUnmanaged(u32){};
@@ -681,7 +695,8 @@ const Parser = struct {
         var stmts = std.ArrayListUnmanaged(u32){};
         defer stmts.deinit(self.allocator);
 
-        while (self.peek() != .kw_case and self.peek() != .kw_default and self.peek() != .r_brace and self.peek() != .eof) {
+        const end_tag: Tag = if (is_alt) .kw_endswitch else .r_brace;
+        while (self.peek() != .kw_case and self.peek() != .kw_default and self.peek() != end_tag and self.peek() != .eof) {
             const stmt = self.parseStatement() catch |err| switch (err) {
                 error.ParseError => { self.synchronize(); continue; },
                 error.OutOfMemory => return error.OutOfMemory,
@@ -694,14 +709,15 @@ const Parser = struct {
         return self.addNode(.{ .tag = .switch_case, .main_token = case_tok, .data = .{ .lhs = vals_extra, .rhs = body_extra } });
     }
 
-    fn parseSwitchDefault(self: *Parser) Error!u32 {
+    fn parseSwitchDefault(self: *Parser, is_alt: bool) Error!u32 {
         const def_tok = self.advance(); // default
         _ = try self.expect(.colon);
 
         var stmts = std.ArrayListUnmanaged(u32){};
         defer stmts.deinit(self.allocator);
 
-        while (self.peek() != .kw_case and self.peek() != .kw_default and self.peek() != .r_brace and self.peek() != .eof) {
+        const end_tag: Tag = if (is_alt) .kw_endswitch else .r_brace;
+        while (self.peek() != .kw_case and self.peek() != .kw_default and self.peek() != end_tag and self.peek() != .eof) {
             const stmt = self.parseStatement() catch |err| switch (err) {
                 error.ParseError => { self.synchronize(); continue; },
                 error.OutOfMemory => return error.OutOfMemory,
