@@ -6611,7 +6611,7 @@ pub const VM = struct {
         const copy = self.allocator.create(PhpArray) catch return error.RuntimeError;
         copy.* = .{ .next_int_key = src.next_int_key, .cursor = src.cursor };
         copy.entries.ensureTotalCapacity(self.allocator, src.entries.items.len) catch return error.RuntimeError;
-        for (src.entries.items) |entry| {
+        for (src.entries.items, 0..) |entry, i| {
             copy.entries.appendAssumeCapacity(.{
                 .key = entry.key,
                 .value = if (entry.value == .array)
@@ -6619,6 +6619,9 @@ pub const VM = struct {
                 else
                     entry.value,
             });
+            if (entry.key == .string) {
+                copy.string_index.put(self.allocator, entry.key.string, i) catch return error.RuntimeError;
+            }
         }
         self.arrays.append(self.allocator, copy) catch return error.RuntimeError;
         return copy;

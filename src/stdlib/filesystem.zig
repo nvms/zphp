@@ -60,6 +60,8 @@ pub const entries = .{
     .{ "stream_resolve_include_path", native_stream_resolve_include_path },
     .{ "stream_isatty", native_stream_isatty },
     .{ "stream_set_chunk_size", native_stream_set_chunk_size },
+    .{ "stream_set_read_buffer", native_stream_set_buffer },
+    .{ "stream_set_write_buffer", native_stream_set_buffer },
     .{ "clearstatcache", native_clearstatcache },
     .{ "tempnam", native_tempnam },
     .{ "umask", native_umask },
@@ -887,6 +889,10 @@ fn native_clearstatcache(_: *NativeContext, _: []const Value) RuntimeError!Value
 
 fn native_stream_set_chunk_size(_: *NativeContext, _: []const Value) RuntimeError!Value {
     return .{ .int = 8192 };
+}
+
+fn native_stream_set_buffer(_: *NativeContext, _: []const Value) RuntimeError!Value {
+    return .{ .int = 0 };
 }
 
 fn native_umask(_: *NativeContext, args: []const Value) RuntimeError!Value {

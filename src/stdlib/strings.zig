@@ -107,7 +107,7 @@ pub const entries = .{
     .{ "strpbrk", native_strpbrk },
 };
 
-fn substr(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+fn substr(_: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len < 2) return .{ .string = "" };
     const s = if (args[0] == .string) args[0].string else return Value{ .string = "" };
     const slen: i64 = @intCast(s.len);
@@ -122,9 +122,9 @@ fn substr(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
             length = @max(0, slen - @as(i64, @intCast(ustart)) + length);
         }
         const end: usize = @min(s.len, ustart + @as(usize, @intCast(@max(0, length))));
-        return .{ .string = try ctx.createString(s[ustart..end]) };
+        return .{ .string = s[ustart..end] };
     }
-    return .{ .string = try ctx.createString(s[ustart..]) };
+    return .{ .string = s[ustart..] };
 }
 
 fn strpos(_: *NativeContext, args: []const Value) RuntimeError!Value {

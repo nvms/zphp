@@ -645,9 +645,11 @@ fn array_fill(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     const val = args[2];
 
     var result = try ctx.createArray();
+    try result.entries.ensureTotalCapacity(ctx.allocator, count);
     for (0..count) |i| {
-        try result.set(ctx.allocator, .{ .int = start_idx + @as(i64, @intCast(i)) }, val);
+        result.entries.appendAssumeCapacity(.{ .key = .{ .int = start_idx + @as(i64, @intCast(i)) }, .value = val });
     }
+    result.next_int_key = start_idx + @as(i64, @intCast(count));
     return .{ .array = result };
 }
 

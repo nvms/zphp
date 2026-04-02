@@ -2,6 +2,7 @@ const std = @import("std");
 
 pub const PhpArray = struct {
     entries: std.ArrayListUnmanaged(Entry) = .{},
+    string_index: std.StringHashMapUnmanaged(usize) = .{},
     next_int_key: i64 = 0,
     cursor: usize = 0,
 
@@ -25,6 +26,7 @@ pub const PhpArray = struct {
 
     pub fn deinit(self: *PhpArray, allocator: std.mem.Allocator) void {
         self.entries.deinit(allocator);
+        self.string_index.deinit(allocator);
     }
 
     pub fn append(self: *PhpArray, allocator: std.mem.Allocator, value: Value) !void {
@@ -47,15 +49,25 @@ pub const PhpArray = struct {
                 }
             }
         }
-        for (self.entries.items) |*entry| {
-            if (entry.key.eql(key)) {
-                entry.value = value;
+        if (key == .string) {
+            if (self.string_index.get(key.string)) |idx| {
+                self.entries.items[idx].value = value;
                 return;
             }
+        } else {
+            for (self.entries.items) |*entry| {
+                if (entry.key.eql(key)) {
+                    entry.value = value;
+                    return;
+                }
+            }
         }
+        const new_idx = self.entries.items.len;
         try self.entries.append(allocator, .{ .key = key, .value = value });
-        if (key == .int and key.int >= self.next_int_key) {
-            self.next_int_key = key.int + 1;
+        if (key == .int) {
+            if (key.int >= self.next_int_key) self.next_int_key = key.int + 1;
+        } else if (key == .string) {
+            try self.string_index.put(allocator, key.string, new_idx);
         }
     }
 
@@ -70,6 +82,12 @@ pub const PhpArray = struct {
                 }
             }
         }
+        if (key == .string) {
+            if (self.string_index.get(key.string)) |idx| {
+                return self.entries.items[idx].value;
+            }
+            return .null;
+        }
         for (self.entries.items) |entry| {
             if (entry.key.eql(key)) return entry.value;
         }
@@ -81,13 +99,31 @@ pub const PhpArray = struct {
     }
 
     pub fn remove(self: *PhpArray, key: Key) void {
-        var i: usize = 0;
-        while (i < self.entries.items.len) {
-            if (self.entries.items[i].key.eql(key)) {
-                _ = self.entries.orderedRemove(i);
-                return;
+        var remove_idx: ?usize = null;
+        if (key == .string) {
+            if (self.string_index.fetchRemove(key.string)) |kv| {
+                remove_idx = kv.value;
             }
-            i += 1;
+        }
+        if (remove_idx == null) {
+            var i: usize = 0;
+            while (i < self.entries.items.len) {
+                if (self.entries.items[i].key.eql(key)) {
+                    remove_idx = i;
+                    break;
+                }
+                i += 1;
+            }
+        }
+        if (remove_idx) |idx| {
+            _ = self.entries.orderedRemove(idx);
+            // rebuild string index for shifted entries
+            var it = self.string_index.iterator();
+            while (it.next()) |entry| {
+                if (entry.value_ptr.* > idx) {
+                    entry.value_ptr.* -= 1;
+                }
+            }
         }
     }
 };
