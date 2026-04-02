@@ -253,8 +253,12 @@ pub const Chunk = struct {
     }
 
     pub fn getSourceLocation(self: *const Chunk, ip: usize, source: []const u8) ?SourceLocation {
-        if (ip >= self.lines.items.len or source.len == 0) return null;
+        if (ip >= self.lines.items.len) return null;
         const byte_offset = self.lines.items[ip];
+        if (source.len == 0) {
+            // bytecode mode: lines store pre-converted line numbers
+            return .{ .line = byte_offset, .column = 0, .line_start = 0, .line_end = 0 };
+        }
         return locationFromOffset(source, byte_offset);
     }
 

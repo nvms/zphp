@@ -3,6 +3,7 @@ const Value = @import("runtime/value.zig").Value;
 const Chunk = @import("pipeline/bytecode.zig").Chunk;
 const ObjFunction = @import("pipeline/bytecode.zig").ObjFunction;
 const CompileResult = @import("pipeline/compiler.zig").CompileResult;
+const TypeHint = @import("pipeline/compiler.zig").TypeHint;
 
 const Allocator = std.mem.Allocator;
 
@@ -58,6 +59,11 @@ pub fn serialize(allocator: Allocator, result: *const CompileResult) ![]u8 {
         for (func.slot_names) |sn| _ = try strtab.intern(allocator, sn);
         try internChunkStrings(allocator, &strtab, &func.chunk);
     }
+    for (result.type_hints.items) |th| {
+        _ = try strtab.intern(allocator, th.name);
+        if (th.return_type.len > 0) _ = try strtab.intern(allocator, th.return_type);
+        for (th.param_types) |pt| _ = try strtab.intern(allocator, pt);
+    }
 
     // header
     try buf.appendSlice(allocator, MAGIC);
@@ -83,12 +89,23 @@ pub fn serialize(allocator: Allocator, result: *const CompileResult) ![]u8 {
     }
 
     // main chunk
-    try serializeChunk(&buf, allocator, &strtab, &result.chunk);
+    try serializeChunk(&buf, allocator, &strtab, &result.chunk, result.source);
 
     // functions
     try writeU32(&buf, allocator, @intCast(result.functions.items.len));
     for (result.functions.items) |*func| {
-        try serializeFunction(&buf, allocator, &strtab, func);
+        try serializeFunction(&buf, allocator, &strtab, func, result.source);
+    }
+
+    // type hints
+    try writeU32(&buf, allocator, @intCast(result.type_hints.items.len));
+    for (result.type_hints.items) |th| {
+        try writeU32(&buf, allocator, try strtab.intern(allocator, th.name));
+        try writeU32(&buf, allocator, if (th.return_type.len > 0) try strtab.intern(allocator, th.return_type) else 0xFFFFFFFF);
+        try writeU16(&buf, allocator, @intCast(th.param_types.len));
+        for (th.param_types) |pt| {
+            try writeU32(&buf, allocator, try strtab.intern(allocator, pt));
+        }
     }
 
     return buf.toOwnedSlice(allocator);
@@ -100,7 +117,7 @@ fn internChunkStrings(allocator: Allocator, strtab: *StringTable, chunk: *const 
     }
 }
 
-fn serializeChunk(buf: *std.ArrayListUnmanaged(u8), allocator: Allocator, strtab: *StringTable, chunk: *const Chunk) !void {
+fn serializeChunk(buf: *std.ArrayListUnmanaged(u8), allocator: Allocator, strtab: *StringTable, chunk: *const Chunk, source: []const u8) !void {
     // code
     try writeU32(buf, allocator, @intCast(chunk.code.items.len));
     try buf.appendSlice(allocator, chunk.code.items);
@@ -111,14 +128,19 @@ fn serializeChunk(buf: *std.ArrayListUnmanaged(u8), allocator: Allocator, strtab
         try serializeValue(buf, allocator, strtab, val);
     }
 
-    // lines
+    // lines (convert byte offsets to line numbers)
     try writeU32(buf, allocator, @intCast(chunk.lines.items.len));
-    for (chunk.lines.items) |line| {
-        try writeU32(buf, allocator, line);
+    for (chunk.lines.items) |byte_offset| {
+        if (source.len > 0) {
+            const loc = Chunk.locationFromOffset(source, byte_offset);
+            try writeU32(buf, allocator, loc.line);
+        } else {
+            try writeU32(buf, allocator, byte_offset);
+        }
     }
 }
 
-fn serializeFunction(buf: *std.ArrayListUnmanaged(u8), allocator: Allocator, strtab: *StringTable, func: *const ObjFunction) !void {
+fn serializeFunction(buf: *std.ArrayListUnmanaged(u8), allocator: Allocator, strtab: *StringTable, func: *const ObjFunction, source: []const u8) !void {
     try writeU32(buf, allocator, try strtab.intern(allocator, func.name));
     try buf.append(allocator, func.arity);
     try buf.append(allocator, func.required_params);
@@ -150,7 +172,7 @@ fn serializeFunction(buf: *std.ArrayListUnmanaged(u8), allocator: Allocator, str
         try writeU32(buf, allocator, try strtab.intern(allocator, sn));
     }
 
-    try serializeChunk(buf, allocator, strtab, &func.chunk);
+    try serializeChunk(buf, allocator, strtab, &func.chunk, source);
 }
 
 fn serializeValue(buf: *std.ArrayListUnmanaged(u8), allocator: Allocator, strtab: *StringTable, val: Value) !void {
@@ -314,6 +336,25 @@ pub fn deserialize(allocator: Allocator, data: []const u8) DeserializeError!Comp
         try functions.append(allocator, func);
     }
 
+    // type hints
+    var type_hints = std.ArrayListUnmanaged(TypeHint){};
+    const th_count = r.readU32() catch 0;
+    for (0..th_count) |_| {
+        const th_name_idx = r.readU32() catch break;
+        const th_ret_idx = r.readU32() catch break;
+        const th_param_count = r.readU16() catch break;
+        const param_types = allocator.alloc([]const u8, th_param_count) catch break;
+        for (0..th_param_count) |pi| {
+            const pt_idx = r.readU32() catch break;
+            param_types[pi] = strings[pt_idx];
+        }
+        type_hints.append(allocator, .{
+            .name = strings[th_name_idx],
+            .return_type = if (th_ret_idx == 0xFFFFFFFF) "" else strings[th_ret_idx],
+            .param_types = param_types,
+        }) catch break;
+    }
+
     allocator.free(strings);
 
     return .{
@@ -324,6 +365,7 @@ pub fn deserialize(allocator: Allocator, data: []const u8) DeserializeError!Comp
         .local_count = local_count,
         .slot_names = slot_names,
         .file_path = file_path,
+        .type_hints = type_hints,
     };
 }
 
