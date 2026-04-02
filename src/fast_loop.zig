@@ -151,6 +151,76 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                 ip += 1;
                 continue :dispatch @as(OpCode, @enumFromInt(_next));
             },
+            .bit_and => {
+                const b_ba = self.stack[sp - 1];
+                const a_ba = self.stack[sp - 2];
+                if (a_ba == .int and b_ba == .int) {
+                    sp -= 1;
+                    self.stack[sp - 1] = .{ .int = a_ba.int & b_ba.int };
+                    const _next = code[ip];
+                    ip += 1;
+                    continue :dispatch @as(OpCode, @enumFromInt(_next));
+                }
+                frame.ip = ip - 1;
+                self.sp = sp;
+                return;
+            },
+            .bit_or => {
+                const b_bo = self.stack[sp - 1];
+                const a_bo = self.stack[sp - 2];
+                if (a_bo == .int and b_bo == .int) {
+                    sp -= 1;
+                    self.stack[sp - 1] = .{ .int = a_bo.int | b_bo.int };
+                    const _next = code[ip];
+                    ip += 1;
+                    continue :dispatch @as(OpCode, @enumFromInt(_next));
+                }
+                frame.ip = ip - 1;
+                self.sp = sp;
+                return;
+            },
+            .bit_xor => {
+                const b_bx = self.stack[sp - 1];
+                const a_bx = self.stack[sp - 2];
+                if (a_bx == .int and b_bx == .int) {
+                    sp -= 1;
+                    self.stack[sp - 1] = .{ .int = a_bx.int ^ b_bx.int };
+                    const _next = code[ip];
+                    ip += 1;
+                    continue :dispatch @as(OpCode, @enumFromInt(_next));
+                }
+                frame.ip = ip - 1;
+                self.sp = sp;
+                return;
+            },
+            .shift_left => {
+                const b_sl = self.stack[sp - 1];
+                const a_sl = self.stack[sp - 2];
+                if (a_sl == .int and b_sl == .int and b_sl.int >= 0 and b_sl.int < 64) {
+                    sp -= 1;
+                    self.stack[sp - 1] = .{ .int = a_sl.int << @intCast(b_sl.int) };
+                    const _next = code[ip];
+                    ip += 1;
+                    continue :dispatch @as(OpCode, @enumFromInt(_next));
+                }
+                frame.ip = ip - 1;
+                self.sp = sp;
+                return;
+            },
+            .shift_right => {
+                const b_sr = self.stack[sp - 1];
+                const a_sr = self.stack[sp - 2];
+                if (a_sr == .int and b_sr == .int and b_sr.int >= 0 and b_sr.int < 64) {
+                    sp -= 1;
+                    self.stack[sp - 1] = .{ .int = a_sr.int >> @intCast(b_sr.int) };
+                    const _next = code[ip];
+                    ip += 1;
+                    continue :dispatch @as(OpCode, @enumFromInt(_next));
+                }
+                frame.ip = ip - 1;
+                self.sp = sp;
+                return;
+            },
             .negate => {
                 self.stack[sp - 1] = self.stack[sp - 1].negate();
                 const _next = code[ip];
@@ -529,6 +599,12 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                         ic.fn_cache_func = f;
                         break :blk f;
                     }
+                    // try inline native handling for hot builtins
+                    if (inlineNativeCall(self, name, arg_count, &sp)) {
+                        const _next = code[ip];
+                        ip += 1;
+                        continue :dispatch @as(OpCode, @enumFromInt(_next));
+                    }
                     frame.ip = ip - 4;
                     self.sp = sp;
                     return;
@@ -841,4 +917,95 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
             }
         }
     }
+}
+
+fn inlineNativeCall(self: *VM, name: []const u8, arg_count: u8, sp: *usize) bool {
+    const ac: usize = arg_count;
+    if (name.len == 6 and std.mem.eql(u8, name, "substr")) {
+        if (ac < 2 or ac > 3) return false;
+        const s_val = self.stack[sp.* - ac];
+        if (s_val != .string) return false;
+        const s = s_val.string;
+        const slen: i64 = @intCast(s.len);
+        var start = Value.toInt(self.stack[sp.* - ac + 1]);
+        if (start < 0) start = @max(0, slen + start);
+        if (start >= slen) {
+            sp.* -= ac;
+            self.stack[sp.*] = .{ .string = "" };
+            sp.* += 1;
+            return true;
+        }
+        const ustart: usize = @intCast(start);
+        if (ac >= 3 and self.stack[sp.* - ac + 2] != .null) {
+            var length = Value.toInt(self.stack[sp.* - ac + 2]);
+            if (length < 0) length = @max(0, slen - @as(i64, @intCast(ustart)) + length);
+            const end: usize = @min(s.len, ustart + @as(usize, @intCast(@max(0, length))));
+            sp.* -= ac;
+            self.stack[sp.*] = .{ .string = s[ustart..end] };
+            sp.* += 1;
+        } else {
+            sp.* -= ac;
+            self.stack[sp.*] = .{ .string = s[ustart..] };
+            sp.* += 1;
+        }
+        return true;
+    }
+    if (name.len == 6 and std.mem.eql(u8, name, "strlen")) {
+        if (ac != 1) return false;
+        const v = self.stack[sp.* - 1];
+        if (v != .string) return false;
+        sp.* -= 1;
+        self.stack[sp.*] = .{ .int = @intCast(v.string.len) };
+        sp.* += 1;
+        return true;
+    }
+    if (name.len == 6 and std.mem.eql(u8, name, "strpos")) {
+        if (ac < 2 or ac > 3) return false;
+        const hay = self.stack[sp.* - ac];
+        const needle = self.stack[sp.* - ac + 1];
+        if (hay != .string or needle != .string) return false;
+        const offset: usize = if (ac >= 3) @intCast(@max(0, Value.toInt(self.stack[sp.* - ac + 2]))) else 0;
+        if (offset >= hay.string.len) {
+            sp.* -= ac;
+            self.stack[sp.*] = .{ .bool = false };
+            sp.* += 1;
+            return true;
+        }
+        if (std.mem.indexOf(u8, hay.string[offset..], needle.string)) |pos| {
+            sp.* -= ac;
+            self.stack[sp.*] = .{ .int = @intCast(pos + offset) };
+            sp.* += 1;
+        } else {
+            sp.* -= ac;
+            self.stack[sp.*] = .{ .bool = false };
+            sp.* += 1;
+        }
+        return true;
+    }
+    if (name.len == 7 and std.mem.eql(u8, name, "strrpos")) {
+        if (ac < 2) return false;
+        const hay = self.stack[sp.* - ac];
+        const needle = self.stack[sp.* - ac + 1];
+        if (hay != .string or needle != .string) return false;
+        if (std.mem.lastIndexOf(u8, hay.string, needle.string)) |pos| {
+            sp.* -= ac;
+            self.stack[sp.*] = .{ .int = @intCast(pos) };
+            sp.* += 1;
+        } else {
+            sp.* -= ac;
+            self.stack[sp.*] = .{ .bool = false };
+            sp.* += 1;
+        }
+        return true;
+    }
+    if (name.len == 5 and std.mem.eql(u8, name, "count")) {
+        if (ac != 1) return false;
+        const v = self.stack[sp.* - 1];
+        if (v != .array) return false;
+        sp.* -= 1;
+        self.stack[sp.*] = .{ .int = v.array.length() };
+        sp.* += 1;
+        return true;
+    }
+    return false;
 }
