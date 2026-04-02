@@ -10,6 +10,7 @@ zphp aims to run standard PHP code as-is. The following all work the way you'd e
 - **Exceptions**: try/catch/finally, custom exception classes, exception chaining
 - **Generators**: yield, yield from, generator return values
 - **Enums**: basic and backed enums, enum methods
+- **Attributes**: `#[Attribute]` syntax on classes, methods, properties, and parameters, with full reflection support (`getAttributes()`, `getName()`, `getArguments()`, `newInstance()`)
 - **Type hints**: parameter types, return types, nullable types, union types
 - **String interpolation**: `"Hello, $name"` and `"Hello, {$obj->name}"`
 - **Arrays**: both sequential and associative, nested arrays, array destructuring
@@ -23,4 +24,4 @@ zphp aims to run standard PHP code as-is. The following all work the way you'd e
 
 ## Test suite
 
-zphp is validated against PHP 8.4 with 176 compatibility tests and 75 multi-file example projects. Each test runs the same PHP code in both zphp and PHP 8.4, comparing output exactly. A Laravel application (7 harness tests covering Eloquent, Blade, validation, JSON API, middleware, and error handling) is also tested against both runtimes. The test suite runs on every commit.
+zphp is validated against PHP 8.4 with 178 compatibility tests and 82 multi-file example projects. Each test runs the same PHP code in both zphp and PHP 8.4, comparing output exactly. A Laravel application (7 harness tests covering Eloquent, Blade, validation, JSON API, middleware, and error handling) is also tested against both runtimes. Standalone executable compilation is verified with 12 additional tests. The test suite runs on every commit.
