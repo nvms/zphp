@@ -98,6 +98,15 @@ pub const PhpArray = struct {
         return @intCast(self.entries.items.len);
     }
 
+    pub fn rebuildStringIndex(self: *PhpArray, allocator: std.mem.Allocator) !void {
+        self.string_index.clearRetainingCapacity();
+        for (self.entries.items, 0..) |entry, i| {
+            if (entry.key == .string) {
+                try self.string_index.put(allocator, entry.key.string, i);
+            }
+        }
+    }
+
     pub fn remove(self: *PhpArray, key: Key) void {
         var remove_idx: ?usize = null;
         if (key == .string) {

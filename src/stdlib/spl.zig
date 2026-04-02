@@ -641,6 +641,7 @@ fn aoOffsetUnset(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     for (arr.entries.items, 0..) |entry, i| {
         if (entry.key.eql(key)) {
             _ = arr.entries.orderedRemove(i);
+            arr.rebuildStringIndex(ctx.allocator) catch {};
             return .null;
         }
     }
@@ -793,6 +794,7 @@ fn aiOffsetUnset(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     for (arr.entries.items, 0..) |entry, i| {
         if (entry.key.eql(key)) {
             _ = arr.entries.orderedRemove(i);
+            arr.rebuildStringIndex(ctx.allocator) catch {};
             return .null;
         }
     }

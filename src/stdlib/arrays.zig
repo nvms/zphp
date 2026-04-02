@@ -90,14 +90,17 @@ fn array_pop(_: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len == 0 or args[0] != .array) return .null;
     const arr = args[0].array;
     if (arr.entries.items.len == 0) return .null;
-    return (arr.entries.pop() orelse return .null).value;
+    const entry = arr.entries.pop() orelse return .null;
+    if (entry.key == .string) _ = arr.string_index.remove(entry.key.string);
+    return entry.value;
 }
 
-fn array_shift(_: *NativeContext, args: []const Value) RuntimeError!Value {
+fn array_shift(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len == 0 or args[0] != .array) return .null;
     const arr = args[0].array;
     if (arr.entries.items.len == 0) return .null;
     const first = arr.entries.orderedRemove(0);
+    try arr.rebuildStringIndex(ctx.allocator);
     return first.value;
 }
 
@@ -279,6 +282,7 @@ fn native_rsort(_: *NativeContext, args: []const Value) RuntimeError!Value {
 fn reindexArray(arr: *PhpArray) void {
     for (arr.entries.items, 0..) |*entry, i| entry.key = .{ .int = @intCast(i) };
     arr.next_int_key = @intCast(arr.entries.items.len);
+    arr.string_index.clearRetainingCapacity();
 }
 
 const SortField = enum { value, key };
@@ -530,6 +534,7 @@ fn array_splice(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
         }
     }
     arr.next_int_key = next_int;
+    try arr.rebuildStringIndex(ctx.allocator);
 
     return .{ .array = removed };
 }
@@ -808,6 +813,7 @@ fn array_unshift(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
         try arr.entries.insert(ctx.allocator, insert_idx, .{ .key = .{ .int = 0 }, .value = val });
         insert_idx += 1;
     }
+    try arr.rebuildStringIndex(ctx.allocator);
     return .{ .int = arr.length() };
 }
 
@@ -887,14 +893,15 @@ fn keyLessThan(_: void, a: PhpArray.Entry, b: PhpArray.Entry) bool {
     return false;
 }
 
-fn native_ksort(_: *NativeContext, args: []const Value) RuntimeError!Value {
+fn native_ksort(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len == 0 or args[0] != .array) return .{ .bool = false };
     const arr = args[0].array;
     std.mem.sort(PhpArray.Entry, arr.entries.items, {}, keyLessThan);
+    try arr.rebuildStringIndex(ctx.allocator);
     return .{ .bool = true };
 }
 
-fn native_krsort(_: *NativeContext, args: []const Value) RuntimeError!Value {
+fn native_krsort(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len == 0 or args[0] != .array) return .{ .bool = false };
     const arr = args[0].array;
     std.mem.sort(PhpArray.Entry, arr.entries.items, {}, struct {
@@ -902,10 +909,11 @@ fn native_krsort(_: *NativeContext, args: []const Value) RuntimeError!Value {
             return keyLessThan({}, b, a);
         }
     }.f);
+    try arr.rebuildStringIndex(ctx.allocator);
     return .{ .bool = true };
 }
 
-fn native_asort(_: *NativeContext, args: []const Value) RuntimeError!Value {
+fn native_asort(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len == 0 or args[0] != .array) return .{ .bool = false };
     const arr = args[0].array;
     std.mem.sort(PhpArray.Entry, arr.entries.items, {}, struct {
@@ -913,10 +921,11 @@ fn native_asort(_: *NativeContext, args: []const Value) RuntimeError!Value {
             return Value.lessThan(a.value, b.value);
         }
     }.f);
+    try arr.rebuildStringIndex(ctx.allocator);
     return .{ .bool = true };
 }
 
-fn native_arsort(_: *NativeContext, args: []const Value) RuntimeError!Value {
+fn native_arsort(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len == 0 or args[0] != .array) return .{ .bool = false };
     const arr = args[0].array;
     std.mem.sort(PhpArray.Entry, arr.entries.items, {}, struct {
@@ -924,6 +933,7 @@ fn native_arsort(_: *NativeContext, args: []const Value) RuntimeError!Value {
             return Value.lessThan(b.value, a.value);
         }
     }.f);
+    try arr.rebuildStringIndex(ctx.allocator);
     return .{ .bool = true };
 }
 
@@ -962,6 +972,7 @@ fn native_uasort(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     const arr = args[0].array;
     const callback = args[1];
     try mergeSort(PhpArray.Entry, arr.entries.items, ctx, callback, .value);
+    try arr.rebuildStringIndex(ctx.allocator);
     return .{ .bool = true };
 }
 
@@ -970,6 +981,7 @@ fn native_uksort(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     const arr = args[0].array;
     const callback = args[1];
     try mergeSort(PhpArray.Entry, arr.entries.items, ctx, callback, .key);
+    try arr.rebuildStringIndex(ctx.allocator);
     return .{ .bool = true };
 }
 

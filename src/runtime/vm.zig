@@ -6602,6 +6602,9 @@ pub const VM = struct {
             }
             if (!found) {
                 try result.entries.append(self.allocator, entry);
+                if (entry.key == .string) {
+                    result.string_index.put(self.allocator, entry.key.string, result.entries.items.len - 1) catch return error.RuntimeError;
+                }
             }
         }
         return result;

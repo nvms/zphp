@@ -105,7 +105,10 @@ fn native_setcookie(ctx: *NativeContext, args: []const Value) RuntimeError!Value
 
 fn native_header_remove(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len == 0) {
-        if (getResponseHeaders(ctx)) |arr| arr.entries.clearRetainingCapacity();
+        if (getResponseHeaders(ctx)) |arr| {
+            arr.entries.clearRetainingCapacity();
+            arr.string_index.clearRetainingCapacity();
+        }
         return .null;
     }
     if (args[0] == .string) removeHeaderByName(ctx, args[0].string);
@@ -202,6 +205,7 @@ fn appendResponseHeader(ctx: *NativeContext, hdr: []const u8) !void {
 
 fn removeHeaderByName(ctx: *NativeContext, name: []const u8) void {
     const arr = getResponseHeaders(ctx) orelse return;
+    var removed = false;
     var i: usize = 0;
     while (i < arr.entries.items.len) {
         const entry = arr.entries.items[i];
@@ -209,11 +213,13 @@ fn removeHeaderByName(ctx: *NativeContext, name: []const u8) void {
             const hdr = entry.value.string;
             if (hdr.len > name.len and hdr[name.len] == ':' and std.ascii.eqlIgnoreCase(hdr[0..name.len], name)) {
                 _ = arr.entries.orderedRemove(i);
+                removed = true;
                 continue;
             }
         }
         i += 1;
     }
+    if (removed) arr.rebuildStringIndex(ctx.allocator) catch {};
 }
 
 fn startsWithIgnoreCase(s: []const u8, prefix: []const u8) bool {
