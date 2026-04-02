@@ -159,6 +159,8 @@ pub const OpCode = enum(u8) {
     static_call_dyn_both, // u8: arg count (class name string and method name string on stack below args)
     static_call_dyn_both_spread, // no operands (class name, method name, and args array on stack)
     get_obj_class, // pop value, push its class name string (for $var::class)
+    array_elem_inc, // pop key, pop array, arr[key]++, push old value
+    array_elem_dec, // pop key, pop array, arr[key]--, push old value
 
     pub fn width(self: OpCode) usize {
         return switch (self) {
@@ -201,6 +203,7 @@ pub const OpCode = enum(u8) {
             .array_get, .array_get_vivify,
             .get_prop_dynamic,
             .isset_prop_dynamic,
+            .array_elem_inc, .array_elem_dec,
             .add, .subtract, .multiply, .divide, .modulo, .power, .concat,
             .bit_and, .bit_or, .bit_xor, .shift_left, .shift_right,
             .equal, .not_equal, .identical, .not_identical,

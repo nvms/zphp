@@ -1476,6 +1476,21 @@ pub const VM = struct {
                     self.push(val);
                 },
 
+                .array_elem_inc, .array_elem_dec => {
+                    const aei_key = self.pop();
+                    const aei_arr = self.pop();
+                    if (aei_arr == .array) {
+                        const ak = Value.toArrayKey(aei_key);
+                        const old = aei_arr.array.get(ak);
+                        const old_int = if (old == .int) old.int else if (old == .float) @as(i64, @intFromFloat(old.float)) else 0;
+                        const new_val: Value = if (op == .array_elem_inc) .{ .int = old_int + 1 } else .{ .int = old_int - 1 };
+                        try aei_arr.array.set(self.allocator, ak, new_val);
+                        self.push(old);
+                    } else {
+                        self.push(.null);
+                    }
+                },
+
                 .iter_begin => {
                     var iterable = self.stack[self.sp - 1];
                     if (iterable == .generator) {

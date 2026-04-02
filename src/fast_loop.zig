@@ -282,6 +282,52 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                     return;
                 }
             },
+            .array_elem_inc => {
+                const aei_key = self.stack[sp - 1];
+                const aei_arr = self.stack[sp - 2];
+                if (aei_arr == .array) {
+                    const ak = Value.toArrayKey(aei_key);
+                    const old = aei_arr.array.get(ak);
+                    if (old == .int) {
+                        aei_arr.array.set(self.allocator, ak, .{ .int = old.int + 1 }) catch {
+                            frame.ip = ip - 1;
+                            self.sp = sp;
+                            return;
+                        };
+                        sp -= 1;
+                        self.stack[sp - 1] = old;
+                        const _next = code[ip];
+                        ip += 1;
+                        continue :dispatch @as(OpCode, @enumFromInt(_next));
+                    }
+                }
+                frame.ip = ip - 1;
+                self.sp = sp;
+                return;
+            },
+            .array_elem_dec => {
+                const aei_key = self.stack[sp - 1];
+                const aei_arr = self.stack[sp - 2];
+                if (aei_arr == .array) {
+                    const ak = Value.toArrayKey(aei_key);
+                    const old = aei_arr.array.get(ak);
+                    if (old == .int) {
+                        aei_arr.array.set(self.allocator, ak, .{ .int = old.int - 1 }) catch {
+                            frame.ip = ip - 1;
+                            self.sp = sp;
+                            return;
+                        };
+                        sp -= 1;
+                        self.stack[sp - 1] = old;
+                        const _next = code[ip];
+                        ip += 1;
+                        continue :dispatch @as(OpCode, @enumFromInt(_next));
+                    }
+                }
+                frame.ip = ip - 1;
+                self.sp = sp;
+                return;
+            },
             .call_indirect => {
                 const ci_ac = code[ip];
                 ip += 1;
