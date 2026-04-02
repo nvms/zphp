@@ -16,6 +16,7 @@ const TAG_BOOL_TRUE: u8 = 2;
 const TAG_INT: u8 = 3;
 const TAG_FLOAT: u8 = 4;
 const TAG_STRING: u8 = 5;
+const TAG_EMPTY_ARRAY: u8 = 6;
 
 const StringTable = struct {
     entries: std.ArrayListUnmanaged([]const u8) = .{},
@@ -51,6 +52,9 @@ pub fn serialize(allocator: Allocator, result: *const CompileResult) ![]u8 {
     for (result.functions.items) |*func| {
         _ = try strtab.intern(allocator, func.name);
         for (func.params) |p| _ = try strtab.intern(allocator, p);
+        for (func.defaults) |d| {
+            if (d == .string) _ = try strtab.intern(allocator, d.string);
+        }
         for (func.slot_names) |sn| _ = try strtab.intern(allocator, sn);
         try internChunkStrings(allocator, &strtab, &func.chunk);
     }
@@ -164,6 +168,13 @@ fn serializeValue(buf: *std.ArrayListUnmanaged(u8), allocator: Allocator, strtab
         .string => |s| {
             try buf.append(allocator, TAG_STRING);
             try writeU32(buf, allocator, try strtab.intern(allocator, s));
+        },
+        .array => {
+            if (val.isEmptyArrayDefault()) {
+                try buf.append(allocator, TAG_EMPTY_ARRAY);
+            } else {
+                try buf.append(allocator, TAG_NULL);
+            }
         },
         else => try buf.append(allocator, TAG_NULL),
     }
@@ -397,6 +408,7 @@ fn deserializeValue(r: *Reader, strings: []const []const u8) !Value {
         TAG_INT => .{ .int = try r.readI64() },
         TAG_FLOAT => .{ .float = try r.readF64() },
         TAG_STRING => .{ .string = strings[try r.readU32()] },
+        TAG_EMPTY_ARRAY => Value.empty_array_default,
         else => .null,
     };
 }
