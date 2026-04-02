@@ -1,0 +1,153 @@
+#!/bin/bash
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+ZPHP="${ZPHP:-$SCRIPT_DIR/../zig-out/bin/zphp}"
+
+if [ ! -f "$ZPHP" ]; then
+    echo "zphp not found at $ZPHP (build with: make build)"
+    exit 1
+fi
+
+TMPDIR="$(mktemp -d)"
+trap 'rm -rf "$TMPDIR"' EXIT
+
+passed=0
+failed=0
+errors=""
+
+run_test() {
+    local name="$1"
+    local php_file="$2"
+
+    local run_out
+    run_out="$("$ZPHP" run "$php_file" 2>&1)" || true
+
+    "$ZPHP" build --compile "$php_file" 2>/dev/null
+    local bin_name
+    bin_name="$(basename "$php_file" .php)"
+
+    if [ ! -f "$bin_name" ]; then
+        failed=$((failed + 1))
+        echo "  FAIL  $name (binary not created)"
+        errors="$errors\n--- $name ---\nbinary not created\n"
+        return
+    fi
+
+    local bin_out
+    bin_out="$(./"$bin_name" 2>&1)" || true
+    rm -f "$bin_name"
+
+    if [ "$run_out" = "$bin_out" ]; then
+        passed=$((passed + 1))
+        echo "  pass  $name"
+    else
+        failed=$((failed + 1))
+        echo "  FAIL  $name"
+        errors="$errors\n--- $name ---\nexpected (zphp run):\n$run_out\ngot (compiled):\n$bin_out\n"
+    fi
+}
+
+echo "standalone executable tests"
+echo ""
+
+# test basic scripts
+cat > "$TMPDIR/hello.php" << 'EOF'
+<?php
+echo "hello world\n";
+$x = 42;
+echo "x = $x\n";
+$arr = [1, 2, 3];
+foreach ($arr as $v) echo "$v ";
+echo "\n";
+EOF
+run_test "basic" "$TMPDIR/hello.php"
+
+cat > "$TMPDIR/loops.php" << 'EOF'
+<?php
+$sum = 0;
+for ($i = 0; $i < 100; $i++) {
+    $sum += $i;
+}
+echo "sum: $sum\n";
+
+$counts = array_fill(0, 5, 0);
+for ($j = 0; $j < 20; $j++) {
+    $counts[$j % 5]++;
+}
+echo implode(",", $counts) . "\n";
+EOF
+run_test "loops" "$TMPDIR/loops.php"
+
+cat > "$TMPDIR/closures.php" << 'EOF'
+<?php
+$add = function($a, $b) { return $a + $b; };
+echo $add(3, 4) . "\n";
+
+$multiplier = function($factor) {
+    return function($x) use ($factor) {
+        return $x * $factor;
+    };
+};
+$double = $multiplier(2);
+$triple = $multiplier(3);
+echo $double(5) . "\n";
+echo $triple(5) . "\n";
+EOF
+run_test "closures" "$TMPDIR/closures.php"
+
+cat > "$TMPDIR/classes.php" << 'EOF'
+<?php
+class Animal {
+    public string $name;
+    public function __construct(string $name) {
+        $this->name = $name;
+    }
+    public function speak(): string {
+        return $this->name . " speaks";
+    }
+}
+
+class Dog extends Animal {
+    public function speak(): string {
+        return $this->name . " barks";
+    }
+}
+
+$d = new Dog("Rex");
+echo $d->speak() . "\n";
+echo ($d instanceof Animal ? "yes" : "no") . "\n";
+EOF
+run_test "classes" "$TMPDIR/classes.php"
+
+cat > "$TMPDIR/strings.php" << 'EOF'
+<?php
+$s = "hello world";
+echo strlen($s) . "\n";
+echo substr($s, 6) . "\n";
+echo strtoupper($s) . "\n";
+echo str_replace("world", "php", $s) . "\n";
+$parts = explode(" ", $s);
+echo count($parts) . "\n";
+echo implode("-", $parts) . "\n";
+EOF
+run_test "strings" "$TMPDIR/strings.php"
+
+# test laravel harness if available
+if [ -d "$SCRIPT_DIR/laravel/app/vendor" ]; then
+    echo ""
+    echo "laravel compilation tests"
+    echo ""
+    for f in "$SCRIPT_DIR"/laravel/harness/test-*.php; do
+        name="$(basename "$f" .php)"
+        run_test "laravel:$name" "$f"
+    done
+fi
+
+echo ""
+echo "$passed passed, $failed failed"
+
+if [ $failed -gt 0 ]; then
+    echo -e "$errors"
+    exit 1
+fi

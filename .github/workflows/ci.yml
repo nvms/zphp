@@ -132,6 +132,24 @@ jobs:
       - run: ./tests/laravel/setup
       - run: ./tests/laravel/run
 
+  compile:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.15.1
+      - name: install system libs
+        run: sudo apt-get update && sudo apt-get install -y libpcre2-dev libsqlite3-dev zlib1g-dev libmysqlclient-dev libpq-dev libssl-dev libnghttp2-dev
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.4'
+          extensions: mbstring, xml, sqlite3, curl, tokenizer
+      - run: zig build
+      - run: ./tests/laravel/setup
+      - name: Run ./tests/compile_test
+        run: ./tests/compile_test
+
   pdo:
     runs-on: ubuntu-latest
     services:
