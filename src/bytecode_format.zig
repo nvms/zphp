@@ -45,6 +45,8 @@ pub fn serialize(allocator: Allocator, result: *const CompileResult) ![]u8 {
     defer strtab.deinit(allocator);
 
     // first pass: intern all strings
+    if (result.file_path.len > 0) _ = try strtab.intern(allocator, result.file_path);
+    for (result.slot_names) |sn| _ = try strtab.intern(allocator, sn);
     try internChunkStrings(allocator, &strtab, &result.chunk);
     for (result.functions.items) |*func| {
         _ = try strtab.intern(allocator, func.name);
@@ -62,6 +64,18 @@ pub fn serialize(allocator: Allocator, result: *const CompileResult) ![]u8 {
     for (strtab.entries.items) |s| {
         try writeU32(&buf, allocator, @intCast(s.len));
         try buf.appendSlice(allocator, s);
+    }
+
+    // top-level metadata
+    try writeU16(&buf, allocator, result.local_count);
+    try writeU16(&buf, allocator, @intCast(result.slot_names.len));
+    for (result.slot_names) |sn| {
+        try writeU32(&buf, allocator, try strtab.intern(allocator, sn));
+    }
+    if (result.file_path.len > 0) {
+        try writeU32(&buf, allocator, try strtab.intern(allocator, result.file_path));
+    } else {
+        try writeU32(&buf, allocator, 0xFFFFFFFF);
     }
 
     // main chunk
@@ -255,6 +269,17 @@ pub fn deserialize(allocator: Allocator, data: []const u8) DeserializeError!Comp
         strings[i] = owned;
     }
 
+    // top-level metadata
+    const local_count = r.readU16() catch return error.InvalidFormat;
+    const slot_name_count = r.readU16() catch return error.InvalidFormat;
+    const slot_names = allocator.alloc([]const u8, slot_name_count) catch return error.OutOfMemory;
+    for (0..slot_name_count) |i| {
+        const sidx = r.readU32() catch return error.InvalidFormat;
+        slot_names[i] = strings[sidx];
+    }
+    const file_path_idx = r.readU32() catch return error.InvalidFormat;
+    const file_path: []const u8 = if (file_path_idx == 0xFFFFFFFF) "" else strings[file_path_idx];
+
     // main chunk
     var chunk = deserializeChunk(&r, allocator, strings) catch return error.InvalidFormat;
     errdefer chunk.deinit(allocator);
@@ -285,6 +310,9 @@ pub fn deserialize(allocator: Allocator, data: []const u8) DeserializeError!Comp
         .functions = functions,
         .string_allocs = string_allocs,
         .allocator = allocator,
+        .local_count = local_count,
+        .slot_names = slot_names,
+        .file_path = file_path,
     };
 }
 
