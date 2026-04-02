@@ -2061,12 +2061,15 @@ pub const VM = struct {
                     const var_name = self.currentChunk().constants.items[var_idx].string;
                     try self.ensureClosureInstance();
                     const closure_name = self.peek().string;
+                    const local_val = self.getLocalByName(var_name);
                     const val = if (self.currentFrame().ref_slots.get(var_name)) |cell|
                         cell.*
+                    else if (local_val != .null)
+                        local_val
                     else if (self.currentFrame().vars.get(var_name)) |v|
                         v
                     else
-                        self.getLocalByName(var_name);
+                        .null;
                     const cap_pos: u32 = @intCast(self.captures.items.len);
                     try self.captures.append(self.allocator, .{
                         .closure_name = closure_name,

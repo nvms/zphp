@@ -121,6 +121,18 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                 ip += 1;
                 continue :dispatch @as(OpCode, @enumFromInt(_next));
             },
+            .greater_equal => {
+                const b = self.stack[sp - 1];
+                const a = self.stack[sp - 2];
+                sp -= 2;
+                self.stack[sp] = .{ .bool = if (a == .int and b == .int) a.int >= b.int else !Value.lessThan(a, b) };
+                sp += 1;
+                const _next = code[ip];
+                ip += 1;
+                continue :dispatch @as(OpCode, @enumFromInt(_next));
+            },
+            .equal => { frame.ip = ip - 1; self.sp = sp; return; },
+            .not_equal => { frame.ip = ip - 1; self.sp = sp; return; },
             .identical => {
                 const b_id = self.stack[sp - 1];
                 const a_id = self.stack[sp - 2];
@@ -263,6 +275,19 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                 ip += 1;
                 continue :dispatch @as(OpCode, @enumFromInt(_next));
             },
+            .jump_if_true => {
+                const offset = (@as(u16, code[ip]) << 8) | code[ip + 1];
+                ip += 2;
+                if (self.stack[sp - 1].isTruthy()) {
+                    ip += offset;
+                } else if (code[ip] == @intFromEnum(OpCode.pop)) {
+                    ip += 1;
+                    sp -= 1;
+                }
+                const _next = code[ip];
+                ip += 1;
+                continue :dispatch @as(OpCode, @enumFromInt(_next));
+            },
             .jump => {
                 const offset = (@as(u16, code[ip]) << 8) | code[ip + 1];
                 ip += 2;
@@ -393,6 +418,95 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                         ip += 1;
                         continue :dispatch @as(OpCode, @enumFromInt(_next));
                     }
+                }
+                frame.ip = ip - 1;
+                self.sp = sp;
+                return;
+            },
+            .echo => {
+                const echo_val = self.stack[sp - 1];
+                sp -= 1;
+                if (echo_val == .string) {
+                    self.output.appendSlice(self.allocator, echo_val.string) catch {
+                        frame.ip = ip - 1;
+                        self.sp = sp + 1;
+                        return;
+                    };
+                    const _next = code[ip];
+                    ip += 1;
+                    continue :dispatch @as(OpCode, @enumFromInt(_next));
+                } else if (echo_val == .int) {
+                    var tmp: [20]u8 = undefined;
+                    const s = std.fmt.bufPrint(&tmp, "{d}", .{echo_val.int}) catch {
+                        frame.ip = ip - 1;
+                        self.sp = sp + 1;
+                        return;
+                    };
+                    self.output.appendSlice(self.allocator, s) catch {
+                        frame.ip = ip - 1;
+                        self.sp = sp + 1;
+                        return;
+                    };
+                    const _next = code[ip];
+                    ip += 1;
+                    continue :dispatch @as(OpCode, @enumFromInt(_next));
+                }
+                frame.ip = ip - 1;
+                self.sp = sp + 1;
+                return;
+            },
+            .array_set => {
+                const as_val = self.stack[sp - 1];
+                const as_key = self.stack[sp - 2];
+                const as_arr = self.stack[sp - 3];
+                if (as_arr == .array) {
+                    as_arr.array.set(self.allocator, Value.toArrayKey(as_key), as_val) catch {
+                        frame.ip = ip - 1;
+                        self.sp = sp;
+                        return;
+                    };
+                    sp -= 2;
+                    self.stack[sp - 1] = as_val;
+                    const _next = code[ip];
+                    ip += 1;
+                    continue :dispatch @as(OpCode, @enumFromInt(_next));
+                }
+                frame.ip = ip - 1;
+                self.sp = sp;
+                return;
+            },
+            .array_push => {
+                const ap_val = self.stack[sp - 1];
+                const ap_arr = self.stack[sp - 2];
+                if (ap_arr == .array) {
+                    ap_arr.array.append(self.allocator, ap_val) catch {
+                        frame.ip = ip - 1;
+                        self.sp = sp;
+                        return;
+                    };
+                    sp -= 1;
+                    const _next = code[ip];
+                    ip += 1;
+                    continue :dispatch @as(OpCode, @enumFromInt(_next));
+                }
+                frame.ip = ip - 1;
+                self.sp = sp;
+                return;
+            },
+            .array_set_elem => {
+                const ase_val = self.stack[sp - 1];
+                const ase_key = self.stack[sp - 2];
+                const ase_arr = self.stack[sp - 3];
+                if (ase_arr == .array) {
+                    ase_arr.array.set(self.allocator, Value.toArrayKey(ase_key), ase_val) catch {
+                        frame.ip = ip - 1;
+                        self.sp = sp;
+                        return;
+                    };
+                    sp -= 2;
+                    const _next = code[ip];
+                    ip += 1;
+                    continue :dispatch @as(OpCode, @enumFromInt(_next));
                 }
                 frame.ip = ip - 1;
                 self.sp = sp;
