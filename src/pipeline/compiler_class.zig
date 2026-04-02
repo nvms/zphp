@@ -7,8 +7,253 @@ const Chunk = @import("bytecode.zig").Chunk;
 const OpCode = @import("bytecode.zig").OpCode;
 const ObjFunction = @import("bytecode.zig").ObjFunction;
 const Value = @import("../runtime/value.zig").Value;
+const PhpArray = @import("../runtime/value.zig").PhpArray;
 const Allocator = std.mem.Allocator;
 const Error = Allocator.Error || error{CompileError};
+
+const ParsedAttr = struct {
+    name: []const u8,
+    args: []const Value,
+};
+
+fn isModifierToken(tag: Token.Tag) bool {
+    return switch (tag) {
+        .kw_public, .kw_protected, .kw_private, .kw_static,
+        .kw_abstract, .kw_readonly, .kw_final, .kw_function,
+        .kw_class, .kw_var,
+        => true,
+        else => false,
+    };
+}
+
+fn isTypeToken(tag: Token.Tag) bool {
+    return switch (tag) {
+        .identifier, .question, .pipe, .backslash, .amp,
+        .kw_array, .kw_callable, .kw_self, .kw_parent, .kw_null,
+        .kw_true, .kw_false, .kw_static,
+        => true,
+        else => false,
+    };
+}
+
+fn parseAttrArgValue(tokens: []const Token, source: []const u8, pos: *usize, allocator: Allocator) Value {
+    if (pos.* >= tokens.len) return .null;
+    const tag = tokens[pos.*].tag;
+    switch (tag) {
+        .string => {
+            const raw = tokens[pos.*].lexeme(source);
+            pos.* += 1;
+            if (raw.len >= 2) return .{ .string = raw[1 .. raw.len - 1] };
+            return .{ .string = raw };
+        },
+        .integer => {
+            const text = tokens[pos.*].lexeme(source);
+            pos.* += 1;
+            return .{ .int = std.fmt.parseInt(i64, text, 0) catch 0 };
+        },
+        .float => {
+            const text = tokens[pos.*].lexeme(source);
+            pos.* += 1;
+            return .{ .float = std.fmt.parseFloat(f64, text) catch 0.0 };
+        },
+        .kw_true => {
+            pos.* += 1;
+            return .{ .bool = true };
+        },
+        .kw_false => {
+            pos.* += 1;
+            return .{ .bool = false };
+        },
+        .kw_null => {
+            pos.* += 1;
+            return .null;
+        },
+        .identifier => {
+            const text = tokens[pos.*].lexeme(source);
+            if (std.mem.eql(u8, text, "true") or std.mem.eql(u8, text, "TRUE")) {
+                pos.* += 1;
+                return .{ .bool = true };
+            }
+            if (std.mem.eql(u8, text, "false") or std.mem.eql(u8, text, "FALSE")) {
+                pos.* += 1;
+                return .{ .bool = false };
+            }
+            if (std.mem.eql(u8, text, "null") or std.mem.eql(u8, text, "NULL")) {
+                pos.* += 1;
+                return .null;
+            }
+            pos.* += 1;
+            return .{ .string = text };
+        },
+        .minus => {
+            pos.* += 1;
+            const inner = parseAttrArgValue(tokens, source, pos, allocator);
+            return switch (inner) {
+                .int => |v| .{ .int = -v },
+                .float => |v| .{ .float = -v },
+                else => .null,
+            };
+        },
+        .l_bracket => {
+            pos.* += 1;
+            const arr = allocator.create(PhpArray) catch return .null;
+            arr.* = .{};
+            while (pos.* < tokens.len and tokens[pos.*].tag != .r_bracket) {
+                const val = parseAttrArgValue(tokens, source, pos, allocator);
+                arr.append(allocator, val) catch break;
+                if (pos.* < tokens.len and tokens[pos.*].tag == .comma) pos.* += 1;
+            }
+            if (pos.* < tokens.len and tokens[pos.*].tag == .r_bracket) pos.* += 1;
+            return .{ .array = arr };
+        },
+        else => {
+            pos.* += 1;
+            return .null;
+        },
+    }
+}
+
+const ast_mod = @import("ast.zig");
+
+fn findAttrRangeForToken(attr_ranges: []const ast_mod.AttrRange, tokens: []const Token, main_token: u32) ?ast_mod.AttrRange {
+    for (attr_ranges) |ar| {
+        if (ar.target_tok > main_token) continue;
+        var pos = ar.target_tok;
+        while (pos <= main_token) {
+            if (pos == main_token) return ar;
+            const tag = tokens[pos].tag;
+            if (isModifierToken(tag) or isTypeToken(tag)) {
+                pos += 1;
+                continue;
+            }
+            break;
+        }
+    }
+    return null;
+}
+
+
+fn extractAttributes(self: *Compiler, main_token: u32) []const ParsedAttr {
+    const ar = findAttrRangeForToken(self.ast.attr_ranges, self.ast.tokens, main_token) orelse return &.{};
+
+    var all_attrs = std.ArrayListUnmanaged(ParsedAttr){};
+    var pos: usize = ar.start;
+    const end: usize = ar.end;
+    while (pos < end) {
+        if (self.ast.tokens[pos].tag != .hash_bracket) {
+            pos += 1;
+            continue;
+        }
+        pos += 1;
+        var rb_pos: usize = pos;
+        var depth: u32 = 1;
+        while (rb_pos < end and depth > 0) {
+            if (self.ast.tokens[rb_pos].tag == .l_bracket) depth += 1
+            else if (self.ast.tokens[rb_pos].tag == .r_bracket) depth -= 1;
+            if (depth > 0) rb_pos += 1;
+        }
+
+        var inner: usize = pos;
+        while (inner < rb_pos) {
+            var name_parts = std.ArrayListUnmanaged(u8){};
+            while (inner < rb_pos and (self.ast.tokens[inner].tag == .identifier or self.ast.tokens[inner].tag == .backslash)) {
+                if (name_parts.items.len > 0 and self.ast.tokens[inner].tag == .identifier) {
+                    name_parts.appendSlice(self.allocator, "\\") catch break;
+                } else if (self.ast.tokens[inner].tag == .backslash) {
+                    if (name_parts.items.len == 0) {
+                        name_parts.appendSlice(self.allocator, "\\") catch break;
+                    }
+                    inner += 1;
+                    continue;
+                }
+                name_parts.appendSlice(self.allocator, self.ast.tokens[inner].lexeme(self.ast.source)) catch break;
+                inner += 1;
+            }
+            if (name_parts.items.len == 0) {
+                inner += 1;
+                continue;
+            }
+
+            const owned_name = name_parts.toOwnedSlice(self.allocator) catch "";
+            self.string_allocs.append(self.allocator, @constCast(owned_name)) catch {};
+
+            var args = std.ArrayListUnmanaged(Value){};
+            if (inner < rb_pos and self.ast.tokens[inner].tag == .l_paren) {
+                inner += 1;
+                while (inner < rb_pos and self.ast.tokens[inner].tag != .r_paren) {
+                    if (inner + 1 < rb_pos and self.ast.tokens[inner].tag == .identifier and self.ast.tokens[inner + 1].tag == .colon) {
+                        inner += 2;
+                    }
+                    const val = parseAttrArgValue(self.ast.tokens, self.ast.source, &inner, self.allocator);
+                    args.append(self.allocator, val) catch break;
+                    if (inner < rb_pos and self.ast.tokens[inner].tag == .comma) inner += 1;
+                }
+                if (inner < rb_pos and self.ast.tokens[inner].tag == .r_paren) inner += 1;
+            }
+
+            all_attrs.append(self.allocator, .{
+                .name = owned_name,
+                .args = args.toOwnedSlice(self.allocator) catch &.{},
+            }) catch break;
+
+            if (inner < rb_pos and self.ast.tokens[inner].tag == .comma) inner += 1;
+        }
+
+        pos = rb_pos + 1;
+    }
+    return all_attrs.toOwnedSlice(self.allocator) catch &.{};
+}
+
+fn freeAttrSlice(allocator: Allocator, attrs: []const ParsedAttr) void {
+    for (attrs) |attr| {
+        if (attr.args.len > 0) allocator.free(attr.args);
+    }
+    if (attrs.len > 0) allocator.free(attrs);
+}
+
+fn emitAttributeData(self: *Compiler, attrs: []const ParsedAttr) Error!void {
+    try self.emitByte(@intCast(attrs.len));
+    for (attrs) |attr| {
+        const name_idx = try self.addConstant(.{ .string = attr.name });
+        try self.emitU16(name_idx);
+        try self.emitByte(@intCast(attr.args.len));
+        for (attr.args) |arg| {
+            try emitAttrValue(self, arg);
+        }
+    }
+}
+
+fn emitAttrValue(self: *Compiler, val: Value) Error!void {
+    switch (val) {
+        .null => try self.emitByte(0x00),
+        .int => |v| {
+            try self.emitByte(0x01);
+            const bytes: [8]u8 = @bitCast(v);
+            for (bytes) |b| try self.emitByte(b);
+        },
+        .float => |v| {
+            try self.emitByte(0x02);
+            const bytes: [8]u8 = @bitCast(v);
+            for (bytes) |b| try self.emitByte(b);
+        },
+        .bool => |v| try self.emitByte(if (v) 0x03 else 0x04),
+        .string => |s| {
+            try self.emitByte(0x05);
+            const idx = try self.addConstant(.{ .string = s });
+            try self.emitU16(idx);
+        },
+        .array => {
+            try self.emitByte(0x06);
+            const arr = val.array;
+            const len: u16 = @intCast(arr.entries.items.len);
+            try self.emitU16(len);
+            for (arr.entries.items) |entry| {
+                try emitAttrValue(self, entry.value);
+            }
+        },
+        else => try self.emitByte(0x00),
+    }
+}
 
 fn buildTypeString(self: *Compiler, start_tok: u32, end_tok: u32) Error![]const u8 {
     if (start_tok == end_tok) return "";
@@ -684,6 +929,60 @@ pub fn compileClassDecl(self: *Compiler, node: Ast.Node) Error!void {
         }
     }
 
+    // class-level attributes
+    const class_attrs = extractAttributes(self, node.main_token);
+    try emitAttributeData(self, class_attrs);
+    freeAttrSlice(self.allocator, class_attrs);
+
+    // method attributes: count of methods that have attrs, then for each: name_idx + attr data
+    const MemberAttr = struct { name: []const u8, attrs: []const ParsedAttr };
+    var methods_with_attrs = std.ArrayListUnmanaged(MemberAttr){};
+    defer methods_with_attrs.deinit(self.allocator);
+    for (members) |member_idx| {
+        const member = self.ast.nodes[member_idx];
+        if (member.tag == .class_method or member.tag == .static_class_method) {
+            const mattrs = extractAttributes(self, member.main_token);
+            if (mattrs.len > 0) {
+                try methods_with_attrs.append(self.allocator, .{
+                    .name = self.ast.tokenSlice(member.main_token),
+                    .attrs = mattrs,
+                });
+            }
+        }
+    }
+    try self.emitByte(@intCast(methods_with_attrs.items.len));
+    for (methods_with_attrs.items) |ma| {
+        const mname_idx = try self.addConstant(.{ .string = ma.name });
+        try self.emitU16(mname_idx);
+        try emitAttributeData(self, ma.attrs);
+    }
+    for (methods_with_attrs.items) |ma| freeAttrSlice(self.allocator, ma.attrs);
+
+    // property attributes
+    var props_with_attrs = std.ArrayListUnmanaged(MemberAttr){};
+    defer props_with_attrs.deinit(self.allocator);
+    for (members) |member_idx| {
+        const member = self.ast.nodes[member_idx];
+        if (member.tag == .class_property) {
+            const pattrs = extractAttributes(self, member.main_token);
+            if (pattrs.len > 0) {
+                var prop_name = self.ast.tokenSlice(member.main_token);
+                if (prop_name.len > 0 and prop_name[0] == '$') prop_name = prop_name[1..];
+                try props_with_attrs.append(self.allocator, .{
+                    .name = prop_name,
+                    .attrs = pattrs,
+                });
+            }
+        }
+    }
+    try self.emitByte(@intCast(props_with_attrs.items.len));
+    for (props_with_attrs.items) |pa| {
+        const ppname_idx = try self.addConstant(.{ .string = pa.name });
+        try self.emitU16(ppname_idx);
+        try emitAttributeData(self, pa.attrs);
+    }
+    for (props_with_attrs.items) |pa| freeAttrSlice(self.allocator, pa.attrs);
+
     // set class constants after class_decl so self:: references resolve
     const cname_idx = try self.addConstant(.{ .string = class_name });
     for (members) |member_idx| {
@@ -944,6 +1243,11 @@ pub fn compileAnonymousClass(self: *Compiler, node: Ast.Node) Error!void {
             try self.emitU16(aidx);
         }
     }
+
+    // anonymous classes don't support attributes yet, emit empty
+    try self.emitByte(0); // class attrs
+    try self.emitByte(0); // method attrs
+    try self.emitByte(0); // property attrs
 
     // now instantiate with constructor args
     for (0..ctor_arg_count) |i| {

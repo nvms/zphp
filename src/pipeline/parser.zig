@@ -1,5 +1,7 @@
 const std = @import("std");
-const Ast = @import("ast.zig").Ast;
+const ast_mod = @import("ast.zig");
+const Ast = ast_mod.Ast;
+const AttrRange = ast_mod.AttrRange;
 const Token = @import("token.zig").Token;
 const Lexer = @import("lexer.zig").Lexer;
 
@@ -26,12 +28,14 @@ pub fn parse(allocator: Allocator, source: []const u8) Allocator.Error!Ast {
         .nodes = .{},
         .extra_data = .{},
         .errors = .{},
+        .attr_ranges = .{},
         .allocator = allocator,
     };
     errdefer {
         p.nodes.deinit(allocator);
         p.extra_data.deinit(allocator);
         p.errors.deinit(allocator);
+        p.attr_ranges.deinit(allocator);
     }
 
     p.parseRoot() catch |err| switch (err) {
@@ -46,6 +50,8 @@ pub fn parse(allocator: Allocator, source: []const u8) Allocator.Error!Ast {
     const extra_slice = try p.extra_data.toOwnedSlice(allocator);
     errdefer allocator.free(extra_slice);
     const errors_slice = try p.errors.toOwnedSlice(allocator);
+    errdefer allocator.free(errors_slice);
+    const attr_slice = try p.attr_ranges.toOwnedSlice(allocator);
 
     return .{
         .source = source,
@@ -53,6 +59,7 @@ pub fn parse(allocator: Allocator, source: []const u8) Allocator.Error!Ast {
         .nodes = nodes_slice,
         .extra_data = extra_slice,
         .errors = errors_slice,
+        .attr_ranges = attr_slice,
         .allocator = allocator,
     };
 }
@@ -64,6 +71,7 @@ const Parser = struct {
     nodes: std.ArrayListUnmanaged(Ast.Node),
     extra_data: std.ArrayListUnmanaged(u32),
     errors: std.ArrayListUnmanaged(Ast.Error),
+    attr_ranges: std.ArrayListUnmanaged(AttrRange) = .{},
     allocator: Allocator,
     found_yield: bool = false,
 
@@ -1815,6 +1823,8 @@ const Parser = struct {
     }
 
     fn skipAttributes(self: *Parser) void {
+        if (self.peek() != .hash_bracket) return;
+        const start = self.pos;
         while (self.peek() == .hash_bracket) {
             _ = self.advance();
             var depth: u32 = 1;
@@ -1824,6 +1834,11 @@ const Parser = struct {
                 else if (self.tokens[tok].tag == .r_bracket) depth -= 1;
             }
         }
+        self.attr_ranges.append(self.allocator, .{
+            .target_tok = self.pos,
+            .start = start,
+            .end = self.pos,
+        }) catch {};
     }
 
     fn parseParam(self: *Parser) Error!u32 {

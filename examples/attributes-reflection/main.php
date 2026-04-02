@@ -1,11 +1,13 @@
 <?php
 // covers: ReflectionClass (getName, getMethods, getProperties, getMethod,
-//   getProperty, getParentClass, getInterfaceNames, hasMethod, isInterface),
-//   ReflectionMethod (getName, getParameters, isPublic, isPrivate,
-//   isProtected, isStatic), ReflectionProperty (getName, isPublic,
-//   isPrivate, isProtected, isDefault), ReflectionParameter (getName,
-//   getPosition, isOptional, hasType, getType), class hierarchy reflection,
-//   interface detection, practical object introspection
+//   getProperty, getParentClass, getInterfaceNames, hasMethod, isInterface,
+//   getAttributes), ReflectionMethod (getName, getParameters, isPublic,
+//   isPrivate, isProtected, isStatic, getAttributes),
+//   ReflectionProperty (getName, isPublic, isPrivate, isProtected, isDefault,
+//   getAttributes), ReflectionParameter (getName, getPosition, isOptional,
+//   hasType, getType), ReflectionAttribute (getName, getArguments,
+//   newInstance), class hierarchy reflection, interface detection,
+//   practical object introspection, PHP 8 attributes
 
 interface Loggable {
     public function logEntry(): string;
@@ -200,5 +202,71 @@ function inspect(object $obj): void {
 
 $user = new User(1, 'Alice', 'alice@example.com');
 inspect($user);
+
+// --- Attributes ---
+
+echo "\n=== Attributes ===\n";
+
+#[Attribute]
+class Route {
+    public function __construct(
+        public string $path = '',
+        public string $method = 'GET'
+    ) {}
+}
+
+#[Attribute]
+class Middleware {
+    public function __construct(public string $name = '') {}
+}
+
+#[Attribute]
+class Column {
+    public function __construct(public string $type = 'string') {}
+}
+
+#[Route('/api/users')]
+#[Middleware('auth')]
+class UserController {
+    #[Column('varchar')]
+    public string $title = '';
+
+    #[Route('/list')]
+    public function list() { return []; }
+
+    #[Route('/create', method: 'POST')]
+    public function create() { return 'created'; }
+}
+
+$rc = new ReflectionClass('UserController');
+$classAttrs = $rc->getAttributes();
+echo "class attr count: " . count($classAttrs) . "\n";
+echo "class attr 0: " . $classAttrs[0]->getName() . "\n";
+echo "class attr 0 args: " . count($classAttrs[0]->getArguments()) . "\n";
+echo "class attr 0 arg 0: " . $classAttrs[0]->getArguments()[0] . "\n";
+echo "class attr 1: " . $classAttrs[1]->getName() . "\n";
+
+$listMethod = $rc->getMethod('list');
+$listAttrs = $listMethod->getAttributes();
+echo "list attr count: " . count($listAttrs) . "\n";
+echo "list attr 0: " . $listAttrs[0]->getName() . "\n";
+
+$createMethod = $rc->getMethod('create');
+$createAttrs = $createMethod->getAttributes();
+echo "create attr count: " . count($createAttrs) . "\n";
+echo "create attr 0: " . $createAttrs[0]->getName() . "\n";
+echo "create attr arg 0: " . $createAttrs[0]->getArguments()[0] . "\n";
+
+$titleProp = $rc->getProperty('title');
+$titleAttrs = $titleProp->getAttributes();
+echo "title attr count: " . count($titleAttrs) . "\n";
+echo "title attr 0: " . $titleAttrs[0]->getName() . "\n";
+echo "title attr 0 arg: " . $titleAttrs[0]->getArguments()[0] . "\n";
+
+// newInstance
+$routeAttr = $classAttrs[0];
+$routeInstance = $routeAttr->newInstance();
+echo "route instance class: " . get_class($routeInstance) . "\n";
+echo "route instance path: " . $routeInstance->path . "\n";
 
 echo "\nDone.\n";

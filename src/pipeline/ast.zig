@@ -1,12 +1,19 @@
 const std = @import("std");
 const Token = @import("token.zig").Token;
 
+pub const AttrRange = struct {
+    target_tok: u32,
+    start: u32,
+    end: u32,
+};
+
 pub const Ast = struct {
     source: []const u8,
     tokens: []const Token,
     nodes: []const Node,
     extra_data: []const u32,
     errors: []const Error,
+    attr_ranges: []const AttrRange = &.{},
     allocator: std.mem.Allocator,
 
     pub fn deinit(self: *Ast) void {
@@ -14,6 +21,7 @@ pub const Ast = struct {
         self.allocator.free(self.nodes);
         self.allocator.free(self.extra_data);
         self.allocator.free(self.errors);
+        if (self.attr_ranges.len > 0) self.allocator.free(self.attr_ranges);
     }
 
     pub fn tokenSlice(self: *const Ast, index: u32) []const u8 {

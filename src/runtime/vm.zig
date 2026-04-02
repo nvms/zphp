@@ -189,6 +189,11 @@ pub const CaptureRange = struct {
     has_refs: bool,
 };
 
+pub const AttributeDef = struct {
+    name: []const u8,
+    args: []const Value = &.{},
+};
+
 pub const ClassDef = struct {
     name: []const u8,
     methods: std.StringHashMapUnmanaged(MethodInfo) = .{},
@@ -201,6 +206,9 @@ pub const ClassDef = struct {
     case_order: std.ArrayListUnmanaged([]const u8) = .{},
     slot_layout: ?*PhpObject.SlotLayout = null,
     used_traits: std.ArrayListUnmanaged([]const u8) = .{},
+    attributes: std.ArrayListUnmanaged(AttributeDef) = .{},
+    method_attributes: std.StringHashMapUnmanaged([]const AttributeDef) = .{},
+    property_attributes: std.StringHashMapUnmanaged([]const AttributeDef) = .{},
 
     pub const Visibility = enum(u8) { public = 0, protected = 1, private = 2 };
 
@@ -218,6 +226,13 @@ pub const ClassDef = struct {
         is_readonly: bool = false,
     };
 
+    fn freeAttributeDefs(allocator: Allocator, attrs: []const AttributeDef) void {
+        for (attrs) |a| {
+            if (a.args.len > 0) allocator.free(a.args);
+        }
+        allocator.free(attrs);
+    }
+
     fn deinit(self: *ClassDef, allocator: Allocator) void {
         self.methods.deinit(allocator);
         self.properties.deinit(allocator);
@@ -225,6 +240,16 @@ pub const ClassDef = struct {
         self.interfaces.deinit(allocator);
         self.used_traits.deinit(allocator);
         self.case_order.deinit(allocator);
+        for (self.attributes.items) |a| {
+            if (a.args.len > 0) allocator.free(a.args);
+        }
+        self.attributes.deinit(allocator);
+        var ma_iter = self.method_attributes.valueIterator();
+        while (ma_iter.next()) |attrs| freeAttributeDefs(allocator, attrs.*);
+        self.method_attributes.deinit(allocator);
+        var pa_iter = self.property_attributes.valueIterator();
+        while (pa_iter.next()) |attrs| freeAttributeDefs(allocator, attrs.*);
+        self.property_attributes.deinit(allocator);
         if (self.slot_layout) |layout| {
             allocator.free(layout.names);
             allocator.free(layout.defaults);
@@ -5094,6 +5119,29 @@ pub const VM = struct {
             try def.used_traits.append(self.allocator, trait_name);
         }
 
+        // class-level attributes
+        const class_attrs = try self.readAttributeDefs();
+        for (class_attrs) |a| try def.attributes.append(self.allocator, a);
+        if (class_attrs.len > 0) self.allocator.free(class_attrs);
+
+        // method attributes
+        const method_attr_count = self.readByte();
+        for (0..method_attr_count) |_| {
+            const ma_name_idx = self.readU16();
+            const ma_name = self.currentChunk().constants.items[ma_name_idx].string;
+            const ma_attrs = try self.readAttributeDefs();
+            try def.method_attributes.put(self.allocator, ma_name, ma_attrs);
+        }
+
+        // property attributes
+        const prop_attr_count = self.readByte();
+        for (0..prop_attr_count) |_| {
+            const pa_name_idx = self.readU16();
+            const pa_name = self.currentChunk().constants.items[pa_name_idx].string;
+            const pa_attrs = try self.readAttributeDefs();
+            try def.property_attributes.put(self.allocator, pa_name, pa_attrs);
+        }
+
         if (def.parent) |parent_name| {
             if (!self.classes.contains(parent_name)) try self.tryAutoload(parent_name);
         }
@@ -5146,6 +5194,62 @@ pub const VM = struct {
 
         try self.registerEnumMethods(enum_name, backed_type_byte);
         try self.classes.put(self.allocator, enum_name, def);
+    }
+
+    fn readAttrValue(self: *VM) Value {
+        const tag = self.readByte();
+        return switch (tag) {
+            0x00 => .null,
+            0x01 => blk: {
+                var bytes: [8]u8 = undefined;
+                for (&bytes) |*b| b.* = self.readByte();
+                break :blk .{ .int = @bitCast(bytes) };
+            },
+            0x02 => blk: {
+                var bytes: [8]u8 = undefined;
+                for (&bytes) |*b| b.* = self.readByte();
+                break :blk .{ .float = @bitCast(bytes) };
+            },
+            0x03 => .{ .bool = true },
+            0x04 => .{ .bool = false },
+            0x05 => blk: {
+                const idx = self.readU16();
+                break :blk .{ .string = self.currentChunk().constants.items[idx].string };
+            },
+            0x06 => blk: {
+                const len = self.readU16();
+                const arr = self.allocator.create(PhpArray) catch break :blk .null;
+                arr.* = .{};
+                self.arrays.append(self.allocator, arr) catch {};
+                for (0..len) |_| {
+                    const v = self.readAttrValue();
+                    arr.append(self.allocator, v) catch {};
+                }
+                break :blk .{ .array = arr };
+            },
+            else => .null,
+        };
+    }
+
+    fn readAttributeDefs(self: *VM) RuntimeError![]const AttributeDef {
+        const count = self.readByte();
+        if (count == 0) return &.{};
+        const attrs = try self.allocator.alloc(AttributeDef, count);
+        for (0..count) |i| {
+            const name_idx = self.readU16();
+            const name = self.currentChunk().constants.items[name_idx].string;
+            const arg_count = self.readByte();
+            if (arg_count > 0) {
+                const args = try self.allocator.alloc(Value, arg_count);
+                for (0..arg_count) |ai| {
+                    args[ai] = self.readAttrValue();
+                }
+                attrs[i] = .{ .name = name, .args = args };
+            } else {
+                attrs[i] = .{ .name = name };
+            }
+        }
+        return attrs;
     }
 
     fn readMethodInfo(self: *VM) struct { []const u8, ClassDef.MethodInfo } {

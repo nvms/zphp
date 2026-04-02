@@ -6,6 +6,7 @@ const vm_mod = @import("../runtime/vm.zig");
 const VM = vm_mod.VM;
 const NativeContext = vm_mod.NativeContext;
 const ClassDef = vm_mod.ClassDef;
+const AttributeDef = vm_mod.AttributeDef;
 const ObjFunction = @import("../pipeline/bytecode.zig").ObjFunction;
 
 const Allocator = std.mem.Allocator;
@@ -253,7 +254,18 @@ pub fn register(vm: *VM, a: Allocator) !void {
     // ReflectionAttribute
     var ra_def = ClassDef{ .name = "ReflectionAttribute" };
     try ra_def.static_props.put(a, "IS_INSTANCEOF", .{ .int = 2 });
+    try ra_def.methods.put(a, "getName", .{ .name = "getName", .arity = 0 });
+    try ra_def.methods.put(a, "getArguments", .{ .name = "getArguments", .arity = 0 });
+    try ra_def.methods.put(a, "newInstance", .{ .name = "newInstance", .arity = 0 });
+    try ra_def.methods.put(a, "getTarget", .{ .name = "getTarget", .arity = 0 });
+    try ra_def.methods.put(a, "isRepeated", .{ .name = "isRepeated", .arity = 0 });
     try vm.classes.put(a, "ReflectionAttribute", ra_def);
+
+    try vm.native_fns.put(a, "ReflectionAttribute::getName", raGetName);
+    try vm.native_fns.put(a, "ReflectionAttribute::getArguments", raGetArguments);
+    try vm.native_fns.put(a, "ReflectionAttribute::newInstance", raNewInstance);
+    try vm.native_fns.put(a, "ReflectionAttribute::getTarget", raGetTarget);
+    try vm.native_fns.put(a, "ReflectionAttribute::isRepeated", raIsRepeated);
 
     // Closure class (static methods only - instance methods handled in VM dispatch)
     var closure_def = ClassDef{ .name = "Closure" };
@@ -596,8 +608,30 @@ fn rcGetInterfaceNames(ctx: *NativeContext, _: []const Value) RuntimeError!Value
     return .{ .array = arr };
 }
 
+fn buildReflectionAttribute(ctx: *NativeContext, attr: AttributeDef) RuntimeError!Value {
+    const obj = try ctx.createObject("ReflectionAttribute");
+    try obj.set(ctx.allocator, "name", .{ .string = attr.name });
+    const args_arr = try ctx.createArray();
+    for (attr.args) |arg| {
+        try args_arr.append(ctx.allocator, arg);
+    }
+    try obj.set(ctx.allocator, "_arguments", .{ .array = args_arr });
+    return .{ .object = obj };
+}
+
+fn buildAttributeArray(ctx: *NativeContext, attrs: []const AttributeDef) RuntimeError!Value {
+    const arr = try ctx.createArray();
+    for (attrs) |attr| {
+        try arr.append(ctx.allocator, try buildReflectionAttribute(ctx, attr));
+    }
+    return .{ .array = arr };
+}
+
 fn rcGetAttributes(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    return .{ .array = try ctx.createArray() };
+    const this = getThis(ctx) orelse return .{ .array = try ctx.createArray() };
+    const class_name = if (this.get("name") == .string) this.get("name").string else return .{ .array = try ctx.createArray() };
+    const cls = ctx.vm.classes.get(class_name) orelse return .{ .array = try ctx.createArray() };
+    return buildAttributeArray(ctx, cls.attributes.items);
 }
 
 fn rcGetProperties(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
@@ -976,6 +1010,7 @@ fn rpHasType(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
 }
 
 fn rpGetAttributes(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    // parameter attributes not yet implemented
     return .{ .array = try ctx.createArray() };
 }
 
@@ -1402,8 +1437,12 @@ fn rpropGetModifiers(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
 }
 
 fn rpropGetAttributes(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const arr = try ctx.createArray();
-    return .{ .array = arr };
+    const this = getThis(ctx) orelse return .{ .array = try ctx.createArray() };
+    const prop_name = if (this.get("name") == .string) this.get("name").string else return .{ .array = try ctx.createArray() };
+    const declaring = if (this.get("_declaring_class") == .string) this.get("_declaring_class").string else return .{ .array = try ctx.createArray() };
+    const cls = ctx.vm.classes.get(declaring) orelse return .{ .array = try ctx.createArray() };
+    const attrs = cls.property_attributes.get(prop_name) orelse return .{ .array = try ctx.createArray() };
+    return buildAttributeArray(ctx, attrs);
 }
 
 fn rpropGetDocComment(_: *NativeContext, _: []const Value) RuntimeError!Value {
@@ -1458,7 +1497,12 @@ fn rmIsAbstract(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
 }
 
 fn rmGetAttributes(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    return .{ .array = try ctx.createArray() };
+    const this = getThis(ctx) orelse return .{ .array = try ctx.createArray() };
+    const method_name = if (this.get("name") == .string) this.get("name").string else return .{ .array = try ctx.createArray() };
+    const declaring = if (this.get("_declaring_class") == .string) this.get("_declaring_class").string else return .{ .array = try ctx.createArray() };
+    const cls = ctx.vm.classes.get(declaring) orelse return .{ .array = try ctx.createArray() };
+    const attrs = cls.method_attributes.get(method_name) orelse return .{ .array = try ctx.createArray() };
+    return buildAttributeArray(ctx, attrs);
 }
 
 fn rpIsPromoted(_: *NativeContext, _: []const Value) RuntimeError!Value {
@@ -1478,4 +1522,52 @@ fn rpGetClass(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
         return .{ .object = obj };
     }
     return .null;
+}
+
+// --- ReflectionAttribute ---
+
+fn raGetName(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const this = getThis(ctx) orelse return .null;
+    return this.get("name");
+}
+
+fn raGetArguments(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const this = getThis(ctx) orelse return .{ .array = try ctx.createArray() };
+    const args = this.get("_arguments");
+    if (args == .array) return args;
+    return .{ .array = try ctx.createArray() };
+}
+
+fn raNewInstance(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const this = getThis(ctx) orelse return .null;
+    const name_val = this.get("name");
+    if (name_val != .string) return .null;
+    const attr_name = name_val.string;
+
+    if (!ctx.vm.classes.contains(attr_name)) {
+        try ctx.vm.tryAutoload(attr_name);
+    }
+
+    const obj = try ctx.createObject(attr_name);
+    const args_val = this.get("_arguments");
+    if (args_val == .array) {
+        const arr = args_val.array;
+        var call_args: [16]Value = undefined;
+        const count = @min(arr.entries.items.len, 16);
+        for (0..count) |i| {
+            call_args[i] = arr.entries.items[i].value;
+        }
+        if (count > 0) {
+            _ = ctx.callMethod(obj, "__construct", call_args[0..count]) catch {};
+        }
+    }
+    return .{ .object = obj };
+}
+
+fn raGetTarget(_: *NativeContext, _: []const Value) RuntimeError!Value {
+    return .{ .int = 0 };
+}
+
+fn raIsRepeated(_: *NativeContext, _: []const Value) RuntimeError!Value {
+    return .{ .bool = false };
 }
