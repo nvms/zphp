@@ -24,6 +24,7 @@ fn isModifierToken(tag: Token.Tag) bool {
         .kw_public, .kw_protected, .kw_private, .kw_static,
         .kw_abstract, .kw_readonly, .kw_final, .kw_function,
         .kw_class, .kw_var, .kw_enum, .kw_interface, .kw_trait,
+        .kw_const,
         => true,
         else => false,
     };
@@ -925,12 +926,14 @@ pub fn compileClassDecl(self: *Compiler, node: Ast.Node) Error!void {
             try self.emitU16(pname_idx);
             try self.emitByte(if (member.data.lhs != 0) @as(u8, 1) else @as(u8, 0));
             try self.emitByte(@intCast(member.data.rhs));
+            try self.emitByte(0); // 0 = static property
         } else if (member.tag == .const_decl) {
             const cname = self.ast.tokenSlice(member.main_token);
             const cname_idx = try self.addConstant(.{ .string = cname });
             try self.emitU16(cname_idx);
             try self.emitByte(1); // always has a value
             try self.emitByte(0); // public visibility
+            try self.emitByte(1); // 1 = constant
         }
     }
 
@@ -1062,6 +1065,29 @@ pub fn compileClassDecl(self: *Compiler, node: Ast.Node) Error!void {
         try emitAttributeData(self, pa.attrs);
     }
     for (props_with_attrs.items) |pa| freeAttrSlice(self.allocator, pa.attrs);
+
+    // constant attributes
+    var consts_with_attrs = std.ArrayListUnmanaged(MemberAttr){};
+    defer consts_with_attrs.deinit(self.allocator);
+    for (members) |member_idx| {
+        const member = self.ast.nodes[member_idx];
+        if (member.tag == .const_decl) {
+            const cattrs = extractAttributes(self, member.main_token);
+            if (cattrs.len > 0) {
+                try consts_with_attrs.append(self.allocator, .{
+                    .name = self.ast.tokenSlice(member.main_token),
+                    .attrs = cattrs,
+                });
+            }
+        }
+    }
+    try self.emitByte(@intCast(consts_with_attrs.items.len));
+    for (consts_with_attrs.items) |ca| {
+        const caname_idx = try self.addConstant(.{ .string = ca.name });
+        try self.emitU16(caname_idx);
+        try emitAttributeData(self, ca.attrs);
+    }
+    for (consts_with_attrs.items) |ca| freeAttrSlice(self.allocator, ca.attrs);
 
     // parameter attributes: methods that have params with attrs
     const ParamAttr = struct { name: []const u8, attrs: []const ParsedAttr };
@@ -1288,12 +1314,14 @@ pub fn compileAnonymousClass(self: *Compiler, node: Ast.Node) Error!void {
             try self.emitU16(pname_idx);
             try self.emitByte(if (member.data.lhs != 0) @as(u8, 1) else @as(u8, 0));
             try self.emitByte(@intCast(member.data.rhs));
+            try self.emitByte(0); // 0 = static property
         } else if (member.tag == .const_decl) {
             const cname = self.ast.tokenSlice(member.main_token);
             const cname_idx = try self.addConstant(.{ .string = cname });
             try self.emitU16(cname_idx);
             try self.emitByte(1);
             try self.emitByte(0);
+            try self.emitByte(1); // 1 = constant
         }
     }
 
@@ -1373,6 +1401,7 @@ pub fn compileAnonymousClass(self: *Compiler, node: Ast.Node) Error!void {
     try self.emitByte(0); // class attrs
     try self.emitByte(0); // method attrs
     try self.emitByte(0); // property attrs
+    try self.emitByte(0); // constant attrs
     try self.emitByte(0); // param attrs
 
     // now instantiate with constructor args
@@ -1764,6 +1793,21 @@ pub fn compileEnumDecl(self: *Compiler, node: Ast.Node) Error!void {
         try emitAttributeData(self, ma.attrs);
     }
     for (methods_with_attrs.items) |ma| freeAttrSlice(self.allocator, ma.attrs);
+
+    // enum constant names (not cases - actual const decls)
+    var enum_const_count: u8 = 0;
+    for (members) |member_idx| {
+        if (self.ast.nodes[member_idx].tag == .const_decl) enum_const_count += 1;
+    }
+    try self.emitByte(enum_const_count);
+    for (members) |member_idx| {
+        const member = self.ast.nodes[member_idx];
+        if (member.tag == .const_decl) {
+            const ec_name = self.ast.tokenSlice(member.main_token);
+            const ec_idx = try self.addConstant(.{ .string = ec_name });
+            try self.emitU16(ec_idx);
+        }
+    }
 
     const cname_idx = try self.addConstant(.{ .string = enum_name });
     const prev_class = self.current_class;

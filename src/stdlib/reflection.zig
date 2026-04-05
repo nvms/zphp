@@ -57,6 +57,10 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try rc_def.methods.put(a, "getTraitNames", .{ .name = "getTraitNames", .arity = 0 });
     try rc_def.methods.put(a, "isEnum", .{ .name = "isEnum", .arity = 0 });
     try rc_def.methods.put(a, "getConstants", .{ .name = "getConstants", .arity = 0 });
+    try rc_def.methods.put(a, "getReflectionConstants", .{ .name = "getReflectionConstants", .arity = 0 });
+    try rc_def.methods.put(a, "getReflectionConstant", .{ .name = "getReflectionConstant", .arity = 1 });
+    try rc_def.methods.put(a, "hasConstant", .{ .name = "hasConstant", .arity = 1 });
+    try rc_def.methods.put(a, "getConstant", .{ .name = "getConstant", .arity = 1 });
     try rc_def.methods.put(a, "isInternal", .{ .name = "isInternal", .arity = 0 });
     try rc_def.methods.put(a, "isUserDefined", .{ .name = "isUserDefined", .arity = 0 });
     try rc_def.methods.put(a, "getFileName", .{ .name = "getFileName", .arity = 0 });
@@ -88,6 +92,10 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try vm.native_fns.put(a, "ReflectionClass::getTraitNames", rcGetTraitNames);
     try vm.native_fns.put(a, "ReflectionClass::isEnum", rcIsEnum);
     try vm.native_fns.put(a, "ReflectionClass::getConstants", rcGetConstants);
+    try vm.native_fns.put(a, "ReflectionClass::getReflectionConstants", rcGetReflectionConstants);
+    try vm.native_fns.put(a, "ReflectionClass::getReflectionConstant", rcGetReflectionConstant);
+    try vm.native_fns.put(a, "ReflectionClass::hasConstant", rcHasConstant);
+    try vm.native_fns.put(a, "ReflectionClass::getConstant", rcGetConstant);
     try vm.native_fns.put(a, "ReflectionClass::isInternal", rcIsInternal);
     try vm.native_fns.put(a, "ReflectionClass::isUserDefined", rcIsUserDefined);
     try vm.native_fns.put(a, "ReflectionClass::getFileName", rcGetFileName);
@@ -280,6 +288,31 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try vm.native_fns.put(a, "ReflectionAttribute::newInstance", raNewInstance);
     try vm.native_fns.put(a, "ReflectionAttribute::getTarget", raGetTarget);
     try vm.native_fns.put(a, "ReflectionAttribute::isRepeated", raIsRepeated);
+
+    // ReflectionClassConstant
+    var rcc_def = ClassDef{ .name = "ReflectionClassConstant" };
+    try rcc_def.properties.append(a, .{ .name = "name", .default = .{ .string = "" } });
+    try rcc_def.properties.append(a, .{ .name = "class", .default = .{ .string = "" } });
+    try rcc_def.methods.put(a, "getName", .{ .name = "getName", .arity = 0 });
+    try rcc_def.methods.put(a, "getValue", .{ .name = "getValue", .arity = 0 });
+    try rcc_def.methods.put(a, "getDeclaringClass", .{ .name = "getDeclaringClass", .arity = 0 });
+    try rcc_def.methods.put(a, "getAttributes", .{ .name = "getAttributes", .arity = 0 });
+    try rcc_def.methods.put(a, "isPublic", .{ .name = "isPublic", .arity = 0 });
+    try rcc_def.methods.put(a, "isProtected", .{ .name = "isProtected", .arity = 0 });
+    try rcc_def.methods.put(a, "isPrivate", .{ .name = "isPrivate", .arity = 0 });
+    try rcc_def.methods.put(a, "isFinal", .{ .name = "isFinal", .arity = 0 });
+    try rcc_def.methods.put(a, "isEnumCase", .{ .name = "isEnumCase", .arity = 0 });
+    try vm.classes.put(a, "ReflectionClassConstant", rcc_def);
+
+    try vm.native_fns.put(a, "ReflectionClassConstant::getName", rccGetName);
+    try vm.native_fns.put(a, "ReflectionClassConstant::getValue", rccGetValue);
+    try vm.native_fns.put(a, "ReflectionClassConstant::getDeclaringClass", rccGetDeclaringClass);
+    try vm.native_fns.put(a, "ReflectionClassConstant::getAttributes", rccGetAttributes);
+    try vm.native_fns.put(a, "ReflectionClassConstant::isPublic", rccIsPublic);
+    try vm.native_fns.put(a, "ReflectionClassConstant::isProtected", rccIsProtected);
+    try vm.native_fns.put(a, "ReflectionClassConstant::isPrivate", rccIsPrivate);
+    try vm.native_fns.put(a, "ReflectionClassConstant::isFinal", rccIsFinal);
+    try vm.native_fns.put(a, "ReflectionClassConstant::isEnumCase", rccIsEnumCase);
 
     // Closure class (static methods only - instance methods handled in VM dispatch)
     var closure_def = ClassDef{ .name = "Closure" };
@@ -774,13 +807,155 @@ fn rcGetConstants(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
     var current: ?[]const u8 = class_name;
     while (current) |name| {
         const cls = ctx.vm.classes.get(name) orelse break;
-        var it = cls.static_props.iterator();
+        var it = cls.constant_names.iterator();
         while (it.next()) |entry| {
-            try arr.set(ctx.allocator, .{ .string = entry.key_ptr.* }, entry.value_ptr.*);
+            if (cls.static_props.get(entry.key_ptr.*)) |val| {
+                try arr.set(ctx.allocator, .{ .string = entry.key_ptr.* }, val);
+            }
         }
         current = cls.parent;
     }
     return .{ .array = arr };
+}
+
+fn rcGetReflectionConstants(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const this = getThis(ctx) orelse return .null;
+    const class_name = if (this.get("name") == .string) this.get("name").string else return .null;
+
+    const arr = try ctx.createArray();
+    var current: ?[]const u8 = class_name;
+    while (current) |name| {
+        const cls = ctx.vm.classes.get(name) orelse break;
+        var it = cls.constant_names.iterator();
+        while (it.next()) |entry| {
+            const cname = entry.key_ptr.*;
+            if (cls.static_props.get(cname)) |val| {
+                const obj = try buildReflectionClassConstant(ctx, name, cname, val);
+                try arr.append(ctx.allocator, obj);
+            }
+        }
+        current = cls.parent;
+    }
+    return .{ .array = arr };
+}
+
+fn rcGetReflectionConstant(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    const this = getThis(ctx) orelse return .{ .bool = false };
+    const class_name = if (this.get("name") == .string) this.get("name").string else return .{ .bool = false };
+    if (args.len == 0 or args[0] != .string) return .{ .bool = false };
+    const target = args[0].string;
+
+    var current: ?[]const u8 = class_name;
+    while (current) |name| {
+        const cls = ctx.vm.classes.get(name) orelse break;
+        if (cls.constant_names.contains(target)) {
+            if (cls.static_props.get(target)) |val| {
+                return try buildReflectionClassConstant(ctx, name, target, val);
+            }
+        }
+        current = cls.parent;
+    }
+    return .{ .bool = false };
+}
+
+fn rcHasConstant(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    const this = getThis(ctx) orelse return .{ .bool = false };
+    const class_name = if (this.get("name") == .string) this.get("name").string else return .{ .bool = false };
+    if (args.len == 0 or args[0] != .string) return .{ .bool = false };
+    const target = args[0].string;
+
+    var current: ?[]const u8 = class_name;
+    while (current) |name| {
+        const cls = ctx.vm.classes.get(name) orelse break;
+        if (cls.constant_names.contains(target)) return .{ .bool = true };
+        current = cls.parent;
+    }
+    return .{ .bool = false };
+}
+
+fn rcGetConstant(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    const this = getThis(ctx) orelse return .{ .bool = false };
+    const class_name = if (this.get("name") == .string) this.get("name").string else return .{ .bool = false };
+    if (args.len == 0 or args[0] != .string) return .{ .bool = false };
+    const target = args[0].string;
+
+    var current: ?[]const u8 = class_name;
+    while (current) |name| {
+        const cls = ctx.vm.classes.get(name) orelse break;
+        if (cls.constant_names.contains(target)) {
+            if (cls.static_props.get(target)) |val| return val;
+        }
+        current = cls.parent;
+    }
+    return .{ .bool = false };
+}
+
+fn buildReflectionClassConstant(ctx: *NativeContext, class_name: []const u8, const_name: []const u8, value: Value) RuntimeError!Value {
+    const obj = try ctx.createObject("ReflectionClassConstant");
+    try obj.set(ctx.allocator, "name", .{ .string = const_name });
+    try obj.set(ctx.allocator, "class", .{ .string = class_name });
+    try obj.set(ctx.allocator, "_value", value);
+    return .{ .object = obj };
+}
+
+fn rccGetName(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const this = getThis(ctx) orelse return .null;
+    return this.get("name");
+}
+
+fn rccGetValue(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const this = getThis(ctx) orelse return .null;
+    return this.get("_value");
+}
+
+fn rccGetDeclaringClass(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const this = getThis(ctx) orelse return .null;
+    const class_name = if (this.get("class") == .string) this.get("class").string else return .null;
+    const rc = try ctx.createObject("ReflectionClass");
+    try rc.set(ctx.allocator, "name", .{ .string = class_name });
+    return .{ .object = rc };
+}
+
+fn rccGetAttributes(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const this = getThis(ctx) orelse return .null;
+    const class_name = if (this.get("class") == .string) this.get("class").string else return .null;
+    const const_name = if (this.get("name") == .string) this.get("name").string else return .null;
+
+    const cls = ctx.vm.classes.get(class_name) orelse {
+        return .{ .array = try ctx.createArray() };
+    };
+    if (cls.constant_attributes.get(const_name)) |attrs| {
+        return try buildAttributeArray(ctx, attrs, null, 16);
+    }
+    return .{ .array = try ctx.createArray() };
+}
+
+fn rccIsPublic(_: *NativeContext, _: []const Value) RuntimeError!Value {
+    return .{ .bool = true };
+}
+
+fn rccIsProtected(_: *NativeContext, _: []const Value) RuntimeError!Value {
+    return .{ .bool = false };
+}
+
+fn rccIsPrivate(_: *NativeContext, _: []const Value) RuntimeError!Value {
+    return .{ .bool = false };
+}
+
+fn rccIsFinal(_: *NativeContext, _: []const Value) RuntimeError!Value {
+    return .{ .bool = false };
+}
+
+fn rccIsEnumCase(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const this = getThis(ctx) orelse return .{ .bool = false };
+    const class_name = if (this.get("class") == .string) this.get("class").string else return .{ .bool = false };
+    const const_name = if (this.get("name") == .string) this.get("name").string else return .{ .bool = false };
+    const cls = ctx.vm.classes.get(class_name) orelse return .{ .bool = false };
+    if (!cls.is_enum) return .{ .bool = false };
+    for (cls.case_order.items) |case_name| {
+        if (std.mem.eql(u8, case_name, const_name)) return .{ .bool = true };
+    }
+    return .{ .bool = false };
 }
 
 fn rcIsInternal(_: *NativeContext, _: []const Value) RuntimeError!Value {

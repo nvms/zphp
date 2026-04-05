@@ -211,6 +211,8 @@ pub const ClassDef = struct {
     method_attributes: std.StringHashMapUnmanaged([]const AttributeDef) = .{},
     property_attributes: std.StringHashMapUnmanaged([]const AttributeDef) = .{},
     param_attributes: std.StringHashMapUnmanaged([]const AttributeDef) = .{},
+    constant_names: std.StringHashMapUnmanaged(void) = .{},
+    constant_attributes: std.StringHashMapUnmanaged([]const AttributeDef) = .{},
 
     pub const Visibility = enum(u8) { public = 0, protected = 1, private = 2 };
 
@@ -260,6 +262,10 @@ pub const ClassDef = struct {
             freeAttributeDefs(allocator, entry.value_ptr.*);
         }
         self.param_attributes.deinit(allocator);
+        self.constant_names.deinit(allocator);
+        var ca_iter = self.constant_attributes.valueIterator();
+        while (ca_iter.next()) |attrs| freeAttributeDefs(allocator, attrs.*);
+        self.constant_attributes.deinit(allocator);
         if (self.slot_layout) |layout| {
             allocator.free(layout.names);
             allocator.free(layout.defaults);
@@ -2523,6 +2529,7 @@ pub const VM = struct {
                             const cname = self.currentChunk().constants.items[cname_idx].string;
                             const cval = self.stack[self.sp - ci];
                             try def.static_props.put(self.allocator, cname, cval);
+                            try def.constant_names.put(self.allocator, cname, {});
                         }
                         self.sp -= const_count;
                     } else {
@@ -5142,11 +5149,13 @@ pub const VM = struct {
         const static_prop_count = self.readU16();
         var sprop_names: [256][]const u8 = undefined;
         var sprop_has_default: [256]u8 = undefined;
+        var sprop_is_const: [256]u8 = undefined;
         for (0..static_prop_count) |pi| {
             const pname_idx = self.readU16();
             sprop_names[pi] = self.currentChunk().constants.items[pname_idx].string;
             sprop_has_default[pi] = self.readByte();
-            _ = self.readByte();
+            _ = self.readByte(); // visibility
+            sprop_is_const[pi] = self.readByte();
         }
 
         const sdefaults = self.popDefaults(256, sprop_has_default[0..static_prop_count]);
@@ -5175,6 +5184,9 @@ pub const VM = struct {
                 break :blk v;
             } else Value{ .null = {} };
             try def.static_props.put(self.allocator, sprop_names[pi], default_val);
+            if (sprop_is_const[pi] == 1) {
+                try def.constant_names.put(self.allocator, sprop_names[pi], {});
+            }
         }
 
         const parent_idx = self.readU16();
@@ -5244,6 +5256,15 @@ pub const VM = struct {
             try def.property_attributes.put(self.allocator, pa_name, pa_attrs);
         }
 
+        // constant attributes
+        const const_attr_count = self.readByte();
+        for (0..const_attr_count) |_| {
+            const ca_name_idx = self.readU16();
+            const ca_name = self.currentChunk().constants.items[ca_name_idx].string;
+            const ca_attrs = try self.readAttributeDefs();
+            try def.constant_attributes.put(self.allocator, ca_name, ca_attrs);
+        }
+
         // parameter attributes
         const param_attr_method_count = self.readByte();
         for (0..param_attr_method_count) |_| {
@@ -5303,6 +5324,7 @@ pub const VM = struct {
                 vj += 1;
             }
             try def.static_props.put(self.allocator, case_names[ci], .{ .object = case_obj });
+            try def.constant_names.put(self.allocator, case_names[ci], {});
             try def.case_order.append(self.allocator, case_names[ci]);
         }
 
@@ -5329,6 +5351,14 @@ pub const VM = struct {
             const ma_name = self.currentChunk().constants.items[ma_name_idx].string;
             const ma_attrs = try self.readAttributeDefs();
             try def.method_attributes.put(self.allocator, ma_name, ma_attrs);
+        }
+
+        // enum constant names (const decls, not cases)
+        const enum_const_count = self.readByte();
+        for (0..enum_const_count) |_| {
+            const ec_name_idx = self.readU16();
+            const ec_name = self.currentChunk().constants.items[ec_name_idx].string;
+            try def.constant_names.put(self.allocator, ec_name, {});
         }
 
         try self.registerEnumMethods(enum_name, backed_type_byte);
