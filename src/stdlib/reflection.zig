@@ -624,7 +624,13 @@ fn buildReflectionAttribute(ctx: *NativeContext, attr: AttributeDef, target: i64
     const obj = try ctx.createObject("ReflectionAttribute");
     try obj.set(ctx.allocator, "name", .{ .string = attr.name });
     const args_arr = try ctx.createArray();
-    for (attr.args) |arg| {
+    for (attr.args, 0..) |arg, i| {
+        if (i < attr.arg_names.len) {
+            if (attr.arg_names[i]) |arg_name| {
+                try args_arr.set(ctx.allocator, .{ .string = arg_name }, arg);
+                continue;
+            }
+        }
         try args_arr.append(ctx.allocator, arg);
     }
     try obj.set(ctx.allocator, "_arguments", .{ .array = args_arr });
@@ -1576,13 +1582,46 @@ fn raNewInstance(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
     const args_val = this.get("_arguments");
     if (args_val == .array) {
         const arr = args_val.array;
-        var call_args: [16]Value = undefined;
-        const count = @min(arr.entries.items.len, 16);
-        for (0..count) |i| {
-            call_args[i] = arr.entries.items[i].value;
+        var has_named = false;
+        for (arr.entries.items) |entry| {
+            if (entry.key == .string) { has_named = true; break; }
         }
-        if (count > 0) {
-            _ = ctx.callMethod(obj, "__construct", call_args[0..count]) catch {};
+
+        if (has_named) {
+            var buf: [256]u8 = undefined;
+            const ctor_key = std.fmt.bufPrint(&buf, "{s}::__construct", .{attr_name}) catch "";
+            if (ctx.vm.functions.get(ctor_key)) |func| {
+                var resolved: [16]Value = .{.null} ** 16;
+                var pos: usize = 0;
+                for (arr.entries.items) |entry| {
+                    if (entry.key == .string) {
+                        for (func.params, 0..) |p, pi| {
+                            const pn = if (p.len > 0 and p[0] == '$') p[1..] else p;
+                            if (std.mem.eql(u8, pn, entry.key.string)) {
+                                resolved[pi] = entry.value;
+                                if (pi >= pos) pos = pi + 1;
+                                break;
+                            }
+                        }
+                    } else {
+                        resolved[pos] = entry.value;
+                        pos += 1;
+                    }
+                }
+                if (pos > 0) {
+                    _ = ctx.callMethod(obj, "__construct", resolved[0..pos]) catch {};
+                }
+            } else {
+                var call_args: [16]Value = undefined;
+                const count = @min(arr.entries.items.len, 16);
+                for (0..count) |i| call_args[i] = arr.entries.items[i].value;
+                if (count > 0) _ = ctx.callMethod(obj, "__construct", call_args[0..count]) catch {};
+            }
+        } else {
+            var call_args: [16]Value = undefined;
+            const count = @min(arr.entries.items.len, 16);
+            for (0..count) |i| call_args[i] = arr.entries.items[i].value;
+            if (count > 0) _ = ctx.callMethod(obj, "__construct", call_args[0..count]) catch {};
         }
     }
     return .{ .object = obj };

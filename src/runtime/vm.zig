@@ -192,6 +192,7 @@ pub const CaptureRange = struct {
 pub const AttributeDef = struct {
     name: []const u8,
     args: []const Value = &.{},
+    arg_names: []const ?[]const u8 = &.{},
 };
 
 pub const ClassDef = struct {
@@ -229,6 +230,7 @@ pub const ClassDef = struct {
     fn freeAttributeDefs(allocator: Allocator, attrs: []const AttributeDef) void {
         for (attrs) |a| {
             if (a.args.len > 0) allocator.free(a.args);
+            if (a.arg_names.len > 0) allocator.free(a.arg_names);
         }
         allocator.free(attrs);
     }
@@ -242,6 +244,7 @@ pub const ClassDef = struct {
         self.case_order.deinit(allocator);
         for (self.attributes.items) |a| {
             if (a.args.len > 0) allocator.free(a.args);
+            if (a.arg_names.len > 0) allocator.free(a.arg_names);
         }
         self.attributes.deinit(allocator);
         var ma_iter = self.method_attributes.valueIterator();
@@ -5257,6 +5260,26 @@ pub const VM = struct {
                 }
                 break :blk .{ .array = arr };
             },
+            0x07 => blk: { // associative array
+                const len = self.readU16();
+                const arr = self.allocator.create(PhpArray) catch break :blk .null;
+                arr.* = .{};
+                self.arrays.append(self.allocator, arr) catch {};
+                for (0..len) |_| {
+                    const key_type = self.readByte();
+                    const key: PhpArray.Key = if (key_type == 0x01) k: {
+                        const kidx = self.readU16();
+                        break :k .{ .string = self.currentChunk().constants.items[kidx].string };
+                    } else k: {
+                        var bytes: [8]u8 = undefined;
+                        for (&bytes) |*b| b.* = self.readByte();
+                        break :k .{ .int = @bitCast(bytes) };
+                    };
+                    const v = self.readAttrValue();
+                    arr.set(self.allocator, key, v) catch {};
+                }
+                break :blk .{ .array = arr };
+            },
             else => .null,
         };
     }
@@ -5271,15 +5294,38 @@ pub const VM = struct {
             const arg_count = self.readByte();
             if (arg_count > 0) {
                 const args = try self.allocator.alloc(Value, arg_count);
+                const names = try self.allocator.alloc(?[]const u8, arg_count);
                 for (0..arg_count) |ai| {
-                    args[ai] = self.readAttrValue();
+                    const named_flag = self.readByte();
+                    if (named_flag == 1) {
+                        const an_idx = self.readU16();
+                        names[ai] = self.currentChunk().constants.items[an_idx].string;
+                    } else {
+                        names[ai] = null;
+                    }
+                    args[ai] = self.resolveAttrConstant(self.readAttrValue());
                 }
-                attrs[i] = .{ .name = name, .args = args };
+                attrs[i] = .{ .name = name, .args = args, .arg_names = names };
             } else {
                 attrs[i] = .{ .name = name };
             }
         }
         return attrs;
+    }
+
+    fn resolveAttrConstant(self: *VM, val: Value) Value {
+        if (val != .string) return val;
+        const s = val.string;
+        if (s.len == 0) return val;
+        // check for Class::CONST pattern
+        if (std.mem.indexOf(u8, s, "::")) |sep| {
+            const class_name = s[0..sep];
+            const const_name = s[sep + 2 ..];
+            if (self.getStaticProp(class_name, const_name)) |v| return v;
+        }
+        // check if it's a PHP constant
+        if (self.php_constants.get(s)) |v| return v;
+        return val;
     }
 
     fn readMethodInfo(self: *VM) struct { []const u8, ClassDef.MethodInfo } {

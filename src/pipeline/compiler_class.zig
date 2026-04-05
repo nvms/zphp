@@ -14,6 +14,7 @@ const Error = Allocator.Error || error{CompileError};
 const ParsedAttr = struct {
     name: []const u8,
     args: []const Value,
+    arg_names: []const ?[]const u8 = &.{},
 };
 
 fn isModifierToken(tag: Token.Tag) bool {
@@ -82,6 +83,14 @@ fn parseAttrArgValue(tokens: []const Token, source: []const u8, pos: *usize, all
                 pos.* += 1;
                 return .null;
             }
+            // check for Class::CONST or Enum::Case pattern
+            if (pos.* + 2 < tokens.len and tokens[pos.* + 1].tag == .colon_colon and tokens[pos.* + 2].tag == .identifier) {
+                // use source range: "ClassName::CONST_NAME" is contiguous in source
+                const start = tokens[pos.*].start;
+                const end = tokens[pos.* + 2].end;
+                pos.* += 3;
+                return .{ .string = source[start..end] };
+            }
             pos.* += 1;
             return .{ .string = text };
         },
@@ -100,7 +109,18 @@ fn parseAttrArgValue(tokens: []const Token, source: []const u8, pos: *usize, all
             arr.* = .{};
             while (pos.* < tokens.len and tokens[pos.*].tag != .r_bracket) {
                 const val = parseAttrArgValue(tokens, source, pos, allocator);
-                arr.append(allocator, val) catch break;
+                if (pos.* < tokens.len and tokens[pos.*].tag == .fat_arrow) {
+                    pos.* += 1;
+                    const map_val = parseAttrArgValue(tokens, source, pos, allocator);
+                    const key: PhpArray.Key = switch (val) {
+                        .string => |s| .{ .string = s },
+                        .int => |i| .{ .int = i },
+                        else => .{ .int = @intCast(arr.entries.items.len) },
+                    };
+                    arr.set(allocator, key, map_val) catch break;
+                } else {
+                    arr.append(allocator, val) catch break;
+                }
                 if (pos.* < tokens.len and tokens[pos.*].tag == .comma) pos.* += 1;
             }
             if (pos.* < tokens.len and tokens[pos.*].tag == .r_bracket) pos.* += 1;
@@ -178,14 +198,18 @@ fn extractAttributes(self: *Compiler, main_token: u32) []const ParsedAttr {
             self.string_allocs.append(self.allocator, @constCast(owned_name)) catch {};
 
             var args = std.ArrayListUnmanaged(Value){};
+            var arg_names = std.ArrayListUnmanaged(?[]const u8){};
             if (inner < rb_pos and self.ast.tokens[inner].tag == .l_paren) {
                 inner += 1;
                 while (inner < rb_pos and self.ast.tokens[inner].tag != .r_paren) {
+                    var arg_name: ?[]const u8 = null;
                     if (inner + 1 < rb_pos and self.ast.tokens[inner].tag == .identifier and self.ast.tokens[inner + 1].tag == .colon) {
+                        arg_name = self.ast.tokens[inner].lexeme(self.ast.source);
                         inner += 2;
                     }
                     const val = parseAttrArgValue(self.ast.tokens, self.ast.source, &inner, self.allocator);
                     args.append(self.allocator, val) catch break;
+                    arg_names.append(self.allocator, arg_name) catch break;
                     if (inner < rb_pos and self.ast.tokens[inner].tag == .comma) inner += 1;
                 }
                 if (inner < rb_pos and self.ast.tokens[inner].tag == .r_paren) inner += 1;
@@ -194,6 +218,7 @@ fn extractAttributes(self: *Compiler, main_token: u32) []const ParsedAttr {
             all_attrs.append(self.allocator, .{
                 .name = owned_name,
                 .args = args.toOwnedSlice(self.allocator) catch &.{},
+                .arg_names = arg_names.toOwnedSlice(self.allocator) catch &.{},
             }) catch break;
 
             if (inner < rb_pos and self.ast.tokens[inner].tag == .comma) inner += 1;
@@ -207,6 +232,7 @@ fn extractAttributes(self: *Compiler, main_token: u32) []const ParsedAttr {
 fn freeAttrSlice(allocator: Allocator, attrs: []const ParsedAttr) void {
     for (attrs) |attr| {
         if (attr.args.len > 0) allocator.free(attr.args);
+        if (attr.arg_names.len > 0) allocator.free(attr.arg_names);
     }
     if (attrs.len > 0) allocator.free(attrs);
 }
@@ -217,7 +243,19 @@ fn emitAttributeData(self: *Compiler, attrs: []const ParsedAttr) Error!void {
         const name_idx = try self.addConstant(.{ .string = attr.name });
         try self.emitU16(name_idx);
         try self.emitByte(@intCast(attr.args.len));
-        for (attr.args) |arg| {
+        for (attr.args, 0..) |arg, i| {
+            // emit named arg flag: 0 = positional, 1 = named (followed by name constant index)
+            if (i < attr.arg_names.len) {
+                if (attr.arg_names[i]) |arg_name| {
+                    try self.emitByte(1);
+                    const an_idx = try self.addConstant(.{ .string = arg_name });
+                    try self.emitU16(an_idx);
+                } else {
+                    try self.emitByte(0);
+                }
+            } else {
+                try self.emitByte(0);
+            }
             try emitAttrValue(self, arg);
         }
     }
@@ -243,12 +281,37 @@ fn emitAttrValue(self: *Compiler, val: Value) Error!void {
             try self.emitU16(idx);
         },
         .array => {
-            try self.emitByte(0x06);
             const arr = val.array;
-            const len: u16 = @intCast(arr.entries.items.len);
-            try self.emitU16(len);
+            var has_string_keys = false;
             for (arr.entries.items) |entry| {
-                try emitAttrValue(self, entry.value);
+                if (entry.key == .string) { has_string_keys = true; break; }
+            }
+            if (has_string_keys) {
+                try self.emitByte(0x07); // associative array
+                const len: u16 = @intCast(arr.entries.items.len);
+                try self.emitU16(len);
+                for (arr.entries.items) |entry| {
+                    switch (entry.key) {
+                        .string => |s| {
+                            try self.emitByte(0x01); // string key
+                            const kidx = try self.addConstant(.{ .string = s });
+                            try self.emitU16(kidx);
+                        },
+                        .int => |ki| {
+                            try self.emitByte(0x00); // int key
+                            const bytes: [8]u8 = @bitCast(ki);
+                            for (bytes) |b| try self.emitByte(b);
+                        },
+                    }
+                    try emitAttrValue(self, entry.value);
+                }
+            } else {
+                try self.emitByte(0x06); // sequential array
+                const len: u16 = @intCast(arr.entries.items.len);
+                try self.emitU16(len);
+                for (arr.entries.items) |entry| {
+                    try emitAttrValue(self, entry.value);
+                }
             }
         },
         else => try self.emitByte(0x00),
