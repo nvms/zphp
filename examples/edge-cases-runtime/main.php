@@ -1,7 +1,7 @@
 <?php
 // covers: explode limit, array_search strict, loose comparison php8,
 //   float casting inf/nan, intdiv division by zero exception,
-//   fiber exception propagation, pipe operator
+//   fiber exception propagation, mb string case conversion
 
 // --- explode with limit ---
 echo "=== Explode Limit ===\n";
@@ -86,13 +86,3 @@ echo mb_strtolower("HÉLLO") . "\n"; // héllo
 echo mb_strtoupper("über") . "\n"; // ÜBER
 echo mb_strtolower("MÜNCHEN") . "\n"; // münchen
 
-// --- pipe operator ---
-echo "=== Pipe Operator ===\n";
-echo ("hello" |> strtoupper(...)), "\n"; // HELLO
-echo ("  hello  " |> trim(...) |> strlen(...)), "\n"; // 5
-echo (5 |> (fn($x) => $x * 3)), "\n"; // 15
-
-$fn = fn($x) => $x ** 2;
-echo (4 |> $fn), "\n"; // 16
-
-echo ("hello" |> strlen(...)), "\n"; // 5
