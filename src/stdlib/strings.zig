@@ -139,14 +139,18 @@ fn strpos(_: *NativeContext, args: []const Value) RuntimeError!Value {
     return .{ .bool = false };
 }
 
-fn replaceOne(ctx: *NativeContext, subject: []const u8, search: []const u8, replace: []const u8) ![]const u8 {
-    if (search.len == 0) return subject;
+const ReplaceResult = struct { str: []const u8, count: i64 };
+
+fn replaceOne(ctx: *NativeContext, subject: []const u8, search: []const u8, replace: []const u8) !ReplaceResult {
+    if (search.len == 0) return .{ .str = subject, .count = 0 };
     var buf = std.ArrayListUnmanaged(u8){};
     var i: usize = 0;
+    var cnt: i64 = 0;
     while (i < subject.len) {
         if (i + search.len <= subject.len and std.mem.eql(u8, subject[i .. i + search.len], search)) {
             try buf.appendSlice(ctx.allocator, replace);
             i += search.len;
+            cnt += 1;
         } else {
             try buf.append(ctx.allocator, subject[i]);
             i += 1;
@@ -154,11 +158,13 @@ fn replaceOne(ctx: *NativeContext, subject: []const u8, search: []const u8, repl
     }
     const s = try buf.toOwnedSlice(ctx.allocator);
     try ctx.strings.append(ctx.allocator, s);
-    return s;
+    return .{ .str = s, .count = cnt };
 }
 
 fn str_replace(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len < 3) return if (args.len >= 3) args[2] else Value{ .string = "" };
+
+    var total_count: i64 = 0;
 
     if (args[0] == .array) {
         const searches = args[0].array;
@@ -171,16 +177,21 @@ fn str_replace(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
                 else
                     "";
             } else if (args[1] == .string) args[1].string else "";
-            result = try replaceOne(ctx, result, needle, replacement);
+            const r = try replaceOne(ctx, result, needle, replacement);
+            result = r.str;
+            total_count += r.count;
         }
+        if (args.len >= 4) ctx.setCallerVar(3, args.len, .{ .int = total_count });
         return .{ .string = result };
     }
 
     const search = if (args[0] == .string) args[0].string else return args[2];
     const replace = if (args[1] == .string) args[1].string else return args[2];
     const subject = if (args[2] == .string) args[2].string else return args[2];
-    const s = try replaceOne(ctx, subject, search, replace);
-    return .{ .string = s };
+    const r = try replaceOne(ctx, subject, search, replace);
+    total_count = r.count;
+    if (args.len >= 4) ctx.setCallerVar(3, args.len, .{ .int = total_count });
+    return .{ .string = r.str };
 }
 
 fn explode(ctx: *NativeContext, args: []const Value) RuntimeError!Value {

@@ -1037,6 +1037,13 @@ fn native_extract(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
         };
         try ctx.strings.append(ctx.allocator, var_name);
         try frame.vars.put(ctx.allocator, var_name, entry.value);
+        const sn = if (frame.func) |func| func.slot_names else ctx.vm.global_slot_names;
+        for (sn, 0..) |sn_name, si| {
+            if (std.mem.eql(u8, sn_name, var_name)) {
+                if (si < frame.locals.len) frame.locals[si] = entry.value;
+                break;
+            }
+        }
         count_val += 1;
     }
     return .{ .int = count_val };
