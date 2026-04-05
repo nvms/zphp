@@ -286,6 +286,7 @@ pub const VM = struct {
     stack: [2048]Value = undefined,
     sp: usize = 0,
     functions: std.StringHashMapUnmanaged(*const ObjFunction) = .{},
+    function_attributes: std.StringHashMapUnmanaged([]const AttributeDef) = .{},
     native_fns: std.StringHashMapUnmanaged(NativeFn) = .{},
     output: std.ArrayListUnmanaged(u8) = .{},
     strings: std.ArrayListUnmanaged([]const u8) = .{},
@@ -682,6 +683,15 @@ pub const VM = struct {
         g_type_info.deinit(self.allocator);
         g_type_info = .{};
         self.functions.deinit(self.allocator);
+        var fa_iter = self.function_attributes.valueIterator();
+        while (fa_iter.next()) |attrs| {
+            for (attrs.*) |a| {
+                if (a.args.len > 0) self.allocator.free(a.args);
+                if (a.arg_names.len > 0) self.allocator.free(a.arg_names);
+            }
+            self.allocator.free(attrs.*);
+        }
+        self.function_attributes.deinit(self.allocator);
         self.native_fns.deinit(self.allocator);
         self.output.deinit(self.allocator);
         self.strings.deinit(self.allocator);
@@ -782,6 +792,9 @@ pub const VM = struct {
         }
         for (result.type_hints.items) |th| {
             try g_type_info.put(self.allocator, th.name, .{ .param_types = th.param_types, .return_type = th.return_type });
+        }
+        for (result.function_attrs.items) |fa| {
+            try self.function_attributes.put(self.allocator, fa.name, fa.attrs);
         }
         var vars: std.StringHashMapUnmanaged(Value) = .{};
         var it = self.request_vars.iterator();

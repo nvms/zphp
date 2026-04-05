@@ -198,6 +198,7 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try rf_def.methods.put(a, "isAnonymous", .{ .name = "isAnonymous", .arity = 0 });
     try rf_def.methods.put(a, "getClosureScopeClass", .{ .name = "getClosureScopeClass", .arity = 0 });
     try rf_def.methods.put(a, "hasReturnType", .{ .name = "hasReturnType", .arity = 0 });
+    try rf_def.methods.put(a, "getAttributes", .{ .name = "getAttributes", .arity = 0 });
     try vm.classes.put(a, "ReflectionFunction", rf_def);
 
     try vm.native_fns.put(a, "ReflectionFunction::__construct", rfConstruct);
@@ -209,6 +210,7 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try vm.native_fns.put(a, "ReflectionFunction::isAnonymous", rfIsAnonymous);
     try vm.native_fns.put(a, "ReflectionFunction::getClosureScopeClass", rfGetClosureScopeClass);
     try vm.native_fns.put(a, "ReflectionFunction::hasReturnType", rfHasReturnType);
+    try vm.native_fns.put(a, "ReflectionFunction::getAttributes", rfGetAttributes);
     try vm.native_fns.put(a, "ReflectionFunction::getClosureUsedVariables", rfGetClosureUsedVariables);
     try vm.native_fns.put(a, "ReflectionFunction::getClosureCalledClass", rfGetClosureCalledClass);
 
@@ -1189,6 +1191,14 @@ fn rfGetClosureCalledClass(ctx: *NativeContext, _: []const Value) RuntimeError!V
         return .{ .object = obj };
     }
     return .null;
+}
+
+fn rfGetAttributes(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    const this = getThis(ctx) orelse return .{ .array = try ctx.createArray() };
+    const func_name = if (this.get("name") == .string) this.get("name").string else return .{ .array = try ctx.createArray() };
+    const attrs = ctx.vm.function_attributes.get(func_name) orelse return .{ .array = try ctx.createArray() };
+    const filter: ?[]const u8 = if (args.len >= 1 and args[0] == .string) args[0].string else null;
+    return buildAttributeArray(ctx, attrs, filter, 2); // TARGET_FUNCTION
 }
 
 fn rfGetClosureScopeClass(ctx: *NativeContext, _: []const Value) RuntimeError!Value {

@@ -6,6 +6,7 @@ const OpCode = @import("bytecode.zig").OpCode;
 const ObjFunction = @import("bytecode.zig").ObjFunction;
 const Value = @import("../runtime/value.zig").Value;
 const PhpArray = @import("../runtime/value.zig").PhpArray;
+const vm_mod = @import("../runtime/vm.zig");
 
 const compiler_strings = @import("compiler_strings.zig");
 const compiler_expr = @import("compiler_expr.zig");
@@ -23,6 +24,11 @@ pub const TypeHint = struct {
     return_type: []const u8 = "",
 };
 
+pub const FunctionAttrEntry = struct {
+    name: []const u8,
+    attrs: []const vm_mod.AttributeDef,
+};
+
 pub const CompileResult = struct {
     chunk: Chunk,
     functions: std.ArrayListUnmanaged(ObjFunction),
@@ -31,6 +37,7 @@ pub const CompileResult = struct {
     local_count: u16 = 0,
     slot_names: []const []const u8 = &.{},
     type_hints: std.ArrayListUnmanaged(TypeHint) = .{},
+    function_attrs: std.ArrayListUnmanaged(FunctionAttrEntry) = .{},
     source: []const u8 = "",
     file_path: []const u8 = "",
 
@@ -50,6 +57,7 @@ pub const CompileResult = struct {
             if (th.param_types.len > 0) self.allocator.free(th.param_types);
         }
         self.type_hints.deinit(self.allocator);
+        self.function_attrs.deinit(self.allocator);
         if (self.slot_names.len > 0) self.allocator.free(self.slot_names);
     }
 };
@@ -110,7 +118,7 @@ pub fn compileWithPath(ast: *const Ast, allocator: Allocator, file_path: []const
     const local_count = c.next_slot;
     c.local_slots.deinit(allocator);
     global_closure_counter = c.closure_count;
-    return .{ .chunk = c.chunk, .functions = c.functions, .string_allocs = c.string_allocs, .allocator = allocator, .local_count = local_count, .slot_names = slot_names, .type_hints = c.type_hints, .source = ast.source, .file_path = file_path };
+    return .{ .chunk = c.chunk, .functions = c.functions, .string_allocs = c.string_allocs, .allocator = allocator, .local_count = local_count, .slot_names = slot_names, .type_hints = c.type_hints, .function_attrs = c.function_attrs, .source = ast.source, .file_path = file_path };
 }
 
 pub const Compiler = struct {
@@ -139,6 +147,7 @@ pub const Compiler = struct {
     local_slots: std.StringHashMapUnmanaged(u16) = .{},
     next_slot: u16 = 0,
     type_hints: std.ArrayListUnmanaged(TypeHint) = .{},
+    function_attrs: std.ArrayListUnmanaged(FunctionAttrEntry) = .{},
     current_source_offset: u32 = 0,
     current_class: []const u8 = "",
     current_parent: []const u8 = "",
