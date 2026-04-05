@@ -1046,6 +1046,51 @@ pub fn compileClassDecl(self: *Compiler, node: Ast.Node) Error!void {
     }
     for (props_with_attrs.items) |pa| freeAttrSlice(self.allocator, pa.attrs);
 
+    // parameter attributes: methods that have params with attrs
+    const ParamAttr = struct { name: []const u8, attrs: []const ParsedAttr };
+    const MethodParamAttrs = struct { method_name: []const u8, params: []const ParamAttr };
+    var methods_with_param_attrs = std.ArrayListUnmanaged(MethodParamAttrs){};
+    defer methods_with_param_attrs.deinit(self.allocator);
+    for (members) |member_idx| {
+        const member = self.ast.nodes[member_idx];
+        if (member.tag == .class_method or member.tag == .static_class_method) {
+            const param_nodes = self.ast.extraSlice(member.data.lhs);
+            var params_with_attrs = std.ArrayListUnmanaged(ParamAttr){};
+            for (param_nodes) |pn| {
+                const pnode = self.ast.nodes[pn];
+                const pattrs = extractAttributes(self, pnode.main_token);
+                if (pattrs.len > 0) {
+                    var pname = self.ast.tokenSlice(pnode.main_token);
+                    if (pname.len > 0 and pname[0] == '$') pname = pname[1..];
+                    try params_with_attrs.append(self.allocator, .{ .name = pname, .attrs = pattrs });
+                }
+            }
+            if (params_with_attrs.items.len > 0) {
+                try methods_with_param_attrs.append(self.allocator, .{
+                    .method_name = self.ast.tokenSlice(member.main_token),
+                    .params = params_with_attrs.toOwnedSlice(self.allocator) catch &.{},
+                });
+            } else {
+                params_with_attrs.deinit(self.allocator);
+            }
+        }
+    }
+    try self.emitByte(@intCast(methods_with_param_attrs.items.len));
+    for (methods_with_param_attrs.items) |mpa| {
+        const mpa_name_idx = try self.addConstant(.{ .string = mpa.method_name });
+        try self.emitU16(mpa_name_idx);
+        try self.emitByte(@intCast(mpa.params.len));
+        for (mpa.params) |pa| {
+            const pa_name_idx = try self.addConstant(.{ .string = pa.name });
+            try self.emitU16(pa_name_idx);
+            try emitAttributeData(self, pa.attrs);
+        }
+    }
+    for (methods_with_param_attrs.items) |mpa| {
+        for (mpa.params) |pa| freeAttrSlice(self.allocator, pa.attrs);
+        self.allocator.free(mpa.params);
+    }
+
     // set class constants after class_decl so self:: references resolve
     const cname_idx = try self.addConstant(.{ .string = class_name });
     for (members) |member_idx| {
@@ -1311,6 +1356,7 @@ pub fn compileAnonymousClass(self: *Compiler, node: Ast.Node) Error!void {
     try self.emitByte(0); // class attrs
     try self.emitByte(0); // method attrs
     try self.emitByte(0); // property attrs
+    try self.emitByte(0); // param attrs
 
     // now instantiate with constructor args
     for (0..ctor_arg_count) |i| {

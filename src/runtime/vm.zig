@@ -210,6 +210,7 @@ pub const ClassDef = struct {
     attributes: std.ArrayListUnmanaged(AttributeDef) = .{},
     method_attributes: std.StringHashMapUnmanaged([]const AttributeDef) = .{},
     property_attributes: std.StringHashMapUnmanaged([]const AttributeDef) = .{},
+    param_attributes: std.StringHashMapUnmanaged([]const AttributeDef) = .{},
 
     pub const Visibility = enum(u8) { public = 0, protected = 1, private = 2 };
 
@@ -253,6 +254,12 @@ pub const ClassDef = struct {
         var pa_iter = self.property_attributes.valueIterator();
         while (pa_iter.next()) |attrs| freeAttributeDefs(allocator, attrs.*);
         self.property_attributes.deinit(allocator);
+        var pra_it = self.param_attributes.iterator();
+        while (pra_it.next()) |entry| {
+            allocator.free(entry.key_ptr.*);
+            freeAttributeDefs(allocator, entry.value_ptr.*);
+        }
+        self.param_attributes.deinit(allocator);
         if (self.slot_layout) |layout| {
             allocator.free(layout.names);
             allocator.free(layout.defaults);
@@ -5222,6 +5229,23 @@ pub const VM = struct {
             const pa_name = self.currentChunk().constants.items[pa_name_idx].string;
             const pa_attrs = try self.readAttributeDefs();
             try def.property_attributes.put(self.allocator, pa_name, pa_attrs);
+        }
+
+        // parameter attributes
+        const param_attr_method_count = self.readByte();
+        for (0..param_attr_method_count) |_| {
+            const pam_name_idx = self.readU16();
+            const pam_method = self.currentChunk().constants.items[pam_name_idx].string;
+            const pam_param_count = self.readByte();
+            for (0..pam_param_count) |_| {
+                const pap_name_idx = self.readU16();
+                const pap_name = self.currentChunk().constants.items[pap_name_idx].string;
+                const pap_attrs = try self.readAttributeDefs();
+                var key_buf: [256]u8 = undefined;
+                const key = std.fmt.bufPrint(&key_buf, "{s}:{s}", .{ pam_method, pap_name }) catch continue;
+                const owned_key = try self.allocator.dupe(u8, key);
+                try def.param_attributes.put(self.allocator, owned_key, pap_attrs);
+            }
         }
 
         if (def.parent) |parent_name| {

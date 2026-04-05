@@ -1037,9 +1037,20 @@ fn rpHasType(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
     return .{ .bool = type_val == .string and type_val.string.len > 0 };
 }
 
-fn rpGetAttributes(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    // parameter attributes not yet implemented
-    return .{ .array = try ctx.createArray() };
+fn rpGetAttributes(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    const this = getThis(ctx) orelse return .{ .array = try ctx.createArray() };
+    const param_name = if (this.get("name") == .string) this.get("name").string else return .{ .array = try ctx.createArray() };
+    const class_name = if (this.get("_declaring_class") == .string) this.get("_declaring_class").string else return .{ .array = try ctx.createArray() };
+    const method_name = if (this.get("_method_name") == .string) this.get("_method_name").string else return .{ .array = try ctx.createArray() };
+
+    const cls = ctx.vm.classes.get(class_name) orelse return .{ .array = try ctx.createArray() };
+
+    var key_buf: [256]u8 = undefined;
+    const key = std.fmt.bufPrint(&key_buf, "{s}:{s}", .{ method_name, param_name }) catch return .{ .array = try ctx.createArray() };
+    const attrs = cls.param_attributes.get(key) orelse return .{ .array = try ctx.createArray() };
+
+    const filter: ?[]const u8 = if (args.len >= 1 and args[0] == .string) args[0].string else null;
+    return buildAttributeArray(ctx, attrs, filter, 32); // TARGET_PARAMETER
 }
 
 fn rpGetDeclaringClass(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
@@ -1250,9 +1261,14 @@ fn buildParamArray(ctx: *NativeContext, func: *const ObjFunction, type_key: []co
         const is_variadic = func.is_variadic and i == func.arity - 1;
         try obj.set(ctx.allocator, "_is_variadic", .{ .bool = is_variadic });
 
-        // declaring class
+        // declaring class and method name
         if (std.mem.indexOf(u8, type_key, "::")) |sep| {
-            try obj.set(ctx.allocator, "_declaring_class", .{ .string = type_key[0..sep] });
+            const decl_class = try ctx.allocator.dupe(u8, type_key[0..sep]);
+            try ctx.strings.append(ctx.allocator, decl_class);
+            try obj.set(ctx.allocator, "_declaring_class", .{ .string = decl_class });
+            const meth_name = try ctx.allocator.dupe(u8, type_key[sep + 2 ..]);
+            try ctx.strings.append(ctx.allocator, meth_name);
+            try obj.set(ctx.allocator, "_method_name", .{ .string = meth_name });
         }
 
         try arr.append(ctx.allocator, .{ .object = obj });
