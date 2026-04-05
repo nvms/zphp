@@ -95,7 +95,7 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y libpcre2-dev libsqlite3-dev zlib1g-dev libmysqlclient-dev libpq-dev libssl-dev libnghttp2-dev
       - uses: shivammathur/setup-php@v2
         with:
-          php-version: '8.4'
+          php-version: '8.5'
       - run: zig build
       - run: php --version
       - run: ./tests/run
@@ -111,7 +111,7 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y libpcre2-dev libsqlite3-dev zlib1g-dev libmysqlclient-dev libpq-dev libssl-dev libnghttp2-dev
       - uses: shivammathur/setup-php@v2
         with:
-          php-version: '8.4'
+          php-version: '8.5'
       - run: zig build
       - run: ./tests/examples_test
 
@@ -126,7 +126,7 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y libpcre2-dev libsqlite3-dev zlib1g-dev libmysqlclient-dev libpq-dev libssl-dev libnghttp2-dev
       - uses: shivammathur/setup-php@v2
         with:
-          php-version: '8.4'
+          php-version: '8.5'
           extensions: mbstring, xml, sqlite3, curl, tokenizer
       - run: zig build
       - run: ./tests/laravel/setup
@@ -143,7 +143,7 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y libpcre2-dev libsqlite3-dev zlib1g-dev libmysqlclient-dev libpq-dev libssl-dev libnghttp2-dev
       - uses: shivammathur/setup-php@v2
         with:
-          php-version: '8.4'
+          php-version: '8.5'
           extensions: mbstring, xml, sqlite3, curl, tokenizer
       - run: zig build
       - run: ./tests/laravel/setup
