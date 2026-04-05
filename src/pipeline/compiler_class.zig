@@ -705,12 +705,25 @@ pub fn compileClosure(self: *Compiler, node: Ast.Node) Error!void {
         try self.type_hints.append(self.allocator, .{ .name = owned_name, .param_types = param_types, .return_type = return_type });
     }
 
+    // closure-level attributes
+    const closure_attrs = extractAttributes(self, node.main_token);
+    if (closure_attrs.len > 0) {
+        const attr_defs = try self.allocator.alloc(AttributeDef, closure_attrs.len);
+        for (closure_attrs, 0..) |pa, i| {
+            attr_defs[i] = .{ .name = pa.name, .args = pa.args, .arg_names = pa.arg_names };
+        }
+        try self.function_attrs.append(self.allocator, .{ .name = owned_name, .attrs = attr_defs });
+        self.allocator.free(closure_attrs);
+    }
+
     for (sub.functions.items) |f| try self.functions.append(self.allocator, f);
     sub.functions.deinit(self.allocator);
     for (sub.string_allocs.items) |s| try self.string_allocs.append(self.allocator, s);
     sub.string_allocs.deinit(self.allocator);
     for (sub.type_hints.items) |th| try self.type_hints.append(self.allocator, th);
     sub.type_hints.deinit(self.allocator);
+    for (sub.function_attrs.items) |fa| try self.function_attrs.append(self.allocator, fa);
+    sub.function_attrs.deinit(self.allocator);
 
     const idx = try self.addConstant(.{ .string = owned_name });
     try self.emitConstant(idx);

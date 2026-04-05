@@ -7003,7 +7003,7 @@ pub const VM = struct {
         }
     }
 
-    fn getOrigClosureName(self: *VM, name: []const u8) []const u8 {
+    pub fn getOrigClosureName(self: *VM, name: []const u8) []const u8 {
         _ = self;
         if (!std.mem.startsWith(u8, name, "__closure_")) return name;
         // runtime instance names have format __closure_N_M, compile name is __closure_N

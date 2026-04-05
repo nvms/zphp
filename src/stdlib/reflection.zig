@@ -1371,7 +1371,8 @@ fn rfGetClosureCalledClass(ctx: *NativeContext, _: []const Value) RuntimeError!V
 fn rfGetAttributes(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     const this = getThis(ctx) orelse return .{ .array = try ctx.createArray() };
     const func_name = if (this.get("name") == .string) this.get("name").string else return .{ .array = try ctx.createArray() };
-    const attrs = ctx.vm.function_attributes.get(func_name) orelse return .{ .array = try ctx.createArray() };
+    const compile_name = ctx.vm.getOrigClosureName(func_name);
+    const attrs = ctx.vm.function_attributes.get(compile_name) orelse return .{ .array = try ctx.createArray() };
     const filter: ?[]const u8 = if (args.len >= 1 and args[0] == .string) args[0].string else null;
     return buildAttributeArray(ctx, attrs, filter, 2); // TARGET_FUNCTION
 }

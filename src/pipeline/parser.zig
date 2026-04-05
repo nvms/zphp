@@ -2014,6 +2014,10 @@ const Parser = struct {
             .kw_match => if (self.isMatchExpr()) self.parseMatchExpr() else self.addLiteral(.identifier),
             .kw_function => self.parseClosureExpr(),
             .kw_fn => self.parseArrowFunc(),
+            .hash_bracket => {
+                self.skipAttributes();
+                return self.parsePrimaryExpr();
+            },
             .l_paren => if (self.isCastExpr()) self.parseCastExpr() else self.parseGroupedExpr(),
             .l_bracket => self.parseArrayLiteral(),
             .kw_array => self.parseArrayKw(),
