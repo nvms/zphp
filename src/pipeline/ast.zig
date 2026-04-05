@@ -82,6 +82,7 @@ pub const Ast = struct {
 
             // binary (non-short-circuit, main_token = operator)
             binary_op, // lhs = left, rhs = right
+            pipe_expr, // lhs = value, rhs = callable
 
             // assignment (main_token = assignment operator)
             assign, // lhs = target, rhs = value

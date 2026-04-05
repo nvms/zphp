@@ -269,6 +269,7 @@ pub const Lexer = struct {
 
     fn lexPipe(self: *Lexer, start: usize) Token {
         if (self.match('|')) return self.makeToken(.pipe_pipe, start);
+        if (self.match('>')) return self.makeToken(.pipe_gt, start);
         if (self.match('=')) return self.makeToken(.pipe_equal, start);
         return self.makeToken(.pipe, start);
     }

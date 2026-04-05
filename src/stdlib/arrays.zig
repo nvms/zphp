@@ -171,8 +171,10 @@ fn array_search(_: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len < 2 or args[1] != .array) return .{ .bool = false };
     const needle = args[0];
     const arr = args[1].array;
+    const strict = args.len >= 3 and args[2] == .bool and args[2].bool;
     for (arr.entries.items) |entry| {
-        if (Value.equal(needle, entry.value)) {
+        const match = if (strict) Value.identical(needle, entry.value) else Value.equal(needle, entry.value);
+        if (match) {
             return switch (entry.key) {
                 .int => |i| .{ .int = i },
                 .string => |s| .{ .string = s },

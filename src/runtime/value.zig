@@ -379,6 +379,9 @@ pub const Value = union(enum) {
             return false;
         }
         if (a == .null and b == .null) return true;
+        // php 8: null compared to string converts null to "" and does string comparison
+        if (a == .null and b == .string) return b.string.len == 0;
+        if (b == .null and a == .string) return a.string.len == 0;
         if (a == .null) return !b.isTruthy();
         if (b == .null) return !a.isTruthy();
         if (a == .string and b == .string) return std.mem.eql(u8, a.string, b.string);

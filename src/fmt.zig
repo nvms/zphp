@@ -355,7 +355,7 @@ const Formatter = struct {
             },
             .identifier => self.write(self.ast.tokens[node.main_token].lexeme(self.source)),
 
-            .binary_op => self.formatBinaryOp(node),
+            .binary_op, .pipe_expr => self.formatBinaryOp(node),
             .assign => self.formatAssign(node),
             .logical_and => self.formatLogical(node, "&&"),
             .logical_or => self.formatLogical(node, "||"),

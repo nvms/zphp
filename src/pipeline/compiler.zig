@@ -144,6 +144,8 @@ pub const Compiler = struct {
     current_parent: []const u8 = "",
     current_function: []const u8 = "",
     in_trait: bool = false,
+    finally_nodes: [8]u32 = [_]u32{0} ** 8,
+    finally_depth: u32 = 0,
 
     pub const LoopJump = struct {
         offset: usize,
@@ -193,6 +195,15 @@ pub const Compiler = struct {
                     for (0..self.foreach_depth) |_| try self.emitOp(.iter_end);
                     if (node.data.lhs != 0) {
                         try self.compileNode(node.data.lhs);
+                    }
+                    // emit finally blocks (innermost first) before returning
+                    var fd = self.finally_depth;
+                    while (fd > 0) {
+                        fd -= 1;
+                        try self.emitOp(.pop_handler);
+                        try self.compileNode(self.finally_nodes[fd]);
+                    }
+                    if (node.data.lhs != 0) {
                         try self.emitOp(.return_val);
                     } else {
                         try self.emitOp(.return_void);
@@ -275,6 +286,7 @@ pub const Compiler = struct {
             .variable_variable => try self.compileVariableVariable(node),
             .identifier => try self.compileGetVar(node),
             .binary_op => try compiler_expr.compileBinaryOp(self, node),
+            .pipe_expr => try compiler_expr.compilePipeExpr(self, node),
             .assign => try compiler_expr.compileAssign(self, node),
             .prefix_op => try compiler_expr.compilePrefixOp(self, node),
             .postfix_op => try compiler_expr.compilePostfixOp(self, node),

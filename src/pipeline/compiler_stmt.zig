@@ -462,6 +462,11 @@ pub fn compileTryCatch(self: *Compiler, node: Ast.Node) Error!void {
     const catch_nodes = self.ast.extra_data[node.data.rhs + 1 .. node.data.rhs + 1 + catch_count];
     const finally_node = self.ast.extra_data[node.data.rhs + 1 + catch_count];
 
+    if (finally_node != 0 and self.finally_depth < 8) {
+        self.finally_nodes[self.finally_depth] = finally_node;
+        self.finally_depth += 1;
+    }
+
     // emit push_handler with placeholder catch offset
     try self.emitOp(.push_handler);
     const handler_offset_pos = self.chunk.offset();
@@ -546,6 +551,12 @@ pub fn compileTryCatch(self: *Compiler, node: Ast.Node) Error!void {
             const ej = try self.emitJump(.jump);
             try end_jumps.append(self.allocator, ej);
         }
+    }
+
+    // restore finally_depth before compiling the finally code paths
+    // (return inside the finally itself should not re-enter this finally)
+    if (finally_node != 0 and self.finally_depth > 0) {
+        self.finally_depth -= 1;
     }
 
     if (finally_node != 0) {

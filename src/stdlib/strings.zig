@@ -189,12 +189,20 @@ fn explode(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     const s = if (args[1] == .string) args[1].string else return Value.null;
     if (delim.len == 0) return .{ .bool = false };
 
+    const limit: i64 = if (args.len >= 3) args[2].toInt() else 0;
+
     var arr = try ctx.createArray();
     var i: usize = 0;
+    var count: i64 = 0;
     while (i <= s.len) {
+        if (limit > 0 and count >= limit - 1) {
+            try arr.append(ctx.allocator, .{ .string = try ctx.createString(s[i..]) });
+            break;
+        }
         if (std.mem.indexOf(u8, s[i..], delim)) |pos| {
             try arr.append(ctx.allocator, .{ .string = try ctx.createString(s[i .. i + pos]) });
             i += pos + delim.len;
+            count += 1;
         } else {
             try arr.append(ctx.allocator, .{ .string = try ctx.createString(s[i..]) });
             break;
@@ -1130,11 +1138,87 @@ fn native_mb_strlen(_: *NativeContext, args: []const Value) RuntimeError!Value {
 }
 
 fn native_mb_strtolower(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    return strtolower(ctx, args);
+    if (args.len == 0) return .{ .string = "" };
+    const s = if (args[0] == .string) args[0].string else return Value{ .string = "" };
+    return .{ .string = try utfCaseConvert(ctx, s, false) };
 }
 
 fn native_mb_strtoupper(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    return strtoupper(ctx, args);
+    if (args.len == 0) return .{ .string = "" };
+    const s = if (args[0] == .string) args[0].string else return Value{ .string = "" };
+    return .{ .string = try utfCaseConvert(ctx, s, true) };
+}
+
+fn utfCaseConvert(ctx: *NativeContext, s: []const u8, to_upper: bool) ![]u8 {
+    var buf = std.ArrayListUnmanaged(u8){};
+    var i: usize = 0;
+    while (i < s.len) {
+        const byte = s[i];
+        if (byte < 0x80) {
+            try buf.append(ctx.allocator, if (to_upper) std.ascii.toUpper(byte) else std.ascii.toLower(byte));
+            i += 1;
+        } else {
+            const len = std.unicode.utf8ByteSequenceLength(byte) catch {
+                try buf.append(ctx.allocator, byte);
+                i += 1;
+                continue;
+            };
+            if (i + len > s.len) {
+                try buf.append(ctx.allocator, byte);
+                i += 1;
+                continue;
+            }
+            const cp = std.unicode.utf8Decode(s[i..][0..len]) catch {
+                try buf.appendSlice(ctx.allocator, s[i .. i + len]);
+                i += len;
+                continue;
+            };
+            const mapped = if (to_upper) unicodeToUpper(cp) else unicodeToLower(cp);
+            var enc: [4]u8 = undefined;
+            const enc_len = std.unicode.utf8Encode(mapped, &enc) catch {
+                try buf.appendSlice(ctx.allocator, s[i .. i + len]);
+                i += len;
+                continue;
+            };
+            try buf.appendSlice(ctx.allocator, enc[0..enc_len]);
+            i += len;
+        }
+    }
+    const result = try buf.toOwnedSlice(ctx.allocator);
+    try ctx.strings.append(ctx.allocator, result);
+    return result;
+}
+
+fn unicodeToUpper(cp: u21) u21 {
+    // latin-1 supplement: a-with-grave through o-with-diaeresis
+    if (cp >= 0x00E0 and cp <= 0x00F6) return cp - 0x20;
+    // latin-1 supplement: o-with-slash through thorn
+    if (cp >= 0x00F8 and cp <= 0x00FE) return cp - 0x20;
+    // latin extended-a pairs (0100-017E): odd codepoints are lowercase
+    if (cp >= 0x0100 and cp <= 0x017E) {
+        if (cp % 2 == 1) return cp - 1;
+    }
+    // greek lowercase to uppercase (03B1-03C9 -> 0391-03A9)
+    if (cp >= 0x03B1 and cp <= 0x03C9) return cp - 0x20;
+    // cyrillic lowercase to uppercase (0430-044F -> 0410-042F)
+    if (cp >= 0x0430 and cp <= 0x044F) return cp - 0x20;
+    return cp;
+}
+
+fn unicodeToLower(cp: u21) u21 {
+    // latin-1 supplement: A-with-grave through O-with-diaeresis
+    if (cp >= 0x00C0 and cp <= 0x00D6) return cp + 0x20;
+    // latin-1 supplement: O-with-slash through Thorn
+    if (cp >= 0x00D8 and cp <= 0x00DE) return cp + 0x20;
+    // latin extended-a pairs (0100-017E): even codepoints are uppercase
+    if (cp >= 0x0100 and cp <= 0x017E) {
+        if (cp % 2 == 0) return cp + 1;
+    }
+    // greek uppercase to lowercase (0391-03A9 -> 03B1-03C9)
+    if (cp >= 0x0391 and cp <= 0x03A9) return cp + 0x20;
+    // cyrillic uppercase to lowercase (0410-042F -> 0430-044F)
+    if (cp >= 0x0410 and cp <= 0x042F) return cp + 0x20;
+    return cp;
 }
 
 fn native_mb_detect_encoding(_: *NativeContext, args: []const Value) RuntimeError!Value {

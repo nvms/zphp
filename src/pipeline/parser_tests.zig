@@ -72,7 +72,7 @@ fn renderNode(ast: *const Ast, idx: u32, buf: *Buf) !void {
         },
         .break_stmt => try w.writeAll("(break)"),
         .continue_stmt => try w.writeAll("(continue)"),
-        .binary_op, .logical_and, .logical_or, .null_coalesce => {
+        .pipe_expr, .binary_op, .logical_and, .logical_or, .null_coalesce => {
             try w.writeByte('(');
             try w.writeAll(ast.tokenSlice(node.main_token));
             try w.writeByte(' ');
@@ -539,6 +539,10 @@ test "binary precedence: mul vs add" { try expectParse("<?php 1 * 2 + 3;", "(+ (
 test "left associativity" { try expectParse("<?php 1 + 2 + 3;", "(+ (+ 1 2) 3)"); }
 test "right associativity: power" { try expectParse("<?php 2 ** 3 ** 4;", "(** 2 (** 3 4))"); }
 test "parenthesized expression" { try expectParse("<?php (1 + 2) * 3;", "(* (+ 1 2) 3)"); }
+test "pipe operator" { try expectParse("<?php $x |> strlen(...);", "(|> $x (callable_ref strlen))"); }
+test "pipe operator chained" { try expectParse("<?php $x |> trim(...) |> strtoupper(...);", "(|> (|> $x (callable_ref trim)) (callable_ref strtoupper))"); }
+test "pipe precedence vs arithmetic" { try expectParse("<?php 5 + 2 |> sqrt(...);", "(|> (+ 5 2) (callable_ref sqrt))"); }
+test "pipe precedence vs comparison" { try expectParse("<?php $x |> strlen(...) == 4;", "(== (|> $x (callable_ref strlen)) 4)"); }
 test "assignment" { try expectParse("<?php $x = 42;", "(= $x 42)"); }
 test "compound assignment" { try expectParse("<?php $x += 1;", "(+= $x 1)"); }
 test "right-associative assignment" { try expectParse("<?php $a = $b = $c;", "(= $a (= $b $c))"); }

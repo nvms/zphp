@@ -139,6 +139,7 @@ pub const Token = struct {
         spaceship,
         amp_amp,
         pipe_pipe,
+        pipe_gt,
         question_question,
         question_arrow,
         arrow,

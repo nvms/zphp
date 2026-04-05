@@ -168,10 +168,13 @@ fn native_fmod(_: *NativeContext, args: []const Value) RuntimeError!Value {
     return .{ .float = @rem(x, y) };
 }
 
-fn native_intdiv(_: *NativeContext, args: []const Value) RuntimeError!Value {
+fn native_intdiv(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len < 2) return .{ .int = 0 };
     const b = Value.toInt(args[1]);
-    if (b == 0) return error.RuntimeError;
+    if (b == 0) {
+        try ctx.vm.setPendingException("DivisionByZeroError", "Division by zero");
+        return error.RuntimeError;
+    }
     return .{ .int = @divTrunc(Value.toInt(args[0]), b) };
 }
 

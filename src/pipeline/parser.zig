@@ -1915,7 +1915,7 @@ const Parser = struct {
                     continue;
                 },
                 .plus_plus, .minus_minus => {
-                    if (20 > min_prec) {
+                    if (21 > min_prec) {
                         const tok = self.advance();
                         left = try self.addNode(.{ .tag = .postfix_op, .main_token = tok, .data = .{ .lhs = left } });
                         continue;
@@ -2381,11 +2381,12 @@ const Parser = struct {
             .amp => 11,
             .equal_equal, .bang_equal, .equal_equal_equal, .bang_equal_equal, .lt_gt => 12,
             .lt, .lt_equal, .gt, .gt_equal, .spaceship => 13,
-            .lt_lt, .gt_gt => 14,
-            .plus, .minus, .dot => 15,
-            .star, .slash, .percent => 16,
-            .kw_instanceof => 17,
-            .star_star => 19,
+            .pipe_gt => 14,
+            .lt_lt, .gt_gt => 15,
+            .plus, .minus, .dot => 16,
+            .star, .slash, .percent => 17,
+            .kw_instanceof => 18,
+            .star_star => 20,
             else => 0,
         };
     }
@@ -2411,6 +2412,7 @@ const Parser = struct {
             .amp_amp, .kw_and => .logical_and,
             .pipe_pipe, .kw_or => .logical_or,
             .question_question => .null_coalesce,
+            .pipe_gt => .pipe_expr,
             .equal, .plus_equal, .minus_equal, .star_equal, .slash_equal, .percent_equal, .star_star_equal, .dot_equal, .amp_equal, .pipe_equal, .caret_equal, .lt_lt_equal, .gt_gt_equal, .question_question_equal => .assign,
             else => .binary_op,
         };

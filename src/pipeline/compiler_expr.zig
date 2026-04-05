@@ -224,6 +224,13 @@ fn emitCompoundOp(self: *Compiler, tag: Token.Tag) Error!void {
     });
 }
 
+pub fn compilePipeExpr(self: *Compiler, node: Ast.Node) Error!void {
+    try self.compileNode(node.data.rhs);
+    try self.compileNode(node.data.lhs);
+    try self.emitOp(.call_indirect);
+    try self.emitByte(1);
+}
+
 pub fn compileBinaryOp(self: *Compiler, node: Ast.Node) Error!void {
     const op_tag = self.ast.tokens[node.main_token].tag;
 

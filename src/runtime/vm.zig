@@ -3179,7 +3179,10 @@ pub const VM = struct {
                                 continue;
                             }
 
-                            const result = try self.executeFiber(fiber, fb, sb, hb);
+                            const result = self.executeFiber(fiber, fb, sb, hb) catch {
+                                if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
+                                return error.RuntimeError;
+                            };
                             self.push(result);
                         } else if (std.mem.eql(u8, method_name, "resume")) {
                             if (fiber.state != .suspended) {
@@ -3196,7 +3199,10 @@ pub const VM = struct {
                             const resume_val = if (ac > 0) args_buf[0] else Value{ .null = {} };
                             self.push(resume_val);
 
-                            const result = try self.executeFiber(fiber, fb, sb, hb);
+                            const result = self.executeFiber(fiber, fb, sb, hb) catch {
+                                if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
+                                return error.RuntimeError;
+                            };
                             self.push(result);
                         } else if (std.mem.eql(u8, method_name, "getReturn")) {
                             if (fiber.state != .terminated) {
@@ -4574,6 +4580,7 @@ pub const VM = struct {
                             outer_gen.ip = self.currentFrame().ip;
                             outer_gen.vars = self.currentFrame().vars;
                             self.saveFrameLocalsToGenerator(outer_gen);
+                            try self.saveGeneratorStack(outer_gen);
                             self.saveGeneratorHandlers(outer_gen);
                             outer_gen.state = .suspended;
                             self.frame_count -= 1;
@@ -4594,6 +4601,7 @@ pub const VM = struct {
                             outer_gen.ip = self.currentFrame().ip;
                             outer_gen.vars = self.currentFrame().vars;
                             self.saveFrameLocalsToGenerator(outer_gen);
+                            try self.saveGeneratorStack(outer_gen);
                             self.saveGeneratorHandlers(outer_gen);
                             outer_gen.state = .suspended;
                             self.frame_count -= 1;
@@ -4723,6 +4731,22 @@ pub const VM = struct {
             }
         }
         return null;
+    }
+
+    pub fn setPendingException(self: *VM, class_name: []const u8, message: []const u8) !void {
+        const obj = try self.allocator.create(PhpObject);
+        obj.* = .{ .class_name = class_name };
+        try obj.set(self.allocator, "message", .{ .string = message });
+        try obj.set(self.allocator, "code", .{ .int = 0 });
+        try obj.set(self.allocator, "file", .{ .string = self.file_path });
+        const ip = if (self.frame_count > 0) self.currentFrame().ip else 0;
+        const line: i64 = if (self.frame_count > 0)
+            if (self.currentChunk().getSourceLocation(if (ip > 0) ip - 1 else 0, self.source)) |loc| @intCast(loc.line) else 0
+        else
+            0;
+        try obj.set(self.allocator, "line", .{ .int = line });
+        try self.objects.append(self.allocator, obj);
+        self.pending_exception = .{ .object = obj };
     }
 
     pub fn throwBuiltinException(self: *VM, class_name: []const u8, message: []const u8) !bool {
