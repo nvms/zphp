@@ -275,14 +275,107 @@ fn array_unique(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     return .{ .array = arr };
 }
 
+const SortFlags = struct {
+    flags: i64,
+    reverse: bool,
+    comptime field: enum { value, key } = .value,
+
+    fn compare(self: SortFlags, a_val: Value, b_val: Value) bool {
+        const x = if (self.reverse) b_val else a_val;
+        const y = if (self.reverse) a_val else b_val;
+        const sort_type = self.flags & 0x7; // mask out SORT_FLAG_CASE
+        return switch (sort_type) {
+            1 => Value.toFloat(x) < Value.toFloat(y), // SORT_NUMERIC
+            2, 5 => blk: { // SORT_STRING, SORT_LOCALE_STRING
+                var xbuf: [64]u8 = undefined;
+                var ybuf: [64]u8 = undefined;
+                const xs = valueToSortStr(x, &xbuf);
+                const ys = valueToSortStr(y, &ybuf);
+                break :blk std.mem.order(u8, xs, ys) == .lt;
+            },
+            6 => blk: { // SORT_NATURAL
+                var xbuf: [64]u8 = undefined;
+                var ybuf: [64]u8 = undefined;
+                const xs = valueToSortStr(x, &xbuf);
+                const ys = valueToSortStr(y, &ybuf);
+                break :blk naturalCompare(xs, ys) < 0;
+            },
+            else => Value.lessThan(x, y), // SORT_REGULAR
+        };
+    }
+
+    fn valueToSortStr(v: Value, buf: *[64]u8) []const u8 {
+        return switch (v) {
+            .string => |s| s,
+            .int => |i| std.fmt.bufPrint(buf, "{d}", .{i}) catch "",
+            .float => |f| std.fmt.bufPrint(buf, "{d}", .{f}) catch "",
+            .bool => |b| if (b) "1" else "",
+            .null => "",
+            else => "",
+        };
+    }
+
+    fn naturalCompare(a: []const u8, b: []const u8) i32 {
+        var ai: usize = 0;
+        var bi: usize = 0;
+        while (ai < a.len and bi < b.len) {
+            const a_digit = a[ai] >= '0' and a[ai] <= '9';
+            const b_digit = b[bi] >= '0' and b[bi] <= '9';
+            if (a_digit and b_digit) {
+                while (ai < a.len and a[ai] == '0') ai += 1;
+                while (bi < b.len and b[bi] == '0') bi += 1;
+                const a_start = ai;
+                const b_start = bi;
+                while (ai < a.len and a[ai] >= '0' and a[ai] <= '9') ai += 1;
+                while (bi < b.len and b[bi] >= '0' and b[bi] <= '9') bi += 1;
+                const a_len = ai - a_start;
+                const b_len = bi - b_start;
+                if (a_len != b_len) return if (a_len < b_len) @as(i32, -1) else 1;
+                for (a_start..ai, b_start..bi) |aj, bj| {
+                    if (a[aj] != b[bj]) return if (a[aj] < b[bj]) @as(i32, -1) else 1;
+                }
+            } else {
+                if (a[ai] != b[bi]) return if (a[ai] < b[bi]) @as(i32, -1) else 1;
+                ai += 1;
+                bi += 1;
+            }
+        }
+        if (ai < a.len) return 1;
+        if (bi < b.len) return -1;
+        return 0;
+    }
+};
+
+fn sortWithFlags(arr: *PhpArray, flags: i64, reverse: bool) void {
+    const ctx_val = SortFlags{ .flags = flags, .reverse = reverse };
+    std.mem.sort(PhpArray.Entry, arr.entries.items, ctx_val, struct {
+        fn f(c: SortFlags, a: PhpArray.Entry, b: PhpArray.Entry) bool {
+            return c.compare(a.value, b.value);
+        }
+    }.f);
+}
+
+fn sortKeyAsValue(k: PhpArray.Key) Value {
+    return switch (k) {
+        .int => |i| .{ .int = i },
+        .string => |s| .{ .string = s },
+    };
+}
+
+fn sortKeysWithFlags(arr: *PhpArray, flags: i64, reverse: bool) void {
+    const ctx_val = SortFlags{ .flags = flags, .reverse = reverse };
+    std.mem.sort(PhpArray.Entry, arr.entries.items, ctx_val, struct {
+        fn f(c: SortFlags, a: PhpArray.Entry, b: PhpArray.Entry) bool {
+            return c.compare(sortKeyAsValue(a.key), sortKeyAsValue(b.key));
+        }
+    }.f);
+}
+
 fn native_sort(_: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len == 0 or args[0] != .array) return .{ .bool = false };
     const arr = args[0].array;
-    std.mem.sort(PhpArray.Entry, arr.entries.items, {}, struct {
-        fn lessThan(_: void, a: PhpArray.Entry, b: PhpArray.Entry) bool {
-            return Value.lessThan(a.value, b.value);
-        }
-    }.lessThan);
+    const flags: i64 = if (args.len >= 2) Value.toInt(args[1]) else 0;
+    sortWithFlags(arr, flags, false);
     reindexArray(arr);
     return .{ .bool = true };
 }
@@ -290,11 +383,8 @@ fn native_sort(_: *NativeContext, args: []const Value) RuntimeError!Value {
 fn native_rsort(_: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len == 0 or args[0] != .array) return .{ .bool = false };
     const arr = args[0].array;
-    std.mem.sort(PhpArray.Entry, arr.entries.items, {}, struct {
-        fn lessThan(_: void, a: PhpArray.Entry, b: PhpArray.Entry) bool {
-            return Value.lessThan(b.value, a.value);
-        }
-    }.lessThan);
+    const flags: i64 = if (args.len >= 2) Value.toInt(args[1]) else 0;
+    sortWithFlags(arr, flags, true);
     reindexArray(arr);
     return .{ .bool = true };
 }
@@ -934,11 +1024,17 @@ fn native_compact(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
 fn native_extract(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len == 0 or args[0] != .array) return .{ .int = 0 };
     const arr = args[0].array;
+    const flags: i64 = if (args.len >= 2) Value.toInt(args[1]) else 0;
+    const prefix = if (args.len >= 3 and args[2] == .string) args[2].string else "";
     const frame = ctx.vm.currentFrame();
     var count_val: i64 = 0;
     for (arr.entries.items) |entry| {
         if (entry.key != .string) continue;
-        const var_name = try std.fmt.allocPrint(ctx.allocator, "${s}", .{entry.key.string});
+        const key = entry.key.string;
+        const var_name = switch (flags) {
+            2 => try std.fmt.allocPrint(ctx.allocator, "${s}_{s}", .{ prefix, key }), // EXTR_PREFIX_ALL
+            else => try std.fmt.allocPrint(ctx.allocator, "${s}", .{key}), // EXTR_OVERWRITE (default)
+        };
         try ctx.strings.append(ctx.allocator, var_name);
         try frame.vars.put(ctx.allocator, var_name, entry.value);
         count_val += 1;
@@ -956,7 +1052,8 @@ fn keyLessThan(_: void, a: PhpArray.Entry, b: PhpArray.Entry) bool {
 fn native_ksort(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len == 0 or args[0] != .array) return .{ .bool = false };
     const arr = args[0].array;
-    std.mem.sort(PhpArray.Entry, arr.entries.items, {}, keyLessThan);
+    const flags: i64 = if (args.len >= 2) Value.toInt(args[1]) else 0;
+    sortKeysWithFlags(arr, flags, false);
     try arr.rebuildStringIndex(ctx.allocator);
     return .{ .bool = true };
 }
@@ -964,11 +1061,8 @@ fn native_ksort(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
 fn native_krsort(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len == 0 or args[0] != .array) return .{ .bool = false };
     const arr = args[0].array;
-    std.mem.sort(PhpArray.Entry, arr.entries.items, {}, struct {
-        fn f(_: void, a: PhpArray.Entry, b: PhpArray.Entry) bool {
-            return keyLessThan({}, b, a);
-        }
-    }.f);
+    const flags: i64 = if (args.len >= 2) Value.toInt(args[1]) else 0;
+    sortKeysWithFlags(arr, flags, true);
     try arr.rebuildStringIndex(ctx.allocator);
     return .{ .bool = true };
 }
@@ -976,11 +1070,8 @@ fn native_krsort(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
 fn native_asort(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len == 0 or args[0] != .array) return .{ .bool = false };
     const arr = args[0].array;
-    std.mem.sort(PhpArray.Entry, arr.entries.items, {}, struct {
-        fn f(_: void, a: PhpArray.Entry, b: PhpArray.Entry) bool {
-            return Value.lessThan(a.value, b.value);
-        }
-    }.f);
+    const flags: i64 = if (args.len >= 2) Value.toInt(args[1]) else 0;
+    sortWithFlags(arr, flags, false);
     try arr.rebuildStringIndex(ctx.allocator);
     return .{ .bool = true };
 }
@@ -988,11 +1079,8 @@ fn native_asort(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
 fn native_arsort(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len == 0 or args[0] != .array) return .{ .bool = false };
     const arr = args[0].array;
-    std.mem.sort(PhpArray.Entry, arr.entries.items, {}, struct {
-        fn f(_: void, a: PhpArray.Entry, b: PhpArray.Entry) bool {
-            return Value.lessThan(b.value, a.value);
-        }
-    }.f);
+    const flags: i64 = if (args.len >= 2) Value.toInt(args[1]) else 0;
+    sortWithFlags(arr, flags, true);
     try arr.rebuildStringIndex(ctx.allocator);
     return .{ .bool = true };
 }

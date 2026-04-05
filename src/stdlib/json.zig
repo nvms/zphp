@@ -6,6 +6,8 @@ const NativeContext = vm_mod.NativeContext;
 const RuntimeError = error{ RuntimeError, OutOfMemory };
 
 const PhpObject = @import("../runtime/value.zig").PhpObject;
+const JSON_FORCE_OBJECT: i64 = 16;
+const JSON_NUMERIC_CHECK: i64 = 32;
 const JSON_UNESCAPED_SLASHES: i64 = 64;
 const JSON_PRETTY_PRINT: i64 = 128;
 const JSON_UNESCAPED_UNICODE: i64 = 256;
@@ -77,6 +79,30 @@ fn encodeValue(buf: *std.ArrayListUnmanaged(u8), a: std.mem.Allocator, val: Valu
             }
         },
         .string => |s| {
+            if ((flags & JSON_NUMERIC_CHECK) != 0 and s.len > 0) {
+                if (std.fmt.parseInt(i64, s, 10)) |int_val| {
+                    var tmp: [32]u8 = undefined;
+                    const ns = std.fmt.bufPrint(&tmp, "{d}", .{int_val}) catch "";
+                    try buf.appendSlice(a, ns);
+                    return;
+                } else |_| {
+                    if (std.fmt.parseFloat(f64, s)) |float_val| {
+                        if (!std.math.isNan(float_val) and !std.math.isInf(float_val)) {
+                            if (float_val == @trunc(float_val) and @abs(float_val) < 1e15) {
+                                const iv: i64 = @intFromFloat(float_val);
+                                var tmp: [32]u8 = undefined;
+                                const ns = std.fmt.bufPrint(&tmp, "{d}", .{iv}) catch "";
+                                try buf.appendSlice(a, ns);
+                            } else {
+                                var tmp: [64]u8 = undefined;
+                                const ns = std.fmt.bufPrint(&tmp, "{d}", .{float_val}) catch "";
+                                try buf.appendSlice(a, ns);
+                            }
+                            return;
+                        }
+                    } else |_| {}
+                }
+            }
             try buf.append(a, '"');
             var i: usize = 0;
             while (i < s.len) {
@@ -149,7 +175,8 @@ fn encodeValue(buf: *std.ArrayListUnmanaged(u8), a: std.mem.Allocator, val: Valu
             try buf.append(a, '"');
         },
         .array => |arr| {
-            if (isSequential(arr)) {
+            const force_object = (flags & JSON_FORCE_OBJECT) != 0;
+            if (!force_object and isSequential(arr)) {
                 try buf.append(a, '[');
                 for (arr.entries.items, 0..) |entry, idx| {
                     if (idx > 0) try buf.append(a, ',');
@@ -287,18 +314,22 @@ fn appendIndent(buf: *std.ArrayListUnmanaged(u8), a: std.mem.Allocator, depth: u
 fn json_decode(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len == 0 or args[0] != .string) return .null;
     const s = args[0].string;
-    // flags can be arg 2 (assoc bool) or arg 4 (flags int)
+    const assoc = if (args.len >= 2) (args[1] == .bool and args[1].bool) else false;
+    const depth: usize = if (args.len >= 3) @intCast(@max(1, Value.toInt(args[2]))) else 512;
     const flags = if (args.len >= 4) Value.toInt(args[3]) else 0;
     var pos: usize = 0;
-    const result = parseValue(ctx, s, &pos) catch {
-        last_error = 4;
-        last_error_msg = "Syntax error";
+    const result = parseValue(ctx, s, &pos, assoc, depth, 0) catch |err| {
+        if (err == error.OutOfMemory) return error.OutOfMemory;
+        const msg = if (last_error == 1) last_error_msg else "Syntax error";
+        if (last_error != 1) {
+            last_error = 4;
+            last_error_msg = "Syntax error";
+        }
         if ((flags & JSON_THROW_ON_ERROR) != 0) {
-            return throwJsonException(ctx, "Syntax error");
+            return throwJsonException(ctx, msg);
         }
         return .null;
     };
-    // check for trailing non-whitespace (invalid json)
     skipWhitespace(s, &pos);
     if (pos < s.len) {
         last_error = 4;
@@ -313,7 +344,7 @@ fn json_decode(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     return result;
 }
 
-fn parseValue(ctx: *NativeContext, s: []const u8, pos: *usize) RuntimeError!Value {
+fn parseValue(ctx: *NativeContext, s: []const u8, pos: *usize, assoc: bool, max_depth: usize, cur_depth: usize) RuntimeError!Value {
     skipWhitespace(s, pos);
     if (pos.* >= s.len) return .null;
 
@@ -322,8 +353,8 @@ fn parseValue(ctx: *NativeContext, s: []const u8, pos: *usize) RuntimeError!Valu
         't' => parseTrue(s, pos),
         'f' => parseFalse(s, pos),
         'n' => parseNull(s, pos),
-        '[' => parseArray(ctx, s, pos),
-        '{' => parseObject(ctx, s, pos),
+        '[' => parseArray(ctx, s, pos, assoc, max_depth, cur_depth),
+        '{' => parseObject(ctx, s, pos, assoc, max_depth, cur_depth),
         '-', '0'...'9' => parseNumber(s, pos),
         else => .null,
     };
@@ -418,7 +449,12 @@ fn parseNull(s: []const u8, pos: *usize) !Value {
     return .null;
 }
 
-fn parseArray(ctx: *NativeContext, s: []const u8, pos: *usize) !Value {
+fn parseArray(ctx: *NativeContext, s: []const u8, pos: *usize, assoc: bool, max_depth: usize, cur_depth: usize) !Value {
+    if (cur_depth >= max_depth) {
+        last_error = 1;
+        last_error_msg = "Maximum stack depth exceeded";
+        return error.RuntimeError;
+    }
     pos.* += 1;
     var arr = try ctx.createArray();
     skipWhitespace(s, pos);
@@ -427,7 +463,7 @@ fn parseArray(ctx: *NativeContext, s: []const u8, pos: *usize) !Value {
         return .{ .array = arr };
     }
     while (pos.* < s.len) {
-        const val = try parseValue(ctx, s, pos);
+        const val = try parseValue(ctx, s, pos, assoc, max_depth, cur_depth + 1);
         try arr.append(ctx.allocator, val);
         skipWhitespace(s, pos);
         if (pos.* < s.len and s[pos.*] == ',') {
@@ -439,13 +475,46 @@ fn parseArray(ctx: *NativeContext, s: []const u8, pos: *usize) !Value {
     return .{ .array = arr };
 }
 
-fn parseObject(ctx: *NativeContext, s: []const u8, pos: *usize) !Value {
+fn parseObject(ctx: *NativeContext, s: []const u8, pos: *usize, assoc: bool, max_depth: usize, cur_depth: usize) !Value {
+    if (cur_depth >= max_depth) {
+        last_error = 1;
+        last_error_msg = "Maximum stack depth exceeded";
+        return error.RuntimeError;
+    }
     pos.* += 1;
-    var arr = try ctx.createArray();
     skipWhitespace(s, pos);
+
+    if (assoc) {
+        var arr = try ctx.createArray();
+        if (pos.* < s.len and s[pos.*] == '}') {
+            pos.* += 1;
+            return .{ .array = arr };
+        }
+        while (pos.* < s.len) {
+            skipWhitespace(s, pos);
+            if (pos.* >= s.len or s[pos.*] != '"') break;
+            const key_val = try parseString(ctx, s, pos);
+            const key_str = if (key_val == .string) key_val.string else "";
+            skipWhitespace(s, pos);
+            if (pos.* < s.len and s[pos.*] == ':') pos.* += 1;
+            const val = try parseValue(ctx, s, pos, assoc, max_depth, cur_depth + 1);
+            try arr.set(ctx.allocator, .{ .string = key_str }, val);
+            skipWhitespace(s, pos);
+            if (pos.* < s.len and s[pos.*] == ',') {
+                pos.* += 1;
+            } else break;
+        }
+        skipWhitespace(s, pos);
+        if (pos.* < s.len and s[pos.*] == '}') pos.* += 1;
+        return .{ .array = arr };
+    }
+
+    const obj = try ctx.allocator.create(PhpObject);
+    obj.* = .{ .class_name = "stdClass" };
+    try ctx.vm.objects.append(ctx.allocator, obj);
     if (pos.* < s.len and s[pos.*] == '}') {
         pos.* += 1;
-        return .{ .array = arr };
+        return .{ .object = obj };
     }
     while (pos.* < s.len) {
         skipWhitespace(s, pos);
@@ -454,8 +523,8 @@ fn parseObject(ctx: *NativeContext, s: []const u8, pos: *usize) !Value {
         const key_str = if (key_val == .string) key_val.string else "";
         skipWhitespace(s, pos);
         if (pos.* < s.len and s[pos.*] == ':') pos.* += 1;
-        const val = try parseValue(ctx, s, pos);
-        try arr.set(ctx.allocator, .{ .string = key_str }, val);
+        const val = try parseValue(ctx, s, pos, assoc, max_depth, cur_depth + 1);
+        try obj.set(ctx.allocator, key_str, val);
         skipWhitespace(s, pos);
         if (pos.* < s.len and s[pos.*] == ',') {
             pos.* += 1;
@@ -463,7 +532,7 @@ fn parseObject(ctx: *NativeContext, s: []const u8, pos: *usize) !Value {
     }
     skipWhitespace(s, pos);
     if (pos.* < s.len and s[pos.*] == '}') pos.* += 1;
-    return .{ .array = arr };
+    return .{ .object = obj };
 }
 
 fn skipWhitespace(s: []const u8, pos: *usize) void {

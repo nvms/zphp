@@ -160,6 +160,8 @@ fn preg_match(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     const match_data = pcre2.pcre2_match_data_create_from_pattern_8(code, null) orelse return Value{ .int = 0 };
     defer pcre2.pcre2_match_data_free_8(match_data);
 
+    const flags: u32 = if (args.len >= 4) @intCast(@max(0, Value.toInt(args[3]))) else 0;
+    const offset_capture = (flags & 256) != 0;
     const offset: usize = if (args.len >= 5 and args[4] == .int and args[4].int >= 0) @intCast(args[4].int) else 0;
     const rc = pcre2.pcre2_match_8(code, subject.ptr, subject.len, offset, 0, match_data, null);
     if (rc < 0) return .{ .int = 0 };
@@ -176,12 +178,15 @@ fn preg_match(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
             const start = ovector[i * 2];
             const end = ovector[i * 2 + 1];
             if (start == pcre2.UNSET or end == pcre2.UNSET) {
-                try matches_arr.append(ctx.allocator, .{ .string = "" });
+                const val = if (offset_capture) try makeOffsetPair(ctx, "", -1) else Value{ .string = "" };
+                try matches_arr.append(ctx.allocator, val);
             } else {
-                try matches_arr.append(ctx.allocator, .{ .string = try ctx.createString(subject[start..end]) });
+                const str = try ctx.createString(subject[start..end]);
+                const val = if (offset_capture) try makeOffsetPair(ctx, str, @intCast(start)) else Value{ .string = str };
+                try matches_arr.append(ctx.allocator, val);
             }
         }
-        try addNamedGroups(ctx, matches_arr, code, ovector, subject, count);
+        try addNamedGroupsInterleaved(ctx, matches_arr, code, ovector, subject, count, offset_capture);
         if (pcre2.pcre2_get_mark_8(match_data)) |mark_ptr| {
             const mark = std.mem.sliceTo(mark_ptr, 0);
             if (mark.len > 0) {
@@ -194,6 +199,60 @@ fn preg_match(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     }
 
     return .{ .int = 1 };
+}
+
+fn addNamedGroupsInterleaved(ctx: *NativeContext, arr: *PhpArray, code: *pcre2.Code, ovector: [*]usize, subject: []const u8, count: usize, offset_capture: bool) !void {
+    var name_count: u32 = 0;
+    _ = pcre2.pcre2_pattern_info_8(code, pcre2.INFO_NAMECOUNT, @ptrCast(&name_count));
+    if (name_count == 0) return;
+    var name_entry_size: u32 = 0;
+    _ = pcre2.pcre2_pattern_info_8(code, pcre2.INFO_NAMEENTRYSIZE, @ptrCast(&name_entry_size));
+    if (name_entry_size == 0) return;
+
+    var name_table: [*]const u8 = undefined;
+    _ = pcre2.pcre2_pattern_info_8(code, pcre2.INFO_NAMETABLE, @ptrCast(&name_table));
+
+    // collect named groups sorted by group_num so we can insert in order
+    const NamedGroup = struct { group_num: usize, name: []const u8 };
+    var groups: [64]NamedGroup = undefined;
+    var group_len: usize = 0;
+    for (0..name_count) |i| {
+        const entry = name_table + i * name_entry_size;
+        const group_num = (@as(usize, entry[0]) << 8) | @as(usize, entry[1]);
+        const name_end = std.mem.indexOfScalar(u8, entry[2..name_entry_size], 0) orelse (name_entry_size - 2);
+        if (group_len < groups.len) {
+            groups[group_len] = .{ .group_num = group_num, .name = entry[2 .. 2 + name_end] };
+            group_len += 1;
+        }
+    }
+    // sort by group_num descending so we insert from the back
+    std.mem.sort(NamedGroup, groups[0..group_len], {}, struct {
+        fn f(_: void, a: NamedGroup, b: NamedGroup) bool {
+            return a.group_num > b.group_num;
+        }
+    }.f);
+
+    for (groups[0..group_len]) |ng| {
+        if (ng.group_num < count) {
+            const start = ovector[ng.group_num * 2];
+            const end = ovector[ng.group_num * 2 + 1];
+            const val: Value = if (start == pcre2.UNSET or end == pcre2.UNSET) blk: {
+                break :blk if (offset_capture) try makeOffsetPair(ctx, "", -1) else Value{ .string = "" };
+            } else blk: {
+                const s = try ctx.createString(subject[start..end]);
+                break :blk if (offset_capture) try makeOffsetPair(ctx, s, @intCast(start)) else Value{ .string = s };
+            };
+            // insert the named key right after the numeric index
+            const insert_pos = ng.group_num + 1;
+            const named_entry = PhpArray.Entry{ .key = .{ .string = try ctx.createString(ng.name) }, .value = val };
+            if (insert_pos < arr.entries.items.len) {
+                try arr.entries.insert(ctx.allocator, insert_pos, named_entry);
+            } else {
+                try arr.entries.append(ctx.allocator, named_entry);
+            }
+            try arr.rebuildStringIndex(ctx.allocator);
+        }
+    }
 }
 
 fn addNamedGroups(ctx: *NativeContext, arr: *PhpArray, code: *pcre2.Code, ovector: [*]usize, subject: []const u8, count: usize) !void {
@@ -303,9 +362,55 @@ fn preg_match_all(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     }
 
     if (!set_order) {
+        // add named group arrays interleaved with their numeric index
+        var name_count_val: u32 = 0;
+        _ = pcre2.pcre2_pattern_info_8(code, pcre2.INFO_NAMECOUNT, @ptrCast(&name_count_val));
+        var name_entry_size_val: u32 = 0;
+        _ = pcre2.pcre2_pattern_info_8(code, pcre2.INFO_NAMEENTRYSIZE, @ptrCast(&name_entry_size_val));
+
+        const NamedGroup = struct { group_num: usize, name: []const u8 };
+        var named_groups: [64]NamedGroup = undefined;
+        var named_len: usize = 0;
+        if (name_count_val > 0 and name_entry_size_val > 0) {
+            var name_table_ptr: [*]const u8 = undefined;
+            _ = pcre2.pcre2_pattern_info_8(code, pcre2.INFO_NAMETABLE, @ptrCast(&name_table_ptr));
+            for (0..name_count_val) |ni| {
+                const entry = name_table_ptr + ni * name_entry_size_val;
+                const gn = (@as(usize, entry[0]) << 8) | @as(usize, entry[1]);
+                const ne = std.mem.indexOfScalar(u8, entry[2..name_entry_size_val], 0) orelse (name_entry_size_val - 2);
+                if (named_len < named_groups.len) {
+                    named_groups[named_len] = .{ .group_num = gn, .name = entry[2 .. 2 + ne] };
+                    named_len += 1;
+                }
+            }
+            // sort by group_num descending for insertion
+            std.mem.sort(NamedGroup, named_groups[0..named_len], {}, struct {
+                fn f(_: void, a: NamedGroup, b: NamedGroup) bool {
+                    return a.group_num > b.group_num;
+                }
+            }.f);
+        }
+
         for (group_arrays.?.items) |arr| {
             try out.append(ctx.allocator, .{ .array = arr });
         }
+
+        // insert named group arrays right after their numeric counterpart
+        for (named_groups[0..named_len]) |ng| {
+            if (ng.group_num < group_arrays.?.items.len) {
+                const insert_pos = ng.group_num + 1;
+                const named_entry = PhpArray.Entry{
+                    .key = .{ .string = try ctx.createString(ng.name) },
+                    .value = .{ .array = group_arrays.?.items[ng.group_num] },
+                };
+                if (insert_pos < out.entries.items.len) {
+                    try out.entries.insert(ctx.allocator, insert_pos, named_entry);
+                } else {
+                    try out.entries.append(ctx.allocator, named_entry);
+                }
+            }
+        }
+        try out.rebuildStringIndex(ctx.allocator);
     }
 
     if (args.len >= 3 and args[2] != .array) {

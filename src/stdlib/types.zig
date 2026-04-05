@@ -1,6 +1,7 @@
 const std = @import("std");
 const Value = @import("../runtime/value.zig").Value;
 const PhpArray = @import("../runtime/value.zig").PhpArray;
+const PhpObject = @import("../runtime/value.zig").PhpObject;
 const NativeContext = @import("../runtime/vm.zig").NativeContext;
 const ClassDef = @import("../runtime/vm.zig").ClassDef;
 const RuntimeError = error{ RuntimeError, OutOfMemory };
@@ -381,8 +382,8 @@ fn get_called_class(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
 fn class_exists(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len == 0 or args[0] != .string) return .{ .bool = false };
     const name = args[0].string;
+    if (std.mem.eql(u8, name, "stdClass") or std.mem.eql(u8, name, "Attribute")) return .{ .bool = true };
     if (ctx.vm.classes.contains(name)) return .{ .bool = true };
-    // second arg controls autoloading (default true)
     const autoload = args.len < 2 or !(args[1] == .bool and !args[1].bool);
     if (autoload and ctx.vm.autoload_callbacks.items.len > 0) {
         try ctx.vm.tryAutoload(name);
@@ -417,12 +418,26 @@ fn method_exists(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     return .{ .bool = false };
 }
 
-fn property_exists(_: *NativeContext, args: []const Value) RuntimeError!Value {
+fn property_exists(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len < 2 or args[1] != .string) return .{ .bool = false };
-    if (args[0] != .object) return .{ .bool = false };
-    const obj = args[0].object;
-    if (obj.getSlotIndex(args[1].string) != null) return .{ .bool = true };
-    return .{ .bool = obj.properties.contains(args[1].string) };
+    const prop_name = args[1].string;
+    if (args[0] == .object) {
+        const obj = args[0].object;
+        if (obj.getSlotIndex(prop_name) != null) return .{ .bool = true };
+        return .{ .bool = obj.properties.contains(prop_name) };
+    }
+    if (args[0] == .string) {
+        const class_name = args[0].string;
+        if (ctx.vm.classes.get(class_name)) |cls| {
+            if (cls.slot_layout) |layout| {
+                for (layout.names) |name| {
+                    if (std.mem.eql(u8, name, prop_name)) return .{ .bool = true };
+                }
+            }
+        }
+        return .{ .bool = false };
+    }
+    return .{ .bool = false };
 }
 
 fn native_is_callable(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
@@ -481,11 +496,50 @@ fn native_settype(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
         return .null;
     if (std.mem.eql(u8, type_name, "array")) {
         if (val == .array) return val;
+        if (val == .object) {
+            const obj = val.object;
+            const arr = try ctx.allocator.create(PhpArray);
+            arr.* = .{};
+            try ctx.arrays.append(ctx.allocator, arr);
+            if (obj.slot_layout) |layout| {
+                if (obj.slots) |slots| {
+                    for (layout.names, 0..) |name, i| {
+                        if (i < slots.len) try arr.set(ctx.allocator, .{ .string = name }, slots[i]);
+                    }
+                }
+            }
+            var dyn_iter = obj.properties.iterator();
+            while (dyn_iter.next()) |entry| {
+                try arr.set(ctx.allocator, .{ .string = entry.key_ptr.* }, entry.value_ptr.*);
+            }
+            return .{ .array = arr };
+        }
         const arr = try ctx.allocator.create(PhpArray);
         arr.* = .{};
         try arr.append(ctx.allocator, val);
         try ctx.arrays.append(ctx.allocator, arr);
         return .{ .array = arr };
+    }
+    if (std.mem.eql(u8, type_name, "object")) {
+        if (val == .object) return val;
+        const obj = try ctx.allocator.create(PhpObject);
+        obj.* = .{ .class_name = "stdClass" };
+        try ctx.vm.objects.append(ctx.allocator, obj);
+        if (val == .array) {
+            for (val.array.entries.items) |entry| {
+                if (entry.key == .string) {
+                    try obj.set(ctx.allocator, entry.key.string, entry.value);
+                } else {
+                    var key_buf: [32]u8 = undefined;
+                    const ks = std.fmt.bufPrint(&key_buf, "{d}", .{entry.key.int}) catch continue;
+                    const key_str = try ctx.createString(ks);
+                    try obj.set(ctx.allocator, key_str, entry.value);
+                }
+            }
+        } else if (val != .null) {
+            try obj.set(ctx.allocator, "scalar", val);
+        }
+        return .{ .object = obj };
     }
     return val;
 }

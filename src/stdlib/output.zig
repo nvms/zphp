@@ -161,6 +161,45 @@ fn printRValue(a: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8), val: Valu
             try out.appendSlice(a, " Object\n");
             try appendIndent(out, a, depth * 4);
             try out.appendSlice(a, "(\n");
+            if (obj.slot_layout) |layout| {
+                if (obj.slots) |slots| {
+                    for (layout.names, 0..) |name, i| {
+                        if (i < slots.len) {
+                            try appendIndent(out, a, (depth + 1) * 4);
+                            try out.appendSlice(a, "[");
+                            try out.appendSlice(a, name);
+                            try out.appendSlice(a, "] => ");
+                            if (slots[i] == .array) {
+                                try printRValue(a, out, slots[i], depth + 2);
+                            } else {
+                                try printRValue(a, out, slots[i], depth + 1);
+                                try out.appendSlice(a, "\n");
+                            }
+                        }
+                    }
+                }
+            }
+            var dyn_iter = obj.properties.iterator();
+            while (dyn_iter.next()) |entry| {
+                var in_slots = false;
+                if (obj.slot_layout) |layout| {
+                    for (layout.names) |sn| {
+                        if (std.mem.eql(u8, sn, entry.key_ptr.*)) { in_slots = true; break; }
+                    }
+                }
+                if (!in_slots) {
+                    try appendIndent(out, a, (depth + 1) * 4);
+                    try out.appendSlice(a, "[");
+                    try out.appendSlice(a, entry.key_ptr.*);
+                    try out.appendSlice(a, "] => ");
+                    if (entry.value_ptr.* == .array) {
+                        try printRValue(a, out, entry.value_ptr.*, depth + 2);
+                    } else {
+                        try printRValue(a, out, entry.value_ptr.*, depth + 1);
+                        try out.appendSlice(a, "\n");
+                    }
+                }
+            }
             try appendIndent(out, a, depth * 4);
             try out.appendSlice(a, ")\n");
         },
@@ -245,7 +284,44 @@ fn varExportValue(a: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8), val: V
             for (0..depth * 2) |_| try out.append(a, ' ');
             try out.append(a, ')');
         },
-        .object => try out.appendSlice(a, "(object)"),
+        .object => |obj| {
+            try out.appendSlice(a, "(object) array(\n");
+            if (obj.slot_layout) |layout| {
+                if (obj.slots) |slots| {
+                    for (layout.names, 0..) |name, i| {
+                        if (i < slots.len) {
+                            for (0..(depth + 1) * 2) |_| try out.append(a, ' ');
+                            try out.append(a, '\'');
+                            try out.appendSlice(a, name);
+                            try out.append(a, '\'');
+                            try out.appendSlice(a, " => ");
+                            try varExportValue(a, out, slots[i], depth + 1);
+                            try out.appendSlice(a, ",\n");
+                        }
+                    }
+                }
+            }
+            var dyn_iter = obj.properties.iterator();
+            while (dyn_iter.next()) |entry| {
+                var in_slots = false;
+                if (obj.slot_layout) |layout| {
+                    for (layout.names) |sn| {
+                        if (std.mem.eql(u8, sn, entry.key_ptr.*)) { in_slots = true; break; }
+                    }
+                }
+                if (!in_slots) {
+                    for (0..(depth + 1) * 2) |_| try out.append(a, ' ');
+                    try out.append(a, '\'');
+                    try out.appendSlice(a, entry.key_ptr.*);
+                    try out.append(a, '\'');
+                    try out.appendSlice(a, " => ");
+                    try varExportValue(a, out, entry.value_ptr.*, depth + 1);
+                    try out.appendSlice(a, ",\n");
+                }
+            }
+            for (0..depth * 2) |_| try out.append(a, ' ');
+            try out.append(a, ')');
+        },
         .generator, .fiber => try out.appendSlice(a, "(object)"),
     }
 }

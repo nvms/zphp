@@ -386,18 +386,31 @@ fn native_file(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     const content = std.fs.cwd().readFileAlloc(ctx.allocator, args[0].string, 1024 * 1024 * 64) catch return Value{ .bool = false };
     try ctx.strings.append(ctx.allocator, content);
 
+    const flags: i64 = if (args.len >= 2) Value.toInt(args[1]) else 0;
+    const ignore_newlines = (flags & 2) != 0; // FILE_IGNORE_NEW_LINES = 2
+    const skip_empty = (flags & 4) != 0; // FILE_SKIP_EMPTY_LINES = 4
+
     var result = try ctx.createArray();
     var start: usize = 0;
     for (content, 0..) |c, i| {
         if (c == '\n') {
-            const line = try ctx.createString(content[start .. i + 1]);
+            const end = if (ignore_newlines) i else i + 1;
+            const line_data = content[start..end];
+            if (skip_empty and (line_data.len == 0 or (line_data.len == 1 and (line_data[0] == '\n' or line_data[0] == '\r')))) {
+                start = i + 1;
+                continue;
+            }
+            const line = try ctx.createString(line_data);
             try result.append(ctx.allocator, .{ .string = line });
             start = i + 1;
         }
     }
     if (start < content.len) {
-        const line = try ctx.createString(content[start..]);
-        try result.append(ctx.allocator, .{ .string = line });
+        const remaining = content[start..];
+        if (!skip_empty or remaining.len > 0) {
+            const line = try ctx.createString(remaining);
+            try result.append(ctx.allocator, .{ .string = line });
+        }
     }
     return .{ .array = result };
 }

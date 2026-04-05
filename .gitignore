@@ -6,3 +6,4 @@ test_compress
 !README.md
 .handoff/
 docs/book/
+.claude/

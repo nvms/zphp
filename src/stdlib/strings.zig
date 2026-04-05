@@ -730,6 +730,23 @@ fn sprintfImpl(ctx: *NativeContext, fmt_str: []const u8, args: []const Value) ![
                 continue;
             }
 
+            // check for argument swapping: %N$
+            var explicit_arg: ?usize = null;
+            {
+                var j = i;
+                var num: usize = 0;
+                var has_digits = false;
+                while (j < fmt_str.len and fmt_str[j] >= '0' and fmt_str[j] <= '9') {
+                    num = num * 10 + (fmt_str[j] - '0');
+                    has_digits = true;
+                    j += 1;
+                }
+                if (has_digits and j < fmt_str.len and fmt_str[j] == '$') {
+                    explicit_arg = if (num > 0) num - 1 else 0;
+                    i = j + 1;
+                }
+            }
+
             var pad_char: u8 = ' ';
             var left_align = false;
             var show_sign = false;
@@ -760,18 +777,31 @@ fn sprintfImpl(ctx: *NativeContext, fmt_str: []const u8, args: []const Value) ![
             var precision: ?usize = null;
             if (i < fmt_str.len and fmt_str[i] == '.') {
                 i += 1;
-                precision = 0;
-                while (i < fmt_str.len and fmt_str[i] >= '0' and fmt_str[i] <= '9') {
-                    precision.? = precision.? * 10 + (fmt_str[i] - '0');
+                if (i < fmt_str.len and fmt_str[i] == '*') {
+                    // dynamic precision from next arg
+                    const prec_arg = if (arg_idx < args.len) args[arg_idx] else Value.null;
+                    arg_idx += 1;
+                    precision = @intCast(@max(0, Value.toInt(prec_arg)));
                     i += 1;
+                } else {
+                    precision = 0;
+                    while (i < fmt_str.len and fmt_str[i] >= '0' and fmt_str[i] <= '9') {
+                        precision.? = precision.? * 10 + (fmt_str[i] - '0');
+                        i += 1;
+                    }
                 }
             }
 
             if (i >= fmt_str.len) break;
             const spec = fmt_str[i];
             i += 1;
-            const arg = if (arg_idx < args.len) args[arg_idx] else Value.null;
-            arg_idx += 1;
+            const arg = if (explicit_arg) |ea|
+                (if (ea < args.len) args[ea] else Value.null)
+            else blk: {
+                const a = if (arg_idx < args.len) args[arg_idx] else Value.null;
+                arg_idx += 1;
+                break :blk a;
+            };
 
             var tmp_buf = std.ArrayListUnmanaged(u8){};
             switch (spec) {
@@ -1417,13 +1447,35 @@ fn native_base64_decode(ctx: *NativeContext, args: []const Value) RuntimeError!V
     const s = if (args[0] == .string) args[0].string else return Value{ .bool = false };
     if (s.len == 0) return .{ .string = "" };
 
+    const strict = args.len >= 2 and args[1] == .bool and args[1].bool;
+
     var buf = std.ArrayListUnmanaged(u8){};
     var accum: u24 = 0;
     var bits: u5 = 0;
+    var pad_count: usize = 0;
     for (s) |c| {
-        if (c == '=') break;
-        if (c == ' ' or c == '\n' or c == '\r' or c == '\t') continue;
-        const val = base64Decode(c) orelse continue;
+        if (c == '=') {
+            pad_count += 1;
+            continue;
+        }
+        if (pad_count > 0 and strict) {
+            buf.deinit(ctx.allocator);
+            return .{ .bool = false };
+        }
+        if (c == ' ' or c == '\n' or c == '\r' or c == '\t') {
+            if (strict) {
+                buf.deinit(ctx.allocator);
+                return .{ .bool = false };
+            }
+            continue;
+        }
+        const val = base64Decode(c) orelse {
+            if (strict) {
+                buf.deinit(ctx.allocator);
+                return .{ .bool = false };
+            }
+            continue;
+        };
         accum = (accum << 6) | val;
         bits += 6;
         if (bits >= 8) {

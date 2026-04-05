@@ -509,7 +509,27 @@ fn dtDiff(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     const mins = @divFloor(@mod(rem, 3600), 60);
     const secs = @mod(rem, 60);
 
+    // compute calendar-based y/m/d
+    const early_ts = if (ts1 < ts2) ts1 else ts2;
+    const late_ts = if (ts1 < ts2) ts2 else ts1;
+    const c1 = baseComponents(early_ts);
+    const c2 = baseComponents(late_ts);
+    var diff_y = c2.year - c1.year;
+    var diff_m = c2.month - c1.month;
+    var diff_d = c2.day - c1.day;
+    if (diff_d < 0) {
+        diff_m -= 1;
+        diff_d += daysInMonth(c1.month, c1.year);
+    }
+    if (diff_m < 0) {
+        diff_y -= 1;
+        diff_m += 12;
+    }
+
     const interval = try ctx.createObject("DateInterval");
+    try interval.set(ctx.allocator, "y", .{ .int = diff_y });
+    try interval.set(ctx.allocator, "m", .{ .int = diff_m });
+    try interval.set(ctx.allocator, "d", .{ .int = diff_d });
     try interval.set(ctx.allocator, "days", .{ .int = total_days });
     try interval.set(ctx.allocator, "h", .{ .int = hours });
     try interval.set(ctx.allocator, "i", .{ .int = mins });
@@ -783,6 +803,24 @@ fn native_strtotime(_: *NativeContext, args: []const Value) RuntimeError!Value {
         return .{ .int = dateToTimestamp(year, month, day, hour, min, sec) - tz_offset };
     }
 
+    // DD.MM.YYYY EU date format
+    if (input.len >= 10 and input[2] == '.' and input[5] == '.') {
+        const day = std.fmt.parseInt(i64, input[0..2], 10) catch null;
+        const month = std.fmt.parseInt(i64, input[3..5], 10) catch null;
+        const year = std.fmt.parseInt(i64, input[6..10], 10) catch null;
+        if (day != null and month != null and year != null) {
+            var hour: i64 = 0;
+            var min: i64 = 0;
+            var sec: i64 = 0;
+            if (input.len >= 19 and input[10] == ' ' and input[13] == ':' and input[16] == ':') {
+                hour = std.fmt.parseInt(i64, input[11..13], 10) catch 0;
+                min = std.fmt.parseInt(i64, input[14..16], 10) catch 0;
+                sec = std.fmt.parseInt(i64, input[17..19], 10) catch 0;
+            }
+            return .{ .int = dateToTimestamp(year.?, month.?, day.?, hour, min, sec) };
+        }
+    }
+
     // RFC 2822: "Mon, 15 Jan 2025 10:30:45 +0000" or "15 Jan 2025 10:30:45 GMT"
     if (tryParseRfc2822(input)) |ts| return .{ .int = ts };
 
@@ -1005,7 +1043,7 @@ fn tryParseFirstLastDay(input: []const u8, base: i64) ?i64 {
     } else if (eqlLower(s, "next month")) {
         month += 1;
         if (month > 12) { month = 1; year += 1; }
-    } else if (eqlLower(s, "last month")) {
+    } else if (eqlLower(s, "last month") or eqlLower(s, "previous month")) {
         month -= 1;
         if (month < 1) { month = 12; year -= 1; }
     } else if (parseMonthName(s) != null) {
