@@ -19,6 +19,8 @@ pub const entries = .{
     .{ "gmdate", native_gmdate },
     .{ "date_default_timezone_set", native_tz_set },
     .{ "date_default_timezone_get", native_tz_get },
+    .{ "localtime", native_localtime },
+    .{ "idate", native_idate },
 };
 
 pub fn register(vm: *VM, a: Allocator) !void {
@@ -1521,6 +1523,77 @@ fn native_tz_set(_: *NativeContext, _: []const Value) RuntimeError!Value {
 fn native_tz_get(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
     _ = ctx;
     return .{ .string = "UTC" };
+}
+
+fn native_localtime(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    const timestamp: i64 = if (args.len >= 1) Value.toInt(args[0]) else std.time.timestamp();
+    const assoc = args.len >= 2 and args[1].isTruthy();
+    const epoch_secs: u64 = @intCast(if (timestamp < 0) 0 else timestamp);
+    const es = std.time.epoch.EpochSeconds{ .secs = epoch_secs };
+    const day_seconds = es.getDaySeconds();
+    const epoch_day = es.getEpochDay();
+    const year_day = epoch_day.calculateYearDay();
+    const month_day = year_day.calculateMonthDay();
+    const day_num: i64 = @intCast(epoch_day.day);
+    const dow: i64 = @intCast(@mod(day_num + 4, 7));
+    const jan1_ts = dateToTimestamp(year_day.year, 1, 1, 0, 0, 0);
+    const jan1_es = std.time.epoch.EpochSeconds{ .secs = @intCast(if (jan1_ts < 0) 0 else jan1_ts) };
+    const jan1_day: i64 = @intCast(jan1_es.getEpochDay().day);
+    const cur_day: i64 = @intCast(epoch_day.day);
+    const yday = cur_day - jan1_day;
+
+    var arr = try ctx.createArray();
+    if (assoc) {
+        try arr.set(ctx.allocator, .{ .string = "tm_sec" }, .{ .int = day_seconds.getSecondsIntoMinute() });
+        try arr.set(ctx.allocator, .{ .string = "tm_min" }, .{ .int = day_seconds.getMinutesIntoHour() });
+        try arr.set(ctx.allocator, .{ .string = "tm_hour" }, .{ .int = day_seconds.getHoursIntoDay() });
+        try arr.set(ctx.allocator, .{ .string = "tm_mday" }, .{ .int = @as(i64, month_day.day_index) + 1 });
+        try arr.set(ctx.allocator, .{ .string = "tm_mon" }, .{ .int = month_day.month.numeric() - 1 });
+        try arr.set(ctx.allocator, .{ .string = "tm_year" }, .{ .int = year_day.year - 1900 });
+        try arr.set(ctx.allocator, .{ .string = "tm_wday" }, .{ .int = dow });
+        try arr.set(ctx.allocator, .{ .string = "tm_yday" }, .{ .int = yday });
+        try arr.set(ctx.allocator, .{ .string = "tm_isdst" }, .{ .int = 0 });
+    } else {
+        try arr.append(ctx.allocator, .{ .int = day_seconds.getSecondsIntoMinute() });
+        try arr.append(ctx.allocator, .{ .int = day_seconds.getMinutesIntoHour() });
+        try arr.append(ctx.allocator, .{ .int = day_seconds.getHoursIntoDay() });
+        try arr.append(ctx.allocator, .{ .int = @as(i64, month_day.day_index) + 1 });
+        try arr.append(ctx.allocator, .{ .int = month_day.month.numeric() - 1 });
+        try arr.append(ctx.allocator, .{ .int = year_day.year - 1900 });
+        try arr.append(ctx.allocator, .{ .int = dow });
+        try arr.append(ctx.allocator, .{ .int = yday });
+        try arr.append(ctx.allocator, .{ .int = 0 });
+    }
+    return .{ .array = arr };
+}
+
+fn native_idate(_: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len == 0 or args[0] != .string or args[0].string.len == 0) return .{ .bool = false };
+    const fmt = args[0].string[0];
+    const timestamp: i64 = if (args.len >= 2) Value.toInt(args[1]) else std.time.timestamp();
+    const epoch_secs: u64 = @intCast(if (timestamp < 0) 0 else timestamp);
+    const es = std.time.epoch.EpochSeconds{ .secs = epoch_secs };
+    const day_seconds = es.getDaySeconds();
+    const epoch_day = es.getEpochDay();
+    const year_day = epoch_day.calculateYearDay();
+    const month_day = year_day.calculateMonthDay();
+    const day_num: i64 = @intCast(epoch_day.day);
+    const dow: i64 = @intCast(@mod(day_num + 4, 7));
+
+    return .{ .int = switch (fmt) {
+        'd' => @as(i64, month_day.day_index) + 1,
+        'h' => @mod(day_seconds.getHoursIntoDay(), 12),
+        'H' => day_seconds.getHoursIntoDay(),
+        'i' => day_seconds.getMinutesIntoHour(),
+        'm' => month_day.month.numeric(),
+        's' => day_seconds.getSecondsIntoMinute(),
+        'U' => timestamp,
+        'w' => dow,
+        'y' => @mod(year_day.year, 100),
+        'Y' => year_day.year,
+        't' => daysInMonth(month_day.month.numeric(), year_day.year),
+        else => 0,
+    } };
 }
 
 const IsoDuration = struct { y: i64, m: i64, d: i64, h: i64, mi: i64, s: i64, f: f64 };

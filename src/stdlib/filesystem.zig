@@ -41,6 +41,7 @@ pub const entries = .{
     .{ "fread", native_fread },
     .{ "fwrite", native_fwrite },
     .{ "fgets", native_fgets },
+    .{ "fgetc", native_fgetc },
     .{ "feof", native_feof },
     .{ "fseek", native_fseek },
     .{ "ftell", native_ftell },
@@ -556,6 +557,17 @@ fn native_fgets(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     }
     if (buf.items.len == 0) return .{ .bool = false };
     const result = try buf.toOwnedSlice(ctx.allocator);
+    try ctx.strings.append(ctx.allocator, result);
+    return .{ .string = result };
+}
+
+fn native_fgetc(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len == 0 or args[0] != .object) return .{ .bool = false };
+    const file = getFileHandle(args[0].object) orelse return Value{ .bool = false };
+    var byte: [1]u8 = undefined;
+    const n = file.read(&byte) catch return Value{ .bool = false };
+    if (n == 0) return .{ .bool = false };
+    const result = try ctx.allocator.dupe(u8, byte[0..1]);
     try ctx.strings.append(ctx.allocator, result);
     return .{ .string = result };
 }
