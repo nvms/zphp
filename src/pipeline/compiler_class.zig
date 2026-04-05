@@ -21,7 +21,7 @@ fn isModifierToken(tag: Token.Tag) bool {
     return switch (tag) {
         .kw_public, .kw_protected, .kw_private, .kw_static,
         .kw_abstract, .kw_readonly, .kw_final, .kw_function,
-        .kw_class, .kw_var,
+        .kw_class, .kw_var, .kw_enum, .kw_interface, .kw_trait,
         => true,
         else => false,
     };
@@ -1381,6 +1381,35 @@ pub fn compileInterfaceDecl(self: *Compiler, node: Ast.Node) Error!void {
         }
     }
 
+    // interface-level attributes
+    const iface_attrs = extractAttributes(self, node.main_token);
+    try emitAttributeData(self, iface_attrs);
+    freeAttrSlice(self.allocator, iface_attrs);
+
+    // method attributes
+    const MemberAttr = struct { name: []const u8, attrs: []const ParsedAttr };
+    var methods_with_attrs = std.ArrayListUnmanaged(MemberAttr){};
+    defer methods_with_attrs.deinit(self.allocator);
+    for (members) |m| {
+        const member = self.ast.nodes[m];
+        if (member.tag == .interface_method) {
+            const mattrs = extractAttributes(self, member.main_token);
+            if (mattrs.len > 0) {
+                try methods_with_attrs.append(self.allocator, .{
+                    .name = self.ast.tokenSlice(member.main_token),
+                    .attrs = mattrs,
+                });
+            }
+        }
+    }
+    try self.emitByte(@intCast(methods_with_attrs.items.len));
+    for (methods_with_attrs.items) |ma| {
+        const mname_idx = try self.addConstant(.{ .string = ma.name });
+        try self.emitU16(mname_idx);
+        try emitAttributeData(self, ma.attrs);
+    }
+    for (methods_with_attrs.items) |ma| freeAttrSlice(self.allocator, ma.attrs);
+
     // set interface constants after interface_decl so self:: references resolve
     for (members) |m| {
         const member = self.ast.nodes[m];
@@ -1512,6 +1541,60 @@ pub fn compileTraitDecl(self: *Compiler, node: Ast.Node) Error!void {
         try self.emitByte(if (pmember.data.lhs != 0) @as(u8, 1) else @as(u8, 0));
         try self.emitByte(@intCast(pmember.data.rhs));
     }
+
+    // trait-level attributes
+    const trait_attrs = extractAttributes(self, node.main_token);
+    try emitAttributeData(self, trait_attrs);
+    freeAttrSlice(self.allocator, trait_attrs);
+
+    // method attributes
+    const MemberAttr = struct { name: []const u8, attrs: []const ParsedAttr };
+    var methods_with_attrs = std.ArrayListUnmanaged(MemberAttr){};
+    defer methods_with_attrs.deinit(self.allocator);
+    for (members) |member_idx| {
+        const member = self.ast.nodes[member_idx];
+        if (member.tag == .class_method or member.tag == .static_class_method) {
+            const mattrs = extractAttributes(self, member.main_token);
+            if (mattrs.len > 0) {
+                try methods_with_attrs.append(self.allocator, .{
+                    .name = self.ast.tokenSlice(member.main_token),
+                    .attrs = mattrs,
+                });
+            }
+        }
+    }
+    try self.emitByte(@intCast(methods_with_attrs.items.len));
+    for (methods_with_attrs.items) |ma| {
+        const mname_idx = try self.addConstant(.{ .string = ma.name });
+        try self.emitU16(mname_idx);
+        try emitAttributeData(self, ma.attrs);
+    }
+    for (methods_with_attrs.items) |ma| freeAttrSlice(self.allocator, ma.attrs);
+
+    // property attributes
+    var props_with_attrs = std.ArrayListUnmanaged(MemberAttr){};
+    defer props_with_attrs.deinit(self.allocator);
+    for (members) |member_idx| {
+        const member = self.ast.nodes[member_idx];
+        if (member.tag == .class_property) {
+            const pattrs = extractAttributes(self, member.main_token);
+            if (pattrs.len > 0) {
+                var prop_name = self.ast.tokenSlice(member.main_token);
+                if (prop_name.len > 0 and prop_name[0] == '$') prop_name = prop_name[1..];
+                try props_with_attrs.append(self.allocator, .{
+                    .name = prop_name,
+                    .attrs = pattrs,
+                });
+            }
+        }
+    }
+    try self.emitByte(@intCast(props_with_attrs.items.len));
+    for (props_with_attrs.items) |pa| {
+        const ppname_idx = try self.addConstant(.{ .string = pa.name });
+        try self.emitU16(ppname_idx);
+        try emitAttributeData(self, pa.attrs);
+    }
+    for (props_with_attrs.items) |pa| freeAttrSlice(self.allocator, pa.attrs);
 }
 
 pub fn compileEnumDecl(self: *Compiler, node: Ast.Node) Error!void {
@@ -1589,6 +1672,35 @@ pub fn compileEnumDecl(self: *Compiler, node: Ast.Node) Error!void {
         const iname_idx = try self.addConstant(.{ .string = self.ast.tokenSlice(impl_node.main_token) });
         try self.emitU16(iname_idx);
     }
+
+    // enum-level attributes
+    const enum_attrs = extractAttributes(self, node.main_token);
+    try emitAttributeData(self, enum_attrs);
+    freeAttrSlice(self.allocator, enum_attrs);
+
+    // method attributes
+    const MemberAttr = struct { name: []const u8, attrs: []const ParsedAttr };
+    var methods_with_attrs = std.ArrayListUnmanaged(MemberAttr){};
+    defer methods_with_attrs.deinit(self.allocator);
+    for (members) |member_idx| {
+        const member = self.ast.nodes[member_idx];
+        if (member.tag == .class_method or member.tag == .static_class_method) {
+            const mattrs = extractAttributes(self, member.main_token);
+            if (mattrs.len > 0) {
+                try methods_with_attrs.append(self.allocator, .{
+                    .name = self.ast.tokenSlice(member.main_token),
+                    .attrs = mattrs,
+                });
+            }
+        }
+    }
+    try self.emitByte(@intCast(methods_with_attrs.items.len));
+    for (methods_with_attrs.items) |ma| {
+        const mname_idx = try self.addConstant(.{ .string = ma.name });
+        try self.emitU16(mname_idx);
+        try emitAttributeData(self, ma.attrs);
+    }
+    for (methods_with_attrs.items) |ma| freeAttrSlice(self.allocator, ma.attrs);
 
     const cname_idx = try self.addConstant(.{ .string = enum_name });
     const prev_class = self.current_class;

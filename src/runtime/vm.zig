@@ -2511,6 +2511,21 @@ pub const VM = struct {
                     for (0..parent_count) |pi| {
                         try def.interfaces.append(self.allocator, parent_names[pi]);
                     }
+
+                    // interface-level attributes
+                    const iface_attrs = try self.readAttributeDefs();
+                    for (iface_attrs) |a| try def.attributes.append(self.allocator, a);
+                    if (iface_attrs.len > 0) self.allocator.free(iface_attrs);
+
+                    // method attributes
+                    const iface_method_attr_count = self.readByte();
+                    for (0..iface_method_attr_count) |_| {
+                        const ma_name_idx = self.readU16();
+                        const ma_name = self.currentChunk().constants.items[ma_name_idx].string;
+                        const ma_attrs = try self.readAttributeDefs();
+                        try def.method_attributes.put(self.allocator, ma_name, ma_attrs);
+                    }
+
                     try self.classes.put(self.allocator, iface_name, def);
 
                     try self.interfaces.put(self.allocator, iface_name, idef);
@@ -2574,6 +2589,40 @@ pub const VM = struct {
                             sprops[pi] = .{ .name = sp_names[pi], .value = sval };
                         }
                         try self.trait_static_props.put(self.allocator, trait_name, sprops);
+                    }
+
+                    // trait-level attributes
+                    const trait_attrs = try self.readAttributeDefs();
+                    const trait_method_attr_count = self.readByte();
+                    var trait_method_attrs: [32]struct { name: []const u8, attrs: []const AttributeDef } = undefined;
+                    for (0..trait_method_attr_count) |tmi| {
+                        const tma_name_idx = self.readU16();
+                        const tma_name = self.currentChunk().constants.items[tma_name_idx].string;
+                        const tma_attrs = try self.readAttributeDefs();
+                        trait_method_attrs[tmi] = .{ .name = tma_name, .attrs = tma_attrs };
+                    }
+                    const trait_prop_attr_count = self.readByte();
+                    var trait_prop_attrs: [32]struct { name: []const u8, attrs: []const AttributeDef } = undefined;
+                    for (0..trait_prop_attr_count) |tpi| {
+                        const tpa_name_idx = self.readU16();
+                        const tpa_name = self.currentChunk().constants.items[tpa_name_idx].string;
+                        const tpa_attrs = try self.readAttributeDefs();
+                        trait_prop_attrs[tpi] = .{ .name = tpa_name, .attrs = tpa_attrs };
+                    }
+
+                    if (trait_attrs.len > 0 or trait_method_attr_count > 0 or trait_prop_attr_count > 0) {
+                        var tdef = ClassDef{ .name = trait_name };
+                        for (trait_attrs) |a| try tdef.attributes.append(self.allocator, a);
+                        if (trait_attrs.len > 0) self.allocator.free(trait_attrs);
+                        for (0..trait_method_attr_count) |tmi| {
+                            try tdef.method_attributes.put(self.allocator, trait_method_attrs[tmi].name, trait_method_attrs[tmi].attrs);
+                        }
+                        for (0..trait_prop_attr_count) |tpi| {
+                            try tdef.property_attributes.put(self.allocator, trait_prop_attrs[tpi].name, trait_prop_attrs[tpi].attrs);
+                        }
+                        try self.classes.put(self.allocator, trait_name, tdef);
+                    } else {
+                        if (trait_attrs.len > 0) self.allocator.free(trait_attrs);
                     }
                 },
 
@@ -5223,6 +5272,20 @@ pub const VM = struct {
         const iface_count = self.readByte();
         for (0..iface_count) |_| {
             try def.interfaces.append(self.allocator, self.currentChunk().constants.items[self.readU16()].string);
+        }
+
+        // enum-level attributes
+        const enum_attrs = try self.readAttributeDefs();
+        for (enum_attrs) |a| try def.attributes.append(self.allocator, a);
+        if (enum_attrs.len > 0) self.allocator.free(enum_attrs);
+
+        // method attributes
+        const enum_method_attr_count = self.readByte();
+        for (0..enum_method_attr_count) |_| {
+            const ma_name_idx = self.readU16();
+            const ma_name = self.currentChunk().constants.items[ma_name_idx].string;
+            const ma_attrs = try self.readAttributeDefs();
+            try def.method_attributes.put(self.allocator, ma_name, ma_attrs);
         }
 
         try self.registerEnumMethods(enum_name, backed_type_byte);
