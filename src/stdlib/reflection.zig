@@ -21,8 +21,8 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try attr_def.static_props.put(a, "TARGET_PROPERTY", .{ .int = 8 });
     try attr_def.static_props.put(a, "TARGET_CLASS_CONSTANT", .{ .int = 16 });
     try attr_def.static_props.put(a, "TARGET_PARAMETER", .{ .int = 32 });
-    try attr_def.static_props.put(a, "TARGET_ALL", .{ .int = 63 });
-    try attr_def.static_props.put(a, "IS_REPEATABLE", .{ .int = 64 });
+    try attr_def.static_props.put(a, "TARGET_ALL", .{ .int = 127 });
+    try attr_def.static_props.put(a, "IS_REPEATABLE", .{ .int = 128 });
     try vm.classes.put(a, "Attribute", attr_def);
 
     // ReflectionException
@@ -1568,6 +1568,26 @@ fn raGetArguments(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
     return .{ .array = try ctx.createArray() };
 }
 
+fn isAttributeClass(vm: *VM, class_name: []const u8) bool {
+    if (std.mem.eql(u8, class_name, "Attribute")) return true;
+    const cls = vm.classes.get(class_name) orelse return false;
+    for (cls.attributes.items) |attr| {
+        if (std.mem.eql(u8, attr.name, "Attribute")) return true;
+    }
+    return false;
+}
+
+fn getAttributeFlags(vm: *VM, class_name: []const u8) i64 {
+    const cls = vm.classes.get(class_name) orelse return 127;
+    for (cls.attributes.items) |attr| {
+        if (std.mem.eql(u8, attr.name, "Attribute")) {
+            if (attr.args.len > 0 and attr.args[0] == .int) return attr.args[0].int;
+            return 127; // TARGET_ALL
+        }
+    }
+    return 127;
+}
+
 fn raNewInstance(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
     const this = getThis(ctx) orelse return .null;
     const name_val = this.get("name");
@@ -1576,6 +1596,45 @@ fn raNewInstance(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
 
     if (!ctx.vm.classes.contains(attr_name)) {
         try ctx.vm.tryAutoload(attr_name);
+    }
+
+    if (!ctx.vm.classes.contains(attr_name)) {
+        const msg = std.fmt.allocPrint(ctx.allocator, "Attribute class \"{s}\" not found", .{attr_name}) catch return error.OutOfMemory;
+        try ctx.strings.append(ctx.allocator, msg);
+        _ = ctx.vm.throwBuiltinException("Error", msg) catch {};
+        return error.RuntimeError;
+    }
+
+    if (!isAttributeClass(ctx.vm, attr_name)) {
+        const msg = std.fmt.allocPrint(ctx.allocator, "Attempting to use non-attribute class \"{s}\" as attribute", .{attr_name}) catch return error.OutOfMemory;
+        try ctx.strings.append(ctx.allocator, msg);
+        _ = ctx.vm.throwBuiltinException("Error", msg) catch {};
+        return error.RuntimeError;
+    }
+
+    // target enforcement
+    const target_val = this.get("_target");
+    if (target_val == .int) {
+        const target = target_val.int;
+        const flags = getAttributeFlags(ctx.vm, attr_name);
+        if (flags != 127 and (flags & target) == 0) {
+            const msg = std.fmt.allocPrint(ctx.allocator, "Attribute \"{s}\" cannot target this declaration", .{attr_name}) catch return error.OutOfMemory;
+            try ctx.strings.append(ctx.allocator, msg);
+            _ = ctx.vm.throwBuiltinException("Error", msg) catch {};
+            return error.RuntimeError;
+        }
+    }
+
+    // repeatability enforcement
+    const is_repeated_val = this.get("_is_repeated");
+    if (is_repeated_val == .bool and is_repeated_val.bool) {
+        const flags = getAttributeFlags(ctx.vm, attr_name);
+        if ((flags & 128) == 0) {
+            const msg = std.fmt.allocPrint(ctx.allocator, "Attribute \"{s}\" must not be repeated", .{attr_name}) catch return error.OutOfMemory;
+            try ctx.strings.append(ctx.allocator, msg);
+            _ = ctx.vm.throwBuiltinException("Error", msg) catch {};
+            return error.RuntimeError;
+        }
     }
 
     const obj = try ctx.createObject(attr_name);

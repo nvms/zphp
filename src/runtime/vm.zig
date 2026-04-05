@@ -5227,6 +5227,30 @@ pub const VM = struct {
         if (def.parent) |parent_name| {
             if (!self.classes.contains(parent_name)) try self.tryAutoload(parent_name);
         }
+
+        // #[Override] enforcement
+        var ma_it = def.method_attributes.iterator();
+        while (ma_it.next()) |entry| {
+            const method_name = entry.key_ptr.*;
+            const mattrs = entry.value_ptr.*;
+            for (mattrs) |attr| {
+                if (std.mem.eql(u8, attr.name, "Override")) {
+                    const parent_has = if (def.parent) |p| blk: {
+                        var buf2: [256]u8 = undefined;
+                        const full = std.fmt.bufPrint(&buf2, "{s}::{s}", .{ p, method_name }) catch break :blk false;
+                        break :blk self.functions.get(full) != null or self.native_fns.get(full) != null;
+                    } else false;
+                    if (!parent_has) {
+                        var buf2: [256]u8 = undefined;
+                        const msg = std.fmt.bufPrint(&buf2, "{s}::{s}() has #[Override] attribute, but no matching parent method exists", .{ class_name, method_name }) catch "";
+                        if (try self.throwBuiltinException("Error", msg)) continue;
+                        return error.RuntimeError;
+                    }
+                    break;
+                }
+            }
+        }
+
         def.slot_layout = try self.buildSlotLayout(&def);
         try self.classes.put(self.allocator, class_name, def);
     }
