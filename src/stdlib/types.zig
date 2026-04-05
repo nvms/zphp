@@ -236,16 +236,20 @@ fn is_numeric(_: *NativeContext, args: []const Value) RuntimeError!Value {
     return .{ .bool = switch (args[0]) {
         .int, .float => true,
         .string => |s| blk: {
+            // trim leading/trailing whitespace (PHP 8 accepts it)
+            var trimmed = s;
+            while (trimmed.len > 0 and (trimmed[0] == ' ' or trimmed[0] == '\t' or trimmed[0] == '\n' or trimmed[0] == '\r')) trimmed = trimmed[1..];
+            while (trimmed.len > 0 and (trimmed[trimmed.len - 1] == ' ' or trimmed[trimmed.len - 1] == '\t' or trimmed[trimmed.len - 1] == '\n' or trimmed[trimmed.len - 1] == '\r')) trimmed = trimmed[0 .. trimmed.len - 1];
+            if (trimmed.len == 0) break :blk false;
             var start: usize = 0;
-            if (s.len > 0 and (s[0] == '+' or s[0] == '-')) start = 1;
-            if (start >= s.len) break :blk false;
-            // reject hex/octal/binary prefixes - PHP 8 only accepts decimal
-            if (s.len > start + 1 and s[start] == '0') {
-                const next = s[start + 1];
+            if (trimmed[0] == '+' or trimmed[0] == '-') start = 1;
+            if (start >= trimmed.len) break :blk false;
+            if (trimmed.len > start + 1 and trimmed[start] == '0') {
+                const next = trimmed[start + 1];
                 if (next == 'x' or next == 'X' or next == 'o' or next == 'O' or next == 'b' or next == 'B')
                     break :blk false;
             }
-            break :blk if (std.fmt.parseFloat(f64, s)) |_| true else |_| false;
+            break :blk if (std.fmt.parseFloat(f64, trimmed)) |_| true else |_| false;
         },
         else => false,
     } };

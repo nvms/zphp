@@ -100,6 +100,17 @@ fn array_shift(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     const arr = args[0].array;
     if (arr.entries.items.len == 0) return .null;
     const first = arr.entries.orderedRemove(0);
+    // re-index numeric keys starting from 0
+    var next_int: i64 = 0;
+    for (arr.entries.items) |*entry| {
+        switch (entry.key) {
+            .int => {
+                entry.key = .{ .int = next_int };
+                next_int += 1;
+            },
+            .string => {},
+        }
+    }
     try arr.rebuildStringIndex(ctx.allocator);
     return first.value;
 }
@@ -107,8 +118,15 @@ fn array_shift(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
 fn array_keys(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len == 0 or args[0] != .array) return .null;
     const src = args[0].array;
+    const has_search = args.len >= 2;
+    const search_val = if (has_search) args[1] else Value.null;
+    const strict = args.len >= 3 and args[2] == .bool and args[2].bool;
     var arr = try ctx.createArray();
     for (src.entries.items) |entry| {
+        if (has_search) {
+            const match = if (strict) Value.identical(search_val, entry.value) else Value.equal(search_val, entry.value);
+            if (!match) continue;
+        }
         const key_val: Value = switch (entry.key) {
             .int => |i| .{ .int = i },
             .string => |s| .{ .string = s },
@@ -482,9 +500,38 @@ fn native_range(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
         return .{ .array = arr };
     }
 
+    // use floats if any arg is a float
+    const use_float = args[0] == .float or args[1] == .float or (args.len >= 3 and args[2] == .float);
+    if (use_float) {
+        const lo_f = Value.toFloat(args[0]);
+        const hi_f = Value.toFloat(args[1]);
+        const step_f: f64 = if (args.len >= 3) blk: {
+            const s = Value.toFloat(args[2]);
+            break :blk if (s == 0) 1.0 else @abs(s);
+        } else 1.0;
+        var arr = try ctx.createArray();
+        if (lo_f <= hi_f) {
+            var v = lo_f;
+            while (v <= hi_f + step_f * 0.0001) : (v += step_f) {
+                if (v > hi_f + step_f * 0.5) break;
+                try arr.append(ctx.allocator, .{ .float = v });
+            }
+        } else {
+            var v = lo_f;
+            while (v >= hi_f - step_f * 0.0001) : (v -= step_f) {
+                if (v < hi_f - step_f * 0.5) break;
+                try arr.append(ctx.allocator, .{ .float = v });
+            }
+        }
+        return .{ .array = arr };
+    }
+
     const lo = Value.toInt(args[0]);
     const hi = Value.toInt(args[1]);
-    const step = if (args.len >= 3) @max(1, Value.toInt(args[2])) else @as(i64, 1);
+    const step: i64 = if (args.len >= 3) blk: {
+        const s = Value.toInt(args[2]);
+        break :blk if (s == 0) 1 else if (s < 0) -s else s;
+    } else 1;
     var arr = try ctx.createArray();
     if (lo <= hi) {
         var i = lo;
@@ -681,29 +728,40 @@ fn arraySetOp(comptime cmp: ArrayCmp, comptime keep_matches: bool) fn (*NativeCo
             const src = args[0].array;
             var result = try ctx.createArray();
             for (src.entries.items) |entry| {
-                const matched = matchesAll(entry, args[1..]);
-                if (matched == keep_matches) try result.set(ctx.allocator, entry.key, entry.value);
+                if (keep_matches) {
+                    // intersect: keep if found in ALL other arrays
+                    if (matchesAll(entry, args[1..])) try result.set(ctx.allocator, entry.key, entry.value);
+                } else {
+                    // diff: keep if found in NONE of the other arrays
+                    if (!matchesAny(entry, args[1..])) try result.set(ctx.allocator, entry.key, entry.value);
+                }
             }
             return .{ .array = result };
         }
         fn matchesAll(entry: PhpArray.Entry, others: []const Value) bool {
             for (others) |arg| {
-                if (arg != .array) return if (keep_matches) false else continue;
-                var found = false;
-                for (arg.array.entries.items) |other| {
-                    const hit = switch (cmp) {
-                        .values => Value.equal(entry.value, other.value),
-                        .keys => entry.key.eql(other.key),
-                        .assoc => entry.key.eql(other.key) and Value.equal(entry.value, other.value),
-                    };
-                    if (hit) {
-                        found = true;
-                        break;
-                    }
-                }
-                if (!found) return false;
+                if (arg != .array) return false;
+                if (!foundIn(entry, arg.array)) return false;
             }
             return true;
+        }
+        fn matchesAny(entry: PhpArray.Entry, others: []const Value) bool {
+            for (others) |arg| {
+                if (arg != .array) continue;
+                if (foundIn(entry, arg.array)) return true;
+            }
+            return false;
+        }
+        fn foundIn(entry: PhpArray.Entry, arr: *const PhpArray) bool {
+            for (arr.entries.items) |other| {
+                const hit = switch (cmp) {
+                    .values => Value.equal(entry.value, other.value),
+                    .keys => entry.key.eql(other.key),
+                    .assoc => entry.key.eql(other.key) and Value.equal(entry.value, other.value),
+                };
+                if (hit) return true;
+            }
+            return false;
         }
     }.f;
 }

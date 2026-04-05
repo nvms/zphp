@@ -208,6 +208,12 @@ fn explode(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
             break;
         }
     }
+
+    if (limit < 0) {
+        const drop: usize = @intCast(@min(@as(i64, @intCast(arr.entries.items.len)), -limit));
+        arr.entries.items.len = arr.entries.items.len -| drop;
+    }
+
     return .{ .array = arr };
 }
 
@@ -462,10 +468,13 @@ fn native_substr_count(_: *NativeContext, args: []const Value) RuntimeError!Valu
     const haystack = if (args[0] == .string) args[0].string else return Value{ .int = 0 };
     const needle = if (args[1] == .string) args[1].string else return Value{ .int = 0 };
     if (needle.len == 0) return .{ .int = 0 };
+    const offset: usize = if (args.len >= 3) @intCast(@max(0, @min(Value.toInt(args[2]), @as(i64, @intCast(haystack.len))))) else 0;
+    const end: usize = if (args.len >= 4) @intCast(@min(@as(i64, @intCast(haystack.len)), @max(0, Value.toInt(args[2]) + Value.toInt(args[3])))) else haystack.len;
+    const search_region = haystack[offset..end];
     var count: i64 = 0;
     var i: usize = 0;
-    while (i + needle.len <= haystack.len) {
-        if (std.mem.eql(u8, haystack[i .. i + needle.len], needle)) {
+    while (i + needle.len <= search_region.len) {
+        if (std.mem.eql(u8, search_region[i .. i + needle.len], needle)) {
             count += 1;
             i += needle.len;
         } else {
@@ -561,10 +570,13 @@ fn native_str_word_count(ctx: *NativeContext, args: []const Value) RuntimeError!
 fn native_nl2br(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len == 0) return .{ .string = "" };
     const s = if (args[0] == .string) args[0].string else return Value{ .string = "" };
+    const use_xhtml = if (args.len >= 2) args[1].isTruthy() else true;
+    const br = if (use_xhtml) "<br />" else "<br>";
     var buf = std.ArrayListUnmanaged(u8){};
     for (s) |c| {
         if (c == '\n') {
-            try buf.appendSlice(ctx.allocator, "<br />\n");
+            try buf.appendSlice(ctx.allocator, br);
+            try buf.append(ctx.allocator, '\n');
         } else {
             try buf.append(ctx.allocator, c);
         }
