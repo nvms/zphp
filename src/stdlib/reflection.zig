@@ -13,6 +13,18 @@ const Allocator = std.mem.Allocator;
 const RuntimeError = error{ RuntimeError, OutOfMemory };
 
 pub fn register(vm: *VM, a: Allocator) !void {
+    // Attribute class with target constants
+    var attr_def = ClassDef{ .name = "Attribute" };
+    try attr_def.static_props.put(a, "TARGET_CLASS", .{ .int = 1 });
+    try attr_def.static_props.put(a, "TARGET_FUNCTION", .{ .int = 2 });
+    try attr_def.static_props.put(a, "TARGET_METHOD", .{ .int = 4 });
+    try attr_def.static_props.put(a, "TARGET_PROPERTY", .{ .int = 8 });
+    try attr_def.static_props.put(a, "TARGET_CLASS_CONSTANT", .{ .int = 16 });
+    try attr_def.static_props.put(a, "TARGET_PARAMETER", .{ .int = 32 });
+    try attr_def.static_props.put(a, "TARGET_ALL", .{ .int = 63 });
+    try attr_def.static_props.put(a, "IS_REPEATABLE", .{ .int = 64 });
+    try vm.classes.put(a, "Attribute", attr_def);
+
     // ReflectionException
     var exc_def = ClassDef{ .name = "ReflectionException" };
     exc_def.parent = "Exception";
@@ -608,7 +620,7 @@ fn rcGetInterfaceNames(ctx: *NativeContext, _: []const Value) RuntimeError!Value
     return .{ .array = arr };
 }
 
-fn buildReflectionAttribute(ctx: *NativeContext, attr: AttributeDef) RuntimeError!Value {
+fn buildReflectionAttribute(ctx: *NativeContext, attr: AttributeDef, target: i64, is_repeated: bool) RuntimeError!Value {
     const obj = try ctx.createObject("ReflectionAttribute");
     try obj.set(ctx.allocator, "name", .{ .string = attr.name });
     const args_arr = try ctx.createArray();
@@ -616,22 +628,32 @@ fn buildReflectionAttribute(ctx: *NativeContext, attr: AttributeDef) RuntimeErro
         try args_arr.append(ctx.allocator, arg);
     }
     try obj.set(ctx.allocator, "_arguments", .{ .array = args_arr });
+    try obj.set(ctx.allocator, "_target", .{ .int = target });
+    try obj.set(ctx.allocator, "_is_repeated", .{ .bool = is_repeated });
     return .{ .object = obj };
 }
 
-fn buildAttributeArray(ctx: *NativeContext, attrs: []const AttributeDef) RuntimeError!Value {
+fn buildAttributeArray(ctx: *NativeContext, attrs: []const AttributeDef, filter: ?[]const u8, target: i64) RuntimeError!Value {
     const arr = try ctx.createArray();
     for (attrs) |attr| {
-        try arr.append(ctx.allocator, try buildReflectionAttribute(ctx, attr));
+        if (filter) |f| {
+            if (!std.mem.eql(u8, attr.name, f)) continue;
+        }
+        var count: usize = 0;
+        for (attrs) |other| {
+            if (std.mem.eql(u8, other.name, attr.name)) count += 1;
+        }
+        try arr.append(ctx.allocator, try buildReflectionAttribute(ctx, attr, target, count > 1));
     }
     return .{ .array = arr };
 }
 
-fn rcGetAttributes(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+fn rcGetAttributes(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     const this = getThis(ctx) orelse return .{ .array = try ctx.createArray() };
     const class_name = if (this.get("name") == .string) this.get("name").string else return .{ .array = try ctx.createArray() };
     const cls = ctx.vm.classes.get(class_name) orelse return .{ .array = try ctx.createArray() };
-    return buildAttributeArray(ctx, cls.attributes.items);
+    const filter: ?[]const u8 = if (args.len >= 1 and args[0] == .string) args[0].string else null;
+    return buildAttributeArray(ctx, cls.attributes.items, filter, 1); // TARGET_CLASS
 }
 
 fn rcGetProperties(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
@@ -1436,13 +1458,14 @@ fn rpropGetModifiers(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
     return .{ .int = 1 };
 }
 
-fn rpropGetAttributes(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+fn rpropGetAttributes(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     const this = getThis(ctx) orelse return .{ .array = try ctx.createArray() };
     const prop_name = if (this.get("name") == .string) this.get("name").string else return .{ .array = try ctx.createArray() };
     const declaring = if (this.get("_declaring_class") == .string) this.get("_declaring_class").string else return .{ .array = try ctx.createArray() };
     const cls = ctx.vm.classes.get(declaring) orelse return .{ .array = try ctx.createArray() };
     const attrs = cls.property_attributes.get(prop_name) orelse return .{ .array = try ctx.createArray() };
-    return buildAttributeArray(ctx, attrs);
+    const filter: ?[]const u8 = if (args.len >= 1 and args[0] == .string) args[0].string else null;
+    return buildAttributeArray(ctx, attrs, filter, 8); // TARGET_PROPERTY
 }
 
 fn rpropGetDocComment(_: *NativeContext, _: []const Value) RuntimeError!Value {
@@ -1496,13 +1519,14 @@ fn rmIsAbstract(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
     return .{ .bool = false };
 }
 
-fn rmGetAttributes(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+fn rmGetAttributes(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     const this = getThis(ctx) orelse return .{ .array = try ctx.createArray() };
     const method_name = if (this.get("name") == .string) this.get("name").string else return .{ .array = try ctx.createArray() };
     const declaring = if (this.get("_declaring_class") == .string) this.get("_declaring_class").string else return .{ .array = try ctx.createArray() };
     const cls = ctx.vm.classes.get(declaring) orelse return .{ .array = try ctx.createArray() };
     const attrs = cls.method_attributes.get(method_name) orelse return .{ .array = try ctx.createArray() };
-    return buildAttributeArray(ctx, attrs);
+    const filter: ?[]const u8 = if (args.len >= 1 and args[0] == .string) args[0].string else null;
+    return buildAttributeArray(ctx, attrs, filter, 4); // TARGET_METHOD
 }
 
 fn rpIsPromoted(_: *NativeContext, _: []const Value) RuntimeError!Value {
@@ -1564,10 +1588,14 @@ fn raNewInstance(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
     return .{ .object = obj };
 }
 
-fn raGetTarget(_: *NativeContext, _: []const Value) RuntimeError!Value {
-    return .{ .int = 0 };
+fn raGetTarget(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const this = getThis(ctx) orelse return .{ .int = 0 };
+    const target = this.get("_target");
+    return if (target == .int) target else .{ .int = 0 };
 }
 
-fn raIsRepeated(_: *NativeContext, _: []const Value) RuntimeError!Value {
-    return .{ .bool = false };
+fn raIsRepeated(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const this = getThis(ctx) orelse return .{ .bool = false };
+    const repeated = this.get("_is_repeated");
+    return if (repeated == .bool) repeated else .{ .bool = false };
 }
