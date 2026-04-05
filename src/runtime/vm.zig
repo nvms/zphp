@@ -5286,13 +5286,71 @@ pub const VM = struct {
             if (!self.classes.contains(parent_name)) try self.tryAutoload(parent_name);
         }
 
-        // #[Override] enforcement deferred - requires compile-phase implementation
-        // to correctly handle all ancestor types (abstract methods, interfaces,
-        // traits, parent hierarchy). runtime enforcement during class registration
-        // breaks class loading when the check fails and the exception is caught
-
         def.slot_layout = try self.buildSlotLayout(&def);
         try self.classes.put(self.allocator, class_name, def);
+
+        // #[Override] enforcement - runs after class is registered so class
+        // loading state stays consistent even if the error is caught
+        var override_err: ?[]const u8 = null;
+        var oa_it = def.method_attributes.iterator();
+        while (oa_it.next()) |entry| {
+            const method_name = entry.key_ptr.*;
+            for (entry.value_ptr.*) |attr| {
+                if (!std.mem.eql(u8, attr.name, "Override")) continue;
+                if (self.methodExistsInAncestors(class_name, method_name, &def)) break;
+                override_err = method_name;
+                break;
+            }
+            if (override_err != null) break;
+        }
+        if (override_err) |method_name| {
+            var buf2: [512]u8 = undefined;
+            const msg = std.fmt.bufPrint(&buf2, "{s}::{s}() has #[\\Override] attribute, but no matching parent method exists", .{ class_name, method_name }) catch "";
+            if (try self.throwBuiltinException("Error", msg)) return;
+            return error.RuntimeError;
+        }
+    }
+
+    fn methodExistsInAncestors(self: *VM, class_name: []const u8, method_name: []const u8, def: *const ClassDef) bool {
+        var buf: [256]u8 = undefined;
+
+        // check parent class chain (functions, native_fns, and method declarations)
+        var current: ?[]const u8 = def.parent;
+        while (current) |parent| {
+            const full = std.fmt.bufPrint(&buf, "{s}::{s}", .{ parent, method_name }) catch break;
+            if (self.functions.contains(full) or self.native_fns.contains(full)) return true;
+            const pcls = self.classes.get(parent) orelse break;
+            if (pcls.methods.contains(method_name)) return true;
+            current = pcls.parent;
+        }
+
+        // check interfaces (including parent interfaces)
+        for (def.interfaces.items) |iface_name| {
+            if (self.interfaceDeclaresMethod(iface_name, method_name)) return true;
+        }
+        // also check parent's interfaces
+        current = def.parent;
+        while (current) |parent| {
+            const pcls = self.classes.get(parent) orelse break;
+            for (pcls.interfaces.items) |iface_name| {
+                if (self.interfaceDeclaresMethod(iface_name, method_name)) return true;
+            }
+            current = pcls.parent;
+        }
+
+        _ = class_name;
+        return false;
+    }
+
+    fn interfaceDeclaresMethod(self: *VM, iface_name: []const u8, method_name: []const u8) bool {
+        const idef = self.interfaces.get(iface_name) orelse return false;
+        for (idef.methods.items) |m| {
+            if (std.mem.eql(u8, m, method_name)) return true;
+        }
+        if (idef.parent) |parent| {
+            return self.interfaceDeclaresMethod(parent, method_name);
+        }
+        return false;
     }
 
     fn handleEnumDecl(self: *VM) RuntimeError!void {

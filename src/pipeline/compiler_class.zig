@@ -789,6 +789,8 @@ pub fn compileClassDecl(self: *Compiler, node: Ast.Node) Error!void {
         if (member.tag == .class_method or member.tag == .static_class_method) {
             try compileClassMethodBody(self, class_name, member);
             method_count += 1;
+        } else if (member.tag == .interface_method) {
+            method_count += 1;
         }
     }
 
@@ -888,6 +890,14 @@ pub fn compileClassDecl(self: *Compiler, node: Ast.Node) Error!void {
             try self.emitByte(if (member.tag == .static_class_method) @as(u8, 1) else @as(u8, 0));
             const vis: u8 = @intCast(member.data.rhs >> 30);
             try self.emitByte(vis);
+        } else if (member.tag == .interface_method) {
+            const method_name_str = self.ast.tokenSlice(member.main_token);
+            const mname_idx = try self.addConstant(.{ .string = method_name_str });
+            try self.emitU16(mname_idx);
+            const param_nodes = self.ast.extraSlice(member.data.lhs);
+            try self.emitByte(@intCast(param_nodes.len));
+            try self.emitByte(0); // not static
+            try self.emitByte(0); // public
         }
     }
 
