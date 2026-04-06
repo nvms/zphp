@@ -10,6 +10,12 @@ pub const entries = .{
     .{ "ob_end_clean", native_ob_end_clean },
     .{ "ob_get_contents", native_ob_get_contents },
     .{ "ob_get_level", native_ob_get_level },
+    .{ "ob_end_flush", native_ob_end_flush },
+    .{ "ob_flush", native_ob_flush },
+    .{ "ob_clean", native_ob_clean },
+    .{ "ob_get_length", native_ob_get_length },
+    .{ "ob_implicit_flush", native_ob_implicit_flush },
+    .{ "ob_list_handlers", native_ob_list_handlers },
     .{ "header", native_header },
     .{ "http_response_code", native_http_response_code },
     .{ "setcookie", native_setcookie },
@@ -46,6 +52,50 @@ fn native_ob_get_contents(ctx: *NativeContext, _: []const Value) RuntimeError!Va
 
 fn native_ob_get_level(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
     return .{ .int = @intCast(ctx.vm.ob_stack.items.len) };
+}
+
+fn native_ob_end_flush(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    if (ctx.vm.ob_stack.items.len == 0) return .{ .bool = false };
+    _ = ctx.vm.ob_stack.pop();
+    return .{ .bool = true };
+}
+
+fn native_ob_flush(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    if (ctx.vm.ob_stack.items.len == 0) return .{ .bool = false };
+    if (ctx.vm.ob_stack.items.len >= 2) {
+        const current_start = ctx.vm.ob_stack.items[ctx.vm.ob_stack.items.len - 1];
+        ctx.vm.ob_stack.items[ctx.vm.ob_stack.items.len - 2] = @min(
+            ctx.vm.ob_stack.items[ctx.vm.ob_stack.items.len - 2],
+            current_start,
+        );
+    }
+    ctx.vm.ob_stack.items[ctx.vm.ob_stack.items.len - 1] = ctx.vm.output.items.len;
+    return .{ .bool = true };
+}
+
+fn native_ob_clean(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    if (ctx.vm.ob_stack.items.len == 0) return .{ .bool = false };
+    const start = ctx.vm.ob_stack.getLast();
+    ctx.vm.output.shrinkRetainingCapacity(start);
+    return .{ .bool = true };
+}
+
+fn native_ob_get_length(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    if (ctx.vm.ob_stack.items.len == 0) return .{ .bool = false };
+    const start = ctx.vm.ob_stack.getLast();
+    return .{ .int = @intCast(ctx.vm.output.items.len - start) };
+}
+
+fn native_ob_implicit_flush(_: *NativeContext, _: []const Value) RuntimeError!Value {
+    return .null;
+}
+
+fn native_ob_list_handlers(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const arr = try ctx.createArray();
+    for (0..ctx.vm.ob_stack.items.len) |_| {
+        try arr.append(ctx.allocator, .{ .string = "default output handler" });
+    }
+    return .{ .array = arr };
 }
 
 fn native_header(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
