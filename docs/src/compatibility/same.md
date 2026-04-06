@@ -20,8 +20,9 @@ zphp aims to run standard PHP code as-is. The following all work the way you'd e
 - **Sessions**: `session_start`, `session_destroy`, `session_id`, `$_SESSION`
 - **HTTP functions**: `header()`, `header_remove()`, `http_response_code()`, `setcookie()`, `headers_sent()`, `headers_list()`
 - **Output buffering**: `ob_start`, `ob_get_clean`, `ob_end_clean`, `ob_get_contents`, `ob_get_level`
+- **cURL**: `curl_init`, `curl_setopt`, `curl_setopt_array`, `curl_exec`, `curl_close`, `curl_error`, `curl_errno`, `curl_getinfo`, `curl_reset`, `curl_version`, with all common `CURLOPT_*` and `CURLINFO_*` constants
 - **Standard library**: string functions, array functions, math functions, JSON, date/time, file I/O, regex (PCRE2), PDO (SQLite, MySQL, PostgreSQL)
 
 ## Test suite
 
-zphp is validated against PHP 8.4 with 178 compatibility tests and 82 multi-file example projects. Each test runs the same PHP code in both zphp and PHP 8.4, comparing output exactly. A Laravel application (7 harness tests covering Eloquent, Blade, validation, JSON API, middleware, and error handling) is also tested against both runtimes. Standalone executable compilation is verified with 12 additional tests. The test suite runs on every commit.
+zphp is validated against PHP 8.4 with 190 compatibility tests and 87 multi-file example projects. Each test runs the same PHP code in both zphp and PHP 8.4, comparing output exactly. A Laravel application (7 harness tests covering Eloquent, Blade, validation, JSON API, middleware, and error handling) is also tested against both runtimes. Standalone executable compilation is verified with 12 additional tests. The test suite runs on every commit.

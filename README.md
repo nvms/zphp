@@ -1,6 +1,6 @@
 # zphp
 
-zphp is a PHP runtime written in Zig with PHP 8.x compatibility. It includes a built-in HTTP server with WebSocket support, TLS, and HTTP/2, plus database drivers for SQLite, MySQL, and PostgreSQL.
+zphp is a PHP runtime written in Zig with PHP 8.x compatibility. It includes a built-in HTTP server with WebSocket support, TLS, and HTTP/2, database drivers for SQLite, MySQL, and PostgreSQL, and cURL bindings for HTTP client operations.
 
 ```sh
 zphp run app.php                    # run a script

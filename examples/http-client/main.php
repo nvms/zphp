@@ -1,197 +1,167 @@
 <?php
-// covers: parse_url, http_build_query, urlencode, urldecode, json_encode, json_decode,
-//         array_merge, array_key_exists, implode, explode, strtolower, strtoupper,
-//         substr, strpos, str_contains, str_starts_with, str_ends_with, trim, rtrim,
-//         sprintf, preg_match, array_map, array_filter, array_keys, array_values,
-//         str_replace, header parsing, multiline string building
+// covers: curl_init, curl_setopt, curl_setopt_array, curl_getinfo, curl_error,
+//   curl_errno, curl_reset, curl_version, CURLOPT constants, CURLINFO constants,
+//   classes, constructor property promotion, match expressions, enums,
+//   named arguments, method chaining, json_encode
 
-// --- URL builder ---
-
-function buildUrl($base, $path, $params = []) {
-    $url = rtrim($base, '/') . '/' . ltrim($path, '/');
-    if (!empty($params)) {
-        $url .= '?' . http_build_query($params);
-    }
-    return $url;
+enum HttpMethod: string {
+    case GET = 'GET';
+    case POST = 'POST';
+    case PUT = 'PUT';
+    case DELETE = 'DELETE';
+    case PATCH = 'PATCH';
 }
 
-$url = buildUrl('https://api.example.com/', '/users', ['page' => 2, 'limit' => 10, 'q' => 'hello world']);
-echo "URL: $url\n";
+class HttpRequest {
+    private array $headers = [];
+    private ?string $body = null;
+    private int $timeout = 30;
+    private bool $followRedirects = true;
+    private int $maxRedirects = 5;
+    private bool $verifySSL = true;
 
-$parts = parse_url($url);
-echo "scheme: {$parts['scheme']}\n";
-echo "host: {$parts['host']}\n";
-echo "path: {$parts['path']}\n";
-echo "query: {$parts['query']}\n";
+    public function __construct(
+        private HttpMethod $method,
+        private string $url
+    ) {}
 
-// --- query string round-trip ---
-
-parse_str($parts['query'], $queryParams);
-echo "page: {$queryParams['page']}\n";
-echo "limit: {$queryParams['limit']}\n";
-echo "q: {$queryParams['q']}\n";
-
-$rebuilt = http_build_query($queryParams);
-echo "rebuilt: $rebuilt\n";
-
-// --- URL encoding ---
-
-$special = "name=John Doe&city=New York&emoji=<>";
-$encoded = urlencode($special);
-echo "encoded: $encoded\n";
-$decoded = urldecode($encoded);
-echo "decoded: $decoded\n";
-echo "roundtrip: " . ($decoded === $special ? "yes" : "no") . "\n";
-
-// --- header parsing ---
-
-function parseHeaders($raw) {
-    $headers = [];
-    $lines = explode("\n", trim($raw));
-    foreach ($lines as $line) {
-        $line = trim($line);
-        if (empty($line)) continue;
-        $pos = strpos($line, ':');
-        if ($pos === false) continue;
-        $key = strtolower(trim(substr($line, 0, $pos)));
-        $value = trim(substr($line, $pos + 1));
-        $headers[$key] = $value;
+    public function withHeader(string $name, string $value): self {
+        $this->headers[] = "$name: $value";
+        return $this;
     }
-    return $headers;
-}
 
-$rawHeaders = "Content-Type: application/json\nX-Request-ID: abc-123\nCache-Control: no-cache, no-store\nAuthorization: Bearer token123\nX-Rate-Limit: 100";
+    public function withBody(string $body): self {
+        $this->body = $body;
+        return $this;
+    }
 
-$headers = parseHeaders($rawHeaders);
-echo "content-type: {$headers['content-type']}\n";
-echo "x-request-id: {$headers['x-request-id']}\n";
-echo "cache-control: {$headers['cache-control']}\n";
+    public function withTimeout(int $seconds): self {
+        $this->timeout = $seconds;
+        return $this;
+    }
 
-// check header existence
-echo "has auth: " . (array_key_exists('authorization', $headers) ? "yes" : "no") . "\n";
-echo "has accept: " . (array_key_exists('accept', $headers) ? "yes" : "no") . "\n";
+    public function withRedirects(bool $follow, int $max = 5): self {
+        $this->followRedirects = $follow;
+        $this->maxRedirects = $max;
+        return $this;
+    }
 
-// --- JSON request/response simulation ---
+    public function withSSLVerification(bool $verify): self {
+        $this->verifySSL = $verify;
+        return $this;
+    }
 
-function buildRequest($method, $url, $headers = [], $body = null) {
-    $request = [
-        'method' => strtoupper($method),
-        'url' => $url,
-        'headers' => $headers,
-    ];
-    if ($body !== null) {
-        if (is_array($body)) {
-            $request['body'] = json_encode($body);
-            $request['headers']['Content-Type'] = 'application/json';
-        } else {
-            $request['body'] = (string)$body;
+    public function toCurl() {
+        $ch = curl_init($this->url);
+
+        curl_setopt_array($ch, [
+            CURLOPT_RETURNTRANSFER => true,
+            CURLOPT_TIMEOUT => $this->timeout,
+            CURLOPT_FOLLOWLOCATION => $this->followRedirects,
+            CURLOPT_MAXREDIRS => $this->maxRedirects,
+            CURLOPT_SSL_VERIFYPEER => $this->verifySSL,
+        ]);
+
+        if ($this->method !== HttpMethod::GET) {
+            curl_setopt($ch, CURLOPT_CUSTOMREQUEST, $this->method->value);
         }
-    }
-    return $request;
-}
 
-$req = buildRequest('post', 'https://api.example.com/users', [
-    'Authorization' => 'Bearer secret',
-    'Accept' => 'application/json',
-], ['name' => 'Alice', 'email' => 'alice@example.com', 'age' => 30]);
-
-echo "method: {$req['method']}\n";
-echo "body: {$req['body']}\n";
-echo "content-type: {$req['headers']['Content-Type']}\n";
-
-// --- JSON response parsing ---
-
-$responseJson = '{"status":200,"data":{"users":[{"id":1,"name":"Alice","active":true},{"id":2,"name":"Bob","active":false},{"id":3,"name":"Charlie","active":true}]},"meta":{"total":3,"page":1}}';
-
-$response = json_decode($responseJson, true);
-echo "status: {$response['status']}\n";
-echo "total users: {$response['meta']['total']}\n";
-
-$users = $response['data']['users'];
-$activeUsers = array_filter($users, function($u) { return $u['active']; });
-$names = array_map(function($u) { return $u['name']; }, array_values($activeUsers));
-echo "active: " . implode(', ', $names) . "\n";
-
-// --- URL path manipulation ---
-
-function joinPath(...$parts) {
-    $result = '';
-    foreach ($parts as $part) {
-        $part = trim($part, '/');
-        if ($part !== '') {
-            $result .= '/' . $part;
+        if ($this->body !== null) {
+            curl_setopt($ch, CURLOPT_POSTFIELDS, $this->body);
         }
-    }
-    return $result;
-}
 
-echo "path: " . joinPath('/api/', '/v2/', 'users/', '/123/') . "\n";
-
-// extract path segments
-$path = '/api/v2/users/123/posts';
-$segments = array_filter(explode('/', $path), function($s) { return $s !== ''; });
-$segments = array_values($segments);
-echo "segments: " . count($segments) . "\n";
-echo "resource: {$segments[2]}\n";
-echo "id: {$segments[3]}\n";
-
-// --- content type parsing ---
-
-function parseContentType($header) {
-    $parts = explode(';', $header);
-    $type = trim($parts[0]);
-    $params = [];
-    for ($i = 1; $i < count($parts); $i++) {
-        $kv = explode('=', trim($parts[$i]), 2);
-        if (count($kv) === 2) {
-            $params[trim($kv[0])] = trim($kv[1]);
+        if (count($this->headers) > 0) {
+            curl_setopt($ch, CURLOPT_HTTPHEADER, $this->headers);
         }
+
+        return $ch;
     }
-    return ['type' => $type, 'params' => $params];
-}
 
-$ct = parseContentType('text/html; charset=utf-8; boundary=something');
-echo "type: {$ct['type']}\n";
-echo "charset: {$ct['params']['charset']}\n";
-echo "boundary: {$ct['params']['boundary']}\n";
-
-// --- basic auth encoding ---
-
-$credentials = base64_encode('user:password123');
-echo "auth: Basic $credentials\n";
-$decoded = base64_decode($credentials);
-echo "credentials: $decoded\n";
-
-// --- cookie parsing ---
-
-function parseCookies($cookieString) {
-    $cookies = [];
-    $pairs = explode(';', $cookieString);
-    foreach ($pairs as $pair) {
-        $kv = explode('=', trim($pair), 2);
-        if (count($kv) === 2) {
-            $cookies[trim($kv[0])] = urldecode(trim($kv[1]));
+    public function describe(): string {
+        $parts = [$this->method->value, $this->url];
+        if ($this->body !== null) {
+            $parts[] = "body=" . strlen($this->body) . "b";
         }
+        $parts[] = "timeout=" . $this->timeout . "s";
+        $parts[] = count($this->headers) . " headers";
+        return implode(' | ', $parts);
     }
-    return $cookies;
 }
 
-$cookies = parseCookies('session=abc123; theme=dark; lang=en; name=John%20Doe');
-echo "session: {$cookies['session']}\n";
-echo "theme: {$cookies['theme']}\n";
-echo "name: {$cookies['name']}\n";
+class RequestInspector {
+    public static function inspect($ch): array {
+        $info = curl_getinfo($ch);
+        return [
+            'url' => $info['url'] ?? '',
+            'http_code' => $info['http_code'] ?? 0,
+        ];
+    }
 
-// --- query string building with nested arrays ---
+    public static function report($ch): void {
+        $info = self::inspect($ch);
+        echo "  url: {$info['url']}\n";
+        echo "  http_code: {$info['http_code']}\n";
+        echo "  error: '" . curl_error($ch) . "'\n";
+        echo "  errno: " . curl_errno($ch) . "\n";
+    }
+}
 
-$params = [
-    'filter' => 'active',
-    'sort' => 'name',
-    'fields' => 'id,name,email',
-];
-$qs = http_build_query($params);
-echo "query: $qs\n";
+// build and inspect requests
+echo "--- GET request ---\n";
+$get = new HttpRequest(HttpMethod::GET, "https://api.example.com/users");
+$get->withHeader("Accept", "application/json")
+    ->withHeader("Authorization", "Bearer token123")
+    ->withTimeout(10);
+echo $get->describe() . "\n";
 
-// verify round-trip
-parse_str($qs, $parsed);
-echo "filter: {$parsed['filter']}\n";
-echo "fields: {$parsed['fields']}\n";
+$ch = $get->toCurl();
+RequestInspector::report($ch);
+
+echo "\n--- POST request ---\n";
+$payload = json_encode(['name' => 'test', 'email' => 'test@example.com']);
+$post = new HttpRequest(HttpMethod::POST, "https://api.example.com/users");
+$post->withHeader("Content-Type", "application/json")
+     ->withBody($payload)
+     ->withTimeout(15);
+echo $post->describe() . "\n";
+
+$ch2 = $post->toCurl();
+RequestInspector::report($ch2);
+
+echo "\n--- DELETE request ---\n";
+$delete = new HttpRequest(HttpMethod::DELETE, "https://api.example.com/users/42");
+$delete->withSSLVerification(false)
+       ->withRedirects(false);
+echo $delete->describe() . "\n";
+
+$ch3 = $delete->toCurl();
+RequestInspector::report($ch3);
+
+// test curl_reset
+echo "\n--- reset ---\n";
+curl_reset($ch);
+$info = curl_getinfo($ch);
+echo "after reset url: '" . ($info['url'] ?? '') . "'\n";
+echo "after reset error: '" . curl_error($ch) . "'\n";
+
+// test version info
+echo "\n--- version ---\n";
+$ver = curl_version();
+echo "has version: " . (isset($ver['version']) ? 'yes' : 'no') . "\n";
+echo "has ssl: " . (isset($ver['ssl_version']) ? 'yes' : 'no') . "\n";
+
+// test method routing with match
+echo "\n--- method routing ---\n";
+$methods = [HttpMethod::GET, HttpMethod::POST, HttpMethod::PUT, HttpMethod::DELETE, HttpMethod::PATCH];
+foreach ($methods as $method) {
+    $label = match($method) {
+        HttpMethod::GET => 'read',
+        HttpMethod::POST => 'create',
+        HttpMethod::PUT => 'replace',
+        HttpMethod::DELETE => 'remove',
+        HttpMethod::PATCH => 'update',
+    };
+    echo "{$method->value}: $label\n";
+}
+
+echo "\ndone\n";

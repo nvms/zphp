@@ -30,14 +30,14 @@ jobs:
           version: 0.15.1
       - name: install system libs (linux)
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y libpcre2-dev libsqlite3-dev zlib1g-dev libmysqlclient-dev libpq-dev libssl-dev libnghttp2-dev
+        run: sudo apt-get update && sudo apt-get install -y libpcre2-dev libsqlite3-dev zlib1g-dev libmysqlclient-dev libpq-dev libssl-dev libnghttp2-dev libcurl4-openssl-dev
       - name: install system libs (macos)
         if: runner.os == 'macOS'
-        run: brew install mysql-client libpq openssl@3 nghttp2
+        run: brew install mysql-client libpq openssl@3 nghttp2 curl
       - name: build
         run: zig build -Doptimize=ReleaseFast
         env:
-          PKG_CONFIG_PATH: ${{ runner.os == 'macOS' && '/opt/homebrew/opt/mysql-client/lib/pkgconfig:/opt/homebrew/opt/libpq/lib/pkgconfig:/usr/local/opt/mysql-client/lib/pkgconfig:/usr/local/opt/libpq/lib/pkgconfig' || '' }}
+          PKG_CONFIG_PATH: ${{ runner.os == 'macOS' && '/opt/homebrew/opt/mysql-client/lib/pkgconfig:/opt/homebrew/opt/libpq/lib/pkgconfig:/opt/homebrew/opt/curl/lib/pkgconfig:/usr/local/opt/mysql-client/lib/pkgconfig:/usr/local/opt/libpq/lib/pkgconfig' || '' }}
       - name: package
         run: |
           cp zig-out/bin/zphp zphp-${{ matrix.name }}

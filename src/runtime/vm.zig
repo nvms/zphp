@@ -461,6 +461,7 @@ pub const VM = struct {
         try @import("../stdlib/websocket.zig").register(vm, allocator);
         try @import("../stdlib/filesystem.zig").register(vm, allocator);
         try @import("../stdlib/reflection.zig").register(vm, allocator);
+        try @import("../stdlib/curl.zig").register(vm, allocator);
         vm.error_reporting_level = 32767;
         vm.ic = try allocator.create(InlineCache);
         vm.ic.?.* = .{};
@@ -620,6 +621,7 @@ pub const VM = struct {
             self.allocator.destroy(a);
         }
         @import("../stdlib/pdo.zig").cleanupResources(self.objects);
+        @import("../stdlib/curl.zig").cleanupResources(self.objects);
         @import("../stdlib/filesystem.zig").cleanupHandles(self.objects);
         for (self.objects.items) |o| {
             o.deinit(self.allocator);

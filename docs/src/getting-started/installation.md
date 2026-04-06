@@ -26,7 +26,7 @@ Requires [Zig 0.15.x](https://ziglang.org/download/) and a few system libraries.
 
 ```
 $ sudo apt-get install -y libpcre2-dev libsqlite3-dev zlib1g-dev \
-    libmysqlclient-dev libpq-dev libssl-dev libnghttp2-dev
+    libmysqlclient-dev libpq-dev libssl-dev libnghttp2-dev libcurl4-openssl-dev
 $ zig build -Doptimize=ReleaseFast
 $ ./zig-out/bin/zphp --version
 ```
@@ -34,7 +34,7 @@ $ ./zig-out/bin/zphp --version
 **macOS (Homebrew):**
 
 ```
-$ brew install mysql-client libpq openssl@3 nghttp2
+$ brew install mysql-client libpq openssl@3 nghttp2 curl
 $ make build
 $ ./zig-out/bin/zphp --version
 ```

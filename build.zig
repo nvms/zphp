@@ -33,6 +33,7 @@ pub fn build(b: *std.Build) void {
     exe_mod.linkSystemLibrary("ssl", .{ .preferred_link_mode = .static, .use_pkg_config = .no });
     exe_mod.linkSystemLibrary("crypto", .{ .preferred_link_mode = .static, .use_pkg_config = .no });
     exe_mod.linkSystemLibrary("nghttp2", .{ .preferred_link_mode = .static });
+    exe_mod.linkSystemLibrary("curl", .{});
     exe_mod.link_libc = true;
     exe_mod.addObject(fast_loop_obj);
 
@@ -73,6 +74,7 @@ pub fn build(b: *std.Build) void {
     test_mod.linkSystemLibrary("ssl", .{ .preferred_link_mode = .static, .use_pkg_config = .no });
     test_mod.linkSystemLibrary("crypto", .{ .preferred_link_mode = .static, .use_pkg_config = .no });
     test_mod.linkSystemLibrary("nghttp2", .{ .preferred_link_mode = .static });
+    test_mod.linkSystemLibrary("curl", .{});
     test_mod.link_libc = true;
     test_mod.addObject(fast_loop_test_obj);
 
