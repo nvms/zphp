@@ -436,6 +436,17 @@ kill $WS_PID 2>/dev/null; wait $WS_PID 2>/dev/null || true
 kill $WSS_PID 2>/dev/null; wait $WSS_PID 2>/dev/null || true
 rm -f /tmp/zphp_test.key /tmp/zphp_test.crt
 
+# --- curl client tests (zphp curl bindings against zphp serve) ---
+curl_out=$(CURL_TEST_PORT=$PORT "$ZPHP" run "$SCRIPT_DIR/serve/curl_client.php" 2>&1)
+curl_passes=$(echo "$curl_out" | grep -c "^  pass")
+curl_fails=$(echo "$curl_out" | grep -c "^  FAIL")
+echo "$curl_out" | grep -E "^  (pass|FAIL)"
+passed=$((passed + curl_passes))
+failed=$((failed + curl_fails))
+if [ $curl_fails -gt 0 ]; then
+    errors="$errors\n--- curl client ---\n$curl_out\n"
+fi
+
 # test: graceful shutdown
 kill -TERM $SERVER_PID
 wait $SERVER_PID 2>/dev/null
