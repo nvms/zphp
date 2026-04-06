@@ -102,4 +102,13 @@ $body = curl_exec($ch8);
 $data = json_decode($body, true);
 test("DELETE method", "DELETE", $data['method']);
 
+// file_get_contents with HTTP URL
+$fgc = file_get_contents("$base/health");
+test("fgc http body", '{"status":"ok"}', $fgc);
+test("fgc http type", "string", gettype($fgc));
+
+// file_get_contents with bad URL
+$fgc_bad = file_get_contents("http://127.0.0.1:1/nope");
+test("fgc bad returns false", false, $fgc_bad);
+
 echo "done\n";

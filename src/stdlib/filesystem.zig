@@ -102,6 +102,58 @@ pub fn cleanupHandles(objects: std.ArrayListUnmanaged(*PhpObject)) void {
 
 // file read/write
 
+const c_curl = @cImport({
+    @cInclude("curl/curl.h");
+});
+
+var curl_global_init_done: bool = false;
+
+const CurlWriteData = struct {
+    allocator: Allocator,
+    buffer: std.ArrayListUnmanaged(u8),
+};
+
+fn curlWriteCallback(data: [*]u8, size: usize, nmemb: usize, userdata: *anyopaque) callconv(.c) usize {
+    const total = size * nmemb;
+    const wd: *CurlWriteData = @ptrCast(@alignCast(userdata));
+    wd.buffer.appendSlice(wd.allocator, data[0..total]) catch return 0;
+    return total;
+}
+
+fn fetchUrl(ctx: *NativeContext, url: []const u8) RuntimeError!Value {
+    if (!curl_global_init_done) {
+        _ = c_curl.curl_global_init(c_curl.CURL_GLOBAL_DEFAULT);
+        curl_global_init_done = true;
+    }
+
+    const handle = c_curl.curl_easy_init() orelse return .{ .bool = false };
+    defer c_curl.curl_easy_cleanup(handle);
+
+    var url_buf: [8192]u8 = undefined;
+    if (url.len >= url_buf.len) return .{ .bool = false };
+    @memcpy(url_buf[0..url.len], url);
+    url_buf[url.len] = 0;
+
+    _ = c_curl.curl_easy_setopt(handle, c_curl.CURLOPT_URL, &url_buf);
+    _ = c_curl.curl_easy_setopt(handle, c_curl.CURLOPT_FOLLOWLOCATION, @as(c_long, 1));
+    _ = c_curl.curl_easy_setopt(handle, c_curl.CURLOPT_MAXREDIRS, @as(c_long, 10));
+
+    var wd = CurlWriteData{
+        .allocator = ctx.allocator,
+        .buffer = .{},
+    };
+    defer wd.buffer.deinit(wd.allocator);
+
+    _ = c_curl.curl_easy_setopt(handle, c_curl.CURLOPT_WRITEFUNCTION, @as(?*const fn ([*]u8, usize, usize, *anyopaque) callconv(.c) usize, &curlWriteCallback));
+    _ = c_curl.curl_easy_setopt(handle, c_curl.CURLOPT_WRITEDATA, @as(*anyopaque, @ptrCast(&wd)));
+
+    const result = c_curl.curl_easy_perform(handle);
+    if (result != c_curl.CURLE_OK) return .{ .bool = false };
+
+    const content = try ctx.createString(wd.buffer.items);
+    return .{ .string = content };
+}
+
 fn native_file_get_contents(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len == 0 or args[0] != .string) return .{ .bool = false };
     const path = args[0].string;
@@ -112,6 +164,9 @@ fn native_file_get_contents(ctx: *NativeContext, args: []const Value) RuntimeErr
     }
     if (std.mem.eql(u8, path, "php://stdout") or std.mem.eql(u8, path, "php://output")) {
         return .{ .string = "" };
+    }
+    if (path.len > 7 and (std.mem.startsWith(u8, path, "http://") or std.mem.startsWith(u8, path, "https://"))) {
+        return fetchUrl(ctx, path);
     }
     const content = std.fs.cwd().readFileAlloc(ctx.allocator, path, 1024 * 1024 * 64) catch return Value{ .bool = false };
     try ctx.strings.append(ctx.allocator, content);

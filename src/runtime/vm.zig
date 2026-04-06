@@ -903,6 +903,8 @@ pub const VM = struct {
                         self.push(val);
                     } else if (name.len > 2 and name[0] == '$' and name[1] == '_') {
                         self.push(self.request_vars.get(name) orelse .null);
+                    } else if (self.request_vars.get(name)) |rv| {
+                        self.push(rv);
                     } else {
                         self.push(.null);
                     }

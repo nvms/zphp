@@ -13,14 +13,14 @@ pub fn main() !void {
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
-    if (bytecode_format.detectEmbeddedBytecode(allocator)) |bc| {
-        defer allocator.free(bc);
-        try runBytecode(allocator, bc);
-        return;
-    }
-
     const args = try std.process.argsAlloc(allocator);
     defer std.process.argsFree(allocator, args);
+
+    if (bytecode_format.detectEmbeddedBytecode(allocator)) |bc| {
+        defer allocator.free(bc);
+        try runBytecode(allocator, bc, args[0], if (args.len > 1) args[1..] else &.{});
+        return;
+    }
 
     if (args.len < 2) {
         try writeStdout("zphp 0.5.3\n");
@@ -35,7 +35,7 @@ fn dispatch(allocator: std.mem.Allocator, args: []const []const u8) !void {
 
     if (std.mem.eql(u8, cmd, "run")) {
         try requireArg(args, 3, "usage: zphp run <file>\n");
-        try runFile(allocator, args[2]);
+        try runFile(allocator, args[2], if (args.len > 3) args[3..] else &.{});
     } else if (std.mem.eql(u8, cmd, "serve")) {
         try requireArg(args, 3, "usage: zphp serve <file> [--port 8080] [--workers N] [--watch] [--tls-cert FILE --tls-key FILE]\n");
         var config = @import("serve.zig").ServeConfig{ .file = args[2] };
@@ -219,7 +219,29 @@ fn initCliServerVars(vm: *VM, a: std.mem.Allocator) !void {
     try env.populateEnvSuperglobal(vm, a, null);
 }
 
-fn runFile(allocator: std.mem.Allocator, path: []const u8) !void {
+fn initArgv(vm: *VM, a: std.mem.Allocator, script_path: []const u8, script_args: []const []const u8) !void {
+    const argv_arr = try a.create(PhpArray);
+    argv_arr.* = .{};
+    try vm.arrays.append(a, argv_arr);
+
+    try argv_arr.append(a, .{ .string = script_path });
+    for (script_args) |arg| {
+        try argv_arr.append(a, .{ .string = arg });
+    }
+
+    try vm.request_vars.put(a, "$argv", .{ .array = argv_arr });
+    try vm.request_vars.put(a, "$argc", .{ .int = @intCast(1 + script_args.len) });
+
+    // also update $_SERVER['argv'] and $_SERVER['argc']
+    if (vm.request_vars.get("$_SERVER")) |sv| {
+        if (sv == .array) {
+            try sv.array.set(a, .{ .string = "argv" }, .{ .array = argv_arr });
+            try sv.array.set(a, .{ .string = "argc" }, .{ .int = @intCast(1 + script_args.len) });
+        }
+    }
+}
+
+fn runFile(allocator: std.mem.Allocator, path: []const u8, script_args: []const []const u8) !void {
     if (std.mem.endsWith(u8, path, ".zphpc")) {
         const bc = std.fs.cwd().readFileAlloc(allocator, path, 256 * 1024 * 1024) catch |err| {
             try writeStderr("error: could not read file '");
@@ -228,7 +250,7 @@ fn runFile(allocator: std.mem.Allocator, path: []const u8) !void {
             return err;
         };
         defer allocator.free(bc);
-        try runBytecode(allocator, bc);
+        try runBytecode(allocator, bc, path, script_args);
         return;
     }
 
@@ -241,19 +263,19 @@ fn runFile(allocator: std.mem.Allocator, path: []const u8) !void {
     var result = try compileSource(allocator, source, abs_path);
     defer result.deinit();
 
-    try runWithVM(allocator, &result);
+    try runWithVM(allocator, &result, path, script_args);
 }
 
-fn runBytecode(allocator: std.mem.Allocator, bc: []const u8) !void {
+fn runBytecode(allocator: std.mem.Allocator, bc: []const u8, path: []const u8, script_args: []const []const u8) !void {
     var result = bytecode_format.deserialize(allocator, bc) catch {
         try writeStderr("error: invalid bytecode file\n");
         std.process.exit(1);
     };
     defer result.deinit();
-    try runWithVM(allocator, &result);
+    try runWithVM(allocator, &result, path, script_args);
 }
 
-fn runWithVM(allocator: std.mem.Allocator, result: *CompileResult) !void {
+fn runWithVM(allocator: std.mem.Allocator, result: *CompileResult, script_path: []const u8, script_args: []const []const u8) !void {
     env.loadEnvFile(allocator);
     const vm = VM.initOnHeap(allocator) catch {
         try writeStderr("vm init error\n");
@@ -265,6 +287,7 @@ fn runWithVM(allocator: std.mem.Allocator, result: *CompileResult) !void {
     }
     vm.file_loader = &loadFile;
     try initCliServerVars(vm, allocator);
+    try initArgv(vm, allocator, script_path, script_args);
     vm.interpret(result) catch {
         if (vm.output.items.len > 0) try writeStdout(vm.output.items);
         if (vm.exit_requested) std.process.exit(0);
