@@ -155,10 +155,17 @@ fn dtConstruct(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     const obj = getThis(ctx) orelse return .null;
     var ts: i64 = std.time.timestamp();
 
+    // extract timezone from second arg
+    var tz_name = ctx.vm.default_tz_name;
+    if (args.len >= 2) {
+        tz_name = extractTimezoneName(args[1..]);
+    }
+    try obj.set(ctx.allocator, "__timezone", .{ .string = tz_name });
+
     if (args.len >= 1 and args[0] == .string) {
         const s = args[0].string;
         if (s.len == 0 or std.mem.eql(u8, s, "now")) {
-            // default: current time
+            // default: current time (UTC), no conversion needed
         } else if (s.len >= 10 and s[4] == '-' and s[7] == '-') {
             const year = std.fmt.parseInt(i64, s[0..4], 10) catch 1970;
             const month = std.fmt.parseInt(i64, s[5..7], 10) catch 1;
@@ -171,7 +178,12 @@ fn dtConstruct(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
                 min = std.fmt.parseInt(i64, s[14..16], 10) catch 0;
                 sec = std.fmt.parseInt(i64, s[17..19], 10) catch 0;
             }
+            // when constructing with a datetime string and a timezone,
+            // the string is interpreted as local time in that timezone
             ts = dateToTimestamp(year, month, day, hour, min, sec);
+            if (lookupTimezone(tz_name)) |tz| {
+                ts -= @as(i64, tzOffsetAt(tz, ts));
+            }
         } else {
             const result = parseRelativeTime(s, ts);
             if (result == .int) ts = result.int;
@@ -186,11 +198,21 @@ fn dtFormat(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     const obj = getThis(ctx) orelse return .null;
     if (args.len == 0 or args[0] != .string) return .{ .string = "" };
     const ts = getTimestamp(obj);
-    return formatTimestamp(ctx, ts, args[0].string);
+    const tz_val = obj.get("__timezone");
+    const tz_name = if (tz_val == .string) tz_val.string else ctx.vm.default_tz_name;
+    const offset = if (lookupTimezone(tz_name)) |tz| tzOffsetAt(tz, ts) else @as(i32, 0);
+    return formatTimestampTz(ctx, ts, args[0].string, offset, tz_name);
 }
 
 pub fn formatTimestamp(ctx: *NativeContext, timestamp: i64, format: []const u8) RuntimeError!Value {
-    const epoch_secs: u64 = @intCast(if (timestamp < 0) 0 else timestamp);
+    const tz_name = ctx.vm.default_tz_name;
+    const offset = if (lookupTimezone(tz_name)) |tz| tzOffsetAt(tz, timestamp) else @as(i32, 0);
+    return formatTimestampTz(ctx, timestamp, format, offset, tz_name);
+}
+
+pub fn formatTimestampTz(ctx: *NativeContext, timestamp: i64, format: []const u8, tz_offset: i32, tz_name: []const u8) RuntimeError!Value {
+    const local_ts = timestamp + @as(i64, tz_offset);
+    const epoch_secs: u64 = @intCast(if (local_ts < 0) 0 else local_ts);
     const es = std.time.epoch.EpochSeconds{ .secs = epoch_secs };
     const day_seconds = es.getDaySeconds();
     const epoch_day = es.getEpochDay();
@@ -308,18 +330,18 @@ pub fn formatTimestamp(ctx: *NativeContext, timestamp: i64, format: []const u8) 
             'c' => {
                 // ISO 8601: YYYY-MM-DDTHH:MM:SS+00:00
                 var tmp: [32]u8 = undefined;
-                const s = std.fmt.bufPrint(&tmp, "{d}-{d:0>2}-{d:0>2}T{d:0>2}:{d:0>2}:{d:0>2}+00:00", .{
+                const s = std.fmt.bufPrint(&tmp, "{d}-{d:0>2}-{d:0>2}T{d:0>2}:{d:0>2}:{d:0>2}", .{
                     year_day.year,
                     month_day.month.numeric(),
                     month_day.day_index + 1,
                     day_seconds.getHoursIntoDay(),
                     day_seconds.getMinutesIntoHour(),
                     day_seconds.getSecondsIntoMinute(),
-                }) catch "0000-00-00T00:00:00+00:00";
+                }) catch "0000-00-00T00:00:00";
                 try buf.appendSlice(a, s);
+                try appendOffsetColon(&buf, a, tz_offset);
             },
             'r' => {
-                // RFC 2822: Day, DD Mon YYYY HH:MM:SS +0000
                 const day_num: i64 = @intCast(epoch_day.day);
                 const dow: usize = @intCast(@mod(day_num + 3, 7));
                 const day_names = [_][]const u8{ "Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun" };
@@ -330,13 +352,14 @@ pub fn formatTimestamp(ctx: *NativeContext, timestamp: i64, format: []const u8) 
                 const s = std.fmt.bufPrint(&tmp, "{d:0>2} ", .{month_day.day_index + 1}) catch "01 ";
                 try buf.appendSlice(a, s);
                 try buf.appendSlice(a, mon_names[month_day.month.numeric() - 1]);
-                const s2 = std.fmt.bufPrint(&tmp, " {d} {d:0>2}:{d:0>2}:{d:0>2} +0000", .{
+                const s2 = std.fmt.bufPrint(&tmp, " {d} {d:0>2}:{d:0>2}:{d:0>2} ", .{
                     year_day.year,
                     day_seconds.getHoursIntoDay(),
                     day_seconds.getMinutesIntoHour(),
                     day_seconds.getSecondsIntoMinute(),
-                }) catch " 0000 00:00:00 +0000";
+                }) catch " 0000 00:00:00 ";
                 try buf.appendSlice(a, s2);
+                try appendOffsetCompact(&buf, a, tz_offset);
             },
             'z' => {
                 const jan1_ts = dateToTimestamp(year_day.year, 1, 1, 0, 0, 0);
@@ -395,10 +418,27 @@ pub fn formatTimestamp(ctx: *NativeContext, timestamp: i64, format: []const u8) 
             },
             'u' => try buf.appendSlice(a, "000000"),
             'v' => try buf.appendSlice(a, "000"),
-            'Z' => try buf.append(a, '0'),
-            'e', 'T' => try buf.appendSlice(a, "UTC"),
-            'P' => try buf.appendSlice(a, "+00:00"),
-            'O' => try buf.appendSlice(a, "+0000"),
+            'Z' => {
+                var tmp: [12]u8 = undefined;
+                const s = std.fmt.bufPrint(&tmp, "{d}", .{tz_offset}) catch "0";
+                try buf.appendSlice(a, s);
+            },
+            'e' => {
+                try buf.appendSlice(a, tz_name);
+            },
+            'T' => {
+                if (lookupTimezone(tz_name)) |tz| {
+                    try buf.appendSlice(a, tzAbbrevAt(tz, timestamp));
+                } else {
+                    try buf.appendSlice(a, tz_name);
+                }
+            },
+            'P' => {
+                try appendOffsetColon(&buf, a, tz_offset);
+            },
+            'O' => {
+                try appendOffsetCompact(&buf, a, tz_offset);
+            },
             'I' => try buf.append(a, '0'),
             '\\' => {
                 fi += 1;
@@ -727,11 +767,50 @@ fn dtzGetName(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
     return if (tz_val == .string) tz_val else .{ .string = "UTC" };
 }
 
-fn dtzGetOffset(_: *NativeContext, _: []const Value) RuntimeError!Value {
+fn dtzGetOffset(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    const obj = getThis(ctx) orelse return .{ .int = 0 };
+    const tz_val = obj.get("timezone");
+    const tz_name = if (tz_val == .string) tz_val.string else "UTC";
+
+    // getOffset takes a DateTime argument for DST calculation
+    var ref_ts: i64 = std.time.timestamp();
+    if (args.len >= 1 and args[0] == .object) {
+        ref_ts = getTimestamp(args[0].object);
+    }
+
+    if (lookupTimezone(tz_name)) |tz| {
+        return .{ .int = @intCast(tzOffsetAt(tz, ref_ts)) };
+    }
     return .{ .int = 0 };
 }
 
 // standalone PHP functions: date(), mktime(), strtotime(), time(), microtime()
+
+fn appendOffsetColon(buf: *std.ArrayListUnmanaged(u8), a: Allocator, offset: i32) !void {
+    const abs: u32 = if (offset < 0) @intCast(-offset) else @intCast(offset);
+    const h = abs / 3600;
+    const m = (abs % 3600) / 60;
+    var tmp: [8]u8 = undefined;
+    const s = std.fmt.bufPrint(&tmp, "{c}{d:0>2}:{d:0>2}", .{
+        @as(u8, if (offset < 0) '-' else '+'),
+        h,
+        m,
+    }) catch "+00:00";
+    try buf.appendSlice(a, s);
+}
+
+fn appendOffsetCompact(buf: *std.ArrayListUnmanaged(u8), a: Allocator, offset: i32) !void {
+    const abs: u32 = if (offset < 0) @intCast(-offset) else @intCast(offset);
+    const h = abs / 3600;
+    const m = (abs % 3600) / 60;
+    var tmp: [8]u8 = undefined;
+    const s = std.fmt.bufPrint(&tmp, "{c}{d:0>2}{d:0>2}", .{
+        @as(u8, if (offset < 0) '-' else '+'),
+        h,
+        m,
+    }) catch "+0000";
+    try buf.appendSlice(a, s);
+}
 
 fn native_date(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len == 0 or args[0] != .string) return .{ .string = "" };
@@ -740,14 +819,18 @@ fn native_date(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     return formatTimestamp(ctx, timestamp, format);
 }
 
-fn native_mktime(_: *NativeContext, args: []const Value) RuntimeError!Value {
+fn native_mktime(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     const hour: i64 = if (args.len > 0) Value.toInt(args[0]) else 0;
     const min: i64 = if (args.len > 1) Value.toInt(args[1]) else 0;
     const sec: i64 = if (args.len > 2) Value.toInt(args[2]) else 0;
     const month: i64 = if (args.len > 3) Value.toInt(args[3]) else 1;
     const day: i64 = if (args.len > 4) Value.toInt(args[4]) else 1;
     const year: i64 = if (args.len > 5) Value.toInt(args[5]) else 1970;
-    return .{ .int = dateToTimestamp(year, month, day, hour, min, sec) };
+    var ts = dateToTimestamp(year, month, day, hour, min, sec);
+    if (lookupTimezone(ctx.vm.default_tz_name)) |tz| {
+        ts -= @as(i64, tzOffsetAt(tz, ts));
+    }
+    return .{ .int = ts };
 }
 
 fn native_strtotime(_: *NativeContext, args: []const Value) RuntimeError!Value {
@@ -1310,12 +1393,188 @@ fn daysInMonth(month: i64, year: i64) i64 {
     return d;
 }
 
+const DstRule = enum { none, us, eu };
+
+const TzEntry = struct {
+    name: []const u8,
+    std_offset: i32,
+    dst_offset: i32,
+    dst_rule: DstRule,
+    std_abbrev: []const u8,
+    dst_abbrev: []const u8,
+};
+
+// us dst: second sunday of march 2:00 -> first sunday of november 2:00
+// eu dst: last sunday of march 1:00 utc -> last sunday of october 1:00 utc
+const tz_table = [_]TzEntry{
+    // north america
+    .{ .name = "america/new_york", .std_offset = -5 * 3600, .dst_offset = -4 * 3600, .dst_rule = .us, .std_abbrev = "EST", .dst_abbrev = "EDT" },
+    .{ .name = "america/chicago", .std_offset = -6 * 3600, .dst_offset = -5 * 3600, .dst_rule = .us, .std_abbrev = "CST", .dst_abbrev = "CDT" },
+    .{ .name = "america/denver", .std_offset = -7 * 3600, .dst_offset = -6 * 3600, .dst_rule = .us, .std_abbrev = "MST", .dst_abbrev = "MDT" },
+    .{ .name = "america/los_angeles", .std_offset = -8 * 3600, .dst_offset = -7 * 3600, .dst_rule = .us, .std_abbrev = "PST", .dst_abbrev = "PDT" },
+    .{ .name = "america/anchorage", .std_offset = -9 * 3600, .dst_offset = -8 * 3600, .dst_rule = .us, .std_abbrev = "AKST", .dst_abbrev = "AKDT" },
+    .{ .name = "america/phoenix", .std_offset = -7 * 3600, .dst_offset = -7 * 3600, .dst_rule = .none, .std_abbrev = "MST", .dst_abbrev = "MST" },
+    .{ .name = "america/toronto", .std_offset = -5 * 3600, .dst_offset = -4 * 3600, .dst_rule = .us, .std_abbrev = "EST", .dst_abbrev = "EDT" },
+    .{ .name = "america/vancouver", .std_offset = -8 * 3600, .dst_offset = -7 * 3600, .dst_rule = .us, .std_abbrev = "PST", .dst_abbrev = "PDT" },
+    .{ .name = "america/mexico_city", .std_offset = -6 * 3600, .dst_offset = -6 * 3600, .dst_rule = .none, .std_abbrev = "CST", .dst_abbrev = "CST" },
+    .{ .name = "america/sao_paulo", .std_offset = -3 * 3600, .dst_offset = -3 * 3600, .dst_rule = .none, .std_abbrev = "BRT", .dst_abbrev = "BRT" },
+    .{ .name = "america/argentina/buenos_aires", .std_offset = -3 * 3600, .dst_offset = -3 * 3600, .dst_rule = .none, .std_abbrev = "ART", .dst_abbrev = "ART" },
+    .{ .name = "pacific/honolulu", .std_offset = -10 * 3600, .dst_offset = -10 * 3600, .dst_rule = .none, .std_abbrev = "HST", .dst_abbrev = "HST" },
+    // europe
+    .{ .name = "europe/london", .std_offset = 0, .dst_offset = 3600, .dst_rule = .eu, .std_abbrev = "GMT", .dst_abbrev = "BST" },
+    .{ .name = "europe/paris", .std_offset = 3600, .dst_offset = 2 * 3600, .dst_rule = .eu, .std_abbrev = "CET", .dst_abbrev = "CEST" },
+    .{ .name = "europe/berlin", .std_offset = 3600, .dst_offset = 2 * 3600, .dst_rule = .eu, .std_abbrev = "CET", .dst_abbrev = "CEST" },
+    .{ .name = "europe/amsterdam", .std_offset = 3600, .dst_offset = 2 * 3600, .dst_rule = .eu, .std_abbrev = "CET", .dst_abbrev = "CEST" },
+    .{ .name = "europe/brussels", .std_offset = 3600, .dst_offset = 2 * 3600, .dst_rule = .eu, .std_abbrev = "CET", .dst_abbrev = "CEST" },
+    .{ .name = "europe/madrid", .std_offset = 3600, .dst_offset = 2 * 3600, .dst_rule = .eu, .std_abbrev = "CET", .dst_abbrev = "CEST" },
+    .{ .name = "europe/rome", .std_offset = 3600, .dst_offset = 2 * 3600, .dst_rule = .eu, .std_abbrev = "CET", .dst_abbrev = "CEST" },
+    .{ .name = "europe/zurich", .std_offset = 3600, .dst_offset = 2 * 3600, .dst_rule = .eu, .std_abbrev = "CET", .dst_abbrev = "CEST" },
+    .{ .name = "europe/vienna", .std_offset = 3600, .dst_offset = 2 * 3600, .dst_rule = .eu, .std_abbrev = "CET", .dst_abbrev = "CEST" },
+    .{ .name = "europe/moscow", .std_offset = 3 * 3600, .dst_offset = 3 * 3600, .dst_rule = .none, .std_abbrev = "MSK", .dst_abbrev = "MSK" },
+    .{ .name = "europe/istanbul", .std_offset = 3 * 3600, .dst_offset = 3 * 3600, .dst_rule = .none, .std_abbrev = "TRT", .dst_abbrev = "TRT" },
+    .{ .name = "europe/athens", .std_offset = 2 * 3600, .dst_offset = 3 * 3600, .dst_rule = .eu, .std_abbrev = "EET", .dst_abbrev = "EEST" },
+    .{ .name = "europe/helsinki", .std_offset = 2 * 3600, .dst_offset = 3 * 3600, .dst_rule = .eu, .std_abbrev = "EET", .dst_abbrev = "EEST" },
+    .{ .name = "europe/bucharest", .std_offset = 2 * 3600, .dst_offset = 3 * 3600, .dst_rule = .eu, .std_abbrev = "EET", .dst_abbrev = "EEST" },
+    .{ .name = "europe/lisbon", .std_offset = 0, .dst_offset = 3600, .dst_rule = .eu, .std_abbrev = "WET", .dst_abbrev = "WEST" },
+    .{ .name = "europe/warsaw", .std_offset = 3600, .dst_offset = 2 * 3600, .dst_rule = .eu, .std_abbrev = "CET", .dst_abbrev = "CEST" },
+    // asia
+    .{ .name = "asia/tokyo", .std_offset = 9 * 3600, .dst_offset = 9 * 3600, .dst_rule = .none, .std_abbrev = "JST", .dst_abbrev = "JST" },
+    .{ .name = "asia/shanghai", .std_offset = 8 * 3600, .dst_offset = 8 * 3600, .dst_rule = .none, .std_abbrev = "CST", .dst_abbrev = "CST" },
+    .{ .name = "asia/hong_kong", .std_offset = 8 * 3600, .dst_offset = 8 * 3600, .dst_rule = .none, .std_abbrev = "HKT", .dst_abbrev = "HKT" },
+    .{ .name = "asia/singapore", .std_offset = 8 * 3600, .dst_offset = 8 * 3600, .dst_rule = .none, .std_abbrev = "SGT", .dst_abbrev = "SGT" },
+    .{ .name = "asia/kolkata", .std_offset = 5 * 3600 + 1800, .dst_offset = 5 * 3600 + 1800, .dst_rule = .none, .std_abbrev = "IST", .dst_abbrev = "IST" },
+    .{ .name = "asia/dubai", .std_offset = 4 * 3600, .dst_offset = 4 * 3600, .dst_rule = .none, .std_abbrev = "GST", .dst_abbrev = "GST" },
+    .{ .name = "asia/seoul", .std_offset = 9 * 3600, .dst_offset = 9 * 3600, .dst_rule = .none, .std_abbrev = "KST", .dst_abbrev = "KST" },
+    .{ .name = "asia/bangkok", .std_offset = 7 * 3600, .dst_offset = 7 * 3600, .dst_rule = .none, .std_abbrev = "ICT", .dst_abbrev = "ICT" },
+    .{ .name = "asia/jakarta", .std_offset = 7 * 3600, .dst_offset = 7 * 3600, .dst_rule = .none, .std_abbrev = "WIB", .dst_abbrev = "WIB" },
+    .{ .name = "asia/tehran", .std_offset = 3 * 3600 + 1800, .dst_offset = 3 * 3600 + 1800, .dst_rule = .none, .std_abbrev = "IRST", .dst_abbrev = "IRST" },
+    .{ .name = "asia/karachi", .std_offset = 5 * 3600, .dst_offset = 5 * 3600, .dst_rule = .none, .std_abbrev = "PKT", .dst_abbrev = "PKT" },
+    .{ .name = "asia/dhaka", .std_offset = 6 * 3600, .dst_offset = 6 * 3600, .dst_rule = .none, .std_abbrev = "BST", .dst_abbrev = "BST" },
+    .{ .name = "asia/kathmandu", .std_offset = 5 * 3600 + 2700, .dst_offset = 5 * 3600 + 2700, .dst_rule = .none, .std_abbrev = "NPT", .dst_abbrev = "NPT" },
+    // oceania
+    .{ .name = "australia/sydney", .std_offset = 10 * 3600, .dst_offset = 11 * 3600, .dst_rule = .none, .std_abbrev = "AEST", .dst_abbrev = "AEDT" },
+    .{ .name = "australia/melbourne", .std_offset = 10 * 3600, .dst_offset = 11 * 3600, .dst_rule = .none, .std_abbrev = "AEST", .dst_abbrev = "AEDT" },
+    .{ .name = "australia/perth", .std_offset = 8 * 3600, .dst_offset = 8 * 3600, .dst_rule = .none, .std_abbrev = "AWST", .dst_abbrev = "AWST" },
+    .{ .name = "pacific/auckland", .std_offset = 12 * 3600, .dst_offset = 13 * 3600, .dst_rule = .none, .std_abbrev = "NZST", .dst_abbrev = "NZDT" },
+    // africa
+    .{ .name = "africa/cairo", .std_offset = 2 * 3600, .dst_offset = 2 * 3600, .dst_rule = .none, .std_abbrev = "EET", .dst_abbrev = "EET" },
+    .{ .name = "africa/lagos", .std_offset = 3600, .dst_offset = 3600, .dst_rule = .none, .std_abbrev = "WAT", .dst_abbrev = "WAT" },
+    .{ .name = "africa/johannesburg", .std_offset = 2 * 3600, .dst_offset = 2 * 3600, .dst_rule = .none, .std_abbrev = "SAST", .dst_abbrev = "SAST" },
+    .{ .name = "africa/nairobi", .std_offset = 3 * 3600, .dst_offset = 3 * 3600, .dst_rule = .none, .std_abbrev = "EAT", .dst_abbrev = "EAT" },
+    // aliases
+    .{ .name = "utc", .std_offset = 0, .dst_offset = 0, .dst_rule = .none, .std_abbrev = "UTC", .dst_abbrev = "UTC" },
+    .{ .name = "gmt", .std_offset = 0, .dst_offset = 0, .dst_rule = .none, .std_abbrev = "GMT", .dst_abbrev = "GMT" },
+    .{ .name = "us/eastern", .std_offset = -5 * 3600, .dst_offset = -4 * 3600, .dst_rule = .us, .std_abbrev = "EST", .dst_abbrev = "EDT" },
+    .{ .name = "us/central", .std_offset = -6 * 3600, .dst_offset = -5 * 3600, .dst_rule = .us, .std_abbrev = "CST", .dst_abbrev = "CDT" },
+    .{ .name = "us/mountain", .std_offset = -7 * 3600, .dst_offset = -6 * 3600, .dst_rule = .us, .std_abbrev = "MST", .dst_abbrev = "MDT" },
+    .{ .name = "us/pacific", .std_offset = -8 * 3600, .dst_offset = -7 * 3600, .dst_rule = .us, .std_abbrev = "PST", .dst_abbrev = "PDT" },
+    .{ .name = "est", .std_offset = -5 * 3600, .dst_offset = -5 * 3600, .dst_rule = .none, .std_abbrev = "EST", .dst_abbrev = "EST" },
+    .{ .name = "mst", .std_offset = -7 * 3600, .dst_offset = -7 * 3600, .dst_rule = .none, .std_abbrev = "MST", .dst_abbrev = "MST" },
+    .{ .name = "hst", .std_offset = -10 * 3600, .dst_offset = -10 * 3600, .dst_rule = .none, .std_abbrev = "HST", .dst_abbrev = "HST" },
+};
+
+fn lookupTimezone(name: []const u8) ?TzEntry {
+    // try fixed offset first: +05:30, -08:00, +0530, etc
+    if (name.len >= 5 and (name[0] == '+' or name[0] == '-')) {
+        const offset = parseFixedOffset(name) orelse return null;
+        return TzEntry{
+            .name = name,
+            .std_offset = offset,
+            .dst_offset = offset,
+            .dst_rule = .none,
+            .std_abbrev = name,
+            .dst_abbrev = name,
+        };
+    }
+
+    for (tz_table) |entry| {
+        if (eqlLower(name, entry.name)) return entry;
+    }
+    return null;
+}
+
+fn parseFixedOffset(s: []const u8) ?i32 {
+    if (s.len < 5 or (s[0] != '+' and s[0] != '-')) return null;
+    const sign: i32 = if (s[0] == '-') -1 else 1;
+    if (s.len >= 6 and s[3] == ':') {
+        const h = std.fmt.parseInt(i32, s[1..3], 10) catch return null;
+        const m = std.fmt.parseInt(i32, s[4..6], 10) catch return null;
+        return sign * (h * 3600 + m * 60);
+    }
+    const h = std.fmt.parseInt(i32, s[1..3], 10) catch return null;
+    const m = std.fmt.parseInt(i32, s[3..5], 10) catch return null;
+    return sign * (h * 3600 + m * 60);
+}
+
+// find nth occurrence of target_dow (0=sun) in given month/year, or last if n=5
+fn nthWeekday(year: i64, month: i64, n: u8, target_dow: u8) i64 {
+    if (n == 5) {
+        // last occurrence
+        const last_day = daysInMonth(month, year);
+        var day = last_day;
+        while (day >= 1) : (day -= 1) {
+            const ts = dateToTimestamp(year, month, day, 0, 0, 0);
+            const dow: u8 = @intCast(@mod(@divFloor(ts, 86400) + 4, 7));
+            if (dow == target_dow) return day;
+        }
+        return 1;
+    }
+    var count: u8 = 0;
+    var day: i64 = 1;
+    const last_day = daysInMonth(month, year);
+    while (day <= last_day) : (day += 1) {
+        const ts = dateToTimestamp(year, month, day, 0, 0, 0);
+        const dow: u8 = @intCast(@mod(@divFloor(ts, 86400) + 4, 7));
+        if (dow == target_dow) {
+            count += 1;
+            if (count == n) return day;
+        }
+    }
+    return 1;
+}
+
+fn isDst(utc_ts: i64, rule: DstRule) bool {
+    if (rule == .none) return false;
+    const comps = baseComponents(utc_ts);
+    const year = comps.year;
+
+    if (rule == .us) {
+        // second sunday of march at 2:00 local (in standard time, so 2:00+std_offset UTC)
+        // -> first sunday of november at 2:00 local
+        const march_day = nthWeekday(year, 3, 2, 0);
+        const nov_day = nthWeekday(year, 11, 1, 0);
+        const dst_start = dateToTimestamp(year, 3, march_day, 2, 0, 0);
+        const dst_end = dateToTimestamp(year, 11, nov_day, 2, 0, 0);
+        return utc_ts >= dst_start and utc_ts < dst_end;
+    }
+
+    if (rule == .eu) {
+        // last sunday of march at 1:00 UTC -> last sunday of october at 1:00 UTC
+        const march_day = nthWeekday(year, 3, 5, 0);
+        const oct_day = nthWeekday(year, 10, 5, 0);
+        const dst_start = dateToTimestamp(year, 3, march_day, 1, 0, 0);
+        const dst_end = dateToTimestamp(year, 10, oct_day, 1, 0, 0);
+        return utc_ts >= dst_start and utc_ts < dst_end;
+    }
+
+    return false;
+}
+
+pub fn tzOffsetAt(tz: TzEntry, utc_ts: i64) i32 {
+    if (isDst(utc_ts, tz.dst_rule)) return tz.dst_offset;
+    return tz.std_offset;
+}
+
+fn tzAbbrevAt(tz: TzEntry, utc_ts: i64) []const u8 {
+    if (isDst(utc_ts, tz.dst_rule)) return tz.dst_abbrev;
+    return tz.std_abbrev;
+}
+
 fn parseTimezoneOffset(s: []const u8) ?i64 {
     // numeric: +0000, -0500, +05:30
     if (s.len >= 5 and (s[0] == '+' or s[0] == '-')) {
         const sign: i64 = if (s[0] == '-') -1 else 1;
         if (s.len >= 6 and s[3] == ':') {
-            // +05:30 format
             const h = std.fmt.parseInt(i64, s[1..3], 10) catch return null;
             const m = std.fmt.parseInt(i64, s[4..6], 10) catch return null;
             return sign * (h * 3600 + m * 60);
@@ -1324,8 +1583,12 @@ fn parseTimezoneOffset(s: []const u8) ?i64 {
         const m = std.fmt.parseInt(i64, s[3..5], 10) catch return null;
         return sign * (h * 3600 + m * 60);
     }
-    // named abbreviations
-    const zones = [_]struct { name: []const u8, offset: i64 }{
+    // named: look up in table
+    if (lookupTimezone(s)) |tz| {
+        return @intCast(tz.std_offset);
+    }
+    // short abbreviations for backwards compat
+    const abbrevs = [_]struct { name: []const u8, offset: i64 }{
         .{ .name = "utc", .offset = 0 },
         .{ .name = "gmt", .offset = 0 },
         .{ .name = "est", .offset = -5 * 3600 },
@@ -1337,7 +1600,7 @@ fn parseTimezoneOffset(s: []const u8) ?i64 {
         .{ .name = "pst", .offset = -8 * 3600 },
         .{ .name = "pdt", .offset = -7 * 3600 },
     };
-    for (zones) |z| {
+    for (abbrevs) |z| {
         if (s.len >= z.name.len and eqlLower(s[0..z.name.len], z.name)) return z.offset;
     }
     return null;
@@ -1515,14 +1778,18 @@ fn native_gmdate(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     return native_date(ctx, args);
 }
 
-// timezone stubs - zphp always runs in UTC
-fn native_tz_set(_: *NativeContext, _: []const Value) RuntimeError!Value {
-    return .{ .bool = true };
+fn native_tz_set(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len == 0 or args[0] != .string) return .{ .bool = false };
+    const name = args[0].string;
+    if (lookupTimezone(name)) |_| {
+        ctx.vm.default_tz_name = name;
+        return .{ .bool = true };
+    }
+    return .{ .bool = false };
 }
 
 fn native_tz_get(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    _ = ctx;
-    return .{ .string = "UTC" };
+    return .{ .string = ctx.vm.default_tz_name };
 }
 
 fn native_localtime(ctx: *NativeContext, args: []const Value) RuntimeError!Value {

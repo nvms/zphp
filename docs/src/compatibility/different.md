@@ -125,9 +125,17 @@ echo formatDate(time()); // globally registered functions work
 
 Most modern PHP frameworks (Laravel, Symfony, etc.) use return-based config files and autoloaded classes, both of which work correctly.
 
+## Timezones
+
+Timezone support covers approximately 60 IANA timezone identifiers across the Americas, Europe, Asia, Oceania, and Africa. `date_default_timezone_set()` and `date_default_timezone_get()` work, as do `DateTimeZone`, `DateTime` with timezone arguments, and all timezone-related format specifiers (`e`, `T`, `P`, `O`, `Z`).
+
+DST transitions are calculated for US rules (second Sunday of March to first Sunday of November) and EU rules (last Sunday of March to last Sunday of October). Zones without DST (Asia/Tokyo, Asia/Kolkata, etc.) use fixed offsets.
+
+Not supported: the full IANA timezone database (historical transition data, political changes to timezone rules), `timezone_identifiers_list()`, and `timezone_abbreviations_list()`. If your timezone isn't in the built-in table, use a fixed offset like `+05:30`.
+
 ## strtotime
 
-`strtotime()` supports common formats, relative modifiers ("next Thursday", "+2 days"), ordinal modifiers, and timezone suffixes (UTC, GMT, EST, PST, numeric offsets, RFC 2822). Timezone parsing is recognition only - internal timestamps are always UTC.
+`strtotime()` supports common formats, relative modifiers ("next Thursday", "+2 days"), ordinal modifiers, and timezone suffixes (UTC, GMT, EST, PST, numeric offsets, RFC 2822).
 
 ## Named arguments
 

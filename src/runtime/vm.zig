@@ -353,6 +353,8 @@ pub const VM = struct {
     response_content_type: []const u8 = "text/html",
     response_headers: ?*PhpArray = null,
     headers_sent: bool = false,
+    default_tz_name: []const u8 = "UTC",
+    default_tz_offset: i32 = 0,
 
     pub const InlineCache = struct {
         // property access: keyed by (chunk_ptr ^ ip), stores class_ptr for visibility skip
@@ -451,6 +453,7 @@ pub const VM = struct {
     }
 
     fn initVm(vm: *VM, allocator: Allocator) RuntimeError!void {
+        vm.default_tz_name = "UTC";
         try @import("../stdlib/registry.zig").register(&vm.native_fns, allocator);
         try initConstants(&vm.php_constants, allocator);
         try @import("../stdlib/exceptions.zig").register(vm, allocator);
@@ -777,6 +780,8 @@ pub const VM = struct {
         self.response_content_type = "text/html";
         self.response_headers = null;
         self.headers_sent = false;
+        self.default_tz_name = "UTC";
+        self.default_tz_offset = 0;
         self.statics.clearRetainingCapacity();
         self.static_vars.clearRetainingCapacity();
         self.global_vars.clearRetainingCapacity();

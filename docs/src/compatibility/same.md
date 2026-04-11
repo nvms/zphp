@@ -25,4 +25,4 @@ zphp aims to run standard PHP code as-is. The following all work the way you'd e
 
 ## Test suite
 
-zphp is validated against PHP 8.4 with 190 compatibility tests and 87 multi-file example projects. Each test runs the same PHP code in both zphp and PHP 8.4, comparing output exactly. A Laravel application (7 harness tests covering Eloquent, Blade, validation, JSON API, middleware, and error handling) is also tested against both runtimes. Standalone executable compilation is verified with 12 additional tests. The test suite runs on every commit.
+zphp is validated against PHP 8.4 with 193 compatibility tests and 88 multi-file example projects. Each test runs the same PHP code in both zphp and PHP 8.4, comparing output exactly. A Laravel application (7 harness tests covering Eloquent, Blade, validation, JSON API, middleware, and error handling) is also tested against both runtimes. Standalone executable compilation is verified with 12 additional tests. The test suite runs on every commit.
