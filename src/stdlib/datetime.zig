@@ -166,6 +166,8 @@ fn dtConstruct(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
         const s = args[0].string;
         if (s.len == 0 or std.mem.eql(u8, s, "now")) {
             // default: current time (UTC), no conversion needed
+        } else if (s.len >= 2 and s[0] == '@') {
+            ts = std.fmt.parseInt(i64, s[1..], 10) catch ts;
         } else if (s.len >= 10 and s[4] == '-' and s[7] == '-') {
             const year = std.fmt.parseInt(i64, s[0..4], 10) catch 1970;
             const month = std.fmt.parseInt(i64, s[5..7], 10) catch 1;
