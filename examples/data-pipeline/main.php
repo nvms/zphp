@@ -1,254 +1,350 @@
 <?php
-// covers: generators (yield, yield from, send, current), foreach on generators,
-//   closures with params, infinite generators, generator exception propagation,
-//   try/catch around generator foreach, chained generator transforms,
-//   str_getcsv, implode, count, array append, nested array access
+// covers: generators, yield, yield from, array_map, array_filter, array_reduce,
+//   array_chunk, array_column, array_combine, array_unique, array_merge,
+//   array_slice, array_splice, array_keys, array_values, array_flip,
+//   array_reverse, array_pop, array_shift, array_unshift, array_push,
+//   usort, uksort, array_walk, compact, extract, list() destructuring,
+//   closures, arrow functions, match, enums, interfaces, traits,
+//   constructor property promotion, readonly, named arguments,
+//   sprintf, json_encode, json_decode, ob_start, ob_get_clean,
+//   str_contains, str_starts_with, str_ends_with, strtolower, strtoupper,
+//   preg_match, preg_replace, explode, implode, trim, rtrim,
+//   intval, floatval, number_format, round, max, min, abs,
+//   count, strlen, substr, strpos, str_replace, str_pad
 
-function fromArray(array $items): Generator
-{
-    foreach ($items as $k => $v) {
-        yield $k => $v;
+interface Transformer {
+    public function transform(array $rows): array;
+}
+
+trait Describable {
+    abstract public function name(): string;
+
+    public function describe(): string {
+        return $this->name() . " (" . get_class($this) . ")";
     }
 }
 
-function mapGen(Generator $gen, callable $fn): Generator
-{
-    foreach ($gen as $k => $v) {
-        yield $k => $fn($v);
+enum DataType: string {
+    case STRING = 'string';
+    case INT = 'int';
+    case FLOAT = 'float';
+    case BOOL = 'bool';
+}
+
+class Column {
+    public function __construct(
+        public readonly string $name,
+        public readonly DataType $type,
+        public readonly bool $nullable = false,
+        public readonly mixed $default = null
+    ) {}
+
+    public function cast(mixed $value): mixed {
+        if ($value === null || $value === '') {
+            if ($this->nullable) return null;
+            if ($this->default !== null) return $this->default;
+        }
+        return match($this->type) {
+            DataType::STRING => (string)$value,
+            DataType::INT => intval($value),
+            DataType::FLOAT => floatval($value),
+            DataType::BOOL => (bool)$value,
+        };
     }
 }
 
-function filterGen(Generator $gen, callable $fn): Generator
-{
-    foreach ($gen as $k => $v) {
-        if ($fn($v)) yield $k => $v;
+class Schema {
+    private array $columns = [];
+
+    public function add(Column $col): self {
+        $this->columns[$col->name] = $col;
+        return $this;
+    }
+
+    public function apply(array $row): array {
+        $result = [];
+        foreach ($this->columns as $name => $col) {
+            $result[$name] = $col->cast($row[$name] ?? null);
+        }
+        return $result;
+    }
+
+    public function columnNames(): array {
+        return array_keys($this->columns);
     }
 }
 
-function takeGen(Generator $gen, int $n): Generator
-{
-    $i = 0;
-    foreach ($gen as $k => $v) {
-        if ($i >= $n) return;
-        yield $k => $v;
-        $i++;
+class FilterTransformer implements Transformer {
+    use Describable;
+
+    public function __construct(private string $field, private string $op, private mixed $value) {}
+
+    public function name(): string {
+        return "filter({$this->field} {$this->op} {$this->value})";
+    }
+
+    public function transform(array $rows): array {
+        return array_values(array_filter($rows, function($row) {
+            $val = $row[$this->field] ?? null;
+            return match($this->op) {
+                '=' => $val == $this->value,
+                '!=' => $val != $this->value,
+                '>' => $val > $this->value,
+                '<' => $val < $this->value,
+                '>=' => $val >= $this->value,
+                '<=' => $val <= $this->value,
+                'contains' => str_contains((string)$val, (string)$this->value),
+                default => true,
+            };
+        }));
     }
 }
 
-function toArray(Generator $gen): array
-{
-    $result = [];
-    foreach ($gen as $v) {
-        $result[] = $v;
-    }
-    return $result;
-}
+class MapTransformer implements Transformer {
+    use Describable;
 
-function reduce(Generator $gen, callable $fn, $initial)
-{
-    $acc = $initial;
-    foreach ($gen as $v) {
-        $acc = $fn($acc, $v);
-    }
-    return $acc;
-}
+    public function __construct(private string $field, private \Closure $fn, private string $label = 'map') {}
 
-// infinite sequence generators
-function naturals(int $start = 1): Generator
-{
-    $n = $start;
-    while (true) {
-        yield $n;
-        $n++;
+    public function name(): string {
+        return "{$this->label}({$this->field})";
+    }
+
+    public function transform(array $rows): array {
+        return array_map(function($row) {
+            $row[$this->field] = ($this->fn)($row[$this->field] ?? null, $row);
+            return $row;
+        }, $rows);
     }
 }
 
-function fibonacci(): Generator
-{
-    $a = 0;
-    $b = 1;
-    while (true) {
-        yield $a;
-        $temp = $a + $b;
-        $a = $b;
-        $b = $temp;
+class SortTransformer implements Transformer {
+    use Describable;
+
+    public function __construct(private string $field, private string $direction = 'asc') {}
+
+    public function name(): string {
+        return "sort({$this->field} {$this->direction})";
+    }
+
+    public function transform(array $rows): array {
+        $dir = $this->direction;
+        $field = $this->field;
+        usort($rows, function($a, $b) use ($field, $dir) {
+            $va = $a[$field] ?? 0;
+            $vb = $b[$field] ?? 0;
+            $cmp = $va <=> $vb;
+            return $dir === 'desc' ? -$cmp : $cmp;
+        });
+        return $rows;
     }
 }
 
-// === test: basic pipeline ===
+class Pipeline {
+    private array $transformers = [];
 
-$data = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
+    public function pipe(Transformer $t): self {
+        $this->transformers[] = $t;
+        return $this;
+    }
 
-$result = toArray(
-    filterGen(
-        mapGen(
-            fromArray($data),
-            function ($x) { return $x * $x; }
-        ),
-        function ($x) { return $x > 10; }
-    )
-);
-echo "squares > 10: " . implode(", ", $result) . "\n";
+    public function run(array $data): array {
+        foreach ($this->transformers as $t) {
+            $data = $t->transform($data);
+        }
+        return $data;
+    }
 
-// === test: take from infinite sequence ===
-
-$firstTen = toArray(takeGen(naturals(), 10));
-echo "first 10: " . implode(", ", $firstTen) . "\n";
-
-// === test: fibonacci ===
-
-$fibs = toArray(takeGen(fibonacci(), 10));
-echo "fibonacci: " . implode(", ", $fibs) . "\n";
-
-// === test: reduce ===
-
-$sum = reduce(fromArray([1, 2, 3, 4, 5]), function ($acc, $v) { return $acc + $v; }, 0);
-echo "sum: $sum\n";
-
-// === test: complex pipeline with records ===
-
-$users = [
-    ["name" => "Alice", "age" => 30, "active" => true],
-    ["name" => "Bob", "age" => 17, "active" => true],
-    ["name" => "Charlie", "age" => 45, "active" => false],
-    ["name" => "Diana", "age" => 28, "active" => true],
-    ["name" => "Eve", "age" => 15, "active" => true],
-    ["name" => "Frank", "age" => 35, "active" => true],
-];
-
-// active adults
-$activeAdults = toArray(
-    mapGen(
-        filterGen(
-            filterGen(
-                fromArray($users),
-                function ($u) { return $u["active"]; }
-            ),
-            function ($u) { return $u["age"] >= 18; }
-        ),
-        function ($u) { return $u["name"]; }
-    )
-);
-echo "active adults: " . implode(", ", $activeAdults) . "\n";
-
-// === test: generator with send ===
-
-function accumulator(): Generator
-{
-    $total = 0;
-    while (true) {
-        $value = yield $total;
-        if ($value === null) return;
-        $total += $value;
+    public function steps(): array {
+        return array_map(fn($t) => $t->describe(), $this->transformers);
     }
 }
 
-$acc = accumulator();
-$acc->current(); // init
-$acc->send(10);
-$acc->send(20);
-$result = $acc->send(30);
-echo "accumulated: " . $acc->current() . "\n";
+// generator that yields rows from "CSV-like" data
+function parseRows(string $data): Generator {
+    $lines = explode("\n", trim($data));
+    $headers = explode(",", array_shift($lines));
+    $headers = array_map('trim', $headers);
 
-// === test: yield from ===
-
-function inner(): Generator
-{
-    yield 1;
-    yield 2;
-    yield 3;
-}
-
-function outer(): Generator
-{
-    yield 0;
-    yield from inner();
-    yield 4;
-}
-
-$combined = toArray(outer());
-echo "yield from: " . implode(", ", $combined) . "\n";
-
-// === test: generator as data transformer ===
-
-function csvRows(array $lines): Generator
-{
     foreach ($lines as $line) {
-        yield str_getcsv($line, ",", "\"", "\\");
-    }
-}
-
-function withHeaders(Generator $rows): Generator
-{
-    $headers = null;
-    foreach ($rows as $row) {
-        if ($headers === null) {
-            $headers = $row;
-            continue;
-        }
-        $record = [];
+        $line = trim($line);
+        if ($line === '') continue;
+        $values = explode(",", $line);
+        $values = array_map('trim', $values);
+        $row = [];
         foreach ($headers as $i => $h) {
-            $record[$h] = $row[$i] ?? "";
+            $row[$h] = $values[$i] ?? '';
         }
-        yield $record;
+        yield $row;
     }
 }
 
-$csv = [
-    "name,age,city",
-    "Alice,30,NYC",
-    "Bob,25,LA",
-    "Charlie,35,Chicago",
-];
+// generator that yields summary stats
+function summarize(array $rows, string $field): Generator {
+    $values = array_map(fn($r) => floatval($r[$field] ?? 0), $rows);
+    $count = count($values);
 
-$records = toArray(withHeaders(csvRows($csv)));
-foreach ($records as $r) {
-    echo "{$r['name']} is {$r['age']} from {$r['city']}\n";
-}
-
-// === test: nested generators ===
-
-function range2(int $start, int $end): Generator
-{
-    for ($i = $start; $i <= $end; $i++) {
-        yield $i;
+    if ($count === 0) {
+        yield 'count' => 0;
+        return;
     }
+
+    yield 'count' => $count;
+    yield 'sum' => array_sum($values);
+    yield 'min' => min(...$values);
+    yield 'max' => max(...$values);
+    yield 'avg' => round(array_sum($values) / $count, 2);
 }
 
-function chunks(Generator $gen, int $size): Generator
-{
-    $chunk = [];
-    foreach ($gen as $v) {
-        $chunk[] = $v;
-        if (count($chunk) === $size) {
-            yield $chunk;
-            $chunk = [];
+// format table using output buffering
+function formatTable(array $rows, array $columns): string {
+    if (count($rows) === 0) return "(empty)\n";
+
+    $widths = [];
+    foreach ($columns as $col) {
+        $widths[$col] = strlen($col);
+    }
+    foreach ($rows as $row) {
+        foreach ($columns as $col) {
+            $val = (string)($row[$col] ?? '');
+            $widths[$col] = max($widths[$col], strlen($val));
         }
     }
-    if (count($chunk) > 0) yield $chunk;
-}
 
-$batches = toArray(chunks(range2(1, 10), 3));
-foreach ($batches as $batch) {
-    echo "[" . implode(",", $batch) . "] ";
-}
-echo "\n";
-
-// === test: exception in generator ===
-
-function riskyGenerator(): Generator
-{
-    yield 1;
-    yield 2;
-    throw new RuntimeException("generator error");
-}
-
-try {
-    foreach (riskyGenerator() as $v) {
-        echo "got: $v\n";
+    ob_start();
+    // header
+    $parts = [];
+    foreach ($columns as $col) {
+        $parts[] = str_pad($col, $widths[$col]);
     }
-} catch (RuntimeException $e) {
-    echo "caught: " . $e->getMessage() . "\n";
+    echo implode(" | ", $parts) . "\n";
+    $parts = [];
+    foreach ($columns as $col) {
+        $parts[] = str_repeat("-", $widths[$col]);
+    }
+    echo implode("-+-", $parts) . "\n";
+    // rows
+    foreach ($rows as $row) {
+        $parts = [];
+        foreach ($columns as $col) {
+            $parts[] = str_pad((string)($row[$col] ?? ''), $widths[$col]);
+        }
+        echo implode(" | ", $parts) . "\n";
+    }
+    return ob_get_clean();
 }
 
-echo "done\n";
+// --- test data ---
+$csv = "name, age, score, department
+Alice, 28, 92.5, engineering
+Bob, 34, 87.3, marketing
+Carol, 25, 95.1, engineering
+Dave, 41, 78.9, sales
+Eve, 30, 88.7, engineering
+Frank, 29, 91.2, marketing
+Grace, 36, 82.4, sales
+Hank, 27, 96.0, engineering
+Ivy, 33, 84.6, marketing
+Jack, 38, 77.8, sales";
+
+// parse and apply schema
+$schema = (new Schema())
+    ->add(new Column('name', DataType::STRING))
+    ->add(new Column('age', DataType::INT))
+    ->add(new Column('score', DataType::FLOAT))
+    ->add(new Column('department', DataType::STRING));
+
+$rows = [];
+foreach (parseRows($csv) as $row) {
+    $rows[] = $schema->apply($row);
+}
+
+echo "parsed: " . count($rows) . " rows\n";
+echo "columns: " . implode(", ", $schema->columnNames()) . "\n";
+
+// pipeline: filter engineering, sort by score desc, add grade
+$pipeline = (new Pipeline())
+    ->pipe(new FilterTransformer('department', '=', 'engineering'))
+    ->pipe(new SortTransformer('score', 'desc'))
+    ->pipe(new MapTransformer('score', function($score) {
+        return match(true) {
+            $score >= 95 => 'A+',
+            $score >= 90 => 'A',
+            $score >= 85 => 'B',
+            $score >= 80 => 'C',
+            default => 'D',
+        };
+    }, 'grade'));
+
+echo "\nsteps: " . implode(" -> ", $pipeline->steps()) . "\n\n";
+
+$result = $pipeline->run($rows);
+echo "--- engineering (sorted by score, graded) ---\n";
+echo formatTable($result, ['name', 'age', 'score', 'department']);
+
+// stats on all rows
+echo "--- score stats (all departments) ---\n";
+foreach (summarize($rows, 'score') as $stat => $value) {
+    echo "  $stat: $value\n";
+}
+
+// group by department using array_reduce
+$grouped = array_reduce($rows, function($acc, $row) {
+    $dept = $row['department'];
+    if (!isset($acc[$dept])) $acc[$dept] = [];
+    $acc[$dept][] = $row['name'];
+    return $acc;
+}, []);
+
+echo "\n--- departments ---\n";
+uksort($grouped, 'strcmp');
+foreach ($grouped as $dept => $names) {
+    echo "  $dept: " . implode(", ", $names) . "\n";
+}
+
+// array operations
+$names = array_column($rows, 'name');
+echo "\nnames: " . implode(", ", $names) . "\n";
+
+$ages = array_column($rows, 'age');
+echo "age range: " . min(...$ages) . "-" . max(...$ages) . "\n";
+
+$reversed = array_reverse(array_slice($names, 0, 3));
+echo "first 3 reversed: " . implode(", ", $reversed) . "\n";
+
+$unique_depts = array_unique(array_column($rows, 'department'));
+sort($unique_depts);
+echo "departments: " . implode(", ", $unique_depts) . "\n";
+
+// test compact/extract
+$total = count($rows);
+$avg_age = round(array_sum($ages) / $total);
+$summary = compact('total', 'avg_age');
+echo "compact: " . json_encode($summary) . "\n";
+
+extract($summary);
+echo "extract: total=$total avg_age=$avg_age\n";
+
+// list destructuring
+[$first, $second] = $rows;
+echo "first: {$first['name']}, second: {$second['name']}\n";
+
+// array_walk
+$scores_formatted = array_column($rows, 'score');
+array_walk($scores_formatted, function(&$v) {
+    $v = number_format($v, 1);
+});
+echo "scores: " . implode(", ", $scores_formatted) . "\n";
+
+// array_chunk
+$chunks = array_chunk($names, 3);
+echo "chunks: " . count($chunks) . "\n";
+echo "chunk[0]: " . implode(", ", $chunks[0]) . "\n";
+
+// string operations on names
+$upper_names = array_map('strtoupper', array_slice($names, 0, 3));
+echo "upper: " . implode(", ", $upper_names) . "\n";
+
+$filtered_names = array_filter($names, fn($n) => str_starts_with($n, 'A') || str_ends_with($n, 'e'));
+echo "A* or *e: " . implode(", ", array_values($filtered_names)) . "\n";
+
+echo "\ndone\n";
