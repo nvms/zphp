@@ -17,6 +17,10 @@ fn writeFmt(buf: *Writer, alloc: std.mem.Allocator, comptime fmt: []const u8, ar
 }
 
 fn writeSourceSnippet(buf: *Writer, alloc: std.mem.Allocator, source: []const u8, loc: SourceLocation, highlight_len: u32) void {
+    // bytecode mode has empty source and loc.column == 0. nothing to render,
+    // and `loc.column - 1` would overflow a u32 below
+    if (source.len == 0 or loc.column == 0) return;
+
     const gutter_width = digitCount(loc.line + 1);
 
     if (loc.line > 1) {
@@ -45,8 +49,14 @@ fn writeSourceSnippet(buf: *Writer, alloc: std.mem.Allocator, source: []const u8
 }
 
 fn writeGutterLine(buf: *Writer, alloc: std.mem.Allocator, gutter_width: u32, line_num: u32, text: []const u8) void {
+    // strip trailing \r so CRLF source files don't emit a literal CR that the
+    // terminal interprets as a carriage return, overwriting the gutter
+    var trimmed = text;
+    if (trimmed.len > 0 and trimmed[trimmed.len - 1] == '\r') {
+        trimmed = trimmed[0 .. trimmed.len - 1];
+    }
     writeFmt(buf, alloc, " {d: >[1]} | ", .{ line_num, gutter_width });
-    write(buf, alloc, text);
+    write(buf, alloc, trimmed);
     write(buf, alloc, "\n");
 }
 
@@ -215,6 +225,8 @@ fn writeStackTrace(buf: *Writer, alloc: std.mem.Allocator, vm: *const VM) void {
 }
 
 fn estimateTokenLength(source: []const u8, loc: SourceLocation) u32 {
+    // bytecode mode has empty source and column == 0, which would underflow below
+    if (source.len == 0 or loc.column == 0) return 1;
     const start = loc.line_start + loc.column - 1;
     if (start >= source.len) return 1;
 
