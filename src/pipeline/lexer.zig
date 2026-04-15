@@ -64,7 +64,8 @@ pub const Lexer = struct {
 
     fn isOpenTagPhp(self: *const Lexer) bool {
         if (self.pos + 5 > self.source.len) return false;
-        if (!std.mem.eql(u8, self.source[self.pos + 2 .. self.pos + 5], "php")) return false;
+        // <?php is case-insensitive in real php: <?PHP and <?Php work too
+        if (!std.ascii.eqlIgnoreCase(self.source[self.pos + 2 .. self.pos + 5], "php")) return false;
         return self.pos + 5 >= self.source.len or isWhitespace(self.source[self.pos + 5]);
     }
 
@@ -133,9 +134,12 @@ pub const Lexer = struct {
             _ = self.skipExponent();
             return self.makeToken(.float, start);
         }
-        if (self.match('.')) {
-            if (self.match('.')) return self.makeToken(.ellipsis, start);
-            return self.makeToken(.invalid, start);
+        // ellipsis must consume all three dots atomically. `..` alone should
+        // emit two dot tokens, not a single invalid one - matches php behavior
+        // where `1..2` tokenizes as float "1." + float ".2"
+        if (self.pos + 1 < self.source.len and self.source[self.pos] == '.' and self.source[self.pos + 1] == '.') {
+            self.pos += 2;
+            return self.makeToken(.ellipsis, start);
         }
         if (self.match('=')) return self.makeToken(.dot_equal, start);
         return self.makeToken(.dot, start);
@@ -195,21 +199,32 @@ pub const Lexer = struct {
     }
 
     fn lexHeredoc(self: *Lexer, start: usize) Token {
-        var is_nowdoc = false;
-        if (self.pos < self.source.len and self.source[self.pos] == '\'') {
-            is_nowdoc = true;
-            self.pos += 1;
+        // php supports three opener forms:
+        //   <<<LABEL      interpolating heredoc
+        //   <<<"LABEL"    same as above, explicit quotes
+        //   <<<'LABEL'    nowdoc (no interpolation)
+        var quote: u8 = 0;
+        if (self.pos < self.source.len) {
+            const q = self.source[self.pos];
+            if (q == '\'' or q == '"') {
+                quote = q;
+                self.pos += 1;
+            }
         }
+        const is_nowdoc = quote == '\'';
 
         const label_start = self.pos;
-        while (self.pos < self.source.len and (std.ascii.isAlphanumeric(self.source[self.pos]) or self.source[self.pos] == '_')) {
+        // label must start with a letter or underscore, not a digit
+        if (self.pos >= self.source.len or !isIdentStart(self.source[self.pos])) {
+            return self.makeToken(.invalid, start);
+        }
+        while (self.pos < self.source.len and isIdentChar(self.source[self.pos])) {
             self.pos += 1;
         }
         const label = self.source[label_start..self.pos];
-        if (label.len == 0) return self.makeToken(.invalid, start);
 
-        if (is_nowdoc) {
-            if (self.pos < self.source.len and self.source[self.pos] == '\'') {
+        if (quote != 0) {
+            if (self.pos < self.source.len and self.source[self.pos] == quote) {
                 self.pos += 1;
             } else {
                 return self.makeToken(.invalid, start);
@@ -312,18 +327,32 @@ pub const Lexer = struct {
         if (first == '0' and self.pos < self.source.len) {
             switch (self.source[self.pos]) {
                 'x', 'X' => {
+                    // if no hex digits follow, roll back so `0xG` tokenizes as
+                    // integer("0") + identifier("xG") matching real php
+                    const save = self.pos;
                     self.pos += 1;
-                    if (!self.skipHexDigits()) return self.makeToken(.invalid, start);
+                    if (!self.skipHexDigits()) {
+                        self.pos = save;
+                        return self.makeToken(.integer, start);
+                    }
                     return self.makeToken(.integer, start);
                 },
                 'b', 'B' => {
+                    const save = self.pos;
                     self.pos += 1;
-                    if (!self.skipBinaryDigits()) return self.makeToken(.invalid, start);
+                    if (!self.skipBinaryDigits()) {
+                        self.pos = save;
+                        return self.makeToken(.integer, start);
+                    }
                     return self.makeToken(.integer, start);
                 },
                 'o', 'O' => {
+                    const save = self.pos;
                     self.pos += 1;
-                    if (!self.skipOctalDigits()) return self.makeToken(.invalid, start);
+                    if (!self.skipOctalDigits()) {
+                        self.pos = save;
+                        return self.makeToken(.integer, start);
+                    }
                     return self.makeToken(.integer, start);
                 },
                 else => {},
@@ -332,13 +361,13 @@ pub const Lexer = struct {
 
         self.skipDecimalDigits();
 
+        // `1.` is always a float in php, regardless of what follows (even EOF).
+        // the fractional part and exponent are optional
         if (self.pos < self.source.len and self.source[self.pos] == '.') {
-            if (self.pos + 1 < self.source.len and isDigit(self.source[self.pos + 1])) {
-                self.pos += 1;
-                self.skipDecimalDigits();
-                _ = self.skipExponent();
-                return self.makeToken(.float, start);
-            }
+            self.pos += 1;
+            self.skipDecimalDigits();
+            _ = self.skipExponent();
+            return self.makeToken(.float, start);
         }
 
         if (self.skipExponent()) return self.makeToken(.float, start);
@@ -379,11 +408,19 @@ pub const Lexer = struct {
     fn skipExponent(self: *Lexer) bool {
         if (self.pos >= self.source.len) return false;
         if (self.source[self.pos] != 'e' and self.source[self.pos] != 'E') return false;
+        // exponent requires at least one digit after e[+-]?. if none, roll
+        // back so `1e` tokenizes as integer("1") + identifier("e") like php
+        const save = self.pos;
         self.pos += 1;
         if (self.pos < self.source.len and (self.source[self.pos] == '+' or self.source[self.pos] == '-')) {
             self.pos += 1;
         }
+        const digit_start = self.pos;
         self.skipDecimalDigits();
+        if (self.pos == digit_start) {
+            self.pos = save;
+            return false;
+        }
         return true;
     }
 
@@ -429,7 +466,8 @@ pub const Lexer = struct {
     }
 
     fn skipLineComment(self: *Lexer) void {
-        while (self.pos < self.source.len and self.source[self.pos] != '\n') {
+        // php treats both \r and \n as line terminators inside // and # comments
+        while (self.pos < self.source.len and self.source[self.pos] != '\n' and self.source[self.pos] != '\r') {
             // ?> terminates a line comment in PHP
             if (self.source[self.pos] == '?' and self.pos + 1 < self.source.len and self.source[self.pos + 1] == '>') return;
             self.pos += 1;
@@ -809,8 +847,55 @@ test "multiple php blocks" {
     );
 }
 
-test "invalid hex literal" {
-    try expectTokens("<?php 0x", &.{ .open_tag, .invalid });
+test "0x without hex digits tokenizes as int + ident" {
+    // matches real php: `0x` -> T_LNUMBER("0") + T_STRING("x")
+    try expectTokens("<?php 0x", &.{ .open_tag, .integer, .identifier });
+    try expectTokens("<?php 0xG", &.{ .open_tag, .integer, .identifier });
+    try expectTokens("<?php 0b", &.{ .open_tag, .integer, .identifier });
+    try expectTokens("<?php 0o", &.{ .open_tag, .integer, .identifier });
+}
+
+test "exponent without digits backs off" {
+    // `1e` is int(1) + ident(e), not a float. `1e5` is float.
+    try expectTokens("<?php 1e", &.{ .open_tag, .integer, .identifier });
+    try expectTokens("<?php 1e+", &.{ .open_tag, .integer, .identifier, .plus });
+    try expectTokens("<?php 1e5", &.{ .open_tag, .float });
+}
+
+test "trailing-dot float" {
+    // `1.` is float(1.0) in php, followed by whatever comes next
+    try expectTokens("<?php 1.", &.{ .open_tag, .float });
+    try expectTokens("<?php 1.;", &.{ .open_tag, .float, .semicolon });
+    try expectTokens("<?php 1.abc", &.{ .open_tag, .float, .identifier });
+    try expectTokens("<?php 1.e5", &.{ .open_tag, .float });
+    try expectTokens("<?php 1..2", &.{ .open_tag, .float, .float });
+}
+
+test "uppercase open tag" {
+    try expectTokens("<?PHP echo 1; ?>", &.{ .open_tag, .kw_echo, .integer, .semicolon, .close_tag });
+    try expectTokens("<?Php echo 1;", &.{ .open_tag, .kw_echo, .integer, .semicolon });
+}
+
+test "quoted heredoc label" {
+    try expectTokens("<?php $x = <<<\"EOT\"\nhello\nEOT;", &.{
+        .open_tag, .variable, .equal, .heredoc, .semicolon,
+    });
+    try expectTokens("<?php $x = <<<'EOT'\nhello\nEOT;", &.{
+        .open_tag, .variable, .equal, .nowdoc, .semicolon,
+    });
+}
+
+test "heredoc label cannot start with digit" {
+    // `<<<1FOO` -> invalid heredoc opener, then the digit/letters tokenize normally
+    try expectTokens("<?php <<<1FOO\nhi\n1FOO;", &.{
+        .open_tag,  .invalid, .integer, .identifier,
+        .identifier, .integer, .identifier, .semicolon,
+    });
+}
+
+test "line comment terminated by CR" {
+    try expectTokens("<?php // x\r$y", &.{ .open_tag, .variable });
+    try expectTokens("<?php # x\r$y", &.{ .open_tag, .variable });
 }
 
 test "invalid character" {
