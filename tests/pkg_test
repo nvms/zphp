@@ -131,10 +131,54 @@ check_contains "add: lock has monolog" '"monolog/monolog"' "$lock_content"
 check_contains "add: lock has transitive psr/log" '"psr/log"' "$lock_content"
 check_exists "add: composer.json created" "composer.json"
 
-# test: remove leaves lock file consistent
+# test: remove updates composer.json and prunes orphan transitive deps
 "$ZPHP" remove monolog/monolog 2>/dev/null
 lock_content=$(cat zphp.lock)
-check_contains "remove: psr/log still in lock" '"psr/log"' "$lock_content"
+composer_content=$(cat composer.json)
+if printf '%s\n' "$lock_content" | grep -qF 'monolog/monolog'; then
+    failed=$((failed + 1))
+    echo "  FAIL  remove: monolog gone from lock"
+else
+    passed=$((passed + 1))
+    echo "  pass  remove: monolog gone from lock"
+fi
+if printf '%s\n' "$lock_content" | grep -qF 'psr/log'; then
+    failed=$((failed + 1))
+    echo "  FAIL  remove: orphan psr/log pruned from lock"
+else
+    passed=$((passed + 1))
+    echo "  pass  remove: orphan psr/log pruned from lock"
+fi
+if printf '%s\n' "$composer_content" | grep -qF 'monolog/monolog'; then
+    failed=$((failed + 1))
+    echo "  FAIL  remove: monolog removed from composer.json"
+else
+    passed=$((passed + 1))
+    echo "  pass  remove: monolog removed from composer.json"
+fi
+if [ -e "vendor/monolog/monolog" ]; then
+    failed=$((failed + 1))
+    echo "  FAIL  remove: vendor/monolog dir deleted"
+else
+    passed=$((passed + 1))
+    echo "  pass  remove: vendor/monolog dir deleted"
+fi
+if [ -e "vendor/psr/log" ]; then
+    failed=$((failed + 1))
+    echo "  FAIL  remove: orphan vendor/psr/log dir pruned"
+else
+    passed=$((passed + 1))
+    echo "  pass  remove: orphan vendor/psr/log dir pruned"
+fi
+
+# test: remove when something still depends on the transitive keeps it
+rm -rf vendor zphp.lock composer.json
+"$ZPHP" add monolog/monolog 2>/dev/null
+"$ZPHP" add psr/log 2>/dev/null
+"$ZPHP" remove monolog/monolog 2>/dev/null
+lock_content=$(cat zphp.lock)
+check_contains "remove: direct dep psr/log kept in lock" '"psr/log"' "$lock_content"
+check_exists "remove: direct dep psr/log vendor kept" "vendor/psr/log"
 
 # test: install skips ext-* constraints
 rm -rf vendor zphp.lock composer.json

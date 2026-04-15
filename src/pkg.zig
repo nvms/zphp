@@ -25,7 +25,11 @@ pub const ComposerJson = struct {
             self.allocator.free(entry.value_ptr.*);
         }
         self.require_dev.deinit(self.allocator);
-        // psr4 keys/values are from parsed json, don't double-free
+        var it3 = self.autoload_psr4.iterator();
+        while (it3.next()) |entry| {
+            self.allocator.free(entry.key_ptr.*);
+            self.allocator.free(entry.value_ptr.*);
+        }
         self.autoload_psr4.deinit(self.allocator);
     }
 };
@@ -37,7 +41,32 @@ pub const LockEntry = struct {
     dist_sha: []const u8 = "",
     autoload_psr4: std.StringHashMapUnmanaged([]const u8) = .{},
     autoload_files: std.ArrayListUnmanaged([]const u8) = .{},
+    requires: std.StringHashMapUnmanaged([]const u8) = .{},
 };
+
+fn freeLockEntry(allocator: Allocator, e: *LockEntry) void {
+    if (e.name.len > 0) allocator.free(e.name);
+    if (e.version.len > 0) allocator.free(e.version);
+    if (e.dist_url.len > 0) allocator.free(e.dist_url);
+    if (e.dist_sha.len > 0) allocator.free(e.dist_sha);
+
+    var psr4_it = e.autoload_psr4.iterator();
+    while (psr4_it.next()) |p| {
+        allocator.free(p.key_ptr.*);
+        allocator.free(p.value_ptr.*);
+    }
+    e.autoload_psr4.deinit(allocator);
+
+    for (e.autoload_files.items) |f| allocator.free(f);
+    e.autoload_files.deinit(allocator);
+
+    var req_it = e.requires.iterator();
+    while (req_it.next()) |p| {
+        allocator.free(p.key_ptr.*);
+        allocator.free(p.value_ptr.*);
+    }
+    e.requires.deinit(allocator);
+}
 
 pub fn parseComposerJson(allocator: Allocator, source: []const u8) !ComposerJson {
     var result = ComposerJson{ .allocator = allocator };
@@ -90,6 +119,78 @@ pub fn parseComposerJson(allocator: Allocator, source: []const u8) !ComposerJson
     }
 
     return result;
+}
+
+fn writeComposerValue(allocator: Allocator, value: std.json.Value) !void {
+    var aw: std.io.Writer.Allocating = .init(allocator);
+    defer aw.deinit();
+    try std.json.Stringify.value(value, .{ .whitespace = .indent_2 }, &aw.writer);
+    try aw.writer.writeByte('\n');
+    try std.fs.cwd().writeFile(.{ .sub_path = "composer.json", .data = aw.written() });
+}
+
+fn upsertComposerRequire(allocator: Allocator, pkg_name: []const u8, version_constraint: []const u8) !void {
+    const source = std.fs.cwd().readFileAlloc(allocator, "composer.json", 1024 * 1024) catch {
+        // no composer.json - create a minimal one
+        var buf = std.ArrayListUnmanaged(u8){};
+        defer buf.deinit(allocator);
+        try buf.appendSlice(allocator, "{\n  \"require\": {\n    \"");
+        try buf.appendSlice(allocator, pkg_name);
+        try buf.appendSlice(allocator, "\": \"");
+        try buf.appendSlice(allocator, version_constraint);
+        try buf.appendSlice(allocator, "\"\n  }\n}\n");
+        try std.fs.cwd().writeFile(.{ .sub_path = "composer.json", .data = buf.items });
+        return;
+    };
+    defer allocator.free(source);
+
+    var parsed = std.json.parseFromSlice(std.json.Value, allocator, source, .{}) catch return;
+    defer parsed.deinit();
+
+    if (parsed.value != .object) return;
+    const root = &parsed.value.object;
+    const arena_alloc = parsed.arena.allocator();
+
+    const req_ptr = root.getPtr("require") orelse blk: {
+        try root.put("require", .{ .object = std.json.ObjectMap.init(arena_alloc) });
+        break :blk root.getPtr("require").?;
+    };
+    if (req_ptr.* != .object) {
+        req_ptr.* = .{ .object = std.json.ObjectMap.init(arena_alloc) };
+    }
+
+    const name_arena = try arena_alloc.dupe(u8, pkg_name);
+    const ver_arena = try arena_alloc.dupe(u8, version_constraint);
+    try req_ptr.object.put(name_arena, .{ .string = ver_arena });
+
+    try writeComposerValue(allocator, parsed.value);
+}
+
+fn removeComposerRequire(allocator: Allocator, pkg_name: []const u8) !bool {
+    const source = std.fs.cwd().readFileAlloc(allocator, "composer.json", 1024 * 1024) catch return false;
+    defer allocator.free(source);
+
+    var parsed = std.json.parseFromSlice(std.json.Value, allocator, source, .{}) catch return false;
+    defer parsed.deinit();
+
+    if (parsed.value != .object) return false;
+    const root = &parsed.value.object;
+
+    var changed = false;
+    if (root.getPtr("require")) |req| {
+        if (req.* == .object) {
+            if (req.object.orderedRemove(pkg_name)) changed = true;
+        }
+    }
+    if (root.getPtr("require-dev")) |req| {
+        if (req.* == .object) {
+            if (req.object.orderedRemove(pkg_name)) changed = true;
+        }
+    }
+    if (!changed) return false;
+
+    try writeComposerValue(allocator, parsed.value);
+    return true;
 }
 
 pub fn downloadPackage(allocator: Allocator, entry: *LockEntry) !void {
@@ -224,6 +325,14 @@ pub fn generateAutoloader(allocator: Allocator, entries: []const LockEntry, proj
 
     // vendor autoload - collect dirs per namespace prefix
     var ns_dirs = std.StringHashMapUnmanaged(std.ArrayListUnmanaged([]const u8)){};
+    defer {
+        var di = ns_dirs.iterator();
+        while (di.next()) |ent| {
+            for (ent.value_ptr.items) |d| allocator.free(d);
+            ent.value_ptr.deinit(allocator);
+        }
+        ns_dirs.deinit(allocator);
+    }
     for (entries) |entry| {
         var it = entry.autoload_psr4.iterator();
         while (it.next()) |e| {
@@ -296,7 +405,22 @@ pub fn writeLockFile(allocator: Allocator, entries: []const LockEntry) !void {
         try buf.appendSlice(allocator, entry.version);
         try buf.appendSlice(allocator, "\",\n      \"dist\": \"");
         try buf.appendSlice(allocator, entry.dist_url);
-        try buf.appendSlice(allocator, "\"\n    }");
+        try buf.appendSlice(allocator, "\"");
+        if (entry.requires.count() > 0) {
+            try buf.appendSlice(allocator, ",\n      \"require\": {");
+            var ri: usize = 0;
+            var it = entry.requires.iterator();
+            while (it.next()) |re| : (ri += 1) {
+                if (ri > 0) try buf.appendSlice(allocator, ", ");
+                try buf.appendSlice(allocator, "\"");
+                try buf.appendSlice(allocator, re.key_ptr.*);
+                try buf.appendSlice(allocator, "\": \"");
+                try buf.appendSlice(allocator, re.value_ptr.*);
+                try buf.appendSlice(allocator, "\"");
+            }
+            try buf.appendSlice(allocator, "}");
+        }
+        try buf.appendSlice(allocator, "\n    }");
     }
 
     try buf.appendSlice(allocator, "\n  ]\n}\n");
@@ -331,6 +455,16 @@ pub fn readLockFile(allocator: Allocator) !?[]LockEntry {
         }
         if (item.object.get("dist")) |d| {
             if (d == .string) entry.dist_url = try allocator.dupe(u8, d.string);
+        }
+        if (item.object.get("require")) |req| {
+            if (req == .object) {
+                var req_it = req.object.iterator();
+                while (req_it.next()) |re| {
+                    const k = try allocator.dupe(u8, re.key_ptr.*);
+                    const v = if (re.value_ptr.* == .string) try allocator.dupe(u8, re.value_ptr.string) else try allocator.dupe(u8, "*");
+                    try entry.requires.put(allocator, k, v);
+                }
+            }
         }
         try entries.append(allocator, entry);
     }
@@ -404,15 +538,38 @@ fn parseSemVer(version: []const u8) SemVer {
     return result;
 }
 
-const Constraint = struct {
-    kind: enum { any, exact, caret, tilde, range },
+const ConstraintKind = enum { any, exact, caret, tilde, range };
+
+const ConstraintPart = struct {
+    kind: ConstraintKind,
     min: SemVer = .{},
     max: SemVer = .{},
-    min_inclusive: bool = true,
     max_inclusive: bool = false,
 };
 
+const max_constraint_parts = 8;
+
+const Constraint = struct {
+    parts: [max_constraint_parts]ConstraintPart = undefined,
+    part_count: u8 = 0,
+};
+
 fn parseConstraint(raw: []const u8) Constraint {
+    var result = Constraint{};
+    var iter = std.mem.splitSequence(u8, raw, "||");
+    while (iter.next()) |chunk| {
+        if (result.part_count >= max_constraint_parts) break;
+        result.parts[result.part_count] = parseConstraintPart(chunk);
+        result.part_count += 1;
+    }
+    if (result.part_count == 0) {
+        result.parts[0] = .{ .kind = .any };
+        result.part_count = 1;
+    }
+    return result;
+}
+
+fn parseConstraintPart(raw: []const u8) ConstraintPart {
     var s = std.mem.trim(u8, raw, " ");
     if (s.len == 0 or std.mem.eql(u8, s, "*")) return .{ .kind = .any };
 
@@ -431,11 +588,22 @@ fn parseConstraint(raw: []const u8) Constraint {
         return .{ .kind = .caret, .min = ver, .max = max };
     }
 
-    // tilde: ~1.2.3 -> >=1.2.3 <1.3.0, ~1.2 -> >=1.2.0 <1.3.0
+    // tilde: ~1.2.3 -> >=1.2.3 <1.3.0, ~1.2 -> >=1.2 <2.0, ~1 -> >=1 <2
     if (s[0] == '~') {
-        const ver = parseSemVer(s[1..]);
+        const vs = s[1..];
+        const ver = parseSemVer(vs);
         if (!ver.valid) return .{ .kind = .any };
-        return .{ .kind = .tilde, .min = ver, .max = .{ .major = ver.major, .minor = ver.minor + 1 } };
+        // count dots up to the pre-release/build separator
+        var dot_count: usize = 0;
+        for (vs) |c| {
+            if (c == '-' or c == '+') break;
+            if (c == '.') dot_count += 1;
+        }
+        const max: SemVer = if (dot_count >= 2)
+            .{ .major = ver.major, .minor = ver.minor + 1 }
+        else
+            .{ .major = ver.major + 1 };
+        return .{ .kind = .tilde, .min = ver, .max = max };
     }
 
     // range: >=1.0 <2.0 (space separated)
@@ -473,11 +641,6 @@ fn parseConstraint(raw: []const u8) Constraint {
         }
     }
 
-    // exact version or composer "||" ranges - for now treat || as picking from any
-    if (std.mem.indexOf(u8, s, "||")) |_| {
-        return .{ .kind = .any };
-    }
-
     // exact version
     const ver = parseSemVer(s);
     if (ver.valid) return .{ .kind = .exact, .min = ver, .max = ver, .max_inclusive = true };
@@ -487,27 +650,30 @@ fn parseConstraint(raw: []const u8) Constraint {
 
 fn satisfiesConstraint(constraint: Constraint, version: SemVer) bool {
     if (!version.valid) return false;
-    return switch (constraint.kind) {
+    var i: usize = 0;
+    while (i < constraint.part_count) : (i += 1) {
+        if (satisfiesConstraintPart(constraint.parts[i], version)) return true;
+    }
+    return false;
+}
+
+fn satisfiesConstraintPart(part: ConstraintPart, version: SemVer) bool {
+    return switch (part.kind) {
         .any => true,
-        .exact => version.major == constraint.min.major and version.minor == constraint.min.minor and version.patch == constraint.min.patch,
+        .exact => version.major == part.min.major and version.minor == part.min.minor and version.patch == part.min.patch,
         .caret, .tilde, .range => blk: {
-            if (!version.gte(constraint.min)) break :blk false;
-            if (constraint.max_inclusive) {
-                break :blk !version.gte(.{ .major = constraint.max.major, .minor = constraint.max.minor, .patch = constraint.max.patch + 1 });
+            if (!version.gte(part.min)) break :blk false;
+            if (part.max_inclusive) {
+                break :blk !version.gte(.{ .major = part.max.major, .minor = part.max.minor, .patch = part.max.patch + 1 });
             }
-            break :blk version.lt(constraint.max);
+            break :blk version.lt(part.max);
         },
     };
 }
 
 // resolves a package, picking the best version matching the constraint.
-// also extracts transitive require entries from the chosen version.
-const ResolveResult = struct {
-    entry: LockEntry,
-    requires: std.StringHashMapUnmanaged([]const u8),
-};
-
-fn resolveWithConstraint(allocator: Allocator, name: []const u8, constraint_str: []const u8) !?ResolveResult {
+// transitive require entries are attached to entry.requires.
+fn resolveWithConstraint(allocator: Allocator, name: []const u8, constraint_str: []const u8) !?LockEntry {
     const url = try std.fmt.allocPrint(allocator, "https://repo.packagist.org/p2/{s}.json", .{name});
     defer allocator.free(url);
 
@@ -572,7 +738,6 @@ fn resolveWithConstraint(allocator: Allocator, name: []const u8, constraint_str:
         }
 
         // extract require for transitive resolution
-        var requires = std.StringHashMapUnmanaged([]const u8){};
         if (ver_obj.object.get("require")) |req| {
             if (req == .object) {
                 var it = req.object.iterator();
@@ -582,12 +747,12 @@ fn resolveWithConstraint(allocator: Allocator, name: []const u8, constraint_str:
                     if (std.mem.eql(u8, dep_name, "php") or std.mem.startsWith(u8, dep_name, "ext-")) continue;
                     const k = try allocator.dupe(u8, dep_name);
                     const v = if (e.value_ptr.* == .string) try allocator.dupe(u8, e.value_ptr.string) else try allocator.dupe(u8, "*");
-                    try requires.put(allocator, k, v);
+                    try entry.requires.put(allocator, k, v);
                 }
             }
         }
 
-        return .{ .entry = entry, .requires = requires };
+        return entry;
     }
 
     return null;
@@ -645,14 +810,15 @@ fn resolveAll(
             continue;
         }
 
-        const result = try resolveWithConstraint(allocator, item.name, item.constraint);
-        if (result) |r| {
+        const entry_opt = try resolveWithConstraint(allocator, item.name, item.constraint);
+        if (entry_opt) |entry| {
             const idx = entries.items.len;
-            try entries.append(allocator, r.entry);
+            try entries.append(allocator, entry);
             try resolved_map.put(allocator, entries.items[idx].name, idx);
 
-            // enqueue transitive deps
-            var dep_it = r.requires.iterator();
+            // enqueue transitive deps from the entry's own requires map
+            // (pointers stay valid for the rest of resolveAll since entries owns them)
+            var dep_it = entries.items[idx].requires.iterator();
             while (dep_it.next()) |dep| {
                 try queue.append(allocator, .{
                     .name = dep.key_ptr.*,
@@ -660,7 +826,6 @@ fn resolveAll(
                     .required_by = entries.items[idx].name,
                 });
             }
-            // keep the requires map alive - keys/values are used by queue items
         } else {
             tui.blank();
             tui.warn(item.name);
@@ -715,23 +880,20 @@ pub fn install(allocator: Allocator) !void {
 
     var entries = std.ArrayListUnmanaged(LockEntry){};
     defer {
-        for (entries.items) |*e| {
-            allocator.free(e.name);
-            allocator.free(e.version);
-            allocator.free(e.dist_url);
-            if (e.dist_sha.len > 0) allocator.free(e.dist_sha);
-            var psr4_it = e.autoload_psr4.iterator();
-            while (psr4_it.next()) |p| {
-                allocator.free(p.key_ptr.*);
-                allocator.free(p.value_ptr.*);
-            }
-            e.autoload_psr4.deinit(allocator);
-        }
+        for (entries.items) |*e| freeLockEntry(allocator, e);
         entries.deinit(allocator);
     }
 
     var conflicts = std.ArrayListUnmanaged(ResolveError){};
-    defer conflicts.deinit(allocator);
+    defer {
+        for (conflicts.items) |*c| {
+            allocator.free(c.package);
+            allocator.free(c.required_by);
+            allocator.free(c.constraint);
+            allocator.free(c.existing_version);
+        }
+        conflicts.deinit(allocator);
+    }
 
     try resolveAll(allocator, &composer.require, &entries, &conflicts);
     tui.progressDone(entries.items.len, "packages resolved");
@@ -796,20 +958,39 @@ pub fn add(allocator: Allocator, name: []const u8) !void {
     tui.step("resolving", name);
 
     var deps = std.StringHashMapUnmanaged([]const u8){};
-    defer deps.deinit(allocator);
+    defer {
+        var di = deps.iterator();
+        while (di.next()) |e| {
+            allocator.free(e.key_ptr.*);
+            allocator.free(e.value_ptr.*);
+        }
+        deps.deinit(allocator);
+    }
     const name_dupe = try allocator.dupe(u8, name);
     const star = try allocator.dupe(u8, "*");
     try deps.put(allocator, name_dupe, star);
 
-    var entries = std.ArrayListUnmanaged(LockEntry){};
-    defer entries.deinit(allocator);
+    var all_entries = std.ArrayListUnmanaged(LockEntry){};
+    defer {
+        for (all_entries.items) |*e| freeLockEntry(allocator, e);
+        all_entries.deinit(allocator);
+    }
 
     var conflicts = std.ArrayListUnmanaged(ResolveError){};
-    defer conflicts.deinit(allocator);
+    defer {
+        for (conflicts.items) |*c| {
+            allocator.free(c.package);
+            allocator.free(c.required_by);
+            allocator.free(c.constraint);
+            allocator.free(c.existing_version);
+        }
+        conflicts.deinit(allocator);
+    }
 
-    try resolveAll(allocator, &deps, &entries, &conflicts);
+    try resolveAll(allocator, &deps, &all_entries, &conflicts);
+    const new_count = all_entries.items.len;
 
-    if (entries.items.len == 0) {
+    if (new_count == 0) {
         tui.err("package not found on packagist");
         return;
     }
@@ -823,62 +1004,61 @@ pub fn add(allocator: Allocator, name: []const u8) !void {
         return;
     }
 
-    for (entries.items) |*entry| {
+    for (all_entries.items) |*entry| {
         tui.item(entry.name, entry.version);
     }
 
     tui.blank();
     tui.header("downloading");
-    for (entries.items, 0..) |*entry, i| {
-        tui.progress(i + 1, entries.items.len, entry.name);
+    for (all_entries.items[0..new_count], 0..) |*entry, i| {
+        tui.progress(i + 1, new_count, entry.name);
         try downloadPackage(allocator, entry);
         try readLocalAutoload(allocator, entry);
     }
-    tui.progressDone(entries.items.len, "packages downloaded");
+    tui.progressDone(new_count, "packages downloaded");
 
-    // update composer.json
-    const source = std.fs.cwd().readFileAlloc(allocator, "composer.json", 1024 * 1024) catch {
-        var buf = std.ArrayListUnmanaged(u8){};
-        defer buf.deinit(allocator);
-        try buf.appendSlice(allocator, "{\n  \"require\": {\n    \"");
-        try buf.appendSlice(allocator, name);
-        try buf.appendSlice(allocator, "\": \"^");
-        const ver = if (entries.items[0].version.len > 0 and entries.items[0].version[0] == 'v') entries.items[0].version[1..] else entries.items[0].version;
-        try buf.appendSlice(allocator, ver);
-        try buf.appendSlice(allocator, "\"\n  }\n}\n");
-        std.fs.cwd().writeFile(.{ .sub_path = "composer.json", .data = buf.items }) catch {};
-        tui.success("created composer.json");
-
-        var empty_psr4 = std.StringHashMapUnmanaged([]const u8){};
-        try generateAutoloader(allocator, entries.items, &empty_psr4);
-        try writeLockFile(allocator, entries.items);
-        tui.success("updated zphp.lock");
-        tui.blank();
-        return;
-    };
-    defer allocator.free(source);
-
-    // merge with existing lock entries (avoid duplicates)
-    var all_entries = std.ArrayListUnmanaged(LockEntry){};
-    defer all_entries.deinit(allocator);
-
-    for (entries.items) |e| try all_entries.append(allocator, e);
-
+    // merge in existing lock entries (those not replaced by a fresh resolve),
+    // rehydrating their autoload info from vendor/ so generateAutoloader works
     if (try readLockFile(allocator)) |existing| {
+        defer allocator.free(existing);
         for (existing) |e| {
+            var owned = e;
             var already = false;
-            for (all_entries.items) |a| {
+            for (all_entries.items[0..new_count]) |a| {
                 if (std.mem.eql(u8, a.name, e.name)) {
                     already = true;
                     break;
                 }
             }
-            if (!already) try all_entries.append(allocator, e);
+            if (already) {
+                freeLockEntry(allocator, &owned);
+            } else {
+                readLocalAutoload(allocator, &owned) catch {};
+                try all_entries.append(allocator, owned);
+            }
         }
     }
 
-    var composer = try parseComposerJson(allocator, source);
-    try generateAutoloader(allocator, all_entries.items, &composer.autoload_psr4);
+    // update composer.json with this package at the resolved version
+    const first_ver = all_entries.items[0].version;
+    const ver_slice = if (first_ver.len > 0 and first_ver[0] == 'v') first_ver[1..] else first_ver;
+    const constraint = try std.fmt.allocPrint(allocator, "^{s}", .{ver_slice});
+    defer allocator.free(constraint);
+    try upsertComposerRequire(allocator, name, constraint);
+
+    // regenerate autoloader from updated composer.json
+    const source = std.fs.cwd().readFileAlloc(allocator, "composer.json", 1024 * 1024) catch "";
+    defer if (source.len > 0) allocator.free(source);
+
+    if (source.len > 0) {
+        var composer = try parseComposerJson(allocator, source);
+        defer composer.deinit();
+        try generateAutoloader(allocator, all_entries.items, &composer.autoload_psr4);
+    } else {
+        var empty_psr4 = std.StringHashMapUnmanaged([]const u8){};
+        try generateAutoloader(allocator, all_entries.items, &empty_psr4);
+    }
+
     try writeLockFile(allocator, all_entries.items);
 
     tui.success("updated zphp.lock");
@@ -889,31 +1069,89 @@ pub fn remove(allocator: Allocator, name: []const u8) !void {
     tui.blank();
     tui.step("removing", name);
 
-    // remove vendor directory
-    const vendor_dir = try std.fmt.allocPrint(allocator, "vendor/{s}", .{name});
-    defer allocator.free(vendor_dir);
-    std.fs.cwd().deleteTree(vendor_dir) catch {};
+    // update composer.json first so reachability is computed from the new roots
+    _ = removeComposerRequire(allocator, name) catch false;
 
-    // update lock file
+    // read updated composer.json for psr-4 info (autoloader generation)
+    const composer_source = std.fs.cwd().readFileAlloc(allocator, "composer.json", 1024 * 1024) catch "";
+    defer if (composer_source.len > 0) allocator.free(composer_source);
+
+    var composer = if (composer_source.len > 0)
+        try parseComposerJson(allocator, composer_source)
+    else
+        ComposerJson{ .allocator = allocator };
+    defer composer.deinit();
+
+    // read existing lock
     const existing = try readLockFile(allocator) orelse {
         tui.err("no zphp.lock found");
         return;
     };
-
-    var entries = std.ArrayListUnmanaged(LockEntry){};
-    defer entries.deinit(allocator);
-    for (existing) |entry| {
-        if (!std.mem.eql(u8, entry.name, name)) {
-            try entries.append(allocator, entry);
+    defer allocator.free(existing);
+    defer {
+        for (existing) |*e| {
+            var owned = e.*;
+            freeLockEntry(allocator, &owned);
         }
     }
 
-    const source = std.fs.cwd().readFileAlloc(allocator, "composer.json", 1024 * 1024) catch "";
-    var composer = if (source.len > 0) try parseComposerJson(allocator, source) else ComposerJson{};
+    // rehydrate autoload info from vendor/ for each existing entry
+    for (existing) |*e| {
+        readLocalAutoload(allocator, e) catch {};
+    }
 
-    try generateAutoloader(allocator, entries.items, &composer.autoload_psr4);
-    try writeLockFile(allocator, entries.items);
+    // compute reachable set: BFS from composer.require roots through entry.requires
+    var reachable = std.StringHashMapUnmanaged(void){};
+    defer reachable.deinit(allocator);
 
+    var queue = std.ArrayListUnmanaged([]const u8){};
+    defer queue.deinit(allocator);
+
+    var rit = composer.require.iterator();
+    while (rit.next()) |re| {
+        try queue.append(allocator, re.key_ptr.*);
+    }
+
+    var qi: usize = 0;
+    while (qi < queue.items.len) : (qi += 1) {
+        const cur = queue.items[qi];
+        const gop = try reachable.getOrPut(allocator, cur);
+        if (gop.found_existing) continue;
+        for (existing) |e| {
+            if (std.mem.eql(u8, e.name, cur)) {
+                var dit = e.requires.iterator();
+                while (dit.next()) |de| {
+                    try queue.append(allocator, de.key_ptr.*);
+                }
+                break;
+            }
+        }
+    }
+
+    // partition: kept stays in lock, orphans get deleted from vendor/
+    var kept = std.ArrayListUnmanaged(LockEntry){};
+    defer kept.deinit(allocator);
+
+    var orphan_count: usize = 0;
+    for (existing) |e| {
+        if (reachable.contains(e.name)) {
+            try kept.append(allocator, e);
+        } else {
+            orphan_count += 1;
+            const vendor_dir = try std.fmt.allocPrint(allocator, "vendor/{s}", .{e.name});
+            defer allocator.free(vendor_dir);
+            std.fs.cwd().deleteTree(vendor_dir) catch {};
+        }
+    }
+
+    try generateAutoloader(allocator, kept.items, &composer.autoload_psr4);
+    try writeLockFile(allocator, kept.items);
+
+    if (orphan_count > 1) {
+        const msg = try std.fmt.allocPrint(allocator, "pruned {d} orphaned packages", .{orphan_count - 1});
+        defer allocator.free(msg);
+        tui.success(msg);
+    }
     tui.success("removed");
     tui.blank();
 }
@@ -958,7 +1196,7 @@ test "parseSemVer two-part" {
 
 test "caret constraint" {
     const c = parseConstraint("^1.2.3");
-    try std.testing.expect(c.kind == .caret);
+    try std.testing.expect(c.parts[0].kind == .caret);
 
     try std.testing.expect(satisfiesConstraint(c, parseSemVer("1.2.3")));
     try std.testing.expect(satisfiesConstraint(c, parseSemVer("1.9.0")));
@@ -976,12 +1214,34 @@ test "caret constraint 0.x" {
 
 test "tilde constraint" {
     const c = parseConstraint("~1.2.3");
-    try std.testing.expect(c.kind == .tilde);
+    try std.testing.expect(c.parts[0].kind == .tilde);
 
     try std.testing.expect(satisfiesConstraint(c, parseSemVer("1.2.3")));
     try std.testing.expect(satisfiesConstraint(c, parseSemVer("1.2.9")));
     try std.testing.expect(!satisfiesConstraint(c, parseSemVer("1.3.0")));
     try std.testing.expect(!satisfiesConstraint(c, parseSemVer("1.2.2")));
+}
+
+test "tilde two-part constraint" {
+    // ~1.2 means >=1.2 <2.0 in composer (different from ~1.2.3 which is <1.3.0)
+    const c = parseConstraint("~1.2");
+    try std.testing.expect(c.parts[0].kind == .tilde);
+
+    try std.testing.expect(satisfiesConstraint(c, parseSemVer("1.2.0")));
+    try std.testing.expect(satisfiesConstraint(c, parseSemVer("1.5.7")));
+    try std.testing.expect(satisfiesConstraint(c, parseSemVer("1.99.99")));
+    try std.testing.expect(!satisfiesConstraint(c, parseSemVer("2.0.0")));
+    try std.testing.expect(!satisfiesConstraint(c, parseSemVer("1.1.9")));
+}
+
+test "tilde single-part constraint" {
+    // ~1 means >=1 <2
+    const c = parseConstraint("~1");
+    try std.testing.expect(c.parts[0].kind == .tilde);
+
+    try std.testing.expect(satisfiesConstraint(c, parseSemVer("1.0.0")));
+    try std.testing.expect(satisfiesConstraint(c, parseSemVer("1.9.9")));
+    try std.testing.expect(!satisfiesConstraint(c, parseSemVer("2.0.0")));
 }
 
 test "wildcard constraint" {
@@ -1001,14 +1261,14 @@ test "range constraint" {
 
 test "exact constraint" {
     const c = parseConstraint("1.2.3");
-    try std.testing.expect(c.kind == .exact);
+    try std.testing.expect(c.parts[0].kind == .exact);
     try std.testing.expect(satisfiesConstraint(c, parseSemVer("1.2.3")));
     try std.testing.expect(!satisfiesConstraint(c, parseSemVer("1.2.4")));
 }
 
 test "any constraint" {
     const c = parseConstraint("*");
-    try std.testing.expect(c.kind == .any);
+    try std.testing.expect(c.parts[0].kind == .any);
     try std.testing.expect(satisfiesConstraint(c, parseSemVer("999.0.0")));
 }
 
@@ -1050,9 +1310,25 @@ test "wildcard major" {
     try std.testing.expect(!satisfiesConstraint(c, parseSemVer("1.9.9")));
 }
 
-test "or constraint falls back to any" {
+test "or constraint accepts versions from either side" {
     const c = parseConstraint("^1.0 || ^2.0");
-    try std.testing.expect(c.kind == .any);
+    try std.testing.expect(c.part_count == 2);
+
+    try std.testing.expect(satisfiesConstraint(c, parseSemVer("1.0.0")));
+    try std.testing.expect(satisfiesConstraint(c, parseSemVer("1.5.9")));
+    try std.testing.expect(satisfiesConstraint(c, parseSemVer("2.0.0")));
+    try std.testing.expect(satisfiesConstraint(c, parseSemVer("2.9.9")));
+    try std.testing.expect(!satisfiesConstraint(c, parseSemVer("0.9.9")));
+    try std.testing.expect(!satisfiesConstraint(c, parseSemVer("3.0.0")));
+}
+
+test "or constraint three parts" {
+    const c = parseConstraint("^1.0 || ^2.0 || ^3.0");
+    try std.testing.expect(c.part_count == 3);
+    try std.testing.expect(satisfiesConstraint(c, parseSemVer("1.9.9")));
+    try std.testing.expect(satisfiesConstraint(c, parseSemVer("2.5.0")));
+    try std.testing.expect(satisfiesConstraint(c, parseSemVer("3.0.0")));
+    try std.testing.expect(!satisfiesConstraint(c, parseSemVer("4.0.0")));
 }
 
 test "gte only constraint" {
@@ -1064,7 +1340,7 @@ test "gte only constraint" {
 
 test "empty constraint is any" {
     const c = parseConstraint("");
-    try std.testing.expect(c.kind == .any);
+    try std.testing.expect(c.parts[0].kind == .any);
 }
 
 test "parseComposerJson with require" {
