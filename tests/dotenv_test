@@ -117,6 +117,70 @@ EOF
 result=$(cd "$TMPDIR" && "$ZPHP" run test.php 2>&1)
 assert_eq "values with equals signs" "host=localhost;port=5432;db=mydb" "$result"
 
+# test: export prefix is stripped
+cat > "$TMPDIR/.env" << 'EOF'
+export EXPORTED_VAR=yes
+export ANOTHER="with quotes"
+EOF
+cat > "$TMPDIR/test.php" << 'EOF'
+<?php
+echo getenv("EXPORTED_VAR") . "|" . getenv("ANOTHER");
+EOF
+result=$(cd "$TMPDIR" && "$ZPHP" run test.php 2>&1)
+assert_eq "export prefix stripped" "yes|with quotes" "$result"
+
+# test: inline comment on unquoted value
+cat > "$TMPDIR/.env" << 'EOF'
+FOO=bar # trailing comment
+NUM=42    # with extra whitespace
+EOF
+cat > "$TMPDIR/test.php" << 'EOF'
+<?php
+echo getenv("FOO") . "|" . getenv("NUM");
+EOF
+result=$(cd "$TMPDIR" && "$ZPHP" run test.php 2>&1)
+assert_eq "inline comment stripped" "bar|42" "$result"
+
+# test: # inside value (no leading space) is kept
+cat > "$TMPDIR/.env" << 'EOF'
+HASH=abc#def
+EOF
+cat > "$TMPDIR/test.php" << 'EOF'
+<?php
+echo getenv("HASH");
+EOF
+result=$(cd "$TMPDIR" && "$ZPHP" run test.php 2>&1)
+assert_eq "# without leading space kept" "abc#def" "$result"
+
+# test: inline comment after quoted value
+cat > "$TMPDIR/.env" << 'EOF'
+GREETING="hello world" # a welcome message
+EOF
+cat > "$TMPDIR/test.php" << 'EOF'
+<?php
+echo getenv("GREETING");
+EOF
+result=$(cd "$TMPDIR" && "$ZPHP" run test.php 2>&1)
+assert_eq "inline comment after quoted" "hello world" "$result"
+
+# test: multi-line quoted value (PEM-key style)
+printf 'PEM="-----BEGIN KEY-----\nline1\nline2\n-----END KEY-----"\nAFTER=next\n' > "$TMPDIR/.env"
+cat > "$TMPDIR/test.php" << 'EOF'
+<?php
+echo str_replace("\n", "|", getenv("PEM")) . ";;" . getenv("AFTER");
+EOF
+result=$(cd "$TMPDIR" && "$ZPHP" run test.php 2>&1)
+assert_eq "multi-line quoted value" "-----BEGIN KEY-----|line1|line2|-----END KEY-----;;next" "$result"
+
+# test: CRLF line endings
+printf 'CRLF_KEY=crlf_value\r\nSECOND=yes\r\n' > "$TMPDIR/.env"
+cat > "$TMPDIR/test.php" << 'EOF'
+<?php
+echo getenv("CRLF_KEY") . "|" . getenv("SECOND");
+EOF
+result=$(cd "$TMPDIR" && "$ZPHP" run test.php 2>&1)
+assert_eq "CRLF line endings" "crlf_value|yes" "$result"
+
 echo ""
 echo "$passed passed, $failed failed"
 [ $failed -eq 0 ] || exit 1

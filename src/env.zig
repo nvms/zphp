@@ -7,21 +7,82 @@ const VM = @import("runtime/vm.zig").VM;
 pub fn loadEnvFile(allocator: std.mem.Allocator) void {
     const content = std.fs.cwd().readFileAlloc(allocator, ".env", 1024 * 1024) catch return;
     defer allocator.free(content);
-    var iter = std.mem.splitScalar(u8, content, '\n');
-    while (iter.next()) |raw_line| {
-        const line = std.mem.trimRight(u8, raw_line, "\r");
-        if (line.len == 0 or line[0] == '#') continue;
-        const eq = std.mem.indexOfScalar(u8, line, '=') orelse continue;
-        const key = std.mem.trim(u8, line[0..eq], " \t");
-        if (key.len == 0) continue;
-        var val = std.mem.trim(u8, line[eq + 1 ..], " \t");
-        if (val.len >= 2) {
-            if ((val[0] == '"' and val[val.len - 1] == '"') or
-                (val[0] == '\'' and val[val.len - 1] == '\''))
-            {
-                val = val[1 .. val.len - 1];
-            }
+
+    var i: usize = 0;
+    while (i < content.len) {
+        // skip leading whitespace and blank lines
+        while (i < content.len and (content[i] == ' ' or content[i] == '\t' or content[i] == '\r' or content[i] == '\n')) i += 1;
+        if (i >= content.len) break;
+
+        // full-line comment
+        if (content[i] == '#') {
+            while (i < content.len and content[i] != '\n') i += 1;
+            continue;
         }
+
+        // optional `export ` prefix (shell-style dotenv files)
+        if (i + 7 <= content.len and std.mem.eql(u8, content[i .. i + 7], "export ")) {
+            i += 7;
+            while (i < content.len and (content[i] == ' ' or content[i] == '\t')) i += 1;
+        }
+
+        // key runs to `=` or end of line
+        const key_start = i;
+        while (i < content.len and content[i] != '=' and content[i] != '\n') i += 1;
+        if (i >= content.len or content[i] == '\n') {
+            if (i < content.len) i += 1;
+            continue;
+        }
+        const key = std.mem.trimRight(u8, content[key_start..i], " \t");
+        i += 1; // skip =
+        if (key.len == 0) {
+            while (i < content.len and content[i] != '\n') i += 1;
+            if (i < content.len) i += 1;
+            continue;
+        }
+
+        // skip spaces before the value (not newlines)
+        while (i < content.len and (content[i] == ' ' or content[i] == '\t')) i += 1;
+
+        var val_start: usize = i;
+        var val_end: usize = i;
+
+        if (i < content.len and (content[i] == '"' or content[i] == '\'')) {
+            // quoted value - may span newlines for things like PEM keys
+            const quote = content[i];
+            i += 1;
+            val_start = i;
+            while (i < content.len and content[i] != quote) {
+                // allow `\"` inside double-quoted values to avoid terminating early
+                if (content[i] == '\\' and quote == '"' and i + 1 < content.len) {
+                    i += 2;
+                } else {
+                    i += 1;
+                }
+            }
+            val_end = i;
+            if (i < content.len) i += 1; // consume closing quote
+            // discard anything after the closing quote up to end-of-line (inline comment, etc.)
+            while (i < content.len and content[i] != '\n') i += 1;
+        } else {
+            // unquoted: end at newline or at a `#` preceded by whitespace (inline comment)
+            while (i < content.len and content[i] != '\n') {
+                if (content[i] == '#' and (i == val_start or content[i - 1] == ' ' or content[i - 1] == '\t')) break;
+                i += 1;
+            }
+            val_end = i;
+            // trim trailing whitespace (including CR on DOS line endings)
+            while (val_end > val_start and (content[val_end - 1] == ' ' or content[val_end - 1] == '\t' or content[val_end - 1] == '\r')) {
+                val_end -= 1;
+            }
+            // consume the rest of the line (comment tail)
+            while (i < content.len and content[i] != '\n') i += 1;
+        }
+
+        if (i < content.len) i += 1; // skip newline
+
+        const val = content[val_start..val_end];
+
         const key_z = allocator.dupeZ(u8, key) catch continue;
         defer allocator.free(key_z);
         const val_z = allocator.dupeZ(u8, val) catch continue;
