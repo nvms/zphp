@@ -222,6 +222,7 @@ const Formatter = struct {
     fn emitTriviaFor(self: *Formatter, tok_idx: u32) void {
         if (tok_idx >= self.trivia.len) return;
         for (self.trivia[tok_idx].comments) |comment| {
+            self.writeIndent();
             self.write(comment.text);
             self.newline();
         }
@@ -258,6 +259,7 @@ const Formatter = struct {
 
             self.emitTriviaForNode(stmt_idx);
             self.formatNode(stmt_idx);
+            if (node.tag == .throw_expr) self.write(";");
             prev_tag = node.tag;
         }
 
@@ -268,8 +270,27 @@ const Formatter = struct {
     }
 
     fn emitTriviaForNode(self: *Formatter, node_idx: u32) void {
-        const tok = self.findFirstToken(node_idx);
-        if (tok) |t| self.emitTriviaFor(t);
+        const tok_opt = self.findFirstToken(node_idx);
+        const tok = tok_opt orelse return;
+
+        // emit any #[Attribute(...)] groups that target this declaration
+        for (self.ast.attr_ranges) |ar| {
+            if (ar.target_tok != tok) continue;
+            self.emitTriviaFor(ar.start);
+            self.writeIndent();
+            var j = ar.start;
+            while (j < ar.end) : (j += 1) {
+                self.write(self.ast.tokens[j].lexeme(self.source));
+                if (j + 1 < ar.end) {
+                    const cur_end = self.ast.tokens[j].end;
+                    const next_start = self.ast.tokens[j + 1].start;
+                    if (next_start > cur_end) self.write(" ");
+                }
+            }
+            self.newline();
+        }
+
+        self.emitTriviaFor(tok);
     }
 
     fn findFirstToken(self: *Formatter, node_idx: u32) ?u32 {
@@ -287,8 +308,91 @@ const Formatter = struct {
             .postfix_op => self.findFirstToken(node.data.lhs),
             .static_call, .dynamic_static_call => self.findFirstToken(node.data.lhs),
             .static_prop_access => self.findFirstToken(node.data.lhs),
+            // declarations: main_token is the name, but trivia (docblocks) attaches to
+            // the leading keyword, so walk backward through any modifiers and the keyword
+            .function_decl => self.declLeadingToken(node.main_token, .kw_function),
+            .class_decl => self.declLeadingToken(node.main_token, .kw_class),
+            .interface_decl => self.declLeadingToken(node.main_token, .kw_interface),
+            .trait_decl => self.declLeadingToken(node.main_token, .kw_trait),
+            .enum_decl => self.declLeadingToken(node.main_token, .kw_enum),
+            .class_method, .static_class_method, .interface_method => self.methodLeadingToken(node.main_token),
+            .class_property, .static_class_property => self.propLeadingToken(node.main_token),
+            .const_decl => self.constLeadingToken(node.main_token),
             else => node.main_token,
         };
+    }
+
+    fn declLeadingToken(self: *Formatter, name_tok: u32, keyword: Tag) u32 {
+        // scan backward from name_tok through the keyword and modifiers
+        var i = name_tok;
+        while (i > 0) {
+            const prev = self.ast.tokens[i - 1].tag;
+            const is_keyword_or_mod = prev == keyword or prev == .kw_abstract or
+                prev == .kw_final or prev == .kw_readonly or prev == .kw_static or
+                prev == .kw_public or prev == .kw_protected or prev == .kw_private or
+                prev == .amp;
+            if (!is_keyword_or_mod) break;
+            i -= 1;
+        }
+        return i;
+    }
+
+    fn methodLeadingToken(self: *Formatter, name_tok: u32) u32 {
+        var i = name_tok;
+        while (i > 0) {
+            const prev = self.ast.tokens[i - 1].tag;
+            if (prev == .kw_function or prev == .kw_public or prev == .kw_protected or
+                prev == .kw_private or prev == .kw_static or prev == .kw_abstract or
+                prev == .kw_final or prev == .kw_readonly or prev == .amp)
+            {
+                i -= 1;
+            } else break;
+        }
+        return i;
+    }
+
+    fn propLeadingToken(self: *Formatter, var_tok: u32) u32 {
+        var i = var_tok;
+        while (i > 0) {
+            const prev = self.ast.tokens[i - 1].tag;
+            if (prev == .kw_public or prev == .kw_protected or prev == .kw_private or
+                prev == .kw_static or prev == .kw_readonly or prev == .identifier or
+                prev == .kw_array or prev == .kw_callable or prev == .kw_self or
+                prev == .kw_null or prev == .kw_true or prev == .kw_false or
+                prev == .question or prev == .pipe or prev == .amp or prev == .backslash)
+            {
+                i -= 1;
+            } else break;
+        }
+        return i;
+    }
+
+    fn constLeadingToken(self: *Formatter, name_tok: u32) u32 {
+        var i = name_tok;
+        while (i > 0) {
+            const prev = self.ast.tokens[i - 1].tag;
+            if (prev == .kw_const or prev == .kw_public or prev == .kw_protected or
+                prev == .kw_private or prev == .kw_final)
+            {
+                i -= 1;
+            } else break;
+        }
+        return i;
+    }
+
+    fn emitInlineTrivia(self: *Formatter, tok_idx: u32) void {
+        if (tok_idx >= self.trivia.len) return;
+        for (self.trivia[tok_idx].comments) |comment| {
+            if (comment.is_line) {
+                // line comment mid-expression is unusual; break and reindent
+                self.write(comment.text);
+                self.newline();
+                self.writeIndent();
+            } else {
+                self.write(comment.text);
+                self.write(" ");
+            }
+        }
     }
 
     fn formatNode(self: *Formatter, node_idx: u32) void {
@@ -392,7 +496,7 @@ const Formatter = struct {
                 }
                 self.write(")");
             },
-            .anonymous_class => self.write("new class { /* anonymous */ }"),
+            .anonymous_class => self.formatAnonymousClass(node),
             .cast_expr => self.formatCastExpr(node),
 
             .closure_expr => self.formatClosure(node),
@@ -488,6 +592,7 @@ const Formatter = struct {
                 self.emitTriviaForNode(stmt_idx);
                 self.writeIndent();
                 self.formatNode(stmt_idx);
+                if (self.ast.nodes[stmt_idx].tag == .throw_expr) self.write(";");
             }
             self.indent -|= 1;
             self.newline();
@@ -503,6 +608,7 @@ const Formatter = struct {
             self.newline();
             self.writeIndent();
             self.formatNode(node_idx);
+            if (node.tag == .throw_expr) self.write(";");
             self.indent -|= 1;
             return;
         }
@@ -599,7 +705,7 @@ const Formatter = struct {
     }
 
     fn formatForeach(self: *Formatter, node: Ast.Node) void {
-        const parts = self.ast.extra_data[node.data.lhs .. node.data.lhs + 3];
+        const parts = self.ast.extra_data[node.data.lhs .. node.data.lhs + 4];
         self.write("foreach (");
         self.formatNode(parts[0]);
         self.write(" as ");
@@ -607,6 +713,7 @@ const Formatter = struct {
             self.formatNode(parts[2]);
             self.write(" => ");
         }
+        if (parts[3] != 0) self.write("&");
         self.formatNode(parts[1]);
         self.write(")");
         self.formatBlockInline(node.data.rhs);
@@ -614,45 +721,30 @@ const Formatter = struct {
 
     fn formatFunctionDecl(self: *Formatter, node: Ast.Node) void {
         self.write("function ");
+        if (node.main_token > 0 and self.ast.tokens[node.main_token - 1].tag == .amp) {
+            self.write("&");
+        }
         self.write(self.ast.tokens[node.main_token].lexeme(self.source));
         self.write("(");
         self.formatParamList(node.data.lhs);
         self.write(")");
-        self.formatReturnType(node.main_token);
+        self.emitReturnType(node.data.lhs);
         self.formatBlockInline(node.data.rhs & 0x7FFFFFFF);
     }
 
-    fn formatReturnType(self: *Formatter, name_tok: u32) void {
-        // scan forward from name token to find : before {
-        var i = name_tok + 1;
-        while (i < self.ast.tokens.len) : (i += 1) {
-            const tag = self.ast.tokens[i].tag;
-            if (tag == .l_brace or tag == .semicolon or tag == .eof) break;
-            if (tag == .r_paren) {
-                // check if next non-whitespace is colon
-                var j = i + 1;
-                while (j < self.ast.tokens.len) : (j += 1) {
-                    const jt = self.ast.tokens[j].tag;
-                    if (jt == .l_brace or jt == .semicolon or jt == .eof) break;
-                    if (jt == .colon) {
-                        self.write(": ");
-                        // emit type tokens until { or ;
-                        var k = j + 1;
-                        while (k < self.ast.tokens.len) : (k += 1) {
-                            const kt = self.ast.tokens[k].tag;
-                            if (kt == .l_brace or kt == .semicolon or kt == .eof or kt == .fat_arrow) break;
-                            if (k > j + 1) {
-                                const prev_end = self.ast.tokens[k - 1].end;
-                                const cur_start = self.ast.tokens[k].start;
-                                if (cur_start > prev_end) self.write(" ");
-                            }
-                            self.write(self.ast.tokens[k].lexeme(self.source));
-                        }
-                        return;
-                    }
-                    if (jt != .colon) break;
-                }
-                break;
+    fn emitReturnType(self: *Formatter, param_extra_idx: u32) void {
+        const count = self.ast.extra_data[param_extra_idx];
+        const ret_start = self.ast.extra_data[param_extra_idx + 1 + count];
+        const ret_end = self.ast.extra_data[param_extra_idx + 1 + count + 1];
+        if (ret_start == ret_end) return;
+        self.write(": ");
+        var i = ret_start;
+        while (i < ret_end) : (i += 1) {
+            self.write(self.ast.tokens[i].lexeme(self.source));
+            if (i + 1 < ret_end) {
+                const cur_end = self.ast.tokens[i].end;
+                const next_start = self.ast.tokens[i + 1].start;
+                if (next_start > cur_end) self.write(" ");
             }
         }
     }
@@ -667,46 +759,29 @@ const Formatter = struct {
 
     fn formatParam(self: *Formatter, node_idx: u32) void {
         const node = self.ast.nodes[node_idx];
-        // emit type hint tokens before the variable
         const var_tok = node.main_token;
-        self.emitTypeTokensBefore(var_tok);
-        if (node.data.rhs == 1) self.write("...");
-        self.write(self.ast.tokens[var_tok].lexeme(self.source));
-        if (node.data.lhs != 0) {
-            self.write(" = ");
-            self.formatNode(node.data.lhs);
-        }
-    }
+        const flags = node.data.rhs;
+        const is_variadic = (flags & 1) != 0;
+        const is_ref = (flags & 2) != 0;
+        const promotion = (flags >> 2) & 0x3;
+        const is_readonly = (flags & 16) != 0;
+        const type_extra_plus_one = flags >> 5;
 
-    fn emitTypeTokensBefore(self: *Formatter, var_tok: u32) void {
-        if (var_tok == 0) return;
-        var start: u32 = var_tok;
-        if (start > 0 and self.ast.tokens[start - 1].tag == .ellipsis) start -= 1;
-        var scan = start;
-        while (scan > 0) {
-            const prev = self.ast.tokens[scan - 1].tag;
-            // only scan over actual type tokens - not l_paren/r_paren (those are param list delimiters)
-            if (prev == .identifier or prev == .kw_array or prev == .kw_callable or
-                prev == .kw_self or prev == .kw_static or prev == .kw_null or
-                prev == .kw_true or prev == .kw_false or prev == .question or
-                prev == .pipe or prev == .amp or prev == .backslash)
-            {
-                scan -= 1;
-            } else break;
+        switch (promotion) {
+            1 => self.write("public "),
+            2 => self.write("protected "),
+            3 => self.write("private "),
+            else => {},
         }
-        // verify the token before our type sequence is a delimiter (comma or l_paren)
-        // if not, we may have grabbed non-type tokens
-        if (scan < start and scan > 0) {
-            const before = self.ast.tokens[scan - 1].tag;
-            if (before != .comma and before != .l_paren and before != .kw_static and before != .kw_readonly) {
-                return;
-            }
-        }
-        if (scan < start) {
-            var i = scan;
-            while (i < start) : (i += 1) {
+        if (is_readonly) self.write("readonly ");
+        if (type_extra_plus_one != 0) {
+            const type_idx = type_extra_plus_one - 1;
+            const ret_start = self.ast.extra_data[type_idx];
+            const ret_end = self.ast.extra_data[type_idx + 1];
+            var i = ret_start;
+            while (i < ret_end) : (i += 1) {
                 self.write(self.ast.tokens[i].lexeme(self.source));
-                if (i + 1 < start) {
+                if (i + 1 < ret_end) {
                     const cur_end = self.ast.tokens[i].end;
                     const next_start = self.ast.tokens[i + 1].start;
                     if (next_start > cur_end) self.write(" ");
@@ -714,9 +789,38 @@ const Formatter = struct {
             }
             self.write(" ");
         }
+        if (is_ref) self.write("&");
+        if (is_variadic) self.write("...");
+        self.write(self.ast.tokens[var_tok].lexeme(self.source));
+        if (node.data.lhs != 0) {
+            self.write(" = ");
+            self.formatNode(node.data.lhs);
+        }
     }
 
     fn formatConstDecl(self: *Formatter, node: Ast.Node) void {
+        // scan backward for visibility/final modifiers (class constants)
+        if (node.main_token >= 2 and self.ast.tokens[node.main_token - 1].tag == .kw_const) {
+            var is_final = false;
+            var visibility: ?[]const u8 = null;
+            var i: i64 = @as(i64, node.main_token) - 2;
+            while (i >= 0) {
+                const tag = self.ast.tokens[@intCast(i)].tag;
+                switch (tag) {
+                    .kw_public => visibility = "public",
+                    .kw_protected => visibility = "protected",
+                    .kw_private => visibility = "private",
+                    .kw_final => is_final = true,
+                    else => break,
+                }
+                i -= 1;
+            }
+            if (is_final) self.write("final ");
+            if (visibility) |v| {
+                self.write(v);
+                self.write(" ");
+            }
+        }
         self.write("const ");
         self.write(self.ast.tokens[node.main_token].lexeme(self.source));
         self.write(" = ");
@@ -748,6 +852,7 @@ const Formatter = struct {
                 for (stmts) |stmt| {
                     self.indentedLine();
                     self.formatNode(stmt);
+                    if (self.ast.nodes[stmt].tag == .throw_expr) self.write(";");
                 }
                 self.indent -|= 1;
             } else if (case_node.tag == .switch_default) {
@@ -757,6 +862,7 @@ const Formatter = struct {
                 for (stmts) |stmt| {
                     self.indentedLine();
                     self.formatNode(stmt);
+                    if (self.ast.nodes[stmt].tag == .throw_expr) self.write(";");
                 }
                 self.indent -|= 1;
             }
@@ -804,11 +910,14 @@ const Formatter = struct {
         for (catches) |catch_idx| {
             const catch_node = self.ast.nodes[catch_idx];
             self.write(" catch (");
-            if (catch_node.data.lhs != 0) {
-                self.formatNode(catch_node.data.lhs);
-                if (catch_node.main_token != 0) self.write(" ");
+            // catch_node.data.lhs is an extra_data index -> {type_count, type_nodes...}
+            const types = self.ast.extraSlice(catch_node.data.lhs);
+            for (types, 0..) |t, i| {
+                if (i > 0) self.write("|");
+                self.formatNode(t);
             }
             if (catch_node.main_token != 0) {
+                if (types.len > 0) self.write(" ");
                 self.write(self.ast.tokens[catch_node.main_token].lexeme(self.source));
             }
             self.write(")");
@@ -824,7 +933,6 @@ const Formatter = struct {
     fn formatThrow(self: *Formatter, node: Ast.Node) void {
         self.write("throw ");
         self.formatNode(node.data.lhs);
-        self.write(";");
     }
 
     fn formatNamespaceDecl(self: *Formatter, node: Ast.Node) void {
@@ -881,10 +989,7 @@ const Formatter = struct {
 
     fn formatClassDecl(self: *Formatter, node: Ast.Node) void {
         const name_tok = node.main_token;
-        // token before name is `class`, token before that may be `abstract`
-        if (name_tok >= 2 and self.ast.tokens[name_tok - 2].tag == .kw_abstract) {
-            self.write("abstract ");
-        }
+        self.emitClassModifiers(name_tok);
         self.write("class ");
         self.write(self.ast.tokens[name_tok].lexeme(self.source));
 
@@ -904,15 +1009,43 @@ const Formatter = struct {
             }
         }
 
-        self.write(" {");
-        const members = self.ast.extraSlice(node.data.lhs);
+        self.write(" ");
+        self.formatClassBody(node.data.lhs);
+    }
+
+    fn emitClassModifiers(self: *Formatter, name_tok: u32) void {
+        if (name_tok < 2) return;
+        // token before name must be `class`; then scan backward for modifiers
+        if (self.ast.tokens[name_tok - 1].tag != .kw_class) return;
+        var has_final = false;
+        var has_abstract = false;
+        var has_readonly = false;
+        var i: i64 = @as(i64, name_tok) - 2;
+        while (i >= 0) {
+            const tag = self.ast.tokens[@intCast(i)].tag;
+            switch (tag) {
+                .kw_final => has_final = true,
+                .kw_abstract => has_abstract = true,
+                .kw_readonly => has_readonly = true,
+                else => break,
+            }
+            i -= 1;
+        }
+        if (has_abstract) self.write("abstract ");
+        if (has_final) self.write("final ");
+        if (has_readonly) self.write("readonly ");
+    }
+
+    fn formatClassBody(self: *Formatter, members_extra: u32) void {
+        self.write("{");
+        const members = self.ast.extraSlice(members_extra);
         if (members.len > 0) {
             self.indent += 1;
             var prev_member_tag: ?NodeTag = null;
             for (members) |member_idx| {
                 const member = self.ast.nodes[member_idx];
-                const is_method = member.tag == .class_method or member.tag == .static_class_method;
-                if (prev_member_tag != null and (is_method or prev_member_tag == .class_method or prev_member_tag == .static_class_method)) {
+                const is_method = member.tag == .class_method or member.tag == .static_class_method or member.tag == .interface_method;
+                if (prev_member_tag != null and (is_method or prev_member_tag == .class_method or prev_member_tag == .static_class_method or prev_member_tag == .interface_method)) {
                     self.blankLine();
                 } else {
                     self.newline();
@@ -928,9 +1061,48 @@ const Formatter = struct {
         self.write("}");
     }
 
+    fn formatAnonymousClass(self: *Formatter, node: Ast.Node) void {
+        self.write("new class");
+        // rhs extra layout: {ctor_arg_count, ctor_args..., parent, impl_count, impls...}
+        const rhs = node.data.rhs;
+        const ctor_count = self.ast.extra_data[rhs];
+        const after_ctor = rhs + 1 + ctor_count;
+        const parent = self.ast.extra_data[after_ctor];
+        const impl_count = self.ast.extra_data[after_ctor + 1];
+
+        if (ctor_count > 0) {
+            self.write("(");
+            var i: u32 = 0;
+            while (i < ctor_count) : (i += 1) {
+                if (i > 0) self.write(", ");
+                self.formatNode(self.ast.extra_data[rhs + 1 + i]);
+            }
+            self.write(")");
+        }
+
+        if (parent != 0) {
+            self.write(" extends ");
+            self.formatNode(parent);
+        }
+        if (impl_count > 0) {
+            self.write(" implements ");
+            var i: u32 = 0;
+            while (i < impl_count) : (i += 1) {
+                if (i > 0) self.write(", ");
+                self.formatNode(self.ast.extra_data[after_ctor + 2 + i]);
+            }
+        }
+
+        self.write(" ");
+        self.formatClassBody(node.data.lhs);
+    }
+
     fn formatClassMethod(self: *Formatter, node: Ast.Node) void {
         const visibility = (node.data.rhs >> 30) & 0x3;
         const body_idx = node.data.rhs & 0x1FFFFFFF;
+        // scan backward for modifiers the parser may have consumed silently (e.g. final)
+        const mods = self.scanTokenModifiers(node.main_token);
+        if (mods.is_final) self.write("final ");
         switch (visibility) {
             0 => self.write("public "),
             1 => self.write("protected "),
@@ -939,12 +1111,48 @@ const Formatter = struct {
         }
         if (node.tag == .static_class_method) self.write("static ");
         self.write("function ");
+        if (node.main_token > 0 and self.ast.tokens[node.main_token - 1].tag == .amp) {
+            self.write("&");
+        }
         self.write(self.ast.tokens[node.main_token].lexeme(self.source));
         self.write("(");
         self.formatParamList(node.data.lhs);
         self.write(")");
-        self.formatReturnType(node.main_token);
+        self.emitReturnType(node.data.lhs);
         self.formatBlockInline(body_idx);
+    }
+
+    const TokenModifiers = struct {
+        visibility: ?[]const u8 = null,
+        is_static: bool = false,
+        is_abstract: bool = false,
+        is_final: bool = false,
+        is_readonly: bool = false,
+    };
+
+    fn scanTokenModifiers(self: *Formatter, name_tok: u32) TokenModifiers {
+        var result = TokenModifiers{};
+        if (name_tok == 0) return result;
+        var i: i64 = @as(i64, name_tok) - 1;
+        // skip `&` if present (return-by-reference)
+        if (i >= 0 and self.ast.tokens[@intCast(i)].tag == .amp) i -= 1;
+        // skip `function` keyword
+        if (i >= 0 and self.ast.tokens[@intCast(i)].tag == .kw_function) i -= 1 else return result;
+        while (i >= 0) {
+            const tag = self.ast.tokens[@intCast(i)].tag;
+            switch (tag) {
+                .kw_public => result.visibility = "public",
+                .kw_protected => result.visibility = "protected",
+                .kw_private => result.visibility = "private",
+                .kw_static => result.is_static = true,
+                .kw_abstract => result.is_abstract = true,
+                .kw_final => result.is_final = true,
+                .kw_readonly => result.is_readonly = true,
+                else => break,
+            }
+            i -= 1;
+        }
+        return result;
     }
 
     fn formatClassProperty(self: *Formatter, node: Ast.Node) void {
@@ -1059,24 +1267,14 @@ const Formatter = struct {
                 }
             }
         }
-        self.write(" {");
-        const methods = self.ast.extraSlice(node.data.lhs);
-        if (methods.len > 0) {
-            self.indent += 1;
-            for (methods) |m| {
-                self.blankLine();
-                self.writeIndent();
-                self.formatNode(m);
-            }
-            self.indent -|= 1;
-            self.indentedLine();
-        }
-        self.write("}");
+        self.write(" ");
+        self.formatClassBody(node.data.lhs);
     }
 
     fn formatInterfaceMethod(self: *Formatter, node: Ast.Node) void {
-        const mods = self.scanMethodModifiers(node.main_token);
+        const mods = self.scanTokenModifiers(node.main_token);
         if (mods.is_abstract) self.write("abstract ");
+        if (mods.is_final) self.write("final ");
         if (mods.visibility) |v| {
             self.write(v);
             self.write(" ");
@@ -1085,59 +1283,22 @@ const Formatter = struct {
         }
         if (mods.is_static) self.write("static ");
         self.write("function ");
+        if (node.main_token > 0 and self.ast.tokens[node.main_token - 1].tag == .amp) {
+            self.write("&");
+        }
         self.write(self.ast.tokens[node.main_token].lexeme(self.source));
         self.write("(");
         self.formatParamList(node.data.lhs);
         self.write(")");
-        self.formatReturnType(node.main_token);
+        self.emitReturnType(node.data.lhs);
         self.write(";");
-    }
-
-    const MethodModifiers = struct {
-        visibility: ?[]const u8,
-        is_abstract: bool,
-        is_static: bool,
-    };
-
-    fn scanMethodModifiers(self: *Formatter, name_tok: u32) MethodModifiers {
-        var result = MethodModifiers{ .visibility = null, .is_abstract = false, .is_static = false };
-        if (name_tok < 2) return result;
-        var i = name_tok - 2;
-        while (true) {
-            const tag = self.ast.tokens[i].tag;
-            if (tag == .kw_public) {
-                result.visibility = "public";
-            } else if (tag == .kw_protected) {
-                result.visibility = "protected";
-            } else if (tag == .kw_private) {
-                result.visibility = "private";
-            } else if (tag == .kw_abstract) {
-                result.is_abstract = true;
-            } else if (tag == .kw_static) {
-                result.is_static = true;
-            } else break;
-            if (i == 0) break;
-            i -= 1;
-        }
-        return result;
     }
 
     fn formatTraitDecl(self: *Formatter, node: Ast.Node) void {
         self.write("trait ");
         self.write(self.ast.tokens[node.main_token].lexeme(self.source));
-        self.write(" {");
-        const members = self.ast.extraSlice(node.data.lhs);
-        if (members.len > 0) {
-            self.indent += 1;
-            for (members) |m| {
-                self.blankLine();
-                self.writeIndent();
-                self.formatNode(m);
-            }
-            self.indent -|= 1;
-            self.indentedLine();
-        }
-        self.write("}");
+        self.write(" ");
+        self.formatClassBody(node.data.lhs);
     }
 
     fn formatTraitUse(self: *Formatter, node: Ast.Node) void {
@@ -1147,7 +1308,47 @@ const Formatter = struct {
             if (i > 0) self.write(", ");
             self.formatNode(t);
         }
-        self.write(";");
+        if (node.data.rhs != 0) {
+            const resolutions = self.ast.extraSlice(node.data.rhs);
+            self.write(" {");
+            self.indent += 1;
+            for (resolutions) |res_idx| {
+                self.indentedLine();
+                self.formatTraitResolution(res_idx);
+            }
+            self.indent -|= 1;
+            self.indentedLine();
+            self.write("}");
+        } else {
+            self.write(";");
+        }
+    }
+
+    fn formatTraitResolution(self: *Formatter, node_idx: u32) void {
+        const node = self.ast.nodes[node_idx];
+        if (node.tag == .trait_insteadof) {
+            if (node.data.lhs != 0) {
+                self.formatNode(node.data.lhs);
+                self.write("::");
+            }
+            self.write(self.ast.tokens[node.main_token].lexeme(self.source));
+            self.write(" insteadof ");
+            const excluded = self.ast.extraSlice(node.data.rhs);
+            for (excluded, 0..) |ex, i| {
+                if (i > 0) self.write(", ");
+                self.formatNode(ex);
+            }
+            self.write(";");
+        } else if (node.tag == .trait_as) {
+            if (node.data.lhs != 0) {
+                self.formatNode(node.data.lhs);
+                self.write("::");
+            }
+            self.write(self.ast.tokens[node.main_token].lexeme(self.source));
+            self.write(" as ");
+            self.write(self.ast.tokens[node.data.rhs].lexeme(self.source));
+            self.write(";");
+        }
     }
 
     // expressions
@@ -1155,20 +1356,17 @@ const Formatter = struct {
     fn formatBinaryOp(self: *Formatter, node: Ast.Node) void {
         self.formatNode(node.data.lhs);
         const op = self.ast.tokens[node.main_token].lexeme(self.source);
-        // dot concatenation uses tight spacing
-        if (self.ast.tokens[node.main_token].tag == .dot) {
-            self.write(" . ");
-        } else {
-            self.write(" ");
-            self.write(op);
-            self.write(" ");
-        }
+        self.write(" ");
+        self.emitInlineTrivia(node.main_token);
+        self.write(op);
+        self.write(" ");
         self.formatNode(node.data.rhs);
     }
 
     fn formatAssign(self: *Formatter, node: Ast.Node) void {
         self.formatNode(node.data.lhs);
         self.write(" ");
+        self.emitInlineTrivia(node.main_token);
         self.write(self.ast.tokens[node.main_token].lexeme(self.source));
         self.write(" ");
         self.formatNode(node.data.rhs);
@@ -1177,6 +1375,7 @@ const Formatter = struct {
     fn formatLogical(self: *Formatter, node: Ast.Node, op: []const u8) void {
         self.formatNode(node.data.lhs);
         self.write(" ");
+        self.emitInlineTrivia(node.main_token);
         self.write(op);
         self.write(" ");
         self.formatNode(node.data.rhs);
@@ -1347,16 +1546,19 @@ const Formatter = struct {
         const body = self.ast.extra_data[node.data.rhs] & 0x7FFFFFFF;
         const use_count = self.ast.extra_data[node.data.rhs + 1];
 
-        if (!is_arrow and use_count > 0) {
+        if (!is_arrow and use_count != 0xFFFFFFFF and use_count > 0) {
             self.write(" use (");
             var i: u32 = 0;
             while (i < use_count) : (i += 1) {
                 if (i > 0) self.write(", ");
                 const var_node = self.ast.nodes[self.ast.extra_data[node.data.rhs + 2 + i]];
+                if (var_node.data.rhs != 0) self.write("&");
                 self.write(self.ast.tokens[var_node.main_token].lexeme(self.source));
             }
             self.write(")");
         }
+
+        self.emitReturnType(node.data.lhs);
 
         if (is_arrow) {
             // arrow function: fn($x) => expr
@@ -1409,6 +1611,7 @@ const Formatter = struct {
     }
 
     fn formatQualifiedName(self: *Formatter, node: Ast.Node) void {
+        if (node.data.rhs == 1) self.write("\\");
         const parts = self.ast.extraSlice(node.data.lhs);
         for (parts, 0..) |tok_idx, i| {
             if (i > 0) self.write("\\");

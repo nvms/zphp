@@ -26,7 +26,7 @@ check_contains() {
     local name="$1"
     local needle="$2"
     local haystack="$3"
-    if echo "$haystack" | grep -qF "$needle"; then
+    if printf '%s\n' "$haystack" | grep -qF "$needle"; then
         passed=$((passed + 1))
         echo "  pass  $name"
     else
@@ -170,6 +170,217 @@ for f in "$SCRIPT_DIR/arithmetic.php" "$SCRIPT_DIR/arrays.php" "$SCRIPT_DIR/clas
     fmt_out=$("$ZPHP" run "$WORKDIR/$name" 2>&1 || true)
     check "output preserved: $name" "$orig" "$fmt_out"
 done
+
+# test: docblock before function preserved
+cat > "$WORKDIR/docblock.php" << 'EOFPHP'
+<?php
+
+/**
+ * Adds two numbers.
+ * @param int $a
+ * @param int $b
+ */
+function addnum($a, $b) {
+    return $a + $b;
+}
+EOFPHP
+"$ZPHP" fmt "$WORKDIR/docblock.php" 2>/dev/null
+content=$(cat "$WORKDIR/docblock.php")
+check_contains "docblock preserved before function" "Adds two numbers." "$content"
+check_contains "docblock @param preserved" "@param int \$a" "$content"
+
+# test: anonymous class body preserved
+cat > "$WORKDIR/anon.php" << 'EOFPHP'
+<?php
+$obj = new class extends Foo implements Bar {
+    public function hello() {
+        return "hi";
+    }
+};
+EOFPHP
+"$ZPHP" fmt "$WORKDIR/anon.php" 2>/dev/null
+content=$(cat "$WORKDIR/anon.php")
+check_contains "anon class extends preserved" "extends Foo" "$content"
+check_contains "anon class implements preserved" "implements Bar" "$content"
+check_contains "anon class method preserved" 'public function hello()' "$content"
+check_contains "anon class method body preserved" 'return "hi"' "$content"
+
+# test: final and readonly class modifiers preserved
+cat > "$WORKDIR/final.php" << 'EOFPHP'
+<?php
+final class Foo {}
+readonly class Bar {}
+final readonly class Baz {}
+abstract class Qux {}
+EOFPHP
+"$ZPHP" fmt "$WORKDIR/final.php" 2>/dev/null
+content=$(cat "$WORKDIR/final.php")
+check_contains "final class preserved" "final class Foo" "$content"
+check_contains "readonly class preserved" "readonly class Bar" "$content"
+check_contains "final readonly class preserved" "final readonly class Baz" "$content"
+check_contains "abstract class preserved" "abstract class Qux" "$content"
+
+# test: class constant visibility preserved
+cat > "$WORKDIR/const.php" << 'EOFPHP'
+<?php
+class Foo {
+    public const PUB = 1;
+    protected const PROT = 2;
+    private const PRIV = 3;
+    final public const FINAL_PUB = 4;
+}
+EOFPHP
+"$ZPHP" fmt "$WORKDIR/const.php" 2>/dev/null
+content=$(cat "$WORKDIR/const.php")
+check_contains "public const preserved" "public const PUB" "$content"
+check_contains "protected const preserved" "protected const PROT" "$content"
+check_contains "private const preserved" "private const PRIV" "$content"
+check_contains "final public const preserved" "final public const FINAL_PUB" "$content"
+
+# test: return-by-reference preserved
+cat > "$WORKDIR/retref.php" << 'EOFPHP'
+<?php
+function &getref() {
+    return $GLOBALS["x"];
+}
+class Foo {
+    public function &method() {
+        return $this->x;
+    }
+}
+EOFPHP
+"$ZPHP" fmt "$WORKDIR/retref.php" 2>/dev/null
+content=$(cat "$WORKDIR/retref.php")
+check_contains "function return-by-ref preserved" "function &getref" "$content"
+check_contains "method return-by-ref preserved" "public function &method" "$content"
+
+# test: closure use by-reference preserved
+cat > "$WORKDIR/useref.php" << 'EOFPHP'
+<?php
+$counter = 0;
+$fn = function () use (&$counter) {
+    $counter++;
+};
+EOFPHP
+"$ZPHP" fmt "$WORKDIR/useref.php" 2>/dev/null
+content=$(cat "$WORKDIR/useref.php")
+check_contains "closure use by-ref preserved" "use (&\$counter)" "$content"
+
+# test: trait conflict resolution block preserved
+cat > "$WORKDIR/trait.php" << 'EOFPHP'
+<?php
+class Alpha {
+    use A, B {
+        A::hello insteadof B;
+        B::hello as helloB;
+    }
+}
+EOFPHP
+"$ZPHP" fmt "$WORKDIR/trait.php" 2>/dev/null
+content=$(cat "$WORKDIR/trait.php")
+check_contains "trait insteadof preserved" "A::hello insteadof B" "$content"
+check_contains "trait as preserved" "B::hello as helloB" "$content"
+
+# test: return type after function-call default preserved
+cat > "$WORKDIR/rettype.php" << 'EOFPHP'
+<?php
+function withDefault($a = strlen("hi")): string {
+    return "x";
+}
+EOFPHP
+"$ZPHP" fmt "$WORKDIR/rettype.php" 2>/dev/null
+content=$(cat "$WORKDIR/rettype.php")
+check_contains "return type after fn-call default preserved" '): string' "$content"
+
+# test: inline block comment in expression preserved
+cat > "$WORKDIR/inline.php" << 'EOFPHP'
+<?php
+$x = 1 /* why */ + 2;
+EOFPHP
+"$ZPHP" fmt "$WORKDIR/inline.php" 2>/dev/null
+content=$(cat "$WORKDIR/inline.php")
+check_contains "inline block comment preserved" '/* why */' "$content"
+
+# test: readonly class with constructor property promotion preserved
+cat > "$WORKDIR/promote.php" << 'EOFPHP'
+<?php
+readonly class Immutable {
+    public function __construct(public string $name, private int $age) {}
+}
+EOFPHP
+"$ZPHP" fmt "$WORKDIR/promote.php" 2>/dev/null
+content=$(cat "$WORKDIR/promote.php")
+check_contains "readonly class preserved" "readonly class Immutable" "$content"
+check_contains "promoted public string preserved" "public string \$name" "$content"
+check_contains "promoted private int preserved" "private int \$age" "$content"
+
+# test: #[Attribute] preserved on class
+cat > "$WORKDIR/attr.php" << 'EOFPHP'
+<?php
+#[Route("/api/users")]
+#[Middleware("auth")]
+class UserController {
+    #[Inject]
+    private $service;
+}
+EOFPHP
+"$ZPHP" fmt "$WORKDIR/attr.php" 2>/dev/null
+content=$(cat "$WORKDIR/attr.php")
+check_contains "class attribute preserved" '#[Route("/api/users")]' "$content"
+check_contains "second class attribute preserved" '#[Middleware("auth")]' "$content"
+check_contains "property attribute preserved" '#[Inject]' "$content"
+
+# test: catch with union type and leading backslash
+cat > "$WORKDIR/catch.php" << 'EOFPHP'
+<?php
+try {
+    doThing();
+} catch (\RuntimeException | \LogicException $e) {
+    echo $e->getMessage();
+}
+EOFPHP
+"$ZPHP" fmt "$WORKDIR/catch.php" 2>/dev/null
+content=$(cat "$WORKDIR/catch.php")
+check_contains "catch union type preserved" 'RuntimeException|\LogicException' "$content"
+check_contains "catch leading backslash preserved" '\RuntimeException' "$content"
+
+# test: foreach by-reference preserved
+cat > "$WORKDIR/foreach.php" << 'EOFPHP'
+<?php
+foreach ($items as &$item) {
+    $item = $item * 2;
+}
+foreach ($pairs as $key => &$val) {
+    $val = "updated";
+}
+EOFPHP
+"$ZPHP" fmt "$WORKDIR/foreach.php" 2>/dev/null
+content=$(cat "$WORKDIR/foreach.php")
+check_contains "foreach by-ref preserved" "foreach (\$items as &\$item)" "$content"
+check_contains "foreach key => by-ref preserved" "\$key => &\$val" "$content"
+
+# test: throw as expression in arrow function
+cat > "$WORKDIR/throwexpr.php" << 'EOFPHP'
+<?php
+$cases = [fn() => throw new TypeError("t"), fn() => throw new ValueError("v")];
+throw new Exception("top-level");
+EOFPHP
+"$ZPHP" fmt "$WORKDIR/throwexpr.php" 2>/dev/null
+content=$(cat "$WORKDIR/throwexpr.php")
+check_contains "throw expr inside arrow fn no trailing semi" 'fn() => throw new TypeError("t")' "$content"
+check_contains "top-level throw has semi" 'throw new Exception("top-level");' "$content"
+
+# test: comment inside function body is indented
+cat > "$WORKDIR/icomment.php" << 'EOFPHP'
+<?php
+function foo() {
+    // comment inside
+    return 1;
+}
+EOFPHP
+"$ZPHP" fmt "$WORKDIR/icomment.php" 2>/dev/null
+content=$(cat "$WORKDIR/icomment.php")
+check_contains "comment inside body indented" "    // comment inside" "$content"
 
 # test: multiple files
 cat > "$WORKDIR/a.php" << 'EOFPHP'
