@@ -102,13 +102,27 @@ fn formatPhpFloat(buf: *std.ArrayListUnmanaged(u8), a: std.mem.Allocator, f: f64
 
 fn native_serialize(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len == 0) return .{ .string = "" };
+    return try serializeToString(ctx, args[0]);
+}
+
+// Public entrypoint for other stdlib modules that need to serialize PHP values
+// (e.g. session storage). Owns allocation via ctx.strings.
+pub fn serializeToString(ctx: *NativeContext, val: Value) RuntimeError!Value {
     var buf = std.ArrayListUnmanaged(u8){};
+    errdefer buf.deinit(ctx.allocator);
     var sctx = SerCtx{};
     defer sctx.deinit(ctx.allocator);
-    try serializeValue(ctx, &buf, &sctx, args[0]);
+    try serializeValue(ctx, &buf, &sctx, val);
     const result = try buf.toOwnedSlice(ctx.allocator);
     try ctx.strings.append(ctx.allocator, result);
     return .{ .string = result };
+}
+
+pub fn unserializeFromString(ctx: *NativeContext, s: []const u8) ?Value {
+    var uctx = UnserCtx{};
+    defer uctx.deinit(ctx.allocator);
+    const result = unserializeValue(ctx, &uctx, s, 0) catch return null;
+    return result.value;
 }
 
 fn emitLenString(buf: *std.ArrayListUnmanaged(u8), a: Allocator, s: []const u8) !void {

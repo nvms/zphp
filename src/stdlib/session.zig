@@ -2,6 +2,7 @@ const std = @import("std");
 const Value = @import("../runtime/value.zig").Value;
 const PhpArray = @import("../runtime/value.zig").PhpArray;
 const NativeContext = @import("../runtime/vm.zig").NativeContext;
+const serialize_mod = @import("serialize.zig");
 const RuntimeError = error{ RuntimeError, OutOfMemory };
 
 pub const entries = .{
@@ -27,11 +28,29 @@ fn setSessionVar(ctx: *NativeContext, key: []const u8, val: Value) !void {
     try ctx.vm.frames[0].vars.put(ctx.allocator, key, val);
 }
 
+const session_id_alphabet = "0123456789abcdefghijklmnopqrstuvwxyz";
+const session_id_len = 26;
+
 fn generateId(ctx: *NativeContext) ![]const u8 {
-    const ts: u64 = @intCast(std.time.milliTimestamp());
-    var buf: [64]u8 = undefined;
-    const s = std.fmt.bufPrint(&buf, "{x}{x}", .{ ts, ts *% 0x517cc1b727220a95 }) catch return error.RuntimeError;
-    return ctx.createString(s);
+    var raw: [session_id_len]u8 = undefined;
+    std.crypto.random.bytes(&raw);
+    // map each byte into the alphabet; modulo bias is negligible for this use
+    for (&raw) |*b| b.* = session_id_alphabet[b.* % session_id_alphabet.len];
+    return ctx.createString(&raw);
+}
+
+// PHP restricts session IDs to [a-zA-Z0-9,-] by default. We reject anything else
+// to prevent path traversal in sessionPath.
+fn isValidSessionId(sid: []const u8) bool {
+    if (sid.len == 0 or sid.len > 128) return false;
+    for (sid) |c| {
+        const ok = (c >= '0' and c <= '9') or
+            (c >= 'a' and c <= 'z') or
+            (c >= 'A' and c <= 'Z') or
+            c == ',' or c == '-';
+        if (!ok) return false;
+    }
+    return true;
 }
 
 fn sessionPath(a: std.mem.Allocator, sid: []const u8) ![]const u8 {
@@ -39,59 +58,33 @@ fn sessionPath(a: std.mem.Allocator, sid: []const u8) ![]const u8 {
 }
 
 fn loadSessionData(ctx: *NativeContext, sid: []const u8) !*PhpArray {
-    const arr = try ctx.createArray();
     const path = try sessionPath(ctx.allocator, sid);
     defer ctx.allocator.free(path);
 
-    const data = std.fs.cwd().readFileAlloc(ctx.allocator, path, 1024 * 1024) catch return arr;
+    const data = std.fs.cwd().readFileAlloc(ctx.allocator, path, 1024 * 1024) catch {
+        return try ctx.createArray();
+    };
     defer ctx.allocator.free(data);
 
-    // simple format: key\0value\0key\0value\0...
-    var pos: usize = 0;
-    while (pos < data.len) {
-        const key_end = std.mem.indexOfPos(u8, data, pos, "\x00") orelse break;
-        const key = try ctx.createString(data[pos..key_end]);
-        pos = key_end + 1;
-        const val_end = std.mem.indexOfPos(u8, data, pos, "\x00") orelse break;
-        const val = try ctx.createString(data[pos..val_end]);
-        try arr.set(ctx.allocator, .{ .string = key }, .{ .string = val });
-        pos = val_end + 1;
-    }
-    return arr;
+    // session data is stored as a serialize()'d array (PHP's "php_serialize" format).
+    // if the file is empty or the deserialize fails, fall back to an empty array so
+    // a corrupt session can never break session_start.
+    if (data.len == 0) return try ctx.createArray();
+    const parsed = serialize_mod.unserializeFromString(ctx, data) orelse return try ctx.createArray();
+    if (parsed != .array) return try ctx.createArray();
+    return parsed.array;
 }
 
 fn saveSessionData(ctx: *NativeContext, sid: []const u8) !void {
     const session_val = ctx.vm.frames[0].vars.get("$_SESSION") orelse return;
     if (session_val != .array) return;
-    const arr = session_val.array;
 
-    var buf = std.ArrayListUnmanaged(u8){};
-    for (arr.entries.items) |entry| {
-        const key_str = switch (entry.key) {
-            .string => |s| s,
-            .int => |n| blk: {
-                var tmp: [20]u8 = undefined;
-                break :blk std.fmt.bufPrint(&tmp, "{d}", .{n}) catch continue;
-            },
-        };
-        try buf.appendSlice(ctx.allocator, key_str);
-        try buf.append(ctx.allocator, 0);
-
-        if (entry.value == .string) {
-            try buf.appendSlice(ctx.allocator, entry.value.string);
-        } else {
-            var val_buf = std.ArrayListUnmanaged(u8){};
-            try entry.value.format(&val_buf, ctx.allocator);
-            try buf.appendSlice(ctx.allocator, val_buf.items);
-            val_buf.deinit(ctx.allocator);
-        }
-        try buf.append(ctx.allocator, 0);
-    }
-    defer buf.deinit(ctx.allocator);
+    const serialized = try serialize_mod.serializeToString(ctx, session_val);
+    if (serialized != .string) return;
 
     const path = try sessionPath(ctx.allocator, sid);
     defer ctx.allocator.free(path);
-    std.fs.cwd().writeFile(.{ .sub_path = path, .data = buf.items }) catch return;
+    std.fs.cwd().writeFile(.{ .sub_path = path, .data = serialized.string }) catch return;
 }
 
 fn getCookieSessionId(ctx: *NativeContext) ?[]const u8 {
@@ -119,14 +112,37 @@ fn setSessionCookie(ctx: *NativeContext, sid: []const u8) !void {
 }
 
 fn native_session_start(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    // already started?
-    if (getSessionVar(ctx, "__session_id") != null) return .{ .bool = true };
+    // already active? (do not short-circuit on __session_id alone so that
+    // a session reopened after session_write_close correctly re-loads data)
+    const active = getSessionVar(ctx, "__session_active");
+    if (active != null and active.? == .bool and active.?.bool) return .{ .bool = true };
 
     var sid: []const u8 = undefined;
     var is_new = false;
 
-    if (getCookieSessionId(ctx)) |existing| {
-        sid = existing;
+    // prefer an existing id cached on this request (e.g. from a prior
+    // session_write_close), otherwise honour the cookie if it's well-formed.
+    if (getSessionVar(ctx, "__session_id")) |existing_sid| {
+        if (existing_sid == .string and isValidSessionId(existing_sid.string)) {
+            sid = existing_sid.string;
+        } else if (getCookieSessionId(ctx)) |cookie_sid| {
+            if (isValidSessionId(cookie_sid)) {
+                sid = cookie_sid;
+            } else {
+                sid = try generateId(ctx);
+                is_new = true;
+            }
+        } else {
+            sid = try generateId(ctx);
+            is_new = true;
+        }
+    } else if (getCookieSessionId(ctx)) |cookie_sid| {
+        if (isValidSessionId(cookie_sid)) {
+            sid = cookie_sid;
+        } else {
+            sid = try generateId(ctx);
+            is_new = true;
+        }
     } else {
         sid = try generateId(ctx);
         is_new = true;
@@ -170,6 +186,13 @@ fn native_session_regenerate_id(ctx: *NativeContext, args: []const Value) Runtim
     const old_sid_val = getSessionVar(ctx, "__session_id") orelse return .{ .bool = false };
     if (old_sid_val != .string) return .{ .bool = false };
 
+    const new_sid = try generateId(ctx);
+
+    // migrate current $_SESSION contents to the new ID so session data survives
+    // regeneration (this is how every PHP framework uses it post-login).
+    try setSessionVar(ctx, "__session_id", .{ .string = new_sid });
+    saveSessionData(ctx, new_sid) catch {};
+
     const delete_old = args.len >= 1 and args[0].isTruthy();
     if (delete_old) {
         const path = try sessionPath(ctx.allocator, old_sid_val.string);
@@ -177,8 +200,6 @@ fn native_session_regenerate_id(ctx: *NativeContext, args: []const Value) Runtim
         std.fs.cwd().deleteFile(path) catch {};
     }
 
-    const new_sid = try generateId(ctx);
-    try setSessionVar(ctx, "__session_id", .{ .string = new_sid });
     try setSessionCookie(ctx, new_sid);
     return .{ .bool = true };
 }
