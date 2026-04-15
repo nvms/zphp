@@ -36,6 +36,9 @@ pub fn initContext(cert_path: [*:0]const u8, key_path: [*:0]const u8) ?*SSL_CTX 
     const method = c.TLS_server_method() orelse return null;
     const ctx = c.SSL_CTX_new(method) orelse return null;
 
+    // reject deprecated TLS 1.0/1.1 - require 1.2+
+    _ = c.SSL_CTX_set_min_proto_version(ctx, c.TLS1_2_VERSION);
+
     if (c.SSL_CTX_use_certificate_chain_file(ctx, cert_path) != 1) {
         c.SSL_CTX_free(ctx);
         return null;
@@ -94,8 +97,12 @@ pub fn read(ssl: *SSL, buf: []u8) !usize {
     const n = c.SSL_read(ssl, buf.ptr, @intCast(buf.len));
     if (n <= 0) {
         const err = c.SSL_get_error(ssl, n);
-        if (err == c.SSL_ERROR_WANT_READ) return error.WouldBlock;
+        // SSL_read can return WANT_WRITE during a renegotiation handshake; both
+        // directions translate to "try again later" so the caller's event loop
+        // can re-poll the socket without dropping the connection.
+        if (err == c.SSL_ERROR_WANT_READ or err == c.SSL_ERROR_WANT_WRITE) return error.WouldBlock;
         if (err == c.SSL_ERROR_ZERO_RETURN) return 0;
+        c.ERR_clear_error();
         return error.ConnectionResetByPeer;
     }
     return @intCast(n);
@@ -105,7 +112,8 @@ pub fn write(ssl: *SSL, data: []const u8) !usize {
     const n = c.SSL_write(ssl, data.ptr, @intCast(data.len));
     if (n <= 0) {
         const err = c.SSL_get_error(ssl, n);
-        if (err == c.SSL_ERROR_WANT_WRITE) return error.WouldBlock;
+        if (err == c.SSL_ERROR_WANT_WRITE or err == c.SSL_ERROR_WANT_READ) return error.WouldBlock;
+        c.ERR_clear_error();
         return error.BrokenPipe;
     }
     return @intCast(n);
