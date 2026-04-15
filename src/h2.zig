@@ -111,10 +111,9 @@ pub const H2Session = struct {
     }
 
     pub fn submitGoaway(self: *H2Session) void {
-        var last_stream: i32 = 0;
-        for (&self.streams) |*s| {
-            if (s.active and s.stream_id > last_stream) last_stream = s.stream_id;
-        }
+        // use nghttp2's own "last processed peer-initiated stream id" - our
+        // active bookkeeping would be 0 at shutdown, telling clients to retry all
+        const last_stream = c.nghttp2_session_get_last_proc_stream_id(self.session);
         _ = c.nghttp2_submit_goaway(self.session, c.NGHTTP2_FLAG_NONE, last_stream, c.NGHTTP2_NO_ERROR, null, 0);
         self.flush() catch {};
     }
@@ -132,6 +131,11 @@ pub const H2Session = struct {
     }
 
     pub fn flush(self: *H2Session) !void {
+        // drain any previously-buffered bytes first to preserve wire order
+        // if the socket still isn't writable, don't produce more via mem_send
+        try self.flushBuffered();
+        if (self.send_buf.items.len > 0) return;
+
         while (true) {
             var data: [*c]const u8 = null;
             const len = c.nghttp2_session_mem_send(self.session, &data);
@@ -197,8 +201,9 @@ pub const H2Session = struct {
     }
 
     pub fn submitResponse(self: *H2Session, stream_id: i32, status: u16, content_type: []const u8, body: []const u8) void {
-        var status_buf: [3]u8 = undefined;
-        const status_str = std.fmt.bufPrint(&status_buf, "{d}", .{status}) catch "200";
+        // u16 max is 5 digits, valid http statuses are 3
+        var status_buf: [5]u8 = undefined;
+        const status_str = std.fmt.bufPrint(&status_buf, "{d}", .{status}) catch "500";
 
         var nv = [_]c.nghttp2_nv{
             makeNv(":status", status_str),
@@ -206,15 +211,21 @@ pub const H2Session = struct {
         };
 
         if (body.len > 0) {
+            // find the stream before allocating - if it's gone, body_source
+            // would never get attached and onStreamClose would never free it
+            const stream = self.findStream(stream_id) orelse {
+                _ = c.nghttp2_submit_response(self.session, stream_id, &nv, nv.len, null);
+                return;
+            };
             const src = self.allocator.create(BodySource) catch return;
             const data = self.allocator.dupe(u8, body) catch {
                 self.allocator.destroy(src);
                 return;
             };
             src.* = .{ .data = data, .pos = 0 };
-            if (self.findStream(stream_id)) |stream| {
-                stream.body_source = src;
-            }
+            // defensive - clear any prior body_source before replacing
+            stream.freeBodySource(self.allocator);
+            stream.body_source = src;
             var prd = c.nghttp2_data_provider{
                 .source = .{ .ptr = @ptrCast(src) },
                 .read_callback = bodyReadCb,
@@ -310,6 +321,10 @@ fn onHeader(
         if (stream.header_count < 64) {
             stream.headers[stream.header_count] = .{ .name = name, .value = value };
             stream.header_count += 1;
+        } else {
+            // drop-and-free past the cap so a flood of headers can't leak memory
+            self.allocator.free(name);
+            self.allocator.free(value);
         }
     }
     return 0;
