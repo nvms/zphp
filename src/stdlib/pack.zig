@@ -110,12 +110,18 @@ fn native_pack(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
                     else => "",
                 };
                 arg_idx += 1;
-                const count = switch (entry.count) {
-                    .star => s.len,
+                const is_star = entry.count == .star;
+                const count: usize = switch (entry.count) {
+                    .star => if (entry.code == 'Z') s.len + 1 else s.len,
                     .exact => |n| n,
                 };
                 const pad: u8 = if (entry.code == 'A') ' ' else 0;
-                const copy_len = @min(s.len, count);
+                // PHP Z with fixed length reserves the last byte for NUL terminator
+                const max_data: usize = if (entry.code == 'Z' and !is_star and count > 0)
+                    count - 1
+                else
+                    count;
+                const copy_len = @min(s.len, max_data);
                 try buf.appendSlice(ctx.allocator, s[0..copy_len]);
                 if (count > copy_len) {
                     try buf.appendNTimes(ctx.allocator, pad, count - copy_len);
@@ -128,15 +134,18 @@ fn native_pack(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
                     else => "",
                 };
                 arg_idx += 1;
-                const nibbles = switch (entry.count) {
+                // match PHP: truncate requested nibble count to the available string length
+                // so pack("H4", "ab") writes only 1 byte (from 2 hex chars) instead of zero-padding
+                const requested = switch (entry.count) {
                     .star => s.len,
                     .exact => |n| n,
                 };
+                const nibbles = @min(requested, s.len);
                 const bytes_needed = (nibbles + 1) / 2;
                 var i: usize = 0;
                 while (i < bytes_needed) : (i += 1) {
-                    const ni0: u8 = if (i * 2 < nibbles) hexDigitVal(if (i * 2 < s.len) s[i * 2] else '0') else 0;
-                    const ni1: u8 = if (i * 2 + 1 < nibbles) hexDigitVal(if (i * 2 + 1 < s.len) s[i * 2 + 1] else '0') else 0;
+                    const ni0: u8 = if (i * 2 < nibbles) hexDigitVal(s[i * 2]) else 0;
+                    const ni1: u8 = if (i * 2 + 1 < nibbles) hexDigitVal(s[i * 2 + 1]) else 0;
                     if (entry.code == 'H') {
                         try buf.append(ctx.allocator, (ni0 << 4) | ni1);
                     } else {
@@ -316,7 +325,6 @@ fn native_unpack(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
 
     var arr = try ctx.createArray();
     var parser = parseFormat(fmt, true);
-    var unnamed_idx: i64 = 1;
 
     while (parser.next()) |entry| {
         switch (entry.code) {
@@ -340,7 +348,7 @@ fn native_unpack(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
                 }
 
                 const owned = try ctx.createString(slice);
-                const key = unpackKey(entry.name, &unnamed_idx);
+                const key = try makeKey(ctx, entry.name, 0, 1);
                 try arr.set(ctx.allocator, key, .{ .string = owned });
             },
             'H', 'h' => {
@@ -364,7 +372,7 @@ fn native_unpack(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
                 }
                 offset += bytes_needed;
 
-                const key = unpackKey(entry.name, &unnamed_idx);
+                const key = try makeKey(ctx, entry.name, 0, 1);
                 try arr.set(ctx.allocator, key, .{ .string = hex_buf });
             },
             'c' => {
@@ -373,7 +381,7 @@ fn native_unpack(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
                 for (0..repeat) |i| {
                     const val: i8 = @bitCast(data[offset]);
                     offset += 1;
-                    const key = unpackKeyIndexed(entry.name, &unnamed_idx, i, repeat);
+                    const key = try makeKey(ctx, entry.name, i, repeat);
                     try arr.set(ctx.allocator, key, .{ .int = val });
                 }
             },
@@ -383,7 +391,7 @@ fn native_unpack(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
                 for (0..repeat) |i| {
                     const val = data[offset];
                     offset += 1;
-                    const key = unpackKeyIndexed(entry.name, &unnamed_idx, i, repeat);
+                    const key = try makeKey(ctx, entry.name, i, repeat);
                     try arr.set(ctx.allocator, key, .{ .int = val });
                 }
             },
@@ -393,7 +401,7 @@ fn native_unpack(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
                 for (0..repeat) |i| {
                     const val: i16 = @bitCast(data[offset..][0..2].*);
                     offset += 2;
-                    const key = unpackKeyIndexed(entry.name, &unnamed_idx, i, repeat);
+                    const key = try makeKey(ctx, entry.name, i, repeat);
                     try arr.set(ctx.allocator, key, .{ .int = val });
                 }
             },
@@ -403,7 +411,7 @@ fn native_unpack(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
                 for (0..repeat) |i| {
                     const val: u16 = @bitCast(data[offset..][0..2].*);
                     offset += 2;
-                    const key = unpackKeyIndexed(entry.name, &unnamed_idx, i, repeat);
+                    const key = try makeKey(ctx, entry.name, i, repeat);
                     try arr.set(ctx.allocator, key, .{ .int = val });
                 }
             },
@@ -413,7 +421,7 @@ fn native_unpack(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
                 for (0..repeat) |i| {
                     const val = std.mem.bigToNative(u16, @bitCast(data[offset..][0..2].*));
                     offset += 2;
-                    const key = unpackKeyIndexed(entry.name, &unnamed_idx, i, repeat);
+                    const key = try makeKey(ctx, entry.name, i, repeat);
                     try arr.set(ctx.allocator, key, .{ .int = val });
                 }
             },
@@ -423,7 +431,7 @@ fn native_unpack(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
                 for (0..repeat) |i| {
                     const val = std.mem.littleToNative(u16, @bitCast(data[offset..][0..2].*));
                     offset += 2;
-                    const key = unpackKeyIndexed(entry.name, &unnamed_idx, i, repeat);
+                    const key = try makeKey(ctx, entry.name, i, repeat);
                     try arr.set(ctx.allocator, key, .{ .int = val });
                 }
             },
@@ -433,7 +441,7 @@ fn native_unpack(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
                 for (0..repeat) |i| {
                     const val: i32 = @bitCast(data[offset..][0..4].*);
                     offset += 4;
-                    const key = unpackKeyIndexed(entry.name, &unnamed_idx, i, repeat);
+                    const key = try makeKey(ctx, entry.name, i, repeat);
                     try arr.set(ctx.allocator, key, .{ .int = val });
                 }
             },
@@ -443,7 +451,7 @@ fn native_unpack(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
                 for (0..repeat) |i| {
                     const val: u32 = @bitCast(data[offset..][0..4].*);
                     offset += 4;
-                    const key = unpackKeyIndexed(entry.name, &unnamed_idx, i, repeat);
+                    const key = try makeKey(ctx, entry.name, i, repeat);
                     try arr.set(ctx.allocator, key, .{ .int = val });
                 }
             },
@@ -453,7 +461,7 @@ fn native_unpack(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
                 for (0..repeat) |i| {
                     const val = std.mem.bigToNative(u32, @bitCast(data[offset..][0..4].*));
                     offset += 4;
-                    const key = unpackKeyIndexed(entry.name, &unnamed_idx, i, repeat);
+                    const key = try makeKey(ctx, entry.name, i, repeat);
                     try arr.set(ctx.allocator, key, .{ .int = val });
                 }
             },
@@ -463,7 +471,7 @@ fn native_unpack(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
                 for (0..repeat) |i| {
                     const val = std.mem.littleToNative(u32, @bitCast(data[offset..][0..4].*));
                     offset += 4;
-                    const key = unpackKeyIndexed(entry.name, &unnamed_idx, i, repeat);
+                    const key = try makeKey(ctx, entry.name, i, repeat);
                     try arr.set(ctx.allocator, key, .{ .int = val });
                 }
             },
@@ -476,7 +484,7 @@ fn native_unpack(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
                     @memcpy(&bytes, data[offset .. offset + sz]);
                     const val: c_int = @bitCast(bytes);
                     offset += sz;
-                    const key = unpackKeyIndexed(entry.name, &unnamed_idx, i, repeat);
+                    const key = try makeKey(ctx, entry.name, i, repeat);
                     try arr.set(ctx.allocator, key, .{ .int = val });
                 }
             },
@@ -489,7 +497,7 @@ fn native_unpack(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
                     @memcpy(&bytes, data[offset .. offset + sz]);
                     const val: c_uint = @bitCast(bytes);
                     offset += sz;
-                    const key = unpackKeyIndexed(entry.name, &unnamed_idx, i, repeat);
+                    const key = try makeKey(ctx, entry.name, i, repeat);
                     try arr.set(ctx.allocator, key, .{ .int = @intCast(val) });
                 }
             },
@@ -499,7 +507,7 @@ fn native_unpack(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
                 for (0..repeat) |i| {
                     const val: i64 = @bitCast(data[offset..][0..8].*);
                     offset += 8;
-                    const key = unpackKeyIndexed(entry.name, &unnamed_idx, i, repeat);
+                    const key = try makeKey(ctx, entry.name, i, repeat);
                     try arr.set(ctx.allocator, key, .{ .int = val });
                 }
             },
@@ -509,7 +517,7 @@ fn native_unpack(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
                 for (0..repeat) |i| {
                     const val: u64 = @bitCast(data[offset..][0..8].*);
                     offset += 8;
-                    const key = unpackKeyIndexed(entry.name, &unnamed_idx, i, repeat);
+                    const key = try makeKey(ctx, entry.name, i, repeat);
                     const int_val: i64 = if (val > std.math.maxInt(i64)) @bitCast(val) else @intCast(val);
                     try arr.set(ctx.allocator, key, .{ .int = int_val });
                 }
@@ -520,7 +528,7 @@ fn native_unpack(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
                 for (0..repeat) |i| {
                     const val = std.mem.bigToNative(u64, @bitCast(data[offset..][0..8].*));
                     offset += 8;
-                    const key = unpackKeyIndexed(entry.name, &unnamed_idx, i, repeat);
+                    const key = try makeKey(ctx, entry.name, i, repeat);
                     const int_val: i64 = if (val > std.math.maxInt(i64)) @bitCast(val) else @intCast(val);
                     try arr.set(ctx.allocator, key, .{ .int = int_val });
                 }
@@ -531,7 +539,7 @@ fn native_unpack(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
                 for (0..repeat) |i| {
                     const val = std.mem.littleToNative(u64, @bitCast(data[offset..][0..8].*));
                     offset += 8;
-                    const key = unpackKeyIndexed(entry.name, &unnamed_idx, i, repeat);
+                    const key = try makeKey(ctx, entry.name, i, repeat);
                     const int_val: i64 = if (val > std.math.maxInt(i64)) @bitCast(val) else @intCast(val);
                     try arr.set(ctx.allocator, key, .{ .int = int_val });
                 }
@@ -548,7 +556,7 @@ fn native_unpack(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
                         else => bits,
                     };
                     const val: f32 = @bitCast(bits);
-                    const key = unpackKeyIndexed(entry.name, &unnamed_idx, i, repeat);
+                    const key = try makeKey(ctx, entry.name, i, repeat);
                     try arr.set(ctx.allocator, key, .{ .float = val });
                 }
             },
@@ -564,7 +572,7 @@ fn native_unpack(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
                         else => bits,
                     };
                     const val: f64 = @bitCast(bits);
-                    const key = unpackKeyIndexed(entry.name, &unnamed_idx, i, repeat);
+                    const key = try makeKey(ctx, entry.name, i, repeat);
                     try arr.set(ctx.allocator, key, .{ .float = val });
                 }
             },
@@ -604,22 +612,14 @@ fn resolveRepeat(count: FormatEntry.Count, byte_size: usize, data_len: usize, of
     };
 }
 
-fn unpackKey(name: ?[]const u8, unnamed_idx: *i64) PhpArray.Key {
-    if (name) |n| return .{ .string = n };
-    const idx = unnamed_idx.*;
-    unnamed_idx.* += 1;
-    return .{ .int = idx };
-}
-
-fn unpackKeyIndexed(name: ?[]const u8, unnamed_idx: *i64, i: usize, repeat: usize) PhpArray.Key {
+fn makeKey(ctx: *NativeContext, name: ?[]const u8, i: usize, repeat: usize) !PhpArray.Key {
     if (name) |n| {
         if (repeat <= 1) return .{ .string = n };
-        _ = i;
-        return .{ .string = n };
+        const buf = try std.fmt.allocPrint(ctx.allocator, "{s}{d}", .{ n, i + 1 });
+        try ctx.strings.append(ctx.allocator, buf);
+        return .{ .string = buf };
     }
-    const idx = unnamed_idx.*;
-    unnamed_idx.* += 1;
-    return .{ .int = idx };
+    return .{ .int = @intCast(i + 1) };
 }
 
 fn hexDigitVal(c: u8) u4 {
