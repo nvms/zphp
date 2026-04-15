@@ -189,4 +189,45 @@ echo ($backAll["string"] === "hello" ? "ok" : "FAIL") . "\n";
 echo ($backAll["array"][0] === 1 ? "ok" : "FAIL") . "\n";
 echo ($backAll["array"][2] === 3 ? "ok" : "FAIL") . "\n";
 
+// --- visibility-preserving object serialization ---
+
+echo "=== object visibility ===\n";
+class VisFoo {
+    public $pub = 1;
+    protected $prot = 2.5;
+    private $priv = "secret";
+}
+$vf = new VisFoo();
+$s = serialize($vf);
+echo $s . "\n";
+$vf2 = unserialize($s);
+echo "pub: " . $vf2->pub . "\n";
+
+// --- object reference tracking ---
+
+echo "=== object refs ===\n";
+class RefNode {
+    public $name;
+    public function __construct($n) { $this->name = $n; }
+}
+$shared = new RefNode("shared");
+$arr_shared = [$shared, $shared, $shared];
+echo serialize($arr_shared) . "\n";
+
+$a = new RefNode("a");
+$b = new RefNode("b");
+echo serialize(["first" => $a, "second" => $b, "third" => $a]) . "\n";
+
+$u = unserialize(serialize([$shared, $shared]));
+echo ($u[0] === $u[1] ? "shared-ok" : "shared-fail") . "\n";
+
+// --- float scientific boundary ---
+
+echo "=== float scientific ===\n";
+echo serialize(1e-4) . "\n";
+echo serialize(1e-5) . "\n";
+echo serialize(1.5e16) . "\n";
+echo serialize(1.0e17) . "\n";
+echo serialize(1.5e19) . "\n";
+
 echo "=== done ===\n";

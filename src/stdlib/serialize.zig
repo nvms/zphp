@@ -1,8 +1,38 @@
 const std = @import("std");
 const Value = @import("../runtime/value.zig").Value;
 const PhpArray = @import("../runtime/value.zig").PhpArray;
+const PhpObject = @import("../runtime/value.zig").PhpObject;
+const ClassDef = @import("../runtime/vm.zig").ClassDef;
 const NativeContext = @import("../runtime/vm.zig").NativeContext;
+const Allocator = std.mem.Allocator;
 const RuntimeError = error{ RuntimeError, OutOfMemory };
+
+const SerCtx = struct {
+    objects: std.AutoHashMapUnmanaged(*PhpObject, usize) = .{},
+    next_slot: usize = 1,
+
+    fn deinit(self: *SerCtx, a: Allocator) void {
+        self.objects.deinit(a);
+    }
+};
+
+const UnserCtx = struct {
+    slots: std.ArrayListUnmanaged(Value) = .{},
+
+    fn deinit(self: *UnserCtx, a: Allocator) void {
+        self.slots.deinit(a);
+    }
+
+    fn reserve(self: *UnserCtx, a: Allocator) !usize {
+        const idx = self.slots.items.len;
+        try self.slots.append(a, .null);
+        return idx;
+    }
+
+    fn store(self: *UnserCtx, idx: usize, val: Value) void {
+        self.slots.items[idx] = val;
+    }
+};
 
 pub const entries = .{
     .{ "serialize", native_serialize },
@@ -27,19 +57,20 @@ fn formatPhpFloat(buf: *std.ArrayListUnmanaged(u8), a: std.mem.Allocator, f: f64
         }
         return;
     }
-    // match PHP's %.14G: scientific notation for exp < -4 or exp >= 14 sig digits
-    // but PHP serializes integer-range floats as integers, so large whole numbers
-    // stay decimal up to ~1e18
+    // match PHP's serialize_precision=-1 shortest-roundtrip algorithm: decimal for
+    // magnitudes in [1e-4, 1e17), scientific otherwise
     const abs_f = @abs(f);
     const exp = if (abs_f != 0) @floor(@log10(abs_f)) else 0;
-    const use_sci = exp < -4 or (exp >= 14 and (f != @trunc(f) or abs_f >= 1e19));
+    const use_sci = exp < -4 or abs_f >= 1e17;
     if (use_sci) {
         // scientific notation like PHP: 1.0E-6, 1.0E+16
         var tmp: [64]u8 = undefined;
         const s = std.fmt.bufPrint(&tmp, "{e}", .{f}) catch return;
-        // zig outputs like 1e-6, PHP outputs like 1.0E-6
-        // need to transform: uppercase E, ensure decimal point, explicit +/- sign
-        for (s) |c| {
+        // zig outputs like 1e-6 or 1e19, PHP outputs 1.0E-6 or 1.0E+19.
+        // transform: uppercase E, ensure decimal point before E, explicit sign after E.
+        var i: usize = 0;
+        while (i < s.len) : (i += 1) {
+            const c = s[i];
             if (c == 'e') {
                 // ensure there's a decimal point before E
                 const written = buf.items.len;
@@ -51,18 +82,16 @@ fn formatPhpFloat(buf: *std.ArrayListUnmanaged(u8), a: std.mem.Allocator, f: f64
                 }
                 if (!has_dot) try buf.appendSlice(a, ".0");
                 try buf.append(a, 'E');
-            } else if (c == '-' and buf.items.len > 0 and buf.items[buf.items.len - 1] == 'E') {
-                try buf.append(a, '-');
-            } else if (c == '+' and buf.items.len > 0 and buf.items[buf.items.len - 1] == 'E') {
-                try buf.append(a, '+');
+                // emit explicit sign; if zig didn't provide one the exponent is positive
+                if (i + 1 < s.len and (s[i + 1] == '-' or s[i + 1] == '+')) {
+                    try buf.append(a, s[i + 1]);
+                    i += 1;
+                } else {
+                    try buf.append(a, '+');
+                }
             } else {
                 try buf.append(a, c);
             }
-        }
-        // if no sign after E, add +
-        if (buf.items.len > 0 and buf.items[buf.items.len - 1] == 'E') {
-            try buf.append(a, '+');
-            try buf.append(a, '0');
         }
     } else {
         var tmp: [64]u8 = undefined;
@@ -74,13 +103,76 @@ fn formatPhpFloat(buf: *std.ArrayListUnmanaged(u8), a: std.mem.Allocator, f: f64
 fn native_serialize(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len == 0) return .{ .string = "" };
     var buf = std.ArrayListUnmanaged(u8){};
-    try serializeValue(&buf, ctx.allocator, args[0]);
+    var sctx = SerCtx{};
+    defer sctx.deinit(ctx.allocator);
+    try serializeValue(ctx, &buf, &sctx, args[0]);
     const result = try buf.toOwnedSlice(ctx.allocator);
     try ctx.strings.append(ctx.allocator, result);
     return .{ .string = result };
 }
 
-fn serializeValue(buf: *std.ArrayListUnmanaged(u8), a: std.mem.Allocator, val: Value) !void {
+fn emitLenString(buf: *std.ArrayListUnmanaged(u8), a: Allocator, s: []const u8) !void {
+    try buf.appendSlice(a, "s:");
+    var tmp: [20]u8 = undefined;
+    const len_s = std.fmt.bufPrint(&tmp, "{d}", .{s.len}) catch return;
+    try buf.appendSlice(a, len_s);
+    try buf.appendSlice(a, ":\"");
+    try buf.appendSlice(a, s);
+    try buf.appendSlice(a, "\";");
+}
+
+fn findPropertyVisibility(cls: ClassDef, name: []const u8) ClassDef.Visibility {
+    for (cls.properties.items) |pdef| {
+        if (std.mem.eql(u8, pdef.name, name)) return pdef.visibility;
+    }
+    return .public;
+}
+
+fn emitObjectPropertyKey(
+    buf: *std.ArrayListUnmanaged(u8),
+    a: Allocator,
+    class_name: []const u8,
+    prop_name: []const u8,
+    visibility: ClassDef.Visibility,
+) !void {
+    switch (visibility) {
+        .public => try emitLenString(buf, a, prop_name),
+        .protected => {
+            const total_len = 3 + prop_name.len;
+            try buf.appendSlice(a, "s:");
+            var tmp: [20]u8 = undefined;
+            const len_s = std.fmt.bufPrint(&tmp, "{d}", .{total_len}) catch return;
+            try buf.appendSlice(a, len_s);
+            try buf.appendSlice(a, ":\"");
+            try buf.append(a, 0);
+            try buf.append(a, '*');
+            try buf.append(a, 0);
+            try buf.appendSlice(a, prop_name);
+            try buf.appendSlice(a, "\";");
+        },
+        .private => {
+            const total_len = 2 + class_name.len + prop_name.len;
+            try buf.appendSlice(a, "s:");
+            var tmp: [20]u8 = undefined;
+            const len_s = std.fmt.bufPrint(&tmp, "{d}", .{total_len}) catch return;
+            try buf.appendSlice(a, len_s);
+            try buf.appendSlice(a, ":\"");
+            try buf.append(a, 0);
+            try buf.appendSlice(a, class_name);
+            try buf.append(a, 0);
+            try buf.appendSlice(a, prop_name);
+            try buf.appendSlice(a, "\";");
+        },
+    }
+}
+
+fn serializeValue(ctx: *NativeContext, buf: *std.ArrayListUnmanaged(u8), sctx: *SerCtx, val: Value) !void {
+    const a = ctx.allocator;
+    // every value occupies a slot, including references themselves
+    const my_slot = sctx.next_slot;
+    sctx.next_slot += 1;
+    _ = my_slot;
+
     switch (val) {
         .null => try buf.appendSlice(a, "N;"),
         .bool => |b| {
@@ -98,15 +190,7 @@ fn serializeValue(buf: *std.ArrayListUnmanaged(u8), a: std.mem.Allocator, val: V
             try formatPhpFloat(buf, a, f);
             try buf.append(a, ';');
         },
-        .string => |str| {
-            try buf.appendSlice(a, "s:");
-            var tmp: [20]u8 = undefined;
-            const len_s = std.fmt.bufPrint(&tmp, "{d}", .{str.len}) catch return;
-            try buf.appendSlice(a, len_s);
-            try buf.appendSlice(a, ":\"");
-            try buf.appendSlice(a, str);
-            try buf.appendSlice(a, "\";");
-        },
+        .string => |str| try emitLenString(buf, a, str),
         .array => |arr| {
             try buf.appendSlice(a, "a:");
             var tmp: [20]u8 = undefined;
@@ -114,6 +198,7 @@ fn serializeValue(buf: *std.ArrayListUnmanaged(u8), a: std.mem.Allocator, val: V
             try buf.appendSlice(a, len_s);
             try buf.appendSlice(a, ":{");
             for (arr.entries.items) |entry| {
+                // keys do not occupy a slot in PHP's reference counting
                 switch (entry.key) {
                     .int => |i| {
                         try buf.appendSlice(a, "i:");
@@ -121,20 +206,25 @@ fn serializeValue(buf: *std.ArrayListUnmanaged(u8), a: std.mem.Allocator, val: V
                         try buf.appendSlice(a, ki);
                         try buf.append(a, ';');
                     },
-                    .string => |s| {
-                        try buf.appendSlice(a, "s:");
-                        const ks = std.fmt.bufPrint(&tmp, "{d}", .{s.len}) catch return;
-                        try buf.appendSlice(a, ks);
-                        try buf.appendSlice(a, ":\"");
-                        try buf.appendSlice(a, s);
-                        try buf.appendSlice(a, "\";");
-                    },
+                    .string => |s| try emitLenString(buf, a, s),
                 }
-                try serializeValue(buf, a, entry.value);
+                try serializeValue(ctx, buf, sctx, entry.value);
             }
             try buf.append(a, '}');
         },
         .object => |obj| {
+            // emit a back-reference if we've already serialized this object
+            if (sctx.objects.get(obj)) |existing_slot| {
+                // rewind the slot counter: this r: entry occupies the slot we already consumed
+                try buf.appendSlice(a, "r:");
+                var tmp: [20]u8 = undefined;
+                const s = std.fmt.bufPrint(&tmp, "{d}", .{existing_slot}) catch return;
+                try buf.appendSlice(a, s);
+                try buf.append(a, ';');
+                return;
+            }
+            try sctx.objects.put(a, obj, sctx.next_slot - 1);
+
             try buf.appendSlice(a, "O:");
             var tmp: [20]u8 = undefined;
             const nl = std.fmt.bufPrint(&tmp, "{d}", .{obj.class_name.len}) catch return;
@@ -147,29 +237,25 @@ fn serializeValue(buf: *std.ArrayListUnmanaged(u8), a: std.mem.Allocator, val: V
             const cl = std.fmt.bufPrint(&tmp, "{d}", .{total_count}) catch return;
             try buf.appendSlice(a, cl);
             try buf.appendSlice(a, ":{");
+
+            const class_def = ctx.vm.classes.get(obj.class_name);
             if (obj.slot_layout) |layout| {
                 if (obj.slots) |slots| {
                     for (layout.names, 0..) |name, i| {
-                        try buf.appendSlice(a, "s:");
-                        const ks = std.fmt.bufPrint(&tmp, "{d}", .{name.len}) catch return;
-                        try buf.appendSlice(a, ks);
-                        try buf.appendSlice(a, ":\"");
-                        try buf.appendSlice(a, name);
-                        try buf.appendSlice(a, "\";");
-                        try serializeValue(buf, a, slots[i]);
+                        const vis: ClassDef.Visibility = if (class_def) |c| findPropertyVisibility(c, name) else .public;
+                        try emitObjectPropertyKey(buf, a, obj.class_name, name, vis);
+                        try serializeValue(ctx, buf, sctx, slots[i]);
                     }
                 }
             }
             var iter = obj.properties.iterator();
             while (iter.next()) |entry| {
                 const k = entry.key_ptr.*;
-                try buf.appendSlice(a, "s:");
-                const ks = std.fmt.bufPrint(&tmp, "{d}", .{k.len}) catch return;
-                try buf.appendSlice(a, ks);
-                try buf.appendSlice(a, ":\"");
-                try buf.appendSlice(a, k);
-                try buf.appendSlice(a, "\";");
-                try serializeValue(buf, a, entry.value_ptr.*);
+                // properties in the hashmap are keyed by the bare name (visibility stored on ClassDef),
+                // so look up visibility the same way as slot properties
+                const vis: ClassDef.Visibility = if (class_def) |c| findPropertyVisibility(c, k) else .public;
+                try emitObjectPropertyKey(buf, a, obj.class_name, k, vis);
+                try serializeValue(ctx, buf, sctx, entry.value_ptr.*);
             }
             try buf.append(a, '}');
         },
@@ -180,7 +266,9 @@ fn serializeValue(buf: *std.ArrayListUnmanaged(u8), a: std.mem.Allocator, val: V
 fn native_unserialize(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len == 0 or args[0] != .string) return Value{ .bool = false };
     const s = args[0].string;
-    const result = unserializeValue(ctx, s, 0) catch return Value{ .bool = false };
+    var uctx = UnserCtx{};
+    defer uctx.deinit(ctx.allocator);
+    const result = unserializeValue(ctx, &uctx, s, 0) catch return Value{ .bool = false };
     return result.value;
 }
 
@@ -189,19 +277,31 @@ const ParseResult = struct {
     pos: usize,
 };
 
-fn unserializeValue(ctx: *NativeContext, s: []const u8, pos: usize) !ParseResult {
+fn stripVisibilityPrefix(name: []const u8) []const u8 {
+    if (name.len > 2 and name[0] == 0) {
+        if (std.mem.indexOfScalarPos(u8, name, 1, 0)) |second| {
+            return name[second + 1 ..];
+        }
+    }
+    return name;
+}
+
+fn unserializeValue(ctx: *NativeContext, uctx: *UnserCtx, s: []const u8, pos: usize) !ParseResult {
     if (pos >= s.len) return error.RuntimeError;
 
     switch (s[pos]) {
         'N' => {
             if (pos + 1 < s.len and s[pos + 1] == ';') {
+                try uctx.slots.append(ctx.allocator, .null);
                 return .{ .value = .null, .pos = pos + 2 };
             }
             return error.RuntimeError;
         },
         'b' => {
             if (pos + 3 < s.len and s[pos + 1] == ':' and s[pos + 3] == ';') {
-                return .{ .value = .{ .bool = s[pos + 2] == '1' }, .pos = pos + 4 };
+                const v: Value = .{ .bool = s[pos + 2] == '1' };
+                try uctx.slots.append(ctx.allocator, v);
+                return .{ .value = v, .pos = pos + 4 };
             }
             return error.RuntimeError;
         },
@@ -210,18 +310,24 @@ fn unserializeValue(ctx: *NativeContext, s: []const u8, pos: usize) !ParseResult
             const start = pos + 2;
             const end = std.mem.indexOfPos(u8, s, start, ";") orelse return error.RuntimeError;
             const i = std.fmt.parseInt(i64, s[start..end], 10) catch return error.RuntimeError;
-            return .{ .value = .{ .int = i }, .pos = end + 1 };
+            const v: Value = .{ .int = i };
+            try uctx.slots.append(ctx.allocator, v);
+            return .{ .value = v, .pos = end + 1 };
         },
         'd' => {
             if (pos + 2 >= s.len or s[pos + 1] != ':') return error.RuntimeError;
             const start = pos + 2;
             const end = std.mem.indexOfPos(u8, s, start, ";") orelse return error.RuntimeError;
             const f = std.fmt.parseFloat(f64, s[start..end]) catch return error.RuntimeError;
-            return .{ .value = .{ .float = f }, .pos = end + 1 };
+            const v: Value = .{ .float = f };
+            try uctx.slots.append(ctx.allocator, v);
+            return .{ .value = v, .pos = end + 1 };
         },
         's' => {
             const r = try parseString(s, pos);
-            return .{ .value = .{ .string = try ctx.createString(r.str) }, .pos = r.pos };
+            const v: Value = .{ .string = try ctx.createString(r.str) };
+            try uctx.slots.append(ctx.allocator, v);
+            return .{ .value = v, .pos = r.pos };
         },
         'a' => {
             if (pos + 2 >= s.len or s[pos + 1] != ':') return error.RuntimeError;
@@ -231,10 +337,17 @@ fn unserializeValue(ctx: *NativeContext, s: []const u8, pos: usize) !ParseResult
             if (colon + 1 >= s.len or s[colon + 1] != '{') return error.RuntimeError;
             var p = colon + 2;
             var arr = try ctx.createArray();
+            const slot_idx = try uctx.reserve(ctx.allocator);
+            uctx.store(slot_idx, .{ .array = arr });
             for (0..count) |_| {
-                const key_result = try unserializeValue(ctx, s, p);
+                // PHP array keys are NOT counted as reference slots; use a throwaway
+                // UnserCtx stack position that we roll back after each key parse.
+                const key_slots_before = uctx.slots.items.len;
+                const key_result = try unserializeValue(ctx, uctx, s, p);
                 p = key_result.pos;
-                const val_result = try unserializeValue(ctx, s, p);
+                uctx.slots.items.len = key_slots_before;
+
+                const val_result = try unserializeValue(ctx, uctx, s, p);
                 p = val_result.pos;
                 const key: PhpArray.Key = switch (key_result.value) {
                     .int => |i| .{ .int = i },
@@ -269,17 +382,35 @@ fn unserializeValue(ctx: *NativeContext, s: []const u8, pos: usize) !ParseResult
                 }
             }
 
+            // register slot before parsing contents so self-refs resolve
+            const slot_idx = try uctx.reserve(ctx.allocator);
+            uctx.store(slot_idx, .{ .object = obj });
+
             for (0..prop_count) |_| {
-                const key_result = try unserializeValue(ctx, s, p);
+                const key_slots_before = uctx.slots.items.len;
+                const key_result = try unserializeValue(ctx, uctx, s, p);
                 p = key_result.pos;
-                const val_result = try unserializeValue(ctx, s, p);
+                uctx.slots.items.len = key_slots_before;
+
+                const val_result = try unserializeValue(ctx, uctx, s, p);
                 p = val_result.pos;
                 if (key_result.value == .string) {
-                    try obj.set(ctx.allocator, key_result.value.string, val_result.value);
+                    const stripped = stripVisibilityPrefix(key_result.value.string);
+                    try obj.set(ctx.allocator, stripped, val_result.value);
                 }
             }
             if (p < s.len and s[p] == '}') p += 1;
             return .{ .value = .{ .object = obj }, .pos = p };
+        },
+        'r', 'R' => {
+            if (pos + 2 >= s.len or s[pos + 1] != ':') return error.RuntimeError;
+            const start = pos + 2;
+            const end = std.mem.indexOfPos(u8, s, start, ";") orelse return error.RuntimeError;
+            const idx = std.fmt.parseInt(usize, s[start..end], 10) catch return error.RuntimeError;
+            if (idx == 0 or idx > uctx.slots.items.len) return error.RuntimeError;
+            const v = uctx.slots.items[idx - 1];
+            try uctx.slots.append(ctx.allocator, v);
+            return .{ .value = v, .pos = end + 1 };
         },
         else => return error.RuntimeError,
     }

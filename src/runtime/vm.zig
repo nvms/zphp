@@ -618,14 +618,17 @@ pub const VM = struct {
     }
 
     fn freeHeapItems(self: *VM) void {
+        // cleanup subsystem resources before freeing strings, because cleanup
+        // reads class_name from each object and those names may live in self.strings
+        // (e.g. when created by unserialize via ctx.createString)
+        @import("../stdlib/pdo.zig").cleanupResources(self.objects);
+        @import("../stdlib/curl.zig").cleanupResources(self.objects);
+        @import("../stdlib/filesystem.zig").cleanupHandles(self.objects);
         for (self.strings.items) |s| self.allocator.free(s);
         for (self.arrays.items) |a| {
             a.deinit(self.allocator);
             self.allocator.destroy(a);
         }
-        @import("../stdlib/pdo.zig").cleanupResources(self.objects);
-        @import("../stdlib/curl.zig").cleanupResources(self.objects);
-        @import("../stdlib/filesystem.zig").cleanupHandles(self.objects);
         for (self.objects.items) |o| {
             o.deinit(self.allocator);
             self.allocator.destroy(o);
