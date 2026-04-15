@@ -996,7 +996,13 @@ fn processWsRead(w: *Worker, c: *Connection) void {
     var consumed_total: usize = 0;
     while (true) {
         const remaining = c.buf[consumed_total..c.buffered];
-        const parsed = ws_proto.tryParseFrame(remaining, max_msg_size) orelse break;
+        const parsed_opt = ws_proto.tryParseFrame(remaining, max_msg_size) catch {
+            // protocol error or oversized message - close the connection
+            ws_proto.writeCloseFrame(c, 1002) catch {};
+            c.state = .closing;
+            break;
+        };
+        const parsed = parsed_opt orelse break;
 
         switch (parsed.frame.opcode) {
             .text, .binary => {
