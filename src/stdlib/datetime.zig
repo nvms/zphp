@@ -139,6 +139,7 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try vm.native_fns.put(a, "DateInterval::__construct", diConstruct);
     try vm.native_fns.put(a, "DateInterval::invert", diInvert);
     try vm.native_fns.put(a, "DateInterval::createFromDateString", diCreateFromDateString);
+    try vm.native_fns.put(a, "DateInterval::format", diFormat);
 }
 
 fn dtGetLastErrors(_: *NativeContext, _: []const Value) RuntimeError!Value {
@@ -2234,6 +2235,69 @@ fn matchUnit(actual: []const u8, base: []const u8) bool {
     if (eqlLower(actual, base)) return true;
     if (actual.len == base.len + 1 and (actual[actual.len - 1] == 's' or actual[actual.len - 1] == 'S') and eqlLower(actual[0..base.len], base)) return true;
     return false;
+}
+
+fn diFormat(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    const obj = getThis(ctx) orelse return .null;
+    if (args.len == 0 or args[0] != .string) return .{ .string = "" };
+    const fmt = args[0].string;
+
+    const y: i64 = @intCast(@abs(Value.toInt(obj.get("y"))));
+    const m: i64 = @intCast(@abs(Value.toInt(obj.get("m"))));
+    const d: i64 = @intCast(@abs(Value.toInt(obj.get("d"))));
+    const h: i64 = @intCast(@abs(Value.toInt(obj.get("h"))));
+    const mi: i64 = @intCast(@abs(Value.toInt(obj.get("i"))));
+    const s: i64 = @intCast(@abs(Value.toInt(obj.get("s"))));
+    const f_us: i64 = blk: {
+        const fv = obj.get("f");
+        if (fv == .float) break :blk @intFromFloat(fv.float * 1_000_000.0);
+        break :blk 0;
+    };
+    const days_v = obj.get("days");
+    const has_days = days_v == .int;
+    const days_total: i64 = if (has_days) @intCast(@abs(days_v.int)) else 0;
+    const invert = Value.toInt(obj.get("invert")) != 0;
+
+    var buf = std.array_list.Managed(u8).init(ctx.allocator);
+    defer buf.deinit();
+    const w = buf.writer();
+
+    var i: usize = 0;
+    while (i < fmt.len) : (i += 1) {
+        const c = fmt[i];
+        if (c != '%' or i + 1 >= fmt.len) {
+            try w.writeByte(c);
+            continue;
+        }
+        i += 1;
+        switch (fmt[i]) {
+            'Y' => try w.print("{d:0>4}", .{y}),
+            'y' => try w.print("{d}", .{y}),
+            'M' => try w.print("{d:0>2}", .{m}),
+            'm' => try w.print("{d}", .{m}),
+            'D' => try w.print("{d:0>2}", .{d}),
+            'd' => try w.print("{d}", .{d}),
+            'a' => if (has_days) try w.print("{d}", .{days_total}) else try w.writeAll("(unknown)"),
+            'H' => try w.print("{d:0>2}", .{h}),
+            'h' => try w.print("{d}", .{h}),
+            'I' => try w.print("{d:0>2}", .{mi}),
+            'i' => try w.print("{d}", .{mi}),
+            'S' => try w.print("{d:0>2}", .{s}),
+            's' => try w.print("{d}", .{s}),
+            'F' => try w.print("{d:0>6}", .{f_us}),
+            'f' => try w.print("{d}", .{f_us}),
+            'R' => try w.writeByte(if (invert) '-' else '+'),
+            'r' => if (invert) try w.writeByte('-'),
+            '%' => try w.writeByte('%'),
+            else => {
+                try w.writeByte('%');
+                try w.writeByte(fmt[i]);
+            },
+        }
+    }
+
+    const dup = try ctx.allocator.dupe(u8, buf.items);
+    return .{ .string = dup };
 }
 
 fn diInvert(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
