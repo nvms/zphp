@@ -103,6 +103,9 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try vm.native_fns.put(a, "DateTimeImmutable::getTimezone", dtGetTimezone);
     try vm.native_fns.put(a, "DateTimeImmutable::setTimezone", dtiSetTimezone);
     try vm.native_fns.put(a, "DateTimeImmutable::createFromFormat", dtiCreateFromFormat);
+    try vm.native_fns.put(a, "DateTimeImmutable::setDate", dtiSetDate);
+    try vm.native_fns.put(a, "DateTimeImmutable::setTime", dtiSetTime);
+    try vm.native_fns.put(a, "DateTimeImmutable::setTimestamp", dtiSetTimestamp);
 
     // DateTimeZone class
     var dtz_def = ClassDef{ .name = "DateTimeZone" };
@@ -135,6 +138,7 @@ pub fn register(vm: *VM, a: Allocator) !void {
 
     try vm.native_fns.put(a, "DateInterval::__construct", diConstruct);
     try vm.native_fns.put(a, "DateInterval::invert", diInvert);
+    try vm.native_fns.put(a, "DateInterval::createFromDateString", diCreateFromDateString);
 }
 
 fn dtGetLastErrors(_: *NativeContext, _: []const Value) RuntimeError!Value {
@@ -543,7 +547,8 @@ fn dtDiff(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     const other = args[0].object;
     const ts1 = getTimestamp(obj);
     const ts2 = getTimestamp(other);
-    var diff_secs = ts1 - ts2;
+    // PHP: $a->diff($b) — invert is 1 only if $b is earlier than $a
+    var diff_secs = ts2 - ts1;
     const invert: i64 = if (diff_secs < 0) 1 else 0;
     if (diff_secs < 0) diff_secs = -diff_secs;
 
@@ -612,6 +617,52 @@ fn dtSetTime(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     return .{ .object = obj };
 }
 
+fn dtiSetDate(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    const obj = getThis(ctx) orelse return .null;
+    if (args.len < 3) return .{ .object = obj };
+    const ts = getTimestamp(obj);
+    const epoch_secs: u64 = @intCast(if (ts < 0) 0 else ts);
+    const es = std.time.epoch.EpochSeconds{ .secs = epoch_secs };
+    const day_seconds = es.getDaySeconds();
+    const h: i64 = day_seconds.getHoursIntoDay();
+    const m: i64 = day_seconds.getMinutesIntoHour();
+    const s: i64 = day_seconds.getSecondsIntoMinute();
+    const new_ts = dateToTimestamp(Value.toInt(args[0]), Value.toInt(args[1]), Value.toInt(args[2]), h, m, s);
+    const new_obj = try ctx.createObject("DateTimeImmutable");
+    try new_obj.set(ctx.allocator, "timestamp", .{ .int = new_ts });
+    const tz = obj.get("__timezone");
+    if (tz != .null) try new_obj.set(ctx.allocator, "__timezone", tz);
+    return .{ .object = new_obj };
+}
+
+fn dtiSetTime(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    const obj = getThis(ctx) orelse return .null;
+    if (args.len < 2) return .{ .object = obj };
+    const ts = getTimestamp(obj);
+    const epoch_secs: u64 = @intCast(if (ts < 0) 0 else ts);
+    const es = std.time.epoch.EpochSeconds{ .secs = epoch_secs };
+    const epoch_day = es.getEpochDay();
+    const year_day = epoch_day.calculateYearDay();
+    const month_day = year_day.calculateMonthDay();
+    const sec: i64 = if (args.len >= 3) Value.toInt(args[2]) else 0;
+    const new_ts = dateToTimestamp(@intCast(year_day.year), month_day.month.numeric(), month_day.day_index + 1, Value.toInt(args[0]), Value.toInt(args[1]), sec);
+    const new_obj = try ctx.createObject("DateTimeImmutable");
+    try new_obj.set(ctx.allocator, "timestamp", .{ .int = new_ts });
+    const tz = obj.get("__timezone");
+    if (tz != .null) try new_obj.set(ctx.allocator, "__timezone", tz);
+    return .{ .object = new_obj };
+}
+
+fn dtiSetTimestamp(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    const obj = getThis(ctx) orelse return .null;
+    if (args.len < 1) return .{ .object = obj };
+    const new_obj = try ctx.createObject("DateTimeImmutable");
+    try new_obj.set(ctx.allocator, "timestamp", .{ .int = Value.toInt(args[0]) });
+    const tz = obj.get("__timezone");
+    if (tz != .null) try new_obj.set(ctx.allocator, "__timezone", tz);
+    return .{ .object = new_obj };
+}
+
 fn dtCreateFromTimestamp(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len == 0) return .null;
     const obj = try ctx.createObject("DateTime");
@@ -620,6 +671,14 @@ fn dtCreateFromTimestamp(ctx: *NativeContext, args: []const Value) RuntimeError!
 }
 
 fn dtCreateFromFormat(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    return createFromFormatImpl(ctx, args, "DateTime");
+}
+
+fn dtiCreateFromFormat(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    return createFromFormatImpl(ctx, args, "DateTimeImmutable");
+}
+
+fn createFromFormatImpl(ctx: *NativeContext, args: []const Value, default_class: []const u8) RuntimeError!Value {
     if (args.len < 2 or args[0] != .string or args[1] != .string) return .{ .bool = false };
     const format = args[0].string;
     const datetime = args[1].string;
@@ -633,72 +692,253 @@ fn dtCreateFromFormat(ctx: *NativeContext, args: []const Value) RuntimeError!Val
                 if (ctx.vm.classes.contains(cc)) break :blk cc;
             }
         }
-        break :blk "DateTime";
+        break :blk default_class;
     };
+
+    const ts = parseDateTimeFormat(format, datetime, std.time.timestamp()) orelse return .{ .bool = false };
     const obj = try ctx.createObject(class_name);
-
-    // handle the most common format Carbon uses: "U.u" (unix timestamp with microseconds)
-    if (std.mem.eql(u8, format, "U.u") or std.mem.eql(u8, format, "U")) {
-        // parse timestamp from string like "1234567890.123456" or "1234567890"
-        var ts: i64 = 0;
-        var neg = false;
-        var i: usize = 0;
-        if (i < datetime.len and datetime[i] == '-') { neg = true; i += 1; }
-        while (i < datetime.len and datetime[i] >= '0' and datetime[i] <= '9') : (i += 1) {
-            ts = ts * 10 + @as(i64, datetime[i] - '0');
-        }
-        if (neg) ts = -ts;
-        try obj.set(ctx.allocator, "timestamp", .{ .int = ts });
-        return .{ .object = obj };
-    }
-
-    // for other formats, try parsing the datetime string as a general date
-    const parsed = parseRelativeTime(datetime, std.time.timestamp());
-    if (parsed == .int) {
-        try obj.set(ctx.allocator, "timestamp", parsed);
-    } else {
-        try obj.set(ctx.allocator, "timestamp", .{ .int = std.time.timestamp() });
-    }
+    try obj.set(ctx.allocator, "timestamp", .{ .int = ts });
     return .{ .object = obj };
 }
 
-fn dtiCreateFromFormat(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len < 2 or args[0] != .string or args[1] != .string) return .{ .bool = false };
-    const format = args[0].string;
-    const datetime = args[1].string;
+// PHP createFromFormat parser. Supports the common specifiers: Y y m n M F d j D l
+// H G h g i s U a A e T P O Z, plus literal escape (\X) and reset markers (! and |).
+// Returns null on parse failure (caller maps to PHP `false`).
+fn parseDateTimeFormat(format: []const u8, datetime: []const u8, now: i64) ?i64 {
+    const ncomps = baseComponents(now);
+    var year: i64 = ncomps.year;
+    var month: i64 = ncomps.month;
+    var day: i64 = ncomps.day;
+    var hour: i64 = ncomps.hour;
+    var min: i64 = ncomps.min;
+    var sec: i64 = ncomps.sec;
+    var u_ts: ?i64 = null;
+    var tz_offset: i64 = 0;
+    var is_pm: ?bool = null;
+    var hour_is_12: bool = false;
 
-    const class_name = blk: {
-        var fi: usize = ctx.vm.frame_count;
-        while (fi > 0) {
-            fi -= 1;
-            if (ctx.vm.frames[fi].called_class) |cc| {
-                if (ctx.vm.classes.contains(cc)) break :blk cc;
-            }
-        }
-        break :blk "DateTimeImmutable";
-    };
-    const obj = try ctx.createObject(class_name);
+    // PHP `!` reset semantics: track which fields have been parsed so far so `|` can reset the rest
+    var parsed_year = false;
+    var parsed_month = false;
+    var parsed_day = false;
+    var parsed_hour = false;
+    var parsed_min = false;
+    var parsed_sec = false;
 
-    if (std.mem.eql(u8, format, "U.u") or std.mem.eql(u8, format, "U")) {
-        var ts: i64 = 0;
-        var neg = false;
-        var i: usize = 0;
-        if (i < datetime.len and datetime[i] == '-') { neg = true; i += 1; }
-        while (i < datetime.len and datetime[i] >= '0' and datetime[i] <= '9') : (i += 1) {
-            ts = ts * 10 + @as(i64, datetime[i] - '0');
+    var fi: usize = 0;
+    var di: usize = 0;
+    while (fi < format.len) : (fi += 1) {
+        const c = format[fi];
+        switch (c) {
+            '!' => {
+                year = 1970; month = 1; day = 1;
+                hour = 0; min = 0; sec = 0;
+                parsed_year = true; parsed_month = true; parsed_day = true;
+                parsed_hour = true; parsed_min = true; parsed_sec = true;
+            },
+            '|' => {
+                if (!parsed_year) year = 1970;
+                if (!parsed_month) month = 1;
+                if (!parsed_day) day = 1;
+                if (!parsed_hour) hour = 0;
+                if (!parsed_min) min = 0;
+                if (!parsed_sec) sec = 0;
+            },
+            '\\' => {
+                fi += 1;
+                if (fi >= format.len) return null;
+                if (di >= datetime.len or datetime[di] != format[fi]) return null;
+                di += 1;
+            },
+            'Y' => {
+                if (di + 4 > datetime.len) return null;
+                year = std.fmt.parseInt(i64, datetime[di..di+4], 10) catch return null;
+                di += 4;
+                parsed_year = true;
+            },
+            'y' => {
+                if (di + 2 > datetime.len) return null;
+                const yy = std.fmt.parseInt(i64, datetime[di..di+2], 10) catch return null;
+                year = if (yy < 70) 2000 + yy else 1900 + yy;
+                di += 2;
+                parsed_year = true;
+            },
+            'm' => {
+                if (di + 2 > datetime.len) return null;
+                month = std.fmt.parseInt(i64, datetime[di..di+2], 10) catch return null;
+                di += 2;
+                parsed_month = true;
+            },
+            'n' => {
+                const took = takeDigits(datetime, di, 1, 2) orelse return null;
+                month = took.value;
+                di = took.next;
+                parsed_month = true;
+            },
+            'd' => {
+                if (di + 2 > datetime.len) return null;
+                day = std.fmt.parseInt(i64, datetime[di..di+2], 10) catch return null;
+                di += 2;
+                parsed_day = true;
+            },
+            'j' => {
+                const took = takeDigits(datetime, di, 1, 2) orelse return null;
+                day = took.value;
+                di = took.next;
+                parsed_day = true;
+            },
+            'H' => {
+                if (di + 2 > datetime.len) return null;
+                hour = std.fmt.parseInt(i64, datetime[di..di+2], 10) catch return null;
+                di += 2;
+                parsed_hour = true;
+            },
+            'G' => {
+                const took = takeDigits(datetime, di, 1, 2) orelse return null;
+                hour = took.value;
+                di = took.next;
+                parsed_hour = true;
+            },
+            'h' => {
+                if (di + 2 > datetime.len) return null;
+                hour = std.fmt.parseInt(i64, datetime[di..di+2], 10) catch return null;
+                di += 2;
+                parsed_hour = true;
+                hour_is_12 = true;
+            },
+            'g' => {
+                const took = takeDigits(datetime, di, 1, 2) orelse return null;
+                hour = took.value;
+                di = took.next;
+                parsed_hour = true;
+                hour_is_12 = true;
+            },
+            'i' => {
+                if (di + 2 > datetime.len) return null;
+                min = std.fmt.parseInt(i64, datetime[di..di+2], 10) catch return null;
+                di += 2;
+                parsed_min = true;
+            },
+            's' => {
+                if (di + 2 > datetime.len) return null;
+                sec = std.fmt.parseInt(i64, datetime[di..di+2], 10) catch return null;
+                di += 2;
+                parsed_sec = true;
+            },
+            'U' => {
+                const start = di;
+                if (di < datetime.len and datetime[di] == '-') di += 1;
+                while (di < datetime.len and datetime[di] >= '0' and datetime[di] <= '9') : (di += 1) {}
+                if (di == start or (di == start + 1 and datetime[start] == '-')) return null;
+                u_ts = std.fmt.parseInt(i64, datetime[start..di], 10) catch return null;
+            },
+            'a', 'A' => {
+                if (di + 2 > datetime.len) return null;
+                const seg = datetime[di..di+2];
+                if (eqlLower(seg, "am")) is_pm = false
+                else if (eqlLower(seg, "pm")) is_pm = true
+                else return null;
+                di += 2;
+            },
+            'M' => {
+                const m = parseShortMonth(datetime[di..]) orelse return null;
+                month = m;
+                di += 3;
+                parsed_month = true;
+            },
+            'F' => {
+                const len = monthNameLen(datetime[di..]);
+                if (len == 0) return null;
+                month = parseMonthName(datetime[di..]) orelse return null;
+                di += len;
+                parsed_month = true;
+            },
+            'D' => {
+                if (di + 3 > datetime.len) return null;
+                di += 3;
+            },
+            'l' => {
+                const len = weekdayNameLen(datetime[di..]) orelse return null;
+                di += len;
+            },
+            'e', 'T' => {
+                // timezone name: consume identifier-ish chars
+                const start = di;
+                while (di < datetime.len and (isAlpha(datetime[di]) or datetime[di] == '/' or datetime[di] == '_' or datetime[di] == '+' or datetime[di] == '-' or (datetime[di] >= '0' and datetime[di] <= '9'))) : (di += 1) {}
+                if (di == start) return null;
+            },
+            'O', 'P' => {
+                // +0200 or +02:00
+                if (di >= datetime.len) return null;
+                const sign: i64 = if (datetime[di] == '+') 1 else if (datetime[di] == '-') -1 else return null;
+                di += 1;
+                if (di + 2 > datetime.len) return null;
+                const hh = std.fmt.parseInt(i64, datetime[di..di+2], 10) catch return null;
+                di += 2;
+                var mm: i64 = 0;
+                if (di < datetime.len and datetime[di] == ':') di += 1;
+                if (di + 2 <= datetime.len and datetime[di] >= '0' and datetime[di] <= '9' and datetime[di+1] >= '0' and datetime[di+1] <= '9') {
+                    mm = std.fmt.parseInt(i64, datetime[di..di+2], 10) catch 0;
+                    di += 2;
+                }
+                tz_offset = sign * (hh * 3600 + mm * 60);
+            },
+            'Z' => {
+                const start = di;
+                if (di < datetime.len and (datetime[di] == '+' or datetime[di] == '-')) di += 1;
+                while (di < datetime.len and datetime[di] >= '0' and datetime[di] <= '9') : (di += 1) {}
+                if (di == start or (di == start + 1 and !isDigit(datetime[start]))) return null;
+                tz_offset = std.fmt.parseInt(i64, datetime[start..di], 10) catch return null;
+            },
+            ' ' => {
+                while (di < datetime.len and datetime[di] == ' ') di += 1;
+            },
+            else => {
+                if (di >= datetime.len or datetime[di] != c) return null;
+                di += 1;
+            },
         }
-        if (neg) ts = -ts;
-        try obj.set(ctx.allocator, "timestamp", .{ .int = ts });
-        return .{ .object = obj };
     }
 
-    const parsed = parseRelativeTime(datetime, std.time.timestamp());
-    if (parsed == .int) {
-        try obj.set(ctx.allocator, "timestamp", parsed);
-    } else {
-        try obj.set(ctx.allocator, "timestamp", .{ .int = std.time.timestamp() });
+    if (u_ts) |ts| return ts - tz_offset;
+
+    if (hour_is_12) {
+        if (is_pm) |pm| {
+            if (pm and hour < 12) hour += 12
+            else if (!pm and hour == 12) hour = 0;
+        }
     }
-    return .{ .object = obj };
+
+    return dateToTimestamp(year, month, day, hour, min, sec) - tz_offset;
+}
+
+fn isDigit(c: u8) bool { return c >= '0' and c <= '9'; }
+fn isAlpha(c: u8) bool { return (c >= 'a' and c <= 'z') or (c >= 'A' and c <= 'Z'); }
+
+fn takeDigits(s: []const u8, start: usize, min_n: usize, max_n: usize) ?struct { value: i64, next: usize } {
+    var i = start;
+    while (i < s.len and i - start < max_n and isDigit(s[i])) : (i += 1) {}
+    const got = i - start;
+    if (got < min_n) return null;
+    const v = std.fmt.parseInt(i64, s[start..i], 10) catch return null;
+    return .{ .value = v, .next = i };
+}
+
+fn parseShortMonth(s: []const u8) ?i64 {
+    const months = [_][]const u8{ "jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec" };
+    if (s.len < 3) return null;
+    for (months, 1..) |name, i| {
+        if (eqlLower(s[0..3], name)) return @intCast(i);
+    }
+    return null;
+}
+
+fn weekdayNameLen(s: []const u8) ?usize {
+    const days = [_][]const u8{ "sunday", "monday", "tuesday", "wednesday", "thursday", "friday", "saturday" };
+    for (days) |name| {
+        if (s.len >= name.len and eqlLower(s[0..name.len], name)) return name.len;
+    }
+    return null;
 }
 
 fn dtiCreateFromTimestamp(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
@@ -1924,8 +2164,76 @@ fn diConstruct(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
         try obj.set(ctx.allocator, "f", .{ .float = dur.f });
     }
     try obj.set(ctx.allocator, "invert", .{ .int = 0 });
-    try obj.set(ctx.allocator, "days", .{ .int = 0 });
+    try obj.set(ctx.allocator, "days", .{ .bool = false });
     return .null;
+}
+
+fn diCreateFromDateString(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len == 0 or args[0] != .string) return .{ .bool = false };
+    const dur = parseRelativeDuration(args[0].string);
+    const obj = try ctx.createObject("DateInterval");
+    try obj.set(ctx.allocator, "y", .{ .int = dur.y });
+    try obj.set(ctx.allocator, "m", .{ .int = dur.m });
+    try obj.set(ctx.allocator, "d", .{ .int = dur.d });
+    try obj.set(ctx.allocator, "h", .{ .int = dur.h });
+    try obj.set(ctx.allocator, "i", .{ .int = dur.mi });
+    try obj.set(ctx.allocator, "s", .{ .int = dur.s });
+    try obj.set(ctx.allocator, "f", .{ .float = 0 });
+    try obj.set(ctx.allocator, "invert", .{ .int = 0 });
+    try obj.set(ctx.allocator, "days", .{ .bool = false });
+    return .{ .object = obj };
+}
+
+const RelDuration = struct { y: i64 = 0, m: i64 = 0, d: i64 = 0, h: i64 = 0, mi: i64 = 0, s: i64 = 0 };
+
+fn parseRelativeDuration(input: []const u8) RelDuration {
+    var out = RelDuration{};
+    var i: usize = 0;
+    while (i < input.len) {
+        while (i < input.len and (input[i] == ' ' or input[i] == '\t')) : (i += 1) {}
+        if (i >= input.len) break;
+
+        // optional sign
+        var sign: i64 = 1;
+        if (input[i] == '+' or input[i] == '-') {
+            if (input[i] == '-') sign = -1;
+            i += 1;
+        }
+
+        // digits
+        const num_start = i;
+        while (i < input.len and isDigit(input[i])) : (i += 1) {}
+        if (i == num_start) {
+            // not a number — skip a token to make progress
+            while (i < input.len and input[i] != ' ' and input[i] != '\t') : (i += 1) {}
+            continue;
+        }
+        const value = sign * (std.fmt.parseInt(i64, input[num_start..i], 10) catch 0);
+
+        // optional whitespace before unit
+        while (i < input.len and (input[i] == ' ' or input[i] == '\t')) : (i += 1) {}
+
+        // unit
+        const unit_start = i;
+        while (i < input.len and isAlpha(input[i])) : (i += 1) {}
+        const unit = input[unit_start..i];
+        if (unit.len == 0) continue;
+
+        if (matchUnit(unit, "year")) out.y += value
+        else if (matchUnit(unit, "month")) out.m += value
+        else if (matchUnit(unit, "week")) out.d += value * 7
+        else if (matchUnit(unit, "day")) out.d += value
+        else if (matchUnit(unit, "hour")) out.h += value
+        else if (matchUnit(unit, "minute") or matchUnit(unit, "min")) out.mi += value
+        else if (matchUnit(unit, "second") or matchUnit(unit, "sec")) out.s += value;
+    }
+    return out;
+}
+
+fn matchUnit(actual: []const u8, base: []const u8) bool {
+    if (eqlLower(actual, base)) return true;
+    if (actual.len == base.len + 1 and (actual[actual.len - 1] == 's' or actual[actual.len - 1] == 'S') and eqlLower(actual[0..base.len], base)) return true;
+    return false;
 }
 
 fn diInvert(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
