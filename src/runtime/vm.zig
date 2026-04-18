@@ -7191,6 +7191,21 @@ pub const VM = struct {
     }
 
     fn bindArgs(self: *VM, vars: *std.StringHashMapUnmanaged(Value), func: *const ObjFunction, args: []const Value) !void {
+        if (func.is_variadic and func.arity > 0) {
+            const fixed: usize = func.arity - 1;
+            const bind_fixed = @min(args.len, fixed);
+            for (0..bind_fixed) |i| {
+                try vars.put(self.allocator, func.params[i], try self.copyValue(args[i]));
+            }
+            const rest = try self.allocator.create(PhpArray);
+            rest.* = .{};
+            for (fixed..args.len) |i| {
+                try rest.append(self.allocator, try self.copyValue(args[i]));
+            }
+            try self.arrays.append(self.allocator, rest);
+            try vars.put(self.allocator, func.params[fixed], .{ .array = rest });
+            return;
+        }
         for (0..args.len) |i| {
             try vars.put(self.allocator, func.params[i], try self.copyValue(args[i]));
         }
@@ -7557,7 +7572,8 @@ pub const VM = struct {
             var new_vars: std.StringHashMapUnmanaged(Value) = .{};
             try new_vars.put(self.allocator, "$this", .{ .object = obj });
             try self.bindClosures(&new_vars, null, full_name);
-            try self.bindArgs(&new_vars, func, args[0..@min(args.len, func.arity)]);
+            const trimmed = if (func.is_variadic) args else args[0..@min(args.len, func.arity)];
+            try self.bindArgs(&new_vars, func, trimmed);
             return self.executeFunction(func, new_vars);
         } else return error.RuntimeError;
     }
@@ -7622,7 +7638,8 @@ pub const VM = struct {
             var new_vars: std.StringHashMapUnmanaged(Value) = .{};
             var closure_refs: std.StringHashMapUnmanaged(*Value) = .{};
             try self.bindClosures(&new_vars, &closure_refs, name);
-            try self.bindArgs(&new_vars, func, args[0..@min(args.len, func.arity)]);
+            const trimmed = if (func.is_variadic) args else args[0..@min(args.len, func.arity)];
+            try self.bindArgs(&new_vars, func, trimmed);
             if (closure_refs.count() > 0) {
                 return self.executeFunctionWithRefs(func, new_vars, closure_refs);
             }
