@@ -163,6 +163,7 @@ fn preg_match(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
 
     const flags: u32 = if (args.len >= 4) @intCast(@max(0, Value.toInt(args[3]))) else 0;
     const offset_capture = (flags & 256) != 0;
+    const unmatched_as_null = (flags & 512) != 0;
     const offset: usize = if (args.len >= 5 and args[4] == .int and args[4].int >= 0) @intCast(args[4].int) else 0;
     const rc = pcre2.pcre2_match_8(code, subject.ptr, subject.len, offset, 0, match_data, null);
     if (rc < 0) return .{ .int = 0 };
@@ -179,7 +180,7 @@ fn preg_match(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
             const start = ovector[i * 2];
             const end = ovector[i * 2 + 1];
             if (start == pcre2.UNSET or end == pcre2.UNSET) {
-                const val = if (offset_capture) try makeOffsetPair(ctx, "", -1) else Value{ .string = "" };
+                const val: Value = if (unmatched_as_null) .null else if (offset_capture) try makeOffsetPair(ctx, "", -1) else Value{ .string = "" };
                 try matches_arr.append(ctx.allocator, val);
             } else {
                 const str = try ctx.createString(subject[start..end]);
@@ -187,7 +188,7 @@ fn preg_match(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
                 try matches_arr.append(ctx.allocator, val);
             }
         }
-        try addNamedGroupsInterleaved(ctx, matches_arr, code, ovector, subject, count, offset_capture);
+        try addNamedGroupsInterleaved(ctx, matches_arr, code, ovector, subject, count, offset_capture, unmatched_as_null);
         if (pcre2.pcre2_get_mark_8(match_data)) |mark_ptr| {
             const mark = std.mem.sliceTo(mark_ptr, 0);
             if (mark.len > 0) {
@@ -202,7 +203,7 @@ fn preg_match(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     return .{ .int = 1 };
 }
 
-fn addNamedGroupsInterleaved(ctx: *NativeContext, arr: *PhpArray, code: *pcre2.Code, ovector: [*]usize, subject: []const u8, count: usize, offset_capture: bool) !void {
+fn addNamedGroupsInterleaved(ctx: *NativeContext, arr: *PhpArray, code: *pcre2.Code, ovector: [*]usize, subject: []const u8, count: usize, offset_capture: bool, unmatched_as_null: bool) !void {
     var name_count: u32 = 0;
     _ = pcre2.pcre2_pattern_info_8(code, pcre2.INFO_NAMECOUNT, @ptrCast(&name_count));
     if (name_count == 0) return;
@@ -238,6 +239,7 @@ fn addNamedGroupsInterleaved(ctx: *NativeContext, arr: *PhpArray, code: *pcre2.C
             const start = ovector[ng.group_num * 2];
             const end = ovector[ng.group_num * 2 + 1];
             const val: Value = if (start == pcre2.UNSET or end == pcre2.UNSET) blk: {
+                if (unmatched_as_null) break :blk .null;
                 break :blk if (offset_capture) try makeOffsetPair(ctx, "", -1) else Value{ .string = "" };
             } else blk: {
                 const s = try ctx.createString(subject[start..end]);
