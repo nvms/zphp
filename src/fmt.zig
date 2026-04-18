@@ -993,9 +993,9 @@ const Formatter = struct {
         self.write("class ");
         self.write(self.ast.tokens[name_tok].lexeme(self.source));
 
-        // parent + implements from rhs
-        const parent = self.ast.extra_data[node.data.rhs];
-        const impl_count = self.ast.extra_data[node.data.rhs + 1];
+        // rhs layout: {class_modifiers, parent, implements_count, impl_nodes...}
+        const parent = self.ast.extra_data[node.data.rhs + 1];
+        const impl_count = self.ast.extra_data[node.data.rhs + 2];
         if (parent != 0) {
             self.write(" extends ");
             self.formatNode(parent);
@@ -1005,7 +1005,7 @@ const Formatter = struct {
             var i: u32 = 0;
             while (i < impl_count) : (i += 1) {
                 if (i > 0) self.write(", ");
-                self.formatNode(self.ast.extra_data[node.data.rhs + 2 + i]);
+                self.formatNode(self.ast.extra_data[node.data.rhs + 3 + i]);
             }
         }
 
