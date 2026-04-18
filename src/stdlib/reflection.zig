@@ -41,6 +41,8 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try rc_def.methods.put(a, "implementsInterface", .{ .name = "implementsInterface", .arity = 1 });
     try rc_def.methods.put(a, "isSubclassOf", .{ .name = "isSubclassOf", .arity = 1 });
     try rc_def.methods.put(a, "isInstance", .{ .name = "isInstance", .arity = 1 });
+    try rc_def.methods.put(a, "isFinal", .{ .name = "isFinal", .arity = 0 });
+    try rc_def.methods.put(a, "isCloneable", .{ .name = "isCloneable", .arity = 0 });
     try rc_def.methods.put(a, "newInstanceArgs", .{ .name = "newInstanceArgs", .arity = 1 });
     try rc_def.methods.put(a, "getMethods", .{ .name = "getMethods", .arity = 0 });
     try rc_def.methods.put(a, "getMethod", .{ .name = "getMethod", .arity = 1 });
@@ -109,6 +111,8 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try vm.native_fns.put(a, "ReflectionClass::getStaticProperties", rcGetStaticProperties);
     try vm.native_fns.put(a, "ReflectionClass::getStaticPropertyValue", rcGetStaticPropertyValue);
     try vm.native_fns.put(a, "ReflectionClass::setStaticPropertyValue", rcSetStaticPropertyValue);
+    try vm.native_fns.put(a, "ReflectionClass::isFinal", rcIsFinal);
+    try vm.native_fns.put(a, "ReflectionClass::isCloneable", rcIsCloneable);
 
     // ReflectionMethod
     var rm_def = ClassDef{ .name = "ReflectionMethod" };
@@ -131,6 +135,7 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try rm_def.methods.put(a, "hasReturnType", .{ .name = "hasReturnType", .arity = 0 });
     try rm_def.methods.put(a, "invokeArgs", .{ .name = "invokeArgs", .arity = 2 });
     try rm_def.methods.put(a, "isAbstract", .{ .name = "isAbstract", .arity = 0 });
+    try rm_def.methods.put(a, "isFinal", .{ .name = "isFinal", .arity = 0 });
     try rm_def.methods.put(a, "getAttributes", .{ .name = "getAttributes", .arity = 0 });
     try vm.classes.put(a, "ReflectionMethod", rm_def);
 
@@ -151,6 +156,7 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try vm.native_fns.put(a, "ReflectionMethod::hasReturnType", rmHasReturnType);
     try vm.native_fns.put(a, "ReflectionMethod::invokeArgs", rmInvokeArgs);
     try vm.native_fns.put(a, "ReflectionMethod::isAbstract", rmIsAbstract);
+    try vm.native_fns.put(a, "ReflectionMethod::isFinal", rmIsFinal);
     try vm.native_fns.put(a, "ReflectionMethod::getAttributes", rmGetAttributes);
 
     // ReflectionParameter
@@ -450,6 +456,16 @@ fn buildPropertyObj(ctx: *NativeContext, class_name: []const u8, prop: ClassDef.
     return obj;
 }
 
+fn hasAbstractMethodInChain(vm: *VM, class_name: []const u8, method_name: []const u8) bool {
+    var current = class_name;
+    while (true) {
+        const cls = vm.classes.get(current) orelse return false;
+        if (cls.methods.get(method_name)) |_| return true;
+        if (cls.parent) |p| { current = p; continue; }
+        return false;
+    }
+}
+
 fn hasInterfaceMethod(vm: *VM, iface_name: []const u8, method_name: []const u8) bool {
     var buf: [256]u8 = undefined;
     const key = std.fmt.bufPrint(&buf, "{s}::{s}", .{ iface_name, method_name }) catch return false;
@@ -512,6 +528,11 @@ fn rcIsInstantiable(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
     const this = getThis(ctx) orelse return .null;
     const is_iface = this.get("_is_interface");
     if (is_iface == .bool and is_iface.bool) return .{ .bool = false };
+    const is_trait = this.get("_is_trait");
+    if (is_trait == .bool and is_trait.bool) return .{ .bool = false };
+    const class_name = if (this.get("name") == .string) this.get("name").string else return .{ .bool = false };
+    const cls = ctx.vm.classes.get(class_name) orelse return .{ .bool = true };
+    if (cls.is_abstract) return .{ .bool = false };
     return .{ .bool = true };
 }
 
@@ -672,7 +693,33 @@ fn rcIsAbstract(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
     const this = getThis(ctx) orelse return .{ .bool = false };
     const is_iface = this.get("_is_interface");
     if (is_iface == .bool and is_iface.bool) return .{ .bool = true };
-    return .{ .bool = false };
+    const class_name = if (this.get("name") == .string) this.get("name").string else return .{ .bool = false };
+    const cls = ctx.vm.classes.get(class_name) orelse return .{ .bool = false };
+    return .{ .bool = cls.is_abstract };
+}
+
+fn rcIsFinal(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const this = getThis(ctx) orelse return .{ .bool = false };
+    const class_name = if (this.get("name") == .string) this.get("name").string else return .{ .bool = false };
+    const cls = ctx.vm.classes.get(class_name) orelse return .{ .bool = false };
+    if (cls.is_enum) return .{ .bool = true };
+    return .{ .bool = cls.is_final };
+}
+
+fn rcIsCloneable(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const this = getThis(ctx) orelse return .{ .bool = false };
+    const is_iface = this.get("_is_interface");
+    if (is_iface == .bool and is_iface.bool) return .{ .bool = false };
+    const is_trait = this.get("_is_trait");
+    if (is_trait == .bool and is_trait.bool) return .{ .bool = false };
+    const class_name = if (this.get("name") == .string) this.get("name").string else return .{ .bool = false };
+    const cls = ctx.vm.classes.get(class_name) orelse return .{ .bool = true };
+    if (cls.is_abstract) return .{ .bool = false };
+    if (cls.is_enum) return .{ .bool = false };
+    if (cls.methods.get("__clone")) |m| {
+        if (m.visibility != .public) return .{ .bool = false };
+    }
+    return .{ .bool = true };
 }
 
 fn rcIsInterface(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
@@ -1113,7 +1160,10 @@ fn rmConstruct(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
         if (ctx.vm.classes.get(class_name) == null and ctx.vm.interfaces.get(class_name) == null) {
             try ctx.vm.tryAutoload(class_name);
         }
-        if (!ctx.vm.hasMethod(class_name, method_name) and !hasInterfaceMethod(ctx.vm, class_name, method_name)) {
+        if (!ctx.vm.hasMethod(class_name, method_name) and
+            !hasInterfaceMethod(ctx.vm, class_name, method_name) and
+            !hasAbstractMethodInChain(ctx.vm, class_name, method_name))
+        {
             const msg = std.fmt.allocPrint(ctx.allocator, "Method {s}::{s}() does not exist", .{ class_name, method_name }) catch return error.OutOfMemory;
             return throwReflection(ctx, msg);
         }
@@ -1832,10 +1882,25 @@ fn rmIsAbstract(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
 
     if (ctx.vm.interfaces.contains(declaring)) return .{ .bool = true };
 
+    if (ctx.vm.classes.get(declaring)) |cls| {
+        if (cls.methods.get(method_name)) |m| {
+            if (m.is_abstract) return .{ .bool = true };
+        }
+    }
+
     var buf: [256]u8 = undefined;
     const key = std.fmt.bufPrint(&buf, "{s}::{s}", .{ declaring, method_name }) catch return .{ .bool = false };
     if (ctx.vm.functions.get(key) == null and ctx.vm.native_fns.get(key) == null) return .{ .bool = true };
     return .{ .bool = false };
+}
+
+fn rmIsFinal(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const this = getThis(ctx) orelse return .{ .bool = false };
+    const method_name = if (this.get("name") == .string) this.get("name").string else return .{ .bool = false };
+    const declaring = if (this.get("_declaring_class") == .string) this.get("_declaring_class").string else return .{ .bool = false };
+    const cls = ctx.vm.classes.get(declaring) orelse return .{ .bool = false };
+    const m = cls.methods.get(method_name) orelse return .{ .bool = false };
+    return .{ .bool = m.is_final };
 }
 
 fn rmGetAttributes(ctx: *NativeContext, args: []const Value) RuntimeError!Value {

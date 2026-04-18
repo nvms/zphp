@@ -8,7 +8,7 @@ const TypeHint = @import("pipeline/compiler.zig").TypeHint;
 const Allocator = std.mem.Allocator;
 
 const MAGIC = "ZPHPC\x00";
-const FORMAT_VERSION: u16 = 1;
+const FORMAT_VERSION: u16 = 2;
 
 // tag bytes for serialized values
 const TAG_NULL: u8 = 0;

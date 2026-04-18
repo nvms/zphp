@@ -215,6 +215,9 @@ pub const ClassDef = struct {
     parent: ?[]const u8 = null,
     interfaces: std.ArrayListUnmanaged([]const u8) = .{},
     is_enum: bool = false,
+    is_abstract: bool = false,
+    is_final: bool = false,
+    is_readonly: bool = false,
     backed_type: enum(u8) { none = 0, int_type = 1, string_type = 2 } = .none,
     case_order: std.ArrayListUnmanaged([]const u8) = .{},
     slot_layout: ?*PhpObject.SlotLayout = null,
@@ -232,6 +235,8 @@ pub const ClassDef = struct {
         name: []const u8,
         arity: u8,
         is_static: bool = false,
+        is_abstract: bool = false,
+        is_final: bool = false,
         visibility: Visibility = .public,
     };
 
@@ -5312,11 +5317,15 @@ pub const VM = struct {
     // ==================================================================
 
     fn handleClassDecl(self: *VM) RuntimeError!void {
+        const class_modifiers = self.readByte();
         const name_idx = self.readU16();
         const class_name = self.currentChunk().constants.items[name_idx].string;
         const method_count = self.readU16();
 
         var def = ClassDef{ .name = class_name };
+        def.is_abstract = (class_modifiers & 1) != 0;
+        def.is_final = (class_modifiers & 2) != 0;
+        def.is_readonly = (class_modifiers & 4) != 0;
 
         for (0..method_count) |_| {
             const mi = self.readMethodInfo();
@@ -5719,7 +5728,15 @@ pub const VM = struct {
         const arity = self.readByte();
         const is_static = self.readByte() == 1;
         const vis: ClassDef.Visibility = @enumFromInt(self.readByte());
-        return .{ method_name, .{ .name = method_name, .arity = arity, .is_static = is_static, .visibility = vis } };
+        const flags = self.readByte();
+        return .{ method_name, .{
+            .name = method_name,
+            .arity = arity,
+            .is_static = is_static,
+            .visibility = vis,
+            .is_abstract = (flags & 1) != 0,
+            .is_final = (flags & 2) != 0,
+        } };
     }
 
     fn popDefaults(self: *VM, comptime max: usize, has_default: []const u8) [max]Value {

@@ -766,13 +766,14 @@ pub fn compileClassDecl(self: *Compiler, node: Ast.Node) Error!void {
     self.current_class = class_name;
     defer self.current_class = prev_class;
 
-    // decode rhs: {parent_node, implements_count, impl_nodes...}
+    // decode rhs: {class_modifiers, parent_node, implements_count, impl_nodes...}
     const rhs_base = node.data.rhs;
-    const parent_node = self.ast.extra_data[rhs_base];
-    const impl_count = self.ast.extra_data[rhs_base + 1];
+    const class_modifiers: u8 = @intCast(self.ast.extra_data[rhs_base] & 0xff);
+    const parent_node = self.ast.extra_data[rhs_base + 1];
+    const impl_count = self.ast.extra_data[rhs_base + 2];
     var impl_names: [16][]const u8 = undefined;
     for (0..impl_count) |i| {
-        const impl_node = self.ast.nodes[self.ast.extra_data[rhs_base + 2 + i]];
+        const impl_node = self.ast.nodes[self.ast.extra_data[rhs_base + 3 + i]];
         impl_names[i] = if (impl_node.tag == .qualified_name) (self.buildQualifiedString(self.ast.extraSlice(impl_node.data.lhs)) catch self.ast.tokenSlice(impl_node.main_token)) else self.resolveClassName(self.ast.tokenSlice(impl_node.main_token));
     }
 
@@ -876,6 +877,7 @@ pub fn compileClassDecl(self: *Compiler, node: Ast.Node) Error!void {
 
     const name_idx = try self.addConstant(.{ .string = class_name });
     try self.emitOp(.class_decl);
+    try self.emitByte(class_modifiers);
     try self.emitU16(name_idx);
     try self.emitU16(method_count);
 
@@ -890,6 +892,9 @@ pub fn compileClassDecl(self: *Compiler, node: Ast.Node) Error!void {
             try self.emitByte(if (member.tag == .static_class_method) @as(u8, 1) else @as(u8, 0));
             const vis: u8 = @intCast(member.data.rhs >> 30);
             try self.emitByte(vis);
+            // method flags: bit 0 = abstract, bit 1 = final
+            const m_final: u8 = if ((member.data.rhs >> 28) & 1 == 1) 2 else 0;
+            try self.emitByte(m_final);
         } else if (member.tag == .interface_method) {
             const method_name_str = self.ast.tokenSlice(member.main_token);
             const mname_idx = try self.addConstant(.{ .string = method_name_str });
@@ -897,7 +902,9 @@ pub fn compileClassDecl(self: *Compiler, node: Ast.Node) Error!void {
             const param_nodes = self.ast.extraSlice(member.data.lhs);
             try self.emitByte(@intCast(param_nodes.len));
             try self.emitByte(0); // not static
-            try self.emitByte(0); // public
+            const i_vis: u8 = @intCast((member.data.rhs >> 28) & 0x3);
+            try self.emitByte(i_vis);
+            try self.emitByte(1); // abstract
         }
     }
 
@@ -1275,6 +1282,7 @@ pub fn compileAnonymousClass(self: *Compiler, node: Ast.Node) Error!void {
 
     const name_idx = try self.addConstant(.{ .string = anon_name });
     try self.emitOp(.class_decl);
+    try self.emitByte(0); // anonymous classes have no class modifiers
     try self.emitU16(name_idx);
     try self.emitU16(method_count);
 
@@ -1289,6 +1297,7 @@ pub fn compileAnonymousClass(self: *Compiler, node: Ast.Node) Error!void {
             try self.emitByte(if (member.tag == .static_class_method) @as(u8, 1) else @as(u8, 0));
             const vis: u8 = @intCast(member.data.rhs >> 30);
             try self.emitByte(vis);
+            try self.emitByte(0); // anonymous classes don't have abstract/final methods
         }
     }
 
@@ -1778,6 +1787,8 @@ pub fn compileEnumDecl(self: *Compiler, node: Ast.Node) Error!void {
             try self.emitByte(if (member.tag == .static_class_method) @as(u8, 1) else @as(u8, 0));
             const vis: u8 = @intCast(member.data.rhs >> 30);
             try self.emitByte(vis);
+            const m_final: u8 = if ((member.data.rhs >> 28) & 1 == 1) 2 else 0;
+            try self.emitByte(m_final);
         }
     }
 
@@ -1951,8 +1962,8 @@ fn compileClassMethodBody(self: *Compiler, class_name: []const u8, member: Ast.N
         }
     }
 
-    // mask out visibility (bits 30-31) and generator flag (bit 29)
-    const body_idx = member.data.rhs & 0x1FFFFFFF;
+    // mask out visibility (bits 30-31), generator flag (bit 29), is_final (bit 28)
+    const body_idx = member.data.rhs & 0x0FFFFFFF;
     try sub.compileNode(body_idx);
     for (sub.pending_gotos.items) |pg| {
         if (sub.labels.get(pg.label)) |target| {

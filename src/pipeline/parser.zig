@@ -1147,8 +1147,13 @@ const Parser = struct {
     }
 
     fn parseClassDecl(self: *Parser) Error!u32 {
-        if (self.peek() == .kw_abstract or self.peek() == .kw_final) _ = self.advance();
-        if (self.peek() == .kw_readonly) _ = self.advance();
+        var class_modifiers: u32 = 0;
+        while (self.peek() == .kw_abstract or self.peek() == .kw_final or self.peek() == .kw_readonly) {
+            if (self.peek() == .kw_abstract) class_modifiers |= 1;
+            if (self.peek() == .kw_final) class_modifiers |= 2;
+            if (self.peek() == .kw_readonly) class_modifiers |= 4;
+            _ = self.advance();
+        }
         _ = self.advance(); // class
         const name_tok = try self.expect(.identifier);
 
@@ -1178,14 +1183,16 @@ const Parser = struct {
             self.skipAttributes();
             var is_static = false;
             var is_abstract = false;
+            var is_final = false;
             var is_readonly = false;
             var visibility: u32 = 0; // 0=public, 1=protected, 2=private
             while (self.peek() == .kw_public or self.peek() == .kw_protected or
                 self.peek() == .kw_private or self.peek() == .kw_static or
-                self.peek() == .kw_abstract or self.peek() == .kw_readonly)
+                self.peek() == .kw_abstract or self.peek() == .kw_final or self.peek() == .kw_readonly)
             {
                 if (self.peek() == .kw_static) is_static = true;
                 if (self.peek() == .kw_abstract) is_abstract = true;
+                if (self.peek() == .kw_final) is_final = true;
                 if (self.peek() == .kw_readonly) is_readonly = true;
                 if (self.peek() == .kw_protected) visibility = 1;
                 if (self.peek() == .kw_private) visibility = 2;
@@ -1196,15 +1203,17 @@ const Parser = struct {
                 try members.append(self.allocator, try self.parseTraitUse());
             } else if (self.peek() == .kw_function) {
                 if (is_abstract) {
-                    try members.append(self.allocator, try self.parseInterfaceMethod());
+                    const method = try self.parseInterfaceMethod();
+                    // encode visibility in rhs bits 28-29; abstract is implicit for interface_method tag
+                    self.nodes.items[method].data.rhs = self.nodes.items[method].data.rhs | (visibility << 28);
+                    try members.append(self.allocator, method);
                 } else {
                     const method = try self.parseClassMethod();
                     if (is_static) {
                         self.nodes.items[method].tag = .static_class_method;
                     }
-                    // encode visibility in rhs high bits (rhs is body block index)
-                    // store visibility separately in extra_data
-                    self.nodes.items[method].data.rhs = self.nodes.items[method].data.rhs | (visibility << 30);
+                    // bits 0-27: body index, bit 28: is_final, bits 30-31: visibility
+                    self.nodes.items[method].data.rhs = self.nodes.items[method].data.rhs | (visibility << 30) | (if (is_final) @as(u32, 1) << 28 else 0);
                     try members.append(self.allocator, method);
                 }
             } else if (self.peek() == .variable) {
@@ -1237,9 +1246,10 @@ const Parser = struct {
 
         const extra = try self.addExtraList(members.items);
 
-        // rhs encodes parent + implements: {parent_node, implements_count, impl_nodes...}
+        // rhs encodes flags + parent + implements: {class_modifiers, parent_node, implements_count, impl_nodes...}
         var rhs_data = std.ArrayListUnmanaged(u32){};
         defer rhs_data.deinit(self.allocator);
+        try rhs_data.append(self.allocator, class_modifiers);
         try rhs_data.append(self.allocator, parent);
         try rhs_data.append(self.allocator, @intCast(implements.items.len));
         for (implements.items) |impl| try rhs_data.append(self.allocator, impl);
