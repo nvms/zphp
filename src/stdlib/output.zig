@@ -307,14 +307,68 @@ fn var_export(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     return .null;
 }
 
+fn varExportString(a: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8), s: []const u8) !void {
+    var has_null = false;
+    for (s) |c| {
+        if (c == 0) { has_null = true; break; }
+    }
+    if (!has_null) {
+        try out.append(a, '\'');
+        for (s) |c| {
+            if (c == '\'') {
+                try out.appendSlice(a, "\\'");
+            } else if (c == '\\') {
+                try out.appendSlice(a, "\\\\");
+            } else {
+                try out.append(a, c);
+            }
+        }
+        try out.append(a, '\'');
+        return;
+    }
+    var first = true;
+    var i: usize = 0;
+    while (i < s.len) {
+        var j = i;
+        while (j < s.len and s[j] != 0) : (j += 1) {}
+        if (j > i) {
+            if (!first) try out.appendSlice(a, " . ");
+            first = false;
+            try out.append(a, '\'');
+            for (s[i..j]) |c| {
+                if (c == '\'') {
+                    try out.appendSlice(a, "\\'");
+                } else if (c == '\\') {
+                    try out.appendSlice(a, "\\\\");
+                } else {
+                    try out.append(a, c);
+                }
+            }
+            try out.append(a, '\'');
+        }
+        if (j < s.len) {
+            if (!first) try out.appendSlice(a, " . ");
+            first = false;
+            try out.appendSlice(a, "\"\\0\"");
+            j += 1;
+        }
+        i = j;
+    }
+    if (first) try out.appendSlice(a, "''");
+}
+
 fn varExportValue(a: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8), val: Value, depth: usize) !void {
     switch (val) {
         .null => try out.appendSlice(a, "NULL"),
         .bool => |b| try out.appendSlice(a, if (b) "true" else "false"),
         .int => |i| {
-            var tmp: [32]u8 = undefined;
-            const s = std.fmt.bufPrint(&tmp, "{d}", .{i}) catch return;
-            try out.appendSlice(a, s);
+            if (i == std.math.minInt(i64)) {
+                try out.appendSlice(a, "-9223372036854775807-1");
+            } else {
+                var tmp: [32]u8 = undefined;
+                const s = std.fmt.bufPrint(&tmp, "{d}", .{i}) catch return;
+                try out.appendSlice(a, s);
+            }
         },
         .float => |f| {
             var tmp: [64]u8 = undefined;
@@ -337,19 +391,7 @@ fn varExportValue(a: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8), val: V
                 }
             }
         },
-        .string => |s| {
-            try out.append(a, '\'');
-            for (s) |c| {
-                if (c == '\'') {
-                    try out.appendSlice(a, "\\'");
-                } else if (c == '\\') {
-                    try out.appendSlice(a, "\\\\");
-                } else {
-                    try out.append(a, c);
-                }
-            }
-            try out.append(a, '\'');
-        },
+        .string => |s| try varExportString(a, out, s),
         .array => |arr| {
             try out.appendSlice(a, "array (\n");
             for (arr.entries.items) |entry| {
@@ -360,11 +402,7 @@ fn varExportValue(a: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8), val: V
                         const ks = std.fmt.bufPrint(&tmp, "{d}", .{ki}) catch return;
                         try out.appendSlice(a, ks);
                     },
-                    .string => |ks| {
-                        try out.append(a, '\'');
-                        try out.appendSlice(a, ks);
-                        try out.append(a, '\'');
-                    },
+                    .string => |ks| try varExportString(a, out, ks),
                 }
                 try out.appendSlice(a, " => ");
                 if (entry.value == .array or entry.value == .object) {
@@ -378,16 +416,26 @@ fn varExportValue(a: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8), val: V
             try out.append(a, ')');
         },
         .object => |obj| {
-            try out.appendSlice(a, "(object) array(\n");
+            const is_std = std.mem.eql(u8, obj.class_name, "stdClass");
+            if (is_std) {
+                try out.appendSlice(a, "(object) array(\n");
+            } else {
+                try out.append(a, '\\');
+                try out.appendSlice(a, obj.class_name);
+                try out.appendSlice(a, "::__set_state(array(\n");
+            }
+            const item_indent = (depth + 1) * 2 + 1;
             if (obj.slot_layout) |layout| {
                 if (obj.slots) |slots| {
                     for (layout.names, 0..) |name, i| {
                         if (i < slots.len) {
-                            for (0..(depth + 1) * 2) |_| try out.append(a, ' ');
-                            try out.append(a, '\'');
-                            try out.appendSlice(a, name);
-                            try out.append(a, '\'');
+                            for (0..item_indent) |_| try out.append(a, ' ');
+                            try varExportString(a, out, name);
                             try out.appendSlice(a, " => ");
+                            if (slots[i] == .array or slots[i] == .object) {
+                                try out.append(a, '\n');
+                                for (0..(depth + 1) * 2) |_| try out.append(a, ' ');
+                            }
                             try varExportValue(a, out, slots[i], depth + 1);
                             try out.appendSlice(a, ",\n");
                         }
@@ -403,17 +451,23 @@ fn varExportValue(a: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8), val: V
                     }
                 }
                 if (!in_slots) {
-                    for (0..(depth + 1) * 2) |_| try out.append(a, ' ');
-                    try out.append(a, '\'');
-                    try out.appendSlice(a, entry.key_ptr.*);
-                    try out.append(a, '\'');
+                    for (0..item_indent) |_| try out.append(a, ' ');
+                    try varExportString(a, out, entry.key_ptr.*);
                     try out.appendSlice(a, " => ");
+                    if (entry.value_ptr.* == .array or entry.value_ptr.* == .object) {
+                        try out.append(a, '\n');
+                        for (0..(depth + 1) * 2) |_| try out.append(a, ' ');
+                    }
                     try varExportValue(a, out, entry.value_ptr.*, depth + 1);
                     try out.appendSlice(a, ",\n");
                 }
             }
             for (0..depth * 2) |_| try out.append(a, ' ');
-            try out.append(a, ')');
+            if (is_std) {
+                try out.append(a, ')');
+            } else {
+                try out.appendSlice(a, "))");
+            }
         },
         .generator, .fiber => try out.appendSlice(a, "(object)"),
     }
