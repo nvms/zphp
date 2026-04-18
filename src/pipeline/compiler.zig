@@ -736,7 +736,7 @@ pub const Compiler = struct {
         return slot;
     }
 
-    fn inFunctionScope(self: *Compiler) bool {
+    pub fn inFunctionScope(self: *Compiler) bool {
         return self.scope_depth > 0;
     }
 

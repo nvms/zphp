@@ -762,9 +762,28 @@ pub fn compileVivifyChain(self: *Compiler, node_idx: u32) Error!void {
         try compileVivifyChain(self,node.data.lhs);
         try self.compileNode(node.data.rhs);
         try self.emitOp(.array_get_vivify);
+    } else if (node.tag == .variable or node.tag == .identifier) {
+        try emitEnsureArray(self, self.ast.tokenSlice(node.main_token));
     } else {
         try self.compileNode(node_idx);
     }
+}
+
+fn emitEnsureArray(self: *Compiler, name: []const u8) Error!void {
+    if (self.local_slots.get(name)) |slot| {
+        try self.emitOp(.ensure_array_local);
+        try self.emitU16(slot);
+        return;
+    }
+    if (!self.inFunctionScope() and name.len > 0 and name[0] == '$') {
+        const slot = self.getOrCreateSlot(name);
+        try self.emitOp(.ensure_array_local);
+        try self.emitU16(slot);
+        return;
+    }
+    const idx = try self.addConstant(.{ .string = name });
+    try self.emitOp(.ensure_array_var);
+    try self.emitU16(idx);
 }
 
 pub fn compileArrayLiteral(self: *Compiler, node: Ast.Node) Error!void {

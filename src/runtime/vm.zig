@@ -1547,8 +1547,99 @@ pub const VM = struct {
                             if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
                             return error.RuntimeError;
                         };
+                    } else if (arr_val == .int or arr_val == .float or (arr_val == .bool and arr_val.bool)) {
+                        if (try self.throwBuiltinException("Error", "Cannot use a scalar value as an array")) continue;
+                        return error.RuntimeError;
+                    } else if (arr_val == .string and key == .string) {
+                        if (try self.throwBuiltinException("TypeError", "Cannot access offset of type string on string")) continue;
+                        return error.RuntimeError;
                     }
                     self.push(val);
+                },
+
+                .ensure_array_local => {
+                    const slot = self.readU16();
+                    const frame = self.currentFrame();
+                    var cur: Value = .null;
+                    if (frame.func) |func| {
+                        if (slot < func.slot_names.len and func.slot_names[slot].len > 0) {
+                            if (frame.ref_slots.get(func.slot_names[slot])) |cell| cur = cell.*;
+                        }
+                        if (cur == .null and slot < frame.locals.len) cur = frame.locals[slot];
+                    } else {
+                        cur = self.getLocalGlobal(slot, frame);
+                    }
+                    if (cur == .array or cur == .string) {
+                        self.push(cur);
+                        continue;
+                    }
+                    if (cur == .object and self.hasMethod(cur.object.class_name, "offsetSet")) {
+                        self.push(cur);
+                        continue;
+                    }
+                    if (cur == .int or cur == .float or (cur == .bool and cur.bool)) {
+                        if (try self.throwBuiltinException("Error", "Cannot use a scalar value as an array")) continue;
+                        return error.RuntimeError;
+                    }
+                    const new_arr = try self.allocator.create(PhpArray);
+                    new_arr.* = .{};
+                    try self.arrays.append(self.allocator, new_arr);
+                    const new_val = Value{ .array = new_arr };
+                    if (frame.func) |func| {
+                        if (slot < func.slot_names.len) {
+                            const name = func.slot_names[slot];
+                            if (name.len > 0) {
+                                if (frame.ref_slots.get(name)) |cell| cell.* = new_val;
+                                try frame.vars.put(self.allocator, name, new_val);
+                            }
+                        }
+                        if (slot < frame.locals.len) frame.locals[slot] = new_val;
+                    } else {
+                        if (slot < frame.locals.len) frame.locals[slot] = new_val;
+                        try self.setLocalGlobal(slot, new_val, frame);
+                    }
+                    self.push(new_val);
+                },
+
+                .ensure_array_var => {
+                    const idx = self.readU16();
+                    const name = self.currentChunk().constants.items[idx].string;
+                    const frame = self.currentFrame();
+                    var cur: Value = .null;
+                    if (frame.ref_slots.get(name)) |cell| {
+                        cur = cell.*;
+                    } else if (frame.vars.get(name)) |v| {
+                        cur = v;
+                    }
+                    if (cur == .array or cur == .string) {
+                        self.push(cur);
+                        continue;
+                    }
+                    if (cur == .object and self.hasMethod(cur.object.class_name, "offsetSet")) {
+                        self.push(cur);
+                        continue;
+                    }
+                    if (cur == .int or cur == .float or (cur == .bool and cur.bool)) {
+                        if (try self.throwBuiltinException("Error", "Cannot use a scalar value as an array")) continue;
+                        return error.RuntimeError;
+                    }
+                    const new_arr = try self.allocator.create(PhpArray);
+                    new_arr.* = .{};
+                    try self.arrays.append(self.allocator, new_arr);
+                    const new_val = Value{ .array = new_arr };
+                    if (frame.ref_slots.get(name)) |cell| {
+                        cell.* = new_val;
+                    } else {
+                        try frame.vars.put(self.allocator, name, new_val);
+                    }
+                    const sn = if (frame.func) |func| func.slot_names else self.global_slot_names;
+                    for (sn, 0..) |s, si| {
+                        if (std.mem.eql(u8, s, name)) {
+                            if (si < frame.locals.len) frame.locals[si] = new_val;
+                            break;
+                        }
+                    }
+                    self.push(new_val);
                 },
 
                 .array_elem_inc, .array_elem_dec => {
