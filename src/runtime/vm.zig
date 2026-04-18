@@ -3361,6 +3361,25 @@ pub const VM = struct {
                             self.push(.null);
                         } else if (std.mem.eql(u8, method_name, "getReturn")) {
                             self.push(gen.return_value);
+                        } else if (std.mem.eql(u8, method_name, "throw")) {
+                            const ex = if (ac > 0) self.stack[self.sp + 1] else Value{ .null = {} };
+                            if (gen.state == .completed) {
+                                self.pending_exception = ex;
+                                if (self.dispatchPendingException(base_frame)) continue;
+                                return error.RuntimeError;
+                            }
+                            if (gen.state == .created) {
+                                self.resumeGenerator(gen, .null) catch {
+                                    if (self.dispatchPendingException(base_frame)) continue;
+                                    return error.RuntimeError;
+                                };
+                            }
+                            gen.pending_throw = ex;
+                            self.resumeGenerator(gen, .null) catch {
+                                if (self.dispatchPendingException(base_frame)) continue;
+                                return error.RuntimeError;
+                            };
+                            self.push(if (gen.state == .completed) .null else gen.current_value);
                         } else {
                             self.error_msg = std.fmt.allocPrint(self.allocator, "Fatal error: Uncaught Error: Call to undefined method Generator::{s}()", .{method_name}) catch null;
                             return error.RuntimeError;
@@ -5105,6 +5124,27 @@ pub const VM = struct {
 
         if (gen.ip > 0) {
             self.push(sent_value);
+        }
+
+        if (gen.pending_throw) |ex| {
+            gen.pending_throw = null;
+            self.pending_exception = ex;
+            // try to dispatch within the generator's frame; if no handler, the exception
+            // will propagate when runUntilFrame catches the eventual error
+            if (self.dispatchPendingException(return_frame)) {
+                // handler found - runLoop will continue from catch block
+            } else {
+                // no handler - generator completes with the exception pending
+                gen.state = .completed;
+                self.handler_count = saved_handler_count;
+                while (self.frame_count > return_frame) {
+                    self.frame_count -= 1;
+                    self.frames[self.frame_count].vars.deinit(self.allocator);
+                }
+                self.sp = saved_sp;
+                self.handler_floor = prev_floor;
+                return error.RuntimeError;
+            }
         }
 
         self.runUntilFrame(return_frame) catch |err| {

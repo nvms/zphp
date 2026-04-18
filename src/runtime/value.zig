@@ -167,6 +167,7 @@ pub const Generator = struct {
     handler_count: usize = 0,
     saved_handlers: [8]SavedHandler = undefined,
     delegate: ?DelegateState = null,
+    pending_throw: ?Value = null,
 
     pub const SavedHandler = struct {
         catch_ip: usize,
