@@ -26,9 +26,11 @@ jobs:
           - os: ubuntu-latest
             name: linux-x86_64-musl
             alpine: x86_64
+            apk_sha: 34bb1a96f0258982377a289392d4ea9f3f4b767a4bb5806b1b87179b79ad8a1c
           - os: ubuntu-24.04-arm
             name: linux-aarch64-musl
             alpine: aarch64
+            apk_sha: e471d35aa221d031abe9b6288aede12a8e9f1a398954e5a2e1d1bce1727b4ef4
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v6
@@ -52,7 +54,7 @@ jobs:
         with:
           arch: ${{ matrix.alpine }}
           branch: latest-stable
-          apk-tools-url: https://gitlab.alpinelinux.org/api/v4/projects/5/packages/generic/v2.14.10/${{ matrix.alpine }}/apk.static
+          apk-tools-url: https://gitlab.alpinelinux.org/api/v4/projects/5/packages/generic/v2.14.10/${{ matrix.alpine }}/apk.static#!sha256!${{ matrix.apk_sha }}
           packages: >
             build-base linux-headers curl xz
             pcre2-dev sqlite-dev sqlite-static zlib-dev zlib-static
