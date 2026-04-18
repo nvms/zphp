@@ -78,9 +78,43 @@ fn native_round(_: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len == 0) return .{ .float = 0.0 };
     const v = Value.toFloat(args[0]);
     const precision: i64 = if (args.len >= 2) Value.toInt(args[1]) else 0;
-    if (precision == 0) return .{ .float = @round(v) };
+    const mode: i64 = if (args.len >= 3) Value.toInt(args[2]) else 1; // PHP_ROUND_HALF_UP=1
     const factor = std.math.pow(f64, 10.0, @floatFromInt(precision));
-    return .{ .float = @round(v * factor) / factor };
+    const scaled = v * factor;
+    const rounded = roundWithMode(scaled, mode);
+    return .{ .float = rounded / factor };
+}
+
+fn roundWithMode(v: f64, mode: i64) f64 {
+    if (std.math.isNan(v) or std.math.isInf(v)) return v;
+    const sign: f64 = if (v < 0) -1.0 else 1.0;
+    const av = @abs(v);
+    const floor = @floor(av);
+    const frac = av - floor;
+    // tolerance for half: use a tiny epsilon for FP noise on values like 1.35*10
+    const eps: f64 = 1e-9;
+    const is_half = @abs(frac - 0.5) < eps;
+    var out: f64 = undefined;
+    if (is_half) {
+        switch (mode) {
+            1 => out = floor + 1.0, // HALF_UP (away from zero)
+            2 => out = floor, // HALF_DOWN (toward zero)
+            3 => { // HALF_EVEN
+                const fi: i64 = @intFromFloat(floor);
+                out = if (@mod(fi, 2) == 0) floor else floor + 1.0;
+            },
+            4 => { // HALF_ODD
+                const fi: i64 = @intFromFloat(floor);
+                out = if (@mod(fi, 2) == 0) floor + 1.0 else floor;
+            },
+            else => out = floor + 1.0,
+        }
+    } else if (frac > 0.5) {
+        out = floor + 1.0;
+    } else {
+        out = floor;
+    }
+    return out * sign;
 }
 
 fn native_min(_: *NativeContext, args: []const Value) RuntimeError!Value {
