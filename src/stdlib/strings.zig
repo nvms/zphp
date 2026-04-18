@@ -45,6 +45,7 @@ pub const entries = .{
     .{ "hex2bin", native_hex2bin },
     .{ "bin2hex", native_bin2hex },
     .{ "mb_strlen", native_mb_strlen },
+    .{ "mb_str_split", native_mb_str_split },
     .{ "mb_strtolower", native_mb_strtolower },
     .{ "mb_strtoupper", native_mb_strtoupper },
     .{ "mb_detect_encoding", native_mb_detect_encoding },
@@ -586,12 +587,20 @@ fn native_nl2br(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     const use_xhtml = if (args.len >= 2) args[1].isTruthy() else true;
     const br = if (use_xhtml) "<br />" else "<br>";
     var buf = std.ArrayListUnmanaged(u8){};
-    for (s) |c| {
-        if (c == '\n') {
+    var i: usize = 0;
+    while (i < s.len) {
+        const c = s[i];
+        if (c == '\r' or c == '\n') {
             try buf.appendSlice(ctx.allocator, br);
-            try buf.append(ctx.allocator, '\n');
+            try buf.append(ctx.allocator, c);
+            i += 1;
+            if (c == '\r' and i < s.len and s[i] == '\n') {
+                try buf.append(ctx.allocator, '\n');
+                i += 1;
+            }
         } else {
             try buf.append(ctx.allocator, c);
+            i += 1;
         }
     }
     const result = try buf.toOwnedSlice(ctx.allocator);
@@ -1073,12 +1082,15 @@ fn native_htmlspecialchars(ctx: *NativeContext, args: []const Value) RuntimeErro
         try ctx.strings.append(ctx.allocator, converted);
         break :blk converted;
     };
+    const flags: i64 = if (args.len >= 2) Value.toInt(args[1]) else 3;
+    const escape_double = (flags & 2) != 0;
+    const escape_single = (flags & 1) != 0;
     var buf = std.ArrayListUnmanaged(u8){};
     for (s) |c| {
         switch (c) {
             '&' => try buf.appendSlice(ctx.allocator, "&amp;"),
-            '"' => try buf.appendSlice(ctx.allocator, "&quot;"),
-            '\'' => try buf.appendSlice(ctx.allocator, "&#039;"),
+            '"' => if (escape_double) try buf.appendSlice(ctx.allocator, "&quot;") else try buf.append(ctx.allocator, '"'),
+            '\'' => if (escape_single) try buf.appendSlice(ctx.allocator, "&#039;") else try buf.append(ctx.allocator, '\''),
             '<' => try buf.appendSlice(ctx.allocator, "&lt;"),
             '>' => try buf.appendSlice(ctx.allocator, "&gt;"),
             else => try buf.append(ctx.allocator, c),
@@ -1101,6 +1113,11 @@ fn native_htmlspecialchars_decode(ctx: *NativeContext, args: []const Value) Runt
                 j += ent.len;
                 continue;
             }
+            if (matchNumericEntity(s[j..])) |ne| {
+                try appendCodepoint(&buf, ctx.allocator, ne.code);
+                j += ne.len;
+                continue;
+            }
         }
         try buf.append(ctx.allocator, s[j]);
         j += 1;
@@ -1108,6 +1125,43 @@ fn native_htmlspecialchars_decode(ctx: *NativeContext, args: []const Value) Runt
     const result = try buf.toOwnedSlice(ctx.allocator);
     try ctx.strings.append(ctx.allocator, result);
     return .{ .string = result };
+}
+
+fn matchNumericEntity(s: []const u8) ?struct { code: u32, len: usize } {
+    if (s.len < 4 or s[0] != '&' or s[1] != '#') return null;
+    var pos: usize = 2;
+    const is_hex = s[pos] == 'x' or s[pos] == 'X';
+    if (is_hex) pos += 1;
+    const start = pos;
+    while (pos < s.len and s[pos] != ';') : (pos += 1) {
+        const c = s[pos];
+        if (is_hex) {
+            if (!((c >= '0' and c <= '9') or (c >= 'a' and c <= 'f') or (c >= 'A' and c <= 'F'))) return null;
+        } else {
+            if (c < '0' or c > '9') return null;
+        }
+    }
+    if (pos >= s.len or s[pos] != ';' or pos == start) return null;
+    const code = std.fmt.parseInt(u32, s[start..pos], if (is_hex) 16 else 10) catch return null;
+    return .{ .code = code, .len = pos + 1 };
+}
+
+fn appendCodepoint(buf: *std.ArrayListUnmanaged(u8), allocator: std.mem.Allocator, code: u32) !void {
+    if (code < 0x80) {
+        try buf.append(allocator, @intCast(code));
+    } else if (code < 0x800) {
+        try buf.append(allocator, @intCast(0xC0 | (code >> 6)));
+        try buf.append(allocator, @intCast(0x80 | (code & 0x3F)));
+    } else if (code < 0x10000) {
+        try buf.append(allocator, @intCast(0xE0 | (code >> 12)));
+        try buf.append(allocator, @intCast(0x80 | ((code >> 6) & 0x3F)));
+        try buf.append(allocator, @intCast(0x80 | (code & 0x3F)));
+    } else if (code < 0x110000) {
+        try buf.append(allocator, @intCast(0xF0 | (code >> 18)));
+        try buf.append(allocator, @intCast(0x80 | ((code >> 12) & 0x3F)));
+        try buf.append(allocator, @intCast(0x80 | ((code >> 6) & 0x3F)));
+        try buf.append(allocator, @intCast(0x80 | (code & 0x3F)));
+    }
 }
 
 const EntityMatch = struct { char: u8, len: usize };
@@ -1167,6 +1221,33 @@ fn native_bin2hex(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     }
     try ctx.strings.append(ctx.allocator, buf);
     return .{ .string = buf };
+}
+
+fn native_mb_str_split(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len == 0) return .null;
+    const s = if (args[0] == .string) args[0].string else return Value.null;
+    const chunk_len: usize = if (args.len >= 2) @intCast(@max(1, Value.toInt(args[1]))) else 1;
+    var arr = try ctx.createArray();
+    if (s.len == 0) {
+        try arr.append(ctx.allocator, .{ .string = "" });
+        return .{ .array = arr };
+    }
+    var i: usize = 0;
+    while (i < s.len) {
+        const start = i;
+        var taken: usize = 0;
+        while (taken < chunk_len and i < s.len) {
+            const byte = s[i];
+            if (byte < 0x80) i += 1
+            else if (byte < 0xE0) i += 2
+            else if (byte < 0xF0) i += 3
+            else i += 4;
+            if (i > s.len) i = s.len;
+            taken += 1;
+        }
+        try arr.append(ctx.allocator, .{ .string = try ctx.createString(s[start..i]) });
+    }
+    return .{ .array = arr };
 }
 
 fn native_mb_strlen(_: *NativeContext, args: []const Value) RuntimeError!Value {
