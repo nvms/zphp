@@ -833,6 +833,16 @@ fn parseDateTimeFormat(format: []const u8, datetime: []const u8, now: i64) ?i64 
                 if (di == start or (di == start + 1 and datetime[start] == '-')) return null;
                 u_ts = std.fmt.parseInt(i64, datetime[start..di], 10) catch return null;
             },
+            'u' => {
+                const start = di;
+                while (di < datetime.len and di - start < 6 and datetime[di] >= '0' and datetime[di] <= '9') : (di += 1) {}
+                if (di == start) return null;
+            },
+            'v' => {
+                const start = di;
+                while (di < datetime.len and di - start < 3 and datetime[di] >= '0' and datetime[di] <= '9') : (di += 1) {}
+                if (di == start) return null;
+            },
             'a', 'A' => {
                 if (di + 2 > datetime.len) return null;
                 const seg = datetime[di..di+2];
