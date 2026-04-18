@@ -87,6 +87,7 @@ pub const entries = .{
     .{ "preg_match_all", preg_match_all },
     .{ "preg_replace", preg_replace },
     .{ "preg_replace_callback", preg_replace_callback },
+    .{ "preg_replace_callback_array", preg_replace_callback_array },
     .{ "preg_split", preg_split },
     .{ "preg_quote", preg_quote },
     .{ "preg_grep", preg_grep },
@@ -668,6 +669,25 @@ fn preg_replace_callback(ctx: *NativeContext, args: []const Value) RuntimeError!
     const s = try result.toOwnedSlice(ctx.allocator);
     try ctx.strings.append(ctx.allocator, s);
     return .{ .string = s };
+}
+
+fn preg_replace_callback_array(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len < 2 or args[0] != .array) return if (args.len >= 2) args[1] else Value.null;
+    const map = args[0].array;
+    var current: Value = args[1];
+    if (current != .string) return current;
+
+    for (map.entries.items) |entry| {
+        if (entry.key != .string) continue;
+        const sub_args = [_]Value{
+            .{ .string = entry.key.string },
+            entry.value,
+            current,
+        };
+        const r = try preg_replace_callback(ctx, &sub_args);
+        if (r == .string) current = r;
+    }
+    return current;
 }
 
 fn preg_split(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
