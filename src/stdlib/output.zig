@@ -367,6 +367,10 @@ fn varExportValue(a: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8), val: V
                     },
                 }
                 try out.appendSlice(a, " => ");
+                if (entry.value == .array or entry.value == .object) {
+                    try out.append(a, '\n');
+                    for (0..(depth + 1) * 2) |_| try out.append(a, ' ');
+                }
                 try varExportValue(a, out, entry.value, depth + 1);
                 try out.appendSlice(a, ",\n");
             }
