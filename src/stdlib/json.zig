@@ -163,45 +163,52 @@ fn encodeValue(buf: *std.ArrayListUnmanaged(u8), a: std.mem.Allocator, val: Valu
                             const hex = "0123456789abcdef";
                             try buf.append(a, hex[c >> 4]);
                             try buf.append(a, hex[c & 0x0f]);
-                        } else if (c >= 0x80 and !unescape_unicode) {
-                            // encode non-ASCII as \uXXXX
-                            const seq_len = std.unicode.utf8ByteSequenceLength(c) catch {
-                                try buf.append(a, c);
-                                i += 1;
-                                continue;
+                        } else if (c >= 0x80) {
+                            const utf8_ignore = (flags & JSON_INVALID_UTF8_IGNORE) != 0;
+                            const utf8_subst = (flags & JSON_INVALID_UTF8_SUBSTITUTE) != 0;
+                            const seq_len_or = std.unicode.utf8ByteSequenceLength(c);
+                            const codepoint: ?u21 = blk: {
+                                const sl = seq_len_or catch break :blk null;
+                                if (i + sl > s.len) break :blk null;
+                                const cp = std.unicode.utf8Decode(s[i..][0..sl]) catch break :blk null;
+                                break :blk cp;
                             };
-                            if (i + seq_len <= s.len) {
-                                const codepoint = std.unicode.utf8Decode(s[i..][0..seq_len]) catch {
-                                    try buf.append(a, c);
+                            if (codepoint == null) {
+                                if (utf8_ignore) {
                                     i += 1;
                                     continue;
-                                };
-                                if (codepoint <= 0xFFFF) {
-                                    var hex_buf: [6]u8 = undefined;
-                                    const hex_str = std.fmt.bufPrint(&hex_buf, "\\u{x:0>4}", .{codepoint}) catch {
-                                        try buf.append(a, c);
-                                        i += 1;
-                                        continue;
-                                    };
-                                    try buf.appendSlice(a, hex_str);
+                                } else if (utf8_subst) {
+                                    if (unescape_unicode) {
+                                        try buf.appendSlice(a, "\xef\xbf\xbd");
+                                    } else {
+                                        try buf.appendSlice(a, "\\ufffd");
+                                    }
+                                    i += 1;
+                                    continue;
                                 } else {
-                                    // surrogate pair for codepoints > 0xFFFF
-                                    const cp = codepoint - 0x10000;
-                                    const high: u16 = @intCast(0xD800 + (cp >> 10));
-                                    const low: u16 = @intCast(0xDC00 + (cp & 0x3FF));
-                                    var hex_buf: [12]u8 = undefined;
-                                    const hex_str = std.fmt.bufPrint(&hex_buf, "\\u{x:0>4}\\u{x:0>4}", .{ high, low }) catch {
-                                        try buf.append(a, c);
-                                        i += 1;
-                                        continue;
-                                    };
-                                    try buf.appendSlice(a, hex_str);
+                                    last_error = 5;
+                                    last_error_msg = "Malformed UTF-8 characters, possibly incorrectly encoded";
+                                    return error.RuntimeError;
                                 }
-                                i += seq_len;
-                                continue;
-                            } else {
-                                try buf.append(a, c);
                             }
+                            const cp = codepoint.?;
+                            const sl = seq_len_or catch unreachable;
+                            if (unescape_unicode) {
+                                try buf.appendSlice(a, s[i..][0..sl]);
+                            } else if (cp <= 0xFFFF) {
+                                var hex_buf: [6]u8 = undefined;
+                                const hex_str = std.fmt.bufPrint(&hex_buf, "\\u{x:0>4}", .{cp}) catch unreachable;
+                                try buf.appendSlice(a, hex_str);
+                            } else {
+                                const cp_off = cp - 0x10000;
+                                const high: u16 = @intCast(0xD800 + (cp_off >> 10));
+                                const low: u16 = @intCast(0xDC00 + (cp_off & 0x3FF));
+                                var hex_buf: [12]u8 = undefined;
+                                const hex_str = std.fmt.bufPrint(&hex_buf, "\\u{x:0>4}\\u{x:0>4}", .{ high, low }) catch unreachable;
+                                try buf.appendSlice(a, hex_str);
+                            }
+                            i += sl;
+                            continue;
                         } else {
                             try buf.append(a, c);
                         }
