@@ -6720,6 +6720,7 @@ pub const VM = struct {
     }
 
     pub fn isInstanceOf(self: *VM, obj_class: []const u8, target_class: []const u8) bool {
+        if (std.mem.eql(u8, target_class, "Stringable") and self.hasMethod(obj_class, "__toString")) return true;
         var current = obj_class;
         while (true) {
             if (std.mem.eql(u8, current, target_class)) return true;
