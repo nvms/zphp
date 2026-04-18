@@ -30,6 +30,12 @@ pub fn register(vm: *VM, a: Allocator) !void {
     exc_def.parent = "Exception";
     try vm.classes.put(a, "ReflectionException", exc_def);
 
+    // Reflection (utility class)
+    var refl_def = ClassDef{ .name = "Reflection" };
+    try refl_def.methods.put(a, "getModifierNames", .{ .name = "getModifierNames", .arity = 1, .is_static = true });
+    try vm.classes.put(a, "Reflection", refl_def);
+    try vm.native_fns.put(a, "Reflection::getModifierNames", reflectionGetModifierNames);
+
     // ReflectionClass
     var rc_def = ClassDef{ .name = "ReflectionClass" };
     try rc_def.properties.append(a, .{ .name = "name", .default = .{ .string = "" } });
@@ -44,7 +50,7 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try rc_def.methods.put(a, "isFinal", .{ .name = "isFinal", .arity = 0 });
     try rc_def.methods.put(a, "isCloneable", .{ .name = "isCloneable", .arity = 0 });
     try rc_def.methods.put(a, "newInstanceArgs", .{ .name = "newInstanceArgs", .arity = 1 });
-    try rc_def.methods.put(a, "getMethods", .{ .name = "getMethods", .arity = 0 });
+    try rc_def.methods.put(a, "getMethods", .{ .name = "getMethods", .arity = 1 });
     try rc_def.methods.put(a, "getMethod", .{ .name = "getMethod", .arity = 1 });
     try rc_def.methods.put(a, "hasMethod", .{ .name = "hasMethod", .arity = 1 });
     try rc_def.methods.put(a, "isAbstract", .{ .name = "isAbstract", .arity = 0 });
@@ -116,6 +122,18 @@ pub fn register(vm: *VM, a: Allocator) !void {
 
     // ReflectionMethod
     var rm_def = ClassDef{ .name = "ReflectionMethod" };
+    try rm_def.static_props.put(a, "IS_STATIC", .{ .int = 16 });
+    try rm_def.static_props.put(a, "IS_PUBLIC", .{ .int = 1 });
+    try rm_def.static_props.put(a, "IS_PROTECTED", .{ .int = 2 });
+    try rm_def.static_props.put(a, "IS_PRIVATE", .{ .int = 4 });
+    try rm_def.static_props.put(a, "IS_ABSTRACT", .{ .int = 64 });
+    try rm_def.static_props.put(a, "IS_FINAL", .{ .int = 32 });
+    try rm_def.constant_names.put(a, "IS_STATIC", {});
+    try rm_def.constant_names.put(a, "IS_PUBLIC", {});
+    try rm_def.constant_names.put(a, "IS_PROTECTED", {});
+    try rm_def.constant_names.put(a, "IS_PRIVATE", {});
+    try rm_def.constant_names.put(a, "IS_ABSTRACT", {});
+    try rm_def.constant_names.put(a, "IS_FINAL", {});
     try rm_def.properties.append(a, .{ .name = "name", .default = .{ .string = "" } });
     try rm_def.properties.append(a, .{ .name = "class", .default = .{ .string = "" } });
     try rm_def.methods.put(a, "__construct", .{ .name = "__construct", .arity = 2 });
@@ -136,6 +154,7 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try rm_def.methods.put(a, "invokeArgs", .{ .name = "invokeArgs", .arity = 2 });
     try rm_def.methods.put(a, "isAbstract", .{ .name = "isAbstract", .arity = 0 });
     try rm_def.methods.put(a, "isFinal", .{ .name = "isFinal", .arity = 0 });
+    try rm_def.methods.put(a, "getModifiers", .{ .name = "getModifiers", .arity = 0 });
     try rm_def.methods.put(a, "getAttributes", .{ .name = "getAttributes", .arity = 0 });
     try vm.classes.put(a, "ReflectionMethod", rm_def);
 
@@ -157,6 +176,7 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try vm.native_fns.put(a, "ReflectionMethod::invokeArgs", rmInvokeArgs);
     try vm.native_fns.put(a, "ReflectionMethod::isAbstract", rmIsAbstract);
     try vm.native_fns.put(a, "ReflectionMethod::isFinal", rmIsFinal);
+    try vm.native_fns.put(a, "ReflectionMethod::getModifiers", rmGetModifiers);
     try vm.native_fns.put(a, "ReflectionMethod::getAttributes", rmGetAttributes);
 
     // ReflectionParameter
@@ -694,9 +714,11 @@ fn rcNewInstanceArgs(ctx: *NativeContext, args: []const Value) RuntimeError!Valu
     return .{ .object = obj };
 }
 
-fn rcGetMethods(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+fn rcGetMethods(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     const this = getThis(ctx) orelse return .null;
     const class_name = if (this.get("name") == .string) this.get("name").string else return .null;
+
+    const filter: ?i64 = if (args.len >= 1 and args[0] == .int) args[0].int else null;
 
     const arr = try ctx.createArray();
     var seen = std.StringHashMapUnmanaged(void){};
@@ -710,14 +732,35 @@ fn rcGetMethods(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
             const method_name = entry.key_ptr.*;
             if (!seen.contains(method_name)) {
                 try seen.put(ctx.allocator, method_name, {});
+                const info = entry.value_ptr.*;
+                if (filter) |f| {
+                    if (!methodMatchesFilter(info, f)) continue;
+                }
                 const declaring = findDeclaringClass(ctx.vm, class_name, method_name);
-                const obj = try buildMethodObj(ctx, class_name, method_name, entry.value_ptr.*, declaring);
+                const obj = try buildMethodObj(ctx, class_name, method_name, info, declaring);
                 try arr.append(ctx.allocator, .{ .object = obj });
             }
         }
         current = cls.parent;
     }
     return .{ .array = arr };
+}
+
+fn methodMatchesFilter(info: ClassDef.MethodInfo, filter: i64) bool {
+    return (methodModifiers(info) & filter) != 0;
+}
+
+fn methodModifiers(info: ClassDef.MethodInfo) i64 {
+    var bits: i64 = 0;
+    switch (info.visibility) {
+        .public => bits |= 1,
+        .protected => bits |= 2,
+        .private => bits |= 4,
+    }
+    if (info.is_static) bits |= 16;
+    if (info.is_final) bits |= 32;
+    if (info.is_abstract) bits |= 64;
+    return bits;
 }
 
 fn rcGetMethod(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
@@ -2021,6 +2064,28 @@ fn rmIsFinal(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
     const cls = ctx.vm.classes.get(declaring) orelse return .{ .bool = false };
     const m = cls.methods.get(method_name) orelse return .{ .bool = false };
     return .{ .bool = m.is_final };
+}
+
+fn rmGetModifiers(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const this = getThis(ctx) orelse return .{ .int = 0 };
+    const method_name = if (this.get("name") == .string) this.get("name").string else return .{ .int = 0 };
+    const declaring = if (this.get("_declaring_class") == .string) this.get("_declaring_class").string else return .{ .int = 0 };
+    const cls = ctx.vm.classes.get(declaring) orelse return .{ .int = 0 };
+    const info = cls.methods.get(method_name) orelse return .{ .int = 0 };
+    return .{ .int = methodModifiers(info) };
+}
+
+fn reflectionGetModifierNames(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len < 1 or args[0] != .int) return .{ .array = try ctx.createArray() };
+    const m = args[0].int;
+    const arr = try ctx.createArray();
+    if ((m & 16) != 0) try arr.append(ctx.allocator, .{ .string = "static" });
+    if ((m & 64) != 0) try arr.append(ctx.allocator, .{ .string = "abstract" });
+    if ((m & 32) != 0) try arr.append(ctx.allocator, .{ .string = "final" });
+    if ((m & 4) != 0) try arr.append(ctx.allocator, .{ .string = "private" });
+    if ((m & 2) != 0) try arr.append(ctx.allocator, .{ .string = "protected" });
+    if ((m & 1) != 0) try arr.append(ctx.allocator, .{ .string = "public" });
+    return .{ .array = arr };
 }
 
 fn rmGetAttributes(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
