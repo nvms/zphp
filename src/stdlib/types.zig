@@ -103,6 +103,7 @@ pub const entries = .{
     .{ "class_uses", native_class_uses },
     .{ "iterator_to_array", native_iterator_to_array },
     .{ "iterator_count", native_iterator_count },
+    .{ "iterator_apply", native_iterator_apply },
     .{ "filter_var", native_filter_var },
     .{ "is_resource", native_is_resource },
     .{ "get_resource_type", native_get_resource_type },
@@ -1239,6 +1240,43 @@ fn native_iterator_count(ctx: *NativeContext, args: []const Value) RuntimeError!
         while (gen.state != .completed) {
             n += 1;
             try ctx.vm.resumeGenerator(gen, .null);
+        }
+        return .{ .int = n };
+    }
+
+    return .{ .int = 0 };
+}
+
+fn native_iterator_apply(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len < 2) return .{ .int = 0 };
+
+    var call_args: []const Value = &.{};
+    if (args.len >= 3 and args[2] == .array) {
+        const arr = args[2].array;
+        const tmp = try ctx.allocator.alloc(Value, arr.entries.items.len);
+        for (arr.entries.items, 0..) |entry, i| tmp[i] = entry.value;
+        call_args = tmp;
+    }
+
+    if (args[0] == .generator) {
+        const gen = args[0].generator;
+        if (gen.state == .created) try ctx.vm.resumeGenerator(gen, .null);
+        var n: i64 = 0;
+        while (gen.state != .completed) {
+            const r = try ctx.invokeCallable(args[1], call_args);
+            if (!r.isTruthy()) break;
+            n += 1;
+            try ctx.vm.resumeGenerator(gen, .null);
+        }
+        return .{ .int = n };
+    }
+
+    if (args[0] == .array) {
+        var n: i64 = 0;
+        for (args[0].array.entries.items) |_| {
+            const r = try ctx.invokeCallable(args[1], call_args);
+            if (!r.isTruthy()) break;
+            n += 1;
         }
         return .{ .int = n };
     }
