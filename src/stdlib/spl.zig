@@ -231,9 +231,9 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try vm.native_fns.put(a, "SplMinHeap::top", minHeapTop);
     try vm.native_fns.put(a, "SplMinHeap::count", heapCount);
     try vm.native_fns.put(a, "SplMinHeap::isEmpty", heapIsEmpty);
-    try vm.native_fns.put(a, "SplMinHeap::current", heapCurrent);
+    try vm.native_fns.put(a, "SplMinHeap::current", minHeapTop);
     try vm.native_fns.put(a, "SplMinHeap::key", heapKey);
-    try vm.native_fns.put(a, "SplMinHeap::next", heapNext);
+    try vm.native_fns.put(a, "SplMinHeap::next", minHeapExtract);
     try vm.native_fns.put(a, "SplMinHeap::rewind", heapRewind);
     try vm.native_fns.put(a, "SplMinHeap::valid", heapValid);
 
@@ -259,9 +259,9 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try vm.native_fns.put(a, "SplMaxHeap::top", maxHeapTop);
     try vm.native_fns.put(a, "SplMaxHeap::count", heapCount);
     try vm.native_fns.put(a, "SplMaxHeap::isEmpty", heapIsEmpty);
-    try vm.native_fns.put(a, "SplMaxHeap::current", heapCurrent);
+    try vm.native_fns.put(a, "SplMaxHeap::current", maxHeapTop);
     try vm.native_fns.put(a, "SplMaxHeap::key", heapKey);
-    try vm.native_fns.put(a, "SplMaxHeap::next", heapNext);
+    try vm.native_fns.put(a, "SplMaxHeap::next", maxHeapExtract);
     try vm.native_fns.put(a, "SplMaxHeap::rewind", heapRewind);
     try vm.native_fns.put(a, "SplMaxHeap::valid", heapValid);
 
@@ -974,40 +974,31 @@ fn pqSetExtractFlags(ctx: *NativeContext, args: []const Value) RuntimeError!Valu
     return .null;
 }
 
-fn pqCurrent(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .null;
-    const arr = getData(obj) orelse return .{ .bool = false };
-    const cursor: usize = @intCast(@max(Value.toInt(obj.get("__cursor")), 0));
-    if (cursor >= arr.entries.items.len) return .{ .bool = false };
-    return pqFormatEntry(ctx, obj, arr.entries.items[cursor].value);
+// pq iteration is destructive: current = top, next = extract, key = remaining-1
+fn pqCurrent(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    return pqTop(ctx, args);
 }
 
 fn pqKey(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
     const obj = getThis(ctx) orelse return .null;
     const arr = getData(obj) orelse return .null;
-    const cursor = Value.toInt(obj.get("__cursor"));
-    if (cursor < 0 or cursor >= @as(i64, @intCast(arr.entries.items.len))) return .null;
-    return .{ .int = cursor };
+    if (arr.entries.items.len == 0) return .null;
+    return .{ .int = @intCast(arr.entries.items.len - 1) };
 }
 
-fn pqNext(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .null;
-    const cursor = Value.toInt(obj.get("__cursor"));
-    try obj.set(ctx.allocator, "__cursor", .{ .int = cursor + 1 });
+fn pqNext(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    _ = try pqExtract(ctx, args);
     return .null;
 }
 
-fn pqRewind(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .null;
-    try obj.set(ctx.allocator, "__cursor", .{ .int = 0 });
+fn pqRewind(_: *NativeContext, _: []const Value) RuntimeError!Value {
     return .null;
 }
 
 fn pqValid(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
     const obj = getThis(ctx) orelse return .{ .bool = false };
     const arr = getData(obj) orelse return .{ .bool = false };
-    const cursor = Value.toInt(obj.get("__cursor"));
-    return .{ .bool = cursor >= 0 and cursor < @as(i64, @intCast(arr.entries.items.len)) };
+    return .{ .bool = arr.entries.items.len > 0 };
 }
 
 // --- SplMinHeap / SplMaxHeap ---
@@ -1104,9 +1095,8 @@ fn heapCurrent(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
 fn heapKey(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
     const obj = getThis(ctx) orelse return .null;
     const arr = getData(obj) orelse return .null;
-    const cursor = Value.toInt(obj.get("__cursor"));
-    if (cursor < 0 or cursor >= @as(i64, @intCast(arr.entries.items.len))) return .null;
-    return .{ .int = cursor };
+    if (arr.entries.items.len == 0) return .null;
+    return .{ .int = @intCast(arr.entries.items.len - 1) };
 }
 
 fn heapNext(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
@@ -1125,8 +1115,7 @@ fn heapRewind(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
 fn heapValid(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
     const obj = getThis(ctx) orelse return .{ .bool = false };
     const arr = getData(obj) orelse return .{ .bool = false };
-    const cursor = Value.toInt(obj.get("__cursor"));
-    return .{ .bool = cursor >= 0 and cursor < @as(i64, @intCast(arr.entries.items.len)) };
+    return .{ .bool = arr.entries.items.len > 0 };
 }
 
 // --- SplFixedArray ---
