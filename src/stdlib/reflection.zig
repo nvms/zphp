@@ -156,6 +156,7 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try rp_def.methods.put(a, "getPosition", .{ .name = "getPosition", .arity = 0 });
     try rp_def.methods.put(a, "allowsNull", .{ .name = "allowsNull", .arity = 0 });
     try rp_def.methods.put(a, "isPassedByReference", .{ .name = "isPassedByReference", .arity = 0 });
+    try rp_def.methods.put(a, "canBePassedByValue", .{ .name = "canBePassedByValue", .arity = 0 });
     try rp_def.methods.put(a, "hasType", .{ .name = "hasType", .arity = 0 });
     try rp_def.methods.put(a, "getAttributes", .{ .name = "getAttributes", .arity = 0 });
     try rp_def.methods.put(a, "getDeclaringClass", .{ .name = "getDeclaringClass", .arity = 0 });
@@ -172,6 +173,7 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try vm.native_fns.put(a, "ReflectionParameter::getPosition", rpGetPosition);
     try vm.native_fns.put(a, "ReflectionParameter::allowsNull", rpAllowsNull);
     try vm.native_fns.put(a, "ReflectionParameter::isPassedByReference", rpIsPassedByReference);
+    try vm.native_fns.put(a, "ReflectionParameter::canBePassedByValue", rpCanBePassedByValue);
     try vm.native_fns.put(a, "ReflectionParameter::hasType", rpHasType);
     try vm.native_fns.put(a, "ReflectionParameter::getAttributes", rpGetAttributes);
     try vm.native_fns.put(a, "ReflectionParameter::getDeclaringClass", rpGetDeclaringClass);
@@ -1206,6 +1208,12 @@ fn rpIsPassedByReference(ctx: *NativeContext, _: []const Value) RuntimeError!Val
     const this = getThis(ctx) orelse return .{ .bool = false };
     const by_ref = this.get("_by_reference");
     return .{ .bool = by_ref == .bool and by_ref.bool };
+}
+
+fn rpCanBePassedByValue(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const this = getThis(ctx) orelse return .{ .bool = true };
+    const by_ref = this.get("_by_reference");
+    return .{ .bool = !(by_ref == .bool and by_ref.bool) };
 }
 
 fn rpHasType(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
