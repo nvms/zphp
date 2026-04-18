@@ -156,6 +156,7 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try rm_def.methods.put(a, "isFinal", .{ .name = "isFinal", .arity = 0 });
     try rm_def.methods.put(a, "getModifiers", .{ .name = "getModifiers", .arity = 0 });
     try rm_def.methods.put(a, "getAttributes", .{ .name = "getAttributes", .arity = 0 });
+    try rm_def.methods.put(a, "getClosure", .{ .name = "getClosure", .arity = 1 });
     try vm.classes.put(a, "ReflectionMethod", rm_def);
 
     try vm.native_fns.put(a, "ReflectionMethod::__construct", rmConstruct);
@@ -178,6 +179,7 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try vm.native_fns.put(a, "ReflectionMethod::isFinal", rmIsFinal);
     try vm.native_fns.put(a, "ReflectionMethod::getModifiers", rmGetModifiers);
     try vm.native_fns.put(a, "ReflectionMethod::getAttributes", rmGetAttributes);
+    try vm.native_fns.put(a, "ReflectionMethod::getClosure", rmGetClosure);
 
     // ReflectionParameter
     var rp_def = ClassDef{ .name = "ReflectionParameter" };
@@ -2132,6 +2134,17 @@ fn rmInvokeArgs(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
         return ctx.callMethod(target.object, method_name, call_args[0..count]) catch .null;
     }
     return ctx.callMethod(target.object, method_name, &.{}) catch .null;
+}
+
+fn rmGetClosure(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    const this = getThis(ctx) orelse return .null;
+    const method_name = if (this.get("name") == .string) this.get("name").string else return .null;
+    if (args.len < 1 or args[0] != .object) return .null;
+
+    const arr = try ctx.createArray();
+    try arr.append(ctx.allocator, args[0]);
+    try arr.append(ctx.allocator, .{ .string = method_name });
+    return .{ .array = arr };
 }
 
 fn rmIsAbstract(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
