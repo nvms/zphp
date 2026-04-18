@@ -197,6 +197,8 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try rp_def.methods.put(a, "isVariadic", .{ .name = "isVariadic", .arity = 0 });
     try rp_def.methods.put(a, "isPromoted", .{ .name = "isPromoted", .arity = 0 });
     try rp_def.methods.put(a, "getClass", .{ .name = "getClass", .arity = 0 });
+    try rp_def.methods.put(a, "isDefaultValueConstant", .{ .name = "isDefaultValueConstant", .arity = 0 });
+    try rp_def.methods.put(a, "getDefaultValueConstantName", .{ .name = "getDefaultValueConstantName", .arity = 0 });
     try vm.classes.put(a, "ReflectionParameter", rp_def);
 
     try vm.native_fns.put(a, "ReflectionParameter::getName", rpGetName);
@@ -214,6 +216,8 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try vm.native_fns.put(a, "ReflectionParameter::isVariadic", rpIsVariadic);
     try vm.native_fns.put(a, "ReflectionParameter::isPromoted", rpIsPromoted);
     try vm.native_fns.put(a, "ReflectionParameter::getClass", rpGetClass);
+    try vm.native_fns.put(a, "ReflectionParameter::isDefaultValueConstant", rpIsDefaultValueConstant);
+    try vm.native_fns.put(a, "ReflectionParameter::getDefaultValueConstantName", rpGetDefaultValueConstantName);
 
     // ReflectionNamedType
     var rnt_def = ClassDef{ .name = "ReflectionNamedType" };
@@ -1507,6 +1511,39 @@ fn rpHasType(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
     return .{ .bool = type_val == .string and type_val.string.len > 0 };
 }
 
+// constant default sentinel: "\x00CC\x00<class>\x00<const>" (class empty for global constants)
+// returns "CONST" for global, "Class::CONST" for class constants
+fn decodeConstSentinel(ctx: *NativeContext, v: Value) !?[]const u8 {
+    if (v != .string) return null;
+    const s = v.string;
+    if (s.len <= 4 or s[0] != 0 or s[1] != 'C' or s[2] != 'C' or s[3] != 0) return null;
+    const rest = s[4..];
+    const sep = std.mem.indexOfScalar(u8, rest, 0) orelse return null;
+    const class_name = rest[0..sep];
+    const const_name = rest[sep + 1 ..];
+    if (class_name.len == 0) return const_name;
+    const joined = try std.fmt.allocPrint(ctx.allocator, "{s}::{s}", .{ class_name, const_name });
+    try ctx.strings.append(ctx.allocator, joined);
+    return joined;
+}
+
+fn rpIsDefaultValueConstant(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const this = getThis(ctx) orelse return .{ .bool = false };
+    const has_default = this.get("_has_default");
+    if (has_default != .bool or !has_default.bool) return .{ .bool = false };
+    const name = this.get("_default_const_name");
+    return .{ .bool = name == .string and name.string.len > 0 };
+}
+
+fn rpGetDefaultValueConstantName(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const this = getThis(ctx) orelse return .null;
+    const has_default = this.get("_has_default");
+    if (has_default != .bool or !has_default.bool) return throwReflection(ctx, "Internal error: no default value available");
+    const name = this.get("_default_const_name");
+    if (name == .string and name.string.len > 0) return name;
+    return .null;
+}
+
 fn rpGetAttributes(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     const this = getThis(ctx) orelse return .{ .array = try ctx.createArray() };
     const param_name = if (this.get("name") == .string) this.get("name").string else return .{ .array = try ctx.createArray() };
@@ -1821,6 +1858,9 @@ fn buildParamArray(ctx: *NativeContext, func: *const ObjFunction, type_key: []co
         if (has_default and i < func.defaults.len) {
             const raw = func.defaults[i];
             try obj.set(ctx.allocator, "_default_value", try ctx.vm.resolveDefault(raw));
+            if (try decodeConstSentinel(ctx, raw)) |const_name| {
+                try obj.set(ctx.allocator, "_default_const_name", .{ .string = const_name });
+            }
         }
 
         // by-reference

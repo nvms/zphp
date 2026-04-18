@@ -7327,6 +7327,10 @@ pub const VM = struct {
                 if (std.mem.indexOfScalar(u8, rest, 0)) |sep| {
                     const class_name = rest[0..sep];
                     const const_name = rest[sep + 1 ..];
+                    if (class_name.len == 0) {
+                        if (self.php_constants.get(const_name)) |v| return v;
+                        return .null;
+                    }
                     if (self.getStaticProp(class_name, const_name)) |v| return v;
                     // fall back to class constants (ClassName::CONST_NAME)
                     var buf: [512]u8 = undefined;
