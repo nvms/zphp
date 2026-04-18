@@ -30,6 +30,7 @@ pub const entries = .{
     .{ "json_decode", json_decode },
     .{ "json_last_error", native_json_last_error },
     .{ "json_last_error_msg", native_json_last_error_msg },
+    .{ "json_validate", json_validate },
 };
 
 fn json_encode(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
@@ -712,6 +713,35 @@ fn throwJsonException(ctx: *NativeContext, msg: []const u8) RuntimeError {
     ctx.vm.objects.append(ctx.allocator, obj) catch {};
     ctx.vm.pending_exception = .{ .object = obj };
     return error.RuntimeError;
+}
+
+fn json_validate(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len == 0 or args[0] != .string) return .{ .bool = false };
+    const s = args[0].string;
+    const depth: usize = if (args.len >= 2) @intCast(@max(1, Value.toInt(args[1]))) else 512;
+    const flags = if (args.len >= 3) Value.toInt(args[2]) else 0;
+    last_error = 0;
+    last_error_msg = "No error";
+    if (s.len == 0) {
+        last_error = 4;
+        last_error_msg = "Syntax error";
+        return .{ .bool = false };
+    }
+    var pos: usize = 0;
+    _ = parseValue(ctx, s, &pos, true, depth, 0, flags) catch {
+        if (last_error == 0) {
+            last_error = 4;
+            last_error_msg = "Syntax error";
+        }
+        return .{ .bool = false };
+    };
+    skipWhitespace(s, &pos);
+    if (pos < s.len) {
+        last_error = 4;
+        last_error_msg = "Syntax error";
+        return .{ .bool = false };
+    }
+    return .{ .bool = true };
 }
 
 fn native_json_last_error(_: *NativeContext, _: []const Value) RuntimeError!Value {
