@@ -29,6 +29,12 @@ pub fn getTypeInfo(key: []const u8) ?TypeInfo {
 }
 
 pub const FileLoader = fn (path: []const u8, allocator: Allocator) ?*CompileResult;
+
+pub const OutputBufferLevel = struct {
+    start: usize,
+    callback: ?Value = null,
+};
+
 pub const NativeContext = struct {
     allocator: Allocator,
     arrays: *std.ArrayListUnmanaged(*PhpArray),
@@ -331,7 +337,7 @@ pub const VM = struct {
     user_error_handler: ?Value = null,
     prev_error_handler: ?Value = null,
     error_reporting_level: i64 = 32767,
-    ob_stack: std.ArrayListUnmanaged(usize) = .{},
+    ob_stack: std.ArrayListUnmanaged(OutputBufferLevel) = .{},
     request_vars: std.StringHashMapUnmanaged(Value) = .{},
     exception_handlers: [1024]ExceptionHandler = undefined,
     handler_count: usize = 0,

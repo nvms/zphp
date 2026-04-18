@@ -2,6 +2,7 @@ const std = @import("std");
 const Value = @import("../runtime/value.zig").Value;
 const PhpArray = @import("../runtime/value.zig").PhpArray;
 const NativeContext = @import("../runtime/vm.zig").NativeContext;
+const OutputBufferLevel = @import("../runtime/vm.zig").OutputBufferLevel;
 const RuntimeError = error{ RuntimeError, OutOfMemory };
 
 pub const entries = .{
@@ -11,6 +12,7 @@ pub const entries = .{
     .{ "ob_get_contents", native_ob_get_contents },
     .{ "ob_get_level", native_ob_get_level },
     .{ "ob_end_flush", native_ob_end_flush },
+    .{ "ob_get_flush", native_ob_get_flush },
     .{ "ob_flush", native_ob_flush },
     .{ "ob_clean", native_ob_clean },
     .{ "ob_get_length", native_ob_get_length },
@@ -24,30 +26,52 @@ pub const entries = .{
     .{ "headers_list", native_headers_list },
 };
 
-fn native_ob_start(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    try ctx.vm.ob_stack.append(ctx.allocator, ctx.vm.output.items.len);
+fn isCallable(v: Value) bool {
+    return switch (v) {
+        .object => true,
+        .string => |s| s.len > 0,
+        .array => |a| a.entries.items.len == 2,
+        else => false,
+    };
+}
+
+fn native_ob_start(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    var level: OutputBufferLevel = .{ .start = ctx.vm.output.items.len };
+    if (args.len >= 1 and args[0] != .null and isCallable(args[0])) {
+        level.callback = args[0];
+    }
+    try ctx.vm.ob_stack.append(ctx.allocator, level);
     return .{ .bool = true };
+}
+
+fn applyCallback(ctx: *NativeContext, level: OutputBufferLevel, content: []const u8) RuntimeError![]const u8 {
+    if (level.callback) |cb| {
+        const result = try ctx.invokeCallable(cb, &.{.{ .string = content }});
+        if (result == .string) return result.string;
+        if (result == .null or result == .bool) return content;
+    }
+    return content;
 }
 
 fn native_ob_get_clean(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
     if (ctx.vm.ob_stack.items.len == 0) return .{ .bool = false };
-    const start = ctx.vm.ob_stack.pop().?;
-    const content = try ctx.createString(ctx.vm.output.items[start..]);
-    ctx.vm.output.shrinkRetainingCapacity(start);
-    return .{ .string = content };
+    const level = ctx.vm.ob_stack.pop().?;
+    const raw = try ctx.createString(ctx.vm.output.items[level.start..]);
+    ctx.vm.output.shrinkRetainingCapacity(level.start);
+    return .{ .string = raw };
 }
 
 fn native_ob_end_clean(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
     if (ctx.vm.ob_stack.items.len == 0) return .{ .bool = false };
-    const start = ctx.vm.ob_stack.pop().?;
-    ctx.vm.output.shrinkRetainingCapacity(start);
+    const level = ctx.vm.ob_stack.pop().?;
+    ctx.vm.output.shrinkRetainingCapacity(level.start);
     return .{ .bool = true };
 }
 
 fn native_ob_get_contents(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
     if (ctx.vm.ob_stack.items.len == 0) return .{ .bool = false };
-    const start = ctx.vm.ob_stack.getLast();
-    return .{ .string = try ctx.createString(ctx.vm.output.items[start..]) };
+    const level = ctx.vm.ob_stack.getLast();
+    return .{ .string = try ctx.createString(ctx.vm.output.items[level.start..]) };
 }
 
 fn native_ob_get_level(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
@@ -56,34 +80,61 @@ fn native_ob_get_level(ctx: *NativeContext, _: []const Value) RuntimeError!Value
 
 fn native_ob_end_flush(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
     if (ctx.vm.ob_stack.items.len == 0) return .{ .bool = false };
-    _ = ctx.vm.ob_stack.pop();
+    const level = ctx.vm.ob_stack.pop().?;
+    if (level.callback) |_| {
+        const raw = try ctx.allocator.dupe(u8, ctx.vm.output.items[level.start..]);
+        defer ctx.allocator.free(raw);
+        ctx.vm.output.shrinkRetainingCapacity(level.start);
+        const transformed = try applyCallback(ctx, level, raw);
+        try ctx.vm.output.appendSlice(ctx.allocator, transformed);
+    }
     return .{ .bool = true };
+}
+
+fn native_ob_get_flush(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    if (ctx.vm.ob_stack.items.len == 0) return .{ .bool = false };
+    const level = ctx.vm.ob_stack.pop().?;
+    const raw = try ctx.allocator.dupe(u8, ctx.vm.output.items[level.start..]);
+    defer ctx.allocator.free(raw);
+    ctx.vm.output.shrinkRetainingCapacity(level.start);
+    const transformed = try applyCallback(ctx, level, raw);
+    const owned = try ctx.createString(transformed);
+    try ctx.vm.output.appendSlice(ctx.allocator, owned);
+    return .{ .string = owned };
 }
 
 fn native_ob_flush(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
     if (ctx.vm.ob_stack.items.len == 0) return .{ .bool = false };
+    const top = &ctx.vm.ob_stack.items[ctx.vm.ob_stack.items.len - 1];
+    if (top.callback) |_| {
+        const raw = try ctx.allocator.dupe(u8, ctx.vm.output.items[top.start..]);
+        defer ctx.allocator.free(raw);
+        ctx.vm.output.shrinkRetainingCapacity(top.start);
+        const transformed = try applyCallback(ctx, top.*, raw);
+        try ctx.vm.output.appendSlice(ctx.allocator, transformed);
+    }
     if (ctx.vm.ob_stack.items.len >= 2) {
-        const current_start = ctx.vm.ob_stack.items[ctx.vm.ob_stack.items.len - 1];
-        ctx.vm.ob_stack.items[ctx.vm.ob_stack.items.len - 2] = @min(
-            ctx.vm.ob_stack.items[ctx.vm.ob_stack.items.len - 2],
+        const current_start = ctx.vm.ob_stack.items[ctx.vm.ob_stack.items.len - 1].start;
+        ctx.vm.ob_stack.items[ctx.vm.ob_stack.items.len - 2].start = @min(
+            ctx.vm.ob_stack.items[ctx.vm.ob_stack.items.len - 2].start,
             current_start,
         );
     }
-    ctx.vm.ob_stack.items[ctx.vm.ob_stack.items.len - 1] = ctx.vm.output.items.len;
+    ctx.vm.ob_stack.items[ctx.vm.ob_stack.items.len - 1].start = ctx.vm.output.items.len;
     return .{ .bool = true };
 }
 
 fn native_ob_clean(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
     if (ctx.vm.ob_stack.items.len == 0) return .{ .bool = false };
-    const start = ctx.vm.ob_stack.getLast();
-    ctx.vm.output.shrinkRetainingCapacity(start);
+    const level = ctx.vm.ob_stack.getLast();
+    ctx.vm.output.shrinkRetainingCapacity(level.start);
     return .{ .bool = true };
 }
 
 fn native_ob_get_length(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
     if (ctx.vm.ob_stack.items.len == 0) return .{ .bool = false };
-    const start = ctx.vm.ob_stack.getLast();
-    return .{ .int = @intCast(ctx.vm.output.items.len - start) };
+    const level = ctx.vm.ob_stack.getLast();
+    return .{ .int = @intCast(ctx.vm.output.items.len - level.start) };
 }
 
 fn native_ob_implicit_flush(_: *NativeContext, _: []const Value) RuntimeError!Value {
