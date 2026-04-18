@@ -40,6 +40,7 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try rc_def.methods.put(a, "getParentClass", .{ .name = "getParentClass", .arity = 0 });
     try rc_def.methods.put(a, "implementsInterface", .{ .name = "implementsInterface", .arity = 1 });
     try rc_def.methods.put(a, "isSubclassOf", .{ .name = "isSubclassOf", .arity = 1 });
+    try rc_def.methods.put(a, "isInstance", .{ .name = "isInstance", .arity = 1 });
     try rc_def.methods.put(a, "newInstanceArgs", .{ .name = "newInstanceArgs", .arity = 1 });
     try rc_def.methods.put(a, "getMethods", .{ .name = "getMethods", .arity = 0 });
     try rc_def.methods.put(a, "getMethod", .{ .name = "getMethod", .arity = 1 });
@@ -75,6 +76,7 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try vm.native_fns.put(a, "ReflectionClass::getParentClass", rcGetParentClass);
     try vm.native_fns.put(a, "ReflectionClass::implementsInterface", rcImplementsInterface);
     try vm.native_fns.put(a, "ReflectionClass::isSubclassOf", rcIsSubclassOf);
+    try vm.native_fns.put(a, "ReflectionClass::isInstance", rcIsInstance);
     try vm.native_fns.put(a, "ReflectionClass::newInstanceArgs", rcNewInstanceArgs);
     try vm.native_fns.put(a, "ReflectionClass::getMethods", rcGetMethods);
     try vm.native_fns.put(a, "ReflectionClass::getMethod", rcGetMethod);
@@ -532,6 +534,34 @@ fn rcImplementsInterface(ctx: *NativeContext, args: []const Value) RuntimeError!
             if (std.mem.eql(u8, iface, iface_name)) return .{ .bool = true };
         }
         current = cls.parent;
+    }
+    return .{ .bool = false };
+}
+
+fn rcIsInstance(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len < 1 or args[0] != .object) return .{ .bool = false };
+    const this = getThis(ctx) orelse return .{ .bool = false };
+    const class_name = if (this.get("name") == .string) this.get("name").string else return .{ .bool = false };
+    const obj_class = args[0].object.class_name;
+    if (std.mem.eql(u8, obj_class, class_name)) return .{ .bool = true };
+    if (ctx.vm.interfaces.contains(class_name)) {
+        var current: ?[]const u8 = obj_class;
+        while (current) |name| {
+            const cls = ctx.vm.classes.get(name) orelse break;
+            for (cls.interfaces.items) |iface| {
+                if (std.mem.eql(u8, iface, class_name)) return .{ .bool = true };
+            }
+            current = cls.parent;
+        }
+        return .{ .bool = false };
+    }
+    var current: ?[]const u8 = obj_class;
+    while (current) |name| {
+        const cls = ctx.vm.classes.get(name) orelse break;
+        if (cls.parent) |p| {
+            if (std.mem.eql(u8, p, class_name)) return .{ .bool = true };
+            current = p;
+        } else break;
     }
     return .{ .bool = false };
 }
