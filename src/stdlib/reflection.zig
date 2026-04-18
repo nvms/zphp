@@ -192,7 +192,7 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try vm.native_fns.put(a, "ReflectionNamedType::getName", rntGetName);
     try vm.native_fns.put(a, "ReflectionNamedType::isBuiltin", rntIsBuiltin);
     try vm.native_fns.put(a, "ReflectionNamedType::allowsNull", rntAllowsNull);
-    try vm.native_fns.put(a, "ReflectionNamedType::__toString", rntGetName);
+    try vm.native_fns.put(a, "ReflectionNamedType::__toString", rntToString);
 
     // ReflectionFunction
     var rf_def = ClassDef{ .name = "ReflectionFunction" };
@@ -1252,6 +1252,18 @@ fn rpIsVariadic(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
 fn rntGetName(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
     const this = getThis(ctx) orelse return .null;
     return this.get("type_name");
+}
+
+fn rntToString(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const this = getThis(ctx) orelse return .null;
+    const name_v = this.get("type_name");
+    if (name_v != .string) return name_v;
+    const nullable_v = this.get("nullable");
+    const is_nullable = nullable_v == .bool and nullable_v.bool;
+    if (!is_nullable or std.mem.eql(u8, name_v.string, "mixed") or std.mem.eql(u8, name_v.string, "null")) return name_v;
+    const result = std.fmt.allocPrint(ctx.allocator, "?{s}", .{name_v.string}) catch return name_v;
+    try ctx.strings.append(ctx.allocator, result);
+    return .{ .string = result };
 }
 
 fn rntIsBuiltin(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
