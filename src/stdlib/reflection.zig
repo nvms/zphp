@@ -253,6 +253,47 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try vm.native_fns.put(a, "ReflectionIntersectionType::allowsNull", ritAllowsNull);
     try vm.native_fns.put(a, "ReflectionIntersectionType::__toString", ritToString);
 
+    // ReflectionEnum (extends ReflectionClass)
+    var re_def = ClassDef{ .name = "ReflectionEnum" };
+    re_def.parent = "ReflectionClass";
+    try re_def.properties.append(a, .{ .name = "name", .default = .{ .string = "" } });
+    try re_def.methods.put(a, "__construct", .{ .name = "__construct", .arity = 1 });
+    try re_def.methods.put(a, "isBacked", .{ .name = "isBacked", .arity = 0 });
+    try re_def.methods.put(a, "getBackingType", .{ .name = "getBackingType", .arity = 0 });
+    try re_def.methods.put(a, "getCases", .{ .name = "getCases", .arity = 0 });
+    try re_def.methods.put(a, "getCase", .{ .name = "getCase", .arity = 1 });
+    try re_def.methods.put(a, "hasCase", .{ .name = "hasCase", .arity = 1 });
+    try vm.classes.put(a, "ReflectionEnum", re_def);
+    try vm.native_fns.put(a, "ReflectionEnum::__construct", reConstruct);
+    try vm.native_fns.put(a, "ReflectionEnum::isBacked", reIsBacked);
+    try vm.native_fns.put(a, "ReflectionEnum::getBackingType", reGetBackingType);
+    try vm.native_fns.put(a, "ReflectionEnum::getCases", reGetCases);
+    try vm.native_fns.put(a, "ReflectionEnum::getCase", reGetCase);
+    try vm.native_fns.put(a, "ReflectionEnum::hasCase", reHasCase);
+
+    // ReflectionEnumUnitCase
+    var reuc_def = ClassDef{ .name = "ReflectionEnumUnitCase" };
+    try reuc_def.properties.append(a, .{ .name = "name", .default = .{ .string = "" } });
+    try reuc_def.properties.append(a, .{ .name = "class", .default = .{ .string = "" } });
+    try reuc_def.methods.put(a, "getName", .{ .name = "getName", .arity = 0 });
+    try reuc_def.methods.put(a, "getValue", .{ .name = "getValue", .arity = 0 });
+    try vm.classes.put(a, "ReflectionEnumUnitCase", reuc_def);
+    try vm.native_fns.put(a, "ReflectionEnumUnitCase::getName", reucGetName);
+    try vm.native_fns.put(a, "ReflectionEnumUnitCase::getValue", reucGetValue);
+
+    // ReflectionEnumBackedCase (extends ReflectionEnumUnitCase)
+    var rebc_def = ClassDef{ .name = "ReflectionEnumBackedCase" };
+    rebc_def.parent = "ReflectionEnumUnitCase";
+    try rebc_def.properties.append(a, .{ .name = "name", .default = .{ .string = "" } });
+    try rebc_def.properties.append(a, .{ .name = "class", .default = .{ .string = "" } });
+    try rebc_def.methods.put(a, "getName", .{ .name = "getName", .arity = 0 });
+    try rebc_def.methods.put(a, "getValue", .{ .name = "getValue", .arity = 0 });
+    try rebc_def.methods.put(a, "getBackingValue", .{ .name = "getBackingValue", .arity = 0 });
+    try vm.classes.put(a, "ReflectionEnumBackedCase", rebc_def);
+    try vm.native_fns.put(a, "ReflectionEnumBackedCase::getName", reucGetName);
+    try vm.native_fns.put(a, "ReflectionEnumBackedCase::getValue", reucGetValue);
+    try vm.native_fns.put(a, "ReflectionEnumBackedCase::getBackingValue", rebcGetBackingValue);
+
     // ReflectionFunction
     var rf_def = ClassDef{ .name = "ReflectionFunction" };
     try rf_def.properties.append(a, .{ .name = "name", .default = .{ .string = "" } });
@@ -2259,4 +2300,121 @@ fn raIsRepeated(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
     const this = getThis(ctx) orelse return .{ .bool = false };
     const repeated = this.get("_is_repeated");
     return if (repeated == .bool) repeated else .{ .bool = false };
+}
+
+// --- ReflectionEnum ---
+
+fn reConstruct(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len < 1) return throwReflection(ctx, "ReflectionEnum::__construct() expects an enum name");
+    const class_name = if (args[0] == .string)
+        args[0].string
+    else if (args[0] == .object)
+        args[0].object.class_name
+    else
+        return throwReflection(ctx, "ReflectionEnum::__construct() expects an enum name or object");
+    const this = getThis(ctx) orelse return .null;
+
+    const cls = ctx.vm.classes.get(class_name) orelse {
+        const msg = std.fmt.allocPrint(ctx.allocator, "Class \"{s}\" does not exist", .{class_name}) catch return throwReflection(ctx, "Class does not exist");
+        try ctx.strings.append(ctx.allocator, msg);
+        return throwReflection(ctx, msg);
+    };
+    if (!cls.is_enum) {
+        const msg = std.fmt.allocPrint(ctx.allocator, "Class \"{s}\" is not an enum", .{class_name}) catch return throwReflection(ctx, "Not an enum");
+        try ctx.strings.append(ctx.allocator, msg);
+        return throwReflection(ctx, msg);
+    }
+
+    try this.set(ctx.allocator, "name", .{ .string = class_name });
+    try this.set(ctx.allocator, "_is_interface", .{ .bool = false });
+    try this.set(ctx.allocator, "_is_trait", .{ .bool = false });
+    return .null;
+}
+
+fn reIsBacked(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const this = getThis(ctx) orelse return .{ .bool = false };
+    const class_name = if (this.get("name") == .string) this.get("name").string else return .{ .bool = false };
+    const cls = ctx.vm.classes.get(class_name) orelse return .{ .bool = false };
+    return .{ .bool = cls.backed_type != .none };
+}
+
+fn reGetBackingType(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const this = getThis(ctx) orelse return .null;
+    const class_name = if (this.get("name") == .string) this.get("name").string else return .null;
+    const cls = ctx.vm.classes.get(class_name) orelse return .null;
+    const type_name: []const u8 = switch (cls.backed_type) {
+        .none => return .null,
+        .int_type => "int",
+        .string_type => "string",
+    };
+    const obj = try createNamedTypeObj(ctx, type_name, false);
+    return .{ .object = obj };
+}
+
+fn reGetCases(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const this = getThis(ctx) orelse return .{ .array = try ctx.createArray() };
+    const class_name = if (this.get("name") == .string) this.get("name").string else return .{ .array = try ctx.createArray() };
+    const cls = ctx.vm.classes.get(class_name) orelse return .{ .array = try ctx.createArray() };
+    const arr = try ctx.createArray();
+    for (cls.case_order.items) |case_name| {
+        const case_obj = try buildEnumCase(ctx, class_name, case_name, cls.backed_type != .none);
+        try arr.append(ctx.allocator, .{ .object = case_obj });
+    }
+    return .{ .array = arr };
+}
+
+fn reGetCase(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len < 1 or args[0] != .string) return throwReflection(ctx, "ReflectionEnum::getCase() expects a name");
+    const this = getThis(ctx) orelse return .null;
+    const class_name = if (this.get("name") == .string) this.get("name").string else return .null;
+    const cls = ctx.vm.classes.get(class_name) orelse return .null;
+    if (!cls.constant_names.contains(args[0].string)) {
+        const msg = std.fmt.allocPrint(ctx.allocator, "Case {s}::{s} does not exist", .{ class_name, args[0].string }) catch return throwReflection(ctx, "Case not found");
+        try ctx.strings.append(ctx.allocator, msg);
+        return throwReflection(ctx, msg);
+    }
+    const obj = try buildEnumCase(ctx, class_name, args[0].string, cls.backed_type != .none);
+    return .{ .object = obj };
+}
+
+fn reHasCase(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len < 1 or args[0] != .string) return .{ .bool = false };
+    const this = getThis(ctx) orelse return .{ .bool = false };
+    const class_name = if (this.get("name") == .string) this.get("name").string else return .{ .bool = false };
+    const cls = ctx.vm.classes.get(class_name) orelse return .{ .bool = false };
+    for (cls.case_order.items) |case_name| {
+        if (std.mem.eql(u8, case_name, args[0].string)) return .{ .bool = true };
+    }
+    return .{ .bool = false };
+}
+
+fn buildEnumCase(ctx: *NativeContext, class_name: []const u8, case_name: []const u8, is_backed: bool) !*PhpObject {
+    const obj_class: []const u8 = if (is_backed) "ReflectionEnumBackedCase" else "ReflectionEnumUnitCase";
+    const obj = try ctx.createObject(obj_class);
+    try obj.set(ctx.allocator, "name", .{ .string = case_name });
+    try obj.set(ctx.allocator, "class", .{ .string = class_name });
+    return obj;
+}
+
+fn reucGetName(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const this = getThis(ctx) orelse return .null;
+    return this.get("name");
+}
+
+fn reucGetValue(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const this = getThis(ctx) orelse return .null;
+    const class_name = if (this.get("class") == .string) this.get("class").string else return .null;
+    const case_name = if (this.get("name") == .string) this.get("name").string else return .null;
+    const cls = ctx.vm.classes.get(class_name) orelse return .null;
+    return cls.static_props.get(case_name) orelse .null;
+}
+
+fn rebcGetBackingValue(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const this = getThis(ctx) orelse return .null;
+    const class_name = if (this.get("class") == .string) this.get("class").string else return .null;
+    const case_name = if (this.get("name") == .string) this.get("name").string else return .null;
+    const cls = ctx.vm.classes.get(class_name) orelse return .null;
+    const case_obj_v = cls.static_props.get(case_name) orelse return .null;
+    if (case_obj_v != .object) return .null;
+    return case_obj_v.object.get("value");
 }
