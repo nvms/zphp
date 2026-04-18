@@ -9,6 +9,7 @@ const ClassDef = vm_mod.ClassDef;
 
 const Allocator = std.mem.Allocator;
 const RuntimeError = error{ RuntimeError, OutOfMemory };
+const arrays_mod = @import("arrays.zig");
 
 pub fn register(vm: *VM, a: Allocator) !void {
     // Countable interface
@@ -105,6 +106,12 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try ao_def.methods.put(a, "getIterator", .{ .name = "getIterator", .arity = 0 });
     try ao_def.methods.put(a, "setFlags", .{ .name = "setFlags", .arity = 1 });
     try ao_def.methods.put(a, "getFlags", .{ .name = "getFlags", .arity = 0 });
+    try ao_def.methods.put(a, "ksort", .{ .name = "ksort", .arity = 1 });
+    try ao_def.methods.put(a, "krsort", .{ .name = "krsort", .arity = 1 });
+    try ao_def.methods.put(a, "asort", .{ .name = "asort", .arity = 1 });
+    try ao_def.methods.put(a, "arsort", .{ .name = "arsort", .arity = 1 });
+    try ao_def.methods.put(a, "uksort", .{ .name = "uksort", .arity = 1 });
+    try ao_def.methods.put(a, "uasort", .{ .name = "uasort", .arity = 1 });
     try vm.classes.put(a, "ArrayObject", ao_def);
 
     try vm.native_fns.put(a, "ArrayObject::__construct", aoConstruct);
@@ -118,6 +125,12 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try vm.native_fns.put(a, "ArrayObject::getIterator", aoGetIterator);
     try vm.native_fns.put(a, "ArrayObject::setFlags", aoSetFlags);
     try vm.native_fns.put(a, "ArrayObject::getFlags", aoGetFlags);
+    try vm.native_fns.put(a, "ArrayObject::ksort", aoKsort);
+    try vm.native_fns.put(a, "ArrayObject::krsort", aoKrsort);
+    try vm.native_fns.put(a, "ArrayObject::asort", aoAsort);
+    try vm.native_fns.put(a, "ArrayObject::arsort", aoArsort);
+    try vm.native_fns.put(a, "ArrayObject::uksort", aoUksort);
+    try vm.native_fns.put(a, "ArrayObject::uasort", aoUasort);
 
     // ArrayIterator
     var ai_def = ClassDef{ .name = "ArrayIterator" };
@@ -139,6 +152,12 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try ai_def.methods.put(a, "append", .{ .name = "append", .arity = 1 });
     try ai_def.methods.put(a, "getFlags", .{ .name = "getFlags", .arity = 0 });
     try ai_def.methods.put(a, "setFlags", .{ .name = "setFlags", .arity = 1 });
+    try ai_def.methods.put(a, "ksort", .{ .name = "ksort", .arity = 1 });
+    try ai_def.methods.put(a, "krsort", .{ .name = "krsort", .arity = 1 });
+    try ai_def.methods.put(a, "asort", .{ .name = "asort", .arity = 1 });
+    try ai_def.methods.put(a, "arsort", .{ .name = "arsort", .arity = 1 });
+    try ai_def.methods.put(a, "uksort", .{ .name = "uksort", .arity = 1 });
+    try ai_def.methods.put(a, "uasort", .{ .name = "uasort", .arity = 1 });
     try vm.classes.put(a, "ArrayIterator", ai_def);
 
     try vm.native_fns.put(a, "ArrayIterator::__construct", aiConstruct);
@@ -156,6 +175,12 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try vm.native_fns.put(a, "ArrayIterator::append", aiAppend);
     try vm.native_fns.put(a, "ArrayIterator::getFlags", aiGetFlags);
     try vm.native_fns.put(a, "ArrayIterator::setFlags", aiSetFlags);
+    try vm.native_fns.put(a, "ArrayIterator::ksort", aoKsort);
+    try vm.native_fns.put(a, "ArrayIterator::krsort", aoKrsort);
+    try vm.native_fns.put(a, "ArrayIterator::asort", aoAsort);
+    try vm.native_fns.put(a, "ArrayIterator::arsort", aoArsort);
+    try vm.native_fns.put(a, "ArrayIterator::uksort", aoUksort);
+    try vm.native_fns.put(a, "ArrayIterator::uasort", aoUasort);
 
     // WeakMap (simplified - uses spl_object_id as key, no weak reference semantics)
     var wm_def = ClassDef{ .name = "WeakMap" };
@@ -209,8 +234,36 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try vm.native_fns.put(a, "SplPriorityQueue::rewind", pqRewind);
     try vm.native_fns.put(a, "SplPriorityQueue::valid", pqValid);
 
+    // SplHeap (abstract base — user must override compare)
+    var heap_def = ClassDef{ .name = "SplHeap" };
+    try heap_def.interfaces.append(a, "Countable");
+    try heap_def.methods.put(a, "__construct", .{ .name = "__construct", .arity = 0 });
+    try heap_def.methods.put(a, "insert", .{ .name = "insert", .arity = 1 });
+    try heap_def.methods.put(a, "extract", .{ .name = "extract", .arity = 0 });
+    try heap_def.methods.put(a, "top", .{ .name = "top", .arity = 0 });
+    try heap_def.methods.put(a, "count", .{ .name = "count", .arity = 0 });
+    try heap_def.methods.put(a, "isEmpty", .{ .name = "isEmpty", .arity = 0 });
+    try heap_def.methods.put(a, "current", .{ .name = "current", .arity = 0 });
+    try heap_def.methods.put(a, "key", .{ .name = "key", .arity = 0 });
+    try heap_def.methods.put(a, "next", .{ .name = "next", .arity = 0 });
+    try heap_def.methods.put(a, "rewind", .{ .name = "rewind", .arity = 0 });
+    try heap_def.methods.put(a, "valid", .{ .name = "valid", .arity = 0 });
+    try vm.classes.put(a, "SplHeap", heap_def);
+
+    try vm.native_fns.put(a, "SplHeap::__construct", heapConstruct);
+    try vm.native_fns.put(a, "SplHeap::insert", heapInsert);
+    try vm.native_fns.put(a, "SplHeap::extract", userHeapExtract);
+    try vm.native_fns.put(a, "SplHeap::top", userHeapTop);
+    try vm.native_fns.put(a, "SplHeap::count", heapCount);
+    try vm.native_fns.put(a, "SplHeap::isEmpty", heapIsEmpty);
+    try vm.native_fns.put(a, "SplHeap::current", userHeapTop);
+    try vm.native_fns.put(a, "SplHeap::key", heapKey);
+    try vm.native_fns.put(a, "SplHeap::next", userHeapExtract);
+    try vm.native_fns.put(a, "SplHeap::rewind", heapRewind);
+    try vm.native_fns.put(a, "SplHeap::valid", heapValid);
+
     // SplMinHeap
-    var minh_def = ClassDef{ .name = "SplMinHeap" };
+    var minh_def = ClassDef{ .name = "SplMinHeap", .parent = "SplHeap" };
     try minh_def.interfaces.append(a, "Countable");
     try minh_def.methods.put(a, "__construct", .{ .name = "__construct", .arity = 0 });
     try minh_def.methods.put(a, "insert", .{ .name = "insert", .arity = 1 });
@@ -238,7 +291,7 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try vm.native_fns.put(a, "SplMinHeap::valid", heapValid);
 
     // SplMaxHeap
-    var maxh_def = ClassDef{ .name = "SplMaxHeap" };
+    var maxh_def = ClassDef{ .name = "SplMaxHeap", .parent = "SplHeap" };
     try maxh_def.interfaces.append(a, "Countable");
     try maxh_def.methods.put(a, "__construct", .{ .name = "__construct", .arity = 0 });
     try maxh_def.methods.put(a, "insert", .{ .name = "insert", .arity = 1 });
@@ -274,6 +327,7 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try fa_def.methods.put(a, "setSize", .{ .name = "setSize", .arity = 1 });
     try fa_def.methods.put(a, "count", .{ .name = "count", .arity = 0 });
     try fa_def.methods.put(a, "toArray", .{ .name = "toArray", .arity = 0 });
+    try fa_def.methods.put(a, "fromArray", .{ .name = "fromArray", .arity = 1, .is_static = true });
     try fa_def.methods.put(a, "offsetGet", .{ .name = "offsetGet", .arity = 1 });
     try fa_def.methods.put(a, "offsetSet", .{ .name = "offsetSet", .arity = 2 });
     try fa_def.methods.put(a, "offsetExists", .{ .name = "offsetExists", .arity = 1 });
@@ -290,6 +344,7 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try vm.native_fns.put(a, "SplFixedArray::setSize", faSetSize);
     try vm.native_fns.put(a, "SplFixedArray::count", faCount);
     try vm.native_fns.put(a, "SplFixedArray::toArray", faToArray);
+    try vm.native_fns.put(a, "SplFixedArray::fromArray", faFromArray);
     try vm.native_fns.put(a, "SplFixedArray::offsetGet", faOffsetGet);
     try vm.native_fns.put(a, "SplFixedArray::offsetSet", faOffsetSet);
     try vm.native_fns.put(a, "SplFixedArray::offsetExists", faOffsetExists);
@@ -678,6 +733,60 @@ fn aoGetArrayCopy(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
     return .{ .array = copy };
 }
 
+fn aoKsort(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    const obj = getThis(ctx) orelse return .{ .bool = false };
+    const arr = getData(obj) orelse return .{ .bool = false };
+    const flags: i64 = if (args.len >= 1) Value.toInt(args[0]) else 0;
+    arrays_mod.sortKeysWithFlags(arr, flags, false);
+    try arr.rebuildStringIndex(ctx.allocator);
+    return .{ .bool = true };
+}
+
+fn aoKrsort(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    const obj = getThis(ctx) orelse return .{ .bool = false };
+    const arr = getData(obj) orelse return .{ .bool = false };
+    const flags: i64 = if (args.len >= 1) Value.toInt(args[0]) else 0;
+    arrays_mod.sortKeysWithFlags(arr, flags, true);
+    try arr.rebuildStringIndex(ctx.allocator);
+    return .{ .bool = true };
+}
+
+fn aoAsort(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    const obj = getThis(ctx) orelse return .{ .bool = false };
+    const arr = getData(obj) orelse return .{ .bool = false };
+    const flags: i64 = if (args.len >= 1) Value.toInt(args[0]) else 0;
+    arrays_mod.sortWithFlags(arr, flags, false);
+    try arr.rebuildStringIndex(ctx.allocator);
+    return .{ .bool = true };
+}
+
+fn aoArsort(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    const obj = getThis(ctx) orelse return .{ .bool = false };
+    const arr = getData(obj) orelse return .{ .bool = false };
+    const flags: i64 = if (args.len >= 1) Value.toInt(args[0]) else 0;
+    arrays_mod.sortWithFlags(arr, flags, true);
+    try arr.rebuildStringIndex(ctx.allocator);
+    return .{ .bool = true };
+}
+
+fn aoUasort(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    const obj = getThis(ctx) orelse return .{ .bool = false };
+    const arr = getData(obj) orelse return .{ .bool = false };
+    if (args.len < 1) return .{ .bool = false };
+    try arrays_mod.mergeSort(PhpArray.Entry, arr.entries.items, ctx, args[0], .value);
+    try arr.rebuildStringIndex(ctx.allocator);
+    return .{ .bool = true };
+}
+
+fn aoUksort(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    const obj = getThis(ctx) orelse return .{ .bool = false };
+    const arr = getData(obj) orelse return .{ .bool = false };
+    if (args.len < 1) return .{ .bool = false };
+    try arrays_mod.mergeSort(PhpArray.Entry, arr.entries.items, ctx, args[0], .key);
+    try arr.rebuildStringIndex(ctx.allocator);
+    return .{ .bool = true };
+}
+
 fn aoGetIterator(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
     const obj = getThis(ctx) orelse return .null;
     const arr = getData(obj) orelse return .null;
@@ -1044,6 +1153,31 @@ fn heapRemoveAt(arr: *PhpArray, idx: usize) Value {
     return val;
 }
 
+fn findUserBestIdx(ctx: *NativeContext, obj: *PhpObject, arr: *PhpArray) !?usize {
+    if (arr.entries.items.len == 0) return null;
+    var best: usize = 0;
+    var i: usize = 1;
+    while (i < arr.entries.items.len) : (i += 1) {
+        const ret = try ctx.vm.callMethod(obj, "compare", &.{ arr.entries.items[i].value, arr.entries.items[best].value });
+        if (Value.toInt(ret) > 0) best = i;
+    }
+    return best;
+}
+
+fn userHeapExtract(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const obj = getThis(ctx) orelse return .null;
+    const arr = getData(obj) orelse return .null;
+    const idx = (findUserBestIdx(ctx, obj, arr) catch return .null) orelse return .null;
+    return heapRemoveAt(arr, idx);
+}
+
+fn userHeapTop(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const obj = getThis(ctx) orelse return .null;
+    const arr = getData(obj) orelse return .null;
+    const idx = (findUserBestIdx(ctx, obj, arr) catch return .null) orelse return .null;
+    return arr.entries.items[idx].value;
+}
+
 fn minHeapExtract(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
     const obj = getThis(ctx) orelse return .null;
     const arr = getData(obj) orelse return .null;
@@ -1176,6 +1310,26 @@ fn faToArray(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
         try copy.set(ctx.allocator, .{ .int = @intCast(i) }, entry.value);
     }
     return .{ .array = copy };
+}
+
+fn faFromArray(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len == 0 or args[0] != .array) {
+        const obj = try ctx.createObject("SplFixedArray");
+        const arr = try ensureData(ctx, obj);
+        try obj.set(ctx.allocator, "__size", .{ .int = 0 });
+        try obj.set(ctx.allocator, "__cursor", .{ .int = 0 });
+        _ = arr;
+        return .{ .object = obj };
+    }
+    const src = args[0].array;
+    const obj = try ctx.createObject("SplFixedArray");
+    const arr = try ensureData(ctx, obj);
+    for (src.entries.items) |entry| {
+        try arr.append(ctx.allocator, entry.value);
+    }
+    try obj.set(ctx.allocator, "__size", .{ .int = @intCast(src.entries.items.len) });
+    try obj.set(ctx.allocator, "__cursor", .{ .int = 0 });
+    return .{ .object = obj };
 }
 
 fn faOffsetGet(ctx: *NativeContext, args: []const Value) RuntimeError!Value {

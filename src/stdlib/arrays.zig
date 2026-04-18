@@ -370,7 +370,7 @@ const SortFlags = struct {
     }
 };
 
-fn sortWithFlags(arr: *PhpArray, flags: i64, reverse: bool) void {
+pub fn sortWithFlags(arr: *PhpArray, flags: i64, reverse: bool) void {
     const ctx_val = SortFlags{ .flags = flags, .reverse = reverse };
     std.mem.sort(PhpArray.Entry, arr.entries.items, ctx_val, struct {
         fn f(c: SortFlags, a: PhpArray.Entry, b: PhpArray.Entry) bool {
@@ -386,7 +386,7 @@ fn sortKeyAsValue(k: PhpArray.Key) Value {
     };
 }
 
-fn sortKeysWithFlags(arr: *PhpArray, flags: i64, reverse: bool) void {
+pub fn sortKeysWithFlags(arr: *PhpArray, flags: i64, reverse: bool) void {
     const ctx_val = SortFlags{ .flags = flags, .reverse = reverse };
     std.mem.sort(PhpArray.Entry, arr.entries.items, ctx_val, struct {
         fn f(c: SortFlags, a: PhpArray.Entry, b: PhpArray.Entry) bool {
@@ -419,9 +419,9 @@ fn reindexArray(arr: *PhpArray) void {
     arr.string_index.clearRetainingCapacity();
 }
 
-const SortField = enum { value, key };
+pub const SortField = enum { value, key };
 
-fn mergeSort(comptime T: type, items: []T, ctx: *NativeContext, callback: Value, comptime field: SortField) RuntimeError!void {
+pub fn mergeSort(comptime T: type, items: []T, ctx: *NativeContext, callback: Value, comptime field: SortField) RuntimeError!void {
     if (items.len <= 1) return;
     if (items.len <= 16) {
         // insertion sort for small slices
