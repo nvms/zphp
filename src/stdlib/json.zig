@@ -11,6 +11,7 @@ const JSON_NUMERIC_CHECK: i64 = 32;
 const JSON_UNESCAPED_SLASHES: i64 = 64;
 const JSON_PRETTY_PRINT: i64 = 128;
 const JSON_UNESCAPED_UNICODE: i64 = 256;
+const JSON_PRESERVE_ZERO_FRACTION: i64 = 1024;
 const JSON_THROW_ON_ERROR: i64 = 4194304;
 
 var last_error: i64 = 0;
@@ -67,11 +68,13 @@ fn encodeValue(buf: *std.ArrayListUnmanaged(u8), a: std.mem.Allocator, val: Valu
                 try buf.appendSlice(a, "null");
                 return;
             }
+            const preserve_zero = (flags & JSON_PRESERVE_ZERO_FRACTION) != 0;
             if (f == @trunc(f) and @abs(f) < 1e15) {
                 const i: i64 = @intFromFloat(f);
                 var tmp: [32]u8 = undefined;
                 const s = std.fmt.bufPrint(&tmp, "{d}", .{i}) catch return;
                 try buf.appendSlice(a, s);
+                if (preserve_zero) try buf.appendSlice(a, ".0");
             } else {
                 var tmp: [64]u8 = undefined;
                 const s = std.fmt.bufPrint(&tmp, "{d}", .{f}) catch return;
