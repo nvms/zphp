@@ -67,6 +67,7 @@ fn encodeValue(buf: *std.ArrayListUnmanaged(u8), a: std.mem.Allocator, val: Valu
         last_error_msg = "Maximum stack depth exceeded";
         return error.RuntimeError;
     }
+    var pushed_visited = false;
     if (val == .array or val == .object) {
         const ptr: usize = switch (val) {
             .array => |arr| @intFromPtr(arr),
@@ -81,8 +82,9 @@ fn encodeValue(buf: *std.ArrayListUnmanaged(u8), a: std.mem.Allocator, val: Valu
             }
         }
         try visited.append(a, ptr);
+        pushed_visited = true;
     }
-    defer if (val == .array or val == .object) {
+    defer if (pushed_visited) {
         _ = visited.pop();
     };
     const unescape_slashes = (flags & JSON_UNESCAPED_SLASHES) != 0;
@@ -102,7 +104,12 @@ fn encodeValue(buf: *std.ArrayListUnmanaged(u8), a: std.mem.Allocator, val: Valu
                 return error.RuntimeError;
             }
             const preserve_zero = (flags & JSON_PRESERVE_ZERO_FRACTION) != 0;
-            if (f == @trunc(f) and @abs(f) < 1e15) {
+            const abs_f = @abs(f);
+            if (f != 0 and (abs_f < 1e-4 or abs_f >= 1e15)) {
+                var tmp: [64]u8 = undefined;
+                const s = formatJsonScientific(&tmp, f);
+                try buf.appendSlice(a, s);
+            } else if (f == @trunc(f) and abs_f < 1e15) {
                 const i: i64 = @intFromFloat(f);
                 var tmp: [32]u8 = undefined;
                 const s = std.fmt.bufPrint(&tmp, "{d}", .{i}) catch return;
@@ -365,6 +372,28 @@ fn encodeValue(buf: *std.ArrayListUnmanaged(u8), a: std.mem.Allocator, val: Valu
     }
 }
 
+fn formatJsonScientific(buf: *[64]u8, f: f64) []const u8 {
+    const abs_f = @abs(f);
+    const exp: i32 = @intFromFloat(@floor(@log10(abs_f)));
+    const mantissa = f / std.math.pow(f64, 10.0, @floatFromInt(exp));
+    var mant_buf: [64]u8 = undefined;
+    var m = std.fmt.bufPrint(&mant_buf, "{d}", .{mantissa}) catch "0";
+    var has_dot = false;
+    for (m) |ch| {
+        if (ch == '.') {
+            has_dot = true;
+            break;
+        }
+    }
+    if (!has_dot) {
+        const tmp = std.fmt.bufPrint(&mant_buf, "{d}.0", .{mantissa}) catch "0.0";
+        m = tmp;
+    }
+    const exp_sign: u8 = if (exp >= 0) '+' else '-';
+    const exp_abs: u32 = @intCast(if (exp >= 0) exp else -exp);
+    return std.fmt.bufPrint(buf, "{s}e{c}{d}", .{ m, exp_sign, exp_abs }) catch "0";
+}
+
 fn isSequential(arr: *const PhpArray) bool {
     for (arr.entries.items, 0..) |entry, idx| {
         if (entry.key != .int or entry.key.int != @as(i64, @intCast(idx))) return false;
@@ -450,6 +479,7 @@ fn parseValue(ctx: *NativeContext, s: []const u8, pos: *usize, assoc: bool, max_
 fn parseString(ctx: *NativeContext, s: []const u8, pos: *usize) !Value {
     pos.* += 1;
     var buf = std.ArrayListUnmanaged(u8){};
+    errdefer buf.deinit(ctx.allocator);
     while (pos.* < s.len and s[pos.*] != '"') {
         if (s[pos.*] == '\\') {
             pos.* += 1;
