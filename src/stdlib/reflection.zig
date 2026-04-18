@@ -304,6 +304,7 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try rf_def.methods.put(a, "getNumberOfParameters", .{ .name = "getNumberOfParameters", .arity = 0 });
     try rf_def.methods.put(a, "getNumberOfRequiredParameters", .{ .name = "getNumberOfRequiredParameters", .arity = 0 });
     try rf_def.methods.put(a, "isAnonymous", .{ .name = "isAnonymous", .arity = 0 });
+    try rf_def.methods.put(a, "isClosure", .{ .name = "isClosure", .arity = 0 });
     try rf_def.methods.put(a, "getClosureScopeClass", .{ .name = "getClosureScopeClass", .arity = 0 });
     try rf_def.methods.put(a, "hasReturnType", .{ .name = "hasReturnType", .arity = 0 });
     try rf_def.methods.put(a, "getAttributes", .{ .name = "getAttributes", .arity = 0 });
@@ -316,6 +317,7 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try vm.native_fns.put(a, "ReflectionFunction::getNumberOfParameters", rfGetNumberOfParameters);
     try vm.native_fns.put(a, "ReflectionFunction::getNumberOfRequiredParameters", rfGetNumberOfRequiredParameters);
     try vm.native_fns.put(a, "ReflectionFunction::isAnonymous", rfIsAnonymous);
+    try vm.native_fns.put(a, "ReflectionFunction::isClosure", rfIsAnonymous);
     try vm.native_fns.put(a, "ReflectionFunction::getClosureScopeClass", rfGetClosureScopeClass);
     try vm.native_fns.put(a, "ReflectionFunction::hasReturnType", rfHasReturnType);
     try vm.native_fns.put(a, "ReflectionFunction::getAttributes", rfGetAttributes);
@@ -1682,18 +1684,30 @@ fn rfGetReturnType(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
     const this = getThis(ctx) orelse return .null;
     const func_name = if (this.get("name") == .string) this.get("name").string else return .null;
 
-    const type_info = vm_mod.getTypeInfo(func_name) orelse return .null;
+    const type_info = closureAwareTypeInfo(func_name) orelse return .null;
     if (type_info.return_type.len == 0) return .null;
 
     const obj = try createTypeObj(ctx, type_info.return_type, false, null);
     return .{ .object = obj };
 }
 
+fn closureAwareTypeInfo(func_name: []const u8) ?@TypeOf(vm_mod.getTypeInfo("").?) {
+    if (vm_mod.getTypeInfo(func_name)) |ti| return ti;
+    if (std.mem.startsWith(u8, func_name, "__closure_")) {
+        const after = func_name["__closure_".len..];
+        if (std.mem.lastIndexOf(u8, after, "_")) |us| {
+            const trimmed = func_name[0 .. "__closure_".len + us];
+            return vm_mod.getTypeInfo(trimmed);
+        }
+    }
+    return null;
+}
+
 fn rfHasReturnType(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
     const this = getThis(ctx) orelse return .{ .bool = false };
     const func_name = if (this.get("name") == .string) this.get("name").string else return .{ .bool = false };
 
-    const type_info = vm_mod.getTypeInfo(func_name) orelse return .{ .bool = false };
+    const type_info = closureAwareTypeInfo(func_name) orelse return .{ .bool = false };
     return .{ .bool = type_info.return_type.len > 0 };
 }
 
