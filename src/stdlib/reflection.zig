@@ -67,6 +67,9 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try rc_def.methods.put(a, "getFileName", .{ .name = "getFileName", .arity = 0 });
     try rc_def.methods.put(a, "getStartLine", .{ .name = "getStartLine", .arity = 0 });
     try rc_def.methods.put(a, "getDefaultProperties", .{ .name = "getDefaultProperties", .arity = 0 });
+    try rc_def.methods.put(a, "getStaticProperties", .{ .name = "getStaticProperties", .arity = 0 });
+    try rc_def.methods.put(a, "getStaticPropertyValue", .{ .name = "getStaticPropertyValue", .arity = 2 });
+    try rc_def.methods.put(a, "setStaticPropertyValue", .{ .name = "setStaticPropertyValue", .arity = 2 });
     try vm.classes.put(a, "ReflectionClass", rc_def);
 
     try vm.native_fns.put(a, "ReflectionClass::__construct", rcConstruct);
@@ -103,6 +106,9 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try vm.native_fns.put(a, "ReflectionClass::getFileName", rcGetFileName);
     try vm.native_fns.put(a, "ReflectionClass::getStartLine", rcGetStartLine);
     try vm.native_fns.put(a, "ReflectionClass::getDefaultProperties", rcGetDefaultProperties);
+    try vm.native_fns.put(a, "ReflectionClass::getStaticProperties", rcGetStaticProperties);
+    try vm.native_fns.put(a, "ReflectionClass::getStaticPropertyValue", rcGetStaticPropertyValue);
+    try vm.native_fns.put(a, "ReflectionClass::setStaticPropertyValue", rcSetStaticPropertyValue);
 
     // ReflectionMethod
     var rm_def = ClassDef{ .name = "ReflectionMethod" };
@@ -1016,6 +1022,60 @@ fn rcGetDefaultProperties(ctx: *NativeContext, _: []const Value) RuntimeError!Va
     }
     return .{ .array = arr };
 }
+
+fn rcGetStaticProperties(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const this = getThis(ctx) orelse return .null;
+    const class_name = if (this.get("name") == .string) this.get("name").string else return .null;
+    const arr = try ctx.createArray();
+    var current: ?[]const u8 = class_name;
+    while (current) |name| {
+        const cls = ctx.vm.classes.get(name) orelse break;
+        var it = cls.static_props.iterator();
+        while (it.next()) |entry| {
+            if (cls.constant_names.contains(entry.key_ptr.*)) continue;
+            try arr.set(ctx.allocator, .{ .string = entry.key_ptr.* }, entry.value_ptr.*);
+        }
+        current = cls.parent;
+    }
+    return .{ .array = arr };
+}
+
+fn rcGetStaticPropertyValue(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len < 1 or args[0] != .string) return throwReflection(ctx, "ReflectionClass::getStaticPropertyValue() expects a property name");
+    const this = getThis(ctx) orelse return .null;
+    const class_name = if (this.get("name") == .string) this.get("name").string else return .null;
+    const prop_name = args[0].string;
+    var current: ?[]const u8 = class_name;
+    while (current) |name| {
+        const cls = ctx.vm.classes.get(name) orelse break;
+        if (!cls.constant_names.contains(prop_name)) {
+            if (cls.static_props.get(prop_name)) |v| return v;
+        }
+        current = cls.parent;
+    }
+    if (args.len >= 2) return args[1];
+    return throwReflection(ctx, "Static property does not exist");
+}
+
+fn rcSetStaticPropertyValue(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len < 2 or args[0] != .string) return throwReflection(ctx, "ReflectionClass::setStaticPropertyValue() expects a property name and value");
+    const this = getThis(ctx) orelse return .null;
+    const class_name = if (this.get("name") == .string) this.get("name").string else return .null;
+    const prop_name = args[0].string;
+    var current: ?[]const u8 = class_name;
+    while (current) |name| {
+        const cls_ptr = ctx.vm.classes.getPtr(name) orelse break;
+        if (!cls_ptr.constant_names.contains(prop_name)) {
+            if (cls_ptr.static_props.contains(prop_name)) {
+                try cls_ptr.static_props.put(ctx.vm.allocator, prop_name, args[1]);
+                return .null;
+            }
+        }
+        current = cls_ptr.parent;
+    }
+    return throwReflection(ctx, "Static property does not exist");
+}
+
 
 // --- ReflectionMethod ---
 
