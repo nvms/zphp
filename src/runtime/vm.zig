@@ -121,6 +121,12 @@ pub const NativeContext = struct {
 
     pub fn invokeCallable(self: *NativeContext, callable: Value, args: []const Value) RuntimeError!Value {
         if (callable == .string) return self.vm.callByName(callable.string, args);
+        if (callable == .object) {
+            if (self.vm.hasMethod(callable.object.class_name, "__invoke")) {
+                return self.vm.callMethod(callable.object, "__invoke", args);
+            }
+            return error.RuntimeError;
+        }
         if (callable != .array) return error.RuntimeError;
         const arr = callable.array;
         if (arr.entries.items.len != 2) return error.RuntimeError;
