@@ -413,10 +413,8 @@ fn native_filemtime(_: *NativeContext, args: []const Value) RuntimeError!Value {
 
 fn native_fileinode(_: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len == 0 or args[0] != .string) return .{ .bool = false };
-    const c = @cImport(@cInclude("sys/stat.h"));
-    var s: c.struct_stat = undefined;
-    if (c.stat(args[0].string.ptr, &s) != 0) return .{ .bool = false };
-    return .{ .int = @intCast(s.st_ino) };
+    const stat = std.fs.cwd().statFile(args[0].string) catch return Value{ .bool = false };
+    return .{ .int = @intCast(stat.inode) };
 }
 
 fn native_filetype(_: *NativeContext, args: []const Value) RuntimeError!Value {
@@ -976,22 +974,19 @@ fn native_stream_set_buffer(_: *NativeContext, _: []const Value) RuntimeError!Va
 }
 
 fn native_umask(_: *NativeContext, args: []const Value) RuntimeError!Value {
-    const c = @cImport(@cInclude("sys/stat.h"));
     if (args.len > 0 and args[0] == .int) {
-        const old = c.umask(@intCast(args[0].int));
+        const old = std.c.umask(@intCast(args[0].int));
         return .{ .int = @intCast(old) };
     }
-    const current = c.umask(0o022);
-    _ = c.umask(current);
+    const current = std.c.umask(0o022);
+    _ = std.c.umask(current);
     return .{ .int = @intCast(current) };
 }
 
 fn native_fileperms(_: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len == 0 or args[0] != .string) return .{ .bool = false };
-    const c = @cImport(@cInclude("sys/stat.h"));
-    var s: c.struct_stat = undefined;
-    if (c.stat(args[0].string.ptr, &s) != 0) return .{ .bool = false };
-    return .{ .int = @intCast(s.st_mode) };
+    const stat = std.fs.cwd().statFile(args[0].string) catch return Value{ .bool = false };
+    return .{ .int = @intCast(stat.mode) };
 }
 
 fn native_is_link(_: *NativeContext, args: []const Value) RuntimeError!Value {

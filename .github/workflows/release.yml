@@ -4,6 +4,7 @@ on:
   push:
     tags:
       - 'v*'
+  workflow_dispatch:
 
 permissions:
   contents: write
@@ -22,26 +23,80 @@ jobs:
             name: linux-aarch64
           - os: macos-latest
             name: macos-aarch64
+          - os: ubuntu-latest
+            name: linux-x86_64-musl
+            alpine: x86_64
+          - os: ubuntu-24.04-arm
+            name: linux-aarch64-musl
+            alpine: aarch64
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v6
+
       - uses: mlugg/setup-zig@v2
+        if: ${{ !matrix.alpine }}
         with:
           version: 0.15.1
-      - name: install system libs (linux)
-        if: runner.os == 'Linux'
+
+      - name: install system libs (ubuntu glibc)
+        if: runner.os == 'Linux' && !matrix.alpine
         run: sudo apt-get update && sudo apt-get install -y libpcre2-dev libsqlite3-dev zlib1g-dev libmysqlclient-dev libpq-dev libssl-dev libnghttp2-dev libcurl4-openssl-dev
+
       - name: install system libs (macos)
         if: runner.os == 'macOS'
         run: brew install mysql-client libpq openssl@3 nghttp2 curl
-      - name: build
+
+      - name: setup alpine (musl)
+        if: matrix.alpine
+        uses: jirutka/setup-alpine@v1
+        with:
+          arch: ${{ matrix.alpine }}
+          branch: latest-stable
+          packages: >
+            build-base linux-headers curl xz
+            pcre2-dev sqlite-dev sqlite-static zlib-dev zlib-static
+            mariadb-connector-c-dev libpq-dev
+            openssl-dev openssl-libs-static
+            nghttp2-dev nghttp2-static curl-dev curl-static
+
+      - name: install zig (alpine)
+        if: matrix.alpine
+        shell: alpine.sh --root {0}
+        run: |
+          cd /tmp
+          curl -sSL https://ziglang.org/download/0.15.1/zig-${{ matrix.alpine }}-linux-0.15.1.tar.xz | tar -xJ
+          mv zig-${{ matrix.alpine }}-linux-0.15.1 /opt/zig
+          ln -s /opt/zig/zig /usr/local/bin/zig
+          zig version
+
+      - name: build (glibc/macos)
+        if: ${{ !matrix.alpine }}
         run: zig build -Doptimize=ReleaseFast
         env:
           PKG_CONFIG_PATH: ${{ runner.os == 'macOS' && '/opt/homebrew/opt/mysql-client/lib/pkgconfig:/opt/homebrew/opt/libpq/lib/pkgconfig:/opt/homebrew/opt/curl/lib/pkgconfig:/usr/local/opt/mysql-client/lib/pkgconfig:/usr/local/opt/libpq/lib/pkgconfig' || '' }}
+
+      - name: build (musl)
+        if: matrix.alpine
+        shell: alpine.sh {0}
+        run: zig build -Doptimize=ReleaseFast
+
+      - name: smoke test (musl)
+        if: matrix.alpine
+        shell: alpine.sh {0}
+        run: |
+          cat > /tmp/smoke.php <<'PHP'
+          <?php
+          echo "musl ok: " . PHP_VERSION . "\n";
+          echo (preg_match('/^ok$/', 'ok') ? 'pcre ok' : 'pcre fail') . "\n";
+          echo (fileperms('/etc/hostname') > 0 ? 'stat ok' : 'stat fail') . "\n";
+          PHP
+          ./zig-out/bin/zphp run /tmp/smoke.php
+
       - name: package
         run: |
           cp zig-out/bin/zphp zphp-${{ matrix.name }}
           chmod +x zphp-${{ matrix.name }}
+
       - uses: actions/upload-artifact@v4
         with:
           name: zphp-${{ matrix.name }}
@@ -49,6 +104,7 @@ jobs:
 
   release:
     needs: build
+    if: startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4
