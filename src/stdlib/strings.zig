@@ -915,6 +915,10 @@ fn sprintfImpl(ctx: *NativeContext, fmt_str: []const u8, args: []const Value) ![
                 if (left_align) {
                     try buf.appendSlice(ctx.allocator, formatted);
                     for (0..padding) |_| try buf.append(ctx.allocator, pad_char);
+                } else if (pad_char == '0' and formatted.len > 0 and (formatted[0] == '+' or formatted[0] == '-')) {
+                    try buf.append(ctx.allocator, formatted[0]);
+                    for (0..padding) |_| try buf.append(ctx.allocator, '0');
+                    try buf.appendSlice(ctx.allocator, formatted[1..]);
                 } else {
                     for (0..padding) |_| try buf.append(ctx.allocator, pad_char);
                     try buf.appendSlice(ctx.allocator, formatted);
