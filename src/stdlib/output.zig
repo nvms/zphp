@@ -318,13 +318,23 @@ fn varExportValue(a: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8), val: V
         },
         .float => |f| {
             var tmp: [64]u8 = undefined;
-            if (f == @trunc(f) and @abs(f) < 1e15) {
-                const i: i64 = @intFromFloat(f);
-                const s = std.fmt.bufPrint(&tmp, "{d}.0", .{i}) catch return;
-                try out.appendSlice(a, s);
+            if (std.math.isNan(f)) {
+                try out.appendSlice(a, "NAN");
+            } else if (std.math.isInf(f)) {
+                try out.appendSlice(a, if (f > 0) "INF" else "-INF");
             } else {
-                const s = std.fmt.bufPrint(&tmp, "{d}", .{f}) catch return;
-                try out.appendSlice(a, s);
+                const abs_f = @abs(f);
+                if (f != 0 and (abs_f < 1e-4 or abs_f >= 1e15)) {
+                    const s = formatScientific(&tmp, f);
+                    try out.appendSlice(a, s);
+                } else if (f == @trunc(f) and abs_f < 1e15) {
+                    const i: i64 = @intFromFloat(f);
+                    const s = std.fmt.bufPrint(&tmp, "{d}.0", .{i}) catch return;
+                    try out.appendSlice(a, s);
+                } else {
+                    const s = std.fmt.bufPrint(&tmp, "{d}", .{f}) catch return;
+                    try out.appendSlice(a, s);
+                }
             }
         },
         .string => |s| {
@@ -412,9 +422,34 @@ fn appendIndent(out: *std.ArrayListUnmanaged(u8), a: std.mem.Allocator, n: usize
 fn formatFloat(tmp: *[64]u8, f: f64) []const u8 {
     if (std.math.isNan(f)) return "NAN";
     if (std.math.isInf(f)) return if (f > 0) "INF" else "-INF";
-    if (f == @trunc(f) and @abs(f) < 1e15) {
+    const abs_f = @abs(f);
+    if (f != 0 and (abs_f < 1e-4 or abs_f >= 1e15)) {
+        return formatScientific(tmp, f);
+    }
+    if (f == @trunc(f) and abs_f < 1e15) {
         const i: i64 = @intFromFloat(f);
         return std.fmt.bufPrint(tmp, "{d}", .{i}) catch "0";
     }
     return std.fmt.bufPrint(tmp, "{d}", .{f}) catch "0";
+}
+
+fn formatScientific(buf: *[64]u8, f: f64) []const u8 {
+    const abs_f = @abs(f);
+    const exp: i32 = @intFromFloat(@floor(@log10(abs_f)));
+    const mantissa = f / std.math.pow(f64, 10.0, @floatFromInt(exp));
+    var mant_buf: [64]u8 = undefined;
+    var m = std.fmt.bufPrint(&mant_buf, "{d}", .{mantissa}) catch "0";
+    var has_dot = false;
+    for (m) |ch| {
+        if (ch == '.') {
+            has_dot = true;
+            break;
+        }
+    }
+    if (!has_dot) {
+        m = std.fmt.bufPrint(&mant_buf, "{d}.0", .{mantissa}) catch "0.0";
+    }
+    const exp_sign: u8 = if (exp >= 0) '+' else '-';
+    const exp_abs: u32 = @intCast(if (exp >= 0) exp else -exp);
+    return std.fmt.bufPrint(buf, "{s}E{c}{d}", .{ m, exp_sign, exp_abs }) catch "0";
 }
