@@ -210,6 +210,29 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try vm.native_fns.put(a, "ReflectionNamedType::allowsNull", rntAllowsNull);
     try vm.native_fns.put(a, "ReflectionNamedType::__toString", rntToString);
 
+    // ReflectionUnionType
+    var rut_def = ClassDef{ .name = "ReflectionUnionType" };
+    try rut_def.properties.append(a, .{ .name = "type_str", .default = .{ .string = "" } });
+    try rut_def.properties.append(a, .{ .name = "nullable", .default = .{ .bool = false } });
+    try rut_def.methods.put(a, "getTypes", .{ .name = "getTypes", .arity = 0 });
+    try rut_def.methods.put(a, "allowsNull", .{ .name = "allowsNull", .arity = 0 });
+    try rut_def.methods.put(a, "__toString", .{ .name = "__toString", .arity = 0 });
+    try vm.classes.put(a, "ReflectionUnionType", rut_def);
+    try vm.native_fns.put(a, "ReflectionUnionType::getTypes", rutGetTypes);
+    try vm.native_fns.put(a, "ReflectionUnionType::allowsNull", rutAllowsNull);
+    try vm.native_fns.put(a, "ReflectionUnionType::__toString", rutToString);
+
+    // ReflectionIntersectionType
+    var rit_def = ClassDef{ .name = "ReflectionIntersectionType" };
+    try rit_def.properties.append(a, .{ .name = "type_str", .default = .{ .string = "" } });
+    try rit_def.methods.put(a, "getTypes", .{ .name = "getTypes", .arity = 0 });
+    try rit_def.methods.put(a, "allowsNull", .{ .name = "allowsNull", .arity = 0 });
+    try rit_def.methods.put(a, "__toString", .{ .name = "__toString", .arity = 0 });
+    try vm.classes.put(a, "ReflectionIntersectionType", rit_def);
+    try vm.native_fns.put(a, "ReflectionIntersectionType::getTypes", ritGetTypes);
+    try vm.native_fns.put(a, "ReflectionIntersectionType::allowsNull", ritAllowsNull);
+    try vm.native_fns.put(a, "ReflectionIntersectionType::__toString", ritToString);
+
     // ReflectionFunction
     var rf_def = ClassDef{ .name = "ReflectionFunction" };
     try rf_def.properties.append(a, .{ .name = "name", .default = .{ .string = "" } });
@@ -388,6 +411,39 @@ fn createNamedTypeObj(ctx: *NativeContext, type_name: []const u8, nullable: bool
     try obj.set(ctx.allocator, "type_name", .{ .string = clean_name });
     try obj.set(ctx.allocator, "nullable", .{ .bool = is_nullable });
     return obj;
+}
+
+fn createTypeObj(ctx: *NativeContext, type_name: []const u8, nullable: bool, self_class: ?[]const u8) !*PhpObject {
+    var clean = type_name;
+    var is_nullable = nullable;
+    if (clean.len > 0 and clean[0] == '?') {
+        clean = clean[1..];
+        is_nullable = true;
+    }
+    // resolve self/static to declaring class
+    if (self_class) |sc| {
+        if (std.mem.eql(u8, clean, "self") or std.mem.eql(u8, clean, "static")) {
+            clean = sc;
+        }
+    }
+    if (std.mem.indexOfScalar(u8, clean, '|') != null) {
+        const obj = try ctx.createObject("ReflectionUnionType");
+        try obj.set(ctx.allocator, "type_str", .{ .string = clean });
+        // detect null member for nullable
+        var it = std.mem.splitScalar(u8, clean, '|');
+        while (it.next()) |part| {
+            if (std.mem.eql(u8, part, "null")) is_nullable = true;
+        }
+        try obj.set(ctx.allocator, "nullable", .{ .bool = is_nullable });
+        try obj.set(ctx.allocator, "_self_class", .{ .string = self_class orelse "" });
+        return obj;
+    }
+    if (std.mem.indexOfScalar(u8, clean, '&') != null) {
+        const obj = try ctx.createObject("ReflectionIntersectionType");
+        try obj.set(ctx.allocator, "type_str", .{ .string = clean });
+        return obj;
+    }
+    return createNamedTypeObj(ctx, clean, is_nullable);
 }
 
 fn buildMethodObj(ctx: *NativeContext, class_name: []const u8, method_name: []const u8, info: ClassDef.MethodInfo, declaring_class: []const u8) !*PhpObject {
@@ -1260,7 +1316,7 @@ fn rmGetReturnType(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
     const type_info = vm_mod.getTypeInfo(key) orelse return .null;
     if (type_info.return_type.len == 0) return .null;
 
-    const obj = try createNamedTypeObj(ctx, type_info.return_type, false);
+    const obj = try createTypeObj(ctx, type_info.return_type, false, declaring);
     return .{ .object = obj };
 }
 
@@ -1307,7 +1363,9 @@ fn rpGetType(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
 
     const nullable = this.get("_nullable");
     const is_nullable = nullable == .bool and nullable.bool;
-    const obj = try createNamedTypeObj(ctx, type_val.string, is_nullable);
+    const declaring = this.get("_declaring_class");
+    const self_class: ?[]const u8 = if (declaring == .string and declaring.string.len > 0) declaring.string else null;
+    const obj = try createTypeObj(ctx, type_val.string, is_nullable, self_class);
     return .{ .object = obj };
 }
 
@@ -1427,6 +1485,68 @@ fn rntAllowsNull(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
     return .{ .bool = nullable == .bool and nullable.bool };
 }
 
+// --- ReflectionUnionType ---
+
+fn rutGetTypes(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const this = getThis(ctx) orelse return .{ .array = try ctx.createArray() };
+    const ts_v = this.get("type_str");
+    if (ts_v != .string) return .{ .array = try ctx.createArray() };
+    const sc_v = this.get("_self_class");
+    const self_class: ?[]const u8 = if (sc_v == .string and sc_v.string.len > 0) sc_v.string else null;
+    const arr = try ctx.createArray();
+    var it = std.mem.splitScalar(u8, ts_v.string, '|');
+    while (it.next()) |part| {
+        if (part.len == 0) continue;
+        const obj = try createNamedTypeObj(ctx, part, false);
+        // resolve self/static
+        if (self_class) |sc| {
+            if (std.mem.eql(u8, part, "self") or std.mem.eql(u8, part, "static")) {
+                try obj.set(ctx.allocator, "type_name", .{ .string = sc });
+            }
+        }
+        try arr.append(ctx.allocator, .{ .object = obj });
+    }
+    return .{ .array = arr };
+}
+
+fn rutAllowsNull(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const this = getThis(ctx) orelse return .{ .bool = false };
+    const nullable = this.get("nullable");
+    return .{ .bool = nullable == .bool and nullable.bool };
+}
+
+fn rutToString(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const this = getThis(ctx) orelse return .null;
+    const ts_v = this.get("type_str");
+    return ts_v;
+}
+
+// --- ReflectionIntersectionType ---
+
+fn ritGetTypes(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const this = getThis(ctx) orelse return .{ .array = try ctx.createArray() };
+    const ts_v = this.get("type_str");
+    if (ts_v != .string) return .{ .array = try ctx.createArray() };
+    const arr = try ctx.createArray();
+    var it = std.mem.splitScalar(u8, ts_v.string, '&');
+    while (it.next()) |part| {
+        if (part.len == 0) continue;
+        const obj = try createNamedTypeObj(ctx, part, false);
+        try arr.append(ctx.allocator, .{ .object = obj });
+    }
+    return .{ .array = arr };
+}
+
+fn ritAllowsNull(_: *NativeContext, _: []const Value) RuntimeError!Value {
+    return .{ .bool = false };
+}
+
+fn ritToString(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const this = getThis(ctx) orelse return .null;
+    const ts_v = this.get("type_str");
+    return ts_v;
+}
+
 // --- ReflectionFunction ---
 
 fn rfConstruct(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
@@ -1481,7 +1601,7 @@ fn rfGetReturnType(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
     const type_info = vm_mod.getTypeInfo(func_name) orelse return .null;
     if (type_info.return_type.len == 0) return .null;
 
-    const obj = try createNamedTypeObj(ctx, type_info.return_type, false);
+    const obj = try createTypeObj(ctx, type_info.return_type, false, null);
     return .{ .object = obj };
 }
 
