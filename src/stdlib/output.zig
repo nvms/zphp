@@ -81,10 +81,86 @@ fn varDumpValue(ctx: *NativeContext, val: Value, depth: usize) !void {
             try out.appendSlice(a, "}\n");
         },
         .object => |obj| {
+            // honor __debugInfo if defined
+            var debug_arr: ?*@import("../runtime/value.zig").PhpArray = null;
+            if (ctx.vm.hasMethod(obj.class_name, "__debugInfo")) {
+                const result = try ctx.vm.callMethod(obj, "__debugInfo", &.{});
+                if (result == .array) debug_arr = result.array;
+            }
+
             try appendIndent(out, a, indent);
             try out.appendSlice(a, "object(");
             try out.appendSlice(a, obj.class_name);
-            try out.appendSlice(a, ")#1 (0) {\n");
+            try out.appendSlice(a, ")#1 (");
+            var tmp: [32]u8 = undefined;
+            var prop_count: usize = 0;
+            if (debug_arr) |da| {
+                prop_count = da.entries.items.len;
+            } else {
+                if (obj.slot_layout) |layout| prop_count += layout.names.len;
+                prop_count += obj.properties.count();
+                if (obj.slot_layout) |layout| {
+                    var dyn_iter = obj.properties.iterator();
+                    while (dyn_iter.next()) |entry| {
+                        for (layout.names) |sn| {
+                            if (std.mem.eql(u8, sn, entry.key_ptr.*)) { prop_count -= 1; break; }
+                        }
+                    }
+                }
+            }
+            const len_s = std.fmt.bufPrint(&tmp, "{d}", .{prop_count}) catch return;
+            try out.appendSlice(a, len_s);
+            try out.appendSlice(a, ") {\n");
+
+            if (debug_arr) |da| {
+                for (da.entries.items) |entry| {
+                    try appendIndent(out, a, indent + 2);
+                    switch (entry.key) {
+                        .int => |ki| {
+                            try out.appendSlice(a, "[");
+                            const ks = std.fmt.bufPrint(&tmp, "{d}", .{ki}) catch return;
+                            try out.appendSlice(a, ks);
+                            try out.appendSlice(a, "]=>\n");
+                        },
+                        .string => |ks| {
+                            try out.appendSlice(a, "[\"");
+                            try out.appendSlice(a, ks);
+                            try out.appendSlice(a, "\"]=>\n");
+                        },
+                    }
+                    try varDumpValue(ctx, entry.value, depth + 1);
+                }
+            } else {
+                if (obj.slot_layout) |layout| {
+                    if (obj.slots) |slots| {
+                        for (layout.names, 0..) |name, i| {
+                            if (i >= slots.len) break;
+                            try appendIndent(out, a, indent + 2);
+                            try out.appendSlice(a, "[\"");
+                            try out.appendSlice(a, name);
+                            try out.appendSlice(a, "\"]=>\n");
+                            try varDumpValue(ctx, slots[i], depth + 1);
+                        }
+                    }
+                }
+                var dyn_iter = obj.properties.iterator();
+                while (dyn_iter.next()) |entry| {
+                    var in_slots = false;
+                    if (obj.slot_layout) |layout| {
+                        for (layout.names) |sn| {
+                            if (std.mem.eql(u8, sn, entry.key_ptr.*)) { in_slots = true; break; }
+                        }
+                    }
+                    if (!in_slots) {
+                        try appendIndent(out, a, indent + 2);
+                        try out.appendSlice(a, "[\"");
+                        try out.appendSlice(a, entry.key_ptr.*);
+                        try out.appendSlice(a, "\"]=>\n");
+                        try varDumpValue(ctx, entry.value_ptr.*, depth + 1);
+                    }
+                }
+            }
+
             try appendIndent(out, a, indent);
             try out.appendSlice(a, "}\n");
         },
