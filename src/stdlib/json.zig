@@ -383,16 +383,25 @@ fn json_decode(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if ((flags & JSON_OBJECT_AS_ARRAY) != 0) assoc = true;
     if (args.len >= 2 and args[1] == .null and (flags & JSON_OBJECT_AS_ARRAY) != 0) assoc = true;
     const depth: usize = if (args.len >= 3) @intCast(@max(1, Value.toInt(args[2]))) else 512;
+    last_error = 0;
+    last_error_msg = "No error";
+    if (s.len == 0) {
+        last_error = 4;
+        last_error_msg = "Syntax error";
+        if ((flags & JSON_THROW_ON_ERROR) != 0) {
+            return throwJsonException(ctx, "Syntax error");
+        }
+        return .null;
+    }
     var pos: usize = 0;
     const result = parseValue(ctx, s, &pos, assoc, depth, 0, flags) catch |err| {
         if (err == error.OutOfMemory) return error.OutOfMemory;
-        const msg = if (last_error == 1) last_error_msg else "Syntax error";
-        if (last_error != 1) {
+        if (last_error == 0) {
             last_error = 4;
             last_error_msg = "Syntax error";
         }
         if ((flags & JSON_THROW_ON_ERROR) != 0) {
-            return throwJsonException(ctx, msg);
+            return throwJsonException(ctx, last_error_msg);
         }
         return .null;
     };
@@ -410,9 +419,17 @@ fn json_decode(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     return result;
 }
 
+fn setSyntaxError() void {
+    last_error = 4;
+    last_error_msg = "Syntax error";
+}
+
 fn parseValue(ctx: *NativeContext, s: []const u8, pos: *usize, assoc: bool, max_depth: usize, cur_depth: usize, flags: i64) RuntimeError!Value {
     skipWhitespace(s, pos);
-    if (pos.* >= s.len) return .null;
+    if (pos.* >= s.len) {
+        setSyntaxError();
+        return error.RuntimeError;
+    }
 
     return switch (s[pos.*]) {
         '"' => parseString(ctx, s, pos),
@@ -422,7 +439,10 @@ fn parseValue(ctx: *NativeContext, s: []const u8, pos: *usize, assoc: bool, max_
         '[' => parseArray(ctx, s, pos, assoc, max_depth, cur_depth, flags),
         '{' => parseObject(ctx, s, pos, assoc, max_depth, cur_depth, flags),
         '-', '0'...'9' => parseNumber(ctx, s, pos, flags),
-        else => .null,
+        else => {
+            setSyntaxError();
+            return error.RuntimeError;
+        },
     };
 }
 
@@ -432,7 +452,11 @@ fn parseString(ctx: *NativeContext, s: []const u8, pos: *usize) !Value {
     while (pos.* < s.len and s[pos.*] != '"') {
         if (s[pos.*] == '\\') {
             pos.* += 1;
-            if (pos.* >= s.len) break;
+            if (pos.* >= s.len) {
+                last_error = 3;
+                last_error_msg = "Control character error, possibly incorrectly encoded";
+                return error.RuntimeError;
+            }
             switch (s[pos.*]) {
                 '"' => try buf.append(ctx.allocator, '"'),
                 '\\' => try buf.append(ctx.allocator, '\\'),
@@ -444,41 +468,56 @@ fn parseString(ctx: *NativeContext, s: []const u8, pos: *usize) !Value {
                 'f' => try buf.append(ctx.allocator, 0x0C),
                 'u' => {
                     pos.* += 1;
-                    if (pos.* + 4 <= s.len) {
-                        const high = std.fmt.parseInt(u21, s[pos.*..][0..4], 16) catch 0xFFFD;
-                        pos.* += 3;
-                        var codepoint: u21 = high;
-                        // surrogate pair: high surrogate followed by \uXXXX low surrogate
-                        if (high >= 0xD800 and high <= 0xDBFF and pos.* + 7 < s.len and
-                            s[pos.* + 1] == '\\' and s[pos.* + 2] == 'u')
-                        {
-                            const low = std.fmt.parseInt(u21, s[pos.* + 3 ..][0..4], 16) catch 0;
-                            if (low >= 0xDC00 and low <= 0xDFFF) {
-                                codepoint = 0x10000 + ((high - 0xD800) << 10) + (low - 0xDC00);
-                                pos.* += 6;
-                            } else {
-                                codepoint = 0xFFFD;
-                            }
-                        } else if (high >= 0xD800 and high <= 0xDFFF) {
-                            // unpaired surrogate
+                    if (pos.* + 4 > s.len) {
+                        setSyntaxError();
+                        return error.RuntimeError;
+                    }
+                    const high = std.fmt.parseInt(u21, s[pos.*..][0..4], 16) catch {
+                        setSyntaxError();
+                        return error.RuntimeError;
+                    };
+                    pos.* += 3;
+                    var codepoint: u21 = high;
+                    if (high >= 0xD800 and high <= 0xDBFF and pos.* + 7 < s.len and
+                        s[pos.* + 1] == '\\' and s[pos.* + 2] == 'u')
+                    {
+                        const low = std.fmt.parseInt(u21, s[pos.* + 3 ..][0..4], 16) catch 0;
+                        if (low >= 0xDC00 and low <= 0xDFFF) {
+                            codepoint = 0x10000 + ((high - 0xD800) << 10) + (low - 0xDC00);
+                            pos.* += 6;
+                        } else {
                             codepoint = 0xFFFD;
                         }
-                        var utf8_buf: [4]u8 = undefined;
-                        const len = std.unicode.utf8Encode(codepoint, &utf8_buf) catch blk: {
-                            const r = std.unicode.utf8Encode(0xFFFD, &utf8_buf) catch 0;
-                            break :blk r;
-                        };
-                        try buf.appendSlice(ctx.allocator, utf8_buf[0..len]);
+                    } else if (high >= 0xD800 and high <= 0xDFFF) {
+                        codepoint = 0xFFFD;
                     }
+                    var utf8_buf: [4]u8 = undefined;
+                    const len = std.unicode.utf8Encode(codepoint, &utf8_buf) catch blk: {
+                        const r = std.unicode.utf8Encode(0xFFFD, &utf8_buf) catch 0;
+                        break :blk r;
+                    };
+                    try buf.appendSlice(ctx.allocator, utf8_buf[0..len]);
                 },
-                else => try buf.append(ctx.allocator, s[pos.*]),
+                else => {
+                    setSyntaxError();
+                    return error.RuntimeError;
+                },
             }
+        } else if (s[pos.*] < 0x20) {
+            last_error = 3;
+            last_error_msg = "Control character error, possibly incorrectly encoded";
+            return error.RuntimeError;
         } else {
             try buf.append(ctx.allocator, s[pos.*]);
         }
         pos.* += 1;
     }
-    if (pos.* < s.len) pos.* += 1;
+    if (pos.* >= s.len) {
+        last_error = 3;
+        last_error_msg = "Control character error, possibly incorrectly encoded";
+        return error.RuntimeError;
+    }
+    pos.* += 1;
     const result = try buf.toOwnedSlice(ctx.allocator);
     try ctx.strings.append(ctx.allocator, result);
     return .{ .string = result };
@@ -522,7 +561,8 @@ fn parseTrue(s: []const u8, pos: *usize) !Value {
         pos.* += 4;
         return .{ .bool = true };
     }
-    return .null;
+    setSyntaxError();
+    return error.RuntimeError;
 }
 
 fn parseFalse(s: []const u8, pos: *usize) !Value {
@@ -530,7 +570,8 @@ fn parseFalse(s: []const u8, pos: *usize) !Value {
         pos.* += 5;
         return .{ .bool = false };
     }
-    return .null;
+    setSyntaxError();
+    return error.RuntimeError;
 }
 
 fn parseNull(s: []const u8, pos: *usize) !Value {
@@ -538,7 +579,8 @@ fn parseNull(s: []const u8, pos: *usize) !Value {
         pos.* += 4;
         return .null;
     }
-    return .null;
+    setSyntaxError();
+    return error.RuntimeError;
 }
 
 fn parseArray(ctx: *NativeContext, s: []const u8, pos: *usize, assoc: bool, max_depth: usize, cur_depth: usize, flags: i64) !Value {
@@ -560,10 +602,19 @@ fn parseArray(ctx: *NativeContext, s: []const u8, pos: *usize, assoc: bool, max_
         skipWhitespace(s, pos);
         if (pos.* < s.len and s[pos.*] == ',') {
             pos.* += 1;
+            skipWhitespace(s, pos);
+            if (pos.* < s.len and s[pos.*] == ']') {
+                setSyntaxError();
+                return error.RuntimeError;
+            }
         } else break;
     }
     skipWhitespace(s, pos);
-    if (pos.* < s.len and s[pos.*] == ']') pos.* += 1;
+    if (pos.* >= s.len or s[pos.*] != ']') {
+        setSyntaxError();
+        return error.RuntimeError;
+    }
+    pos.* += 1;
     return .{ .array = arr };
 }
 
@@ -584,11 +635,18 @@ fn parseObject(ctx: *NativeContext, s: []const u8, pos: *usize, assoc: bool, max
         }
         while (pos.* < s.len) {
             skipWhitespace(s, pos);
-            if (pos.* >= s.len or s[pos.*] != '"') break;
+            if (pos.* >= s.len or s[pos.*] != '"') {
+                setSyntaxError();
+                return error.RuntimeError;
+            }
             const key_val = try parseString(ctx, s, pos);
             const key_str = if (key_val == .string) key_val.string else "";
             skipWhitespace(s, pos);
-            if (pos.* < s.len and s[pos.*] == ':') pos.* += 1;
+            if (pos.* >= s.len or s[pos.*] != ':') {
+                setSyntaxError();
+                return error.RuntimeError;
+            }
+            pos.* += 1;
             const val = try parseValue(ctx, s, pos, assoc, max_depth, cur_depth + 1, flags);
             try arr.set(ctx.allocator, .{ .string = key_str }, val);
             skipWhitespace(s, pos);
@@ -597,7 +655,11 @@ fn parseObject(ctx: *NativeContext, s: []const u8, pos: *usize, assoc: bool, max
             } else break;
         }
         skipWhitespace(s, pos);
-        if (pos.* < s.len and s[pos.*] == '}') pos.* += 1;
+        if (pos.* >= s.len or s[pos.*] != '}') {
+            setSyntaxError();
+            return error.RuntimeError;
+        }
+        pos.* += 1;
         return .{ .array = arr };
     }
 
@@ -610,11 +672,18 @@ fn parseObject(ctx: *NativeContext, s: []const u8, pos: *usize, assoc: bool, max
     }
     while (pos.* < s.len) {
         skipWhitespace(s, pos);
-        if (pos.* >= s.len or s[pos.*] != '"') break;
+        if (pos.* >= s.len or s[pos.*] != '"') {
+            setSyntaxError();
+            return error.RuntimeError;
+        }
         const key_val = try parseString(ctx, s, pos);
         const key_str = if (key_val == .string) key_val.string else "";
         skipWhitespace(s, pos);
-        if (pos.* < s.len and s[pos.*] == ':') pos.* += 1;
+        if (pos.* >= s.len or s[pos.*] != ':') {
+            setSyntaxError();
+            return error.RuntimeError;
+        }
+        pos.* += 1;
         const val = try parseValue(ctx, s, pos, assoc, max_depth, cur_depth + 1, flags);
         try obj.set(ctx.allocator, key_str, val);
         skipWhitespace(s, pos);
@@ -623,7 +692,11 @@ fn parseObject(ctx: *NativeContext, s: []const u8, pos: *usize, assoc: bool, max
         } else break;
     }
     skipWhitespace(s, pos);
-    if (pos.* < s.len and s[pos.*] == '}') pos.* += 1;
+    if (pos.* >= s.len or s[pos.*] != '}') {
+        setSyntaxError();
+        return error.RuntimeError;
+    }
+    pos.* += 1;
     return .{ .object = obj };
 }
 
