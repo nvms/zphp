@@ -381,14 +381,35 @@ fn parseString(ctx: *NativeContext, s: []const u8, pos: *usize) !Value {
                 'n' => try buf.append(ctx.allocator, '\n'),
                 'r' => try buf.append(ctx.allocator, '\r'),
                 't' => try buf.append(ctx.allocator, '\t'),
+                'b' => try buf.append(ctx.allocator, 0x08),
+                'f' => try buf.append(ctx.allocator, 0x0C),
                 'u' => {
                     pos.* += 1;
                     if (pos.* + 4 <= s.len) {
-                        const code = std.fmt.parseInt(u21, s[pos.*..][0..4], 16) catch 0xFFFD;
-                        var utf8_buf: [4]u8 = undefined;
-                        const len = std.unicode.utf8Encode(code, &utf8_buf) catch 0;
-                        try buf.appendSlice(ctx.allocator, utf8_buf[0..len]);
+                        const high = std.fmt.parseInt(u21, s[pos.*..][0..4], 16) catch 0xFFFD;
                         pos.* += 3;
+                        var codepoint: u21 = high;
+                        // surrogate pair: high surrogate followed by \uXXXX low surrogate
+                        if (high >= 0xD800 and high <= 0xDBFF and pos.* + 7 < s.len and
+                            s[pos.* + 1] == '\\' and s[pos.* + 2] == 'u')
+                        {
+                            const low = std.fmt.parseInt(u21, s[pos.* + 3 ..][0..4], 16) catch 0;
+                            if (low >= 0xDC00 and low <= 0xDFFF) {
+                                codepoint = 0x10000 + ((high - 0xD800) << 10) + (low - 0xDC00);
+                                pos.* += 6;
+                            } else {
+                                codepoint = 0xFFFD;
+                            }
+                        } else if (high >= 0xD800 and high <= 0xDFFF) {
+                            // unpaired surrogate
+                            codepoint = 0xFFFD;
+                        }
+                        var utf8_buf: [4]u8 = undefined;
+                        const len = std.unicode.utf8Encode(codepoint, &utf8_buf) catch blk: {
+                            const r = std.unicode.utf8Encode(0xFFFD, &utf8_buf) catch 0;
+                            break :blk r;
+                        };
+                        try buf.appendSlice(ctx.allocator, utf8_buf[0..len]);
                     }
                 },
                 else => try buf.append(ctx.allocator, s[pos.*]),
