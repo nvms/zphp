@@ -6,6 +6,10 @@ const NativeContext = vm_mod.NativeContext;
 const RuntimeError = error{ RuntimeError, OutOfMemory };
 
 const PhpObject = @import("../runtime/value.zig").PhpObject;
+const JSON_HEX_TAG: i64 = 1;
+const JSON_HEX_AMP: i64 = 2;
+const JSON_HEX_APOS: i64 = 4;
+const JSON_HEX_QUOT: i64 = 8;
 const JSON_FORCE_OBJECT: i64 = 16;
 const JSON_NUMERIC_CHECK: i64 = 32;
 const JSON_UNESCAPED_SLASHES: i64 = 64;
@@ -14,6 +18,8 @@ const JSON_UNESCAPED_UNICODE: i64 = 256;
 const JSON_PRESERVE_ZERO_FRACTION: i64 = 1024;
 const JSON_BIGINT_AS_STRING: i64 = 2;
 const JSON_OBJECT_AS_ARRAY: i64 = 1;
+const JSON_INVALID_UTF8_IGNORE: i64 = 1048576;
+const JSON_INVALID_UTF8_SUBSTITUTE: i64 = 2097152;
 const JSON_THROW_ON_ERROR: i64 = 4194304;
 
 var last_error: i64 = 0;
@@ -115,12 +121,22 @@ fn encodeValue(buf: *std.ArrayListUnmanaged(u8), a: std.mem.Allocator, val: Valu
                     } else |_| {}
                 }
             }
+            const hex_tag = (flags & JSON_HEX_TAG) != 0;
+            const hex_amp = (flags & JSON_HEX_AMP) != 0;
+            const hex_quot = (flags & JSON_HEX_QUOT) != 0;
+            const hex_apos = (flags & JSON_HEX_APOS) != 0;
             try buf.append(a, '"');
             var i: usize = 0;
             while (i < s.len) {
                 const c = s[i];
                 switch (c) {
-                    '"' => try buf.appendSlice(a, "\\\""),
+                    '"' => {
+                        if (hex_quot) {
+                            try buf.appendSlice(a, "\\u0022");
+                        } else {
+                            try buf.appendSlice(a, "\\\"");
+                        }
+                    },
                     '\\' => try buf.appendSlice(a, "\\\\"),
                     '\n' => try buf.appendSlice(a, "\\n"),
                     '\r' => try buf.appendSlice(a, "\\r"),
@@ -131,6 +147,18 @@ fn encodeValue(buf: *std.ArrayListUnmanaged(u8), a: std.mem.Allocator, val: Valu
                         } else {
                             try buf.appendSlice(a, "\\/");
                         }
+                    },
+                    '<' => {
+                        if (hex_tag) try buf.appendSlice(a, "\\u003C") else try buf.append(a, '<');
+                    },
+                    '>' => {
+                        if (hex_tag) try buf.appendSlice(a, "\\u003E") else try buf.append(a, '>');
+                    },
+                    '&' => {
+                        if (hex_amp) try buf.appendSlice(a, "\\u0026") else try buf.append(a, '&');
+                    },
+                    '\'' => {
+                        if (hex_apos) try buf.appendSlice(a, "\\u0027") else try buf.append(a, '\'');
                     },
                     else => {
                         if (c < 0x20) {
