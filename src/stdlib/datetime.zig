@@ -2297,6 +2297,7 @@ fn diFormat(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     }
 
     const dup = try ctx.allocator.dupe(u8, buf.items);
+    try ctx.strings.append(ctx.allocator, dup);
     return .{ .string = dup };
 }
 
