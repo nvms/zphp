@@ -29,11 +29,13 @@ pub const entries = .{
 fn json_encode(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len == 0) return .{ .bool = false };
     const flags = if (args.len >= 2) Value.toInt(args[1]) else 0;
+    const depth: usize = if (args.len >= 3) @intCast(@max(1, Value.toInt(args[2]))) else 512;
     var buf = std.ArrayListUnmanaged(u8){};
-    encodeValue(&buf, ctx.allocator, args[0], 0, flags, ctx.vm) catch {
+    encodeValue(&buf, ctx.allocator, args[0], 0, depth, flags, ctx.vm) catch {
         buf.deinit(ctx.allocator);
-        // check if it was a NaN/Inf error
-        if (args[0] == .float and (std.math.isNan(args[0].float) or std.math.isInf(args[0].float))) {
+        if (last_error == 1) {
+            // depth error already set
+        } else if (args[0] == .float and (std.math.isNan(args[0].float) or std.math.isInf(args[0].float))) {
             last_error = 5;
             last_error_msg = "Inf and NaN cannot be JSON encoded";
         } else {
@@ -52,8 +54,13 @@ fn json_encode(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     return .{ .string = result };
 }
 
-fn encodeValue(buf: *std.ArrayListUnmanaged(u8), a: std.mem.Allocator, val: Value, depth: usize, flags: i64, vm: ?*vm_mod.VM) !void {
+fn encodeValue(buf: *std.ArrayListUnmanaged(u8), a: std.mem.Allocator, val: Value, depth: usize, max_depth: usize, flags: i64, vm: ?*vm_mod.VM) !void {
     const pretty = (flags & JSON_PRETTY_PRINT) != 0;
+    if ((val == .array or val == .object) and depth >= max_depth) {
+        last_error = 1;
+        last_error_msg = "Maximum stack depth exceeded";
+        return error.RuntimeError;
+    }
     const unescape_slashes = (flags & JSON_UNESCAPED_SLASHES) != 0;
     const unescape_unicode = (flags & JSON_UNESCAPED_UNICODE) != 0;
     switch (val) {
@@ -189,7 +196,7 @@ fn encodeValue(buf: *std.ArrayListUnmanaged(u8), a: std.mem.Allocator, val: Valu
                         try buf.append(a, '\n');
                         try appendIndent(buf, a, depth + 1);
                     }
-                    try encodeValue(buf, a, entry.value, depth + 1, flags, vm);
+                    try encodeValue(buf, a, entry.value, depth + 1, max_depth, flags, vm);
                 }
                 if (pretty and arr.entries.items.len > 0) {
                     try buf.append(a, '\n');
@@ -220,7 +227,7 @@ fn encodeValue(buf: *std.ArrayListUnmanaged(u8), a: std.mem.Allocator, val: Valu
                     }
                     try buf.append(a, ':');
                     if (pretty) try buf.append(a, ' ');
-                    try encodeValue(buf, a, entry.value, depth + 1, flags, vm);
+                    try encodeValue(buf, a, entry.value, depth + 1, max_depth, flags, vm);
                 }
                 if (pretty and arr.entries.items.len > 0) {
                     try buf.append(a, '\n');
@@ -236,7 +243,7 @@ fn encodeValue(buf: *std.ArrayListUnmanaged(u8), a: std.mem.Allocator, val: Valu
                         try buf.appendSlice(a, "{}");
                         return;
                     };
-                    try encodeValue(buf, a, result, depth, flags, vm);
+                    try encodeValue(buf, a, result, depth, max_depth, flags, vm);
                     return;
                 }
             }
@@ -293,7 +300,7 @@ fn encodeValue(buf: *std.ArrayListUnmanaged(u8), a: std.mem.Allocator, val: Valu
                 try buf.append(a, '"');
                 try buf.append(a, ':');
                 if (pretty) try buf.append(a, ' ');
-                try encodeValue(buf, a, prop.value, depth + 1, flags, vm);
+                try encodeValue(buf, a, prop.value, depth + 1, max_depth, flags, vm);
             }
             if (pretty) {
                 try buf.append(a, '\n');
