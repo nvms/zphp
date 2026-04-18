@@ -1286,7 +1286,7 @@ fn array_replace_recursive(ctx: *NativeContext, args: []const Value) RuntimeErro
 }
 
 fn walkRecursive(ctx: *NativeContext, arr: *PhpArray, callback: Value) RuntimeError!void {
-    for (arr.entries.items) |entry| {
+    for (arr.entries.items, 0..) |entry, idx| {
         if (entry.value == .array) {
             try walkRecursive(ctx, entry.value.array, callback);
         } else {
@@ -1295,6 +1295,7 @@ fn walkRecursive(ctx: *NativeContext, arr: *PhpArray, callback: Value) RuntimeEr
                 .string => |s| Value{ .string = s },
             } };
             _ = try ctx.invokeCallableRef(callback, &call_args);
+            arr.entries.items[idx].value = call_args[0];
         }
     }
 }
