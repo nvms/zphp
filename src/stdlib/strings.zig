@@ -200,7 +200,9 @@ fn explode(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     const s = if (args[1] == .string) args[1].string else return Value.null;
     if (delim.len == 0) return .{ .bool = false };
 
-    const limit: i64 = if (args.len >= 3) args[2].toInt() else 0;
+    var limit: i64 = if (args.len >= 3) args[2].toInt() else std.math.maxInt(i64);
+    // PHP: limit 0 is treated as 1
+    if (limit == 0) limit = 1;
 
     var arr = try ctx.createArray();
     var i: usize = 0;
