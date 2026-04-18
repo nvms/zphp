@@ -491,6 +491,41 @@ fn addNamedGroupsToMatch(ctx: *NativeContext, arr: *PhpArray, code: *pcre2.Code,
     try arr.rebuildStringIndex(ctx.allocator);
 }
 
+fn translateReplacement(allocator: std.mem.Allocator, src: []const u8) ![]u8 {
+    var out = std.ArrayListUnmanaged(u8){};
+    defer out.deinit(allocator);
+    var i: usize = 0;
+    while (i < src.len) {
+        const c = src[i];
+        if (c == '\\' and i + 1 < src.len) {
+            const n = src[i + 1];
+            if (n >= '0' and n <= '9') {
+                try out.append(allocator, '$');
+                try out.append(allocator, n);
+                i += 2;
+                continue;
+            }
+            if (n == '\\') {
+                try out.append(allocator, '\\');
+                i += 2;
+                continue;
+            }
+            if (n == '$') {
+                try out.append(allocator, '\\');
+                try out.append(allocator, '$');
+                i += 2;
+                continue;
+            }
+            try out.append(allocator, c);
+            i += 1;
+            continue;
+        }
+        try out.append(allocator, c);
+        i += 1;
+    }
+    return out.toOwnedSlice(allocator);
+}
+
 fn preg_replace(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len < 3 or args[0] != .string or args[2] != .string) return if (args.len >= 3) args[2] else Value.null;
     const info = parsePattern(args[0].string) orelse return args[2];
@@ -508,6 +543,9 @@ fn preg_replace(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
         return pregReplaceLimited(ctx, code, match_data, subject, replacement, @intCast(limit));
     }
 
+    const xrep = try translateReplacement(ctx.allocator, replacement);
+    defer ctx.allocator.free(xrep);
+
     const sub_opts: u32 = pcre2.SUBSTITUTE_OVERFLOW_LENGTH | pcre2.SUBSTITUTE_GLOBAL;
 
     var out_len: usize = 0;
@@ -519,8 +557,8 @@ fn preg_replace(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
         sub_opts,
         match_data,
         null,
-        replacement.ptr,
-        replacement.len,
+        xrep.ptr,
+        xrep.len,
         null,
         &out_len,
     );
@@ -537,8 +575,8 @@ fn preg_replace(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
         sub_opts,
         match_data,
         null,
-        replacement.ptr,
-        replacement.len,
+        xrep.ptr,
+        xrep.len,
         buf.ptr,
         &out_len,
     );
