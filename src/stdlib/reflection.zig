@@ -539,6 +539,7 @@ fn findDeclaringClass(vm: *VM, class_name: []const u8, method_name: []const u8) 
         const key = std.fmt.bufPrint(&buf, "{s}::{s}", .{ current, method_name }) catch break;
         if (vm.functions.get(key) != null or vm.native_fns.get(key) != null) {
             declaring = current;
+            break;
         }
         const cls = vm.classes.get(current) orelse break;
         current = cls.parent orelse break;
