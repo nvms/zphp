@@ -37,14 +37,11 @@ fn json_encode(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     const flags = if (args.len >= 2) Value.toInt(args[1]) else 0;
     const depth: usize = if (args.len >= 3) @intCast(@max(1, Value.toInt(args[2]))) else 512;
     var buf = std.ArrayListUnmanaged(u8){};
+    last_error = 0;
+    last_error_msg = "No error";
     encodeValue(&buf, ctx.allocator, args[0], 0, depth, flags, ctx.vm) catch {
         buf.deinit(ctx.allocator);
-        if (last_error == 1) {
-            // depth error already set
-        } else if (args[0] == .float and (std.math.isNan(args[0].float) or std.math.isInf(args[0].float))) {
-            last_error = 5;
-            last_error_msg = "Inf and NaN cannot be JSON encoded";
-        } else {
+        if (last_error == 0) {
             last_error = 5;
             last_error_msg = "Malformed UTF-8 characters, possibly incorrectly encoded";
         }
@@ -79,9 +76,9 @@ fn encodeValue(buf: *std.ArrayListUnmanaged(u8), a: std.mem.Allocator, val: Valu
         },
         .float => |f| {
             if (std.math.isNan(f) or std.math.isInf(f)) {
-                if ((flags & JSON_THROW_ON_ERROR) != 0) return error.RuntimeError;
-                try buf.appendSlice(a, "null");
-                return;
+                last_error = 7;
+                last_error_msg = "Inf and NaN cannot be JSON encoded";
+                return error.RuntimeError;
             }
             const preserve_zero = (flags & JSON_PRESERVE_ZERO_FRACTION) != 0;
             if (f == @trunc(f) and @abs(f) < 1e15) {
