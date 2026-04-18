@@ -482,13 +482,31 @@ pub const Value = union(enum) {
         var i: usize = 0;
         while (i < s.len and (s[i] == ' ' or s[i] == '\t' or s[i] == '\n' or s[i] == '\r')) i += 1;
         if (i >= s.len) return 0;
+        const start = i;
         var neg = false;
         if (s[i] == '-') { neg = true; i += 1; } else if (s[i] == '+') i += 1;
         if (i >= s.len or s[i] < '0' or s[i] > '9') return 0;
+        const digits_start = i;
+        while (i < s.len and s[i] >= '0' and s[i] <= '9') i += 1;
+        var is_float = false;
+        if (i < s.len and s[i] == '.') is_float = true;
+        if (i < s.len and (s[i] == 'e' or s[i] == 'E')) {
+            var j = i + 1;
+            if (j < s.len and (s[j] == '-' or s[j] == '+')) j += 1;
+            if (j < s.len and s[j] >= '0' and s[j] <= '9') is_float = true;
+        }
+        if (is_float) {
+            const f = parseLeadingFloat(s[start..]);
+            if (!std.math.isFinite(f)) return 0;
+            const max_f: f64 = 9.2233720368547758e18;
+            if (f >= max_f or f < -max_f) return 0;
+            return @intFromFloat(f);
+        }
         var result: i64 = 0;
-        while (i < s.len and s[i] >= '0' and s[i] <= '9') {
-            result = result *% 10 +% @as(i64, s[i] - '0');
-            i += 1;
+        var k = digits_start;
+        while (k < s.len and s[k] >= '0' and s[k] <= '9') {
+            result = result *% 10 +% @as(i64, s[k] - '0');
+            k += 1;
         }
         return if (neg) -result else result;
     }
