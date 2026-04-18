@@ -1431,8 +1431,13 @@ fn buildParamArray(ctx: *NativeContext, func: *const ObjFunction, type_key: []co
             try obj.set(ctx.allocator, "_nullable", .{ .bool = false });
         }
 
+        // variadic
+        const is_variadic = func.is_variadic and i == func.arity - 1;
+        try obj.set(ctx.allocator, "_is_variadic", .{ .bool = is_variadic });
+
         // default values - defaults array has one entry per param, non-default params have .null
-        const has_default = i >= func.required_params;
+        // variadic params never have a default (they collect remaining args)
+        const has_default = !is_variadic and i >= func.required_params;
         try obj.set(ctx.allocator, "_has_default", .{ .bool = has_default });
         if (has_default and i < func.defaults.len) {
             const raw = func.defaults[i];
@@ -1442,10 +1447,6 @@ fn buildParamArray(ctx: *NativeContext, func: *const ObjFunction, type_key: []co
         // by-reference
         const by_ref = if (i < func.ref_params.len) func.ref_params[i] else false;
         try obj.set(ctx.allocator, "_by_reference", .{ .bool = by_ref });
-
-        // variadic
-        const is_variadic = func.is_variadic and i == func.arity - 1;
-        try obj.set(ctx.allocator, "_is_variadic", .{ .bool = is_variadic });
 
         // declaring class and method name
         if (std.mem.indexOf(u8, type_key, "::")) |sep| {
