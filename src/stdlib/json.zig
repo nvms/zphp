@@ -37,9 +37,11 @@ fn json_encode(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     const flags = if (args.len >= 2) Value.toInt(args[1]) else 0;
     const depth: usize = if (args.len >= 3) @intCast(@max(1, Value.toInt(args[2]))) else 512;
     var buf = std.ArrayListUnmanaged(u8){};
+    var visited = std.ArrayListUnmanaged(usize){};
+    defer visited.deinit(ctx.allocator);
     last_error = 0;
     last_error_msg = "No error";
-    encodeValue(&buf, ctx.allocator, args[0], 0, depth, flags, ctx.vm) catch {
+    encodeValue(&buf, ctx.allocator, args[0], 0, depth, flags, ctx.vm, &visited) catch {
         buf.deinit(ctx.allocator);
         if (last_error == 0) {
             last_error = 5;
@@ -57,13 +59,31 @@ fn json_encode(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     return .{ .string = result };
 }
 
-fn encodeValue(buf: *std.ArrayListUnmanaged(u8), a: std.mem.Allocator, val: Value, depth: usize, max_depth: usize, flags: i64, vm: ?*vm_mod.VM) !void {
+fn encodeValue(buf: *std.ArrayListUnmanaged(u8), a: std.mem.Allocator, val: Value, depth: usize, max_depth: usize, flags: i64, vm: ?*vm_mod.VM, visited: *std.ArrayListUnmanaged(usize)) !void {
     const pretty = (flags & JSON_PRETTY_PRINT) != 0;
     if ((val == .array or val == .object) and depth >= max_depth) {
         last_error = 1;
         last_error_msg = "Maximum stack depth exceeded";
         return error.RuntimeError;
     }
+    if (val == .array or val == .object) {
+        const ptr: usize = switch (val) {
+            .array => |arr| @intFromPtr(arr),
+            .object => |obj| @intFromPtr(obj),
+            else => 0,
+        };
+        for (visited.items) |seen| {
+            if (seen == ptr) {
+                last_error = 6;
+                last_error_msg = "Recursion detected";
+                return error.RuntimeError;
+            }
+        }
+        try visited.append(a, ptr);
+    }
+    defer if (val == .array or val == .object) {
+        _ = visited.pop();
+    };
     const unescape_slashes = (flags & JSON_UNESCAPED_SLASHES) != 0;
     const unescape_unicode = (flags & JSON_UNESCAPED_UNICODE) != 0;
     switch (val) {
@@ -228,7 +248,7 @@ fn encodeValue(buf: *std.ArrayListUnmanaged(u8), a: std.mem.Allocator, val: Valu
                         try buf.append(a, '\n');
                         try appendIndent(buf, a, depth + 1);
                     }
-                    try encodeValue(buf, a, entry.value, depth + 1, max_depth, flags, vm);
+                    try encodeValue(buf, a, entry.value, depth + 1, max_depth, flags, vm, visited);
                 }
                 if (pretty and arr.entries.items.len > 0) {
                     try buf.append(a, '\n');
@@ -259,7 +279,7 @@ fn encodeValue(buf: *std.ArrayListUnmanaged(u8), a: std.mem.Allocator, val: Valu
                     }
                     try buf.append(a, ':');
                     if (pretty) try buf.append(a, ' ');
-                    try encodeValue(buf, a, entry.value, depth + 1, max_depth, flags, vm);
+                    try encodeValue(buf, a, entry.value, depth + 1, max_depth, flags, vm, visited);
                 }
                 if (pretty and arr.entries.items.len > 0) {
                     try buf.append(a, '\n');
@@ -275,7 +295,7 @@ fn encodeValue(buf: *std.ArrayListUnmanaged(u8), a: std.mem.Allocator, val: Valu
                         try buf.appendSlice(a, "{}");
                         return;
                     };
-                    try encodeValue(buf, a, result, depth, max_depth, flags, vm);
+                    try encodeValue(buf, a, result, depth, max_depth, flags, vm, visited);
                     return;
                 }
             }
@@ -332,7 +352,7 @@ fn encodeValue(buf: *std.ArrayListUnmanaged(u8), a: std.mem.Allocator, val: Valu
                 try buf.append(a, '"');
                 try buf.append(a, ':');
                 if (pretty) try buf.append(a, ' ');
-                try encodeValue(buf, a, prop.value, depth + 1, max_depth, flags, vm);
+                try encodeValue(buf, a, prop.value, depth + 1, max_depth, flags, vm, visited);
             }
             if (pretty) {
                 try buf.append(a, '\n');
