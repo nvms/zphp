@@ -51,9 +51,16 @@ pub const entries = .{
 fn native_abs(_: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len == 0) return .{ .int = 0 };
     return switch (args[0]) {
-        .int => |i| .{ .int = if (i < 0) -i else i },
+        .int => |i| if (i == std.math.minInt(i64))
+            .{ .float = -@as(f64, @floatFromInt(i)) }
+        else
+            .{ .int = if (i < 0) -i else i },
         .float => |f| .{ .float = @abs(f) },
-        else => .{ .int = @as(i64, if (Value.toInt(args[0]) < 0) -Value.toInt(args[0]) else Value.toInt(args[0])) },
+        else => blk: {
+            const i = Value.toInt(args[0]);
+            if (i == std.math.minInt(i64)) break :blk Value{ .float = -@as(f64, @floatFromInt(i)) };
+            break :blk Value{ .int = if (i < 0) -i else i };
+        },
     };
 }
 
