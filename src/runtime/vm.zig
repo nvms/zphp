@@ -1562,24 +1562,24 @@ pub const VM = struct {
                     const frame = self.currentFrame();
                     var cur: Value = .null;
                     if (frame.func) |func| {
+                        var from_ref = false;
                         if (slot < func.slot_names.len and func.slot_names[slot].len > 0) {
-                            if (frame.ref_slots.get(func.slot_names[slot])) |cell| cur = cell.*;
+                            if (frame.ref_slots.get(func.slot_names[slot])) |cell| {
+                                cur = cell.*;
+                                from_ref = true;
+                            }
                         }
-                        if (cur == .null and slot < frame.locals.len) cur = frame.locals[slot];
+                        if (!from_ref and slot < frame.locals.len) cur = frame.locals[slot];
                     } else {
                         cur = self.getLocalGlobal(slot, frame);
-                    }
-                    if (cur == .array or cur == .string) {
-                        self.push(cur);
-                        continue;
-                    }
-                    if (cur == .object and self.hasMethod(cur.object.class_name, "offsetSet")) {
-                        self.push(cur);
-                        continue;
                     }
                     if (cur == .int or cur == .float or (cur == .bool and cur.bool)) {
                         if (try self.throwBuiltinException("Error", "Cannot use a scalar value as an array")) continue;
                         return error.RuntimeError;
+                    }
+                    if (cur != .null and !(cur == .bool and !cur.bool)) {
+                        self.push(cur);
+                        continue;
                     }
                     const new_arr = try self.allocator.create(PhpArray);
                     new_arr.* = .{};
@@ -1606,22 +1606,24 @@ pub const VM = struct {
                     const name = self.currentChunk().constants.items[idx].string;
                     const frame = self.currentFrame();
                     var cur: Value = .null;
+                    var from_request = false;
                     if (frame.ref_slots.get(name)) |cell| {
                         cur = cell.*;
                     } else if (frame.vars.get(name)) |v| {
                         cur = v;
-                    }
-                    if (cur == .array or cur == .string) {
-                        self.push(cur);
-                        continue;
-                    }
-                    if (cur == .object and self.hasMethod(cur.object.class_name, "offsetSet")) {
-                        self.push(cur);
-                        continue;
+                    } else if (name.len > 2 and name[0] == '$' and name[1] == '_') {
+                        if (self.request_vars.get(name)) |rv| {
+                            cur = rv;
+                            from_request = true;
+                        }
                     }
                     if (cur == .int or cur == .float or (cur == .bool and cur.bool)) {
                         if (try self.throwBuiltinException("Error", "Cannot use a scalar value as an array")) continue;
                         return error.RuntimeError;
+                    }
+                    if (cur != .null and !(cur == .bool and !cur.bool)) {
+                        self.push(cur);
+                        continue;
                     }
                     const new_arr = try self.allocator.create(PhpArray);
                     new_arr.* = .{};
@@ -1629,6 +1631,8 @@ pub const VM = struct {
                     const new_val = Value{ .array = new_arr };
                     if (frame.ref_slots.get(name)) |cell| {
                         cell.* = new_val;
+                    } else if (from_request) {
+                        try self.request_vars.put(self.allocator, name, new_val);
                     } else {
                         try frame.vars.put(self.allocator, name, new_val);
                     }
@@ -7492,6 +7496,17 @@ pub const VM = struct {
                 try self.generators.append(self.allocator, gen);
                 self.push(.{ .generator = gen });
             } else {
+                if (self.frame_count >= 2047) {
+                    new_vars.deinit(self.allocator);
+                    callee_refs.deinit(self.allocator);
+                    callee_array_bindings.deinit(self.allocator);
+                    callee_object_bindings.deinit(self.allocator);
+                    const msg = std.fmt.allocPrint(self.allocator, "Maximum function nesting level of 2048 reached, aborting in {s}()", .{name}) catch "Maximum function nesting level reached";
+                    try self.strings.append(self.allocator, msg);
+                    if (try self.throwBuiltinException("Error", msg)) return;
+                    self.error_msg = msg;
+                    return error.RuntimeError;
+                }
                 const inherit_cc = if (std.mem.startsWith(u8, name, "__closure_"))
                     self.closureScopeByName(name) orelse self.currentFrame().called_class
                 else

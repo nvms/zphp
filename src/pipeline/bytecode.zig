@@ -172,6 +172,7 @@ pub const OpCode = enum(u8) {
             .closure_bind, .closure_bind_ref, .define_const,
             .iter_check, .inc_local, .dec_local,
             .get_static_prop_dynamic,
+            .ensure_array_local, .ensure_array_var,
             => 3,
             .call, .call_spread, .new_obj, .method_call, .method_call_spread, .static_call_dyn_method => 4,
             .get_static_prop, .set_static_prop, .get_static, .set_static,
@@ -197,6 +198,7 @@ pub const OpCode = enum(u8) {
             .constant, .op_null, .op_true, .op_false, .dup, .get_var, .get_local,
             .get_global, .get_static,
             .get_static_prop, .array_new, .clone_obj, .isset_prop, .isset_index,
+            .ensure_array_local, .ensure_array_var,
             => 1,
             // pop object, push property value (net 0: pop obj, push val)
             .get_prop,

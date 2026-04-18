@@ -759,11 +759,12 @@ pub fn compileArrayAccess(self: *Compiler, node: Ast.Node) Error!void {
 pub fn compileVivifyChain(self: *Compiler, node_idx: u32) Error!void {
     const node = self.ast.nodes[node_idx];
     if (node.tag == .array_access) {
-        try compileVivifyChain(self,node.data.lhs);
+        try compileVivifyChain(self, node.data.lhs);
         try self.compileNode(node.data.rhs);
         try self.emitOp(.array_get_vivify);
     } else if (node.tag == .variable or node.tag == .identifier) {
-        try emitEnsureArray(self, self.ast.tokenSlice(node.main_token));
+        const name = self.ast.tokenSlice(node.main_token);
+        try emitEnsureArray(self, name);
     } else {
         try self.compileNode(node_idx);
     }
