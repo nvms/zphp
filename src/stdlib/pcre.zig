@@ -243,8 +243,8 @@ fn addNamedGroupsInterleaved(ctx: *NativeContext, arr: *PhpArray, code: *pcre2.C
                 const s = try ctx.createString(subject[start..end]);
                 break :blk if (offset_capture) try makeOffsetPair(ctx, s, @intCast(start)) else Value{ .string = s };
             };
-            // insert the named key right after the numeric index
-            const insert_pos = ng.group_num + 1;
+            // PHP places the named key directly before its numeric counterpart
+            const insert_pos = ng.group_num;
             const named_entry = PhpArray.Entry{ .key = .{ .string = try ctx.createString(ng.name) }, .value = val };
             if (insert_pos < arr.entries.items.len) {
                 try arr.entries.insert(ctx.allocator, insert_pos, named_entry);
@@ -396,10 +396,10 @@ fn preg_match_all(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
             try out.append(ctx.allocator, .{ .array = arr });
         }
 
-        // insert named group arrays right after their numeric counterpart
+        // PHP places the named key directly before its numeric counterpart
         for (named_groups[0..named_len]) |ng| {
             if (ng.group_num < group_arrays.?.items.len) {
-                const insert_pos = ng.group_num + 1;
+                const insert_pos = ng.group_num;
                 const named_entry = PhpArray.Entry{
                     .key = .{ .string = try ctx.createString(ng.name) },
                     .value = .{ .array = group_arrays.?.items[ng.group_num] },
@@ -452,23 +452,43 @@ fn addNamedGroupsToMatch(ctx: *NativeContext, arr: *PhpArray, code: *pcre2.Code,
     var name_table: [*]const u8 = undefined;
     _ = pcre2.pcre2_pattern_info_8(code, pcre2.INFO_NAMETABLE, @ptrCast(&name_table));
 
+    const NamedGroup = struct { group_num: usize, name: []const u8 };
+    var groups: [64]NamedGroup = undefined;
+    var group_len: usize = 0;
     for (0..name_count) |i| {
         const entry = name_table + i * name_entry_size;
         const group_num = (@as(usize, entry[0]) << 8) | @as(usize, entry[1]);
         const name_end = std.mem.indexOfScalar(u8, entry[2..name_entry_size], 0) orelse (name_entry_size - 2);
-        const name = entry[2 .. 2 + name_end];
-        if (group_num < count) {
-            const start = ovector[group_num * 2];
-            const end = ovector[group_num * 2 + 1];
-            const val: Value = if (start == pcre2.UNSET or end == pcre2.UNSET) blk: {
-                break :blk if (offset_capture) try makeOffsetPair(ctx, "", -1) else Value{ .string = "" };
-            } else blk: {
-                const s = try ctx.createString(subject[start..end]);
-                break :blk if (offset_capture) try makeOffsetPair(ctx, s, @intCast(start)) else Value{ .string = s };
-            };
-            try arr.set(ctx.allocator, .{ .string = try ctx.createString(name) }, val);
+        if (group_len < groups.len) {
+            groups[group_len] = .{ .group_num = group_num, .name = entry[2 .. 2 + name_end] };
+            group_len += 1;
         }
     }
+    std.mem.sort(NamedGroup, groups[0..group_len], {}, struct {
+        fn f(_: void, a: NamedGroup, b: NamedGroup) bool {
+            return a.group_num > b.group_num;
+        }
+    }.f);
+
+    for (groups[0..group_len]) |ng| {
+        if (ng.group_num >= count) continue;
+        const start = ovector[ng.group_num * 2];
+        const end = ovector[ng.group_num * 2 + 1];
+        const val: Value = if (start == pcre2.UNSET or end == pcre2.UNSET) blk: {
+            break :blk if (offset_capture) try makeOffsetPair(ctx, "", -1) else Value{ .string = "" };
+        } else blk: {
+            const s = try ctx.createString(subject[start..end]);
+            break :blk if (offset_capture) try makeOffsetPair(ctx, s, @intCast(start)) else Value{ .string = s };
+        };
+        const insert_pos = ng.group_num;
+        const named_entry = PhpArray.Entry{ .key = .{ .string = try ctx.createString(ng.name) }, .value = val };
+        if (insert_pos < arr.entries.items.len) {
+            try arr.entries.insert(ctx.allocator, insert_pos, named_entry);
+        } else {
+            try arr.entries.append(ctx.allocator, named_entry);
+        }
+    }
+    try arr.rebuildStringIndex(ctx.allocator);
 }
 
 fn preg_replace(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
