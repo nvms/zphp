@@ -261,11 +261,24 @@ fn array_slice(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
 fn array_unique(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len == 0 or args[0] != .array) return .null;
     const src = args[0].array;
+    // default in PHP is SORT_STRING (2)
+    const flag = if (args.len >= 2) Value.toInt(args[1]) else 2;
     var arr = try ctx.createArray();
     for (src.entries.items) |entry| {
         var found = false;
         for (arr.entries.items) |existing| {
-            if (Value.equal(entry.value, existing.value)) {
+            const eq = switch (flag) {
+                1 => Value.toFloat(entry.value) == Value.toFloat(existing.value), // SORT_NUMERIC
+                2, 5, 6 => blk: { // SORT_STRING, SORT_LOCALE_STRING, SORT_NATURAL
+                    var ab: [64]u8 = undefined;
+                    var bb: [64]u8 = undefined;
+                    const as = valueAsString(entry.value, &ab);
+                    const bs = valueAsString(existing.value, &bb);
+                    break :blk std.mem.eql(u8, as, bs);
+                },
+                else => Value.equal(entry.value, existing.value), // SORT_REGULAR
+            };
+            if (eq) {
                 found = true;
                 break;
             }
@@ -273,6 +286,17 @@ fn array_unique(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
         if (!found) try arr.set(ctx.allocator, entry.key, entry.value);
     }
     return .{ .array = arr };
+}
+
+fn valueAsString(v: Value, buf: *[64]u8) []const u8 {
+    return switch (v) {
+        .string => |s| s,
+        .int => |i| std.fmt.bufPrint(buf, "{d}", .{i}) catch "",
+        .float => |f| std.fmt.bufPrint(buf, "{d}", .{f}) catch "",
+        .bool => |b| if (b) "1" else "",
+        .null => "",
+        else => "",
+    };
 }
 
 const SortFlags = struct {
