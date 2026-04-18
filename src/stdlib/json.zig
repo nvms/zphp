@@ -12,6 +12,8 @@ const JSON_UNESCAPED_SLASHES: i64 = 64;
 const JSON_PRETTY_PRINT: i64 = 128;
 const JSON_UNESCAPED_UNICODE: i64 = 256;
 const JSON_PRESERVE_ZERO_FRACTION: i64 = 1024;
+const JSON_BIGINT_AS_STRING: i64 = 2;
+const JSON_OBJECT_AS_ARRAY: i64 = 1;
 const JSON_THROW_ON_ERROR: i64 = 4194304;
 
 var last_error: i64 = 0;
@@ -317,11 +319,13 @@ fn appendIndent(buf: *std.ArrayListUnmanaged(u8), a: std.mem.Allocator, depth: u
 fn json_decode(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len == 0 or args[0] != .string) return .null;
     const s = args[0].string;
-    const assoc = if (args.len >= 2) (args[1] == .bool and args[1].bool) else false;
-    const depth: usize = if (args.len >= 3) @intCast(@max(1, Value.toInt(args[2]))) else 512;
     const flags = if (args.len >= 4) Value.toInt(args[3]) else 0;
+    var assoc = if (args.len >= 2) (args[1] == .bool and args[1].bool) else false;
+    if ((flags & JSON_OBJECT_AS_ARRAY) != 0) assoc = true;
+    if (args.len >= 2 and args[1] == .null and (flags & JSON_OBJECT_AS_ARRAY) != 0) assoc = true;
+    const depth: usize = if (args.len >= 3) @intCast(@max(1, Value.toInt(args[2]))) else 512;
     var pos: usize = 0;
-    const result = parseValue(ctx, s, &pos, assoc, depth, 0) catch |err| {
+    const result = parseValue(ctx, s, &pos, assoc, depth, 0, flags) catch |err| {
         if (err == error.OutOfMemory) return error.OutOfMemory;
         const msg = if (last_error == 1) last_error_msg else "Syntax error";
         if (last_error != 1) {
@@ -347,7 +351,7 @@ fn json_decode(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     return result;
 }
 
-fn parseValue(ctx: *NativeContext, s: []const u8, pos: *usize, assoc: bool, max_depth: usize, cur_depth: usize) RuntimeError!Value {
+fn parseValue(ctx: *NativeContext, s: []const u8, pos: *usize, assoc: bool, max_depth: usize, cur_depth: usize, flags: i64) RuntimeError!Value {
     skipWhitespace(s, pos);
     if (pos.* >= s.len) return .null;
 
@@ -356,9 +360,9 @@ fn parseValue(ctx: *NativeContext, s: []const u8, pos: *usize, assoc: bool, max_
         't' => parseTrue(s, pos),
         'f' => parseFalse(s, pos),
         'n' => parseNull(s, pos),
-        '[' => parseArray(ctx, s, pos, assoc, max_depth, cur_depth),
-        '{' => parseObject(ctx, s, pos, assoc, max_depth, cur_depth),
-        '-', '0'...'9' => parseNumber(s, pos),
+        '[' => parseArray(ctx, s, pos, assoc, max_depth, cur_depth, flags),
+        '{' => parseObject(ctx, s, pos, assoc, max_depth, cur_depth, flags),
+        '-', '0'...'9' => parseNumber(ctx, s, pos, flags),
         else => .null,
     };
 }
@@ -400,7 +404,7 @@ fn parseString(ctx: *NativeContext, s: []const u8, pos: *usize) !Value {
     return .{ .string = result };
 }
 
-fn parseNumber(s: []const u8, pos: *usize) !Value {
+fn parseNumber(ctx: *NativeContext, s: []const u8, pos: *usize, flags: i64) !Value {
     const start = pos.*;
     if (pos.* < s.len and s[pos.*] == '-') pos.* += 1;
     while (pos.* < s.len and s[pos.*] >= '0' and s[pos.*] <= '9') pos.* += 1;
@@ -422,6 +426,11 @@ fn parseNumber(s: []const u8, pos: *usize) !Value {
         return .{ .float = f };
     }
     const i = std.fmt.parseInt(i64, num_str, 10) catch {
+        if ((flags & JSON_BIGINT_AS_STRING) != 0) {
+            const dup = try ctx.allocator.dupe(u8, num_str);
+            try ctx.strings.append(ctx.allocator, dup);
+            return .{ .string = dup };
+        }
         const f = std.fmt.parseFloat(f64, num_str) catch 0.0;
         return .{ .float = f };
     };
@@ -452,7 +461,7 @@ fn parseNull(s: []const u8, pos: *usize) !Value {
     return .null;
 }
 
-fn parseArray(ctx: *NativeContext, s: []const u8, pos: *usize, assoc: bool, max_depth: usize, cur_depth: usize) !Value {
+fn parseArray(ctx: *NativeContext, s: []const u8, pos: *usize, assoc: bool, max_depth: usize, cur_depth: usize, flags: i64) !Value {
     if (cur_depth >= max_depth) {
         last_error = 1;
         last_error_msg = "Maximum stack depth exceeded";
@@ -466,7 +475,7 @@ fn parseArray(ctx: *NativeContext, s: []const u8, pos: *usize, assoc: bool, max_
         return .{ .array = arr };
     }
     while (pos.* < s.len) {
-        const val = try parseValue(ctx, s, pos, assoc, max_depth, cur_depth + 1);
+        const val = try parseValue(ctx, s, pos, assoc, max_depth, cur_depth + 1, flags);
         try arr.append(ctx.allocator, val);
         skipWhitespace(s, pos);
         if (pos.* < s.len and s[pos.*] == ',') {
@@ -478,7 +487,7 @@ fn parseArray(ctx: *NativeContext, s: []const u8, pos: *usize, assoc: bool, max_
     return .{ .array = arr };
 }
 
-fn parseObject(ctx: *NativeContext, s: []const u8, pos: *usize, assoc: bool, max_depth: usize, cur_depth: usize) !Value {
+fn parseObject(ctx: *NativeContext, s: []const u8, pos: *usize, assoc: bool, max_depth: usize, cur_depth: usize, flags: i64) !Value {
     if (cur_depth >= max_depth) {
         last_error = 1;
         last_error_msg = "Maximum stack depth exceeded";
@@ -500,7 +509,7 @@ fn parseObject(ctx: *NativeContext, s: []const u8, pos: *usize, assoc: bool, max
             const key_str = if (key_val == .string) key_val.string else "";
             skipWhitespace(s, pos);
             if (pos.* < s.len and s[pos.*] == ':') pos.* += 1;
-            const val = try parseValue(ctx, s, pos, assoc, max_depth, cur_depth + 1);
+            const val = try parseValue(ctx, s, pos, assoc, max_depth, cur_depth + 1, flags);
             try arr.set(ctx.allocator, .{ .string = key_str }, val);
             skipWhitespace(s, pos);
             if (pos.* < s.len and s[pos.*] == ',') {
@@ -526,7 +535,7 @@ fn parseObject(ctx: *NativeContext, s: []const u8, pos: *usize, assoc: bool, max
         const key_str = if (key_val == .string) key_val.string else "";
         skipWhitespace(s, pos);
         if (pos.* < s.len and s[pos.*] == ':') pos.* += 1;
-        const val = try parseValue(ctx, s, pos, assoc, max_depth, cur_depth + 1);
+        const val = try parseValue(ctx, s, pos, assoc, max_depth, cur_depth + 1, flags);
         try obj.set(ctx.allocator, key_str, val);
         skipWhitespace(s, pos);
         if (pos.* < s.len and s[pos.*] == ',') {
