@@ -1,6 +1,7 @@
 const std = @import("std");
 const Value = @import("../runtime/value.zig").Value;
 const NativeContext = @import("../runtime/vm.zig").NativeContext;
+const ClassDef = @import("../runtime/vm.zig").ClassDef;
 const RuntimeError = error{ RuntimeError, OutOfMemory };
 
 pub const entries = .{
@@ -131,14 +132,13 @@ fn varDumpValue(ctx: *NativeContext, val: Value, depth: usize) !void {
                     try varDumpValue(ctx, entry.value, depth + 1);
                 }
             } else {
+                const class_def = ctx.vm.classes.get(obj.class_name);
                 if (obj.slot_layout) |layout| {
                     if (obj.slots) |slots| {
                         for (layout.names, 0..) |name, i| {
                             if (i >= slots.len) break;
                             try appendIndent(out, a, indent + 2);
-                            try out.appendSlice(a, "[\"");
-                            try out.appendSlice(a, name);
-                            try out.appendSlice(a, "\"]=>\n");
+                            try emitDumpKey(out, a, name, obj.class_name, propVisibility(class_def, name));
                             try varDumpValue(ctx, slots[i], depth + 1);
                         }
                     }
@@ -153,9 +153,7 @@ fn varDumpValue(ctx: *NativeContext, val: Value, depth: usize) !void {
                     }
                     if (!in_slots) {
                         try appendIndent(out, a, indent + 2);
-                        try out.appendSlice(a, "[\"");
-                        try out.appendSlice(a, entry.key_ptr.*);
-                        try out.appendSlice(a, "\"]=>\n");
+                        try emitDumpKey(out, a, entry.key_ptr.*, obj.class_name, propVisibility(class_def, entry.key_ptr.*));
                         try varDumpValue(ctx, entry.value_ptr.*, depth + 1);
                     }
                 }
@@ -475,6 +473,30 @@ fn varExportValue(a: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8), val: V
 
 fn appendIndent(out: *std.ArrayListUnmanaged(u8), a: std.mem.Allocator, n: usize) !void {
     for (0..n) |_| try out.append(a, ' ');
+}
+
+fn propVisibility(class_def: ?ClassDef, name: []const u8) ClassDef.Visibility {
+    const cls = class_def orelse return .public;
+    for (cls.properties.items) |pdef| {
+        if (std.mem.eql(u8, pdef.name, name)) return pdef.visibility;
+    }
+    return .public;
+}
+
+fn emitDumpKey(out: *std.ArrayListUnmanaged(u8), a: std.mem.Allocator, name: []const u8, class_name: []const u8, vis: ClassDef.Visibility) !void {
+    try out.appendSlice(a, "[\"");
+    try out.appendSlice(a, name);
+    try out.append(a, '"');
+    switch (vis) {
+        .public => {},
+        .protected => try out.appendSlice(a, ":protected"),
+        .private => {
+            try out.appendSlice(a, ":\"");
+            try out.appendSlice(a, class_name);
+            try out.appendSlice(a, "\":private");
+        },
+    }
+    try out.appendSlice(a, "]=>\n");
 }
 
 fn formatFloat(tmp: *[64]u8, f: f64) []const u8 {
