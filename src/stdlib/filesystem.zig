@@ -86,14 +86,33 @@ fn getFileHandle(obj: *PhpObject) ?std.fs.File {
     return std.fs.File{ .handle = @intCast(v.int) };
 }
 
+fn getBufferBacking(obj: *PhpObject) ?[]const u8 {
+    const v = obj.get("__buffer");
+    if (v != .string) return null;
+    return v.string;
+}
+
+fn getBufferPos(obj: *PhpObject) usize {
+    const v = obj.get("__pos");
+    if (v != .int or v.int < 0) return 0;
+    return @intCast(v.int);
+}
+
+fn setBufferPos(obj: *PhpObject, pos: usize) void {
+    obj.properties.put(std.heap.page_allocator, "__pos", .{ .int = @intCast(pos) }) catch {};
+}
+
 pub fn cleanupHandles(objects: std.ArrayListUnmanaged(*PhpObject)) void {
     for (objects.items) |obj| {
         if (std.mem.eql(u8, obj.class_name, "FileHandle")) {
             const open = obj.get("__open");
             if (open == .bool and open.bool) {
                 if (getFileHandle(obj)) |file| {
-                    // use raw syscall to avoid panic on invalid fd
-                    _ = std.posix.system.close(file.handle);
+                    // never close stdin/stdout/stderr - they belong to the host
+                    if (file.handle > 2) {
+                        // use raw syscall to avoid panic on invalid fd
+                        _ = std.posix.system.close(file.handle);
+                    }
                 }
                 obj.properties.put(std.heap.page_allocator, "__open", .{ .bool = false }) catch {};
             }
@@ -163,7 +182,13 @@ fn native_file_get_contents(ctx: *NativeContext, args: []const Value) RuntimeErr
         if (body_val == .string) return body_val;
         return .{ .string = "" };
     }
-    if (std.mem.eql(u8, path, "php://stdout") or std.mem.eql(u8, path, "php://output")) {
+    if (std.mem.eql(u8, path, "php://stdin")) {
+        const stdin = std.fs.File{ .handle = 0 };
+        const data = stdin.readToEndAlloc(ctx.allocator, 1024 * 1024 * 64) catch return Value{ .bool = false };
+        try ctx.strings.append(ctx.allocator, data);
+        return .{ .string = data };
+    }
+    if (std.mem.eql(u8, path, "php://stdout") or std.mem.eql(u8, path, "php://output") or std.mem.eql(u8, path, "php://stderr")) {
         return .{ .string = "" };
     }
     if (path.len > 7 and (std.mem.startsWith(u8, path, "http://") or std.mem.startsWith(u8, path, "https://"))) {
@@ -184,6 +209,20 @@ fn native_file_put_contents(ctx: *NativeContext, args: []const Value) RuntimeErr
         try ctx.strings.append(ctx.allocator, s);
         break :blk s;
     };
+    if (std.mem.eql(u8, path, "php://stdout") or std.mem.eql(u8, path, "php://output")) {
+        try ctx.vm.output.appendSlice(ctx.allocator, data);
+        return .{ .int = @intCast(data.len) };
+    }
+    if (std.mem.eql(u8, path, "php://stderr")) {
+        if (ctx.vm.output.items.len > 0) {
+            const stdout = std.fs.File{ .handle = 1 };
+            _ = stdout.write(ctx.vm.output.items) catch {};
+            ctx.vm.output.clearRetainingCapacity();
+        }
+        const stderr = std.fs.File{ .handle = 2 };
+        const n = stderr.write(data) catch return Value{ .bool = false };
+        return .{ .int = @intCast(n) };
+    }
     const flags: i64 = if (args.len >= 3) Value.toInt(args[2]) else 0;
     const append = (flags & 8) != 0; // FILE_APPEND = 8
     if (append) {
@@ -512,6 +551,18 @@ fn native_fopen(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
         try ctx.vm.objects.append(ctx.allocator, obj);
         return .{ .object = obj };
     }
+    if (std.mem.eql(u8, path, "php://input")) {
+        const body_val = ctx.vm.request_vars.get("__raw_body");
+        const body: []const u8 = if (body_val != null and body_val.? == .string) body_val.?.string else "";
+        const obj = try ctx.allocator.create(PhpObject);
+        obj.* = .{ .class_name = "FileHandle" };
+        try obj.set(ctx.allocator, "__buffer", .{ .string = body });
+        try obj.set(ctx.allocator, "__pos", .{ .int = 0 });
+        try obj.set(ctx.allocator, "__open", .{ .bool = true });
+        try obj.set(ctx.allocator, "__mode", .{ .string = "r" });
+        try ctx.vm.objects.append(ctx.allocator, obj);
+        return .{ .object = obj };
+    }
 
     const file = if (std.mem.eql(u8, path, "php://temp") or std.mem.eql(u8, path, "php://memory")) blk: {
         const tmp = std.fmt.allocPrint(ctx.allocator, "/tmp/zphp_{d}", .{@as(u64, @truncate(@as(u128, @bitCast(std.time.nanoTimestamp()))))}) catch return Value{ .bool = false };
@@ -556,16 +607,29 @@ fn native_fclose(_: *NativeContext, args: []const Value) RuntimeError!Value {
     if (!std.mem.eql(u8, obj.class_name, "FileHandle")) return .{ .bool = false };
     const open = obj.get("__open");
     if (open != .bool or !open.bool) return .{ .bool = false };
-    if (getFileHandle(obj)) |file| file.close();
+    if (getFileHandle(obj)) |file| {
+        // never close stdin/stdout/stderr - they're shared with the host process
+        if (file.handle > 2) file.close();
+    }
     obj.properties.put(std.heap.page_allocator, "__open", .{ .bool = false }) catch {};
     return .{ .bool = true };
 }
 
 fn native_fread(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len < 2 or args[0] != .object or args[1] != .int) return .{ .bool = false };
-    const file = getFileHandle(args[0].object) orelse return Value{ .bool = false };
+    const obj = args[0].object;
     const length: usize = @intCast(@max(args[1].int, 0));
     if (length == 0) return .{ .string = "" };
+    if (getBufferBacking(obj)) |buffer| {
+        const pos = getBufferPos(obj);
+        if (pos >= buffer.len) return .{ .string = "" };
+        const end = @min(pos + length, buffer.len);
+        const slice = try ctx.allocator.dupe(u8, buffer[pos..end]);
+        try ctx.strings.append(ctx.allocator, slice);
+        setBufferPos(obj, end);
+        return .{ .string = slice };
+    }
+    const file = getFileHandle(obj) orelse return Value{ .bool = false };
 
     const buf = try ctx.allocator.alloc(u8, length);
     const n = file.read(buf) catch {
@@ -588,18 +652,48 @@ fn native_fread(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     return .{ .string = buf };
 }
 
-fn native_fwrite(_: *NativeContext, args: []const Value) RuntimeError!Value {
+fn native_fwrite(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len < 2 or args[0] != .object or args[1] != .string) return .{ .bool = false };
-    const file = getFileHandle(args[0].object) orelse return Value{ .bool = false };
+    const obj = args[0].object;
     const data = args[1].string;
+    const file = getFileHandle(obj) orelse return Value{ .bool = false };
+    // route php://stdout and php://output through the VM output buffer so the order
+    // matches echo. for php://stderr, flush the buffer first so anything echo'd before
+    // this call lands before our stderr write
+    if (file.handle == 1) {
+        try ctx.vm.output.appendSlice(ctx.allocator, data);
+        return .{ .int = @intCast(data.len) };
+    }
+    if (file.handle == 2) {
+        if (ctx.vm.output.items.len > 0) {
+            const stdout = std.fs.File{ .handle = 1 };
+            _ = stdout.write(ctx.vm.output.items) catch {};
+            ctx.vm.output.clearRetainingCapacity();
+        }
+    }
     const written = file.write(data) catch return Value{ .bool = false };
     return .{ .int = @intCast(written) };
 }
 
 fn native_fgets(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len == 0 or args[0] != .object) return .{ .bool = false };
-    const file = getFileHandle(args[0].object) orelse return Value{ .bool = false };
+    const obj = args[0].object;
     const max_len: usize = if (args.len >= 2 and args[1] == .int) @intCast(@max(args[1].int, 1)) else 1024;
+    if (getBufferBacking(obj)) |buffer| {
+        const pos = getBufferPos(obj);
+        if (pos >= buffer.len) return .{ .bool = false };
+        var end = pos;
+        while (end < buffer.len and end - pos < max_len) {
+            const c = buffer[end];
+            end += 1;
+            if (c == '\n') break;
+        }
+        const slice = try ctx.allocator.dupe(u8, buffer[pos..end]);
+        try ctx.strings.append(ctx.allocator, slice);
+        setBufferPos(obj, end);
+        return .{ .string = slice };
+    }
+    const file = getFileHandle(obj) orelse return Value{ .bool = false };
 
     var buf = std.ArrayListUnmanaged(u8){};
     var byte: [1]u8 = undefined;
@@ -628,7 +722,11 @@ fn native_fgetc(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
 
 fn native_feof(_: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len == 0 or args[0] != .object) return .{ .bool = true };
-    const file = getFileHandle(args[0].object) orelse return Value{ .bool = true };
+    const obj = args[0].object;
+    if (getBufferBacking(obj)) |buffer| {
+        return .{ .bool = getBufferPos(obj) >= buffer.len };
+    }
+    const file = getFileHandle(obj) orelse return Value{ .bool = true };
     // peek one byte to check EOF
     var byte: [1]u8 = undefined;
     const n = file.read(&byte) catch return Value{ .bool = true };
@@ -640,7 +738,7 @@ fn native_feof(_: *NativeContext, args: []const Value) RuntimeError!Value {
 
 fn native_fseek(_: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len < 2 or args[0] != .object or args[1] != .int) return .{ .int = -1 };
-    const file = getFileHandle(args[0].object) orelse return Value{ .int = -1 };
+    const obj = args[0].object;
     const offset = args[1].int;
     const whence: u2 = if (args.len >= 3 and args[2] == .int) blk: {
         break :blk switch (args[2].int) {
@@ -649,6 +747,18 @@ fn native_fseek(_: *NativeContext, args: []const Value) RuntimeError!Value {
             else => 0, // SEEK_SET
         };
     } else 0;
+    if (getBufferBacking(obj)) |buffer| {
+        const new_pos: i64 = switch (whence) {
+            0 => offset,
+            1 => @as(i64, @intCast(getBufferPos(obj))) + offset,
+            2 => @as(i64, @intCast(buffer.len)) + offset,
+            else => return .{ .int = -1 },
+        };
+        if (new_pos < 0) return .{ .int = -1 };
+        setBufferPos(obj, @intCast(new_pos));
+        return .{ .int = 0 };
+    }
+    const file = getFileHandle(obj) orelse return Value{ .int = -1 };
     switch (whence) {
         0 => file.seekTo(@intCast(offset)) catch return Value{ .int = -1 },
         1 => file.seekBy(offset) catch return Value{ .int = -1 },
@@ -660,14 +770,23 @@ fn native_fseek(_: *NativeContext, args: []const Value) RuntimeError!Value {
 
 fn native_ftell(_: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len == 0 or args[0] != .object) return .{ .bool = false };
-    const file = getFileHandle(args[0].object) orelse return Value{ .bool = false };
+    const obj = args[0].object;
+    if (getBufferBacking(obj) != null) {
+        return .{ .int = @intCast(getBufferPos(obj)) };
+    }
+    const file = getFileHandle(obj) orelse return Value{ .bool = false };
     const pos = file.getPos() catch return Value{ .bool = false };
     return .{ .int = @intCast(pos) };
 }
 
 fn native_rewind(_: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len == 0 or args[0] != .object) return .{ .bool = false };
-    const file = getFileHandle(args[0].object) orelse return Value{ .bool = false };
+    const obj = args[0].object;
+    if (getBufferBacking(obj) != null) {
+        setBufferPos(obj, 0);
+        return .{ .bool = true };
+    }
+    const file = getFileHandle(obj) orelse return Value{ .bool = false };
     file.seekTo(0) catch return Value{ .bool = false };
     return .{ .bool = true };
 }
