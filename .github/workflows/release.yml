@@ -81,7 +81,7 @@ jobs:
       - name: build (musl)
         if: matrix.alpine
         shell: alpine.sh {0}
-        run: zig build -Doptimize=ReleaseFast
+        run: zig build -Doptimize=ReleaseFast -Dcpu=baseline
 
       - name: smoke test (musl)
         if: matrix.alpine
