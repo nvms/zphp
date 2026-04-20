@@ -6,6 +6,7 @@ const vm_mod = @import("../runtime/vm.zig");
 const VM = vm_mod.VM;
 const NativeContext = vm_mod.NativeContext;
 const ClassDef = vm_mod.ClassDef;
+const phar = @import("phar.zig");
 
 const Allocator = std.mem.Allocator;
 const RuntimeError = error{ RuntimeError, OutOfMemory };
@@ -148,6 +149,66 @@ fn base64DecodeBytes(a: Allocator, s: []const u8) !?[]u8 {
     return out;
 }
 
+const PharResolved = struct {
+    archive_path: []const u8, // slice into input - not owned
+    internal_path: []const u8, // slice into input - not owned
+};
+
+// resolves "phar:///abs/path/to/file.phar/internal/dir/file.txt" by walking
+// path components from longest to shortest until one names a real file on disk.
+// PHP allows phars without a .phar extension, so we can't shortcut on suffix
+fn resolvePharPath(path: []const u8) ?PharResolved {
+    if (!std.mem.startsWith(u8, path, "phar://")) return null;
+    const tail = path[7..];
+    var split: usize = tail.len;
+    while (split > 0) {
+        // find the next slash from the right
+        while (split > 0 and tail[split - 1] != '/') split -= 1;
+        if (split == 0) break;
+        const candidate = tail[0 .. split - 1];
+        const stat = std.fs.cwd().statFile(candidate) catch {
+            split -= 1;
+            continue;
+        };
+        if (stat.kind == .file) {
+            return .{ .archive_path = candidate, .internal_path = tail[split..] };
+        }
+        split -= 1;
+    }
+    // try the whole tail as an archive (no internal path)
+    if (std.fs.cwd().statFile(tail)) |st| {
+        if (st.kind == .file) return .{ .archive_path = tail, .internal_path = "" };
+    } else |_| {}
+    return null;
+}
+
+// loads and parses a phar from disk. caller owns returned bytes and must
+// also call phar.deinit on the returned Phar with the same allocator
+const PharLoaded = struct {
+    bytes: []u8,
+    parsed: phar.Phar,
+};
+
+fn loadPhar(a: Allocator, archive_path: []const u8) !PharLoaded {
+    const bytes = try std.fs.cwd().readFileAlloc(a, archive_path, 256 * 1024 * 1024);
+    errdefer a.free(bytes);
+    const parsed = try phar.parse(a, bytes);
+    return .{ .bytes = bytes, .parsed = parsed };
+}
+
+fn freePhar(a: Allocator, loaded: *PharLoaded) void {
+    loaded.parsed.deinit(a);
+    a.free(loaded.bytes);
+}
+
+// returns the raw decoded contents of the file at internal_path, or null if missing
+fn readPharEntry(a: Allocator, archive_path: []const u8, internal_path: []const u8) !?[]u8 {
+    var loaded = loadPhar(a, archive_path) catch return null;
+    defer freePhar(a, &loaded);
+    const entry = loaded.parsed.lookup(internal_path) orelse return null;
+    return try phar.extract(a, &loaded.parsed, entry);
+}
+
 // parses "data://[mediatype][;base64],<data>" into the decoded byte payload.
 // returns null on malformed input (no comma, bad base64)
 fn parseDataUri(a: Allocator, path: []const u8) !?[]u8 {
@@ -257,6 +318,12 @@ fn native_file_get_contents(ctx: *NativeContext, args: []const Value) RuntimeErr
         try ctx.strings.append(ctx.allocator, payload);
         return .{ .string = payload };
     }
+    if (std.mem.startsWith(u8, path, "phar://")) {
+        const r = resolvePharPath(path) orelse return .{ .bool = false };
+        const payload = (readPharEntry(ctx.allocator, r.archive_path, r.internal_path) catch return Value{ .bool = false }) orelse return Value{ .bool = false };
+        try ctx.strings.append(ctx.allocator, payload);
+        return .{ .string = payload };
+    }
     if (path.len > 7 and (std.mem.startsWith(u8, path, "http://") or std.mem.startsWith(u8, path, "https://"))) {
         return fetchUrl(ctx, path);
     }
@@ -305,21 +372,46 @@ fn native_file_put_contents(ctx: *NativeContext, args: []const Value) RuntimeErr
     return .{ .int = @intCast(data.len) };
 }
 
-fn native_file_exists(_: *NativeContext, args: []const Value) RuntimeError!Value {
+fn native_file_exists(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len == 0 or args[0] != .string) return .{ .bool = false };
-    std.fs.cwd().access(args[0].string, .{}) catch return Value{ .bool = false };
+    const path = args[0].string;
+    if (std.mem.startsWith(u8, path, "phar://")) {
+        const r = resolvePharPath(path) orelse return .{ .bool = false };
+        if (r.internal_path.len == 0) return .{ .bool = true }; // archive itself
+        var loaded = loadPhar(ctx.allocator, r.archive_path) catch return Value{ .bool = false };
+        defer freePhar(ctx.allocator, &loaded);
+        if (loaded.parsed.lookup(r.internal_path) != null) return .{ .bool = true };
+        return .{ .bool = loaded.parsed.isDir(r.internal_path) };
+    }
+    std.fs.cwd().access(path, .{}) catch return Value{ .bool = false };
     return .{ .bool = true };
 }
 
-fn native_is_file(_: *NativeContext, args: []const Value) RuntimeError!Value {
+fn native_is_file(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len == 0 or args[0] != .string) return .{ .bool = false };
-    const stat = std.fs.cwd().statFile(args[0].string) catch return Value{ .bool = false };
+    const path = args[0].string;
+    if (std.mem.startsWith(u8, path, "phar://")) {
+        const r = resolvePharPath(path) orelse return .{ .bool = false };
+        if (r.internal_path.len == 0) return .{ .bool = true };
+        var loaded = loadPhar(ctx.allocator, r.archive_path) catch return Value{ .bool = false };
+        defer freePhar(ctx.allocator, &loaded);
+        return .{ .bool = loaded.parsed.lookup(r.internal_path) != null };
+    }
+    const stat = std.fs.cwd().statFile(path) catch return Value{ .bool = false };
     return .{ .bool = stat.kind == .file };
 }
 
-fn native_is_dir(_: *NativeContext, args: []const Value) RuntimeError!Value {
+fn native_is_dir(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len == 0 or args[0] != .string) return .{ .bool = false };
-    var dir = std.fs.cwd().openDir(args[0].string, .{}) catch return Value{ .bool = false };
+    const path = args[0].string;
+    if (std.mem.startsWith(u8, path, "phar://")) {
+        const r = resolvePharPath(path) orelse return .{ .bool = false };
+        if (r.internal_path.len == 0) return .{ .bool = false }; // the archive is a file, not a dir
+        var loaded = loadPhar(ctx.allocator, r.archive_path) catch return Value{ .bool = false };
+        defer freePhar(ctx.allocator, &loaded);
+        return .{ .bool = loaded.parsed.isDir(r.internal_path) };
+    }
+    var dir = std.fs.cwd().openDir(path, .{}) catch return Value{ .bool = false };
     dir.close();
     return .{ .bool = true };
 }
@@ -641,6 +733,19 @@ fn native_fopen(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
         try ctx.vm.objects.append(ctx.allocator, obj);
         return .{ .object = obj };
     }
+    if (std.mem.startsWith(u8, path, "phar://")) {
+        const r = resolvePharPath(path) orelse return .{ .bool = false };
+        const payload = (readPharEntry(ctx.allocator, r.archive_path, r.internal_path) catch return Value{ .bool = false }) orelse return Value{ .bool = false };
+        try ctx.strings.append(ctx.allocator, payload);
+        const obj = try ctx.allocator.create(PhpObject);
+        obj.* = .{ .class_name = "FileHandle" };
+        try obj.set(ctx.allocator, "__buffer", .{ .string = payload });
+        try obj.set(ctx.allocator, "__pos", .{ .int = 0 });
+        try obj.set(ctx.allocator, "__open", .{ .bool = true });
+        try obj.set(ctx.allocator, "__mode", .{ .string = "r" });
+        try ctx.vm.objects.append(ctx.allocator, obj);
+        return .{ .object = obj };
+    }
 
     const file = if (std.mem.eql(u8, path, "php://temp") or std.mem.eql(u8, path, "php://memory")) blk: {
         const tmp = std.fmt.allocPrint(ctx.allocator, "/tmp/zphp_{d}", .{@as(u64, @truncate(@as(u128, @bitCast(std.time.nanoTimestamp()))))}) catch return Value{ .bool = false };
@@ -911,7 +1016,7 @@ fn stream_get_meta_data(ctx: *NativeContext, args: []const Value) RuntimeError!V
 
 fn stream_get_wrappers(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
     const result = try ctx.createArray();
-    const wrappers = [_][]const u8{ "https", "php", "file", "data", "http" };
+    const wrappers = [_][]const u8{ "https", "php", "file", "data", "http", "phar" };
     for (wrappers) |w| try result.append(ctx.allocator, .{ .string = w });
     return .{ .array = result };
 }
