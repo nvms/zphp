@@ -1,6 +1,6 @@
 .{
     .name = .zphp,
-    .version = "0.5.4",
+    .version = "0.5.5",
     .fingerprint = 0x8c166727fa24d451,
     .minimum_zig_version = "0.15.0",
     .paths = .{
