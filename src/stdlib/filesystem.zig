@@ -52,6 +52,7 @@ pub const entries = .{
     .{ "fgetcsv", native_fgetcsv },
     .{ "fputcsv", native_fputcsv },
     .{ "stream_get_meta_data", stream_get_meta_data },
+    .{ "stream_get_wrappers", stream_get_wrappers },
     .{ "fstat", native_fstat },
     .{ "stream_get_contents", stream_get_contents },
     .{ "touch", native_touch },
@@ -708,6 +709,13 @@ fn stream_get_meta_data(ctx: *NativeContext, args: []const Value) RuntimeError!V
     try result.set(ctx.allocator, .{ .string = "unread_bytes" }, .{ .int = 0 });
     try result.set(ctx.allocator, .{ .string = "seekable" }, .{ .bool = true });
     try result.set(ctx.allocator, .{ .string = "uri" }, .{ .string = "" });
+    return .{ .array = result };
+}
+
+fn stream_get_wrappers(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const result = try ctx.createArray();
+    const wrappers = [_][]const u8{ "file", "http", "https" };
+    for (wrappers) |w| try result.append(ctx.allocator, .{ .string = w });
     return .{ .array = result };
 }
 
