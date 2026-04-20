@@ -102,6 +102,67 @@ fn setBufferPos(obj: *PhpObject, pos: usize) void {
     obj.properties.put(std.heap.page_allocator, "__pos", .{ .int = @intCast(pos) }) catch {};
 }
 
+fn hexNibble(c: u8) ?u8 {
+    return switch (c) {
+        '0'...'9' => c - '0',
+        'a'...'f' => c - 'a' + 10,
+        'A'...'F' => c - 'A' + 10,
+        else => null,
+    };
+}
+
+fn percentDecode(a: Allocator, s: []const u8) ![]u8 {
+    var buf = std.ArrayListUnmanaged(u8){};
+    errdefer buf.deinit(a);
+    var i: usize = 0;
+    while (i < s.len) {
+        if (s[i] == '%' and i + 2 < s.len) {
+            const hi = hexNibble(s[i + 1]);
+            const lo = hexNibble(s[i + 2]);
+            if (hi != null and lo != null) {
+                try buf.append(a, (hi.? << 4) | lo.?);
+                i += 3;
+                continue;
+            }
+        }
+        try buf.append(a, s[i]);
+        i += 1;
+    }
+    return try buf.toOwnedSlice(a);
+}
+
+fn base64DecodeBytes(a: Allocator, s: []const u8) !?[]u8 {
+    var clean = std.ArrayListUnmanaged(u8){};
+    defer clean.deinit(a);
+    for (s) |c| {
+        if (c == ' ' or c == '\n' or c == '\r' or c == '\t') continue;
+        try clean.append(a, c);
+    }
+    const decoder = std.base64.standard.Decoder;
+    const dest_len = decoder.calcSizeForSlice(clean.items) catch return null;
+    const out = try a.alloc(u8, dest_len);
+    decoder.decode(out, clean.items) catch {
+        a.free(out);
+        return null;
+    };
+    return out;
+}
+
+// parses "data://[mediatype][;base64],<data>" into the decoded byte payload.
+// returns null on malformed input (no comma, bad base64)
+fn parseDataUri(a: Allocator, path: []const u8) !?[]u8 {
+    if (!std.mem.startsWith(u8, path, "data://")) return null;
+    const rest = path[7..];
+    const comma = std.mem.indexOfScalar(u8, rest, ',') orelse return null;
+    const meta = rest[0..comma];
+    const data = rest[comma + 1 ..];
+    const is_base64 = std.mem.endsWith(u8, meta, ";base64");
+    const decoded = try percentDecode(a, data);
+    if (!is_base64) return decoded;
+    defer a.free(decoded);
+    return try base64DecodeBytes(a, decoded);
+}
+
 pub fn cleanupHandles(objects: std.ArrayListUnmanaged(*PhpObject)) void {
     for (objects.items) |obj| {
         if (std.mem.eql(u8, obj.class_name, "FileHandle")) {
@@ -190,6 +251,11 @@ fn native_file_get_contents(ctx: *NativeContext, args: []const Value) RuntimeErr
     }
     if (std.mem.eql(u8, path, "php://stdout") or std.mem.eql(u8, path, "php://output") or std.mem.eql(u8, path, "php://stderr")) {
         return .{ .string = "" };
+    }
+    if (std.mem.startsWith(u8, path, "data://")) {
+        const payload = (parseDataUri(ctx.allocator, path) catch return Value{ .bool = false }) orelse return Value{ .bool = false };
+        try ctx.strings.append(ctx.allocator, payload);
+        return .{ .string = payload };
     }
     if (path.len > 7 and (std.mem.startsWith(u8, path, "http://") or std.mem.startsWith(u8, path, "https://"))) {
         return fetchUrl(ctx, path);
@@ -563,6 +629,18 @@ fn native_fopen(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
         try ctx.vm.objects.append(ctx.allocator, obj);
         return .{ .object = obj };
     }
+    if (std.mem.startsWith(u8, path, "data://")) {
+        const payload = (parseDataUri(ctx.allocator, path) catch return Value{ .bool = false }) orelse return Value{ .bool = false };
+        try ctx.strings.append(ctx.allocator, payload);
+        const obj = try ctx.allocator.create(PhpObject);
+        obj.* = .{ .class_name = "FileHandle" };
+        try obj.set(ctx.allocator, "__buffer", .{ .string = payload });
+        try obj.set(ctx.allocator, "__pos", .{ .int = 0 });
+        try obj.set(ctx.allocator, "__open", .{ .bool = true });
+        try obj.set(ctx.allocator, "__mode", .{ .string = "r" });
+        try ctx.vm.objects.append(ctx.allocator, obj);
+        return .{ .object = obj };
+    }
 
     const file = if (std.mem.eql(u8, path, "php://temp") or std.mem.eql(u8, path, "php://memory")) blk: {
         const tmp = std.fmt.allocPrint(ctx.allocator, "/tmp/zphp_{d}", .{@as(u64, @truncate(@as(u128, @bitCast(std.time.nanoTimestamp()))))}) catch return Value{ .bool = false };
@@ -833,7 +911,7 @@ fn stream_get_meta_data(ctx: *NativeContext, args: []const Value) RuntimeError!V
 
 fn stream_get_wrappers(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
     const result = try ctx.createArray();
-    const wrappers = [_][]const u8{ "file", "http", "https" };
+    const wrappers = [_][]const u8{ "https", "php", "file", "data", "http" };
     for (wrappers) |w| try result.append(ctx.allocator, .{ .string = w });
     return .{ .array = result };
 }
