@@ -46,7 +46,10 @@ pub const CompileResult = struct {
         for (self.functions.items) |*f| {
             f.chunk.deinit(self.allocator);
             self.allocator.free(f.params);
-            if (f.defaults.len > 0) self.allocator.free(f.defaults);
+            if (f.defaults.len > 0) {
+                for (f.defaults) |d| freeDefaultValue(self.allocator, d);
+                self.allocator.free(f.defaults);
+            }
             if (f.ref_params.len > 0) self.allocator.free(f.ref_params);
             if (f.slot_names.len > 0) self.allocator.free(f.slot_names);
         }
@@ -61,6 +64,15 @@ pub const CompileResult = struct {
         if (self.slot_names.len > 0) self.allocator.free(self.slot_names);
     }
 };
+
+fn freeDefaultValue(allocator: Allocator, v: Value) void {
+    if (v == .array and !Value.isEmptyArrayDefault(v)) {
+        const arr = v.array;
+        for (arr.entries.items) |entry| freeDefaultValue(allocator, entry.value);
+        arr.deinit(allocator);
+        allocator.destroy(arr);
+    }
+}
 
 pub fn compile(ast: *const Ast, allocator: Allocator) Error!CompileResult {
     return compileWithPath(ast, allocator, "");
@@ -595,22 +607,32 @@ pub const Compiler = struct {
                 if (elems.len == 0) break :blk Value.empty_array_default;
                 const arr = self.allocator.create(PhpArray) catch break :blk Value.empty_array_default;
                 arr.* = .{};
+                var ok = true;
                 for (elems) |elem_idx| {
                     const elem = self.ast.nodes[elem_idx];
-                    if (elem.tag == .array_element) {
-                        const val = self.evalConstExpr(elem.data.lhs);
-                        if (val == .null and elem.data.lhs != 0 and self.ast.nodes[elem.data.lhs].tag != .null_literal) break :blk Value.empty_array_default;
-                        if (elem.data.rhs != 0) {
-                            const key = self.evalConstExpr(elem.data.rhs);
-                            if (key == .string) {
-                                arr.set(self.allocator, .{ .string = key.string }, val) catch break :blk Value.empty_array_default;
-                            } else {
-                                arr.set(self.allocator, .{ .int = Value.toInt(key) }, val) catch break :blk Value.empty_array_default;
-                            }
-                        } else {
-                            arr.append(self.allocator, val) catch break :blk Value.empty_array_default;
-                        }
+                    if (elem.tag != .array_element) continue;
+                    const val = self.evalConstExpr(elem.data.lhs);
+                    if (val == .null and elem.data.lhs != 0 and self.ast.nodes[elem.data.lhs].tag != .null_literal) {
+                        ok = false;
+                        break;
                     }
+                    if (elem.data.rhs != 0) {
+                        const key = self.evalConstExpr(elem.data.rhs);
+                        const set_key: PhpArray.Key = if (key == .string) .{ .string = key.string } else .{ .int = Value.toInt(key) };
+                        arr.set(self.allocator, set_key, val) catch {
+                            ok = false;
+                            break;
+                        };
+                    } else {
+                        arr.append(self.allocator, val) catch {
+                            ok = false;
+                            break;
+                        };
+                    }
+                }
+                if (!ok) {
+                    freeDefaultValue(self.allocator, .{ .array = arr });
+                    break :blk Value.empty_array_default;
                 }
                 break :blk .{ .array = arr };
             },
