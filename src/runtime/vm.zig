@@ -336,6 +336,10 @@ pub const VM = struct {
     global_vars: std.ArrayListUnmanaged(StaticEntry) = .{},
     file_loader: ?*const FileLoader = null,
     loaded_files: std.StringHashMapUnmanaged(void) = .{},
+    // protocols whose builtin stream wrapper has been disabled via stream_wrapper_unregister
+    stream_wrappers_unregistered: std.StringHashMapUnmanaged(void) = .{},
+    // protocol -> user class name registered via stream_wrapper_register
+    stream_wrappers_user: std.StringHashMapUnmanaged([]const u8) = .{},
     compile_results: std.ArrayListUnmanaged(*CompileResult) = .{},
     error_msg: ?[]const u8 = null,
     exit_requested: bool = false,
@@ -786,6 +790,8 @@ pub const VM = struct {
         self.static_vars.deinit(self.allocator);
         self.global_vars.deinit(self.allocator);
         self.loaded_files.deinit(self.allocator);
+        self.stream_wrappers_unregistered.deinit(self.allocator);
+        self.stream_wrappers_user.deinit(self.allocator);
         if (self.serve_mode) {
             for (self.compile_results.items) |r| {
                 var result = r;
@@ -838,6 +844,8 @@ pub const VM = struct {
         self.static_vars.clearRetainingCapacity();
         self.global_vars.clearRetainingCapacity();
         self.loaded_files.clearRetainingCapacity();
+        self.stream_wrappers_unregistered.clearRetainingCapacity();
+        self.stream_wrappers_user.clearRetainingCapacity();
         self.magic_get_guard.clearRetainingCapacity();
         self.magic_call_guard.clearRetainingCapacity();
         if (self.serve_mode) {

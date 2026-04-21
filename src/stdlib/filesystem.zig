@@ -54,6 +54,9 @@ pub const entries = .{
     .{ "fputcsv", native_fputcsv },
     .{ "stream_get_meta_data", stream_get_meta_data },
     .{ "stream_get_wrappers", stream_get_wrappers },
+    .{ "stream_wrapper_register", stream_wrapper_register },
+    .{ "stream_wrapper_unregister", stream_wrapper_unregister },
+    .{ "stream_wrapper_restore", stream_wrapper_restore },
     .{ "fstat", native_fstat },
     .{ "stream_get_contents", stream_get_contents },
     .{ "touch", native_touch },
@@ -299,6 +302,27 @@ fn fetchUrl(ctx: *NativeContext, url: []const u8) RuntimeError!Value {
 fn native_file_get_contents(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len == 0 or args[0] != .string) return .{ .bool = false };
     const path = args[0].string;
+    if (userWrapperFor(ctx.vm, path)) |class_name| {
+        const opened = (try dispatchUserOpen(ctx, class_name, path, "rb")) orelse return Value{ .bool = false };
+        const fh = opened.object;
+        const wrapper = fileHandleWrapper(fh) orelse return .{ .bool = false };
+        var buf = std.ArrayListUnmanaged(u8){};
+        defer buf.deinit(ctx.allocator);
+        while (true) {
+            const chunk = try ctx.callMethod(wrapper, "stream_read", &[_]Value{.{ .int = 8192 }});
+            if (chunk != .string or chunk.string.len == 0) break;
+            try buf.appendSlice(ctx.allocator, chunk.string);
+        }
+        if (ctx.vm.hasMethod(fh.class_name, "stream_close") or ctx.vm.hasMethod(wrapper.class_name, "stream_close")) {
+            _ = try ctx.callMethod(wrapper, "stream_close", &.{});
+        }
+        const owned = try buf.toOwnedSlice(ctx.allocator);
+        try ctx.strings.append(ctx.allocator, owned);
+        return .{ .string = owned };
+    }
+    if (extractScheme(path)) |s| {
+        if (isBuiltinWrapper(s) and isWrapperUnregistered(ctx.vm, s)) return .{ .bool = false };
+    }
     if (std.mem.eql(u8, path, "php://input")) {
         const body_val = ctx.vm.request_vars.get("__raw_body") orelse return .{ .string = "" };
         if (body_val == .string) return body_val;
@@ -342,6 +366,19 @@ fn native_file_put_contents(ctx: *NativeContext, args: []const Value) RuntimeErr
         try ctx.strings.append(ctx.allocator, s);
         break :blk s;
     };
+    if (userWrapperFor(ctx.vm, path)) |class_name| {
+        const opened = (try dispatchUserOpen(ctx, class_name, path, "wb")) orelse return Value{ .bool = false };
+        const wrapper = fileHandleWrapper(opened.object) orelse return .{ .bool = false };
+        const written = try ctx.callMethod(wrapper, "stream_write", &[_]Value{.{ .string = data }});
+        if (ctx.vm.hasMethod(wrapper.class_name, "stream_close")) {
+            _ = try ctx.callMethod(wrapper, "stream_close", &.{});
+        }
+        if (written != .int) return .{ .bool = false };
+        return .{ .int = written.int };
+    }
+    if (extractScheme(path)) |s| {
+        if (isBuiltinWrapper(s) and isWrapperUnregistered(ctx.vm, s)) return .{ .bool = false };
+    }
     if (std.mem.eql(u8, path, "php://stdout") or std.mem.eql(u8, path, "php://output")) {
         try ctx.vm.output.appendSlice(ctx.allocator, data);
         return .{ .int = @intCast(data.len) };
@@ -375,6 +412,13 @@ fn native_file_put_contents(ctx: *NativeContext, args: []const Value) RuntimeErr
 fn native_file_exists(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len == 0 or args[0] != .string) return .{ .bool = false };
     const path = args[0].string;
+    if (userWrapperFor(ctx.vm, path)) |class_name| {
+        const arr = try dispatchUserStat(ctx, class_name, path, 0);
+        return .{ .bool = arr != null };
+    }
+    if (extractScheme(path)) |s| {
+        if (isBuiltinWrapper(s) and isWrapperUnregistered(ctx.vm, s)) return .{ .bool = false };
+    }
     if (std.mem.startsWith(u8, path, "phar://")) {
         const r = resolvePharPath(path) orelse return .{ .bool = false };
         if (r.internal_path.len == 0) return .{ .bool = true }; // archive itself
@@ -390,6 +434,15 @@ fn native_file_exists(ctx: *NativeContext, args: []const Value) RuntimeError!Val
 fn native_is_file(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len == 0 or args[0] != .string) return .{ .bool = false };
     const path = args[0].string;
+    if (userWrapperFor(ctx.vm, path)) |class_name| {
+        const arr = (try dispatchUserStat(ctx, class_name, path, 0)) orelse return .{ .bool = false };
+        const mode_v = arr.get(.{ .string = "mode" });
+        if (mode_v != .int) return .{ .bool = false };
+        return .{ .bool = (mode_v.int & 0o170000) == 0o100000 };
+    }
+    if (extractScheme(path)) |s| {
+        if (isBuiltinWrapper(s) and isWrapperUnregistered(ctx.vm, s)) return .{ .bool = false };
+    }
     if (std.mem.startsWith(u8, path, "phar://")) {
         const r = resolvePharPath(path) orelse return .{ .bool = false };
         if (r.internal_path.len == 0) return .{ .bool = true };
@@ -404,6 +457,15 @@ fn native_is_file(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
 fn native_is_dir(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len == 0 or args[0] != .string) return .{ .bool = false };
     const path = args[0].string;
+    if (userWrapperFor(ctx.vm, path)) |class_name| {
+        const arr = (try dispatchUserStat(ctx, class_name, path, 0)) orelse return .{ .bool = false };
+        const mode_v = arr.get(.{ .string = "mode" });
+        if (mode_v != .int) return .{ .bool = false };
+        return .{ .bool = (mode_v.int & 0o170000) == 0o040000 };
+    }
+    if (extractScheme(path)) |s| {
+        if (isBuiltinWrapper(s) and isWrapperUnregistered(ctx.vm, s)) return .{ .bool = false };
+    }
     if (std.mem.startsWith(u8, path, "phar://")) {
         const r = resolvePharPath(path) orelse return .{ .bool = false };
         if (r.internal_path.len == 0) return .{ .bool = false }; // the archive is a file, not a dir
@@ -490,9 +552,22 @@ fn native_rmdir(_: *NativeContext, args: []const Value) RuntimeError!Value {
     return .{ .bool = true };
 }
 
-fn native_unlink(_: *NativeContext, args: []const Value) RuntimeError!Value {
+fn native_unlink(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len == 0 or args[0] != .string) return .{ .bool = false };
-    std.fs.cwd().deleteFile(args[0].string) catch return Value{ .bool = false };
+    const path = args[0].string;
+    if (userWrapperFor(ctx.vm, path)) |class_name| {
+        if (!ctx.vm.hasMethod(class_name, "unlink")) return .{ .bool = false };
+        const wrapper = try ctx.createObject(class_name);
+        if (ctx.vm.hasMethod(class_name, "__construct")) {
+            _ = try ctx.callMethod(wrapper, "__construct", &.{});
+        }
+        const result = try ctx.callMethod(wrapper, "unlink", &[_]Value{.{ .string = path }});
+        return .{ .bool = result.isTruthy() };
+    }
+    if (extractScheme(path)) |s| {
+        if (isBuiltinWrapper(s) and isWrapperUnregistered(ctx.vm, s)) return .{ .bool = false };
+    }
+    std.fs.cwd().deleteFile(path) catch return Value{ .bool = false };
     return .{ .bool = true };
 }
 
@@ -682,6 +757,13 @@ fn native_fopen(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     const path = args[0].string;
     const mode = args[1].string;
 
+    if (userWrapperFor(ctx.vm, path)) |class_name| {
+        return (try dispatchUserOpen(ctx, class_name, path, mode)) orelse Value{ .bool = false };
+    }
+    if (extractScheme(path)) |s| {
+        if (isBuiltinWrapper(s) and isWrapperUnregistered(ctx.vm, s)) return .{ .bool = false };
+    }
+
     if (std.mem.eql(u8, path, "php://stdout") or std.mem.eql(u8, path, "php://output")) {
         const obj = try ctx.allocator.create(PhpObject);
         obj.* = .{ .class_name = "FileHandle" };
@@ -784,12 +866,19 @@ fn openWithMode(path: []const u8, mode: []const u8) !std.fs.File {
     };
 }
 
-fn native_fclose(_: *NativeContext, args: []const Value) RuntimeError!Value {
+fn native_fclose(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len == 0 or args[0] != .object) return .{ .bool = false };
     const obj = args[0].object;
     if (!std.mem.eql(u8, obj.class_name, "FileHandle")) return .{ .bool = false };
     const open = obj.get("__open");
     if (open != .bool or !open.bool) return .{ .bool = false };
+    if (fileHandleWrapper(obj)) |wrapper| {
+        if (ctx.vm.hasMethod(wrapper.class_name, "stream_close")) {
+            _ = try ctx.callMethod(wrapper, "stream_close", &.{});
+        }
+        obj.properties.put(std.heap.page_allocator, "__open", .{ .bool = false }) catch {};
+        return .{ .bool = true };
+    }
     if (getFileHandle(obj)) |file| {
         // never close stdin/stdout/stderr - they're shared with the host process
         if (file.handle > 2) file.close();
@@ -803,6 +892,11 @@ fn native_fread(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     const obj = args[0].object;
     const length: usize = @intCast(@max(args[1].int, 0));
     if (length == 0) return .{ .string = "" };
+    if (fileHandleWrapper(obj)) |wrapper| {
+        const result = try ctx.callMethod(wrapper, "stream_read", &[_]Value{.{ .int = @intCast(length) }});
+        if (result == .string) return result;
+        return .{ .string = "" };
+    }
     if (getBufferBacking(obj)) |buffer| {
         const pos = getBufferPos(obj);
         if (pos >= buffer.len) return .{ .string = "" };
@@ -839,6 +933,11 @@ fn native_fwrite(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len < 2 or args[0] != .object or args[1] != .string) return .{ .bool = false };
     const obj = args[0].object;
     const data = args[1].string;
+    if (fileHandleWrapper(obj)) |wrapper| {
+        const result = try ctx.callMethod(wrapper, "stream_write", &[_]Value{.{ .string = data }});
+        if (result == .int) return result;
+        return .{ .int = 0 };
+    }
     const file = getFileHandle(obj) orelse return Value{ .bool = false };
     // route php://stdout and php://output through the VM output buffer so the order
     // matches echo. for php://stderr, flush the buffer first so anything echo'd before
@@ -903,9 +1002,14 @@ fn native_fgetc(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     return .{ .string = result };
 }
 
-fn native_feof(_: *NativeContext, args: []const Value) RuntimeError!Value {
+fn native_feof(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len == 0 or args[0] != .object) return .{ .bool = true };
     const obj = args[0].object;
+    if (fileHandleWrapper(obj)) |wrapper| {
+        if (!ctx.vm.hasMethod(wrapper.class_name, "stream_eof")) return .{ .bool = false };
+        const result = try ctx.callMethod(wrapper, "stream_eof", &.{});
+        return .{ .bool = result.isTruthy() };
+    }
     if (getBufferBacking(obj)) |buffer| {
         return .{ .bool = getBufferPos(obj) >= buffer.len };
     }
@@ -919,7 +1023,7 @@ fn native_feof(_: *NativeContext, args: []const Value) RuntimeError!Value {
     return .{ .bool = false };
 }
 
-fn native_fseek(_: *NativeContext, args: []const Value) RuntimeError!Value {
+fn native_fseek(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len < 2 or args[0] != .object or args[1] != .int) return .{ .int = -1 };
     const obj = args[0].object;
     const offset = args[1].int;
@@ -930,6 +1034,11 @@ fn native_fseek(_: *NativeContext, args: []const Value) RuntimeError!Value {
             else => 0, // SEEK_SET
         };
     } else 0;
+    if (fileHandleWrapper(obj)) |wrapper| {
+        if (!ctx.vm.hasMethod(wrapper.class_name, "stream_seek")) return .{ .int = -1 };
+        const result = try ctx.callMethod(wrapper, "stream_seek", &[_]Value{ .{ .int = offset }, .{ .int = whence } });
+        return .{ .int = if (result.isTruthy()) 0 else -1 };
+    }
     if (getBufferBacking(obj)) |buffer| {
         const new_pos: i64 = switch (whence) {
             0 => offset,
@@ -951,9 +1060,15 @@ fn native_fseek(_: *NativeContext, args: []const Value) RuntimeError!Value {
     return .{ .int = 0 };
 }
 
-fn native_ftell(_: *NativeContext, args: []const Value) RuntimeError!Value {
+fn native_ftell(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len == 0 or args[0] != .object) return .{ .bool = false };
     const obj = args[0].object;
+    if (fileHandleWrapper(obj)) |wrapper| {
+        if (!ctx.vm.hasMethod(wrapper.class_name, "stream_tell")) return .{ .bool = false };
+        const result = try ctx.callMethod(wrapper, "stream_tell", &.{});
+        if (result == .int) return result;
+        return .{ .bool = false };
+    }
     if (getBufferBacking(obj) != null) {
         return .{ .int = @intCast(getBufferPos(obj)) };
     }
@@ -962,9 +1077,14 @@ fn native_ftell(_: *NativeContext, args: []const Value) RuntimeError!Value {
     return .{ .int = @intCast(pos) };
 }
 
-fn native_rewind(_: *NativeContext, args: []const Value) RuntimeError!Value {
+fn native_rewind(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len == 0 or args[0] != .object) return .{ .bool = false };
     const obj = args[0].object;
+    if (fileHandleWrapper(obj)) |wrapper| {
+        if (!ctx.vm.hasMethod(wrapper.class_name, "stream_seek")) return .{ .bool = false };
+        const result = try ctx.callMethod(wrapper, "stream_seek", &[_]Value{ .{ .int = 0 }, .{ .int = 0 } });
+        return .{ .bool = result.isTruthy() };
+    }
     if (getBufferBacking(obj) != null) {
         setBufferPos(obj, 0);
         return .{ .bool = true };
@@ -1014,11 +1134,128 @@ fn stream_get_meta_data(ctx: *NativeContext, args: []const Value) RuntimeError!V
     return .{ .array = result };
 }
 
+const builtin_wrappers = [_][]const u8{ "https", "php", "file", "data", "http", "phar" };
+
+fn isBuiltinWrapper(p: []const u8) bool {
+    for (builtin_wrappers) |w| {
+        if (std.mem.eql(u8, w, p)) return true;
+    }
+    return false;
+}
+
+// extracts "phar" from "phar://something". returns null if no scheme.
+fn extractScheme(path: []const u8) ?[]const u8 {
+    const idx = std.mem.indexOf(u8, path, "://") orelse return null;
+    return path[0..idx];
+}
+
+// returns true if the protocol's builtin handling has been suppressed via
+// stream_wrapper_unregister. user-registered wrappers always dispatch first
+// regardless of this flag
+fn isWrapperUnregistered(vm: *VM, scheme: []const u8) bool {
+    return vm.stream_wrappers_unregistered.contains(scheme);
+}
+
+// returns the user wrapper class name registered for the path's scheme, or null
+fn userWrapperFor(vm: *VM, path: []const u8) ?[]const u8 {
+    const scheme = extractScheme(path) orelse return null;
+    return vm.stream_wrappers_user.get(scheme);
+}
+
+// instantiates a user wrapper class, calls __construct() if defined, then
+// stream_open(path, mode, options=0, opened_path=null). returns a FileHandle
+// PhpObject with __wrapper_obj pointing at the wrapper instance. returns null
+// if stream_open returned false or threw
+fn dispatchUserOpen(ctx: *NativeContext, class_name: []const u8, path: []const u8, mode: []const u8) RuntimeError!?Value {
+    const wrapper = try ctx.createObject(class_name);
+    if (ctx.vm.hasMethod(class_name, "__construct")) {
+        _ = try ctx.callMethod(wrapper, "__construct", &.{});
+    }
+    const open_args = [_]Value{
+        .{ .string = path },
+        .{ .string = mode },
+        .{ .int = 0 },
+        .null,
+    };
+    const ok = try ctx.callMethod(wrapper, "stream_open", &open_args);
+    if (!ok.isTruthy()) return null;
+    const fh = try ctx.allocator.create(PhpObject);
+    fh.* = .{ .class_name = "FileHandle" };
+    try fh.set(ctx.allocator, "__wrapper_obj", .{ .object = wrapper });
+    try fh.set(ctx.allocator, "__open", .{ .bool = true });
+    try fh.set(ctx.allocator, "__mode", .{ .string = mode });
+    try ctx.vm.objects.append(ctx.allocator, fh);
+    return Value{ .object = fh };
+}
+
+// returns the wrapper instance attached to a FileHandle, if any
+fn fileHandleWrapper(obj: *PhpObject) ?*PhpObject {
+    const v = obj.get("__wrapper_obj");
+    if (v != .object) return null;
+    return v.object;
+}
+
+// calls $wrapper->url_stat(path, flags) for a registered user wrapper. returns
+// the array result, or null on failure / not implemented
+fn dispatchUserStat(ctx: *NativeContext, class_name: []const u8, path: []const u8, flags: i64) RuntimeError!?*PhpArray {
+    if (!ctx.vm.hasMethod(class_name, "url_stat")) return null;
+    const wrapper = try ctx.createObject(class_name);
+    if (ctx.vm.hasMethod(class_name, "__construct")) {
+        _ = try ctx.callMethod(wrapper, "__construct", &.{});
+    }
+    const stat_args = [_]Value{ .{ .string = path }, .{ .int = flags } };
+    const result = try ctx.callMethod(wrapper, "url_stat", &stat_args);
+    if (result != .array) return null;
+    return result.array;
+}
+
 fn stream_get_wrappers(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
     const result = try ctx.createArray();
-    const wrappers = [_][]const u8{ "https", "php", "file", "data", "http", "phar" };
-    for (wrappers) |w| try result.append(ctx.allocator, .{ .string = w });
+    for (builtin_wrappers) |w| {
+        if (ctx.vm.stream_wrappers_unregistered.contains(w)) continue;
+        try result.append(ctx.allocator, .{ .string = w });
+    }
+    var it = ctx.vm.stream_wrappers_user.keyIterator();
+    while (it.next()) |k| try result.append(ctx.allocator, .{ .string = k.* });
     return .{ .array = result };
+}
+
+fn stream_wrapper_register(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len < 2 or args[0] != .string or args[1] != .string) return .{ .bool = false };
+    const protocol = args[0].string;
+    const class_name = args[1].string;
+    if (protocol.len == 0) return .{ .bool = false };
+    // already registered (builtin still active or user wrapper present)
+    const builtin_active = isBuiltinWrapper(protocol) and !ctx.vm.stream_wrappers_unregistered.contains(protocol);
+    if (builtin_active or ctx.vm.stream_wrappers_user.contains(protocol)) return .{ .bool = false };
+    if (!ctx.vm.classes.contains(class_name)) {
+        ctx.vm.tryAutoload(class_name) catch return Value{ .bool = false };
+        if (!ctx.vm.classes.contains(class_name)) return .{ .bool = false };
+    }
+    const proto_owned = try ctx.createString(protocol);
+    const class_owned = try ctx.createString(class_name);
+    try ctx.vm.stream_wrappers_user.put(ctx.allocator, proto_owned, class_owned);
+    return .{ .bool = true };
+}
+
+fn stream_wrapper_unregister(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len == 0 or args[0] != .string) return .{ .bool = false };
+    const protocol = args[0].string;
+    if (ctx.vm.stream_wrappers_user.fetchRemove(protocol) != null) return .{ .bool = true };
+    if (!isBuiltinWrapper(protocol)) return .{ .bool = false };
+    if (ctx.vm.stream_wrappers_unregistered.contains(protocol)) return .{ .bool = false };
+    const proto_owned = try ctx.createString(protocol);
+    try ctx.vm.stream_wrappers_unregistered.put(ctx.allocator, proto_owned, {});
+    return .{ .bool = true };
+}
+
+fn stream_wrapper_restore(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len == 0 or args[0] != .string) return .{ .bool = false };
+    const protocol = args[0].string;
+    if (!isBuiltinWrapper(protocol)) return .{ .bool = false };
+    if (!ctx.vm.stream_wrappers_unregistered.contains(protocol)) return .{ .bool = true };
+    _ = ctx.vm.stream_wrappers_unregistered.remove(protocol);
+    return .{ .bool = true };
 }
 
 fn stream_get_contents(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
