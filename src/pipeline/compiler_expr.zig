@@ -979,7 +979,7 @@ pub fn compileStaticPropAccess(self: *Compiler, node: Ast.Node) Error!void {
     try self.emitU16(prop_idx);
 }
 
-fn resolveNodeClassName(self: *Compiler, class_node: Ast.Node) ![]const u8 {
+pub fn resolveNodeClassName(self: *Compiler, class_node: Ast.Node) ![]const u8 {
     if (class_node.tag == .qualified_name) {
         const parts = self.ast.extraSlice(class_node.data.lhs);
         const name = try self.buildQualifiedString(parts);

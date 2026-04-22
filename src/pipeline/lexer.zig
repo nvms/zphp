@@ -10,7 +10,13 @@ pub const Lexer = struct {
     const State = enum { html, php };
 
     pub fn init(source: []const u8) Lexer {
-        return .{ .source = source, .pos = 0, .state = .html };
+        // PHP CLI strips a leading shebang line so executable scripts work
+        var pos: usize = 0;
+        if (source.len >= 2 and source[0] == '#' and source[1] == '!') {
+            while (pos < source.len and source[pos] != '\n') pos += 1;
+            if (pos < source.len) pos += 1;
+        }
+        return .{ .source = source, .pos = pos, .state = .html };
     }
 
     pub fn next(self: *Lexer) Token {

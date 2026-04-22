@@ -542,7 +542,7 @@ fn preg_replace(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     defer pcre2.pcre2_match_data_free_8(match_data);
 
     if (limit > 0) {
-        return pregReplaceLimited(ctx, code, match_data, subject, replacement, @intCast(limit));
+        return pregReplaceLimited(ctx, code, match_data, subject, replacement, @intCast(limit), args);
     }
 
     const xrep = try translateReplacement(ctx.allocator, replacement);
@@ -565,8 +565,14 @@ fn preg_replace(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
         &out_len,
     );
 
-    if (rc >= 0) return args[2];
-    if (rc != pcre2.ERROR_NOMEMORY) return args[2];
+    if (rc >= 0) {
+        ctx.setCallerVar(4, args.len, .{ .int = @intCast(rc) });
+        return args[2];
+    }
+    if (rc != pcre2.ERROR_NOMEMORY) {
+        ctx.setCallerVar(4, args.len, .{ .int = 0 });
+        return args[2];
+    }
 
     const buf = try ctx.allocator.alloc(u8, out_len);
     rc = pcre2.pcre2_substitute_8(
@@ -585,15 +591,17 @@ fn preg_replace(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
 
     if (rc < 0) {
         ctx.allocator.free(buf);
+        ctx.setCallerVar(4, args.len, .{ .int = 0 });
         return args[2];
     }
 
+    ctx.setCallerVar(4, args.len, .{ .int = @intCast(rc) });
     const result = buf[0..out_len];
     try ctx.strings.append(ctx.allocator, buf);
     return .{ .string = result };
 }
 
-fn pregReplaceLimited(ctx: *NativeContext, code: *pcre2.Code, match_data: *pcre2.MatchData, subject: []const u8, replacement: []const u8, limit: usize) RuntimeError!Value {
+fn pregReplaceLimited(ctx: *NativeContext, code: *pcre2.Code, match_data: *pcre2.MatchData, subject: []const u8, replacement: []const u8, limit: usize, args: []const Value) RuntimeError!Value {
     var parts = std.ArrayListUnmanaged(u8){};
     defer parts.deinit(ctx.allocator);
     var offset: usize = 0;
@@ -656,6 +664,7 @@ fn pregReplaceLimited(ctx: *NativeContext, code: *pcre2.Code, match_data: *pcre2
     const buf = try ctx.allocator.alloc(u8, parts.items.len);
     @memcpy(buf, parts.items);
     try ctx.strings.append(ctx.allocator, buf);
+    ctx.setCallerVar(4, args.len, .{ .int = @intCast(count) });
     return .{ .string = buf };
 }
 

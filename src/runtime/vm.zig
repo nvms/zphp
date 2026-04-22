@@ -1481,9 +1481,9 @@ pub const VM = struct {
                     }
                 },
                 .return_val => {
-                    const result = self.pop();
+                    var result = self.pop();
                     if (g_type_info.count() > 0) {
-                        if (try self.checkReturnType(result)) continue;
+                        if (try self.checkReturnType(&result)) continue;
                     }
                     const saved_entry_sp = self.currentFrame().entry_sp;
                     try self.popFrame();
@@ -7469,7 +7469,11 @@ pub const VM = struct {
         if (std.mem.eql(u8, type_name, "int") or std.mem.eql(u8, type_name, "integer")) return val == .int;
         if (std.mem.eql(u8, type_name, "float") or std.mem.eql(u8, type_name, "double")) return val == .float or val == .int;
         if (std.mem.eql(u8, type_name, "bool") or std.mem.eql(u8, type_name, "boolean")) return val == .bool or val == .int;
-        if (std.mem.eql(u8, type_name, "string")) return val == .string;
+        if (std.mem.eql(u8, type_name, "string")) {
+            if (val == .string) return true;
+            if (val == .object and self.hasMethod(val.object.class_name, "__toString")) return true;
+            return false;
+        }
         if (std.mem.eql(u8, type_name, "array")) return val == .array;
         if (std.mem.eql(u8, type_name, "callable")) return val == .string or val == .array or val == .object;
         if (std.mem.eql(u8, type_name, "null")) return val == .null;
@@ -7526,23 +7530,42 @@ pub const VM = struct {
                 if (try self.throwBuiltinException("TypeError", msg)) return true;
                 return error.RuntimeError;
             }
+            if (val == .object and self.typeStrAllowsString(type_str) and self.hasMethod(val.object.class_name, "__toString")) {
+                const s = self.objectToString(val.object) catch continue;
+                self.stack[self.sp - ac + i] = .{ .string = s };
+            }
         }
         return false;
     }
 
-    noinline fn checkReturnType(self: *VM, val: Value) RuntimeError!bool {
+    noinline fn checkReturnType(self: *VM, val: *Value) RuntimeError!bool {
         if (g_type_info.count() == 0) return false;
         const frame = &self.frames[self.frame_count - 1];
         const func_name = if (frame.func) |f| f.name else return false;
         const ti = g_type_info.get(func_name) orelse return false;
         if (ti.return_type.len == 0) return false;
-        if (!self.checkTypeMatch(val, ti.return_type)) {
-            const msg = std.fmt.allocPrint(self.allocator, "{s}(): Return value must be of type {s}, {s} returned", .{ func_name, ti.return_type, valueTypeName(val) }) catch return error.RuntimeError;
+        if (!self.checkTypeMatch(val.*, ti.return_type)) {
+            const msg = std.fmt.allocPrint(self.allocator, "{s}(): Return value must be of type {s}, {s} returned", .{ func_name, ti.return_type, valueTypeName(val.*) }) catch return error.RuntimeError;
             try self.strings.append(self.allocator, msg);
             self.error_msg = msg;
             try self.popFrame();
             if (try self.throwBuiltinException("TypeError", msg)) return true;
             return error.RuntimeError;
+        }
+        // coerce Stringable -> string when return type allows string
+        if (val.* == .object and self.typeStrAllowsString(ti.return_type) and self.hasMethod(val.object.class_name, "__toString")) {
+            const s = self.objectToString(val.object) catch return false;
+            val.* = .{ .string = s };
+        }
+        return false;
+    }
+
+    fn typeStrAllowsString(_: *VM, type_str: []const u8) bool {
+        var s = type_str;
+        if (s.len > 0 and s[0] == '?') s = s[1..];
+        var it = std.mem.splitScalar(u8, s, '|');
+        while (it.next()) |part| {
+            if (std.mem.eql(u8, part, "string") or std.mem.eql(u8, part, "Stringable") or std.mem.eql(u8, part, "mixed")) return true;
         }
         return false;
     }

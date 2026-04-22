@@ -638,8 +638,7 @@ pub const Compiler = struct {
             },
             .static_prop_access => blk: {
                 const class_node = self.ast.nodes[n.data.lhs];
-                var class_name = self.ast.tokenSlice(class_node.main_token);
-                class_name = self.resolveClassName(class_name);
+                const class_name = @import("compiler_expr.zig").resolveNodeClassName(self, class_node) catch break :blk Value.null;
                 var prop_name = self.ast.tokenSlice(n.main_token);
                 if (prop_name.len > 0 and prop_name[0] == '$') prop_name = prop_name[1..];
                 // encode as deferred sentinel: "\x00CC\x00ClassName\x00CONST_NAME"

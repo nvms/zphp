@@ -71,6 +71,11 @@ pub const entries = .{
     .{ "restore_exception_handler", native_noop_true },
     .{ "register_shutdown_function", native_noop_null },
     .{ "error_reporting", native_error_reporting },
+    .{ "error_get_last", native_noop_null },
+    .{ "error_clear_last", native_noop_null },
+    .{ "get_include_path", native_get_include_path },
+    .{ "set_include_path", native_set_include_path },
+    .{ "restore_include_path", native_noop_null },
     .{ "trigger_error", native_trigger_error },
     .{ "user_error", native_trigger_error },
     .{ "class_alias", native_class_alias },
@@ -891,6 +896,14 @@ fn native_noop_zero(_: *NativeContext, _: []const Value) RuntimeError!Value {
     return .{ .int = 0 };
 }
 
+fn native_get_include_path(_: *NativeContext, _: []const Value) RuntimeError!Value {
+    return .{ .string = "." };
+}
+
+fn native_set_include_path(_: *NativeContext, _: []const Value) RuntimeError!Value {
+    return .{ .string = "." };
+}
+
 fn native_error_reporting(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     const prev = ctx.vm.error_reporting_level;
     if (args.len > 0) {
@@ -923,6 +936,10 @@ fn native_class_alias(ctx: *NativeContext, args: []const Value) RuntimeError!Val
     if (args.len < 2 or args[0] != .string or args[1] != .string) return .{ .bool = false };
     const original = args[0].string;
     const alias = args[1].string;
+    const autoload = if (args.len >= 3) args[2].isTruthy() else true;
+    if (autoload and !ctx.vm.classes.contains(original)) {
+        ctx.vm.tryAutoload(original) catch return Value{ .bool = false };
+    }
     if (ctx.vm.classes.get(original)) |cls| {
         var alias_def = ClassDef{ .name = alias, .parent = original };
         // copy interfaces
