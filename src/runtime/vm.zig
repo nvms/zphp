@@ -7531,7 +7531,7 @@ pub const VM = struct {
                 return error.RuntimeError;
             }
             if (val == .object and self.typeStrAllowsString(type_str) and self.hasMethod(val.object.class_name, "__toString")) {
-                const s = self.objectToString(val.object) catch continue;
+                const s = try self.objectToString(val.object);
                 self.stack[self.sp - ac + i] = .{ .string = s };
             }
         }
@@ -7554,7 +7554,7 @@ pub const VM = struct {
         }
         // coerce Stringable -> string when return type allows string
         if (val.* == .object and self.typeStrAllowsString(ti.return_type) and self.hasMethod(val.object.class_name, "__toString")) {
-            const s = self.objectToString(val.object) catch return false;
+            const s = try self.objectToString(val.object);
             val.* = .{ .string = s };
         }
         return false;
@@ -7563,11 +7563,7 @@ pub const VM = struct {
     fn typeStrAllowsString(_: *VM, type_str: []const u8) bool {
         var s = type_str;
         if (s.len > 0 and s[0] == '?') s = s[1..];
-        var it = std.mem.splitScalar(u8, s, '|');
-        while (it.next()) |part| {
-            if (std.mem.eql(u8, part, "string") or std.mem.eql(u8, part, "Stringable") or std.mem.eql(u8, part, "mixed")) return true;
-        }
-        return false;
+        return std.mem.eql(u8, s, "string");
     }
 
     fn isAncestor(self: *VM, ancestor: []const u8, descendant: []const u8) bool {
