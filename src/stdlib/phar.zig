@@ -1,4 +1,5 @@
 const std = @import("std");
+const zlib = @cImport(@cInclude("zlib.h"));
 
 const Allocator = std.mem.Allocator;
 
@@ -6,6 +7,7 @@ pub const ParseError = error{
     NotAPhar,
     BadManifest,
     UnsupportedCompression,
+    CorruptCompressedData,
     EntryNotFound,
     OutOfMemory,
 };
@@ -182,6 +184,36 @@ pub fn extract(a: Allocator, phar: *const Phar, entry: Entry) ![]u8 {
     if (entry.data_offset + entry.compressed_size > phar.raw.len) return ParseError.BadManifest;
     const blob = phar.raw[entry.data_offset .. entry.data_offset + entry.compressed_size];
     const compression = entry.flags & COMPRESSION_MASK;
-    if (compression != 0) return ParseError.UnsupportedCompression;
-    return try a.dupe(u8, blob);
+    return switch (compression) {
+        0 => try a.dupe(u8, blob),
+        COMPRESSED_GZ => try inflateRaw(a, blob, entry.uncompressed_size),
+        COMPRESSED_BZ2 => ParseError.UnsupportedCompression,
+        else => ParseError.UnsupportedCompression,
+    };
+}
+
+// raw deflate (no zlib or gzip wrapper) is what phar uses for gz-compressed entries.
+// inflateInit2 with negative windowBits selects raw mode
+fn inflateRaw(a: Allocator, input: []const u8, uncompressed_size: u32) ![]u8 {
+    if (uncompressed_size == 0) return try a.alloc(u8, 0);
+
+    const out = try a.alloc(u8, uncompressed_size);
+    errdefer a.free(out);
+
+    var stream: zlib.z_stream = std.mem.zeroes(zlib.z_stream);
+    if (zlib.inflateInit2_(&stream, -15, zlib.zlibVersion(), @sizeOf(zlib.z_stream)) != zlib.Z_OK) {
+        return ParseError.CorruptCompressedData;
+    }
+    defer _ = zlib.inflateEnd(&stream);
+
+    stream.next_in = @constCast(input.ptr);
+    stream.avail_in = @intCast(input.len);
+    stream.next_out = out.ptr;
+    stream.avail_out = @intCast(out.len);
+
+    const rc = zlib.inflate(&stream, zlib.Z_FINISH);
+    if (rc != zlib.Z_STREAM_END) return ParseError.CorruptCompressedData;
+    if (stream.total_out != uncompressed_size) return ParseError.CorruptCompressedData;
+
+    return out;
 }
