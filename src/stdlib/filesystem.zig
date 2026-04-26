@@ -7,6 +7,7 @@ const VM = vm_mod.VM;
 const NativeContext = vm_mod.NativeContext;
 const ClassDef = vm_mod.ClassDef;
 const phar = @import("phar.zig");
+const zlib = @cImport(@cInclude("zlib.h"));
 
 const Allocator = std.mem.Allocator;
 const RuntimeError = error{ RuntimeError, OutOfMemory };
@@ -348,6 +349,11 @@ fn native_file_get_contents(ctx: *NativeContext, args: []const Value) RuntimeErr
         try ctx.strings.append(ctx.allocator, payload);
         return .{ .string = payload };
     }
+    if (std.mem.startsWith(u8, path, ZLIB_PREFIX)) {
+        const decoded = readZlibFile(ctx.allocator, path) catch return Value{ .bool = false };
+        try ctx.strings.append(ctx.allocator, decoded);
+        return .{ .string = decoded };
+    }
     if (path.len > 7 and (std.mem.startsWith(u8, path, "http://") or std.mem.startsWith(u8, path, "https://"))) {
         return fetchUrl(ctx, path);
     }
@@ -393,6 +399,10 @@ fn native_file_put_contents(ctx: *NativeContext, args: []const Value) RuntimeErr
         const n = stderr.write(data) catch return Value{ .bool = false };
         return .{ .int = @intCast(n) };
     }
+    if (std.mem.startsWith(u8, path, ZLIB_PREFIX)) {
+        writeZlibFile(ctx.allocator, path, data) catch return Value{ .bool = false };
+        return .{ .int = @intCast(data.len) };
+    }
     const flags: i64 = if (args.len >= 3) Value.toInt(args[2]) else 0;
     const append = (flags & 8) != 0; // FILE_APPEND = 8
     if (append) {
@@ -427,6 +437,10 @@ fn native_file_exists(ctx: *NativeContext, args: []const Value) RuntimeError!Val
         if (loaded.parsed.lookup(r.internal_path) != null) return .{ .bool = true };
         return .{ .bool = loaded.parsed.isDir(r.internal_path) };
     }
+    if (std.mem.startsWith(u8, path, ZLIB_PREFIX)) {
+        std.fs.cwd().access(path[ZLIB_PREFIX.len..], .{}) catch return Value{ .bool = false };
+        return .{ .bool = true };
+    }
     std.fs.cwd().access(path, .{}) catch return Value{ .bool = false };
     return .{ .bool = true };
 }
@@ -449,6 +463,10 @@ fn native_is_file(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
         var loaded = loadPhar(ctx.allocator, r.archive_path) catch return Value{ .bool = false };
         defer freePhar(ctx.allocator, &loaded);
         return .{ .bool = loaded.parsed.lookup(r.internal_path) != null };
+    }
+    if (std.mem.startsWith(u8, path, ZLIB_PREFIX)) {
+        const stat = std.fs.cwd().statFile(path[ZLIB_PREFIX.len..]) catch return Value{ .bool = false };
+        return .{ .bool = stat.kind == .file };
     }
     const stat = std.fs.cwd().statFile(path) catch return Value{ .bool = false };
     return .{ .bool = stat.kind == .file };
@@ -828,6 +846,29 @@ fn native_fopen(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
         try ctx.vm.objects.append(ctx.allocator, obj);
         return .{ .object = obj };
     }
+    if (std.mem.startsWith(u8, path, ZLIB_PREFIX)) {
+        const is_write = mode.len >= 1 and (mode[0] == 'w' or mode[0] == 'a' or mode[0] == 'x');
+        const obj = try ctx.allocator.create(PhpObject);
+        obj.* = .{ .class_name = "FileHandle" };
+        try obj.set(ctx.allocator, "__open", .{ .bool = true });
+        try obj.set(ctx.allocator, "__mode", .{ .string = mode });
+        try obj.set(ctx.allocator, "__zlib_path", .{ .string = try ctx.createString(path) });
+        try ctx.vm.objects.append(ctx.allocator, obj);
+        if (is_write) {
+            try obj.set(ctx.allocator, "__zlib_writing", .{ .bool = true });
+            try obj.set(ctx.allocator, "__buffer", .{ .string = "" });
+            try obj.set(ctx.allocator, "__pos", .{ .int = 0 });
+        } else {
+            const decoded = readZlibFile(ctx.allocator, path) catch {
+                obj.set(ctx.allocator, "__open", .{ .bool = false }) catch {};
+                return .{ .bool = false };
+            };
+            try ctx.strings.append(ctx.allocator, decoded);
+            try obj.set(ctx.allocator, "__buffer", .{ .string = decoded });
+            try obj.set(ctx.allocator, "__pos", .{ .int = 0 });
+        }
+        return .{ .object = obj };
+    }
 
     const file = if (std.mem.eql(u8, path, "php://temp") or std.mem.eql(u8, path, "php://memory")) blk: {
         const tmp = std.fmt.allocPrint(ctx.allocator, "/tmp/zphp_{d}", .{@as(u64, @truncate(@as(u128, @bitCast(std.time.nanoTimestamp()))))}) catch return Value{ .bool = false };
@@ -879,12 +920,29 @@ fn native_fclose(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
         obj.properties.put(std.heap.page_allocator, "__open", .{ .bool = false }) catch {};
         return .{ .bool = true };
     }
+    if (isZlibWriting(obj)) {
+        const path_v = obj.get("__zlib_path");
+        const buf_v = obj.get("__buffer");
+        if (path_v == .string and buf_v == .string) {
+            writeZlibFile(ctx.allocator, path_v.string, buf_v.string) catch {
+                obj.properties.put(std.heap.page_allocator, "__open", .{ .bool = false }) catch {};
+                return .{ .bool = false };
+            };
+        }
+        obj.properties.put(std.heap.page_allocator, "__open", .{ .bool = false }) catch {};
+        return .{ .bool = true };
+    }
     if (getFileHandle(obj)) |file| {
         // never close stdin/stdout/stderr - they're shared with the host process
         if (file.handle > 2) file.close();
     }
     obj.properties.put(std.heap.page_allocator, "__open", .{ .bool = false }) catch {};
     return .{ .bool = true };
+}
+
+fn isZlibWriting(obj: *PhpObject) bool {
+    const v = obj.get("__zlib_writing");
+    return v == .bool and v.bool;
 }
 
 fn native_fread(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
@@ -937,6 +995,16 @@ fn native_fwrite(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
         const result = try ctx.callMethod(wrapper, "stream_write", &[_]Value{.{ .string = data }});
         if (result == .int) return result;
         return .{ .int = 0 };
+    }
+    if (isZlibWriting(obj)) {
+        const cur = obj.get("__buffer");
+        const cur_str: []const u8 = if (cur == .string) cur.string else "";
+        const combined = try ctx.allocator.alloc(u8, cur_str.len + data.len);
+        @memcpy(combined[0..cur_str.len], cur_str);
+        @memcpy(combined[cur_str.len..], data);
+        try ctx.strings.append(ctx.allocator, combined);
+        try obj.set(ctx.allocator, "__buffer", .{ .string = combined });
+        return .{ .int = @intCast(data.len) };
     }
     const file = getFileHandle(obj) orelse return Value{ .bool = false };
     // route php://stdout and php://output through the VM output buffer so the order
@@ -1134,7 +1202,89 @@ fn stream_get_meta_data(ctx: *NativeContext, args: []const Value) RuntimeError!V
     return .{ .array = result };
 }
 
-const builtin_wrappers = [_][]const u8{ "https", "php", "file", "data", "http", "phar" };
+const builtin_wrappers = [_][]const u8{ "https", "php", "file", "data", "http", "phar", "compress.zlib" };
+
+const ZLIB_PREFIX = "compress.zlib://";
+
+// gzip-decode bytes. accepts both gzip-wrapped and zlib-wrapped streams via
+// auto-detection (windowBits=15+32). caller owns the returned buffer
+fn gzipDecode(a: Allocator, input: []const u8) ![]u8 {
+    if (input.len == 0) return try a.alloc(u8, 0);
+    var stream: zlib.z_stream = std.mem.zeroes(zlib.z_stream);
+    if (zlib.inflateInit2_(&stream, 15 + 32, zlib.zlibVersion(), @sizeOf(zlib.z_stream)) != zlib.Z_OK) {
+        return error.InflateInitFailed;
+    }
+    defer _ = zlib.inflateEnd(&stream);
+
+    var out = std.ArrayListUnmanaged(u8){};
+    errdefer out.deinit(a);
+
+    stream.next_in = @constCast(input.ptr);
+    stream.avail_in = @intCast(input.len);
+
+    var chunk: [16 * 1024]u8 = undefined;
+    while (true) {
+        stream.next_out = &chunk;
+        stream.avail_out = chunk.len;
+        const rc = zlib.inflate(&stream, zlib.Z_NO_FLUSH);
+        const produced = chunk.len - stream.avail_out;
+        if (produced > 0) try out.appendSlice(a, chunk[0..produced]);
+        if (rc == zlib.Z_STREAM_END) break;
+        if (rc != zlib.Z_OK) return error.CorruptCompressedData;
+        if (stream.avail_in == 0 and produced == 0) break;
+    }
+
+    return try out.toOwnedSlice(a);
+}
+
+// gzip-encode bytes (gzip format, default compression). caller owns the buffer
+fn gzipEncode(a: Allocator, input: []const u8) ![]u8 {
+    var stream: zlib.z_stream = std.mem.zeroes(zlib.z_stream);
+    if (zlib.deflateInit2_(
+        &stream,
+        zlib.Z_DEFAULT_COMPRESSION,
+        zlib.Z_DEFLATED,
+        15 + 16, // gzip wrapper
+        8,
+        zlib.Z_DEFAULT_STRATEGY,
+        zlib.zlibVersion(),
+        @sizeOf(zlib.z_stream),
+    ) != zlib.Z_OK) {
+        return error.DeflateInitFailed;
+    }
+    defer _ = zlib.deflateEnd(&stream);
+
+    const bound = zlib.deflateBound(&stream, @intCast(input.len));
+    const out = try a.alloc(u8, bound + 32);
+    errdefer a.free(out);
+
+    stream.next_in = @constCast(input.ptr);
+    stream.avail_in = @intCast(input.len);
+    stream.next_out = out.ptr;
+    stream.avail_out = @intCast(out.len);
+
+    const rc = zlib.deflate(&stream, zlib.Z_FINISH);
+    if (rc != zlib.Z_STREAM_END) return error.DeflateFailed;
+
+    return try a.realloc(out, stream.total_out);
+}
+
+// reads a `compress.zlib://` path's underlying file and inflates it. returns
+// owned bytes on success. caller registers them with vm.strings if needed
+fn readZlibFile(a: Allocator, path: []const u8) ![]u8 {
+    const inner = path[ZLIB_PREFIX.len..];
+    const raw = try std.fs.cwd().readFileAlloc(a, inner, 1024 * 1024 * 256);
+    defer a.free(raw);
+    return try gzipDecode(a, raw);
+}
+
+// gzip-encodes data and writes it to the path under `compress.zlib://`
+fn writeZlibFile(a: Allocator, path: []const u8, data: []const u8) !void {
+    const inner = path[ZLIB_PREFIX.len..];
+    const encoded = try gzipEncode(a, data);
+    defer a.free(encoded);
+    try std.fs.cwd().writeFile(.{ .sub_path = inner, .data = encoded });
+}
 
 fn isBuiltinWrapper(p: []const u8) bool {
     for (builtin_wrappers) |w| {
