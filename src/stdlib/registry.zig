@@ -49,4 +49,5 @@ test {
     _ = @import("serialize.zig");
     _ = @import("pack.zig");
     _ = @import("ini.zig");
+    _ = @import("phar_class.zig");
 }

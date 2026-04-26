@@ -51,7 +51,7 @@ pub const COMPRESSION_MASK: u32 = 0x0000F000;
 pub const COMPRESSED_GZ: u32 = 0x00001000;
 pub const COMPRESSED_BZ2: u32 = 0x00002000;
 
-const HALT_TOKEN = "__HALT_COMPILER();";
+pub const HALT_TOKEN = "__HALT_COMPILER();";
 
 fn findManifestStart(raw: []const u8) ?usize {
     const idx = std.mem.indexOf(u8, raw, HALT_TOKEN) orelse return null;
@@ -190,6 +190,137 @@ pub fn extract(a: Allocator, phar: *const Phar, entry: Entry) ![]u8 {
         COMPRESSED_BZ2 => ParseError.UnsupportedCompression,
         else => ParseError.UnsupportedCompression,
     };
+}
+
+pub const default_stub = "<?php __HALT_COMPILER(); ?>\r\n";
+
+pub const SIG_FLAG_MD5: u32 = 0x0001;
+pub const SIG_FLAG_SHA1: u32 = 0x0002;
+
+pub const GLOBAL_FLAG_SIGNATURE: u32 = 0x00010000;
+
+pub const WriteEntry = struct {
+    name: []const u8,
+    contents: []const u8,
+    timestamp: u32 = 0,
+    compress: u32 = 0, // 0, COMPRESSED_GZ, or COMPRESSED_BZ2
+};
+
+// builds a complete phar byte stream: stub, manifest, file data, signature.
+// caller owns returned bytes
+pub fn write(a: Allocator, stub: []const u8, alias: []const u8, entries: []const WriteEntry) ![]u8 {
+    var buf = std.ArrayListUnmanaged(u8){};
+    errdefer buf.deinit(a);
+
+    // stub must contain __HALT_COMPILER();. if it doesn't, fall back to default
+    const effective_stub = if (std.mem.indexOf(u8, stub, HALT_TOKEN) != null) stub else default_stub;
+    try buf.appendSlice(a, effective_stub);
+    if (std.mem.indexOf(u8, effective_stub, HALT_TOKEN) != null and !std.mem.endsWith(u8, effective_stub, "\n")) {
+        try buf.appendSlice(a, "\r\n");
+    }
+
+    // compress entry data first so we know compressed sizes for the manifest
+    var blobs = try a.alloc([]u8, entries.len);
+    defer {
+        for (blobs) |b| a.free(b);
+        a.free(blobs);
+    }
+    for (entries, 0..) |entry, i| {
+        if (entry.compress == COMPRESSED_GZ and entry.contents.len > 0) {
+            blobs[i] = try deflateRaw(a, entry.contents);
+        } else {
+            blobs[i] = try a.dupe(u8, entry.contents);
+        }
+    }
+
+    // build manifest body (everything after the 4-byte length prefix, up through per-file entries)
+    var mbody = std.ArrayListUnmanaged(u8){};
+    defer mbody.deinit(a);
+
+    try writeU32LE(a, &mbody, @intCast(entries.len));
+    try writeU16BE(a, &mbody, 0x1100); // api 1.1.0
+    try writeU32LE(a, &mbody, GLOBAL_FLAG_SIGNATURE);
+    try writeU32LE(a, &mbody, @intCast(alias.len));
+    try mbody.appendSlice(a, alias);
+    try writeU32LE(a, &mbody, 0); // global metadata length
+
+    for (entries, 0..) |entry, i| {
+        const blob = blobs[i];
+        try writeU32LE(a, &mbody, @intCast(entry.name.len));
+        try mbody.appendSlice(a, entry.name);
+        try writeU32LE(a, &mbody, @intCast(entry.contents.len));
+        try writeU32LE(a, &mbody, entry.timestamp);
+        try writeU32LE(a, &mbody, @intCast(blob.len));
+        try writeU32LE(a, &mbody, crc32sum(entry.contents));
+        try writeU32LE(a, &mbody, entry.compress);
+        try writeU32LE(a, &mbody, 0); // entry metadata length
+    }
+
+    // emit manifest length + body
+    try writeU32LE(a, &buf, @intCast(mbody.items.len));
+    try buf.appendSlice(a, mbody.items);
+
+    // emit file data
+    for (blobs) |blob| try buf.appendSlice(a, blob);
+
+    // signature: SHA1 over everything written so far (stub + manifest + data)
+    var hasher = std.crypto.hash.Sha1.init(.{});
+    hasher.update(buf.items);
+    var digest: [20]u8 = undefined;
+    hasher.final(&digest);
+    try buf.appendSlice(a, &digest);
+    try writeU32LE(a, &buf, SIG_FLAG_SHA1);
+    try buf.appendSlice(a, "GBMB");
+
+    return try buf.toOwnedSlice(a);
+}
+
+fn writeU32LE(a: Allocator, buf: *std.ArrayListUnmanaged(u8), v: u32) !void {
+    var bytes: [4]u8 = undefined;
+    std.mem.writeInt(u32, &bytes, v, .little);
+    try buf.appendSlice(a, &bytes);
+}
+
+fn writeU16BE(a: Allocator, buf: *std.ArrayListUnmanaged(u8), v: u16) !void {
+    var bytes: [2]u8 = undefined;
+    std.mem.writeInt(u16, &bytes, v, .big);
+    try buf.appendSlice(a, &bytes);
+}
+
+fn crc32sum(data: []const u8) u32 {
+    return std.hash.Crc32.hash(data);
+}
+
+fn deflateRaw(a: Allocator, input: []const u8) ![]u8 {
+    var stream: zlib.z_stream = std.mem.zeroes(zlib.z_stream);
+    if (zlib.deflateInit2_(
+        &stream,
+        zlib.Z_DEFAULT_COMPRESSION,
+        zlib.Z_DEFLATED,
+        -15,
+        8,
+        zlib.Z_DEFAULT_STRATEGY,
+        zlib.zlibVersion(),
+        @sizeOf(zlib.z_stream),
+    ) != zlib.Z_OK) {
+        return error.DeflateInitFailed;
+    }
+    defer _ = zlib.deflateEnd(&stream);
+
+    const bound = zlib.deflateBound(&stream, @intCast(input.len));
+    const out = try a.alloc(u8, bound);
+    errdefer a.free(out);
+
+    stream.next_in = @constCast(input.ptr);
+    stream.avail_in = @intCast(input.len);
+    stream.next_out = out.ptr;
+    stream.avail_out = @intCast(out.len);
+
+    const rc = zlib.deflate(&stream, zlib.Z_FINISH);
+    if (rc != zlib.Z_STREAM_END) return error.DeflateFailed;
+
+    const final = try a.realloc(out, stream.total_out);
+    return final;
 }
 
 // raw deflate (no zlib or gzip wrapper) is what phar uses for gz-compressed entries.

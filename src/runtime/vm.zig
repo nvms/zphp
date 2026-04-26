@@ -486,6 +486,7 @@ pub const VM = struct {
         try @import("../stdlib/filesystem.zig").register(vm, allocator);
         try @import("../stdlib/reflection.zig").register(vm, allocator);
         try @import("../stdlib/curl.zig").register(vm, allocator);
+        try @import("../stdlib/phar_class.zig").register(vm, allocator);
         vm.error_reporting_level = 32767;
         vm.ic = try allocator.create(InlineCache);
         vm.ic.?.* = .{};
