@@ -791,6 +791,7 @@ pub fn compileClassDecl(self: *Compiler, node: Ast.Node) Error!void {
             try compileClassMethodBody(self, class_name, member);
             method_count += 1;
         } else if (member.tag == .interface_method) {
+            try compileInterfaceMethodStub(self, class_name, member);
             method_count += 1;
         }
     }
@@ -1547,6 +1548,14 @@ pub fn compileInterfaceDecl(self: *Compiler, node: Ast.Node) Error!void {
             try self.emitOp(.pop);
         }
     }
+
+    // register stub functions so reflection can introspect interface method signatures
+    for (members) |m| {
+        const member = self.ast.nodes[m];
+        if (member.tag == .interface_method) {
+            try compileInterfaceMethodStub(self, iface_name, member);
+        }
+    }
 }
 
 pub fn compileTraitDecl(self: *Compiler, node: Ast.Node) Error!void {
@@ -2010,6 +2019,59 @@ fn compileClassMethodBody(self: *Compiler, class_name: []const u8, member: Ast.N
     sub.string_allocs.deinit(self.allocator);
     for (sub.type_hints.items) |th| try self.type_hints.append(self.allocator, th);
     sub.type_hints.deinit(self.allocator);
+}
+
+fn compileInterfaceMethodStub(self: *Compiler, owner_name: []const u8, member: Ast.Node) Error!void {
+    const method_name = self.ast.tokenSlice(member.main_token);
+    const full_name = try std.fmt.allocPrint(self.allocator, "{s}::{s}", .{ owner_name, method_name });
+    try self.string_allocs.append(self.allocator, full_name);
+
+    const param_nodes = self.ast.extraSlice(member.data.lhs);
+    const param_names = try self.allocator.alloc([]const u8, param_nodes.len);
+    const ref_flags = try self.allocator.alloc(bool, param_nodes.len);
+    for (param_nodes, 0..) |p, i| {
+        const pnode = self.ast.nodes[p];
+        param_names[i] = self.ast.tokenSlice(pnode.main_token);
+        ref_flags[i] = (pnode.data.rhs & 2) != 0;
+    }
+
+    var defaults = std.ArrayListUnmanaged(Value){};
+    defer defaults.deinit(self.allocator);
+    var required: u8 = 0;
+    var seen_default = false;
+    var is_variadic = false;
+    for (param_nodes) |p| {
+        const pnode = self.ast.nodes[p];
+        if ((pnode.data.rhs & 1) != 0) {
+            is_variadic = true;
+            try defaults.append(self.allocator, .null);
+        } else if (pnode.data.lhs != 0) {
+            seen_default = true;
+            try defaults.append(self.allocator, self.evalConstExpr(pnode.data.lhs));
+        } else {
+            if (!seen_default) required += 1;
+            try defaults.append(self.allocator, .null);
+        }
+    }
+    if (!seen_default and !is_variadic) required = @intCast(param_nodes.len);
+    const defaults_owned = try self.allocator.alloc(Value, defaults.items.len);
+    @memcpy(defaults_owned, defaults.items);
+
+    try self.functions.append(self.allocator, .{
+        .name = full_name,
+        .arity = @intCast(param_nodes.len),
+        .required_params = required,
+        .is_variadic = is_variadic,
+        .params = param_names[0..param_nodes.len],
+        .defaults = defaults_owned,
+        .ref_params = ref_flags,
+    });
+
+    const param_types = try extractParamTypes(self, param_nodes);
+    const return_type = try extractReturnType(self, member.data.lhs, @intCast(param_nodes.len));
+    if (param_types.len > 0 or return_type.len > 0) {
+        try self.type_hints.append(self.allocator, .{ .name = full_name, .param_types = param_types, .return_type = return_type });
+    }
 }
 
 fn hasRefParams(ref_flags: []const bool) bool {
