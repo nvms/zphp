@@ -8,8 +8,26 @@ const ClassDef = vm_mod.ClassDef;
 const Allocator = std.mem.Allocator;
 const RuntimeError = error{ RuntimeError, OutOfMemory };
 
+const DT_FORMAT_CONSTS = .{
+    .{ "ATOM", "Y-m-d\\TH:i:sP" },
+    .{ "COOKIE", "l, d-M-Y H:i:s T" },
+    .{ "ISO8601", "Y-m-d\\TH:i:sO" },
+    .{ "ISO8601_EXPANDED", "X-m-d\\TH:i:sP" },
+    .{ "RFC822", "D, d M y H:i:s O" },
+    .{ "RFC850", "l, d-M-y H:i:s T" },
+    .{ "RFC1036", "D, d M y H:i:s O" },
+    .{ "RFC1123", "D, d M Y H:i:s O" },
+    .{ "RFC2822", "D, d M Y H:i:s O" },
+    .{ "RFC3339", "Y-m-d\\TH:i:sP" },
+    .{ "RFC3339_EXTENDED", "Y-m-d\\TH:i:s.vP" },
+    .{ "RFC7231", "D, d M Y H:i:s \\G\\M\\T" },
+    .{ "RSS", "D, d M Y H:i:s O" },
+    .{ "W3C", "Y-m-d\\TH:i:sP" },
+};
+
 pub const entries = .{
     .{ "date", native_date },
+    .{ "date_create_from_format", native_date_create_from_format },
     .{ "mktime", native_mktime },
     .{ "strtotime", native_strtotime },
     .{ "time", native_time },
@@ -29,6 +47,13 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try iface.methods.append(a, "format");
     try iface.methods.append(a, "getTimestamp");
     try vm.interfaces.put(a, "DateTimeInterface", iface);
+
+    // shadow class so DateTimeInterface::ATOM-style constant lookups resolve
+    var dti_const = ClassDef{ .name = "DateTimeInterface", .is_abstract = true };
+    inline for (DT_FORMAT_CONSTS) |c| {
+        try dti_const.static_props.put(a, c[0], .{ .string = c[1] });
+    }
+    try vm.classes.put(a, "DateTimeInterface", dti_const);
 
     // DateTime class
     var dt_def = ClassDef{ .name = "DateTime" };
@@ -51,6 +76,9 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try dt_def.methods.put(a, "getLastErrors", .{ .name = "getLastErrors", .arity = 0, .is_static = true });
     try dt_def.methods.put(a, "getTimezone", .{ .name = "getTimezone", .arity = 0 });
     try dt_def.methods.put(a, "setTimezone", .{ .name = "setTimezone", .arity = 1 });
+    inline for (DT_FORMAT_CONSTS) |c| {
+        try dt_def.static_props.put(a, c[0], .{ .string = c[1] });
+    }
     try vm.classes.put(a, "DateTime", dt_def);
 
     try vm.native_fns.put(a, "DateTime::__construct", dtConstruct);
@@ -88,6 +116,9 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try dti_def.methods.put(a, "getTimezone", .{ .name = "getTimezone", .arity = 0 });
     try dti_def.methods.put(a, "setTimezone", .{ .name = "setTimezone", .arity = 1 });
     try dti_def.methods.put(a, "createFromFormat", .{ .name = "createFromFormat", .arity = 2, .is_static = true });
+    inline for (DT_FORMAT_CONSTS) |c| {
+        try dti_def.static_props.put(a, c[0], .{ .string = c[1] });
+    }
     try vm.classes.put(a, "DateTimeImmutable", dti_def);
 
     try vm.native_fns.put(a, "DateTimeImmutable::__construct", dtConstruct);
@@ -672,6 +703,10 @@ fn dtCreateFromTimestamp(ctx: *NativeContext, args: []const Value) RuntimeError!
 }
 
 fn dtCreateFromFormat(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    return createFromFormatImpl(ctx, args, "DateTime");
+}
+
+fn native_date_create_from_format(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     return createFromFormatImpl(ctx, args, "DateTime");
 }
 

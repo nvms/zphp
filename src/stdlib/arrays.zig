@@ -25,6 +25,8 @@ pub const entries = .{
     .{ "array_map", array_map },
     .{ "array_filter", array_filter },
     .{ "usort", native_usort },
+    .{ "natsort", natsort_impl },
+    .{ "natcasesort", natcasesort_impl },
     .{ "array_splice", array_splice },
     .{ "array_combine", array_combine },
     .{ "array_chunk", array_chunk },
@@ -400,6 +402,73 @@ pub fn sortKeysWithFlags(arr: *PhpArray, flags: i64, reverse: bool) void {
             return c.compare(sortKeyAsValue(a.key), sortKeyAsValue(b.key));
         }
     }.f);
+}
+
+fn natCompareStr(a: []const u8, b: []const u8, fold_case: bool) i64 {
+    var ai: usize = 0;
+    var bi: usize = 0;
+    while (ai < a.len and bi < b.len) {
+        const ca = a[ai];
+        const cb = b[bi];
+        if (std.ascii.isDigit(ca) and std.ascii.isDigit(cb)) {
+            var as = ai;
+            while (as < a.len and a[as] == '0') as += 1;
+            var ae = as;
+            while (ae < a.len and std.ascii.isDigit(a[ae])) ae += 1;
+            var bs = bi;
+            while (bs < b.len and b[bs] == '0') bs += 1;
+            var be = bs;
+            while (be < b.len and std.ascii.isDigit(b[be])) be += 1;
+            const al = ae - as;
+            const bl = be - bs;
+            if (al != bl) return @as(i64, @intCast(al)) - @as(i64, @intCast(bl));
+            for (a[as..ae], b[bs..be]) |x, y| {
+                if (x != y) return @as(i64, x) - @as(i64, y);
+            }
+            ai = ae;
+            bi = be;
+            continue;
+        }
+        const xa: u8 = if (fold_case) std.ascii.toLower(ca) else ca;
+        const xb: u8 = if (fold_case) std.ascii.toLower(cb) else cb;
+        if (xa != xb) return @as(i64, xa) - @as(i64, xb);
+        ai += 1;
+        bi += 1;
+    }
+    if (a.len != b.len) return @as(i64, @intCast(a.len)) - @as(i64, @intCast(b.len));
+    return 0;
+}
+
+fn natsortImpl(arr: *PhpArray, fold_case: bool) void {
+    const N = arr.entries.items.len;
+    if (N < 2) return;
+    var i: usize = 1;
+    while (i < N) : (i += 1) {
+        const tmp = arr.entries.items[i];
+        var j: usize = i;
+        while (j > 0) {
+            const av = arr.entries.items[j - 1].value;
+            const sa: []const u8 = if (av == .string) av.string else "";
+            const sb: []const u8 = if (tmp.value == .string) tmp.value.string else "";
+            if (natCompareStr(sa, sb, fold_case) <= 0) break;
+            arr.entries.items[j] = arr.entries.items[j - 1];
+            j -= 1;
+        }
+        arr.entries.items[j] = tmp;
+    }
+    arr.string_index.clearRetainingCapacity();
+}
+
+fn natsort_impl(_: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len == 0 or args[0] != .array) return .{ .bool = false };
+    natsortImpl(args[0].array, false);
+    return .{ .bool = true };
+}
+
+fn natcasesort_impl(_: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len == 0 or args[0] != .array) return .{ .bool = false };
+    natsortImpl(args[0].array, true);
+    return .{ .bool = true };
 }
 
 fn native_sort(_: *NativeContext, args: []const Value) RuntimeError!Value {

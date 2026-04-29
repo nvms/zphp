@@ -24,6 +24,8 @@ pub const entries = .{
     .{ "str_pad", str_pad },
     .{ "strcmp", native_strcmp },
     .{ "strcasecmp", native_strcasecmp },
+    .{ "strnatcmp", native_strnatcmp },
+    .{ "strnatcasecmp", native_strnatcasecmp },
     .{ "strncmp", native_strncmp },
     .{ "strncasecmp", native_strncasecmp },
     .{ "ord", native_ord },
@@ -414,6 +416,57 @@ fn native_strcasecmp(_: *NativeContext, args: []const Value) RuntimeError!Value 
     }
     if (a.len != b.len) return .{ .int = @as(i64, @intCast(a.len)) - @as(i64, @intCast(b.len)) };
     return .{ .int = 0 };
+}
+
+fn natCompare(a: []const u8, b: []const u8, fold_case: bool) i64 {
+    var ai: usize = 0;
+    var bi: usize = 0;
+    while (ai < a.len and bi < b.len) {
+        const ca = a[ai];
+        const cb = b[bi];
+        if (std.ascii.isDigit(ca) and std.ascii.isDigit(cb)) {
+            // skip leading zeros
+            var as = ai;
+            while (as < a.len and a[as] == '0') as += 1;
+            var ae = as;
+            while (ae < a.len and std.ascii.isDigit(a[ae])) ae += 1;
+            var bs = bi;
+            while (bs < b.len and b[bs] == '0') bs += 1;
+            var be = bs;
+            while (be < b.len and std.ascii.isDigit(b[be])) be += 1;
+            const al = ae - as;
+            const bl = be - bs;
+            if (al != bl) return @as(i64, @intCast(al)) - @as(i64, @intCast(bl));
+            for (a[as..ae], b[bs..be]) |x, y| {
+                if (x != y) return @as(i64, x) - @as(i64, y);
+            }
+            // skip past digits
+            ai = ae;
+            bi = be;
+            continue;
+        }
+        const xa: u8 = if (fold_case) std.ascii.toLower(ca) else ca;
+        const xb: u8 = if (fold_case) std.ascii.toLower(cb) else cb;
+        if (xa != xb) return @as(i64, xa) - @as(i64, xb);
+        ai += 1;
+        bi += 1;
+    }
+    if (a.len != b.len) return @as(i64, @intCast(a.len)) - @as(i64, @intCast(b.len));
+    return 0;
+}
+
+fn native_strnatcmp(_: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len < 2) return .{ .int = 0 };
+    const a = if (args[0] == .string) args[0].string else "";
+    const b = if (args[1] == .string) args[1].string else "";
+    return .{ .int = natCompare(a, b, false) };
+}
+
+fn native_strnatcasecmp(_: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len < 2) return .{ .int = 0 };
+    const a = if (args[0] == .string) args[0].string else "";
+    const b = if (args[1] == .string) args[1].string else "";
+    return .{ .int = natCompare(a, b, true) };
 }
 
 fn native_strncasecmp(_: *NativeContext, args: []const Value) RuntimeError!Value {
