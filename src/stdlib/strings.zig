@@ -48,6 +48,8 @@ pub const entries = .{
     .{ "mb_str_split", native_mb_str_split },
     .{ "mb_strtolower", native_mb_strtolower },
     .{ "mb_strtoupper", native_mb_strtoupper },
+    .{ "mb_convert_case", native_mb_convert_case },
+    .{ "mb_check_encoding", native_mb_check_encoding },
     .{ "mb_detect_encoding", native_mb_detect_encoding },
     .{ "mb_convert_encoding", native_mb_convert_encoding },
     .{ "iconv", native_iconv },
@@ -1287,6 +1289,91 @@ fn native_mb_strtoupper(ctx: *NativeContext, args: []const Value) RuntimeError!V
     if (args.len == 0) return .{ .string = "" };
     const s = if (args[0] == .string) args[0].string else return Value{ .string = "" };
     return .{ .string = try utfCaseConvert(ctx, s, true) };
+}
+
+fn native_mb_convert_case(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len < 2 or args[0] != .string) return .{ .string = "" };
+    const s = args[0].string;
+    const mode = Value.toInt(args[1]);
+    return switch (mode) {
+        0 => .{ .string = try utfCaseConvert(ctx, s, true) },
+        1 => .{ .string = try utfCaseConvert(ctx, s, false) },
+        2 => .{ .string = try utfTitleCase(ctx, s) },
+        else => .{ .string = try ctx.createString(s) },
+    };
+}
+
+fn utfTitleCase(ctx: *NativeContext, s: []const u8) ![]u8 {
+    var buf = std.ArrayListUnmanaged(u8){};
+    var i: usize = 0;
+    var at_word_start = true;
+    while (i < s.len) {
+        const byte = s[i];
+        if (byte < 0x80) {
+            const is_alpha = std.ascii.isAlphabetic(byte);
+            const is_word = is_alpha or std.ascii.isDigit(byte);
+            if (at_word_start and is_alpha) {
+                try buf.append(ctx.allocator, std.ascii.toUpper(byte));
+                at_word_start = false;
+            } else if (is_alpha) {
+                try buf.append(ctx.allocator, std.ascii.toLower(byte));
+            } else {
+                try buf.append(ctx.allocator, byte);
+                if (!is_word) at_word_start = true;
+            }
+            i += 1;
+        } else {
+            const len = std.unicode.utf8ByteSequenceLength(byte) catch {
+                try buf.append(ctx.allocator, byte);
+                i += 1;
+                continue;
+            };
+            if (i + len > s.len) {
+                try buf.append(ctx.allocator, byte);
+                i += 1;
+                continue;
+            }
+            const cp = std.unicode.utf8Decode(s[i..][0..len]) catch {
+                try buf.appendSlice(ctx.allocator, s[i .. i + len]);
+                i += len;
+                continue;
+            };
+            const mapped = if (at_word_start) unicodeToUpper(cp) else unicodeToLower(cp);
+            var enc: [4]u8 = undefined;
+            const enc_len = std.unicode.utf8Encode(mapped, &enc) catch {
+                try buf.appendSlice(ctx.allocator, s[i .. i + len]);
+                i += len;
+                continue;
+            };
+            try buf.appendSlice(ctx.allocator, enc[0..enc_len]);
+            at_word_start = false;
+            i += len;
+        }
+    }
+    const out = try ctx.allocator.dupe(u8, buf.items);
+    buf.deinit(ctx.allocator);
+    try ctx.strings.append(ctx.allocator, out);
+    return out;
+}
+
+fn native_mb_check_encoding(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    _ = ctx;
+    if (args.len == 0) return .{ .bool = true };
+    if (args[0] != .string) return .{ .bool = false };
+    const s = args[0].string;
+    var i: usize = 0;
+    while (i < s.len) {
+        const byte = s[i];
+        if (byte < 0x80) {
+            i += 1;
+            continue;
+        }
+        const len = std.unicode.utf8ByteSequenceLength(byte) catch return .{ .bool = false };
+        if (i + len > s.len) return .{ .bool = false };
+        _ = std.unicode.utf8Decode(s[i..][0..len]) catch return .{ .bool = false };
+        i += len;
+    }
+    return .{ .bool = true };
 }
 
 fn utfCaseConvert(ctx: *NativeContext, s: []const u8, to_upper: bool) ![]u8 {

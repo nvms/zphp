@@ -75,6 +75,13 @@ pub const entries = .{
     .{ "fileperms", native_fileperms },
     .{ "is_link", native_is_link },
     .{ "readlink", native_readlink },
+    .{ "popen", native_popen },
+    .{ "pclose", native_pclose },
+    .{ "proc_open", native_proc_open },
+    .{ "proc_close", native_proc_close },
+    .{ "proc_get_status", native_proc_get_status },
+    .{ "proc_terminate", native_proc_terminate },
+    .{ "stream_set_blocking", native_stream_set_blocking },
 };
 
 // file handle management - store handles in PhpObjects with class "FileHandle"
@@ -920,6 +927,18 @@ fn native_fclose(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
         obj.properties.put(std.heap.page_allocator, "__open", .{ .bool = false }) catch {};
         return .{ .bool = true };
     }
+    const popen_cmd = obj.get("__popen_cmd");
+    if (popen_cmd == .string) {
+        const buf_v_p = obj.get("__buffer");
+        const data: []const u8 = if (buf_v_p == .string) buf_v_p.string else "";
+        if (runShellCapture(ctx.allocator, popen_cmd.string, data)) |r| {
+            ctx.allocator.free(r.stdout);
+            ctx.allocator.free(r.stderr);
+        } else |_| {}
+        obj.properties.put(std.heap.page_allocator, "__open", .{ .bool = false }) catch {};
+        obj.properties.put(std.heap.page_allocator, "__popen_cmd", .null) catch {};
+        return .{ .bool = true };
+    }
     if (isZlibWriting(obj)) {
         const path_v = obj.get("__zlib_path");
         const buf_v = obj.get("__buffer");
@@ -996,7 +1015,7 @@ fn native_fwrite(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
         if (result == .int) return result;
         return .{ .int = 0 };
     }
-    if (isZlibWriting(obj)) {
+    if (isZlibWriting(obj) or obj.get("__popen_cmd") == .string) {
         const cur = obj.get("__buffer");
         const cur_str: []const u8 = if (cur == .string) cur.string else "";
         const combined = try ctx.allocator.alloc(u8, cur_str.len + data.len);
@@ -1410,7 +1429,15 @@ fn stream_wrapper_restore(ctx: *NativeContext, args: []const Value) RuntimeError
 
 fn stream_get_contents(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len == 0 or args[0] != .object) return .{ .bool = false };
-    const file = getFileHandle(args[0].object) orelse return Value{ .bool = false };
+    const obj = args[0].object;
+    if (getBufferBacking(obj)) |buffer| {
+        const pos = getBufferPos(obj);
+        if (pos >= buffer.len) return .{ .string = "" };
+        const remaining = buffer[pos..];
+        setBufferPos(obj, buffer.len);
+        return .{ .string = try ctx.createString(remaining) };
+    }
+    const file = getFileHandle(obj) orelse return Value{ .bool = false };
     const buf = file.readToEndAlloc(ctx.allocator, 10 * 1024 * 1024) catch return Value{ .bool = false };
     try ctx.strings.append(ctx.allocator, buf);
     return .{ .string = buf };
@@ -1709,3 +1736,163 @@ fn native_tempnam(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     return .{ .string = result };
 }
 
+
+fn runShellCapture(allocator: std.mem.Allocator, command: []const u8, stdin_data: ?[]const u8) !struct { stdout: []u8, stderr: []u8, exit: i64 } {
+    var child = std.process.Child.init(&.{ "/bin/sh", "-c", command }, allocator);
+    child.stdin_behavior = if (stdin_data != null) .Pipe else .Ignore;
+    child.stdout_behavior = .Pipe;
+    child.stderr_behavior = .Pipe;
+    try child.spawn();
+    if (stdin_data) |data| {
+        if (child.stdin) |*stdin_file| {
+            _ = stdin_file.writeAll(data) catch {};
+            stdin_file.close();
+            child.stdin = null;
+        }
+    }
+    var stdout_buf = std.ArrayListUnmanaged(u8){};
+    var stderr_buf = std.ArrayListUnmanaged(u8){};
+    try child.collectOutput(allocator, &stdout_buf, &stderr_buf, 64 * 1024 * 1024);
+    const term = try child.wait();
+    const stdout = try stdout_buf.toOwnedSlice(allocator);
+    const stderr = try stderr_buf.toOwnedSlice(allocator);
+    const exit: i64 = switch (term) {
+        .Exited => |c| @intCast(c),
+        .Signal => |c| @as(i64, @intCast(c)) + 128,
+        else => -1,
+    };
+    return .{ .stdout = stdout, .stderr = stderr, .exit = exit };
+}
+
+fn makeReadBufferHandle(ctx: *NativeContext, data: []const u8) !*PhpObject {
+    const obj = try ctx.allocator.create(PhpObject);
+    obj.* = .{ .class_name = "FileHandle" };
+    try ctx.vm.objects.append(ctx.allocator, obj);
+    try obj.set(ctx.allocator, "__buffer", .{ .string = data });
+    try obj.set(ctx.allocator, "__pos", .{ .int = 0 });
+    try obj.set(ctx.allocator, "__open", .{ .bool = true });
+    try obj.set(ctx.allocator, "__mode", .{ .string = "r" });
+    return obj;
+}
+
+fn makePopenWriteHandle(ctx: *NativeContext, command: []const u8) !*PhpObject {
+    const obj = try ctx.allocator.create(PhpObject);
+    obj.* = .{ .class_name = "FileHandle" };
+    try ctx.vm.objects.append(ctx.allocator, obj);
+    const cmd_copy = try ctx.allocator.dupe(u8, command);
+    try ctx.vm.strings.append(ctx.allocator, cmd_copy);
+    try obj.set(ctx.allocator, "__popen_cmd", .{ .string = cmd_copy });
+    try obj.set(ctx.allocator, "__buffer", .{ .string = "" });
+    try obj.set(ctx.allocator, "__pos", .{ .int = 0 });
+    try obj.set(ctx.allocator, "__open", .{ .bool = true });
+    try obj.set(ctx.allocator, "__mode", .{ .string = "w" });
+    return obj;
+}
+
+fn native_popen(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len < 2 or args[0] != .string or args[1] != .string) return .{ .bool = false };
+    const cmd = args[0].string;
+    const mode = args[1].string;
+    if (mode.len > 0 and (mode[0] == 'r')) {
+        const result = runShellCapture(ctx.allocator, cmd, null) catch return .{ .bool = false };
+        ctx.allocator.free(result.stderr);
+        try ctx.vm.strings.append(ctx.allocator, result.stdout);
+        const obj = try makeReadBufferHandle(ctx, result.stdout);
+        try obj.set(ctx.allocator, "__popen_exit", .{ .int = result.exit });
+        return .{ .object = obj };
+    }
+    if (mode.len > 0 and (mode[0] == 'w')) {
+        const obj = try makePopenWriteHandle(ctx, cmd);
+        return .{ .object = obj };
+    }
+    return .{ .bool = false };
+}
+
+fn native_pclose(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len == 0 or args[0] != .object) return .{ .int = -1 };
+    const obj = args[0].object;
+    const cmd_v = obj.get("__popen_cmd");
+    if (cmd_v == .string) {
+        const buf_v = obj.get("__buffer");
+        const stdin_data: []const u8 = if (buf_v == .string) buf_v.string else "";
+        const result = runShellCapture(ctx.allocator, cmd_v.string, stdin_data) catch {
+            obj.properties.put(std.heap.page_allocator, "__open", .{ .bool = false }) catch {};
+            return .{ .int = -1 };
+        };
+        ctx.allocator.free(result.stdout);
+        ctx.allocator.free(result.stderr);
+        obj.properties.put(std.heap.page_allocator, "__open", .{ .bool = false }) catch {};
+        return .{ .int = result.exit };
+    }
+    const exit_v = obj.get("__popen_exit");
+    obj.properties.put(std.heap.page_allocator, "__open", .{ .bool = false }) catch {};
+    if (exit_v == .int) return .{ .int = exit_v.int };
+    return .{ .int = 0 };
+}
+
+fn native_proc_open(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len < 3 or args[0] != .string) return .{ .bool = false };
+    const cmd = args[0].string;
+    const result = runShellCapture(ctx.allocator, cmd, null) catch return .{ .bool = false };
+    try ctx.vm.strings.append(ctx.allocator, result.stdout);
+    try ctx.vm.strings.append(ctx.allocator, result.stderr);
+
+    if (args[2] == .array) {
+        const pipes = args[2].array;
+        // stdin (write-only no-op handle - process already ran)
+        const stdin_obj = try ctx.allocator.create(PhpObject);
+        stdin_obj.* = .{ .class_name = "FileHandle" };
+        try ctx.vm.objects.append(ctx.allocator, stdin_obj);
+        try stdin_obj.set(ctx.allocator, "__buffer", .{ .string = "" });
+        try stdin_obj.set(ctx.allocator, "__pos", .{ .int = 0 });
+        try stdin_obj.set(ctx.allocator, "__open", .{ .bool = true });
+        try stdin_obj.set(ctx.allocator, "__mode", .{ .string = "w" });
+        try pipes.set(ctx.allocator, .{ .int = 0 }, .{ .object = stdin_obj });
+        try pipes.set(ctx.allocator, .{ .int = 1 }, .{ .object = try makeReadBufferHandle(ctx, result.stdout) });
+        try pipes.set(ctx.allocator, .{ .int = 2 }, .{ .object = try makeReadBufferHandle(ctx, result.stderr) });
+    }
+
+    const proc = try ctx.allocator.create(PhpObject);
+    proc.* = .{ .class_name = "ProcessResource" };
+    try ctx.vm.objects.append(ctx.allocator, proc);
+    try proc.set(ctx.allocator, "__cmd", .{ .string = try ctx.vm.allocator.dupe(u8, cmd) });
+    try proc.set(ctx.allocator, "__exit", .{ .int = result.exit });
+    try proc.set(ctx.allocator, "__running", .{ .bool = false });
+    try ctx.vm.strings.append(ctx.allocator, proc.get("__cmd").string);
+    return .{ .object = proc };
+}
+
+fn native_proc_close(_: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len == 0 or args[0] != .object) return .{ .int = -1 };
+    const obj = args[0].object;
+    const exit = obj.get("__exit");
+    if (exit == .int) return .{ .int = exit.int };
+    return .{ .int = 0 };
+}
+
+fn native_proc_get_status(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len == 0 or args[0] != .object) return .{ .bool = false };
+    const obj = args[0].object;
+    const result = try ctx.allocator.create(PhpArray);
+    result.* = .{};
+    try ctx.vm.arrays.append(ctx.allocator, result);
+    const cmd = obj.get("__cmd");
+    const exit = obj.get("__exit");
+    try result.set(ctx.allocator, .{ .string = "command" }, if (cmd == .string) cmd else .{ .string = "" });
+    try result.set(ctx.allocator, .{ .string = "pid" }, .{ .int = 0 });
+    try result.set(ctx.allocator, .{ .string = "running" }, .{ .bool = false });
+    try result.set(ctx.allocator, .{ .string = "signaled" }, .{ .bool = false });
+    try result.set(ctx.allocator, .{ .string = "stopped" }, .{ .bool = false });
+    try result.set(ctx.allocator, .{ .string = "exitcode" }, if (exit == .int) exit else .{ .int = 0 });
+    try result.set(ctx.allocator, .{ .string = "termsig" }, .{ .int = 0 });
+    try result.set(ctx.allocator, .{ .string = "stopsig" }, .{ .int = 0 });
+    return .{ .array = result };
+}
+
+fn native_proc_terminate(_: *NativeContext, _: []const Value) RuntimeError!Value {
+    return .{ .bool = true };
+}
+
+fn native_stream_set_blocking(_: *NativeContext, _: []const Value) RuntimeError!Value {
+    return .{ .bool = true };
+}
