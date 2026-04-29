@@ -76,6 +76,13 @@ pub const entries = .{
     .{ "array_multisort", array_multisort },
     .{ "array_diff_uassoc", array_diff_uassoc },
     .{ "array_diff_ukey", array_diff_ukey },
+    .{ "array_udiff", array_udiff },
+    .{ "array_udiff_assoc", array_udiff_assoc },
+    .{ "array_udiff_uassoc", array_udiff_uassoc },
+    .{ "array_uintersect", array_uintersect },
+    .{ "array_uintersect_assoc", array_uintersect_assoc },
+    .{ "array_uintersect_uassoc", array_uintersect_uassoc },
+    .{ "array_intersect_ukey", array_intersect_ukey },
     .{ "array_change_key_case", array_change_key_case },
 };
 
@@ -1494,6 +1501,158 @@ fn array_diff_uassoc(ctx: *NativeContext, args: []const Value) RuntimeError!Valu
             if (in_any) break;
         }
         if (!in_any) try result.set(ctx.allocator, entry.key, entry.value);
+    }
+    return .{ .array = result };
+}
+
+fn array_udiff(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len < 3 or args[0] != .array) return .null;
+    const src = args[0].array;
+    const callback = args[args.len - 1];
+    var result = try ctx.createArray();
+    for (src.entries.items) |entry| {
+        var in_any = false;
+        for (args[1 .. args.len - 1]) |arg| {
+            if (arg != .array) continue;
+            for (arg.array.entries.items) |other| {
+                const cmp = try ctx.invokeCallable(callback, &.{ entry.value, other.value });
+                if (Value.toInt(cmp) == 0) { in_any = true; break; }
+            }
+            if (in_any) break;
+        }
+        if (!in_any) try result.set(ctx.allocator, entry.key, entry.value);
+    }
+    return .{ .array = result };
+}
+
+fn array_uintersect(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len < 3 or args[0] != .array) return .null;
+    const src = args[0].array;
+    const callback = args[args.len - 1];
+    var result = try ctx.createArray();
+    for (src.entries.items) |entry| {
+        var in_all = true;
+        for (args[1 .. args.len - 1]) |arg| {
+            if (arg != .array) { in_all = false; break; }
+            var found = false;
+            for (arg.array.entries.items) |other| {
+                const cmp = try ctx.invokeCallable(callback, &.{ entry.value, other.value });
+                if (Value.toInt(cmp) == 0) { found = true; break; }
+            }
+            if (!found) { in_all = false; break; }
+        }
+        if (in_all) try result.set(ctx.allocator, entry.key, entry.value);
+    }
+    return .{ .array = result };
+}
+
+fn array_udiff_assoc(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len < 3 or args[0] != .array) return .null;
+    const src = args[0].array;
+    const callback = args[args.len - 1];
+    var result = try ctx.createArray();
+    for (src.entries.items) |entry| {
+        var in_any = false;
+        for (args[1 .. args.len - 1]) |arg| {
+            if (arg != .array) continue;
+            for (arg.array.entries.items) |other| {
+                if (!entry.key.eql(other.key)) continue;
+                const cmp = try ctx.invokeCallable(callback, &.{ entry.value, other.value });
+                if (Value.toInt(cmp) == 0) { in_any = true; break; }
+            }
+            if (in_any) break;
+        }
+        if (!in_any) try result.set(ctx.allocator, entry.key, entry.value);
+    }
+    return .{ .array = result };
+}
+
+fn array_uintersect_assoc(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len < 3 or args[0] != .array) return .null;
+    const src = args[0].array;
+    const callback = args[args.len - 1];
+    var result = try ctx.createArray();
+    for (src.entries.items) |entry| {
+        var in_all = true;
+        for (args[1 .. args.len - 1]) |arg| {
+            if (arg != .array) { in_all = false; break; }
+            var found = false;
+            for (arg.array.entries.items) |other| {
+                if (!entry.key.eql(other.key)) continue;
+                const cmp = try ctx.invokeCallable(callback, &.{ entry.value, other.value });
+                if (Value.toInt(cmp) == 0) { found = true; break; }
+            }
+            if (!found) { in_all = false; break; }
+        }
+        if (in_all) try result.set(ctx.allocator, entry.key, entry.value);
+    }
+    return .{ .array = result };
+}
+
+fn array_udiff_uassoc(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len < 4 or args[0] != .array) return .null;
+    const src = args[0].array;
+    const value_cb = args[args.len - 2];
+    const key_cb = args[args.len - 1];
+    var result = try ctx.createArray();
+    for (src.entries.items) |entry| {
+        var in_any = false;
+        for (args[1 .. args.len - 2]) |arg| {
+            if (arg != .array) continue;
+            for (arg.array.entries.items) |other| {
+                const kcmp = try ctx.invokeCallable(key_cb, &.{ keyToValue(entry.key), keyToValue(other.key) });
+                if (Value.toInt(kcmp) != 0) continue;
+                const vcmp = try ctx.invokeCallable(value_cb, &.{ entry.value, other.value });
+                if (Value.toInt(vcmp) == 0) { in_any = true; break; }
+            }
+            if (in_any) break;
+        }
+        if (!in_any) try result.set(ctx.allocator, entry.key, entry.value);
+    }
+    return .{ .array = result };
+}
+
+fn array_uintersect_uassoc(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len < 4 or args[0] != .array) return .null;
+    const src = args[0].array;
+    const value_cb = args[args.len - 2];
+    const key_cb = args[args.len - 1];
+    var result = try ctx.createArray();
+    for (src.entries.items) |entry| {
+        var in_all = true;
+        for (args[1 .. args.len - 2]) |arg| {
+            if (arg != .array) { in_all = false; break; }
+            var found = false;
+            for (arg.array.entries.items) |other| {
+                const kcmp = try ctx.invokeCallable(key_cb, &.{ keyToValue(entry.key), keyToValue(other.key) });
+                if (Value.toInt(kcmp) != 0) continue;
+                const vcmp = try ctx.invokeCallable(value_cb, &.{ entry.value, other.value });
+                if (Value.toInt(vcmp) == 0) { found = true; break; }
+            }
+            if (!found) { in_all = false; break; }
+        }
+        if (in_all) try result.set(ctx.allocator, entry.key, entry.value);
+    }
+    return .{ .array = result };
+}
+
+fn array_intersect_ukey(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len < 3 or args[0] != .array) return .null;
+    const src = args[0].array;
+    const callback = args[args.len - 1];
+    var result = try ctx.createArray();
+    for (src.entries.items) |entry| {
+        var in_all = true;
+        for (args[1 .. args.len - 1]) |arg| {
+            if (arg != .array) { in_all = false; break; }
+            var found = false;
+            for (arg.array.entries.items) |other| {
+                const cmp = try ctx.invokeCallable(callback, &.{ keyToValue(entry.key), keyToValue(other.key) });
+                if (Value.toInt(cmp) == 0) { found = true; break; }
+            }
+            if (!found) { in_all = false; break; }
+        }
+        if (in_all) try result.set(ctx.allocator, entry.key, entry.value);
     }
     return .{ .array = result };
 }
