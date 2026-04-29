@@ -1338,9 +1338,17 @@ fn native_filter_var(_: *NativeContext, args: []const Value) RuntimeError!Value 
         },
         257 => { // FILTER_VALIDATE_INT
             if (value == .int) return value;
+            if (value == .float) return value;
             const s = if (value == .string) value.string else return .{ .bool = false };
-            _ = std.fmt.parseInt(i64, s, 10) catch return .{ .bool = false };
-            return value;
+            const trimmed = std.mem.trim(u8, s, " ");
+            const n = std.fmt.parseInt(i64, trimmed, 10) catch return .{ .bool = false };
+            return .{ .int = n };
+        },
+        259 => { // FILTER_VALIDATE_FLOAT
+            if (value == .float or value == .int) return value;
+            const s = if (value == .string) value.string else return .{ .bool = false };
+            const f = std.fmt.parseFloat(f64, std.mem.trim(u8, s, " ")) catch return .{ .bool = false };
+            return .{ .float = f };
         },
         258 => { // FILTER_VALIDATE_BOOLEAN
             if (value == .bool) return value;
