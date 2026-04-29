@@ -14,6 +14,12 @@ pub const entries = .{
     .{ "hash_algos", native_hash_algos },
     .{ "hash_equals", native_hash_equals },
     .{ "hash_file", native_hash_file },
+    .{ "hash_init", native_hash_init },
+    .{ "hash_update", native_hash_update },
+    .{ "hash_update_file", native_hash_update_file },
+    .{ "hash_final", native_hash_final },
+    .{ "hash_copy", native_hash_copy },
+    .{ "hash_pbkdf2", native_hash_pbkdf2 },
 };
 
 fn native_password_hash(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
@@ -254,4 +260,129 @@ fn native_hash_equals(_: *NativeContext, args: []const Value) RuntimeError!Value
     var result: u8 = 0;
     for (known, user) |a, b| result |= a ^ b;
     return .{ .bool = result == 0 };
+}
+
+const PhpObject = @import("../runtime/value.zig").PhpObject;
+
+fn native_hash_init(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len < 1 or args[0] != .string) return .{ .bool = false };
+    const algo = HashAlgo.fromString(args[0].string) orelse return .{ .bool = false };
+    _ = algo;
+    const obj = try ctx.allocator.create(PhpObject);
+    obj.* = .{ .class_name = "HashContext" };
+    try ctx.vm.objects.append(ctx.allocator, obj);
+    try obj.set(ctx.allocator, "algo", .{ .string = try ctx.createString(args[0].string) });
+    // store accumulated bytes in a string buffer that grows
+    try obj.set(ctx.allocator, "buffer", .{ .string = "" });
+    if (args.len >= 3 and args[2] == .string) {
+        try obj.set(ctx.allocator, "key", .{ .string = try ctx.createString(args[2].string) });
+    }
+    return .{ .object = obj };
+}
+
+fn native_hash_update(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len < 2 or args[0] != .object or args[1] != .string) return .{ .bool = false };
+    const obj = args[0].object;
+    const cur = obj.get("buffer");
+    const cur_str: []const u8 = if (cur == .string) cur.string else "";
+    const new_buf = try ctx.allocator.alloc(u8, cur_str.len + args[1].string.len);
+    @memcpy(new_buf[0..cur_str.len], cur_str);
+    @memcpy(new_buf[cur_str.len..], args[1].string);
+    try ctx.vm.strings.append(ctx.allocator, new_buf);
+    try obj.set(ctx.allocator, "buffer", .{ .string = new_buf });
+    return .{ .bool = true };
+}
+
+fn native_hash_update_file(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len < 2 or args[0] != .object or args[1] != .string) return .{ .bool = false };
+    const data = std.fs.cwd().readFileAlloc(ctx.allocator, args[1].string, 64 * 1024 * 1024) catch return .{ .bool = false };
+    return native_hash_update(ctx, &.{ args[0], .{ .string = data } });
+}
+
+fn native_hash_final(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len < 1 or args[0] != .object) return .{ .bool = false };
+    const obj = args[0].object;
+    const algo_v = obj.get("algo");
+    const buf_v = obj.get("buffer");
+    if (algo_v != .string) return .{ .bool = false };
+    const data: []const u8 = if (buf_v == .string) buf_v.string else "";
+    const algo = HashAlgo.fromString(algo_v.string) orelse return .{ .bool = false };
+    const raw_output = args.len >= 2 and args[1].isTruthy();
+    var digest: [64]u8 = undefined;
+    const dlen = algo.digestLen();
+    const key_v = obj.get("key");
+    if (key_v == .string and key_v.string.len > 0) {
+        computeHmac(algo, data, key_v.string, digest[0..dlen]);
+    } else {
+        computeHash(algo, data, digest[0..dlen]);
+    }
+    if (raw_output) return .{ .string = try ctx.createString(digest[0..dlen]) };
+    return .{ .string = try toHexString(ctx, digest[0..dlen]) };
+}
+
+fn native_hash_copy(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len < 1 or args[0] != .object) return .{ .bool = false };
+    const orig = args[0].object;
+    const obj = try ctx.allocator.create(PhpObject);
+    obj.* = .{ .class_name = "HashContext" };
+    try ctx.vm.objects.append(ctx.allocator, obj);
+    try obj.set(ctx.allocator, "algo", orig.get("algo"));
+    try obj.set(ctx.allocator, "buffer", orig.get("buffer"));
+    try obj.set(ctx.allocator, "key", orig.get("key"));
+    return .{ .object = obj };
+}
+
+fn native_hash_pbkdf2(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len < 4 or args[0] != .string or args[1] != .string or args[2] != .string) return .{ .bool = false };
+    const algo_name = args[0].string;
+    const password = args[1].string;
+    const salt = args[2].string;
+    const iterations: usize = @intCast(@max(1, Value.toInt(args[3])));
+    const length_arg: usize = if (args.len >= 5) @intCast(@max(0, Value.toInt(args[4]))) else 0;
+    const raw_output = args.len >= 6 and args[5].isTruthy();
+    const algo = HashAlgo.fromString(algo_name) orelse return .{ .bool = false };
+    const dlen = algo.digestLen();
+
+    const out_bytes: usize = blk: {
+        if (length_arg == 0) break :blk dlen;
+        if (raw_output) break :blk length_arg;
+        break :blk (length_arg + 1) / 2;
+    };
+    const out = try ctx.allocator.alloc(u8, out_bytes);
+
+    // basic PBKDF2-HMAC implementation
+    var block_index: u32 = 1;
+    var written: usize = 0;
+    while (written < out_bytes) : (block_index += 1) {
+        var u_buf: [64]u8 = undefined;
+        const salted = try ctx.allocator.alloc(u8, salt.len + 4);
+        defer ctx.allocator.free(salted);
+        @memcpy(salted[0..salt.len], salt);
+        salted[salt.len] = @intCast((block_index >> 24) & 0xff);
+        salted[salt.len + 1] = @intCast((block_index >> 16) & 0xff);
+        salted[salt.len + 2] = @intCast((block_index >> 8) & 0xff);
+        salted[salt.len + 3] = @intCast(block_index & 0xff);
+        computeHmac(algo, salted, password, u_buf[0..dlen]);
+        var t_buf: [64]u8 = undefined;
+        @memcpy(t_buf[0..dlen], u_buf[0..dlen]);
+        var iter: usize = 1;
+        while (iter < iterations) : (iter += 1) {
+            var next_u: [64]u8 = undefined;
+            computeHmac(algo, u_buf[0..dlen], password, next_u[0..dlen]);
+            @memcpy(u_buf[0..dlen], next_u[0..dlen]);
+            for (0..dlen) |i| t_buf[i] ^= u_buf[i];
+        }
+        const take: usize = @min(dlen, out_bytes - written);
+        @memcpy(out[written..written + take], t_buf[0..take]);
+        written += take;
+    }
+
+    if (raw_output) {
+        try ctx.vm.strings.append(ctx.allocator, out);
+        return .{ .string = out };
+    }
+    const hex = try toHexString(ctx, out);
+    ctx.allocator.free(out);
+    if (length_arg > 0 and length_arg < hex.len) return .{ .string = hex[0..length_arg] };
+    return .{ .string = hex };
 }
