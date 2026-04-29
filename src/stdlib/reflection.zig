@@ -50,6 +50,7 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try rc_def.methods.put(a, "isFinal", .{ .name = "isFinal", .arity = 0 });
     try rc_def.methods.put(a, "isCloneable", .{ .name = "isCloneable", .arity = 0 });
     try rc_def.methods.put(a, "newInstanceArgs", .{ .name = "newInstanceArgs", .arity = 1 });
+    try rc_def.methods.put(a, "newInstance", .{ .name = "newInstance", .arity = 0 });
     try rc_def.methods.put(a, "getMethods", .{ .name = "getMethods", .arity = 1 });
     try rc_def.methods.put(a, "getMethod", .{ .name = "getMethod", .arity = 1 });
     try rc_def.methods.put(a, "hasMethod", .{ .name = "hasMethod", .arity = 1 });
@@ -89,6 +90,7 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try vm.native_fns.put(a, "ReflectionClass::isSubclassOf", rcIsSubclassOf);
     try vm.native_fns.put(a, "ReflectionClass::isInstance", rcIsInstance);
     try vm.native_fns.put(a, "ReflectionClass::newInstanceArgs", rcNewInstanceArgs);
+    try vm.native_fns.put(a, "ReflectionClass::newInstance", rcNewInstance);
     try vm.native_fns.put(a, "ReflectionClass::getMethods", rcGetMethods);
     try vm.native_fns.put(a, "ReflectionClass::getMethod", rcGetMethod);
     try vm.native_fns.put(a, "ReflectionClass::hasMethod", rcHasMethod);
@@ -734,6 +736,23 @@ fn rcIsSubclassOf(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
         }
     }
     return .{ .bool = false };
+}
+
+fn rcNewInstance(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    const this = getThis(ctx) orelse return .null;
+    const class_name = if (this.get("name") == .string) this.get("name").string else return .null;
+    const obj = try ctx.vm.allocator.create(PhpObject);
+    obj.* = .{ .class_name = class_name };
+    try ctx.vm.objects.append(ctx.vm.allocator, obj);
+    if (ctx.vm.classes.get(class_name)) |cls| {
+        for (cls.properties.items) |prop| {
+            try obj.set(ctx.vm.allocator, prop.name, prop.default);
+        }
+    }
+    if (ctx.vm.hasMethod(class_name, "__construct")) {
+        _ = try ctx.callMethod(obj, "__construct", args);
+    }
+    return .{ .object = obj };
 }
 
 fn rcNewInstanceArgs(ctx: *NativeContext, args: []const Value) RuntimeError!Value {

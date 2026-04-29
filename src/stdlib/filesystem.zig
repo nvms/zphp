@@ -82,6 +82,15 @@ pub const entries = .{
     .{ "proc_get_status", native_proc_get_status },
     .{ "proc_terminate", native_proc_terminate },
     .{ "stream_set_blocking", native_stream_set_blocking },
+    .{ "mime_content_type", native_mime_content_type },
+    .{ "disk_free_space", native_disk_free_space },
+    .{ "diskfreespace", native_disk_free_space },
+    .{ "disk_total_space", native_disk_total_space },
+    .{ "linkinfo", native_linkinfo },
+    .{ "finfo_open", native_finfo_open },
+    .{ "finfo_file", native_finfo_file },
+    .{ "finfo_buffer", native_finfo_buffer },
+    .{ "finfo_close", native_finfo_close },
 };
 
 // file handle management - store handles in PhpObjects with class "FileHandle"
@@ -1894,5 +1903,149 @@ fn native_proc_terminate(_: *NativeContext, _: []const Value) RuntimeError!Value
 }
 
 fn native_stream_set_blocking(_: *NativeContext, _: []const Value) RuntimeError!Value {
+    return .{ .bool = true };
+}
+
+const MimeEntry = struct { ext: []const u8, mime: []const u8 };
+const mime_table = [_]MimeEntry{
+    .{ .ext = "html", .mime = "text/html" },
+    .{ .ext = "htm", .mime = "text/html" },
+    .{ .ext = "css", .mime = "text/css" },
+    .{ .ext = "js", .mime = "application/javascript" },
+    .{ .ext = "mjs", .mime = "application/javascript" },
+    .{ .ext = "json", .mime = "application/json" },
+    .{ .ext = "xml", .mime = "application/xml" },
+    .{ .ext = "txt", .mime = "text/plain" },
+    .{ .ext = "md", .mime = "text/markdown" },
+    .{ .ext = "csv", .mime = "text/csv" },
+    .{ .ext = "yml", .mime = "application/yaml" },
+    .{ .ext = "yaml", .mime = "application/yaml" },
+    .{ .ext = "png", .mime = "image/png" },
+    .{ .ext = "jpg", .mime = "image/jpeg" },
+    .{ .ext = "jpeg", .mime = "image/jpeg" },
+    .{ .ext = "gif", .mime = "image/gif" },
+    .{ .ext = "webp", .mime = "image/webp" },
+    .{ .ext = "svg", .mime = "image/svg+xml" },
+    .{ .ext = "ico", .mime = "image/x-icon" },
+    .{ .ext = "bmp", .mime = "image/bmp" },
+    .{ .ext = "tiff", .mime = "image/tiff" },
+    .{ .ext = "pdf", .mime = "application/pdf" },
+    .{ .ext = "zip", .mime = "application/zip" },
+    .{ .ext = "tar", .mime = "application/x-tar" },
+    .{ .ext = "gz", .mime = "application/gzip" },
+    .{ .ext = "bz2", .mime = "application/x-bzip2" },
+    .{ .ext = "7z", .mime = "application/x-7z-compressed" },
+    .{ .ext = "rar", .mime = "application/vnd.rar" },
+    .{ .ext = "mp3", .mime = "audio/mpeg" },
+    .{ .ext = "wav", .mime = "audio/wav" },
+    .{ .ext = "ogg", .mime = "audio/ogg" },
+    .{ .ext = "flac", .mime = "audio/flac" },
+    .{ .ext = "mp4", .mime = "video/mp4" },
+    .{ .ext = "webm", .mime = "video/webm" },
+    .{ .ext = "mov", .mime = "video/quicktime" },
+    .{ .ext = "avi", .mime = "video/x-msvideo" },
+    .{ .ext = "doc", .mime = "application/msword" },
+    .{ .ext = "docx", .mime = "application/vnd.openxmlformats-officedocument.wordprocessingml.document" },
+    .{ .ext = "xls", .mime = "application/vnd.ms-excel" },
+    .{ .ext = "xlsx", .mime = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" },
+    .{ .ext = "ppt", .mime = "application/vnd.ms-powerpoint" },
+    .{ .ext = "pptx", .mime = "application/vnd.openxmlformats-officedocument.presentationml.presentation" },
+    .{ .ext = "ttf", .mime = "font/ttf" },
+    .{ .ext = "otf", .mime = "font/otf" },
+    .{ .ext = "woff", .mime = "font/woff" },
+    .{ .ext = "woff2", .mime = "font/woff2" },
+    .{ .ext = "wasm", .mime = "application/wasm" },
+    .{ .ext = "phar", .mime = "application/x-php" },
+    .{ .ext = "php", .mime = "application/x-php" },
+};
+
+fn mimeFromExt(path: []const u8) []const u8 {
+    const dot = std.mem.lastIndexOfScalar(u8, path, '.') orelse return "application/octet-stream";
+    const ext = path[dot + 1 ..];
+    var lower_buf: [16]u8 = undefined;
+    if (ext.len > lower_buf.len) return "application/octet-stream";
+    for (ext, 0..) |c, i| lower_buf[i] = std.ascii.toLower(c);
+    const lower = lower_buf[0..ext.len];
+    for (mime_table) |entry| {
+        if (std.mem.eql(u8, entry.ext, lower)) return entry.mime;
+    }
+    return "application/octet-stream";
+}
+
+fn detectMimeFromBytes(data: []const u8) ?[]const u8 {
+    if (data.len >= 8 and std.mem.eql(u8, data[0..8], "\x89PNG\r\n\x1a\n")) return "image/png";
+    if (data.len >= 3 and std.mem.eql(u8, data[0..3], "\xff\xd8\xff")) return "image/jpeg";
+    if (data.len >= 6 and (std.mem.eql(u8, data[0..6], "GIF87a") or std.mem.eql(u8, data[0..6], "GIF89a"))) return "image/gif";
+    if (data.len >= 4 and std.mem.eql(u8, data[0..4], "%PDF")) return "application/pdf";
+    if (data.len >= 4 and std.mem.eql(u8, data[0..4], "PK\x03\x04")) return "application/zip";
+    if (data.len >= 2 and std.mem.eql(u8, data[0..2], "\x1f\x8b")) return "application/gzip";
+    if (data.len >= 4 and std.mem.eql(u8, data[0..4], "RIFF") and data.len >= 12 and std.mem.eql(u8, data[8..12], "WEBP")) return "image/webp";
+    if (data.len >= 5 and std.mem.eql(u8, data[0..5], "<?xml")) return "application/xml";
+    if (data.len >= 5 and std.mem.eql(u8, data[0..5], "<?php")) return "text/x-php";
+    return null;
+}
+
+fn native_mime_content_type(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len == 0 or args[0] != .string) return .{ .bool = false };
+    const path = args[0].string;
+    const file = std.fs.cwd().openFile(path, .{}) catch {
+        return .{ .string = try ctx.createString(mimeFromExt(path)) };
+    };
+    defer file.close();
+    var buf: [16]u8 = undefined;
+    const n = file.read(&buf) catch return .{ .string = try ctx.createString(mimeFromExt(path)) };
+    if (detectMimeFromBytes(buf[0..n])) |m| return .{ .string = try ctx.createString(m) };
+    return .{ .string = try ctx.createString(mimeFromExt(path)) };
+}
+
+const c_statvfs = @cImport({
+    @cInclude("sys/statvfs.h");
+});
+
+fn native_disk_free_space(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len == 0 or args[0] != .string) return .{ .bool = false };
+    const path_z = try ctx.allocator.allocSentinel(u8, args[0].string.len, 0);
+    defer ctx.allocator.free(path_z);
+    @memcpy(path_z[0..args[0].string.len], args[0].string);
+    var st: c_statvfs.struct_statvfs = undefined;
+    if (c_statvfs.statvfs(path_z, &st) != 0) return .{ .bool = false };
+    return .{ .float = @floatFromInt(@as(u64, st.f_bavail) * @as(u64, st.f_frsize)) };
+}
+
+fn native_disk_total_space(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len == 0 or args[0] != .string) return .{ .bool = false };
+    const path_z = try ctx.allocator.allocSentinel(u8, args[0].string.len, 0);
+    defer ctx.allocator.free(path_z);
+    @memcpy(path_z[0..args[0].string.len], args[0].string);
+    var st: c_statvfs.struct_statvfs = undefined;
+    if (c_statvfs.statvfs(path_z, &st) != 0) return .{ .bool = false };
+    return .{ .float = @floatFromInt(@as(u64, st.f_blocks) * @as(u64, st.f_frsize)) };
+}
+
+fn native_linkinfo(_: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len == 0 or args[0] != .string) return .{ .int = -1 };
+    const stat = std.fs.cwd().statFile(args[0].string) catch return .{ .int = -1 };
+    return .{ .int = @intCast(stat.inode) };
+}
+
+fn native_finfo_open(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const obj = try ctx.allocator.create(PhpObject);
+    obj.* = .{ .class_name = "finfo" };
+    try ctx.vm.objects.append(ctx.allocator, obj);
+    return .{ .object = obj };
+}
+
+fn native_finfo_file(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len < 2 or args[1] != .string) return .{ .bool = false };
+    return native_mime_content_type(ctx, &.{args[1]});
+}
+
+fn native_finfo_buffer(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len < 2 or args[1] != .string) return .{ .bool = false };
+    if (detectMimeFromBytes(args[1].string)) |m| return .{ .string = try ctx.createString(m) };
+    return .{ .string = "application/octet-stream" };
+}
+
+fn native_finfo_close(_: *NativeContext, _: []const Value) RuntimeError!Value {
     return .{ .bool = true };
 }
