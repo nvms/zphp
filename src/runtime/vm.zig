@@ -481,6 +481,7 @@ pub const VM = struct {
         try @import("../stdlib/datetime.zig").register(vm, allocator);
         try @import("../stdlib/spl.zig").register(vm, allocator);
         try @import("../stdlib/spl_iterators.zig").register(vm, allocator);
+        try @import("../stdlib/spl_file.zig").register(vm, allocator);
         try @import("../stdlib/pdo.zig").register(vm, allocator);
         try @import("../stdlib/websocket.zig").register(vm, allocator);
         try @import("../stdlib/filesystem.zig").register(vm, allocator);

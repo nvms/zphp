@@ -25,6 +25,12 @@ pub const entries = .{
     .{ "set_time_limit", native_set_time_limit },
     .{ "request_parse_body", native_request_parse_body },
     .{ "trait_exists", native_trait_exists },
+    .{ "shell_exec", native_shell_exec },
+    .{ "exec", native_exec },
+    .{ "system", native_system },
+    .{ "passthru", native_passthru },
+    .{ "escapeshellarg", native_escapeshellarg },
+    .{ "escapeshellcmd", native_escapeshellcmd },
 };
 
 fn native_sleep(_: *NativeContext, args: []const Value) RuntimeError!Value {
@@ -302,4 +308,162 @@ fn native_trait_exists(ctx: *NativeContext, args: []const Value) RuntimeError!Va
     if (args.len == 0 or args[0] != .string) return .{ .bool = false };
     const name = args[0].string;
     return .{ .bool = ctx.vm.traits.contains(name) };
+}
+
+fn runShell(allocator: std.mem.Allocator, command: []const u8, capture: bool) !std.process.Child.RunResult {
+    const argv = [_][]const u8{ "/bin/sh", "-c", command };
+    return std.process.Child.run(.{
+        .allocator = allocator,
+        .argv = &argv,
+        .max_output_bytes = if (capture) 64 * 1024 * 1024 else 1024,
+    });
+}
+
+fn native_shell_exec(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len < 1 or args[0] != .string) return .null;
+    const result = runShell(ctx.allocator, args[0].string, true) catch return .null;
+    defer ctx.allocator.free(result.stderr);
+    if (result.stdout.len == 0) {
+        ctx.allocator.free(result.stdout);
+        return .null;
+    }
+    try ctx.vm.strings.append(ctx.allocator, result.stdout);
+    return .{ .string = result.stdout };
+}
+
+fn native_exec(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len < 1 or args[0] != .string) return .{ .bool = false };
+    const result = runShell(ctx.allocator, args[0].string, true) catch return .{ .bool = false };
+    defer ctx.allocator.free(result.stderr);
+    defer ctx.allocator.free(result.stdout);
+
+    var lines = std.ArrayListUnmanaged([]const u8){};
+    defer lines.deinit(ctx.allocator);
+    var iter = std.mem.splitScalar(u8, result.stdout, '\n');
+    while (iter.next()) |raw| {
+        var line = raw;
+        if (line.len > 0 and line[line.len - 1] == '\r') line = line[0 .. line.len - 1];
+        try lines.append(ctx.allocator, line);
+    }
+    if (lines.items.len > 0 and lines.items[lines.items.len - 1].len == 0) {
+        _ = lines.pop();
+    }
+
+    // optional output array (param 2, by-ref) - we append lines if it's an array
+    if (args.len >= 2 and args[1] == .array) {
+        for (lines.items) |line| {
+            const copy = try ctx.allocator.dupe(u8, line);
+            try ctx.vm.strings.append(ctx.allocator, copy);
+            try args[1].array.append(ctx.allocator, .{ .string = copy });
+        }
+    }
+    // optional result_code (param 3, by-ref)
+    const exit_code: i64 = switch (result.term) {
+        .Exited => |c| @intCast(c),
+        .Signal => |c| @as(i64, @intCast(c)) + 128,
+        else => -1,
+    };
+    if (args.len >= 3 and args[2] == .array) {
+        try args[2].array.append(ctx.allocator, .{ .int = exit_code });
+    }
+
+    if (lines.items.len == 0) return .{ .string = "" };
+    const last = lines.items[lines.items.len - 1];
+    const copy = try ctx.allocator.dupe(u8, last);
+    try ctx.vm.strings.append(ctx.allocator, copy);
+    return .{ .string = copy };
+}
+
+fn native_system(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len < 1 or args[0] != .string) return .{ .bool = false };
+    const result = runShell(ctx.allocator, args[0].string, true) catch return .{ .bool = false };
+    defer ctx.allocator.free(result.stderr);
+    defer ctx.allocator.free(result.stdout);
+
+    try ctx.vm.output.appendSlice(ctx.allocator, result.stdout);
+
+    const exit_code: i64 = switch (result.term) {
+        .Exited => |c| @intCast(c),
+        .Signal => |c| @as(i64, @intCast(c)) + 128,
+        else => -1,
+    };
+    if (args.len >= 2 and args[1] == .array) {
+        try args[1].array.append(ctx.allocator, .{ .int = exit_code });
+    }
+
+    // last line of output
+    var last_line: []const u8 = "";
+    if (result.stdout.len > 0) {
+        var end = result.stdout.len;
+        if (result.stdout[end - 1] == '\n') end -= 1;
+        const start = if (std.mem.lastIndexOfScalar(u8, result.stdout[0..end], '\n')) |i| i + 1 else 0;
+        last_line = result.stdout[start..end];
+    }
+    const copy = try ctx.allocator.dupe(u8, last_line);
+    try ctx.vm.strings.append(ctx.allocator, copy);
+    return .{ .string = copy };
+}
+
+fn native_passthru(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len < 1 or args[0] != .string) return .null;
+    const result = runShell(ctx.allocator, args[0].string, true) catch return .{ .bool = false };
+    defer ctx.allocator.free(result.stderr);
+    defer ctx.allocator.free(result.stdout);
+    try ctx.vm.output.appendSlice(ctx.allocator, result.stdout);
+    const exit_code: i64 = switch (result.term) {
+        .Exited => |c| @intCast(c),
+        .Signal => |c| @as(i64, @intCast(c)) + 128,
+        else => -1,
+    };
+    if (args.len >= 2 and args[1] == .array) {
+        try args[1].array.append(ctx.allocator, .{ .int = exit_code });
+    }
+    return .null;
+}
+
+fn native_escapeshellarg(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len < 1 or args[0] != .string) return .{ .string = "''" };
+    const s = args[0].string;
+    var buf = std.ArrayListUnmanaged(u8){};
+    try buf.append(ctx.allocator, '\'');
+    for (s) |c| {
+        if (c == 0) continue;
+        if (c == '\'') {
+            try buf.appendSlice(ctx.allocator, "'\\''");
+        } else {
+            try buf.append(ctx.allocator, c);
+        }
+    }
+    try buf.append(ctx.allocator, '\'');
+    const out = try ctx.allocator.dupe(u8, buf.items);
+    buf.deinit(ctx.allocator);
+    try ctx.vm.strings.append(ctx.allocator, out);
+    return .{ .string = out };
+}
+
+fn native_escapeshellcmd(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len < 1 or args[0] != .string) return .{ .string = "" };
+    const s = args[0].string;
+    var buf = std.ArrayListUnmanaged(u8){};
+    var in_squote = false;
+    var in_dquote = false;
+    for (s) |c| {
+        if (c == 0) continue;
+        const is_special = switch (c) {
+            '#', '&', ';', '`', '|', '*', '?', '~', '<', '>', '^', '(', ')', '[', ']', '{', '}', '$', '\\', '\x0a', '\xff' => true,
+            else => false,
+        };
+        if (c == '\'' and !in_dquote) {
+            in_squote = !in_squote;
+        } else if (c == '"' and !in_squote) {
+            in_dquote = !in_dquote;
+        } else if (is_special and !in_squote and !in_dquote) {
+            try buf.append(ctx.allocator, '\\');
+        }
+        try buf.append(ctx.allocator, c);
+    }
+    const out = try ctx.allocator.dupe(u8, buf.items);
+    buf.deinit(ctx.allocator);
+    try ctx.vm.strings.append(ctx.allocator, out);
+    return .{ .string = out };
 }
