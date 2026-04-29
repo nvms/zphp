@@ -2938,6 +2938,14 @@ pub const VM = struct {
                     if (!self.classes.contains(class_name)) {
                         try self.tryAutoload(class_name);
                     }
+                    if (!self.classes.contains(class_name)) {
+                        const ac_drop: usize = arg_count;
+                        self.sp -= ac_drop;
+                        const msg = try std.fmt.allocPrint(self.allocator, "Class \"{s}\" not found", .{class_name});
+                        try self.strings.append(self.allocator, msg);
+                        if (try self.throwBuiltinException("Error", msg)) continue;
+                        return error.RuntimeError;
+                    }
 
                     const obj = try self.allocator.create(PhpObject);
                     obj.* = .{ .class_name = class_name };
@@ -3119,6 +3127,13 @@ pub const VM = struct {
                         return error.RuntimeError;
                     };
                     if (!self.classes.contains(class_name)) try self.tryAutoload(class_name);
+                    if (!self.classes.contains(class_name)) {
+                        self.sp -= ac + 1;
+                        const msg = try std.fmt.allocPrint(self.allocator, "Class \"{s}\" not found", .{class_name});
+                        try self.strings.append(self.allocator, msg);
+                        if (try self.throwBuiltinException("Error", msg)) continue;
+                        return error.RuntimeError;
+                    }
 
                     const obj = try self.allocator.create(PhpObject);
                     obj.* = .{ .class_name = class_name };

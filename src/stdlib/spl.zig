@@ -12,6 +12,10 @@ const RuntimeError = error{ RuntimeError, OutOfMemory };
 const arrays_mod = @import("arrays.zig");
 
 pub fn register(vm: *VM, a: Allocator) !void {
+    // stdClass - the default empty class for casting and json/pdo decoding
+    const std_def = ClassDef{ .name = "stdClass" };
+    try vm.classes.put(a, "stdClass", std_def);
+
     // Countable interface
     var countable = vm_mod.InterfaceDef{ .name = "Countable" };
     try countable.methods.append(a, "count");
