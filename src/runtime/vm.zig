@@ -4384,7 +4384,7 @@ pub const VM = struct {
                                 const sc_saved_fc = self.frame_count;
                                 self.frames[self.frame_count].entry_sp = self.sp;
                     self.frame_count += 1;
-                                var ctx = self.makeContext(null);
+                                var ctx = self.makeContext(full_name);
                                 const result = native(&ctx, args_buf[0..ac]) catch {
                                     if (self.frame_count > sc_saved_fc) {
                                         self.frame_count -= 1;

@@ -551,6 +551,14 @@ pub const Compiler = struct {
                 if (val_node.tag == .list_destructure or val_node.tag == .array_literal) {
                     try self.compileDestructure(val_node);
                     try self.emitOp(.pop);
+                } else if (val_node.tag == .property_access) {
+                    try self.compileNode(val_node.data.lhs);
+                    try self.emitOp(.swap);
+                    const prop_name = self.propName(val_node);
+                    const prop_idx = try self.addConstant(.{ .string = prop_name });
+                    try self.emitOp(.set_prop);
+                    try self.emitU16(prop_idx);
+                    try self.emitOp(.pop);
                 } else {
                     const name = self.ast.tokenSlice(val_node.main_token);
                     try self.emitSetVar(name);
