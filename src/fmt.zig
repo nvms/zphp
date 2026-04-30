@@ -765,7 +765,7 @@ const Formatter = struct {
         const is_ref = (flags & 2) != 0;
         const promotion = (flags >> 2) & 0x3;
         const is_readonly = (flags & 16) != 0;
-        const type_extra_plus_one = flags >> 5;
+        const type_extra_plus_one = flags >> 7;
 
         switch (promotion) {
             1 => self.write("public "),
