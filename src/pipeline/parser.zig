@@ -1048,17 +1048,28 @@ const Parser = struct {
             var is_abstract = false;
             var is_readonly = false;
             var visibility: u32 = 0;
+            var set_visibility: u32 = 0;
+            var has_set_vis = false;
             while (self.peek() == .kw_public or self.peek() == .kw_protected or
                 self.peek() == .kw_private or self.peek() == .kw_static or
                 self.peek() == .kw_abstract or self.peek() == .kw_readonly)
             {
-                if (self.peek() == .kw_static) is_static = true;
-                if (self.peek() == .kw_abstract) is_abstract = true;
-                if (self.peek() == .kw_readonly) is_readonly = true;
-                if (self.peek() == .kw_protected) visibility = 1;
-                if (self.peek() == .kw_private) visibility = 2;
+                if (self.peek() == .kw_static) { is_static = true; _ = self.advance(); continue; }
+                if (self.peek() == .kw_abstract) { is_abstract = true; _ = self.advance(); continue; }
+                if (self.peek() == .kw_readonly) { is_readonly = true; _ = self.advance(); continue; }
+                const vis_val: u32 = if (self.peek() == .kw_protected) 1 else if (self.peek() == .kw_private) 2 else 0;
                 _ = self.advance();
+                if (self.peek() == .l_paren and self.peekAt(1) == .identifier and std.mem.eql(u8, self.lexemeAt(1), "set") and self.peekAt(2) == .r_paren) {
+                    _ = self.advance();
+                    _ = self.advance();
+                    _ = self.advance();
+                    set_visibility = vis_val;
+                    has_set_vis = true;
+                } else {
+                    visibility = vis_val;
+                }
             }
+            if (!has_set_vis) set_visibility = visibility;
 
             if (self.peek() == .kw_use) {
                 try members.append(self.allocator, try self.parseTraitUse());
@@ -1078,7 +1089,7 @@ const Parser = struct {
                 if (is_static) {
                     self.nodes.items[prop].tag = .static_class_property;
                 }
-                self.nodes.items[prop].data.rhs = visibility | (if (is_readonly) @as(u32, 4) else 0);
+                self.nodes.items[prop].data.rhs = visibility | (if (is_readonly) @as(u32, 4) else 0) | (set_visibility << 3) | (if (has_set_vis) @as(u32, 1) << 5 else 0);
                 try members.append(self.allocator, prop);
             } else if (self.peek() == .kw_const) {
                 try members.append(self.allocator, try self.parseConstDecl());
@@ -1089,7 +1100,7 @@ const Parser = struct {
                     if (is_static) {
                         self.nodes.items[prop].tag = .static_class_property;
                     }
-                    self.nodes.items[prop].data.rhs = visibility | (if (is_readonly) @as(u32, 4) else 0);
+                    self.nodes.items[prop].data.rhs = visibility | (if (is_readonly) @as(u32, 4) else 0) | (set_visibility << 3) | (if (has_set_vis) @as(u32, 1) << 5 else 0);
                     try members.append(self.allocator, prop);
                 } else {
                     _ = self.advance();
@@ -1189,18 +1200,29 @@ const Parser = struct {
             var is_final = false;
             var is_readonly = false;
             var visibility: u32 = 0; // 0=public, 1=protected, 2=private
+            var set_visibility: u32 = 0;
+            var has_set_vis = false;
             while (self.peek() == .kw_public or self.peek() == .kw_protected or
                 self.peek() == .kw_private or self.peek() == .kw_static or
                 self.peek() == .kw_abstract or self.peek() == .kw_final or self.peek() == .kw_readonly)
             {
-                if (self.peek() == .kw_static) is_static = true;
-                if (self.peek() == .kw_abstract) is_abstract = true;
-                if (self.peek() == .kw_final) is_final = true;
-                if (self.peek() == .kw_readonly) is_readonly = true;
-                if (self.peek() == .kw_protected) visibility = 1;
-                if (self.peek() == .kw_private) visibility = 2;
+                if (self.peek() == .kw_static) { is_static = true; _ = self.advance(); continue; }
+                if (self.peek() == .kw_abstract) { is_abstract = true; _ = self.advance(); continue; }
+                if (self.peek() == .kw_final) { is_final = true; _ = self.advance(); continue; }
+                if (self.peek() == .kw_readonly) { is_readonly = true; _ = self.advance(); continue; }
+                const vis_val: u32 = if (self.peek() == .kw_protected) 1 else if (self.peek() == .kw_private) 2 else 0;
                 _ = self.advance();
+                if (self.peek() == .l_paren and self.peekAt(1) == .identifier and std.mem.eql(u8, self.lexemeAt(1), "set") and self.peekAt(2) == .r_paren) {
+                    _ = self.advance();
+                    _ = self.advance();
+                    _ = self.advance();
+                    set_visibility = vis_val;
+                    has_set_vis = true;
+                } else {
+                    visibility = vis_val;
+                }
             }
+            if (!has_set_vis) set_visibility = visibility;
 
             if (self.peek() == .kw_use) {
                 try members.append(self.allocator, try self.parseTraitUse());
@@ -1224,8 +1246,8 @@ const Parser = struct {
                 if (is_static) {
                     self.nodes.items[prop].tag = .static_class_property;
                 }
-                // bits 0-1: visibility, bit 2: readonly
-                self.nodes.items[prop].data.rhs = visibility | (if (is_readonly) @as(u32, 4) else 0);
+                // bits 0-1: read visibility, bit 2: readonly, bits 3-4: set visibility, bit 5: has asymmetric set
+                self.nodes.items[prop].data.rhs = visibility | (if (is_readonly) @as(u32, 4) else 0) | (set_visibility << 3) | (if (has_set_vis) @as(u32, 1) << 5 else 0);
                 try members.append(self.allocator, prop);
             } else if (self.peek() == .kw_const) {
                 try members.append(self.allocator, try self.parseConstDecl());
@@ -1236,7 +1258,7 @@ const Parser = struct {
                     if (is_static) {
                         self.nodes.items[prop].tag = .static_class_property;
                     }
-                    self.nodes.items[prop].data.rhs = visibility | (if (is_readonly) @as(u32, 4) else 0);
+                    self.nodes.items[prop].data.rhs = visibility | (if (is_readonly) @as(u32, 4) else 0) | (set_visibility << 3) | (if (has_set_vis) @as(u32, 1) << 5 else 0);
                     try members.append(self.allocator, prop);
                 } else {
                     _ = self.advance();
@@ -1857,15 +1879,31 @@ const Parser = struct {
     fn parseParam(self: *Parser) Error!u32 {
         self.skipAttributes();
         // constructor property promotion: visibility keyword before param
-        // 0 = none, 1 = public, 2 = protected, 3 = private
+        // read-side promotion: 0 = none, 1 = public, 2 = protected, 3 = private
+        // set-side promotion: 0 = no asymmetric override (use read), 1/2/3 same encoding
         var promotion: u32 = 0;
+        var set_promotion: u32 = 0;
         var param_readonly = false;
-        // handle readonly and visibility in any order
-        if (self.peek() == .kw_readonly) { param_readonly = true; _ = self.advance(); }
-        if (self.peek() == .kw_public) { promotion = 1; _ = self.advance(); }
-        else if (self.peek() == .kw_protected) { promotion = 2; _ = self.advance(); }
-        else if (self.peek() == .kw_private) { promotion = 3; _ = self.advance(); }
-        if (self.peek() == .kw_readonly) { param_readonly = true; _ = self.advance(); }
+        // handle readonly + visibility keywords (each may have (set) qualifier)
+        var loop_iters: u32 = 0;
+        while (loop_iters < 4) : (loop_iters += 1) {
+            const tag = self.peek();
+            if (tag == .kw_readonly) { param_readonly = true; _ = self.advance(); continue; }
+            if (tag == .kw_public or tag == .kw_protected or tag == .kw_private) {
+                const vis_val: u32 = if (tag == .kw_public) 1 else if (tag == .kw_protected) 2 else 3;
+                _ = self.advance();
+                if (self.peek() == .l_paren and self.peekAt(1) == .identifier and std.mem.eql(u8, self.lexemeAt(1), "set") and self.peekAt(2) == .r_paren) {
+                    _ = self.advance();
+                    _ = self.advance();
+                    _ = self.advance();
+                    set_promotion = vis_val;
+                } else {
+                    promotion = vis_val;
+                }
+                continue;
+            }
+            break;
+        }
         const type_range = self.collectTypeHint();
         // reference: &$param
         const is_ref = self.peek() == .amp;
@@ -1880,15 +1918,17 @@ const Parser = struct {
             _ = self.advance();
             default = try self.parseExpression();
         }
-        // rhs encoding: bit 0 = variadic, bit 1 = by-reference, bits 2-3 = promotion visibility, bit 4 = readonly
+        // rhs encoding: bit 0 = variadic, bit 1 = by-reference, bits 2-3 = read promotion,
+        // bit 4 = readonly, bits 5-6 = set promotion (0 = same as read), bits 7+ = type_extra
         var flags: u32 = 0;
         if (is_variadic) flags |= 1;
         if (is_ref) flags |= 2;
         flags |= (promotion << 2);
         if (param_readonly) flags |= 16;
+        flags |= (set_promotion << 5);
         if (type_range[0] != type_range[1]) {
             const type_extra = try self.addExtra(&type_range);
-            flags |= ((type_extra + 1) << 5);
+            flags |= ((type_extra + 1) << 7);
         }
         return self.addNode(.{ .tag = .variable, .main_token = tok, .data = .{ .lhs = default, .rhs = flags } });
     }

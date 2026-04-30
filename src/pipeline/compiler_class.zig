@@ -372,14 +372,14 @@ fn extractParamTypes(self: *Compiler, param_nodes: []const u32) Error![]const []
     var has_any = false;
     for (param_nodes) |p| {
         const rhs = self.ast.nodes[p].data.rhs;
-        if ((rhs >> 5) != 0) { has_any = true; break; }
+        if ((rhs >> 7) != 0) { has_any = true; break; }
     }
     if (!has_any) return &.{};
 
     const types = try self.allocator.alloc([]const u8, param_nodes.len);
     for (param_nodes, 0..) |p, i| {
         const rhs = self.ast.nodes[p].data.rhs;
-        const type_extra_idx = rhs >> 5;
+        const type_extra_idx = rhs >> 7;
         if (type_extra_idx == 0) {
             types[i] = "";
         } else {
@@ -945,9 +945,11 @@ pub fn compileClassDecl(self: *Compiler, node: Ast.Node) Error!void {
             const pname_idx = try self.addConstant(.{ .string = param_name });
             try self.emitU16(pname_idx);
             try self.emitByte(1); // has default (null placeholder)
-            // bits 0-1: visibility, bit 2: readonly
+            // bits 0-1: visibility, bit 2: readonly, bits 3-4: set visibility, bit 5: has asymmetric set
             const is_ro: u8 = if ((pnode.data.rhs & 16) != 0) 4 else 0;
-            try self.emitByte(@as(u8, @intCast(promotion - 1)) | is_ro);
+            const set_promo = (pnode.data.rhs >> 5) & 3;
+            const asymm_bits: u8 = if (set_promo > 0) (@as(u8, @intCast(set_promo - 1)) << 3) | 0x20 else 0;
+            try self.emitByte(@as(u8, @intCast(promotion - 1)) | is_ro | asymm_bits);
         }
     }
 
@@ -1337,7 +1339,9 @@ pub fn compileAnonymousClass(self: *Compiler, node: Ast.Node) Error!void {
             try self.emitU16(pname_idx);
             try self.emitByte(1);
             const is_ro: u8 = if ((pnode.data.rhs & 16) != 0) 4 else 0;
-            try self.emitByte(@as(u8, @intCast(promotion - 1)) | is_ro);
+            const set_promo = (pnode.data.rhs >> 5) & 3;
+            const asymm_bits: u8 = if (set_promo > 0) (@as(u8, @intCast(set_promo - 1)) << 3) | 0x20 else 0;
+            try self.emitByte(@as(u8, @intCast(promotion - 1)) | is_ro | asymm_bits);
         }
     }
 

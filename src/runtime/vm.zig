@@ -245,6 +245,7 @@ pub const ClassDef = struct {
         name: []const u8,
         default: Value,
         visibility: Visibility = .public,
+        set_visibility: Visibility = .public,
         is_readonly: bool = false,
     };
 
@@ -3342,6 +3343,14 @@ pub const VM = struct {
                                 if (try self.throwBuiltinException("Error", msg)) continue;
                                 return error.RuntimeError;
                             }
+                            if (vr.set_visibility != vr.visibility and !self.checkVisibility(vr.defining_class, vr.set_visibility)) {
+                                const msg = try std.fmt.allocPrint(self.allocator, "Cannot modify {s}(set) property {s}::${s} from global scope", .{
+                                    @tagName(vr.set_visibility), vr.defining_class, prop_name,
+                                });
+                                try self.strings.append(self.allocator, msg);
+                                if (try self.throwBuiltinException("Error", msg)) continue;
+                                return error.RuntimeError;
+                            }
                             if (vr.is_readonly) {
                                 const existing = obj.get(prop_name);
                                 if (existing != .null) {
@@ -3356,7 +3365,7 @@ pub const VM = struct {
                             try obj.set(self.allocator, prop_name, val);
                             // populate IC for slot-indexed writes
                             if (self.ic) |ic| {
-                                if (vr.visibility == .public) {
+                                if (vr.visibility == .public and vr.set_visibility == .public) {
                                     const sp_idx = InlineCache.propIndex(@intFromPtr(self.currentChunk()), sp_ip);
                                     const si = if (obj.slot_layout != null) obj.getSlotIndex(prop_name) orelse @as(u16, 0xFFFF) else @as(u16, 0xFFFF);
                                     ic.prop[sp_idx] = .{ .key = sp_ip, .chunk_key = @intFromPtr(self.currentChunk()), .class_ptr = @intFromPtr(obj.class_name.ptr), .slot_index = si };
@@ -5403,6 +5412,7 @@ pub const VM = struct {
         var prop_names: [256][]const u8 = undefined;
         var prop_has_default: [256]u8 = undefined;
         var prop_vis: [256]ClassDef.Visibility = undefined;
+        var prop_set_vis: [256]ClassDef.Visibility = undefined;
         var prop_readonly: [256]bool = .{false} ** 256;
         for (0..prop_count) |pi| {
             const pname_idx = self.readU16();
@@ -5411,6 +5421,8 @@ pub const VM = struct {
             const vis_byte = self.readByte();
             prop_vis[pi] = @enumFromInt(vis_byte & 0x03);
             prop_readonly[pi] = (vis_byte & 0x04) != 0;
+            const has_asymm = (vis_byte & 0x20) != 0;
+            prop_set_vis[pi] = if (has_asymm) @enumFromInt((vis_byte >> 3) & 0x03) else prop_vis[pi];
         }
 
         const static_prop_count = self.readU16();
@@ -5439,6 +5451,7 @@ pub const VM = struct {
                 .name = prop_names[pi],
                 .default = default_val,
                 .visibility = prop_vis[pi],
+                .set_visibility = prop_set_vis[pi],
                 .is_readonly = prop_readonly[pi],
             });
         }
@@ -6955,14 +6968,14 @@ pub const VM = struct {
         return self.isInstanceOf(caller_class, target_class) or self.isInstanceOf(target_class, caller_class);
     }
 
-    pub const VisResult = struct { visibility: ClassDef.Visibility, defining_class: []const u8, is_readonly: bool = false };
+    pub const VisResult = struct { visibility: ClassDef.Visibility, defining_class: []const u8, is_readonly: bool = false, set_visibility: ClassDef.Visibility = .public };
 
     pub fn findPropertyVisibility(self: *VM, class_name: []const u8, prop_name: []const u8) VisResult {
         var current: ?[]const u8 = class_name;
         while (current) |cn| {
             if (self.classes.get(cn)) |cls| {
                 for (cls.properties.items) |prop| {
-                    if (std.mem.eql(u8, prop.name, prop_name)) return .{ .visibility = prop.visibility, .defining_class = cn, .is_readonly = prop.is_readonly };
+                    if (std.mem.eql(u8, prop.name, prop_name)) return .{ .visibility = prop.visibility, .defining_class = cn, .is_readonly = prop.is_readonly, .set_visibility = prop.set_visibility };
                 }
                 current = cls.parent;
             } else break;
