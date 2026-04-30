@@ -1636,8 +1636,74 @@ const Parser = struct {
             _ = self.advance();
             default = try self.parseExpression();
         }
+        if (self.peek() == .l_brace) {
+            return self.parsePropertyHooks(tok, default);
+        }
         _ = try self.expect(.semicolon);
         return self.addNode(.{ .tag = .class_property, .main_token = tok, .data = .{ .lhs = default } });
+    }
+
+    fn parsePropertyHooks(self: *Parser, name_tok: u32, default: u32) Error!u32 {
+        _ = self.advance(); // {
+        var get_body: u32 = 0;
+        var set_body: u32 = 0;
+        var set_param_tok: u32 = 0;
+        var get_short: u32 = 0;
+        var set_short: u32 = 0;
+        while (self.peek() != .r_brace and self.peek() != .eof) {
+            // skip attributes / final / & before the hook name
+            self.skipAttributes();
+            if (self.peek() == .kw_final) _ = self.advance();
+            const is_ref = self.peek() == .amp;
+            if (is_ref) _ = self.advance();
+            if (self.peek() != .identifier) {
+                _ = self.advance();
+                continue;
+            }
+            const hook_name = self.tokens[self.pos].lexeme(self.source);
+            const is_get = std.mem.eql(u8, hook_name, "get");
+            const is_set = std.mem.eql(u8, hook_name, "set");
+            if (!is_get and !is_set) {
+                _ = self.advance();
+                continue;
+            }
+            _ = self.advance(); // get/set
+
+            // optional set parameter list: set(type? $value)
+            var local_set_param: u32 = 0;
+            if (is_set and self.peek() == .l_paren) {
+                _ = self.advance();
+                if (self.peek() != .r_paren) {
+                    self.skipTypeHint();
+                    if (self.peek() == .amp) _ = self.advance();
+                    if (self.peek() == .variable) {
+                        local_set_param = self.advance();
+                    }
+                }
+                _ = try self.expect(.r_paren);
+            }
+
+            if (self.peek() == .fat_arrow) {
+                _ = self.advance();
+                const expr = try self.parseExpression();
+                _ = try self.expect(.semicolon);
+                if (is_get) { get_body = expr; get_short = 1; }
+                else { set_body = expr; set_short = 1; set_param_tok = local_set_param; }
+            } else if (self.peek() == .l_brace) {
+                const block = try self.parseBlock();
+                if (is_get) { get_body = block; }
+                else { set_body = block; set_param_tok = local_set_param; }
+            } else if (self.peek() == .semicolon) {
+                // abstract hook in interface (rare); skip
+                _ = self.advance();
+            } else {
+                _ = self.advance();
+            }
+        }
+        _ = try self.expect(.r_brace);
+
+        const extra_idx = try self.addExtra(&[_]u32{ default, get_body, set_body, set_param_tok, get_short, set_short });
+        return self.addNode(.{ .tag = .class_property_hooks, .main_token = name_tok, .data = .{ .lhs = extra_idx } });
     }
 
     fn parseClosureExpr(self: *Parser) Error!u32 {

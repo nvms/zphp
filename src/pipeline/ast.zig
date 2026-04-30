@@ -122,6 +122,8 @@ pub const Ast = struct {
             class_decl, // main_token = class name, lhs = extra index -> {count, member_nodes...}, rhs = extra index -> {parent_node, implements_count, implements_nodes...}
             class_method, // main_token = method name, lhs = extra index -> {count, param...}, rhs = body block
             class_property, // main_token = property variable, lhs = default value (0 = none)
+            class_property_hooks, // main_token = property variable, lhs = extra index -> {default, get_body, set_body, set_param_tok, get_short, set_short}, rhs = visibility flags
+
             static_class_method, // same as class_method but static
             static_class_property, // same as class_property but static
             interface_decl, // main_token = interface name, lhs = extra index -> {count, method_nodes...}, rhs = extra index -> {parent_count, parent_nodes...} (0 = no parents)

@@ -351,6 +351,7 @@ pub const VM = struct {
     autoload_depth: u8 = 0,
     magic_get_guard: std.ArrayListUnmanaged(struct { obj_ptr: usize, prop_name: []const u8 }) = .{},
     magic_call_guard: std.ArrayListUnmanaged(struct { obj_ptr: usize, method_name: []const u8 }) = .{},
+    prop_hook_guard: std.ArrayListUnmanaged(struct { obj_ptr: usize, prop_name: []const u8 }) = .{},
     user_error_handler: ?Value = null,
     prev_error_handler: ?Value = null,
     error_reporting_level: i64 = 32767,
@@ -813,6 +814,7 @@ pub const VM = struct {
         self.autoload_callbacks.deinit(self.allocator);
         self.magic_get_guard.deinit(self.allocator);
         self.magic_call_guard.deinit(self.allocator);
+        self.prop_hook_guard.deinit(self.allocator);
         for (self.serve_cache_keys.items) |k| self.allocator.free(k);
         self.serve_cache_keys.deinit(self.allocator);
         self.serve_compile_cache.deinit(self.allocator);
@@ -3223,6 +3225,15 @@ pub const VM = struct {
                     if (obj_val == .object) {
                         const obj = obj_val.object;
 
+                        // property hooks: dispatch to get hook if present (and not recursing)
+                        if (self.hasPropHook(obj.class_name, prop_name, .get) and !self.inPropHook(obj, prop_name)) {
+                            const hook_result = try self.callPropHook(obj, prop_name, .get, .null);
+                            if (hook_result) |hv| {
+                                self.push(hv);
+                                continue;
+                            }
+                        }
+
                         // IC: slot-indexed fast path
                         if (self.ic) |ic| {
                             const gp_idx = InlineCache.propIndex(@intFromPtr(self.currentChunk()), gp_ip);
@@ -3316,6 +3327,15 @@ pub const VM = struct {
                     const obj_val = self.pop();
                     if (obj_val == .object) {
                         const obj = obj_val.object;
+
+                        // property hooks: dispatch to set hook if present (and not recursing)
+                        if (self.hasPropHook(obj.class_name, prop_name, .set) and !self.inPropHook(obj, prop_name)) {
+                            const hook_result = try self.callPropHook(obj, prop_name, .set, val);
+                            if (hook_result != null) {
+                                self.push(val);
+                                continue;
+                            }
+                        }
 
                         // IC: slot-indexed fast path
                         if (self.ic) |ic| {
@@ -7161,6 +7181,54 @@ pub const VM = struct {
             if (best) |b| return b;
         }
         return null;
+    }
+
+    pub fn propHookName(self: *VM, prop_name: []const u8, kind: enum { get, set }) ?[]const u8 {
+        const suffix = switch (kind) { .get => "$hook_get", .set => "$hook_set" };
+        const name = std.fmt.allocPrint(self.allocator, "{s}{s}", .{ prop_name, suffix }) catch return null;
+        self.strings.append(self.allocator, name) catch {
+            self.allocator.free(name);
+            return null;
+        };
+        return name;
+    }
+
+    pub fn inPropHook(self: *VM, obj: *PhpObject, prop_name: []const u8) bool {
+        const obj_id = @intFromPtr(obj);
+        for (self.prop_hook_guard.items) |g| {
+            if (g.obj_ptr == obj_id and std.mem.eql(u8, g.prop_name, prop_name)) return true;
+        }
+        return false;
+    }
+
+    pub fn callPropHook(self: *VM, obj: *PhpObject, prop_name: []const u8, kind: enum { get, set }, value: Value) RuntimeError!?Value {
+        if (self.inPropHook(obj, prop_name)) return null;
+        const suffix = switch (kind) { .get => "$hook_get", .set => "$hook_set" };
+        const hook_name = try std.fmt.allocPrint(self.allocator, "{s}{s}", .{ prop_name, suffix });
+        try self.strings.append(self.allocator, hook_name);
+        if (!self.hasMethod(obj.class_name, hook_name)) return null;
+        const obj_id = @intFromPtr(obj);
+        try self.prop_hook_guard.append(self.allocator, .{ .obj_ptr = obj_id, .prop_name = prop_name });
+        defer {
+            var i: usize = self.prop_hook_guard.items.len;
+            while (i > 0) {
+                i -= 1;
+                const g = self.prop_hook_guard.items[i];
+                if (g.obj_ptr == obj_id and std.mem.eql(u8, g.prop_name, prop_name)) {
+                    _ = self.prop_hook_guard.swapRemove(i);
+                    break;
+                }
+            }
+        }
+        const args: []const Value = if (kind == .set) &.{value} else &.{};
+        return try self.callMethod(obj, hook_name, args);
+    }
+
+    pub fn hasPropHook(self: *VM, class_name: []const u8, prop_name: []const u8, kind: enum { get, set }) bool {
+        const suffix = switch (kind) { .get => "$hook_get", .set => "$hook_set" };
+        var buf: [256]u8 = undefined;
+        const hook_name = std.fmt.bufPrint(&buf, "{s}{s}", .{ prop_name, suffix }) catch return false;
+        return self.hasMethod(class_name, hook_name);
     }
 
     pub fn hasMethod(self: *VM, class_name: []const u8, method_name: []const u8) bool {

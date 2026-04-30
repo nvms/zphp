@@ -797,6 +797,23 @@ pub fn compileClassDecl(self: *Compiler, node: Ast.Node) Error!void {
         } else if (member.tag == .interface_method) {
             try compileInterfaceMethodStub(self, class_name, member);
             method_count += 1;
+        } else if (member.tag == .class_property_hooks) {
+            const ext = member.data.lhs;
+            const get_body = self.ast.extra_data[ext + 1];
+            const set_body = self.ast.extra_data[ext + 2];
+            const set_param_tok = self.ast.extra_data[ext + 3];
+            const get_short = self.ast.extra_data[ext + 4];
+            const set_short = self.ast.extra_data[ext + 5];
+            var prop_name = self.ast.tokenSlice(member.main_token);
+            if (prop_name.len > 0 and prop_name[0] == '$') prop_name = prop_name[1..];
+            if (get_body != 0) {
+                try compilePropertyHook(self, class_name, prop_name, get_body, .get, get_short != 0, 0);
+                method_count += 1;
+            }
+            if (set_body != 0) {
+                try compilePropertyHook(self, class_name, prop_name, set_body, .set, set_short != 0, set_param_tok);
+                method_count += 1;
+            }
         }
     }
 
@@ -834,7 +851,7 @@ pub fn compileClassDecl(self: *Compiler, node: Ast.Node) Error!void {
     var prop_count: u16 = 0;
     for (members) |member_idx| {
         const member = self.ast.nodes[member_idx];
-        if (member.tag == .class_property) prop_count += 1;
+        if (member.tag == .class_property or member.tag == .class_property_hooks) prop_count += 1;
     }
     prop_count += @intCast(trait_prop_members.items.len);
     prop_count += promoted_count;
@@ -844,6 +861,9 @@ pub fn compileClassDecl(self: *Compiler, node: Ast.Node) Error!void {
             if (member.data.lhs != 0) {
                 try self.compileNode(member.data.lhs);
             }
+        } else if (member.tag == .class_property_hooks) {
+            const default_idx = self.ast.extra_data[member.data.lhs];
+            if (default_idx != 0) try self.compileNode(default_idx);
         }
     }
     // compile trait property defaults
@@ -900,6 +920,32 @@ pub fn compileClassDecl(self: *Compiler, node: Ast.Node) Error!void {
             // method flags: bit 0 = abstract, bit 1 = final
             const m_final: u8 = if ((member.data.rhs >> 28) & 1 == 1) 2 else 0;
             try self.emitByte(m_final);
+        } else if (member.tag == .class_property_hooks) {
+            const ext = member.data.lhs;
+            const get_body = self.ast.extra_data[ext + 1];
+            const set_body = self.ast.extra_data[ext + 2];
+            var prop_name = self.ast.tokenSlice(member.main_token);
+            if (prop_name.len > 0 and prop_name[0] == '$') prop_name = prop_name[1..];
+            if (get_body != 0) {
+                const hk_name = try std.fmt.allocPrint(self.allocator, "{s}$hook_get", .{prop_name});
+                try self.string_allocs.append(self.allocator, hk_name);
+                const mname_idx = try self.addConstant(.{ .string = hk_name });
+                try self.emitU16(mname_idx);
+                try self.emitByte(0); // arity
+                try self.emitByte(0); // not static
+                try self.emitByte(2); // private vis
+                try self.emitByte(0); // flags
+            }
+            if (set_body != 0) {
+                const hk_name = try std.fmt.allocPrint(self.allocator, "{s}$hook_set", .{prop_name});
+                try self.string_allocs.append(self.allocator, hk_name);
+                const mname_idx = try self.addConstant(.{ .string = hk_name });
+                try self.emitU16(mname_idx);
+                try self.emitByte(1); // arity
+                try self.emitByte(0); // not static
+                try self.emitByte(2); // private vis
+                try self.emitByte(0); // flags
+            }
         } else if (member.tag == .interface_method) {
             const method_name_str = self.ast.tokenSlice(member.main_token);
             const mname_idx = try self.addConstant(.{ .string = method_name_str });
@@ -922,6 +968,14 @@ pub fn compileClassDecl(self: *Compiler, node: Ast.Node) Error!void {
             const pname_idx = try self.addConstant(.{ .string = prop_name });
             try self.emitU16(pname_idx);
             try self.emitByte(if (member.data.lhs != 0) @as(u8, 1) else @as(u8, 0));
+            try self.emitByte(@intCast(member.data.rhs));
+        } else if (member.tag == .class_property_hooks) {
+            var prop_name = self.ast.tokenSlice(member.main_token);
+            if (prop_name.len > 0 and prop_name[0] == '$') prop_name = prop_name[1..];
+            const pname_idx = try self.addConstant(.{ .string = prop_name });
+            try self.emitU16(pname_idx);
+            const default_idx = self.ast.extra_data[member.data.lhs];
+            try self.emitByte(if (default_idx != 0) @as(u8, 1) else @as(u8, 0));
             try self.emitByte(@intCast(member.data.rhs));
         }
     }
@@ -2027,6 +2081,119 @@ fn compileClassMethodBody(self: *Compiler, class_name: []const u8, member: Ast.N
     sub.string_allocs.deinit(self.allocator);
     for (sub.type_hints.items) |th| try self.type_hints.append(self.allocator, th);
     sub.type_hints.deinit(self.allocator);
+    for (sub.new_defaults.items) |nd| try self.new_defaults.append(self.allocator, nd);
+    sub.new_defaults.deinit(self.allocator);
+}
+
+const HookKind = enum { get, set };
+
+fn compilePropertyHook(self: *Compiler, class_name: []const u8, prop_name: []const u8, body_idx: u32, kind: HookKind, is_short: bool, set_param_tok: u32) Error!void {
+    const suffix = if (kind == .get) "$hook_get" else "$hook_set";
+    const full_name = try std.fmt.allocPrint(self.allocator, "{s}::{s}{s}", .{ class_name, prop_name, suffix });
+    try self.string_allocs.append(self.allocator, full_name);
+
+    var param_names_list = std.ArrayListUnmanaged([]const u8){};
+    defer param_names_list.deinit(self.allocator);
+    if (kind == .set) {
+        const pname = if (set_param_tok != 0) self.ast.tokenSlice(set_param_tok) else "$value";
+        try param_names_list.append(self.allocator, pname);
+    }
+    const param_names = try self.allocator.alloc([]const u8, param_names_list.items.len);
+    @memcpy(param_names, param_names_list.items);
+    const ref_flags = try self.allocator.alloc(bool, param_names.len);
+    @memset(ref_flags, false);
+
+    const defaults = try self.allocator.alloc(Value, param_names.len);
+    @memset(defaults, .null);
+
+    var sub = Compiler{
+        .ast = self.ast,
+        .chunk = .{},
+        .functions = .{},
+        .string_allocs = .{},
+        .allocator = self.allocator,
+        .scope_depth = self.scope_depth + 1,
+        .loop_start = null,
+        .break_jumps = .{},
+        .continue_jumps = .{},
+        .closure_count = self.closure_count,
+        .file_path = self.file_path,
+        .namespace = self.namespace,
+        .use_aliases = self.use_aliases,
+        .use_fn_aliases = self.use_fn_aliases,
+        .current_class = class_name,
+        .current_function = full_name,
+    };
+    errdefer {
+        sub.chunk.deinit(self.allocator);
+        sub.break_jumps.deinit(self.allocator);
+        sub.continue_jumps.deinit(self.allocator);
+        sub.string_allocs.deinit(self.allocator);
+        sub.local_slots.deinit(self.allocator);
+        sub.type_hints.deinit(self.allocator);
+        sub.pending_gotos.deinit(self.allocator);
+        sub.labels.deinit(self.allocator);
+    }
+
+    _ = sub.getOrCreateSlot("$this");
+    for (param_names) |pn| _ = sub.getOrCreateSlot(pn);
+
+    if (is_short) {
+        if (kind == .get) {
+            try sub.compileNode(body_idx);
+            try sub.emitOp(.return_val);
+        } else {
+            // set short form: $this->prop = expr (raw write since hook guard is active)
+            const this_slot = sub.local_slots.get("$this") orelse 0;
+            try sub.emitOp(.get_local);
+            try sub.emitU16(this_slot);
+            try sub.compileNode(body_idx);
+            const prop_idx = try sub.addConstant(.{ .string = prop_name });
+            try sub.emitOp(.set_prop);
+            try sub.emitU16(prop_idx);
+            try sub.emitOp(.pop);
+        }
+    } else {
+        try sub.compileNode(body_idx);
+    }
+    for (sub.pending_gotos.items) |pg| {
+        if (sub.labels.get(pg.label)) |target| sub.patchJumpTo(pg.offset, target);
+    }
+    sub.pending_gotos.deinit(self.allocator);
+    sub.labels.deinit(self.allocator);
+    try sub.emitOp(.op_null);
+    try sub.emitOp(.return_val);
+    sub.break_jumps.deinit(self.allocator);
+    sub.continue_jumps.deinit(self.allocator);
+
+    self.closure_count = sub.closure_count;
+    const slot_names = try sub.buildSlotNames();
+    const local_count = sub.next_slot;
+    sub.local_slots.deinit(self.allocator);
+
+    const method_lo = !needsVarSync(&sub.chunk) and sub.closure_count == 0;
+
+    try self.functions.append(self.allocator, .{
+        .name = full_name,
+        .arity = @intCast(param_names.len),
+        .required_params = @intCast(param_names.len),
+        .params = param_names,
+        .defaults = defaults,
+        .ref_params = ref_flags,
+        .chunk = sub.chunk,
+        .locals_only = method_lo,
+        .local_count = local_count,
+        .slot_names = slot_names,
+    });
+
+    for (sub.functions.items) |f| try self.functions.append(self.allocator, f);
+    sub.functions.deinit(self.allocator);
+    for (sub.string_allocs.items) |s| try self.string_allocs.append(self.allocator, s);
+    sub.string_allocs.deinit(self.allocator);
+    for (sub.type_hints.items) |th| try self.type_hints.append(self.allocator, th);
+    sub.type_hints.deinit(self.allocator);
+    for (sub.function_attrs.items) |fa| try self.function_attrs.append(self.allocator, fa);
+    sub.function_attrs.deinit(self.allocator);
     for (sub.new_defaults.items) |nd| try self.new_defaults.append(self.allocator, nd);
     sub.new_defaults.deinit(self.allocator);
 }

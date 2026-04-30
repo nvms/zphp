@@ -323,7 +323,7 @@ fn renderNode(ast: *const Ast, idx: u32, buf: *Buf) !void {
             try w.writeAll(ast.tokenSlice(node.main_token));
             try w.writeByte(')');
         },
-        .class_property => {
+        .class_property, .class_property_hooks => {
             try w.writeAll("(prop ");
             try w.writeAll(ast.tokenSlice(node.main_token));
             try w.writeByte(')');

@@ -316,7 +316,7 @@ const Formatter = struct {
             .trait_decl => self.declLeadingToken(node.main_token, .kw_trait),
             .enum_decl => self.declLeadingToken(node.main_token, .kw_enum),
             .class_method, .static_class_method, .interface_method => self.methodLeadingToken(node.main_token),
-            .class_property, .static_class_property => self.propLeadingToken(node.main_token),
+            .class_property, .class_property_hooks, .static_class_property => self.propLeadingToken(node.main_token),
             .const_decl => self.constLeadingToken(node.main_token),
             else => node.main_token,
         };
@@ -443,7 +443,7 @@ const Formatter = struct {
             .trait_use => self.formatTraitUse(node),
             .trait_insteadof, .trait_as => {},
             .class_method, .static_class_method => self.formatClassMethod(node),
-            .class_property, .static_class_property => self.formatClassProperty(node),
+            .class_property, .class_property_hooks, .static_class_property => self.formatClassProperty(node),
             .interface_method => self.formatInterfaceMethod(node),
 
             .integer_literal, .float_literal, .string_literal => {
