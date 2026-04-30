@@ -239,6 +239,7 @@ pub const PhpObject = struct {
     properties: std.StringHashMapUnmanaged(Value) = .{},
     slots: ?[]Value = null,
     slot_layout: ?*const SlotLayout = null,
+    lazy_initializer: Value = .null,
 
     pub const SlotLayout = struct {
         names: []const []const u8,

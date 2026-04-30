@@ -62,6 +62,11 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try rc_def.methods.put(a, "getProperty", .{ .name = "getProperty", .arity = 1 });
     try rc_def.methods.put(a, "hasProperty", .{ .name = "hasProperty", .arity = 1 });
     try rc_def.methods.put(a, "newInstanceWithoutConstructor", .{ .name = "newInstanceWithoutConstructor", .arity = 0 });
+    try rc_def.methods.put(a, "newLazyGhost", .{ .name = "newLazyGhost", .arity = 1 });
+    try rc_def.methods.put(a, "newLazyProxy", .{ .name = "newLazyProxy", .arity = 1 });
+    try rc_def.methods.put(a, "initializeLazyObject", .{ .name = "initializeLazyObject", .arity = 1 });
+    try rc_def.methods.put(a, "isUninitializedLazyObject", .{ .name = "isUninitializedLazyObject", .arity = 1 });
+    try rc_def.methods.put(a, "markLazyObjectAsInitialized", .{ .name = "markLazyObjectAsInitialized", .arity = 1 });
     try rc_def.methods.put(a, "getShortName", .{ .name = "getShortName", .arity = 0 });
     try rc_def.methods.put(a, "isTrait", .{ .name = "isTrait", .arity = 0 });
     try rc_def.methods.put(a, "getTraitNames", .{ .name = "getTraitNames", .arity = 0 });
@@ -102,6 +107,11 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try vm.native_fns.put(a, "ReflectionClass::getProperty", rcGetProperty);
     try vm.native_fns.put(a, "ReflectionClass::hasProperty", rcHasProperty);
     try vm.native_fns.put(a, "ReflectionClass::newInstanceWithoutConstructor", rcNewInstanceWithoutConstructor);
+    try vm.native_fns.put(a, "ReflectionClass::newLazyGhost", rcNewLazyGhost);
+    try vm.native_fns.put(a, "ReflectionClass::newLazyProxy", rcNewLazyGhost);
+    try vm.native_fns.put(a, "ReflectionClass::initializeLazyObject", rcInitializeLazyObject);
+    try vm.native_fns.put(a, "ReflectionClass::isUninitializedLazyObject", rcIsUninitializedLazyObject);
+    try vm.native_fns.put(a, "ReflectionClass::markLazyObjectAsInitialized", rcMarkLazyObjectAsInitialized);
     try vm.native_fns.put(a, "ReflectionClass::getShortName", rcGetShortName);
     try vm.native_fns.put(a, "ReflectionClass::isTrait", rcIsTrait);
     try vm.native_fns.put(a, "ReflectionClass::getTraitNames", rcGetTraitNames);
@@ -995,6 +1005,35 @@ fn rcHasProperty(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     const this = getThis(ctx) orelse return .{ .bool = false };
     const class_name = if (this.get("name") == .string) this.get("name").string else return .{ .bool = false };
     return .{ .bool = findPropertyDef(ctx.vm, class_name, args[0].string) != null };
+}
+
+fn rcNewLazyGhost(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    const this = getThis(ctx) orelse return .null;
+    const class_name = if (this.get("name") == .string) this.get("name").string else return .null;
+    if (args.len < 1) return .null;
+    const obj = try ctx.vm.allocator.create(PhpObject);
+    obj.* = .{ .class_name = class_name, .lazy_initializer = args[0] };
+    try ctx.vm.objects.append(ctx.vm.allocator, obj);
+    try ctx.vm.initObjectProperties(obj, class_name);
+    return .{ .object = obj };
+}
+
+fn rcInitializeLazyObject(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len < 1 or args[0] != .object) return .null;
+    const obj = args[0].object;
+    try ctx.vm.triggerLazyInit(obj);
+    return .{ .object = obj };
+}
+
+fn rcIsUninitializedLazyObject(_: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len < 1 or args[0] != .object) return .{ .bool = false };
+    return .{ .bool = args[0].object.lazy_initializer != .null };
+}
+
+fn rcMarkLazyObjectAsInitialized(_: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len < 1 or args[0] != .object) return .null;
+    args[0].object.lazy_initializer = .null;
+    return .{ .object = args[0].object };
 }
 
 fn rcNewInstanceWithoutConstructor(ctx: *NativeContext, _: []const Value) RuntimeError!Value {

@@ -3225,6 +3225,8 @@ pub const VM = struct {
                     if (obj_val == .object) {
                         const obj = obj_val.object;
 
+                        if (obj.lazy_initializer != .null) try self.triggerLazyInit(obj);
+
                         // property hooks: dispatch to get hook if present (and not recursing)
                         if (self.hasPropHook(obj.class_name, prop_name, .get) and !self.inPropHook(obj, prop_name)) {
                             const hook_result = try self.callPropHook(obj, prop_name, .get, .null);
@@ -3328,6 +3330,8 @@ pub const VM = struct {
                     if (obj_val == .object) {
                         const obj = obj_val.object;
 
+                        if (obj.lazy_initializer != .null) try self.triggerLazyInit(obj);
+
                         // property hooks: dispatch to set hook if present (and not recursing)
                         if (self.hasPropHook(obj.class_name, prop_name, .set) and !self.inPropHook(obj, prop_name)) {
                             const hook_result = try self.callPropHook(obj, prop_name, .set, val);
@@ -3404,6 +3408,10 @@ pub const VM = struct {
 
                     // object/generator is below args on the stack
                     const obj_val = self.stack[self.sp - ac - 1];
+
+                    if (obj_val == .object and obj_val.object.lazy_initializer != .null) {
+                        try self.triggerLazyInit(obj_val.object);
+                    }
 
                     // generator method dispatch
                     if (obj_val == .generator) {
@@ -7181,6 +7189,17 @@ pub const VM = struct {
             if (best) |b| return b;
         }
         return null;
+    }
+
+    pub fn triggerLazyInit(self: *VM, obj: *PhpObject) RuntimeError!void {
+        if (obj.lazy_initializer == .null) return;
+        const initializer = obj.lazy_initializer;
+        obj.lazy_initializer = .null;
+        var ctx = self.makeContext(null);
+        _ = ctx.invokeCallable(initializer, &.{.{ .object = obj }}) catch |err| {
+            obj.lazy_initializer = initializer;
+            return err;
+        };
     }
 
     pub fn propHookName(self: *VM, prop_name: []const u8, kind: enum { get, set }) ?[]const u8 {
