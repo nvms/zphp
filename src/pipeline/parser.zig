@@ -172,8 +172,11 @@ const Parser = struct {
             .kw_require, .kw_require_once, .kw_include, .kw_include_once => self.parseRequireStmt(),
             .l_brace => self.parseBlock(),
             .semicolon => {
-                _ = self.advance();
-                return self.parseStatement();
+                const tok = self.advance();
+                // empty statement: emit an empty block so callers (block, if-body, etc.)
+                // don't have to recurse past the next non-semicolon token
+                const extra = try self.addExtraList(&.{});
+                return self.addNode(.{ .tag = .block, .main_token = tok, .data = .{ .lhs = extra } });
             },
             .identifier => {
                 if (self.pos + 1 < self.tokens.len and self.tokens[self.pos + 1].tag == .colon) {
