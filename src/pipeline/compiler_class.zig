@@ -533,6 +533,8 @@ pub fn compileFunction(self: *Compiler, node: Ast.Node) Error!void {
     sub.type_hints.deinit(self.allocator);
     for (sub.function_attrs.items) |fa| try self.function_attrs.append(self.allocator, fa);
     sub.function_attrs.deinit(self.allocator);
+    for (sub.new_defaults.items) |nd| try self.new_defaults.append(self.allocator, nd);
+    sub.new_defaults.deinit(self.allocator);
 }
 
 pub fn compileClosure(self: *Compiler, node: Ast.Node) Error!void {
@@ -724,6 +726,8 @@ pub fn compileClosure(self: *Compiler, node: Ast.Node) Error!void {
     sub.type_hints.deinit(self.allocator);
     for (sub.function_attrs.items) |fa| try self.function_attrs.append(self.allocator, fa);
     sub.function_attrs.deinit(self.allocator);
+    for (sub.new_defaults.items) |nd| try self.new_defaults.append(self.allocator, nd);
+    sub.new_defaults.deinit(self.allocator);
 
     const idx = try self.addConstant(.{ .string = owned_name });
     try self.emitConstant(idx);
@@ -2019,6 +2023,8 @@ fn compileClassMethodBody(self: *Compiler, class_name: []const u8, member: Ast.N
     sub.string_allocs.deinit(self.allocator);
     for (sub.type_hints.items) |th| try self.type_hints.append(self.allocator, th);
     sub.type_hints.deinit(self.allocator);
+    for (sub.new_defaults.items) |nd| try self.new_defaults.append(self.allocator, nd);
+    sub.new_defaults.deinit(self.allocator);
 }
 
 fn compileInterfaceMethodStub(self: *Compiler, owner_name: []const u8, member: Ast.Node) Error!void {

@@ -1001,7 +1001,7 @@ pub fn resolveNodeClassName(self: *Compiler, class_node: Ast.Node) ![]const u8 {
     return self.resolveClassName(self.ast.tokenSlice(class_node.main_token));
 }
 
-fn resolveQualifiedNewName(self: *Compiler, node: Ast.Node) !struct { name: []const u8, is_absolute: bool } {
+pub fn resolveQualifiedNewName(self: *Compiler, node: Ast.Node) !struct { name: []const u8, is_absolute: bool } {
     const first = self.ast.tokenSlice(node.main_token);
     const rhs_raw = node.data.rhs & ~(@as(u32, 1) << 31);
     const is_absolute = (node.data.rhs & (1 << 31)) != 0;

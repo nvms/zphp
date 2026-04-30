@@ -290,6 +290,31 @@ pub const Chunk = struct {
     }
 };
 
+pub const NewDefault = struct {
+    class_name: []const u8,
+    args: []Value,
+};
+
+pub const NEW_DEFAULT_PREFIX = "\x00NW\x00";
+
+pub fn isNewDefaultSentinel(s: []const u8) bool {
+    return s.len == NEW_DEFAULT_PREFIX.len + 8 and std.mem.startsWith(u8, s, NEW_DEFAULT_PREFIX);
+}
+
+pub fn newDefaultPtr(s: []const u8) ?*NewDefault {
+    if (!isNewDefaultSentinel(s)) return null;
+    const bytes = s[NEW_DEFAULT_PREFIX.len..][0..8];
+    const ptr_int = std.mem.readInt(u64, bytes, .little);
+    return @ptrFromInt(ptr_int);
+}
+
+pub fn encodeNewDefaultSentinel(allocator: std.mem.Allocator, nd: *const NewDefault) ![]u8 {
+    var buf = try allocator.alloc(u8, NEW_DEFAULT_PREFIX.len + 8);
+    @memcpy(buf[0..NEW_DEFAULT_PREFIX.len], NEW_DEFAULT_PREFIX);
+    std.mem.writeInt(u64, buf[NEW_DEFAULT_PREFIX.len..][0..8], @intFromPtr(nd), .little);
+    return buf;
+}
+
 pub const ObjFunction = struct {
     name: []const u8,
     arity: u8,

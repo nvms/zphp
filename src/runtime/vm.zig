@@ -6,9 +6,10 @@ const Generator = @import("value.zig").Generator;
 const Fiber = @import("value.zig").Fiber;
 const ArrayRefBinding = @import("value.zig").ArrayRefBinding;
 const ObjectRefBinding = @import("value.zig").ObjectRefBinding;
-const Chunk = @import("../pipeline/bytecode.zig").Chunk;
-const OpCode = @import("../pipeline/bytecode.zig").OpCode;
-const ObjFunction = @import("../pipeline/bytecode.zig").ObjFunction;
+const bytecode = @import("../pipeline/bytecode.zig");
+const Chunk = bytecode.Chunk;
+const OpCode = bytecode.OpCode;
+const ObjFunction = bytecode.ObjFunction;
 const CompileResult = @import("../pipeline/compiler.zig").CompileResult;
 const enums = @import("../stdlib/enums.zig");
 
@@ -7418,8 +7419,47 @@ pub const VM = struct {
                     return .null;
                 }
             }
+            // deferred new-expression default: "\x00NW\x00<8 byte ptr>"
+            if (bytecode.newDefaultPtr(s)) |nd| {
+                return self.instantiateForDefault(nd);
+            }
         }
         return val;
+    }
+
+    fn instantiateForDefault(self: *VM, nd: *const bytecode.NewDefault) RuntimeError!Value {
+        var class_name = nd.class_name;
+        if (std.mem.eql(u8, class_name, "self") or std.mem.eql(u8, class_name, "static")) {
+            if (self.currentDefiningClass()) |dc| class_name = dc;
+        } else if (std.mem.eql(u8, class_name, "parent")) {
+            if (self.parentResolvingClass()) |dc| {
+                if (self.classes.get(dc)) |cls| {
+                    if (cls.parent) |p| class_name = p;
+                }
+            }
+        }
+        if (!self.classes.contains(class_name)) {
+            try self.tryAutoload(class_name);
+        }
+        if (!self.classes.contains(class_name)) {
+            const msg = try std.fmt.allocPrint(self.allocator, "Class \"{s}\" not found", .{class_name});
+            try self.strings.append(self.allocator, msg);
+            self.error_msg = msg;
+            return error.RuntimeError;
+        }
+        const obj = try self.allocator.create(PhpObject);
+        obj.* = .{ .class_name = class_name };
+        try self.objects.append(self.allocator, obj);
+        try self.initObjectProperties(obj, class_name);
+
+        var resolved_args: [16]Value = undefined;
+        const n_args = @min(nd.args.len, resolved_args.len);
+        for (0..n_args) |i| resolved_args[i] = try self.resolveDefault(nd.args[i]);
+
+        if (self.resolveMethod(class_name, "__construct") catch null) |_| {
+            _ = try self.callMethod(obj, "__construct", resolved_args[0..n_args]);
+        }
+        return .{ .object = obj };
     }
 
     fn fillDefaults(self: *VM, vars: *std.StringHashMapUnmanaged(Value), func: *const ObjFunction, arg_count: usize) !void {

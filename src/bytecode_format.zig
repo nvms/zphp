@@ -1,14 +1,15 @@
 const std = @import("std");
 const Value = @import("runtime/value.zig").Value;
-const Chunk = @import("pipeline/bytecode.zig").Chunk;
-const ObjFunction = @import("pipeline/bytecode.zig").ObjFunction;
+const bytecode = @import("pipeline/bytecode.zig");
+const Chunk = bytecode.Chunk;
+const ObjFunction = bytecode.ObjFunction;
 const CompileResult = @import("pipeline/compiler.zig").CompileResult;
 const TypeHint = @import("pipeline/compiler.zig").TypeHint;
 
 const Allocator = std.mem.Allocator;
 
 const MAGIC = "ZPHPC\x00";
-const FORMAT_VERSION: u16 = 2;
+const FORMAT_VERSION: u16 = 3;
 
 // tag bytes for serialized values
 const TAG_NULL: u8 = 0;
@@ -18,6 +19,7 @@ const TAG_INT: u8 = 3;
 const TAG_FLOAT: u8 = 4;
 const TAG_STRING: u8 = 5;
 const TAG_EMPTY_ARRAY: u8 = 6;
+const TAG_NEW_DEFAULT: u8 = 7;
 
 const StringTable = struct {
     entries: std.ArrayListUnmanaged([]const u8) = .{},
@@ -54,10 +56,16 @@ pub fn serialize(allocator: Allocator, result: *const CompileResult) ![]u8 {
         _ = try strtab.intern(allocator, func.name);
         for (func.params) |p| _ = try strtab.intern(allocator, p);
         for (func.defaults) |d| {
-            if (d == .string) _ = try strtab.intern(allocator, d.string);
+            if (d == .string and !bytecode.isNewDefaultSentinel(d.string)) _ = try strtab.intern(allocator, d.string);
         }
         for (func.slot_names) |sn| _ = try strtab.intern(allocator, sn);
         try internChunkStrings(allocator, &strtab, &func.chunk);
+    }
+    for (result.new_defaults.items) |nd| {
+        _ = try strtab.intern(allocator, nd.class_name);
+        for (nd.args) |a| {
+            if (a == .string and !bytecode.isNewDefaultSentinel(a.string)) _ = try strtab.intern(allocator, a.string);
+        }
     }
     for (result.type_hints.items) |th| {
         _ = try strtab.intern(allocator, th.name);
@@ -188,8 +196,15 @@ fn serializeValue(buf: *std.ArrayListUnmanaged(u8), allocator: Allocator, strtab
             try writeF64(buf, allocator, f);
         },
         .string => |s| {
-            try buf.append(allocator, TAG_STRING);
-            try writeU32(buf, allocator, try strtab.intern(allocator, s));
+            if (bytecode.newDefaultPtr(s)) |nd| {
+                try buf.append(allocator, TAG_NEW_DEFAULT);
+                try writeU32(buf, allocator, try strtab.intern(allocator, nd.class_name));
+                try buf.append(allocator, @intCast(nd.args.len));
+                for (nd.args) |a| try serializeValue(buf, allocator, strtab, a);
+            } else {
+                try buf.append(allocator, TAG_STRING);
+                try writeU32(buf, allocator, try strtab.intern(allocator, s));
+            }
         },
         .array => {
             if (val.isEmptyArrayDefault()) {
@@ -275,6 +290,13 @@ const Reader = struct {
 
 const DeserializeError = error{ InvalidFormat, UnexpectedEof, OutOfMemory };
 
+const DeserCtx = struct {
+    allocator: Allocator,
+    strings: []const []const u8,
+    new_defaults: *std.ArrayListUnmanaged(*bytecode.NewDefault),
+    string_allocs: *std.ArrayListUnmanaged([]const u8),
+};
+
 pub fn deserialize(allocator: Allocator, data: []const u8) DeserializeError!CompileResult {
     var r = Reader{ .data = data };
 
@@ -313,8 +335,23 @@ pub fn deserialize(allocator: Allocator, data: []const u8) DeserializeError!Comp
     const file_path_idx = r.readU32() catch return error.InvalidFormat;
     const file_path: []const u8 = if (file_path_idx == 0xFFFFFFFF) "" else strings[file_path_idx];
 
+    var new_defaults = std.ArrayListUnmanaged(*bytecode.NewDefault){};
+    errdefer {
+        for (new_defaults.items) |nd| {
+            allocator.free(nd.args);
+            allocator.destroy(nd);
+        }
+        new_defaults.deinit(allocator);
+    }
+    var ctx = DeserCtx{
+        .allocator = allocator,
+        .strings = strings,
+        .new_defaults = &new_defaults,
+        .string_allocs = &string_allocs,
+    };
+
     // main chunk
-    var chunk = deserializeChunk(&r, allocator, strings) catch return error.InvalidFormat;
+    var chunk = deserializeChunk(&r, &ctx) catch return error.InvalidFormat;
     errdefer chunk.deinit(allocator);
 
     // functions
@@ -332,7 +369,7 @@ pub fn deserialize(allocator: Allocator, data: []const u8) DeserializeError!Comp
     }
 
     for (0..func_count) |_| {
-        const func = deserializeFunction(&r, allocator, strings) catch return error.InvalidFormat;
+        const func = deserializeFunction(&r, &ctx) catch return error.InvalidFormat;
         try functions.append(allocator, func);
     }
 
@@ -366,31 +403,34 @@ pub fn deserialize(allocator: Allocator, data: []const u8) DeserializeError!Comp
         .slot_names = slot_names,
         .file_path = file_path,
         .type_hints = type_hints,
+        .new_defaults = new_defaults,
     };
 }
 
-fn deserializeChunk(r: *Reader, allocator: Allocator, strings: []const []const u8) !Chunk {
+fn deserializeChunk(r: *Reader, ctx: *DeserCtx) !Chunk {
     var chunk = Chunk{};
-    errdefer chunk.deinit(allocator);
+    errdefer chunk.deinit(ctx.allocator);
 
     const code_len = try r.readU32();
     const code_data = try r.readSlice(code_len);
-    try chunk.code.appendSlice(allocator, code_data);
+    try chunk.code.appendSlice(ctx.allocator, code_data);
 
     const const_count = try r.readU16();
     for (0..const_count) |_| {
-        try chunk.constants.append(allocator, try deserializeValue(r, strings));
+        try chunk.constants.append(ctx.allocator, try deserializeValue(r, ctx));
     }
 
     const line_count = try r.readU32();
     for (0..line_count) |_| {
-        try chunk.lines.append(allocator, try r.readU32());
+        try chunk.lines.append(ctx.allocator, try r.readU32());
     }
 
     return chunk;
 }
 
-fn deserializeFunction(r: *Reader, allocator: Allocator, strings: []const []const u8) !ObjFunction {
+fn deserializeFunction(r: *Reader, ctx: *DeserCtx) !ObjFunction {
+    const allocator = ctx.allocator;
+    const strings = ctx.strings;
     const name_idx = try r.readU32();
     const arity = try r.readByte();
     const required = try r.readByte();
@@ -406,7 +446,7 @@ fn deserializeFunction(r: *Reader, allocator: Allocator, strings: []const []cons
     const default_count = try r.readByte();
     const defaults = try allocator.alloc(Value, default_count);
     for (0..default_count) |i| {
-        defaults[i] = try deserializeValue(r, strings);
+        defaults[i] = try deserializeValue(r, ctx);
     }
 
     const ref_count = try r.readByte();
@@ -423,7 +463,7 @@ fn deserializeFunction(r: *Reader, allocator: Allocator, strings: []const []cons
         slot_names[i] = strings[sidx];
     }
 
-    const chunk = try deserializeChunk(r, allocator, strings);
+    const chunk = try deserializeChunk(r, ctx);
 
     return .{
         .name = strings[name_idx],
@@ -441,7 +481,7 @@ fn deserializeFunction(r: *Reader, allocator: Allocator, strings: []const []cons
     };
 }
 
-fn deserializeValue(r: *Reader, strings: []const []const u8) !Value {
+fn deserializeValue(r: *Reader, ctx: *DeserCtx) !Value {
     const tag = try r.readByte();
     return switch (tag) {
         TAG_NULL => .null,
@@ -449,8 +489,22 @@ fn deserializeValue(r: *Reader, strings: []const []const u8) !Value {
         TAG_BOOL_TRUE => .{ .bool = true },
         TAG_INT => .{ .int = try r.readI64() },
         TAG_FLOAT => .{ .float = try r.readF64() },
-        TAG_STRING => .{ .string = strings[try r.readU32()] },
+        TAG_STRING => .{ .string = ctx.strings[try r.readU32()] },
         TAG_EMPTY_ARRAY => Value.empty_array_default,
+        TAG_NEW_DEFAULT => blk: {
+            const class_idx = try r.readU32();
+            const arg_count = try r.readByte();
+            const args = try ctx.allocator.alloc(Value, arg_count);
+            errdefer ctx.allocator.free(args);
+            for (0..arg_count) |i| args[i] = try deserializeValue(r, ctx);
+            const nd = try ctx.allocator.create(bytecode.NewDefault);
+            errdefer ctx.allocator.destroy(nd);
+            nd.* = .{ .class_name = ctx.strings[class_idx], .args = args };
+            try ctx.new_defaults.append(ctx.allocator, nd);
+            const sentinel = bytecode.encodeNewDefaultSentinel(ctx.allocator, nd) catch return error.OutOfMemory;
+            try ctx.string_allocs.append(ctx.allocator, sentinel);
+            break :blk .{ .string = sentinel };
+        },
         else => .null,
     };
 }
@@ -462,7 +516,7 @@ fn deserializeValue(r: *Reader, strings: []const []const u8) !Value {
 const TRAILER_MAGIC = "ZPHPEXE\x00";
 const TRAILER_SIZE = 16; // 8 bytes magic + 4 bytes offset + 4 bytes length
 
-pub fn appendToExecutable(allocator: Allocator, exe_path: []const u8, bytecode: []const u8, out_path: []const u8) !void {
+pub fn appendToExecutable(allocator: Allocator, exe_path: []const u8, bc_data: []const u8, out_path: []const u8) !void {
     const exe_data = try std.fs.cwd().readFileAlloc(allocator, exe_path, 256 * 1024 * 1024);
     defer allocator.free(exe_data);
 
@@ -471,8 +525,8 @@ pub fn appendToExecutable(allocator: Allocator, exe_path: []const u8, bytecode: 
 
     try file.writeAll(exe_data);
     const bc_offset: u32 = @intCast(exe_data.len);
-    const bc_length: u32 = @intCast(bytecode.len);
-    try file.writeAll(bytecode);
+    const bc_length: u32 = @intCast(bc_data.len);
+    try file.writeAll(bc_data);
 
     // trailer: magic + offset + length
     try file.writeAll(TRAILER_MAGIC);

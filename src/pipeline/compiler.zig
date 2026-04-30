@@ -1,9 +1,10 @@
 const std = @import("std");
 const Ast = @import("ast.zig").Ast;
 const Token = @import("token.zig").Token;
-const Chunk = @import("bytecode.zig").Chunk;
-const OpCode = @import("bytecode.zig").OpCode;
-const ObjFunction = @import("bytecode.zig").ObjFunction;
+const bytecode = @import("bytecode.zig");
+const Chunk = bytecode.Chunk;
+const OpCode = bytecode.OpCode;
+const ObjFunction = bytecode.ObjFunction;
 const Value = @import("../runtime/value.zig").Value;
 const PhpArray = @import("../runtime/value.zig").PhpArray;
 const vm_mod = @import("../runtime/vm.zig");
@@ -38,6 +39,7 @@ pub const CompileResult = struct {
     slot_names: []const []const u8 = &.{},
     type_hints: std.ArrayListUnmanaged(TypeHint) = .{},
     function_attrs: std.ArrayListUnmanaged(FunctionAttrEntry) = .{},
+    new_defaults: std.ArrayListUnmanaged(*bytecode.NewDefault) = .{},
     source: []const u8 = "",
     file_path: []const u8 = "",
 
@@ -61,6 +63,12 @@ pub const CompileResult = struct {
         }
         self.type_hints.deinit(self.allocator);
         self.function_attrs.deinit(self.allocator);
+        for (self.new_defaults.items) |nd| {
+            for (nd.args) |a| freeDefaultValue(self.allocator, a);
+            self.allocator.free(nd.args);
+            self.allocator.destroy(nd);
+        }
+        self.new_defaults.deinit(self.allocator);
         if (self.slot_names.len > 0) self.allocator.free(self.slot_names);
     }
 };
@@ -130,7 +138,7 @@ pub fn compileWithPath(ast: *const Ast, allocator: Allocator, file_path: []const
     const local_count = c.next_slot;
     c.local_slots.deinit(allocator);
     global_closure_counter = c.closure_count;
-    return .{ .chunk = c.chunk, .functions = c.functions, .string_allocs = c.string_allocs, .allocator = allocator, .local_count = local_count, .slot_names = slot_names, .type_hints = c.type_hints, .function_attrs = c.function_attrs, .source = ast.source, .file_path = file_path };
+    return .{ .chunk = c.chunk, .functions = c.functions, .string_allocs = c.string_allocs, .allocator = allocator, .local_count = local_count, .slot_names = slot_names, .type_hints = c.type_hints, .function_attrs = c.function_attrs, .new_defaults = c.new_defaults, .source = ast.source, .file_path = file_path };
 }
 
 pub const Compiler = struct {
@@ -160,6 +168,7 @@ pub const Compiler = struct {
     next_slot: u16 = 0,
     type_hints: std.ArrayListUnmanaged(TypeHint) = .{},
     function_attrs: std.ArrayListUnmanaged(FunctionAttrEntry) = .{},
+    new_defaults: std.ArrayListUnmanaged(*bytecode.NewDefault) = .{},
     current_source_offset: u32 = 0,
     current_class: []const u8 = "",
     current_parent: []const u8 = "",
@@ -663,6 +672,32 @@ pub const Compiler = struct {
                 // treat as a constant name (sentinel for runtime resolution)
                 const resolved = self.resolveClassName(name);
                 const sentinel = std.fmt.allocPrint(self.allocator, "\x00CC\x00\x00{s}", .{resolved}) catch break :blk Value.null;
+                self.string_allocs.append(self.allocator, sentinel) catch break :blk Value.null;
+                break :blk .{ .string = sentinel };
+            },
+            .new_expr => blk: {
+                const resolved = @import("compiler_expr.zig").resolveQualifiedNewName(self, n) catch break :blk Value.null;
+                const raw_name = resolved.name;
+                const class_name = if (resolved.is_absolute) raw_name else self.resolveClassName(raw_name);
+                const arg_indices = self.ast.extraSlice(n.data.lhs);
+                // bail on splat/named args - keep the simple positional case
+                for (arg_indices) |arg_idx| {
+                    const an = self.ast.nodes[arg_idx];
+                    if (an.tag == .splat_expr or an.tag == .named_arg) break :blk Value.null;
+                }
+                const args = self.allocator.alloc(Value, arg_indices.len) catch break :blk Value.null;
+                for (arg_indices, 0..) |arg_idx, i| args[i] = self.evalConstExpr(arg_idx);
+                const nd = self.allocator.create(bytecode.NewDefault) catch {
+                    self.allocator.free(args);
+                    break :blk Value.null;
+                };
+                nd.* = .{ .class_name = class_name, .args = args };
+                self.new_defaults.append(self.allocator, nd) catch {
+                    self.allocator.free(args);
+                    self.allocator.destroy(nd);
+                    break :blk Value.null;
+                };
+                const sentinel = bytecode.encodeNewDefaultSentinel(self.allocator, nd) catch break :blk Value.null;
                 self.string_allocs.append(self.allocator, sentinel) catch break :blk Value.null;
                 break :blk .{ .string = sentinel };
             },
