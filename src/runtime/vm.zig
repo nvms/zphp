@@ -5480,7 +5480,7 @@ pub const VM = struct {
                 .default = default_val,
                 .visibility = prop_vis[pi],
                 .set_visibility = prop_set_vis[pi],
-                .is_readonly = prop_readonly[pi],
+                .is_readonly = prop_readonly[pi] or def.is_readonly,
             });
         }
 
@@ -7264,11 +7264,13 @@ pub const VM = struct {
     }
 
     fn resolveMethod(self: *VM, class_name: []const u8, method_name: []const u8) RuntimeError![]const u8 {
-        // single-entry cache: skip string format + hashmap lookup on repeat calls
+        // single-entry cache: skip string format + hashmap lookup on repeat calls.
+        // verify content as well as pointer because callers may pass stack-local
+        // bufPrint slices whose memory address gets reused across calls
         if (self.method_cache_class.ptr == class_name.ptr and
             self.method_cache_class.len == class_name.len and
-            self.method_cache_method.ptr == method_name.ptr and
-            self.method_cache_method.len == method_name.len)
+            self.method_cache_method.len == method_name.len and
+            std.mem.eql(u8, self.method_cache_method, method_name))
         {
             return self.method_cache_result;
         }
