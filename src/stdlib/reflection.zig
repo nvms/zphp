@@ -48,6 +48,7 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try rc_def.methods.put(a, "isSubclassOf", .{ .name = "isSubclassOf", .arity = 1 });
     try rc_def.methods.put(a, "isInstance", .{ .name = "isInstance", .arity = 1 });
     try rc_def.methods.put(a, "isFinal", .{ .name = "isFinal", .arity = 0 });
+    try rc_def.methods.put(a, "isReadOnly", .{ .name = "isReadOnly", .arity = 0 });
     try rc_def.methods.put(a, "isCloneable", .{ .name = "isCloneable", .arity = 0 });
     try rc_def.methods.put(a, "newInstanceArgs", .{ .name = "newInstanceArgs", .arity = 1 });
     try rc_def.methods.put(a, "newInstance", .{ .name = "newInstance", .arity = 0 });
@@ -130,6 +131,7 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try vm.native_fns.put(a, "ReflectionClass::getStaticPropertyValue", rcGetStaticPropertyValue);
     try vm.native_fns.put(a, "ReflectionClass::setStaticPropertyValue", rcSetStaticPropertyValue);
     try vm.native_fns.put(a, "ReflectionClass::isFinal", rcIsFinal);
+    try vm.native_fns.put(a, "ReflectionClass::isReadOnly", rcIsReadOnly);
     try vm.native_fns.put(a, "ReflectionClass::isCloneable", rcIsCloneable);
 
     // ReflectionMethod
@@ -884,6 +886,13 @@ fn rcIsFinal(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
     return .{ .bool = cls.is_final };
 }
 
+fn rcIsReadOnly(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const this = getThis(ctx) orelse return .{ .bool = false };
+    const class_name = if (this.get("name") == .string) this.get("name").string else return .{ .bool = false };
+    const cls = ctx.vm.classes.get(class_name) orelse return .{ .bool = false };
+    return .{ .bool = cls.is_readonly };
+}
+
 fn rcIsCloneable(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
     const this = getThis(ctx) orelse return .{ .bool = false };
     const is_iface = this.get("_is_interface");
@@ -1536,7 +1545,10 @@ fn rpGetDefaultValue(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
 fn rpIsOptional(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
     const this = getThis(ctx) orelse return .{ .bool = false };
     const has_default = this.get("_has_default");
-    return .{ .bool = has_default == .bool and has_default.bool };
+    if (has_default == .bool and has_default.bool) return .{ .bool = true };
+    // variadic params are always optional
+    const is_var = this.get("_is_variadic");
+    return .{ .bool = is_var == .bool and is_var.bool };
 }
 
 fn rpGetPosition(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
