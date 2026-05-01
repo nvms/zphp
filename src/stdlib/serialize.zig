@@ -239,6 +239,44 @@ fn serializeValue(ctx: *NativeContext, buf: *std.ArrayListUnmanaged(u8), sctx: *
             }
             try sctx.objects.put(a, obj, sctx.next_slot - 1);
 
+            // PHP 7.4+ __serialize: returns the array used as the object's serialized payload
+            if (ctx.vm.hasMethod(obj.class_name, "__serialize")) {
+                const ser_result = try ctx.vm.callMethod(obj, "__serialize", &.{});
+                if (ser_result == .array) {
+                    try buf.appendSlice(a, "O:");
+                    var tmp: [20]u8 = undefined;
+                    const nl = std.fmt.bufPrint(&tmp, "{d}", .{obj.class_name.len}) catch return;
+                    try buf.appendSlice(a, nl);
+                    try buf.appendSlice(a, ":\"");
+                    try buf.appendSlice(a, obj.class_name);
+                    try buf.appendSlice(a, "\":");
+                    const cl = std.fmt.bufPrint(&tmp, "{d}", .{ser_result.array.entries.items.len}) catch return;
+                    try buf.appendSlice(a, cl);
+                    try buf.appendSlice(a, ":{");
+                    for (ser_result.array.entries.items) |entry| {
+                        switch (entry.key) {
+                            .int => |i| {
+                                try buf.appendSlice(a, "i:");
+                                const ki = std.fmt.bufPrint(&tmp, "{d}", .{i}) catch return;
+                                try buf.appendSlice(a, ki);
+                                try buf.append(a, ';');
+                            },
+                            .string => |s| try emitLenString(buf, a, s),
+                        }
+                        try serializeValue(ctx, buf, sctx, entry.value);
+                    }
+                    try buf.append(a, '}');
+                    return;
+                }
+            }
+
+            // older __sleep: returns string[] of property names to include
+            var sleep_props: ?*PhpArray = null;
+            if (ctx.vm.hasMethod(obj.class_name, "__sleep")) {
+                const sleep_result = try ctx.vm.callMethod(obj, "__sleep", &.{});
+                if (sleep_result == .array) sleep_props = sleep_result.array;
+            }
+
             try buf.appendSlice(a, "O:");
             var tmp: [20]u8 = undefined;
             const nl = std.fmt.bufPrint(&tmp, "{d}", .{obj.class_name.len}) catch return;
@@ -246,13 +284,30 @@ fn serializeValue(ctx: *NativeContext, buf: *std.ArrayListUnmanaged(u8), sctx: *
             try buf.appendSlice(a, ":\"");
             try buf.appendSlice(a, obj.class_name);
             try buf.appendSlice(a, "\":");
-            const slot_count: u32 = if (obj.slot_layout) |layout| @intCast(layout.names.len) else 0;
-            const total_count = slot_count + obj.properties.count();
+            var total_count: u32 = 0;
+            if (sleep_props) |sp| {
+                total_count = @intCast(sp.entries.items.len);
+            } else {
+                const slot_count: u32 = if (obj.slot_layout) |layout| @intCast(layout.names.len) else 0;
+                total_count = slot_count + obj.properties.count();
+            }
             const cl = std.fmt.bufPrint(&tmp, "{d}", .{total_count}) catch return;
             try buf.appendSlice(a, cl);
             try buf.appendSlice(a, ":{");
 
             const class_def = ctx.vm.classes.get(obj.class_name);
+            if (sleep_props) |sp| {
+                for (sp.entries.items) |entry| {
+                    if (entry.value != .string) continue;
+                    const name = entry.value.string;
+                    const vis: ClassDef.Visibility = if (class_def) |c| findPropertyVisibility(c, name) else .public;
+                    try emitObjectPropertyKey(buf, a, obj.class_name, name, vis);
+                    const v = obj.get(name);
+                    try serializeValue(ctx, buf, sctx, v);
+                }
+                try buf.append(a, '}');
+                return;
+            }
             if (obj.slot_layout) |layout| {
                 if (obj.slots) |slots| {
                     for (layout.names, 0..) |name, i| {
@@ -400,6 +455,16 @@ fn unserializeValue(ctx: *NativeContext, uctx: *UnserCtx, s: []const u8, pos: us
             const slot_idx = try uctx.reserve(ctx.allocator);
             uctx.store(slot_idx, .{ .object = obj });
 
+            // collect props into a temp array first so __unserialize can receive them
+            const has_unserialize = ctx.vm.hasMethod(class_name, "__unserialize");
+            var collected: ?*PhpArray = null;
+            if (has_unserialize) {
+                const arr = try ctx.allocator.create(PhpArray);
+                arr.* = .{};
+                try ctx.vm.arrays.append(ctx.allocator, arr);
+                collected = arr;
+            }
+
             for (0..prop_count) |_| {
                 const key_slots_before = uctx.slots.items.len;
                 const key_result = try unserializeValue(ctx, uctx, s, p);
@@ -408,12 +473,28 @@ fn unserializeValue(ctx: *NativeContext, uctx: *UnserCtx, s: []const u8, pos: us
 
                 const val_result = try unserializeValue(ctx, uctx, s, p);
                 p = val_result.pos;
-                if (key_result.value == .string) {
+                if (collected) |arr| {
+                    const k: PhpArray.Key = switch (key_result.value) {
+                        .string => |str| .{ .string = stripVisibilityPrefix(str) },
+                        .int => |n| .{ .int = n },
+                        else => continue,
+                    };
+                    try arr.set(ctx.allocator, k, val_result.value);
+                } else if (key_result.value == .string) {
                     const stripped = stripVisibilityPrefix(key_result.value.string);
                     try obj.set(ctx.allocator, stripped, val_result.value);
                 }
             }
             if (p < s.len and s[p] == '}') p += 1;
+
+            if (has_unserialize) {
+                if (collected) |arr| {
+                    _ = try ctx.vm.callMethod(obj, "__unserialize", &.{.{ .array = arr }});
+                }
+            } else if (ctx.vm.hasMethod(class_name, "__wakeup")) {
+                _ = try ctx.vm.callMethod(obj, "__wakeup", &.{});
+            }
+
             return .{ .value = .{ .object = obj }, .pos = p };
         },
         'r', 'R' => {
