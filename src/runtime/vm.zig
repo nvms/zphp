@@ -5556,6 +5556,17 @@ pub const VM = struct {
                     self.error_msg = msg;
                     return error.RuntimeError;
                 }
+                // reject overrides of final methods
+                var pcls_iter = parent_cls.methods.iterator();
+                while (pcls_iter.next()) |pe| {
+                    if (!pe.value_ptr.is_final) continue;
+                    if (def.methods.get(pe.key_ptr.*)) |_| {
+                        const msg = try std.fmt.allocPrint(self.allocator, "Cannot override final method {s}::{s}()", .{ parent_name, pe.key_ptr.* });
+                        try self.strings.append(self.allocator, msg);
+                        self.error_msg = msg;
+                        return error.RuntimeError;
+                    }
+                }
             }
         }
 
