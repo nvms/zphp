@@ -317,6 +317,7 @@ const SortFlags = struct {
         const x = if (self.reverse) b_val else a_val;
         const y = if (self.reverse) a_val else b_val;
         const sort_type = self.flags & 0x7; // mask out SORT_FLAG_CASE
+        const case_insensitive = (self.flags & 8) != 0; // SORT_FLAG_CASE
         return switch (sort_type) {
             1 => Value.toFloat(x) < Value.toFloat(y), // SORT_NUMERIC
             2, 5 => blk: { // SORT_STRING, SORT_LOCALE_STRING
@@ -324,6 +325,13 @@ const SortFlags = struct {
                 var ybuf: [64]u8 = undefined;
                 const xs = valueToSortStr(x, &xbuf);
                 const ys = valueToSortStr(y, &ybuf);
+                if (case_insensitive) {
+                    var lxbuf: [64]u8 = undefined;
+                    var lybuf: [64]u8 = undefined;
+                    const lxs = lowerInto(&lxbuf, xs);
+                    const lys = lowerInto(&lybuf, ys);
+                    break :blk std.mem.order(u8, lxs, lys) == .lt;
+                }
                 break :blk std.mem.order(u8, xs, ys) == .lt;
             },
             6 => blk: { // SORT_NATURAL
@@ -331,10 +339,25 @@ const SortFlags = struct {
                 var ybuf: [64]u8 = undefined;
                 const xs = valueToSortStr(x, &xbuf);
                 const ys = valueToSortStr(y, &ybuf);
+                if (case_insensitive) {
+                    var lxbuf: [64]u8 = undefined;
+                    var lybuf: [64]u8 = undefined;
+                    const lxs = lowerInto(&lxbuf, xs);
+                    const lys = lowerInto(&lybuf, ys);
+                    break :blk naturalCompare(lxs, lys) < 0;
+                }
                 break :blk naturalCompare(xs, ys) < 0;
             },
             else => Value.lessThan(x, y), // SORT_REGULAR
         };
+    }
+
+    fn lowerInto(buf: []u8, s: []const u8) []const u8 {
+        const n = @min(buf.len, s.len);
+        for (s[0..n], 0..) |c, i| {
+            buf[i] = if (c >= 'A' and c <= 'Z') c + 32 else c;
+        }
+        return buf[0..n];
     }
 
     fn valueToSortStr(v: Value, buf: *[64]u8) []const u8 {
@@ -782,7 +805,15 @@ fn array_combine(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len < 2 or args[0] != .array or args[1] != .array) return .{ .bool = false };
     const keys_arr = args[0].array;
     const vals_arr = args[1].array;
-    if (keys_arr.entries.items.len != vals_arr.entries.items.len) return .{ .bool = false };
+    if (keys_arr.entries.items.len != vals_arr.entries.items.len) {
+        const obj = try ctx.allocator.create(@import("../runtime/value.zig").PhpObject);
+        obj.* = .{ .class_name = "ValueError" };
+        try obj.set(ctx.allocator, "message", .{ .string = "array_combine(): Argument #1 ($keys) and argument #2 ($values) must have the same number of elements" });
+        try obj.set(ctx.allocator, "code", .{ .int = 0 });
+        try ctx.vm.objects.append(ctx.allocator, obj);
+        ctx.vm.pending_exception = .{ .object = obj };
+        return error.RuntimeError;
+    }
 
     var arr = try ctx.createArray();
     for (keys_arr.entries.items, vals_arr.entries.items) |k, v| {
