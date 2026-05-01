@@ -453,6 +453,19 @@ pub const Value = union(enum) {
             return objectsCompare(a.object, b.object);
         }
         if (a == .object or b == .object or a == .generator or b == .generator or a == .fiber or b == .fiber) return 0;
+        if (a == .array and b == .array) {
+            const al = a.array.entries.items.len;
+            const bl = b.array.entries.items.len;
+            if (al != bl) return if (al < bl) -1 else 1;
+            for (a.array.entries.items) |entry| {
+                const bv = b.array.get(entry.key);
+                if (bv == .null and !arrayHasKey(b.array, entry.key)) return 1;
+                const c = compare(entry.value, bv);
+                if (c != 0) return c;
+            }
+            return 0;
+        }
+        if (a == .array or b == .array) return if (a == .array) 1 else -1;
         if (a == .string and b == .string) {
             return switch (std.mem.order(u8, a.string, b.string)) {
                 .lt => -1,
@@ -465,6 +478,16 @@ pub const Value = union(enum) {
         if (af < bf) return -1;
         if (af > bf) return 1;
         return 0;
+    }
+
+    fn arrayHasKey(arr: *PhpArray, key: PhpArray.Key) bool {
+        for (arr.entries.items) |e| {
+            switch (e.key) {
+                .string => |s| if (key == .string and std.mem.eql(u8, s, key.string)) return true,
+                .int => |n| if (key == .int and n == key.int) return true,
+            }
+        }
+        return false;
     }
 
     fn objectsCompare(a: *PhpObject, b: *PhpObject) i64 {
