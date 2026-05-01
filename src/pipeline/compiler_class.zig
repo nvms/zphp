@@ -1692,7 +1692,15 @@ pub fn compileTraitDecl(self: *Compiler, node: Ast.Node) Error!void {
         }
     }
 
-    // compile defaults for static properties first (popped second by VM)
+    // collect const_decl members (PHP 8.2+ trait constants)
+    var const_decls = std.ArrayListUnmanaged(u32){};
+    defer const_decls.deinit(self.allocator);
+    for (members) |member_idx| {
+        const member = self.ast.nodes[member_idx];
+        if (member.tag == .const_decl) try const_decls.append(self.allocator, member_idx);
+    }
+
+    // compile defaults for static properties first (popped third by VM)
     for (static_props.items) |pi| {
         const pmember = self.ast.nodes[pi];
         if (pmember.data.lhs != 0) {
@@ -1700,7 +1708,13 @@ pub fn compileTraitDecl(self: *Compiler, node: Ast.Node) Error!void {
         }
     }
 
-    // compile defaults for own properties second (popped first by VM)
+    // compile defaults for trait constants (popped second by VM)
+    for (const_decls.items) |pi| {
+        const pmember = self.ast.nodes[pi];
+        if (pmember.data.lhs != 0) try self.compileNode(pmember.data.lhs);
+    }
+
+    // compile defaults for own properties last (popped first by VM)
     for (own_props.items) |pi| {
         const pmember = self.ast.nodes[pi];
         if (pmember.data.lhs != 0) {
@@ -1735,6 +1749,16 @@ pub fn compileTraitDecl(self: *Compiler, node: Ast.Node) Error!void {
         try self.emitU16(pname_idx);
         try self.emitByte(if (pmember.data.lhs != 0) @as(u8, 1) else @as(u8, 0));
         try self.emitByte(@intCast(pmember.data.rhs));
+    }
+
+    // trait constants (PHP 8.2+)
+    try self.emitByte(@intCast(const_decls.items.len));
+    for (const_decls.items) |pi| {
+        const pmember = self.ast.nodes[pi];
+        const pname = self.ast.tokenSlice(pmember.main_token);
+        const pname_idx = try self.addConstant(.{ .string = pname });
+        try self.emitU16(pname_idx);
+        try self.emitByte(if (pmember.data.lhs != 0) @as(u8, 1) else @as(u8, 0));
     }
 
     // trait-level attributes

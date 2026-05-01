@@ -333,6 +333,7 @@ pub const VM = struct {
     trait_uses: std.StringHashMapUnmanaged([]const []const u8) = .{},
     trait_props: std.StringHashMapUnmanaged([]const ClassDef.PropertyDef) = .{},
     trait_static_props: std.StringHashMapUnmanaged([]const TraitStaticProp) = .{},
+    trait_constants: std.StringHashMapUnmanaged([]const TraitStaticProp) = .{},
     statics: std.StringHashMapUnmanaged(Value) = .{},
     static_vars: std.ArrayListUnmanaged(StaticEntry) = .{},
     global_vars: std.ArrayListUnmanaged(StaticEntry) = .{},
@@ -742,6 +743,9 @@ pub const VM = struct {
         var tsp_iter = self.trait_static_props.valueIterator();
         while (tsp_iter.next()) |props| self.allocator.free(props.*);
         self.trait_static_props.clearRetainingCapacity();
+        var tc_iter = self.trait_constants.valueIterator();
+        while (tc_iter.next()) |props| self.allocator.free(props.*);
+        self.trait_constants.clearRetainingCapacity();
     }
 
     fn releaseFrames(self: *VM) void {
@@ -804,6 +808,9 @@ pub const VM = struct {
         var tsp_iter = self.trait_static_props.valueIterator();
         while (tsp_iter.next()) |props| self.allocator.free(props.*);
         self.trait_static_props.deinit(self.allocator);
+        var tc_iter = self.trait_constants.valueIterator();
+        while (tc_iter.next()) |props| self.allocator.free(props.*);
+        self.trait_constants.deinit(self.allocator);
         self.statics.deinit(self.allocator);
         self.static_vars.deinit(self.allocator);
         self.global_vars.deinit(self.allocator);
@@ -2831,6 +2838,29 @@ pub const VM = struct {
                             sprops[pi] = .{ .name = sp_names[pi], .value = sval };
                         }
                         try self.trait_static_props.put(self.allocator, trait_name, sprops);
+                    }
+
+                    // trait constants (PHP 8.2+)
+                    const tc_count = self.readByte();
+                    if (tc_count > 0) {
+                        var tc_names: [32][]const u8 = undefined;
+                        var tc_has_default: [32]u8 = undefined;
+                        for (0..tc_count) |ci| {
+                            tc_names[ci] = self.currentChunk().constants.items[self.readU16()].string;
+                            tc_has_default[ci] = self.readByte();
+                        }
+                        const tc_defaults = self.popDefaults(32, tc_has_default[0..tc_count]);
+                        const tcs = try self.allocator.alloc(TraitStaticProp, tc_count);
+                        var tcj: usize = 0;
+                        for (0..tc_count) |ci| {
+                            const cval = if (tc_has_default[ci] == 1) blk: {
+                                const v = tc_defaults[tcj];
+                                tcj += 1;
+                                break :blk v;
+                            } else Value{ .null = {} };
+                            tcs[ci] = .{ .name = tc_names[ci], .value = cval };
+                        }
+                        try self.trait_constants.put(self.allocator, trait_name, tcs);
                     }
 
                     // trait-level attributes
@@ -5998,6 +6028,15 @@ pub const VM = struct {
             for (sprops) |sp| {
                 if (!def.static_props.contains(sp.name)) {
                     try def.static_props.put(self.allocator, sp.name, sp.value);
+                }
+            }
+        }
+
+        if (self.trait_constants.get(trait_name)) |consts| {
+            for (consts) |c| {
+                if (!def.static_props.contains(c.name)) {
+                    try def.static_props.put(self.allocator, c.name, c.value);
+                    try def.constant_names.put(self.allocator, c.name, {});
                 }
             }
         }
