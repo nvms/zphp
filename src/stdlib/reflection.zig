@@ -2044,7 +2044,15 @@ fn rpSetValue(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     const this = getThis(ctx) orelse return .null;
     const prop_name = if (this.get("name") == .string) this.get("name").string else return .null;
     if (args.len >= 2 and args[0] == .object) {
-        try args[0].object.set(ctx.allocator, prop_name, args[1]);
+        const target = args[0].object;
+        const vr = ctx.vm.findPropertyVisibility(target.class_name, prop_name);
+        if (vr.is_readonly and target.get(prop_name) != .null) {
+            const msg = try std.fmt.allocPrint(ctx.allocator, "Cannot modify readonly property {s}::${s}", .{ vr.defining_class, prop_name });
+            try ctx.vm.strings.append(ctx.allocator, msg);
+            _ = ctx.vm.throwBuiltinException("Error", msg) catch {};
+            return error.RuntimeError;
+        }
+        try target.set(ctx.allocator, prop_name, args[1]);
     }
     return .null;
 }

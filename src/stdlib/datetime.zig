@@ -171,6 +171,146 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try vm.native_fns.put(a, "DateInterval::invert", diInvert);
     try vm.native_fns.put(a, "DateInterval::createFromDateString", diCreateFromDateString);
     try vm.native_fns.put(a, "DateInterval::format", diFormat);
+
+    // DatePeriod
+    var dp_def = ClassDef{ .name = "DatePeriod" };
+    try dp_def.static_props.put(a, "EXCLUDE_START_DATE", .{ .int = 1 });
+    try dp_def.static_props.put(a, "INCLUDE_END_DATE", .{ .int = 2 });
+    try dp_def.constant_names.put(a, "EXCLUDE_START_DATE", {});
+    try dp_def.constant_names.put(a, "INCLUDE_END_DATE", {});
+    try dp_def.interfaces.append(a, "IteratorAggregate");
+    try dp_def.methods.put(a, "__construct", .{ .name = "__construct", .arity = 3 });
+    try dp_def.methods.put(a, "getStartDate", .{ .name = "getStartDate", .arity = 0 });
+    try dp_def.methods.put(a, "getEndDate", .{ .name = "getEndDate", .arity = 0 });
+    try dp_def.methods.put(a, "getDateInterval", .{ .name = "getDateInterval", .arity = 0 });
+    try dp_def.methods.put(a, "getIterator", .{ .name = "getIterator", .arity = 0 });
+    try vm.classes.put(a, "DatePeriod", dp_def);
+    try vm.native_fns.put(a, "DatePeriod::__construct", dpConstruct);
+    try vm.native_fns.put(a, "DatePeriod::getStartDate", dpGetStart);
+    try vm.native_fns.put(a, "DatePeriod::getEndDate", dpGetEnd);
+    try vm.native_fns.put(a, "DatePeriod::getDateInterval", dpGetInterval);
+    try vm.native_fns.put(a, "DatePeriod::getIterator", dpGetIterator);
+
+    var dpi_def = ClassDef{ .name = "DatePeriodIterator" };
+    try dpi_def.interfaces.append(a, "Iterator");
+    try dpi_def.methods.put(a, "current", .{ .name = "current", .arity = 0 });
+    try dpi_def.methods.put(a, "key", .{ .name = "key", .arity = 0 });
+    try dpi_def.methods.put(a, "next", .{ .name = "next", .arity = 0 });
+    try dpi_def.methods.put(a, "rewind", .{ .name = "rewind", .arity = 0 });
+    try dpi_def.methods.put(a, "valid", .{ .name = "valid", .arity = 0 });
+    try vm.classes.put(a, "DatePeriodIterator", dpi_def);
+    try vm.native_fns.put(a, "DatePeriodIterator::current", dpiCurrent);
+    try vm.native_fns.put(a, "DatePeriodIterator::key", dpiKey);
+    try vm.native_fns.put(a, "DatePeriodIterator::next", dpiNext);
+    try vm.native_fns.put(a, "DatePeriodIterator::rewind", dpiRewind);
+    try vm.native_fns.put(a, "DatePeriodIterator::valid", dpiValid);
+}
+
+fn dpConstruct(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    const obj = getThis(ctx) orelse return .null;
+    if (args.len < 3) return .null;
+    if (args[0] != .object or args[1] != .object) return .null;
+    try obj.set(ctx.allocator, "__start", args[0]);
+    try obj.set(ctx.allocator, "__interval", args[1]);
+    if (args[2] == .object) {
+        try obj.set(ctx.allocator, "__end", args[2]);
+    } else if (args[2] == .int) {
+        try obj.set(ctx.allocator, "__recurrences", args[2]);
+    }
+    if (args.len >= 4) try obj.set(ctx.allocator, "__options", args[3]);
+    return .null;
+}
+
+fn dpGetStart(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const obj = getThis(ctx) orelse return .null;
+    return obj.get("__start");
+}
+
+fn dpGetEnd(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const obj = getThis(ctx) orelse return .null;
+    return obj.get("__end");
+}
+
+fn dpGetInterval(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const obj = getThis(ctx) orelse return .null;
+    return obj.get("__interval");
+}
+
+fn dpGetIterator(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const obj = getThis(ctx) orelse return .null;
+    const iter = try ctx.vm.allocator.create(@import("../runtime/value.zig").PhpObject);
+    iter.* = .{ .class_name = "DatePeriodIterator" };
+    try ctx.vm.objects.append(ctx.vm.allocator, iter);
+    try iter.set(ctx.allocator, "__start", obj.get("__start"));
+    try iter.set(ctx.allocator, "__end", obj.get("__end"));
+    try iter.set(ctx.allocator, "__interval", obj.get("__interval"));
+    try iter.set(ctx.allocator, "__recurrences", obj.get("__recurrences"));
+    const opts = obj.get("__options");
+    const exclude_start = opts == .int and (opts.int & 1) != 0;
+    const start_v = obj.get("__start");
+    if (start_v != .object) return .null;
+    var ts = getTimestamp(start_v.object);
+    if (exclude_start) {
+        const di = obj.get("__interval");
+        if (di == .object) ts += intervalToSeconds(di.object);
+    }
+    try iter.set(ctx.allocator, "__cursor_ts", .{ .int = ts });
+    try iter.set(ctx.allocator, "__index", .{ .int = 0 });
+    return .{ .object = iter };
+}
+
+fn dpiTimestampInRange(this: *@import("../runtime/value.zig").PhpObject) bool {
+    const ts = Value.toInt(this.get("__cursor_ts"));
+    const end_v = this.get("__end");
+    if (end_v == .object) {
+        const end_ts = getTimestamp(end_v.object);
+        return ts < end_ts;
+    }
+    const rec_v = this.get("__recurrences");
+    if (rec_v == .int) {
+        return Value.toInt(this.get("__index")) <= rec_v.int;
+    }
+    return false;
+}
+
+fn dpiCurrent(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const this = getThis(ctx) orelse return .null;
+    if (!dpiTimestampInRange(this)) return .{ .bool = false };
+    const ts = Value.toInt(this.get("__cursor_ts"));
+    const dt = try ctx.createObject("DateTime");
+    try dt.set(ctx.allocator, "timestamp", .{ .int = ts });
+    const start_v = this.get("__start");
+    if (start_v == .object) {
+        const tz = start_v.object.get("__timezone");
+        if (tz == .string) try dt.set(ctx.allocator, "__timezone", tz);
+    }
+    return .{ .object = dt };
+}
+
+fn dpiKey(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const this = getThis(ctx) orelse return .null;
+    return this.get("__index");
+}
+
+fn dpiNext(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const this = getThis(ctx) orelse return .null;
+    const di = this.get("__interval");
+    if (di == .object) {
+        const cur = Value.toInt(this.get("__cursor_ts"));
+        try this.set(ctx.allocator, "__cursor_ts", .{ .int = cur + intervalToSeconds(di.object) });
+    }
+    const idx = Value.toInt(this.get("__index"));
+    try this.set(ctx.allocator, "__index", .{ .int = idx + 1 });
+    return .null;
+}
+
+fn dpiRewind(_: *NativeContext, _: []const Value) RuntimeError!Value {
+    return .null;
+}
+
+fn dpiValid(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const this = getThis(ctx) orelse return .{ .bool = false };
+    return .{ .bool = dpiTimestampInRange(this) };
 }
 
 fn dtGetLastErrors(_: *NativeContext, _: []const Value) RuntimeError!Value {
@@ -215,6 +355,9 @@ fn dtConstruct(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
                 hour = std.fmt.parseInt(i64, s[11..13], 10) catch 0;
                 min = std.fmt.parseInt(i64, s[14..16], 10) catch 0;
                 sec = std.fmt.parseInt(i64, s[17..19], 10) catch 0;
+            } else if (s.len >= 16 and (s[10] == ' ' or s[10] == 'T') and s[13] == ':') {
+                hour = std.fmt.parseInt(i64, s[11..13], 10) catch 0;
+                min = std.fmt.parseInt(i64, s[14..16], 10) catch 0;
             }
             // when constructing with a datetime string and a timezone,
             // the string is interpreted as local time in that timezone

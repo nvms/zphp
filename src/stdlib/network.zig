@@ -16,9 +16,71 @@ pub const entries = .{
     .{ "fsockopen", native_fsockopen },
     .{ "pfsockopen", native_fsockopen },
     .{ "stream_socket_client", native_stream_socket_client },
+    .{ "stream_context_create", native_stream_context_create },
+    .{ "stream_context_get_options", native_stream_context_get_options },
+    .{ "stream_context_get_params", native_stream_context_get_params },
+    .{ "stream_context_set_options", native_stream_context_set_options },
+    .{ "stream_context_set_option", native_stream_context_set_options },
+    .{ "stream_context_set_params", native_stream_context_set_params },
+    .{ "stream_context_get_default", native_stream_context_get_default },
+    .{ "stream_context_set_default", native_stream_context_set_default },
     .{ "checkdnsrr", native_checkdnsrr },
     .{ "dns_get_record", native_dns_get_record },
 };
+
+fn native_stream_context_create(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    const obj = try ctx.vm.allocator.create(PhpObject);
+    obj.* = .{ .class_name = "StreamContext" };
+    try ctx.vm.objects.append(ctx.vm.allocator, obj);
+    if (args.len >= 1 and args[0] == .array) {
+        try obj.set(ctx.allocator, "options", args[0]);
+    }
+    if (args.len >= 2 and args[1] == .array) {
+        try obj.set(ctx.allocator, "params", args[1]);
+    }
+    return .{ .object = obj };
+}
+
+fn native_stream_context_get_options(_: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len < 1 or args[0] != .object) return .{ .bool = false };
+    const opts = args[0].object.get("options");
+    if (opts == .array) return opts;
+    return .{ .bool = false };
+}
+
+fn native_stream_context_get_params(_: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len < 1 or args[0] != .object) return .{ .bool = false };
+    return args[0].object.get("params");
+}
+
+fn native_stream_context_set_options(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len < 2 or args[0] != .object) return .{ .bool = false };
+    if (args[1] == .array) {
+        try args[0].object.set(ctx.allocator, "options", args[1]);
+        return .{ .bool = true };
+    }
+    return .{ .bool = false };
+}
+
+fn native_stream_context_set_params(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len < 2 or args[0] != .object) return .{ .bool = false };
+    if (args[1] == .array) {
+        try args[0].object.set(ctx.allocator, "params", args[1]);
+        return .{ .bool = true };
+    }
+    return .{ .bool = false };
+}
+
+fn native_stream_context_get_default(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const obj = try ctx.vm.allocator.create(PhpObject);
+    obj.* = .{ .class_name = "StreamContext" };
+    try ctx.vm.objects.append(ctx.vm.allocator, obj);
+    return .{ .object = obj };
+}
+
+fn native_stream_context_set_default(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    return native_stream_context_create(ctx, args);
+}
 
 fn createString(ctx: *NativeContext, s: []const u8) ![]const u8 {
     const copy = try ctx.allocator.dupe(u8, s);
