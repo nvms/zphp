@@ -5570,6 +5570,7 @@ pub const VM = struct {
             }
         }
 
+
         const iface_count = self.readByte();
         for (0..iface_count) |_| {
             const iname_idx = self.readU16();
@@ -5666,6 +5667,63 @@ pub const VM = struct {
         // composer's autoloader uses `include` (not require_once), so a class
         // file can be re-executed multiple times during a single autoload chain.
         // each re-execution rebuilds slot_layout and the class def. the LAST
+        // unless this class is itself abstract, every abstract method inherited
+        // from the parent chain (and required by any implemented interface)
+        // must be implemented by a non-abstract method
+        if (!def.is_abstract) {
+            var seen_abstract = std.StringHashMapUnmanaged([]const u8){};
+            defer seen_abstract.deinit(self.allocator);
+            var current_parent: ?[]const u8 = def.parent;
+            while (current_parent) |pn| {
+                if (self.classes.get(pn)) |pc| {
+                    var pi = pc.methods.iterator();
+                    while (pi.next()) |pe| {
+                        if (!pe.value_ptr.is_abstract) continue;
+                        if (seen_abstract.contains(pe.key_ptr.*)) continue;
+                        try seen_abstract.put(self.allocator, pe.key_ptr.*, pn);
+                    }
+                    current_parent = pc.parent;
+                } else break;
+            }
+            for (def.interfaces.items) |iname| {
+                var current_iface: ?[]const u8 = iname;
+                while (current_iface) |in| {
+                    if (self.interfaces.get(in)) |idef| {
+                        for (idef.methods.items) |mname| {
+                            if (seen_abstract.contains(mname)) continue;
+                            try seen_abstract.put(self.allocator, mname, in);
+                        }
+                        current_iface = idef.parent;
+                    } else break;
+                }
+            }
+            var sa_iter = seen_abstract.iterator();
+            while (sa_iter.next()) |se| {
+                // walk parent chain looking for a non-abstract implementation
+                var found_concrete = false;
+                if (def.methods.get(se.key_ptr.*)) |m| {
+                    if (!m.is_abstract) found_concrete = true;
+                }
+                if (!found_concrete) {
+                    var pp: ?[]const u8 = def.parent;
+                    while (pp) |pn2| {
+                        if (self.classes.get(pn2)) |pc| {
+                            if (pc.methods.get(se.key_ptr.*)) |pm| {
+                                if (!pm.is_abstract) { found_concrete = true; break; }
+                            }
+                            pp = pc.parent;
+                        } else break;
+                    }
+                }
+                if (!found_concrete) {
+                    const msg = try std.fmt.allocPrint(self.allocator, "Class {s} contains abstract method {s}::{s} and must therefore be declared abstract or implement it", .{ class_name, se.value_ptr.*, se.key_ptr.* });
+                    try self.strings.append(self.allocator, msg);
+                    self.error_msg = msg;
+                    return error.RuntimeError;
+                }
+            }
+        }
+
         // put has the most complete state (e.g. parent slots merged), so we
         // let it win - but we must free the prior def or its slot_layout and
         // owned tables leak
