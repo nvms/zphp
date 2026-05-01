@@ -101,6 +101,12 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try pdo_def.static_props.put(a, "FETCH_NUM", .{ .int = 3 });
     try pdo_def.static_props.put(a, "FETCH_OBJ", .{ .int = 5 });
     try pdo_def.static_props.put(a, "FETCH_COLUMN", .{ .int = 7 });
+    try pdo_def.static_props.put(a, "FETCH_KEY_PAIR", .{ .int = 12 });
+    try pdo_def.static_props.put(a, "FETCH_UNIQUE", .{ .int = 196608 });
+    try pdo_def.static_props.put(a, "FETCH_GROUP", .{ .int = 65536 });
+    try pdo_def.static_props.put(a, "FETCH_CLASS", .{ .int = 8 });
+    try pdo_def.static_props.put(a, "FETCH_LAZY", .{ .int = 1 });
+    try pdo_def.static_props.put(a, "FETCH_NAMED", .{ .int = 11 });
     try pdo_def.static_props.put(a, "ATTR_ERRMODE", .{ .int = 3 });
     try pdo_def.static_props.put(a, "ATTR_DEFAULT_FETCH_MODE", .{ .int = 19 });
     try pdo_def.static_props.put(a, "ERRMODE_EXCEPTION", .{ .int = 2 });
@@ -124,26 +130,91 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try vm.native_fns.put(a, "PDO::getAttribute", pdoGetAttribute);
 
     var stmt_def = ClassDef{ .name = "PDOStatement" };
+    try stmt_def.interfaces.append(a, "Iterator");
+    try stmt_def.interfaces.append(a, "Traversable");
     try stmt_def.methods.put(a, "execute", .{ .name = "execute", .arity = 1 });
     try stmt_def.methods.put(a, "fetch", .{ .name = "fetch", .arity = 1 });
     try stmt_def.methods.put(a, "fetchAll", .{ .name = "fetchAll", .arity = 1 });
     try stmt_def.methods.put(a, "fetchColumn", .{ .name = "fetchColumn", .arity = 1 });
+    try stmt_def.methods.put(a, "fetchObject", .{ .name = "fetchObject", .arity = 2 });
     try stmt_def.methods.put(a, "rowCount", .{ .name = "rowCount", .arity = 0 });
     try stmt_def.methods.put(a, "columnCount", .{ .name = "columnCount", .arity = 0 });
     try stmt_def.methods.put(a, "closeCursor", .{ .name = "closeCursor", .arity = 0 });
     try stmt_def.methods.put(a, "setFetchMode", .{ .name = "setFetchMode", .arity = 1 });
     try stmt_def.methods.put(a, "bindValue", .{ .name = "bindValue", .arity = 2 });
+    try stmt_def.methods.put(a, "rewind", .{ .name = "rewind", .arity = 0 });
+    try stmt_def.methods.put(a, "current", .{ .name = "current", .arity = 0 });
+    try stmt_def.methods.put(a, "key", .{ .name = "key", .arity = 0 });
+    try stmt_def.methods.put(a, "next", .{ .name = "next", .arity = 0 });
+    try stmt_def.methods.put(a, "valid", .{ .name = "valid", .arity = 0 });
     try vm.classes.put(a, "PDOStatement", stmt_def);
 
     try vm.native_fns.put(a, "PDOStatement::execute", stmtExecute);
     try vm.native_fns.put(a, "PDOStatement::fetch", stmtFetch);
     try vm.native_fns.put(a, "PDOStatement::fetchAll", stmtFetchAll);
     try vm.native_fns.put(a, "PDOStatement::fetchColumn", stmtFetchColumn);
+    try vm.native_fns.put(a, "PDOStatement::fetchObject", stmtFetchObject);
     try vm.native_fns.put(a, "PDOStatement::rowCount", stmtRowCount);
     try vm.native_fns.put(a, "PDOStatement::columnCount", stmtColumnCount);
     try vm.native_fns.put(a, "PDOStatement::closeCursor", stmtCloseCursor);
     try vm.native_fns.put(a, "PDOStatement::setFetchMode", stmtSetFetchMode);
     try vm.native_fns.put(a, "PDOStatement::bindValue", stmtBindValue);
+    try vm.native_fns.put(a, "PDOStatement::rewind", stmtIterRewind);
+    try vm.native_fns.put(a, "PDOStatement::current", stmtIterCurrent);
+    try vm.native_fns.put(a, "PDOStatement::key", stmtIterKey);
+    try vm.native_fns.put(a, "PDOStatement::next", stmtIterNext);
+    try vm.native_fns.put(a, "PDOStatement::valid", stmtIterValid);
+}
+
+fn stmtIterRewind(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const obj = getThis(ctx) orelse return .null;
+    try obj.set(ctx.allocator, "__iter_key", .{ .int = 0 });
+    // fetch the first row
+    const row = try stmtFetch(ctx, &.{});
+    try obj.set(ctx.allocator, "__iter_current", row);
+    return .null;
+}
+
+fn stmtIterCurrent(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const obj = getThis(ctx) orelse return .null;
+    return obj.get("__iter_current");
+}
+
+fn stmtIterKey(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const obj = getThis(ctx) orelse return .{ .int = 0 };
+    return obj.get("__iter_key");
+}
+
+fn stmtIterNext(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const obj = getThis(ctx) orelse return .null;
+    const cur_key = Value.toInt(obj.get("__iter_key"));
+    try obj.set(ctx.allocator, "__iter_key", .{ .int = cur_key + 1 });
+    const row = try stmtFetch(ctx, &.{});
+    try obj.set(ctx.allocator, "__iter_current", row);
+    return .null;
+}
+
+fn stmtIterValid(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const obj = getThis(ctx) orelse return .{ .bool = false };
+    const cur = obj.get("__iter_current");
+    return .{ .bool = cur == .array };
+}
+
+fn stmtFetchObject(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    const row = try stmtFetch(ctx, &.{.{ .int = 2 }}); // FETCH_ASSOC
+    if (row != .array) return .{ .bool = false };
+    var class_name: []const u8 = "stdClass";
+    if (args.len >= 1 and args[0] == .string) class_name = args[0].string;
+    const obj = try ctx.vm.allocator.create(PhpObject);
+    obj.* = .{ .class_name = class_name };
+    try ctx.vm.objects.append(ctx.vm.allocator, obj);
+    if (ctx.vm.classes.contains(class_name)) {
+        try ctx.vm.initObjectProperties(obj, class_name);
+    }
+    for (row.array.entries.items) |entry| {
+        if (entry.key == .string) try obj.set(ctx.allocator, entry.key.string, entry.value);
+    }
+    return .{ .object = obj };
 }
 
 pub fn cleanupResources(objects: std.ArrayListUnmanaged(*PhpObject)) void {
@@ -470,6 +541,54 @@ fn stmtFetchAll(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
 
     if (mode == 5) {
         try fetchAllAsObjects(ctx, stmt, result, obj);
+        try obj.set(ctx.allocator, "__has_row", .{ .bool = false });
+        return .{ .array = result };
+    }
+
+    const has_row_pre = obj.get("__has_row");
+    const stepped_pre = obj.get("__stepped");
+    const start_with_row = stepped_pre == .bool and stepped_pre.bool and has_row_pre == .bool and has_row_pre.bool;
+
+    // FETCH_KEY_PAIR (12): col 0 = key, col 1 = value
+    if (mode == 12) {
+        if (start_with_row) {
+            const key_v = try columnToValue(ctx, stmt, 0);
+            const val_v = try columnToValue(ctx, stmt, 1);
+            const ak: PhpArray.Key = switch (key_v) {
+                .string => |s| .{ .string = s },
+                .int => |n| .{ .int = n },
+                else => .{ .int = Value.toInt(key_v) },
+            };
+            try result.set(ctx.allocator, ak, val_v);
+        }
+        var rc = sqlite.sqlite3_step(stmt);
+        while (rc == sqlite.ROW) {
+            const key_v = try columnToValue(ctx, stmt, 0);
+            const val_v = try columnToValue(ctx, stmt, 1);
+            const ak: PhpArray.Key = switch (key_v) {
+                .string => |s| .{ .string = s },
+                .int => |n| .{ .int = n },
+                else => .{ .int = Value.toInt(key_v) },
+            };
+            try result.set(ctx.allocator, ak, val_v);
+            rc = sqlite.sqlite3_step(stmt);
+        }
+        try obj.set(ctx.allocator, "__has_row", .{ .bool = false });
+        return .{ .array = result };
+    }
+
+    // FETCH_COLUMN (7): single column from each row, default col 0
+    if (mode == 7) {
+        if (start_with_row) {
+            const val_v = try columnToValue(ctx, stmt, 0);
+            try result.append(ctx.allocator, val_v);
+        }
+        var rc = sqlite.sqlite3_step(stmt);
+        while (rc == sqlite.ROW) {
+            const val_v = try columnToValue(ctx, stmt, 0);
+            try result.append(ctx.allocator, val_v);
+            rc = sqlite.sqlite3_step(stmt);
+        }
         try obj.set(ctx.allocator, "__has_row", .{ .bool = false });
         return .{ .array = result };
     }
