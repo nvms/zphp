@@ -7,6 +7,8 @@ pub const entries = .{
     .{ "password_hash", native_password_hash },
     .{ "password_verify", native_password_verify },
     .{ "password_needs_rehash", native_password_needs_rehash },
+    .{ "password_get_info", native_password_get_info },
+    .{ "password_algos", native_password_algos },
     .{ "random_bytes", native_random_bytes },
     .{ "random_int", native_random_int },
     .{ "hash", native_hash },
@@ -55,6 +57,57 @@ fn native_password_verify(_: *NativeContext, args: []const Value) RuntimeError!V
     }) catch return Value{ .bool = false };
 
     return Value{ .bool = true };
+}
+
+fn native_password_get_info(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    const PhpArray = @import("../runtime/value.zig").PhpArray;
+    const info = try ctx.allocator.create(PhpArray);
+    info.* = .{};
+    try ctx.vm.arrays.append(ctx.allocator, info);
+
+    if (args.len == 0 or args[0] != .string) {
+        try info.set(ctx.allocator, .{ .string = "algo" }, .null);
+        try info.set(ctx.allocator, .{ .string = "algoName" }, .{ .string = "unknown" });
+        const empty = try ctx.allocator.create(PhpArray);
+        empty.* = .{};
+        try ctx.vm.arrays.append(ctx.allocator, empty);
+        try info.set(ctx.allocator, .{ .string = "options" }, .{ .array = empty });
+        return .{ .array = info };
+    }
+
+    const hash = args[0].string;
+    var algo: Value = .null;
+    var algo_name: []const u8 = "unknown";
+    const options = try ctx.allocator.create(PhpArray);
+    options.* = .{};
+    try ctx.vm.arrays.append(ctx.allocator, options);
+
+    if (hash.len >= 7 and hash[0] == '$' and hash[1] == '2' and (hash[2] == 'y' or hash[2] == 'b' or hash[2] == 'a')) {
+        algo = .{ .string = try ctx.createString("2y") };
+        algo_name = "bcrypt";
+        // parse cost: $2y$XX$
+        const cost_start: usize = 4;
+        if (hash.len >= 6 and hash[cost_start - 1] == '$') {
+            const dollar_after = std.mem.indexOfScalarPos(u8, hash, cost_start, '$') orelse hash.len;
+            if (std.fmt.parseInt(i64, hash[cost_start..dollar_after], 10)) |cost| {
+                try options.set(ctx.allocator, .{ .string = "cost" }, .{ .int = cost });
+            } else |_| {}
+        }
+    }
+
+    try info.set(ctx.allocator, .{ .string = "algo" }, algo);
+    try info.set(ctx.allocator, .{ .string = "algoName" }, .{ .string = try ctx.createString(algo_name) });
+    try info.set(ctx.allocator, .{ .string = "options" }, .{ .array = options });
+    return .{ .array = info };
+}
+
+fn native_password_algos(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const PhpArray = @import("../runtime/value.zig").PhpArray;
+    const arr = try ctx.allocator.create(PhpArray);
+    arr.* = .{};
+    try ctx.vm.arrays.append(ctx.allocator, arr);
+    try arr.append(ctx.allocator, .{ .string = "2y" });
+    return .{ .array = arr };
 }
 
 fn native_password_needs_rehash(_: *NativeContext, args: []const Value) RuntimeError!Value {

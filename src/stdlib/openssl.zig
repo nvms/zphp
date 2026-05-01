@@ -14,7 +14,21 @@ pub const entries = .{
     .{ "openssl_decrypt", opensslDecrypt },
     .{ "openssl_cipher_key_length", cipherKeyLength },
     .{ "openssl_get_cipher_methods", getCipherMethods },
+    .{ "openssl_random_pseudo_bytes", opensslRandomPseudoBytes },
 };
+
+fn opensslRandomPseudoBytes(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len == 0 or args[0] != .int or args[0].int < 0) return .{ .bool = false };
+    const n: usize = @intCast(args[0].int);
+    if (n == 0) return .{ .string = "" };
+    const buf = try ctx.allocator.alloc(u8, n);
+    if (c.RAND_bytes(buf.ptr, @intCast(n)) != 1) {
+        ctx.allocator.free(buf);
+        return .{ .bool = false };
+    }
+    try ctx.vm.strings.append(ctx.allocator, buf);
+    return .{ .string = buf };
+}
 
 fn fetchCipher(name: []const u8) ?*const c.EVP_CIPHER {
     var buf: [64]u8 = undefined;
