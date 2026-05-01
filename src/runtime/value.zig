@@ -618,7 +618,7 @@ pub const Value = union(enum) {
                 try buf.appendSlice(allocator, s);
             },
             .float => |f| {
-                if (f == @trunc(f) and @abs(f) < 1e15) {
+                if (f == @trunc(f) and @abs(f) < 1e14) {
                     const i: i64 = @intFromFloat(f);
                     var tmp: [32]u8 = undefined;
                     const s = std.fmt.bufPrint(&tmp, "{d}", .{i}) catch return;
@@ -630,8 +630,10 @@ pub const Value = union(enum) {
                     try buf.appendSlice(allocator, "INF");
                 } else {
                     const abs_f = @abs(f);
-                    // very small or very large numbers use scientific notation
-                    if (abs_f != 0 and (abs_f < 1e-4 or abs_f >= 1e15)) {
+                    // very small or very large numbers use scientific notation.
+                    // PHP defaults precision=14 so values needing more than 14
+                    // significant digits go scientific.
+                    if (abs_f != 0 and (abs_f < 1e-4 or abs_f >= 1e14)) {
                         var tmp: [64]u8 = undefined;
                         const s = formatScientific(&tmp, f);
                         try buf.appendSlice(allocator, s);
