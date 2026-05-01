@@ -1757,6 +1757,15 @@ pub const VM = struct {
                             self.stack[self.sp - 1] = inner;
                             iterable = inner;
                         }
+                        // getIterator may have returned a generator; iterate it directly
+                        if (iterable == .generator) {
+                            self.resumeGenerator(iterable.generator, .null) catch {
+                                if (self.dispatchPendingException(base_frame)) continue;
+                                return error.RuntimeError;
+                            };
+                            self.push(.{ .int = -1 });
+                            continue;
+                        }
                         // Iterator protocol
                         if (iterable == .object and self.hasMethod(iterable.object.class_name, "rewind")) {
                             _ = self.callMethod(iterable.object, "rewind", &.{}) catch {};
@@ -7931,6 +7940,12 @@ pub const VM = struct {
             try self.bindClosures(&new_vars, null, full_name);
             const trimmed = if (func.is_variadic) args else args[0..@min(args.len, func.arity)];
             try self.bindArgs(&new_vars, func, trimmed);
+            if (func.is_generator) {
+                const gen = try self.allocator.create(Generator);
+                gen.* = .{ .func = func, .vars = new_vars };
+                try self.generators.append(self.allocator, gen);
+                return .{ .generator = gen };
+            }
             return self.executeFunction(func, new_vars);
         } else return error.RuntimeError;
     }

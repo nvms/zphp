@@ -372,6 +372,8 @@ fn get_class(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
         return .{ .string = this_val.object.class_name };
     }
     if (args[0] == .object) return .{ .string = args[0].object.class_name };
+    if (args[0] == .generator) return .{ .string = "Generator" };
+    if (args[0] == .fiber) return .{ .string = "Fiber" };
     if (args[0] == .string and std.mem.startsWith(u8, args[0].string, "__closure_")) return .{ .string = "Closure" };
     return .{ .bool = false };
 }
