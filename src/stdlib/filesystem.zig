@@ -639,24 +639,63 @@ fn native_scandir(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
 fn native_glob(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len == 0 or args[0] != .string) return .{ .bool = false };
     const pattern = args[0].string;
+    const flags: i64 = if (args.len >= 2 and args[1] == .int) args[1].int else 0;
+    const GLOB_BRACE: i64 = 128;
+    const GLOB_ONLYDIR: i64 = 8192;
+    const GLOB_NOSORT: i64 = 32;
 
-    // extract directory and file pattern from glob
-    const dir_path = if (std.mem.lastIndexOf(u8, pattern, "/")) |pos| pattern[0..pos] else ".";
-    const file_pattern = if (std.mem.lastIndexOf(u8, pattern, "/")) |pos| pattern[pos + 1 ..] else pattern;
+    const result = try ctx.createArray();
 
-    var dir = std.fs.cwd().openDir(dir_path, .{ .iterate = true }) catch return Value{ .array = try ctx.createArray() };
-    defer dir.close();
-
-    var result = try ctx.createArray();
-    var iter = dir.iterate();
-    while (iter.next() catch null) |entry| {
-        if (globMatch(file_pattern, entry.name)) {
-            var path_buf: [4096]u8 = undefined;
-            const full = std.fmt.bufPrint(&path_buf, "{s}/{s}", .{ dir_path, entry.name }) catch continue;
-            try result.append(ctx.allocator, .{ .string = try ctx.createString(full) });
+    if ((flags & GLOB_BRACE) != 0) {
+        if (std.mem.indexOfScalar(u8, pattern, '{')) |open| {
+            if (std.mem.indexOfScalarPos(u8, pattern, open, '}')) |close| {
+                const prefix = pattern[0..open];
+                const suffix = pattern[close + 1 ..];
+                const inner = pattern[open + 1 .. close];
+                var it = std.mem.splitScalar(u8, inner, ',');
+                while (it.next()) |alt| {
+                    const expanded = try std.fmt.allocPrint(ctx.allocator, "{s}{s}{s}", .{ prefix, alt, suffix });
+                    defer ctx.allocator.free(expanded);
+                    try globAppend(ctx, result, expanded, flags);
+                }
+                if ((flags & GLOB_NOSORT) == 0) sortArrayValues(result);
+                return .{ .array = result };
+            }
         }
     }
+
+    try globAppend(ctx, result, pattern, flags);
+    if ((flags & GLOB_NOSORT) == 0) sortArrayValues(result);
+    _ = GLOB_ONLYDIR;
     return .{ .array = result };
+}
+
+fn globAppend(ctx: *NativeContext, result: *PhpArray, pattern: []const u8, flags: i64) !void {
+    const GLOB_ONLYDIR: i64 = 8192;
+    const dir_path = if (std.mem.lastIndexOf(u8, pattern, "/")) |pos| pattern[0..pos] else ".";
+    const file_pattern = if (std.mem.lastIndexOf(u8, pattern, "/")) |pos| pattern[pos + 1 ..] else pattern;
+    var dir = std.fs.cwd().openDir(dir_path, .{ .iterate = true }) catch return;
+    defer dir.close();
+    var iter = dir.iterate();
+    while (iter.next() catch null) |entry| {
+        if (!globMatch(file_pattern, entry.name)) continue;
+        if ((flags & GLOB_ONLYDIR) != 0 and entry.kind != .directory) continue;
+        var path_buf: [4096]u8 = undefined;
+        const full = std.fmt.bufPrint(&path_buf, "{s}/{s}", .{ dir_path, entry.name }) catch continue;
+        try result.append(ctx.allocator, .{ .string = try ctx.createString(full) });
+    }
+}
+
+fn sortArrayValues(arr: *PhpArray) void {
+    const items = arr.entries.items;
+    const Entry = PhpArray.Entry;
+    std.sort.pdq(Entry, items, {}, struct {
+        fn lt(_: void, a: Entry, b: Entry) bool {
+            if (a.value != .string or b.value != .string) return false;
+            return std.mem.order(u8, a.value.string, b.value.string) == .lt;
+        }
+    }.lt);
+    for (items, 0..) |*entry, i| entry.key = .{ .int = @intCast(i) };
 }
 
 fn globMatch(pattern: []const u8, name: []const u8) bool {
