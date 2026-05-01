@@ -681,7 +681,7 @@ pub fn compileClosure(self: *Compiler, node: Ast.Node) Error!void {
     const local_count = sub.next_slot;
     sub.local_slots.deinit(self.allocator);
 
-    const closure_lo = !gen and !has_any_ref and !has_ref_capture and !needsVarSync(&sub.chunk);
+    const closure_lo = !gen and !is_variadic and !has_any_ref and !has_ref_capture and !needsVarSync(&sub.chunk);
 
     const func = ObjFunction{
         .name = owned_name,
