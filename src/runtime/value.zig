@@ -370,7 +370,11 @@ pub const Value = union(enum) {
     }
 
     pub fn equal(a: Value, b: Value) bool {
-        if (a == .object and b == .object) return a.object == b.object;
+        if (a == .object and b == .object) {
+            if (a.object == b.object) return true;
+            if (!std.mem.eql(u8, a.object.class_name, b.object.class_name)) return false;
+            return objectsCompare(a.object, b.object) == 0;
+        }
         if (a == .object or b == .object or a == .fiber or b == .fiber) return false;
         if (a == .array and b == .array) return arrayEqual(a.array, b.array, false);
         if (a == .array or b == .array) {
@@ -434,6 +438,7 @@ pub const Value = union(enum) {
     }
 
     pub fn lessThan(a: Value, b: Value) bool {
+        if (a == .object and b == .object) return compare(a, b) < 0;
         if (a == .object or b == .object or a == .generator or b == .generator or a == .fiber or b == .fiber) return false;
         if (a == .string and b == .string) {
             return std.mem.order(u8, a.string, b.string) == .lt;
@@ -442,6 +447,11 @@ pub const Value = union(enum) {
     }
 
     pub fn compare(a: Value, b: Value) i64 {
+        if (a == .object and b == .object) {
+            if (a.object == b.object) return 0;
+            if (!std.mem.eql(u8, a.object.class_name, b.object.class_name)) return 1;
+            return objectsCompare(a.object, b.object);
+        }
         if (a == .object or b == .object or a == .generator or b == .generator or a == .fiber or b == .fiber) return 0;
         if (a == .string and b == .string) {
             return switch (std.mem.order(u8, a.string, b.string)) {
@@ -454,6 +464,37 @@ pub const Value = union(enum) {
         const bf = toFloat(b);
         if (af < bf) return -1;
         if (af > bf) return 1;
+        return 0;
+    }
+
+    fn objectsCompare(a: *PhpObject, b: *PhpObject) i64 {
+        // walk a's slots + properties; compare value-by-value
+        if (a.slots) |sa| {
+            const sb = b.slots orelse return 1;
+            if (a.slot_layout) |la| {
+                for (la.names, 0..) |name, i| {
+                    if (i >= sa.len or i >= sb.len) break;
+                    const va = sa[i];
+                    const vb = b.get(name);
+                    const c = compare(va, vb);
+                    if (c != 0) return c;
+                }
+            }
+        }
+        var it = a.properties.iterator();
+        while (it.next()) |entry| {
+            const va = entry.value_ptr.*;
+            const vb = b.get(entry.key_ptr.*);
+            const c = compare(va, vb);
+            if (c != 0) return c;
+        }
+        var it2 = b.properties.iterator();
+        while (it2.next()) |entry| {
+            if (a.properties.get(entry.key_ptr.*) == null) {
+                // b has prop a doesn't: a < b
+                return -1;
+            }
+        }
         return 0;
     }
 
