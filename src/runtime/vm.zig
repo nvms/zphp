@@ -2701,6 +2701,12 @@ pub const VM = struct {
                     const obj_val = self.pop();
                     if (obj_val == .object and class_name_val == .string) {
                         self.push(.{ .bool = self.isInstanceOf(obj_val.object.class_name, class_name_val.string) });
+                    } else if (obj_val == .generator and class_name_val == .string) {
+                        const t = class_name_val.string;
+                        const matches = std.mem.eql(u8, t, "Generator") or
+                            std.mem.eql(u8, t, "Iterator") or
+                            std.mem.eql(u8, t, "Traversable");
+                        self.push(.{ .bool = matches });
                     } else if (obj_val == .string and class_name_val == .string and
                         std.mem.eql(u8, class_name_val.string, "Closure") and
                         std.mem.startsWith(u8, obj_val.string, "__closure_"))

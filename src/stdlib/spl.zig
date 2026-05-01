@@ -324,6 +324,7 @@ pub fn register(vm: *VM, a: Allocator) !void {
 
     // SplFixedArray
     var fa_def = ClassDef{ .name = "SplFixedArray" };
+    try fa_def.interfaces.append(a, "Iterator");
     try fa_def.interfaces.append(a, "Countable");
     try fa_def.interfaces.append(a, "ArrayAccess");
     try fa_def.methods.put(a, "__construct", .{ .name = "__construct", .arity = 1 });
