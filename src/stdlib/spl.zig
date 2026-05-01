@@ -1167,7 +1167,8 @@ fn pqInsert(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     for (arr.entries.items) |entry| {
         if (entry.value != .array) break;
         const ep = entry.value.array.get(.{ .int = 1 });
-        if (Value.compare(args[1], ep) > 0) break;
+        // ties: insert before equal-priority items so later-inserted comes out first (matches PHP)
+        if (Value.compare(args[1], ep) >= 0) break;
         pos += 1;
     }
     try arr.entries.insert(ctx.allocator, pos, .{ .key = .{ .int = @intCast(arr.entries.items.len) }, .value = .{ .array = pair } });
@@ -1183,12 +1184,19 @@ fn pqExtractValue(ctx: *NativeContext, obj: *PhpObject) RuntimeError!Value {
     return pqFormatEntry(ctx, obj, entry);
 }
 
-fn pqFormatEntry(_: *NativeContext, obj: *PhpObject, entry: Value) Value {
+fn pqFormatEntry(ctx: *NativeContext, obj: *PhpObject, entry: Value) Value {
     const flags = Value.toInt(obj.get("__flags"));
     if (entry != .array) return entry;
     const pair = entry.array;
     if (flags == EXTR_PRIORITY) return pair.get(.{ .int = 1 });
-    if (flags == EXTR_BOTH) return entry;
+    if (flags == EXTR_BOTH) {
+        const result = ctx.allocator.create(PhpArray) catch return entry;
+        result.* = .{};
+        ctx.vm.arrays.append(ctx.allocator, result) catch return entry;
+        result.set(ctx.allocator, .{ .string = "data" }, pair.get(.{ .int = 0 })) catch return entry;
+        result.set(ctx.allocator, .{ .string = "priority" }, pair.get(.{ .int = 1 })) catch return entry;
+        return .{ .array = result };
+    }
     return pair.get(.{ .int = 0 });
 }
 
