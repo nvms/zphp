@@ -1,5 +1,6 @@
 const std = @import("std");
 const Value = @import("../runtime/value.zig").Value;
+const PhpArray = @import("../runtime/value.zig").PhpArray;
 const NativeContext = @import("../runtime/vm.zig").NativeContext;
 const RuntimeError = error{ RuntimeError, OutOfMemory };
 
@@ -2481,7 +2482,7 @@ fn native_parse_str(ctx: *NativeContext, args: []const Value) RuntimeError!Value
     if (args.len == 0 or args[0] != .string) return .null;
     const s = args[0].string;
 
-    var arr = try ctx.createArray();
+    const arr = try ctx.createArray();
     var rest = s;
     while (rest.len > 0) {
         var pair: []const u8 = undefined;
@@ -2505,12 +2506,67 @@ fn native_parse_str(ctx: *NativeContext, args: []const Value) RuntimeError!Value
 
         const decoded_key = try urlDecodeSlice(ctx, key);
         const decoded_val = try urlDecodeSlice(ctx, val);
-        try arr.set(ctx.allocator, .{ .string = decoded_key }, .{ .string = decoded_val });
+        try insertParsedKey(ctx, arr, decoded_key, .{ .string = decoded_val });
     }
     if (args.len >= 2) {
         ctx.setCallerVar(1, args.len, .{ .array = arr });
     }
     return .null;
+}
+
+fn insertParsedKey(ctx: *NativeContext, root: *PhpArray, key: []const u8, value: Value) !void {
+    // split "a[b][c]" -> base="a", segs=["b","c"]. an empty segment "[]" means append.
+    const open = std.mem.indexOfScalar(u8, key, '[');
+    if (open == null) {
+        try root.set(ctx.allocator, .{ .string = key }, value);
+        return;
+    }
+    const base_name = key[0..open.?];
+    var segments: [16][]const u8 = undefined;
+    var seg_count: usize = 0;
+    var pos: usize = open.?;
+    while (pos < key.len and seg_count < segments.len) {
+        if (key[pos] != '[') break;
+        const close = std.mem.indexOfScalarPos(u8, key, pos + 1, ']') orelse break;
+        segments[seg_count] = key[pos + 1 .. close];
+        seg_count += 1;
+        pos = close + 1;
+    }
+
+    const base_key: PhpArray.Key = .{ .string = base_name };
+    var current_arr: *PhpArray = root;
+    var current_key: PhpArray.Key = base_key;
+    var i: usize = 0;
+    while (i < seg_count) : (i += 1) {
+        const cur_v = current_arr.get(current_key);
+        const next_arr: *PhpArray = blk: {
+            if (cur_v == .array) break :blk cur_v.array;
+            const new_a = try ctx.allocator.create(PhpArray);
+            new_a.* = .{};
+            try ctx.vm.arrays.append(ctx.allocator, new_a);
+            try current_arr.set(ctx.allocator, current_key, .{ .array = new_a });
+            break :blk new_a;
+        };
+        const seg = segments[i];
+        if (seg.len == 0) {
+            // append: next_arr.append decides the int key
+            current_arr = next_arr;
+            // pre-compute next int key
+            var max_int: i64 = -1;
+            for (next_arr.entries.items) |e| {
+                if (e.key == .int and e.key.int > max_int) max_int = e.key.int;
+            }
+            current_key = .{ .int = max_int + 1 };
+        } else {
+            current_arr = next_arr;
+            if (std.fmt.parseInt(i64, seg, 10)) |n| {
+                current_key = .{ .int = n };
+            } else |_| {
+                current_key = .{ .string = seg };
+            }
+        }
+    }
+    try current_arr.set(ctx.allocator, current_key, value);
 }
 
 fn native_strstr(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
