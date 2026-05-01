@@ -7673,16 +7673,37 @@ pub const VM = struct {
         if (type_str.len == 0) return true;
         if (type_str[0] == '?') {
             if (val == .null) return true;
-            return self.checkSingleType(val, type_str[1..]);
+            return self.checkTypeMatch(val, type_str[1..]);
         }
-        if (std.mem.indexOf(u8, type_str, "|")) |_| {
-            var it = std.mem.splitScalar(u8, type_str, '|');
-            while (it.next()) |part| {
-                if (self.checkSingleType(val, part)) return true;
+        // top-level union: split on '|' respecting parens
+        var depth: i32 = 0;
+        var start: usize = 0;
+        for (type_str, 0..) |c, i| {
+            if (c == '(') depth += 1
+            else if (c == ')') depth -= 1
+            else if (c == '|' and depth == 0) {
+                if (self.checkIntersection(val, type_str[start..i])) return true;
+                start = i + 1;
             }
-            return false;
         }
-        return self.checkSingleType(val, type_str);
+        return self.checkIntersection(val, type_str[start..]);
+    }
+
+    noinline fn checkIntersection(self: *VM, val: Value, expr: []const u8) bool {
+        if (expr.len == 0) return true;
+        var s = expr;
+        if (s.len >= 2 and s[0] == '(' and s[s.len - 1] == ')') s = s[1 .. s.len - 1];
+        var depth: i32 = 0;
+        var start: usize = 0;
+        for (s, 0..) |c, i| {
+            if (c == '(') depth += 1
+            else if (c == ')') depth -= 1
+            else if (c == '&' and depth == 0) {
+                if (!self.checkSingleType(val, s[start..i])) return false;
+                start = i + 1;
+            }
+        }
+        return self.checkSingleType(val, s[start..]);
     }
 
     noinline fn checkParamTypes(self: *VM, name: []const u8, arg_count: u8) RuntimeError!bool {

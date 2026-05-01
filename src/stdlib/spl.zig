@@ -491,6 +491,116 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try vm.native_fns.put(a, "SplObjectStorage::offsetSet", sosOffsetSet);
     try vm.native_fns.put(a, "SplObjectStorage::offsetExists", sosOffsetExists);
     try vm.native_fns.put(a, "SplObjectStorage::offsetUnset", sosOffsetUnset);
+
+    // WeakReference: holds the target. zphp is request-scoped so the target
+    // never goes away mid-request. get() always returns the target.
+    var wr_def = ClassDef{ .name = "WeakReference", .is_final = true };
+    try wr_def.methods.put(a, "create", .{ .name = "create", .arity = 1, .is_static = true });
+    try wr_def.methods.put(a, "get", .{ .name = "get", .arity = 0 });
+    try vm.classes.put(a, "WeakReference", wr_def);
+    try vm.native_fns.put(a, "WeakReference::create", weakRefCreate);
+    try vm.native_fns.put(a, "WeakReference::get", weakRefGet);
+
+    // add iteration support to existing WeakMap
+    if (vm.classes.getPtr("WeakMap")) |wm| {
+        try wm.interfaces.append(a, "IteratorAggregate");
+        try wm.methods.put(a, "getIterator", .{ .name = "getIterator", .arity = 0 });
+    }
+    try vm.native_fns.put(a, "WeakMap::getIterator", weakMapGetIterator);
+
+    var wmi_def = ClassDef{ .name = "WeakMapIterator" };
+    try wmi_def.interfaces.append(a, "Iterator");
+    try wmi_def.methods.put(a, "current", .{ .name = "current", .arity = 0 });
+    try wmi_def.methods.put(a, "key", .{ .name = "key", .arity = 0 });
+    try wmi_def.methods.put(a, "next", .{ .name = "next", .arity = 0 });
+    try wmi_def.methods.put(a, "rewind", .{ .name = "rewind", .arity = 0 });
+    try wmi_def.methods.put(a, "valid", .{ .name = "valid", .arity = 0 });
+    try vm.classes.put(a, "WeakMapIterator", wmi_def);
+    try vm.native_fns.put(a, "WeakMapIterator::current", wmiCurrent);
+    try vm.native_fns.put(a, "WeakMapIterator::key", wmiKey);
+    try vm.native_fns.put(a, "WeakMapIterator::next", wmiNext);
+    try vm.native_fns.put(a, "WeakMapIterator::rewind", wmiRewind);
+    try vm.native_fns.put(a, "WeakMapIterator::valid", wmiValid);
+}
+
+fn wmiCursorObj(this: *PhpObject) ?*PhpObject {
+    const objs_v = this.get("__objs");
+    if (objs_v != .array) return null;
+    const cursor = Value.toInt(this.get("__cursor"));
+    if (cursor < 0 or cursor >= @as(i64, @intCast(objs_v.array.entries.items.len))) return null;
+    const v = objs_v.array.entries.items[@intCast(cursor)].value;
+    if (v != .object) return null;
+    return v.object;
+}
+
+fn wmiCurrent(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const this = getThis(ctx) orelse return .null;
+    const target = wmiCursorObj(this) orelse return .null;
+    const info_v = this.get("__info");
+    if (info_v != .array) return .null;
+    return info_v.array.get(.{ .int = sosObjKey(target) });
+}
+
+fn wmiKey(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const this = getThis(ctx) orelse return .null;
+    const target = wmiCursorObj(this) orelse return .null;
+    return .{ .object = target };
+}
+
+fn wmiNext(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const this = getThis(ctx) orelse return .null;
+    const cur = Value.toInt(this.get("__cursor"));
+    try this.set(ctx.allocator, "__cursor", .{ .int = cur + 1 });
+    return .null;
+}
+
+fn wmiRewind(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const this = getThis(ctx) orelse return .null;
+    try this.set(ctx.allocator, "__cursor", .{ .int = 0 });
+    return .null;
+}
+
+fn wmiValid(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const this = getThis(ctx) orelse return .{ .bool = false };
+    const objs_v = this.get("__objs");
+    if (objs_v != .array) return .{ .bool = false };
+    const cursor = Value.toInt(this.get("__cursor"));
+    return .{ .bool = cursor >= 0 and cursor < @as(i64, @intCast(objs_v.array.entries.items.len)) };
+}
+
+// =========================================================
+// WeakReference
+// =========================================================
+
+fn weakRefCreate(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len < 1 or args[0] != .object) return .null;
+    const ref = try ctx.vm.allocator.create(PhpObject);
+    ref.* = .{ .class_name = "WeakReference" };
+    try ctx.vm.objects.append(ctx.vm.allocator, ref);
+    try ref.set(ctx.vm.allocator, "__target", args[0]);
+    return .{ .object = ref };
+}
+
+fn weakRefGet(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const this = getThis(ctx) orelse return .null;
+    return this.get("__target");
+}
+
+// =========================================================
+// WeakMap
+// =========================================================
+
+fn weakMapGetIterator(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const obj = getThis(ctx) orelse return .null;
+    const keys_v = obj.get("__keys");
+    const data_v = obj.get("__data");
+    const iter = try ctx.vm.allocator.create(PhpObject);
+    iter.* = .{ .class_name = "WeakMapIterator" };
+    try ctx.vm.objects.append(ctx.vm.allocator, iter);
+    if (keys_v == .array) try iter.set(ctx.allocator, "__objs", keys_v);
+    if (data_v == .array) try iter.set(ctx.allocator, "__info", data_v);
+    try iter.set(ctx.allocator, "__cursor", .{ .int = 0 });
+    return .{ .object = iter };
 }
 
 fn getThis(ctx: *NativeContext) ?*PhpObject {
@@ -959,6 +1069,14 @@ fn wmObjKey(arg: Value) ?i64 {
 fn wmConstruct(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
     const obj = getThis(ctx) orelse return .null;
     _ = try ensureData(ctx, obj);
+    // __keys parallel-tracks the object references in insertion order so that
+    // iteration can yield real object keys (the int-keyed __data only has pointers)
+    if (obj.get("__keys") != .array) {
+        const keys = try ctx.allocator.create(PhpArray);
+        keys.* = .{};
+        try ctx.vm.arrays.append(ctx.allocator, keys);
+        try obj.set(ctx.allocator, "__keys", .{ .array = keys });
+    }
     return .null;
 }
 
@@ -984,7 +1102,12 @@ fn wmOffsetSet(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     const arr = try ensureData(ctx, obj);
     if (args.len < 2) return .null;
     const key = wmObjKey(args[0]) orelse return .null;
+    const is_new = arr.get(.{ .int = key }) == .null;
     try arr.set(ctx.allocator, .{ .int = key }, args[1]);
+    if (is_new and args[0] == .object) {
+        const keys_v = obj.get("__keys");
+        if (keys_v == .array) try keys_v.array.append(ctx.allocator, args[0]);
+    }
     return .null;
 }
 
@@ -994,6 +1117,18 @@ fn wmOffsetUnset(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len == 0) return .null;
     const key = wmObjKey(args[0]) orelse return .null;
     arr.remove(.{ .int = key });
+    if (args[0] == .object) {
+        const keys_v = obj.get("__keys");
+        if (keys_v == .array) {
+            const target = args[0].object;
+            for (keys_v.array.entries.items, 0..) |e, i| {
+                if (e.value == .object and e.value.object == target) {
+                    _ = keys_v.array.entries.orderedRemove(i);
+                    break;
+                }
+            }
+        }
+    }
     return .null;
 }
 
