@@ -69,6 +69,20 @@ fn getStmtPtr(obj: *PhpObject) ?*sqlite.Stmt {
 }
 
 pub fn throwPdo(ctx: *NativeContext, msg: []const u8) RuntimeError!Value {
+    // honor ATTR_ERRMODE: silent (0) returns false, warning (1) returns false,
+    // exception (2) throws PDOException. default in PHP 8 is exception, but for
+    // backward-compat zphp defaults the construct path to exception too
+    if (ctx.vm.currentFrame().vars.get("$this")) |this_v| {
+        if (this_v == .object) {
+            const obj = this_v.object;
+            try obj.set(ctx.allocator, "__error_code", .{ .string = "HY000" });
+            const owned = try ctx.createString(msg);
+            try obj.set(ctx.allocator, "__error_message", .{ .string = owned });
+            const mode = obj.get("__errmode");
+            const m: i64 = if (mode == .int) mode.int else 2;
+            if (m != 2) return .{ .bool = false };
+        }
+    }
     if (try ctx.vm.throwBuiltinException("PDOException", msg)) return .null;
     return error.RuntimeError;
 }
@@ -92,8 +106,12 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try pdo_def.methods.put(a, "commit", .{ .name = "commit", .arity = 0 });
     try pdo_def.methods.put(a, "rollBack", .{ .name = "rollBack", .arity = 0 });
     try pdo_def.methods.put(a, "errorInfo", .{ .name = "errorInfo", .arity = 0 });
+    try pdo_def.methods.put(a, "errorCode", .{ .name = "errorCode", .arity = 0 });
     try pdo_def.methods.put(a, "setAttribute", .{ .name = "setAttribute", .arity = 2 });
     try pdo_def.methods.put(a, "getAttribute", .{ .name = "getAttribute", .arity = 1 });
+    try pdo_def.methods.put(a, "quote", .{ .name = "quote", .arity = 1 });
+    try pdo_def.methods.put(a, "inTransaction", .{ .name = "inTransaction", .arity = 0 });
+    try pdo_def.methods.put(a, "getAvailableDrivers", .{ .name = "getAvailableDrivers", .arity = 0, .is_static = true });
 
     // PDO constants as static properties
     try pdo_def.static_props.put(a, "FETCH_BOTH", .{ .int = 4 });
@@ -110,6 +128,20 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try pdo_def.static_props.put(a, "ATTR_ERRMODE", .{ .int = 3 });
     try pdo_def.static_props.put(a, "ATTR_DEFAULT_FETCH_MODE", .{ .int = 19 });
     try pdo_def.static_props.put(a, "ERRMODE_EXCEPTION", .{ .int = 2 });
+    try pdo_def.static_props.put(a, "ERRMODE_SILENT", .{ .int = 0 });
+    try pdo_def.static_props.put(a, "ERRMODE_WARNING", .{ .int = 1 });
+    try pdo_def.static_props.put(a, "ATTR_CASE", .{ .int = 8 });
+    try pdo_def.static_props.put(a, "CASE_NATURAL", .{ .int = 0 });
+    try pdo_def.static_props.put(a, "CASE_LOWER", .{ .int = 2 });
+    try pdo_def.static_props.put(a, "CASE_UPPER", .{ .int = 1 });
+    try pdo_def.static_props.put(a, "ATTR_PERSISTENT", .{ .int = 12 });
+    try pdo_def.static_props.put(a, "ATTR_AUTOCOMMIT", .{ .int = 0 });
+    try pdo_def.static_props.put(a, "ATTR_EMULATE_PREPARES", .{ .int = 20 });
+    try pdo_def.static_props.put(a, "ATTR_DRIVER_NAME", .{ .int = 16 });
+    try pdo_def.static_props.put(a, "ATTR_SERVER_VERSION", .{ .int = 4 });
+    try pdo_def.static_props.put(a, "ATTR_CLIENT_VERSION", .{ .int = 5 });
+    try pdo_def.static_props.put(a, "PARAM_BOOL", .{ .int = 5 });
+    try pdo_def.static_props.put(a, "PARAM_LOB", .{ .int = 3 });
     try pdo_def.static_props.put(a, "PARAM_NULL", .{ .int = 0 });
     try pdo_def.static_props.put(a, "PARAM_INT", .{ .int = 1 });
     try pdo_def.static_props.put(a, "PARAM_STR", .{ .int = 2 });
@@ -120,6 +152,10 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try vm.native_fns.put(a, "PDO::connect", pdoConnect);
     try vm.native_fns.put(a, "PDO::exec", pdoExec);
     try vm.native_fns.put(a, "PDO::query", pdoQuery);
+    try vm.native_fns.put(a, "PDO::quote", pdoQuote);
+    try vm.native_fns.put(a, "PDO::inTransaction", pdoInTransaction);
+    try vm.native_fns.put(a, "PDO::getAvailableDrivers", pdoGetAvailableDrivers);
+    try vm.native_fns.put(a, "PDO::errorCode", pdoErrorCode);
     try vm.native_fns.put(a, "PDO::prepare", pdoPrepare);
     try vm.native_fns.put(a, "PDO::lastInsertId", pdoLastInsertId);
     try vm.native_fns.put(a, "PDO::beginTransaction", pdoBeginTransaction);
@@ -142,6 +178,12 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try stmt_def.methods.put(a, "closeCursor", .{ .name = "closeCursor", .arity = 0 });
     try stmt_def.methods.put(a, "setFetchMode", .{ .name = "setFetchMode", .arity = 1 });
     try stmt_def.methods.put(a, "bindValue", .{ .name = "bindValue", .arity = 2 });
+    try stmt_def.methods.put(a, "bindParam", .{ .name = "bindParam", .arity = 2 });
+    try stmt_def.methods.put(a, "errorCode", .{ .name = "errorCode", .arity = 0 });
+    try stmt_def.methods.put(a, "errorInfo", .{ .name = "errorInfo", .arity = 0 });
+    try stmt_def.methods.put(a, "debugDumpParams", .{ .name = "debugDumpParams", .arity = 0 });
+    try stmt_def.methods.put(a, "getColumnMeta", .{ .name = "getColumnMeta", .arity = 1 });
+    try stmt_def.methods.put(a, "nextRowset", .{ .name = "nextRowset", .arity = 0 });
     try stmt_def.methods.put(a, "rewind", .{ .name = "rewind", .arity = 0 });
     try stmt_def.methods.put(a, "current", .{ .name = "current", .arity = 0 });
     try stmt_def.methods.put(a, "key", .{ .name = "key", .arity = 0 });
@@ -159,6 +201,12 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try vm.native_fns.put(a, "PDOStatement::closeCursor", stmtCloseCursor);
     try vm.native_fns.put(a, "PDOStatement::setFetchMode", stmtSetFetchMode);
     try vm.native_fns.put(a, "PDOStatement::bindValue", stmtBindValue);
+    try vm.native_fns.put(a, "PDOStatement::bindParam", stmtBindValue);
+    try vm.native_fns.put(a, "PDOStatement::errorCode", stmtErrorCode);
+    try vm.native_fns.put(a, "PDOStatement::errorInfo", stmtErrorInfo);
+    try vm.native_fns.put(a, "PDOStatement::debugDumpParams", stmtDebugDumpParams);
+    try vm.native_fns.put(a, "PDOStatement::getColumnMeta", stmtGetColumnMeta);
+    try vm.native_fns.put(a, "PDOStatement::nextRowset", stmtNextRowset);
     try vm.native_fns.put(a, "PDOStatement::rewind", stmtIterRewind);
     try vm.native_fns.put(a, "PDOStatement::current", stmtIterCurrent);
     try vm.native_fns.put(a, "PDOStatement::key", stmtIterKey);
@@ -315,7 +363,9 @@ fn pdoExec(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     const rc = sqlite.sqlite3_exec(db, sql_z, null, null, @ptrCast(&errmsg));
     if (rc != sqlite.OK) {
         const msg = if (errmsg) |e| std.mem.span(e) else "SQL execution error";
-        return throwPdo(ctx, msg);
+        const result = try throwPdo(ctx, msg);
+        if (result == .bool and !result.bool) return .{ .bool = false };
+        return result;
     }
     return .{ .int = sqlite.sqlite3_changes(db) };
 }
@@ -391,6 +441,7 @@ fn pdoBeginTransaction(ctx: *NativeContext, _: []const Value) RuntimeError!Value
     if (std.mem.eql(u8, drv, "pgsql")) return pdo_pgsql.beginTransaction(ctx, obj);
     const db = getDbPtr(obj) orelse return .{ .bool = false };
     const rc = sqlite.sqlite3_exec(db, "BEGIN", null, null, null);
+    if (rc == sqlite.OK) try obj.set(ctx.allocator, "__in_transaction", .{ .bool = true });
     return .{ .bool = rc == sqlite.OK };
 }
 
@@ -401,6 +452,7 @@ fn pdoCommit(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
     if (std.mem.eql(u8, drv, "pgsql")) return pdo_pgsql.commit(ctx, obj);
     const db = getDbPtr(obj) orelse return .{ .bool = false };
     const rc = sqlite.sqlite3_exec(db, "COMMIT", null, null, null);
+    if (rc == sqlite.OK) try obj.set(ctx.allocator, "__in_transaction", .{ .bool = false });
     return .{ .bool = rc == sqlite.OK };
 }
 
@@ -411,6 +463,7 @@ fn pdoRollBack(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
     if (std.mem.eql(u8, drv, "pgsql")) return pdo_pgsql.rollBack(ctx, obj);
     const db = getDbPtr(obj) orelse return .{ .bool = false };
     const rc = sqlite.sqlite3_exec(db, "ROLLBACK", null, null, null);
+    if (rc == sqlite.OK) try obj.set(ctx.allocator, "__in_transaction", .{ .bool = false });
     return .{ .bool = rc == sqlite.OK };
 }
 
@@ -434,6 +487,8 @@ fn pdoSetAttribute(ctx: *NativeContext, args: []const Value) RuntimeError!Value 
     const attr = if (args[0] == .int) args[0].int else return .{ .bool = false };
     if (attr == 19) {
         try obj.set(ctx.allocator, "__default_fetch_mode", args[1]);
+    } else if (attr == 3) {
+        try obj.set(ctx.allocator, "__errmode", args[1]);
     }
     return .{ .bool = true };
 }
@@ -548,6 +603,24 @@ fn stmtFetchAll(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     const has_row_pre = obj.get("__has_row");
     const stepped_pre = obj.get("__stepped");
     const start_with_row = stepped_pre == .bool and stepped_pre.bool and has_row_pre == .bool and has_row_pre.bool;
+
+    // FETCH_CLASS (8): hydrate rows into instances of the given class
+    if (mode == 8) {
+        var class_name: []const u8 = "stdClass";
+        if (args.len >= 2 and args[1] == .string) class_name = args[1].string;
+        if (start_with_row) {
+            const inst = try fetchRowAsClass(ctx, stmt, class_name);
+            try result.append(ctx.allocator, inst);
+        }
+        var rc = sqlite.sqlite3_step(stmt);
+        while (rc == sqlite.ROW) {
+            const inst = try fetchRowAsClass(ctx, stmt, class_name);
+            try result.append(ctx.allocator, inst);
+            rc = sqlite.sqlite3_step(stmt);
+        }
+        try obj.set(ctx.allocator, "__has_row", .{ .bool = false });
+        return .{ .array = result };
+    }
 
     // FETCH_KEY_PAIR (12): col 0 = key, col 1 = value
     if (mode == 12) {
@@ -685,6 +758,101 @@ fn stmtSetFetchMode(ctx: *NativeContext, args: []const Value) RuntimeError!Value
     return .{ .bool = true };
 }
 
+fn pdoQuote(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len < 1) return .{ .bool = false };
+    var s_buf: [4096]u8 = undefined;
+    const v = args[0];
+    var input: []const u8 = "";
+    var fallback: [32]u8 = undefined;
+    switch (v) {
+        .string => |s| input = s,
+        .int => |n| input = std.fmt.bufPrint(&fallback, "{d}", .{n}) catch return .{ .bool = false },
+        .float => |f| input = std.fmt.bufPrint(&fallback, "{d}", .{f}) catch return .{ .bool = false },
+        .bool => |b| input = if (b) "1" else "",
+        .null => input = "",
+        else => return .{ .bool = false },
+    }
+    // single-quote and double internal quotes per SQL standard
+    var w: usize = 0;
+    if (w + 1 >= s_buf.len) return .{ .bool = false };
+    s_buf[w] = '\''; w += 1;
+    for (input) |c| {
+        if (c == '\'') {
+            if (w + 2 >= s_buf.len) return .{ .bool = false };
+            s_buf[w] = '\''; w += 1;
+            s_buf[w] = '\''; w += 1;
+        } else {
+            if (w + 1 >= s_buf.len) return .{ .bool = false };
+            s_buf[w] = c; w += 1;
+        }
+    }
+    if (w + 1 >= s_buf.len) return .{ .bool = false };
+    s_buf[w] = '\''; w += 1;
+    const result = try ctx.createString(s_buf[0..w]);
+    return .{ .string = result };
+}
+
+fn pdoInTransaction(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const obj = getThis(ctx) orelse return .{ .bool = false };
+    const t = obj.get("__in_transaction");
+    return .{ .bool = t == .bool and t.bool };
+}
+
+fn pdoGetAvailableDrivers(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const arr = try ctx.createArray();
+    try arr.append(ctx.allocator, .{ .string = "sqlite" });
+    try arr.append(ctx.allocator, .{ .string = "mysql" });
+    try arr.append(ctx.allocator, .{ .string = "pgsql" });
+    return .{ .array = arr };
+}
+
+fn pdoErrorCode(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const obj = getThis(ctx) orelse return .null;
+    const code = obj.get("__error_code");
+    if (code == .string) return code;
+    return .{ .string = "00000" };
+}
+
+fn stmtErrorCode(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const obj = getThis(ctx) orelse return .null;
+    const code = obj.get("__error_code");
+    if (code == .string) return code;
+    return .{ .string = "00000" };
+}
+
+fn stmtErrorInfo(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const obj = getThis(ctx) orelse return .null;
+    const arr = try ctx.createArray();
+    const code = obj.get("__error_code");
+    try arr.append(ctx.allocator, if (code == .string) code else .{ .string = "00000" });
+    const driver_code = obj.get("__driver_error_code");
+    try arr.append(ctx.allocator, if (driver_code == .int) driver_code else .{ .int = 0 });
+    const msg = obj.get("__error_message");
+    try arr.append(ctx.allocator, if (msg == .string) msg else .null);
+    return .{ .array = arr };
+}
+
+fn stmtDebugDumpParams(_: *NativeContext, _: []const Value) RuntimeError!Value {
+    return .null;
+}
+
+fn stmtGetColumnMeta(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    const obj = getThis(ctx) orelse return .{ .bool = false };
+    if (args.len < 1 or args[0] != .int) return .{ .bool = false };
+    const stmt = getStmtPtr(obj) orelse return .{ .bool = false };
+    const col: c_int = @intCast(args[0].int);
+    const arr = try ctx.createArray();
+    if (sqlite.sqlite3_column_name(stmt, col)) |np| {
+        const n = std.mem.span(np);
+        try arr.set(ctx.allocator, .{ .string = "name" }, .{ .string = try ctx.createString(n) });
+    }
+    return .{ .array = arr };
+}
+
+fn stmtNextRowset(_: *NativeContext, _: []const Value) RuntimeError!Value {
+    return .{ .bool = false };
+}
+
 fn stmtBindValue(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     const obj = getThis(ctx) orelse return .{ .bool = false };
     if (args.len < 2) return .{ .bool = false };
@@ -729,6 +897,24 @@ fn fetchRowAsObject(ctx: *NativeContext, stmt: *sqlite.Stmt) !Value {
         if (sqlite.sqlite3_column_name(stmt, i)) |name_ptr| {
             const name = std.mem.span(name_ptr);
             try obj.set(ctx.allocator, try ctx.createString(name), val);
+        }
+    }
+    return .{ .object = obj };
+}
+
+fn fetchRowAsClass(ctx: *NativeContext, stmt: *sqlite.Stmt, class_name: []const u8) !Value {
+    const obj = try ctx.vm.allocator.create(PhpObject);
+    obj.* = .{ .class_name = class_name };
+    try ctx.vm.objects.append(ctx.vm.allocator, obj);
+    if (ctx.vm.classes.contains(class_name)) try ctx.vm.initObjectProperties(obj, class_name);
+    const col_count = sqlite.sqlite3_column_count(stmt);
+    var i: c_int = 0;
+    while (i < col_count) : (i += 1) {
+        if (sqlite.sqlite3_column_name(stmt, i)) |name_ptr| {
+            const name = std.mem.span(name_ptr);
+            const owned = try ctx.createString(name);
+            const val = try columnToValue(ctx, stmt, i);
+            try obj.set(ctx.allocator, owned, val);
         }
     }
     return .{ .object = obj };
