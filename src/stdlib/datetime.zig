@@ -477,6 +477,13 @@ pub fn formatTimestampTz(ctx: *NativeContext, timestamp: i64, format: []const u8
                 const s = std.fmt.bufPrint(&tmp, "{d}", .{h12}) catch "0";
                 try buf.appendSlice(a, s);
             },
+            'h' => {
+                const h = day_seconds.getHoursIntoDay();
+                const h12: u32 = if (h == 0) 12 else if (h > 12) h - 12 else h;
+                var tmp: [4]u8 = undefined;
+                const s = std.fmt.bufPrint(&tmp, "{d:0>2}", .{h12}) catch "00";
+                try buf.appendSlice(a, s);
+            },
             'A' => try buf.appendSlice(a, if (day_seconds.getHoursIntoDay() < 12) "AM" else "PM"),
             'a' => try buf.appendSlice(a, if (day_seconds.getHoursIntoDay() < 12) "am" else "pm"),
             'l' => {
@@ -685,12 +692,38 @@ fn intervalToSeconds(interval: *PhpObject) i64 {
     return if (invert != 0) -total else total;
 }
 
+// add a DateInterval to a timestamp using calendar arithmetic for y/m/d so
+// month-length variation and 31st-of-month rollover behave like PHP
+fn applyInterval(ts: i64, interval: *PhpObject, sign: i64) i64 {
+    const y = Value.toInt(interval.get("y"));
+    const m = Value.toInt(interval.get("m"));
+    const d = Value.toInt(interval.get("d"));
+    const h = Value.toInt(interval.get("h"));
+    const i = Value.toInt(interval.get("i"));
+    const s = Value.toInt(interval.get("s"));
+    const invert = Value.toInt(interval.get("invert"));
+    const direction: i64 = if (invert != 0) -sign else sign;
+
+    const c = baseComponents(ts);
+    var year: i64 = c.year + direction * y;
+    var month: i64 = c.month + direction * m;
+    while (month > 12) : ({ month -= 12; year += 1; }) {}
+    while (month < 1) : ({ month += 12; year -= 1; }) {}
+    const day: i64 = c.day + direction * d;
+
+    // build a timestamp from the calendar components, letting dateToTimestamp
+    // normalize day overflow (Jan 32 -> Feb 1, Jan 31 with Feb target -> Mar 2/3)
+    var new_ts = dateToTimestamp(year, month, day, c.hour, c.min, c.sec);
+    new_ts += direction * (h * 3600 + i * 60 + s);
+    return new_ts;
+}
+
 fn dtAdd(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     const obj = getThis(ctx) orelse return .null;
     if (args.len == 0 or args[0] != .object) return .{ .object = obj };
     const ts = getTimestamp(obj);
-    const delta = intervalToSeconds(args[0].object);
-    try obj.set(ctx.allocator, "timestamp", .{ .int = ts + delta });
+    const new_ts = applyInterval(ts, args[0].object, 1);
+    try obj.set(ctx.allocator, "timestamp", .{ .int = new_ts });
     return .{ .object = obj };
 }
 
@@ -698,8 +731,8 @@ fn dtSub(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     const obj = getThis(ctx) orelse return .null;
     if (args.len == 0 or args[0] != .object) return .{ .object = obj };
     const ts = getTimestamp(obj);
-    const delta = intervalToSeconds(args[0].object);
-    try obj.set(ctx.allocator, "timestamp", .{ .int = ts - delta });
+    const new_ts = applyInterval(ts, args[0].object, -1);
+    try obj.set(ctx.allocator, "timestamp", .{ .int = new_ts });
     return .{ .object = obj };
 }
 
@@ -707,9 +740,9 @@ fn dtiAdd(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     const obj = getThis(ctx) orelse return .null;
     if (args.len == 0 or args[0] != .object) return .{ .object = obj };
     const ts = getTimestamp(obj);
-    const delta = intervalToSeconds(args[0].object);
+    const new_ts = applyInterval(ts, args[0].object, 1);
     const new_obj = try ctx.createObject("DateTimeImmutable");
-    try new_obj.set(ctx.allocator, "timestamp", .{ .int = ts + delta });
+    try new_obj.set(ctx.allocator, "timestamp", .{ .int = new_ts });
     return .{ .object = new_obj };
 }
 
@@ -717,9 +750,9 @@ fn dtiSub(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     const obj = getThis(ctx) orelse return .null;
     if (args.len == 0 or args[0] != .object) return .{ .object = obj };
     const ts = getTimestamp(obj);
-    const delta = intervalToSeconds(args[0].object);
+    const new_ts = applyInterval(ts, args[0].object, -1);
     const new_obj = try ctx.createObject("DateTimeImmutable");
-    try new_obj.set(ctx.allocator, "timestamp", .{ .int = ts - delta });
+    try new_obj.set(ctx.allocator, "timestamp", .{ .int = new_ts });
     return .{ .object = new_obj };
 }
 
@@ -1572,6 +1605,12 @@ pub fn parseRelativeTime(input: []const u8, base: i64) Value {
 
     // "now"
     if (eqlLower(s, "now")) return .{ .int = base };
+
+    // RFC 2822 / 7231 - "Mon, 15 Jan 2024 10:30:00 GMT"
+    if (tryParseRfc2822(s)) |ts| return .{ .int = ts };
+
+    // textual month dates
+    if (tryParseTextualDate(s)) |ts| return .{ .int = ts };
 
     // "today", "yesterday", "tomorrow", "midnight", "noon"
     if (tryParseKeyword(s, base)) |ts| return .{ .int = ts };
