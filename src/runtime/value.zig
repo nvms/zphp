@@ -726,9 +726,11 @@ pub const Value = union(enum) {
     const BinOp = enum { add, sub, mul };
 
     fn numericBinOp(a: Value, b: Value, op: BinOp) Value {
-        if (a == .int and b == .int) {
-            const ai = a.int;
-            const bi = b.int;
+        const ar = numericPromote(a);
+        const br = numericPromote(b);
+        if (ar == .int_kind and br == .int_kind) {
+            const ai = ar.int_kind;
+            const bi = br.int_kind;
             switch (op) {
                 .add => {
                     const r = @addWithOverflow(ai, bi);
@@ -752,13 +754,68 @@ pub const Value = union(enum) {
                 .mul => af * bf,
             } };
         }
-        const af = toFloat(a);
-        const bf = toFloat(b);
+        const af: f64 = switch (ar) {
+            .int_kind => |i| @floatFromInt(i),
+            .float_kind => |f| f,
+        };
+        const bf: f64 = switch (br) {
+            .int_kind => |i| @floatFromInt(i),
+            .float_kind => |f| f,
+        };
         return .{ .float = switch (op) {
             .add => af + bf,
             .sub => af - bf,
             .mul => af * bf,
         } };
+    }
+
+    const NumericValue = union(enum) {
+        int_kind: i64,
+        float_kind: f64,
+    };
+
+    fn numericPromote(v: Value) NumericValue {
+        return switch (v) {
+            .int => |i| .{ .int_kind = i },
+            .float => |f| .{ .float_kind = f },
+            .bool => |b| .{ .int_kind = if (b) @as(i64, 1) else 0 },
+            .null => .{ .int_kind = 0 },
+            .string => |s| classifyNumericString(s),
+            else => .{ .int_kind = 0 },
+        };
+    }
+
+    fn classifyNumericString(s: []const u8) NumericValue {
+        var start: usize = 0;
+        while (start < s.len and (s[start] == ' ' or s[start] == '\t' or s[start] == '\n' or s[start] == '\r')) start += 1;
+        var i = start;
+        var has_dot = false;
+        var has_exp = false;
+        if (i < s.len and (s[i] == '+' or s[i] == '-')) i += 1;
+        while (i < s.len) : (i += 1) {
+            const c = s[i];
+            if (c >= '0' and c <= '9') continue;
+            if (c == '.' and !has_dot and !has_exp) { has_dot = true; continue; }
+            if ((c == 'e' or c == 'E') and !has_exp and i > start) {
+                has_exp = true;
+                if (i + 1 < s.len and (s[i + 1] == '+' or s[i + 1] == '-')) i += 1;
+                continue;
+            }
+            break;
+        }
+        const num_str = s[start..i];
+        if (num_str.len == 0 or std.mem.eql(u8, num_str, "+") or std.mem.eql(u8, num_str, "-")) {
+            return .{ .int_kind = 0 };
+        }
+        if (has_dot or has_exp) {
+            const f = std.fmt.parseFloat(f64, num_str) catch 0.0;
+            return .{ .float_kind = f };
+        }
+        const n = std.fmt.parseInt(i64, num_str, 10) catch {
+            const f = std.fmt.parseFloat(f64, num_str) catch 0.0;
+            return .{ .float_kind = f };
+        };
+        return .{ .int_kind = n };
     }
 };
 
