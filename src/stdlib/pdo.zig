@@ -266,7 +266,9 @@ fn stmtFetchObject(ctx: *NativeContext, args: []const Value) RuntimeError!Value 
 }
 
 pub fn cleanupResources(objects: std.ArrayListUnmanaged(*PhpObject)) void {
-    // finalize statements first, then close databases
+    // finalize statements first, then close databases. the obj is being torn down
+    // right after this so we don't need to clear the pointer fields in the
+    // property map (which would require the VM allocator to grow the bucket).
     for (objects.items) |obj| {
         if (std.mem.eql(u8, obj.class_name, "PDOStatement")) {
             const drv = getDriver(obj);
@@ -275,10 +277,7 @@ pub fn cleanupResources(objects: std.ArrayListUnmanaged(*PhpObject)) void {
             } else if (std.mem.eql(u8, drv, "pgsql")) {
                 pdo_pgsql.cleanupStatement(obj);
             } else {
-                if (getStmtPtr(obj)) |stmt| {
-                    _ = sqlite.sqlite3_finalize(stmt);
-                    obj.properties.put(std.heap.page_allocator, "__stmt_ptr", .{ .int = 0 }) catch {};
-                }
+                if (getStmtPtr(obj)) |stmt| _ = sqlite.sqlite3_finalize(stmt);
             }
         }
     }
@@ -290,10 +289,7 @@ pub fn cleanupResources(objects: std.ArrayListUnmanaged(*PhpObject)) void {
             } else if (std.mem.eql(u8, drv, "pgsql")) {
                 pdo_pgsql.cleanupConnection(obj);
             } else {
-                if (getDbPtr(obj)) |db| {
-                    _ = sqlite.sqlite3_close_v2(db);
-                    obj.properties.put(std.heap.page_allocator, "__db_ptr", .{ .int = 0 }) catch {};
-                }
+                if (getDbPtr(obj)) |db| _ = sqlite.sqlite3_close_v2(db);
             }
         }
     }
@@ -342,13 +338,36 @@ fn pdoConstruct(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
         const rc = sqlite.sqlite3_open(path_z, &db);
         if (rc != sqlite.OK or db == null) return throwPdo(ctx, "Failed to open database");
         try obj.set(ctx.allocator, "__db_ptr", .{ .int = @intCast(@intFromPtr(db.?)) });
+        try applyOptionsArray(ctx, obj, args);
         return .null;
     }
 
-    if (std.mem.eql(u8, driver, "mysql")) return pdo_mysql.connect(ctx, obj, rest, args);
-    if (std.mem.eql(u8, driver, "pgsql")) return pdo_pgsql.connect(ctx, obj, rest, args);
+    if (std.mem.eql(u8, driver, "mysql")) {
+        const r = try pdo_mysql.connect(ctx, obj, rest, args);
+        try applyOptionsArray(ctx, obj, args);
+        return r;
+    }
+    if (std.mem.eql(u8, driver, "pgsql")) {
+        const r = try pdo_pgsql.connect(ctx, obj, rest, args);
+        try applyOptionsArray(ctx, obj, args);
+        return r;
+    }
 
     return throwPdo(ctx, "Unsupported PDO driver");
+}
+
+fn applyOptionsArray(ctx: *NativeContext, obj: *PhpObject, args: []const Value) !void {
+    if (args.len < 4 or args[3] != .array) return;
+    const opts = args[3].array;
+    for (opts.entries.items) |entry| {
+        if (entry.key != .int) continue;
+        const k = entry.key.int;
+        if (k == 3) { // ATTR_ERRMODE
+            try obj.set(ctx.allocator, "__errmode", entry.value);
+        } else if (k == 19) { // ATTR_DEFAULT_FETCH_MODE
+            try obj.set(ctx.allocator, "__default_fetch_mode", entry.value);
+        }
+    }
 }
 
 fn pdoExec(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
@@ -389,6 +408,7 @@ fn pdoQuery(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     const stmt_obj = try ctx.createObject("PDOStatement");
     try stmt_obj.set(ctx.allocator, "__stmt_ptr", .{ .int = @intCast(@intFromPtr(stmt_ptr.?)) });
     try stmt_obj.set(ctx.allocator, "__db_ptr", .{ .int = @intCast(@intFromPtr(db)) });
+    try stmt_obj.set(ctx.allocator, "__pdo", .{ .object = obj });
     // step once to position on first row
     const step_rc = sqlite.sqlite3_step(stmt_ptr.?);
     try stmt_obj.set(ctx.allocator, "__has_row", .{ .bool = step_rc == sqlite.ROW });
@@ -416,6 +436,7 @@ fn pdoPrepare(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     const stmt_obj = try ctx.createObject("PDOStatement");
     try stmt_obj.set(ctx.allocator, "__stmt_ptr", .{ .int = @intCast(@intFromPtr(stmt_ptr.?)) });
     try stmt_obj.set(ctx.allocator, "__db_ptr", .{ .int = @intCast(@intFromPtr(db)) });
+    try stmt_obj.set(ctx.allocator, "__pdo", .{ .object = obj });
     try stmt_obj.set(ctx.allocator, "__has_row", .{ .bool = false });
     try stmt_obj.set(ctx.allocator, "__stepped", .{ .bool = false });
 
@@ -502,6 +523,12 @@ fn pdoGetAttribute(ctx: *NativeContext, args: []const Value) RuntimeError!Value 
         if (mode == .int) return mode;
         return .{ .int = 4 };
     }
+    if (attr == 3) {
+        const m = obj.get("__errmode");
+        if (m == .int) return m;
+        return .{ .int = 2 };
+    }
+    if (attr == 16) return .{ .string = getDriver(obj) };
     return .null;
 }
 
@@ -591,8 +618,66 @@ fn stmtFetchAll(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     const stmt = getStmtPtr(obj) orelse return .{ .bool = false };
 
     const mode: i64 = if (args.len >= 1 and args[0] == .int) args[0].int else getDefaultFetchMode(obj);
+    const FETCH_GROUP_FLAG: i64 = 65536;
+    const FETCH_UNIQUE_FLAG: i64 = 196608;
+    const base_mode = mode & 0xFFFF;
+    const is_unique = (mode & FETCH_UNIQUE_FLAG) == FETCH_UNIQUE_FLAG;
+    const is_group = !is_unique and (mode & FETCH_GROUP_FLAG) != 0;
 
     var result = try ctx.createArray();
+
+    if (is_group or is_unique) {
+        const row_mode: i64 = if (base_mode != 0) base_mode else 4;
+        var first = true;
+        while (true) {
+            const has_row_pre0 = obj.get("__has_row");
+            const stepped_pre0 = obj.get("__stepped");
+            const start_with_row0 = first and stepped_pre0 == .bool and stepped_pre0.bool and has_row_pre0 == .bool and has_row_pre0.bool;
+            if (!start_with_row0) {
+                const rc = sqlite.sqlite3_step(stmt);
+                if (rc != sqlite.ROW) break;
+            }
+            first = false;
+            // first column is the group/unique key
+            const key_v = try columnToValue(ctx, stmt, 0);
+            // rest of columns form the value row
+            var inner = try ctx.createArray();
+            const col_count = sqlite.sqlite3_column_count(stmt);
+            var i: c_int = 1;
+            while (i < col_count) : (i += 1) {
+                const v = try columnToValue(ctx, stmt, i);
+                if (row_mode == 3 or row_mode == 4) try inner.append(ctx.allocator, v);
+                if (row_mode == 2 or row_mode == 4) {
+                    if (sqlite.sqlite3_column_name(stmt, i)) |np| {
+                        const name = try ctx.createString(std.mem.span(np));
+                        try inner.set(ctx.allocator, .{ .string = name }, v);
+                    }
+                }
+            }
+            const ak: PhpArray.Key = switch (key_v) {
+                .string => |s| .{ .string = s },
+                .int => |n| .{ .int = n },
+                else => .{ .int = Value.toInt(key_v) },
+            };
+            if (is_unique) {
+                try result.set(ctx.allocator, ak, .{ .array = inner });
+            } else {
+                // group: collect rows under the key
+                const existing = result.get(ak);
+                if (existing == .array) {
+                    try existing.array.append(ctx.allocator, .{ .array = inner });
+                } else {
+                    const group = try ctx.allocator.create(PhpArray);
+                    group.* = .{};
+                    try ctx.vm.arrays.append(ctx.allocator, group);
+                    try group.append(ctx.allocator, .{ .array = inner });
+                    try result.set(ctx.allocator, ak, .{ .array = group });
+                }
+            }
+        }
+        try obj.set(ctx.allocator, "__has_row", .{ .bool = false });
+        return .{ .array = result };
+    }
 
     if (mode == 5) {
         try fetchAllAsObjects(ctx, stmt, result, obj);
@@ -881,6 +966,12 @@ fn stmtBindValue(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
 fn getDefaultFetchMode(obj: *PhpObject) i64 {
     const mode = obj.get("__fetch_mode");
     if (mode == .int) return mode.int;
+    // fall back to the parent PDO's default fetch mode
+    const pdo = obj.get("__pdo");
+    if (pdo == .object) {
+        const dm = pdo.object.get("__default_fetch_mode");
+        if (dm == .int) return dm.int;
+    }
     return 4; // FETCH_BOTH
 }
 
