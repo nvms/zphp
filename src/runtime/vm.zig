@@ -5724,6 +5724,15 @@ pub const VM = struct {
             }
         }
 
+        // anonymous classes have a stable structure and are re-executed every
+        // time the call site runs. their existing instances point at the old
+        // slot_layout, so freeing it (as we do for regular re-registration)
+        // would invalidate live objects. keep the first registration.
+        if (std.mem.startsWith(u8, class_name, "__anon_class_") and self.classes.contains(class_name)) {
+            def.deinit(self.allocator);
+            return;
+        }
+
         // put has the most complete state (e.g. parent slots merged), so we
         // let it win - but we must free the prior def or its slot_layout and
         // owned tables leak
