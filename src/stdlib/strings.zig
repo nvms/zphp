@@ -97,6 +97,9 @@ pub const entries = .{
     .{ "parse_url", native_parse_url },
     .{ "parse_str", native_parse_str },
     .{ "strstr", native_strstr },
+    .{ "strrchr", native_strrchr },
+    .{ "addcslashes", native_addcslashes },
+    .{ "stripcslashes", native_stripcslashes },
     .{ "strchr", native_strstr },
     .{ "strtr", native_strtr },
     .{ "vsprintf", native_vsprintf },
@@ -2567,6 +2570,135 @@ fn insertParsedKey(ctx: *NativeContext, root: *PhpArray, key: []const u8, value:
         }
     }
     try current_arr.set(ctx.allocator, current_key, value);
+}
+
+fn native_addcslashes(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len < 2 or args[0] != .string or args[1] != .string) return if (args.len >= 1) args[0] else Value.null;
+    const s = args[0].string;
+    const charset = args[1].string;
+    // expand "a..z" ranges
+    var mask = [_]bool{false} ** 256;
+    var i: usize = 0;
+    while (i < charset.len) : (i += 1) {
+        if (i + 3 < charset.len and charset[i + 1] == '.' and charset[i + 2] == '.') {
+            const lo = charset[i];
+            const hi = charset[i + 3];
+            if (lo <= hi) {
+                var c: u16 = lo;
+                while (c <= hi) : (c += 1) mask[c] = true;
+                i += 3;
+                continue;
+            }
+        }
+        mask[charset[i]] = true;
+    }
+    var buf = std.ArrayListUnmanaged(u8){};
+    errdefer buf.deinit(ctx.allocator);
+    for (s) |c| {
+        if (mask[c]) {
+            // PHP uses readable single-char escapes for common control chars
+            const named: ?u8 = switch (c) {
+                '\n' => 'n',
+                '\t' => 't',
+                '\r' => 'r',
+                7 => 'a',
+                8 => 'b',
+                12 => 'f',
+                11 => 'v',
+                else => null,
+            };
+            if (named) |ch| {
+                try buf.append(ctx.allocator, '\\');
+                try buf.append(ctx.allocator, ch);
+            } else if (c < 32 or c >= 127) {
+                var tmp: [4]u8 = undefined;
+                const oct = std.fmt.bufPrint(&tmp, "\\{o:0>3}", .{c}) catch continue;
+                try buf.appendSlice(ctx.allocator, oct);
+            } else {
+                try buf.append(ctx.allocator, '\\');
+                try buf.append(ctx.allocator, c);
+            }
+        } else {
+            try buf.append(ctx.allocator, c);
+        }
+    }
+    const result = try buf.toOwnedSlice(ctx.allocator);
+    try ctx.strings.append(ctx.allocator, result);
+    return .{ .string = result };
+}
+
+fn native_stripcslashes(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len < 1 or args[0] != .string) return .null;
+    const s = args[0].string;
+    var buf = std.ArrayListUnmanaged(u8){};
+    errdefer buf.deinit(ctx.allocator);
+    var i: usize = 0;
+    while (i < s.len) : (i += 1) {
+        if (s[i] != '\\' or i + 1 >= s.len) {
+            try buf.append(ctx.allocator, s[i]);
+            continue;
+        }
+        const next = s[i + 1];
+        const c: u8 = switch (next) {
+            'n' => '\n',
+            't' => '\t',
+            'r' => '\r',
+            'a' => 7,
+            'b' => 8,
+            'f' => 12,
+            'v' => 11,
+            '0'...'9' => blk: {
+                var end = i + 1;
+                var v: u16 = 0;
+                while (end < s.len and end - i < 4 and s[end] >= '0' and s[end] <= '7') : (end += 1) {
+                    v = v * 8 + (s[end] - '0');
+                }
+                i = end - 1;
+                break :blk @intCast(v & 0xff);
+            },
+            'x' => blk: {
+                var end = i + 2;
+                var v: u16 = 0;
+                while (end < s.len and end - (i + 2) < 2) : (end += 1) {
+                    const ch = s[end];
+                    const d: u8 = if (ch >= '0' and ch <= '9') ch - '0'
+                        else if (ch >= 'a' and ch <= 'f') ch - 'a' + 10
+                        else if (ch >= 'A' and ch <= 'F') ch - 'A' + 10
+                        else break;
+                    v = v * 16 + d;
+                }
+                if (end == i + 2) {
+                    try buf.append(ctx.allocator, '\\');
+                    try buf.append(ctx.allocator, 'x');
+                    continue;
+                }
+                i = end - 1;
+                break :blk @intCast(v & 0xff);
+            },
+            else => next,
+        };
+        try buf.append(ctx.allocator, c);
+        if (next != '0' and next < '0' or next > '9') {
+            if (next != 'x') i += 1;
+        }
+    }
+    const result = try buf.toOwnedSlice(ctx.allocator);
+    try ctx.strings.append(ctx.allocator, result);
+    return .{ .string = result };
+}
+
+fn native_strrchr(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len < 2 or args[0] != .string or args[1] != .string) return .{ .bool = false };
+    const haystack = args[0].string;
+    const needle = args[1].string;
+    if (needle.len == 0) return .{ .bool = false };
+    const c = needle[0];
+    if (std.mem.lastIndexOfScalar(u8, haystack, c)) |pos| {
+        const before = args.len >= 3 and args[2].isTruthy();
+        if (before) return .{ .string = try ctx.createString(haystack[0..pos]) };
+        return .{ .string = try ctx.createString(haystack[pos..]) };
+    }
+    return .{ .bool = false };
 }
 
 fn native_strstr(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
