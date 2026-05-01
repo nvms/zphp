@@ -1219,11 +1219,11 @@ fn native_iterator_to_array(ctx: *NativeContext, args: []const Value) RuntimeErr
     if (args.len == 0) return .{ .array = try ctx.createArray() };
 
     if (args[0] == .array) return args[0];
+    const preserve_keys = if (args.len > 1 and args[1] == .bool) args[1].bool else true;
 
     if (args[0] == .generator) {
         const gen = args[0].generator;
         const arr = try ctx.createArray();
-        const preserve_keys = if (args.len > 1 and args[1] == .bool) args[1].bool else true;
 
         if (gen.state == .created) try ctx.vm.resumeGenerator(gen, .null);
 
@@ -1238,6 +1238,41 @@ fn native_iterator_to_array(ctx: *NativeContext, args: []const Value) RuntimeErr
                 try arr.append(ctx.allocator, gen.current_value);
             }
             try ctx.vm.resumeGenerator(gen, .null);
+        }
+        return .{ .array = arr };
+    }
+
+    if (args[0] == .object) {
+        const obj = args[0].object;
+        const arr = try ctx.createArray();
+        // try IteratorAggregate -> getIterator first
+        if (ctx.vm.hasMethod(obj.class_name, "getIterator")) {
+            const inner_v = try ctx.vm.callMethod(obj, "getIterator", &.{});
+            // recurse with the inner iterator
+            var inner_args: [2]Value = undefined;
+            inner_args[0] = inner_v;
+            var n: usize = 1;
+            if (args.len > 1) { inner_args[1] = args[1]; n = 2; }
+            return native_iterator_to_array(ctx, inner_args[0..n]);
+        }
+        // Iterator protocol: rewind/valid/current/key/next
+        if (!ctx.vm.hasMethod(obj.class_name, "rewind")) return .{ .array = arr };
+        _ = try ctx.vm.callMethod(obj, "rewind", &.{});
+        var valid_v = try ctx.vm.callMethod(obj, "valid", &.{});
+        while (valid_v.isTruthy()) {
+            const cur = try ctx.vm.callMethod(obj, "current", &.{});
+            if (preserve_keys) {
+                const key = try ctx.vm.callMethod(obj, "key", &.{});
+                try arr.set(ctx.allocator, switch (key) {
+                    .int => |i| .{ .int = i },
+                    .string => |s| .{ .string = s },
+                    else => .{ .int = arr.length() },
+                }, cur);
+            } else {
+                try arr.append(ctx.allocator, cur);
+            }
+            _ = try ctx.vm.callMethod(obj, "next", &.{});
+            valid_v = try ctx.vm.callMethod(obj, "valid", &.{});
         }
         return .{ .array = arr };
     }
