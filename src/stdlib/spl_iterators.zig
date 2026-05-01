@@ -18,6 +18,23 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try rec_iter.methods.append(a, "getChildren");
     try vm.interfaces.put(a, "RecursiveIterator", rec_iter);
 
+    // GeneratorWrapper: lets generators be passed where Iterator objects
+    // are expected (FilterIterator, AppendIterator, etc.). Stores the
+    // generator and forwards Iterator methods to it.
+    var gw_def = ClassDef{ .name = "GeneratorWrapper" };
+    try gw_def.interfaces.append(a, "Iterator");
+    try gw_def.methods.put(a, "rewind", .{ .name = "rewind", .arity = 0 });
+    try gw_def.methods.put(a, "current", .{ .name = "current", .arity = 0 });
+    try gw_def.methods.put(a, "key", .{ .name = "key", .arity = 0 });
+    try gw_def.methods.put(a, "next", .{ .name = "next", .arity = 0 });
+    try gw_def.methods.put(a, "valid", .{ .name = "valid", .arity = 0 });
+    try vm.classes.put(a, "GeneratorWrapper", gw_def);
+    try vm.native_fns.put(a, "GeneratorWrapper::rewind", gwRewind);
+    try vm.native_fns.put(a, "GeneratorWrapper::current", gwCurrent);
+    try vm.native_fns.put(a, "GeneratorWrapper::key", gwKey);
+    try vm.native_fns.put(a, "GeneratorWrapper::next", gwNext);
+    try vm.native_fns.put(a, "GeneratorWrapper::valid", gwValid);
+
     // SplFileInfo
     var fi_def = ClassDef{ .name = "SplFileInfo" };
     for ([_][]const u8{
@@ -819,10 +836,69 @@ fn rdiValid(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
 // FilterIterator
 // ==========================================
 
+/// wrap a value into an iterator-protocol object. generators get wrapped in
+/// GeneratorWrapper so the rest of the iterator infra can call rewind/current
+/// /key/next/valid on them without special-casing every site.
+fn wrapAsIterator(ctx: *NativeContext, v: Value) !Value {
+    if (v == .object) return v;
+    if (v == .generator) {
+        const wrapper = try ctx.vm.allocator.create(PhpObject);
+        wrapper.* = .{ .class_name = "GeneratorWrapper" };
+        try ctx.vm.objects.append(ctx.vm.allocator, wrapper);
+        try wrapper.set(ctx.allocator, "__gen", v);
+        return .{ .object = wrapper };
+    }
+    return v;
+}
+
+fn gwGenerator(this: *PhpObject) ?*@import("../runtime/value.zig").Generator {
+    const v = this.get("__gen");
+    if (v != .generator) return null;
+    return v.generator;
+}
+
+fn gwRewind(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const this = getThis(ctx) orelse return .null;
+    const gen = gwGenerator(this) orelse return .null;
+    if (gen.state == .created) try ctx.vm.resumeGenerator(gen, .null);
+    return .null;
+}
+
+fn gwCurrent(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const this = getThis(ctx) orelse return .null;
+    const gen = gwGenerator(this) orelse return .null;
+    if (gen.state == .created) try ctx.vm.resumeGenerator(gen, .null);
+    return gen.current_value;
+}
+
+fn gwKey(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const this = getThis(ctx) orelse return .null;
+    const gen = gwGenerator(this) orelse return .null;
+    if (gen.state == .created) try ctx.vm.resumeGenerator(gen, .null);
+    return gen.current_key;
+}
+
+fn gwNext(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const this = getThis(ctx) orelse return .null;
+    const gen = gwGenerator(this) orelse return .null;
+    if (gen.state == .created) try ctx.vm.resumeGenerator(gen, .null);
+    try ctx.vm.resumeGenerator(gen, .null);
+    return .null;
+}
+
+fn gwValid(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const this = getThis(ctx) orelse return .{ .bool = false };
+    const gen = gwGenerator(this) orelse return .{ .bool = false };
+    if (gen.state == .created) try ctx.vm.resumeGenerator(gen, .null);
+    return .{ .bool = gen.state != .completed };
+}
+
 fn filterConstruct(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     const obj = getThis(ctx) orelse return .null;
-    if (args.len < 1 or args[0] != .object) return .null;
-    try obj.set(ctx.allocator, "__fi_inner", args[0]);
+    if (args.len < 1) return .null;
+    const inner = try wrapAsIterator(ctx, args[0]);
+    if (inner != .object) return .null;
+    try obj.set(ctx.allocator, "__fi_inner", inner);
     return .null;
 }
 
@@ -892,7 +968,9 @@ fn filterGetInner(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
 
 fn riiConstruct(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     const obj = getThis(ctx) orelse return .null;
-    if (args.len < 1 or args[0] != .object) return .null;
+    if (args.len < 1) return .null;
+    const inner = try wrapAsIterator(ctx, args[0]);
+    if (inner != .object) return .null;
     const mode: i64 = if (args.len >= 2) Value.toInt(args[1]) else 0;
 
     try obj.set(ctx.allocator, "__rii_mode", .{ .int = mode });
@@ -902,7 +980,7 @@ fn riiConstruct(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     const stack = try ctx.allocator.create(PhpArray);
     stack.* = .{};
     try ctx.vm.arrays.append(ctx.allocator, stack);
-    try stack.append(ctx.allocator, args[0]);
+    try stack.append(ctx.allocator, inner);
     try obj.set(ctx.allocator, "__rii_stack", .{ .array = stack });
     try obj.set(ctx.allocator, "__rii_valid", .{ .bool = false });
 
@@ -1095,8 +1173,10 @@ fn riiGetSubIterator(ctx: *NativeContext, args: []const Value) RuntimeError!Valu
 
 fn iiConstruct(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     const obj = getThis(ctx) orelse return .null;
-    if (args.len < 1 or args[0] != .object) return .null;
-    try obj.set(ctx.allocator, "__ii_inner", args[0]);
+    if (args.len < 1) return .null;
+    const inner = try wrapAsIterator(ctx, args[0]);
+    if (inner != .object) return .null;
+    try obj.set(ctx.allocator, "__ii_inner", inner);
     return .null;
 }
 
@@ -1166,8 +1246,10 @@ fn emptyCurrent(_: *NativeContext, _: []const Value) RuntimeError!Value {
 
 fn limitConstruct(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     const obj = getThis(ctx) orelse return .null;
-    if (args.len < 1 or args[0] != .object) return .null;
-    try obj.set(ctx.allocator, "__ii_inner", args[0]);
+    if (args.len < 1) return .null;
+    const inner = try wrapAsIterator(ctx, args[0]);
+    if (inner != .object) return .null;
+    try obj.set(ctx.allocator, "__ii_inner", inner);
     const offset: i64 = if (args.len >= 2) Value.toInt(args[1]) else 0;
     const count: i64 = if (args.len >= 3) Value.toInt(args[2]) else -1;
     try obj.set(ctx.allocator, "__li_offset", .{ .int = offset });
@@ -1272,12 +1354,14 @@ fn appGetIters(obj: *PhpObject) ?*PhpArray {
 
 fn appAppend(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     const obj = getThis(ctx) orelse return .null;
-    if (args.len < 1 or args[0] != .object) return .null;
+    if (args.len < 1) return .null;
+    const inner = try wrapAsIterator(ctx, args[0]);
+    if (inner != .object) return .null;
     const iters = appGetIters(obj) orelse return .null;
-    try iters.append(ctx.allocator, args[0]);
+    try iters.append(ctx.allocator, inner);
     // if this is the first iterator and we haven't started, rewind it
     if (iters.length() == 1) {
-        _ = try ctx.vm.callMethod(args[0].object, "rewind", &.{});
+        _ = try ctx.vm.callMethod(inner.object, "rewind", &.{});
     }
     return .null;
 }
@@ -1361,8 +1445,10 @@ fn appGetArrayIterator(ctx: *NativeContext, _: []const Value) RuntimeError!Value
 
 fn cbfConstruct(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     const obj = getThis(ctx) orelse return .null;
-    if (args.len < 1 or args[0] != .object) return .null;
-    try obj.set(ctx.allocator, "__fi_inner", args[0]);
+    if (args.len < 1) return .null;
+    const inner = try wrapAsIterator(ctx, args[0]);
+    if (inner != .object) return .null;
+    try obj.set(ctx.allocator, "__fi_inner", inner);
     if (args.len >= 2) try obj.set(ctx.allocator, "__cb_fn", args[1]);
     return .null;
 }
@@ -1385,9 +1471,11 @@ fn cbfAccept(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
 
 fn rxConstruct(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     const obj = getThis(ctx) orelse return .null;
-    if (args.len < 1 or args[0] != .object) return .null;
+    if (args.len < 1) return .null;
+    const inner = try wrapAsIterator(ctx, args[0]);
+    if (inner != .object) return .null;
     if (args.len < 2 or args[1] != .string) return .null;
-    try obj.set(ctx.allocator, "__fi_inner", args[0]);
+    try obj.set(ctx.allocator, "__fi_inner", inner);
     try obj.set(ctx.allocator, "__rx_regex", .{ .string = try createString(ctx, args[1].string) });
     const mode: i64 = if (args.len >= 3) Value.toInt(args[2]) else 0;
     const flags: i64 = if (args.len >= 4) Value.toInt(args[3]) else 0;
@@ -1521,8 +1609,10 @@ fn rxSetPregFlags(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
 
 fn ciConstruct(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     const obj = getThis(ctx) orelse return .null;
-    if (args.len < 1 or args[0] != .object) return .null;
-    try obj.set(ctx.allocator, "__ii_inner", args[0]);
+    if (args.len < 1) return .null;
+    const inner = try wrapAsIterator(ctx, args[0]);
+    if (inner != .object) return .null;
+    try obj.set(ctx.allocator, "__ii_inner", inner);
     const flags: i64 = if (args.len >= 2) Value.toInt(args[1]) else 1;
     try obj.set(ctx.allocator, "__ci_flags", .{ .int = flags });
     const cache = try ctx.allocator.create(PhpArray);
