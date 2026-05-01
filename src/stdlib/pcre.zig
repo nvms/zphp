@@ -529,7 +529,30 @@ fn translateReplacement(allocator: std.mem.Allocator, src: []const u8) ![]u8 {
 }
 
 fn preg_replace(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len < 3 or args[0] != .string or args[2] != .string) return if (args.len >= 3) args[2] else Value.null;
+    if (args.len < 3) return .null;
+    // subject can be an array - apply replacements element-wise and return array
+    if (args[2] == .array) {
+        const subj_arr = args[2].array;
+        const result_arr = try ctx.allocator.create(@import("../runtime/value.zig").PhpArray);
+        result_arr.* = .{};
+        try ctx.vm.arrays.append(ctx.allocator, result_arr);
+        for (subj_arr.entries.items) |se| {
+            var sub_args: [4]Value = undefined;
+            sub_args[0] = args[0];
+            sub_args[1] = args[1];
+            sub_args[2] = se.value;
+            var n: usize = 3;
+            if (args.len >= 4) { sub_args[3] = args[3]; n = 4; }
+            const replaced = try preg_replace(ctx, sub_args[0..n]);
+            try result_arr.set(ctx.allocator, se.key, replaced);
+        }
+        return .{ .array = result_arr };
+    }
+    // pattern can be array - call recursively for each (pattern, replacement) pair
+    if (args[0] == .array) {
+        return try pregReplaceArrayPattern(ctx, args);
+    }
+    if (args[0] != .string or args[2] != .string) return args[2];
     const info = parsePattern(args[0].string) orelse return args[2];
     const replacement = if (args[1] == .string) args[1].string else return args[2];
     const subject = args[2].string;
@@ -599,6 +622,34 @@ fn preg_replace(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     const result = buf[0..out_len];
     try ctx.strings.append(ctx.allocator, buf);
     return .{ .string = result };
+}
+
+fn pregReplaceArrayPattern(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    const patterns = args[0].array;
+    var current: Value = args[2];
+    for (patterns.entries.items, 0..) |pe, idx| {
+        if (pe.value != .string) continue;
+        // pick the matching replacement: same key if replacements is array, else scalar
+        var replacement: Value = if (args[1] == .string) args[1] else Value{ .string = "" };
+        if (args[1] == .array) {
+            const rep_arr = args[1].array;
+            // PHP behaves as: replacement[i] for the i-th pattern (or "" past end)
+            if (idx < rep_arr.entries.items.len and rep_arr.entries.items[idx].value == .string) {
+                replacement = rep_arr.entries.items[idx].value;
+            }
+        }
+        const single_args = [_]Value{ pe.value, replacement, current } ++ ([_]Value{.null} ** 0);
+        // recursive call with three-arg form
+        var rest: [4]Value = undefined;
+        rest[0] = pe.value;
+        rest[1] = replacement;
+        rest[2] = current;
+        var n: usize = 3;
+        if (args.len >= 4) { rest[3] = args[3]; n = 4; }
+        current = try preg_replace(ctx, rest[0..n]);
+        _ = single_args;
+    }
+    return current;
 }
 
 fn pregReplaceLimited(ctx: *NativeContext, code: *pcre2.Code, match_data: *pcre2.MatchData, subject: []const u8, replacement: []const u8, limit: usize, args: []const Value) RuntimeError!Value {
