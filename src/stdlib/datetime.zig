@@ -28,6 +28,8 @@ const DT_FORMAT_CONSTS = .{
 pub const entries = .{
     .{ "date", native_date },
     .{ "date_create_from_format", native_date_create_from_format },
+    .{ "date_parse", native_date_parse },
+    .{ "date_parse_from_format", native_date_parse_from_format },
     .{ "mktime", native_mktime },
     .{ "strtotime", native_strtotime },
     .{ "time", native_time },
@@ -37,6 +39,11 @@ pub const entries = .{
     .{ "gmdate", native_gmdate },
     .{ "date_default_timezone_set", native_tz_set },
     .{ "date_default_timezone_get", native_tz_get },
+    .{ "timezone_name_get", native_timezone_name_get },
+    .{ "timezone_offset_get", native_timezone_offset_get },
+    .{ "timezone_open", native_timezone_open },
+    .{ "date_timezone_get", native_date_timezone_get },
+    .{ "date_timezone_set", native_date_timezone_set },
     .{ "localtime", native_localtime },
     .{ "idate", native_idate },
 };
@@ -1430,6 +1437,64 @@ fn native_checkdate(_: *NativeContext, args: []const Value) RuntimeError!Value {
     return .{ .bool = day <= max_day };
 }
 
+fn buildDateParseResult(ctx: *NativeContext, year: ?i64, month: ?i64, day: ?i64, hour: ?i64, minute: ?i64, second: ?i64, fraction: f64, errors: []const []const u8) !Value {
+    const PhpArray = @import("../runtime/value.zig").PhpArray;
+    var arr = try ctx.createArray();
+    try arr.set(ctx.allocator, .{ .string = "year" }, if (year) |y| .{ .int = y } else .{ .bool = false });
+    try arr.set(ctx.allocator, .{ .string = "month" }, if (month) |m| .{ .int = m } else .{ .bool = false });
+    try arr.set(ctx.allocator, .{ .string = "day" }, if (day) |d| .{ .int = d } else .{ .bool = false });
+    try arr.set(ctx.allocator, .{ .string = "hour" }, if (hour) |h| .{ .int = h } else .{ .bool = false });
+    try arr.set(ctx.allocator, .{ .string = "minute" }, if (minute) |m| .{ .int = m } else .{ .bool = false });
+    try arr.set(ctx.allocator, .{ .string = "second" }, if (second) |s| .{ .int = s } else .{ .bool = false });
+    try arr.set(ctx.allocator, .{ .string = "fraction" }, .{ .float = fraction });
+    try arr.set(ctx.allocator, .{ .string = "warning_count" }, .{ .int = 0 });
+    const warns = try ctx.allocator.create(PhpArray);
+    warns.* = .{};
+    try ctx.vm.arrays.append(ctx.allocator, warns);
+    try arr.set(ctx.allocator, .{ .string = "warnings" }, .{ .array = warns });
+    try arr.set(ctx.allocator, .{ .string = "error_count" }, .{ .int = @intCast(errors.len) });
+    const errs = try ctx.allocator.create(PhpArray);
+    errs.* = .{};
+    try ctx.vm.arrays.append(ctx.allocator, errs);
+    for (errors, 0..) |e, i| try errs.set(ctx.allocator, .{ .int = @intCast(i) }, .{ .string = e });
+    try arr.set(ctx.allocator, .{ .string = "errors" }, .{ .array = errs });
+    try arr.set(ctx.allocator, .{ .string = "is_localtime" }, .{ .bool = false });
+    return .{ .array = arr };
+}
+
+fn native_date_parse(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len == 0 or args[0] != .string) return .{ .bool = false };
+    const s = args[0].string;
+    var year: ?i64 = null;
+    var month: ?i64 = null;
+    var day: ?i64 = null;
+    var hour: ?i64 = null;
+    var minute: ?i64 = null;
+    var second: ?i64 = null;
+    if (s.len >= 10 and s[4] == '-' and s[7] == '-') {
+        year = std.fmt.parseInt(i64, s[0..4], 10) catch null;
+        month = std.fmt.parseInt(i64, s[5..7], 10) catch null;
+        day = std.fmt.parseInt(i64, s[8..10], 10) catch null;
+        if (s.len >= 16 and (s[10] == ' ' or s[10] == 'T') and s[13] == ':') {
+            hour = std.fmt.parseInt(i64, s[11..13], 10) catch null;
+            minute = std.fmt.parseInt(i64, s[14..16], 10) catch null;
+            if (s.len >= 19 and s[16] == ':') {
+                second = std.fmt.parseInt(i64, s[17..19], 10) catch null;
+            } else {
+                second = 0;
+            }
+        }
+    }
+    return buildDateParseResult(ctx, year, month, day, hour, minute, second, 0.0, &.{});
+}
+
+fn native_date_parse_from_format(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    // for now just delegate to date_parse on the value - format-driven parsing
+    // is implemented for date_create_from_format; a full mirror is out of scope
+    if (args.len < 2 or args[1] != .string) return .{ .bool = false };
+    return native_date_parse(ctx, args[1..]);
+}
+
 fn native_getdate(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     const timestamp: i64 = if (args.len >= 1) Value.toInt(args[0]) else std.time.timestamp();
     const epoch_secs: u64 = @intCast(if (timestamp < 0) 0 else timestamp);
@@ -2217,6 +2282,48 @@ fn native_tz_set(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
         return .{ .bool = true };
     }
     return .{ .bool = false };
+}
+
+fn native_timezone_name_get(_: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len < 1 or args[0] != .object) return .{ .bool = false };
+    const name = args[0].object.get("timezone");
+    if (name == .string) return name;
+    return .{ .string = "UTC" };
+}
+
+fn native_timezone_offset_get(_: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len < 2 or args[0] != .object or args[1] != .object) return .{ .bool = false };
+    const tz_obj = args[0].object;
+    const dt_obj = args[1].object;
+    const tz_name = if (tz_obj.get("timezone") == .string) tz_obj.get("timezone").string else "UTC";
+    const ts = getTimestamp(dt_obj);
+    if (lookupTimezone(tz_name)) |tz| return .{ .int = @intCast(tzOffsetAt(tz, ts)) };
+    return .{ .int = 0 };
+}
+
+fn native_timezone_open(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len < 1 or args[0] != .string) return .{ .bool = false };
+    const obj = try ctx.createObject("DateTimeZone");
+    try obj.set(ctx.allocator, "timezone", args[0]);
+    return .{ .object = obj };
+}
+
+fn native_date_timezone_get(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len < 1 or args[0] != .object) return .{ .bool = false };
+    const tz_v = args[0].object.get("__timezone");
+    if (tz_v != .string) return .{ .bool = false };
+    const tz_obj = try ctx.createObject("DateTimeZone");
+    try tz_obj.set(ctx.allocator, "timezone", tz_v);
+    return .{ .object = tz_obj };
+}
+
+fn native_date_timezone_set(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len < 2 or args[0] != .object or args[1] != .object) return .{ .bool = false };
+    const tz_name = args[1].object.get("timezone");
+    if (tz_name == .string) {
+        try args[0].object.set(ctx.allocator, "__timezone", tz_name);
+    }
+    return args[0];
 }
 
 fn native_tz_get(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
