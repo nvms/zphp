@@ -2180,7 +2180,12 @@ fn rmInvoke(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len > 0 and args[0] == .object) {
         return ctx.callMethod(args[0].object, method_name, args[1..]) catch .null;
     }
-    return .null;
+    // static call: target is null/missing, dispatch by ClassName::methodName
+    const declaring = if (this.get("_declaring_class") == .string) this.get("_declaring_class").string else return .null;
+    var buf: [256]u8 = undefined;
+    const full = std.fmt.bufPrint(&buf, "{s}::{s}", .{ declaring, method_name }) catch return .null;
+    const rest = if (args.len >= 1) args[1..] else args[0..];
+    return ctx.vm.callByName(full, rest) catch .null;
 }
 
 fn rmInvokeArgs(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
@@ -2188,18 +2193,23 @@ fn rmInvokeArgs(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     const method_name = if (this.get("name") == .string) this.get("name").string else return .null;
     if (args.len < 1) return .null;
     const target = args[0];
-    if (target != .object) return .null;
 
+    var call_args: [16]Value = undefined;
+    var count: usize = 0;
     if (args.len >= 2 and args[1] == .array) {
         const arg_arr = args[1].array;
-        var call_args: [16]Value = undefined;
-        const count = @min(arg_arr.entries.items.len, 16);
-        for (0..count) |i| {
-            call_args[i] = arg_arr.entries.items[i].value;
-        }
+        count = @min(arg_arr.entries.items.len, 16);
+        for (0..count) |i| call_args[i] = arg_arr.entries.items[i].value;
+    }
+
+    if (target == .object) {
         return ctx.callMethod(target.object, method_name, call_args[0..count]) catch .null;
     }
-    return ctx.callMethod(target.object, method_name, &.{}) catch .null;
+    // static call: null target
+    const declaring = if (this.get("_declaring_class") == .string) this.get("_declaring_class").string else return .null;
+    var buf: [256]u8 = undefined;
+    const full = std.fmt.bufPrint(&buf, "{s}::{s}", .{ declaring, method_name }) catch return .null;
+    return ctx.vm.callByName(full, call_args[0..count]) catch .null;
 }
 
 fn rmGetClosure(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
