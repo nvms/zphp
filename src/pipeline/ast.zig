@@ -115,6 +115,8 @@ pub const Ast = struct {
 
             // exceptions
             throw_expr, // lhs = expression to throw
+            print_expr, // lhs = expression to print; pushes int 1
+
             try_catch, // lhs = try body, rhs = extra index -> {catch_count, catch_nodes..., finally_node_or_0}
             catch_clause, // main_token = variable, lhs = type name node (0 = catch all), rhs = body block
 

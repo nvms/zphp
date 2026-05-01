@@ -334,6 +334,13 @@ pub const Compiler = struct {
             .nullsafe_property_access => try compiler_expr.compileNullsafePropertyAccess(self, node),
             .nullsafe_method_call => try compiler_expr.compileNullsafeMethodCall(self, node),
             .throw_expr => try compiler_stmt.compileThrow(self, node),
+            .print_expr => {
+                try self.compileNode(node.data.lhs);
+                try self.emitOp(.echo);
+                const one_idx = try self.addConstant(.{ .int = 1 });
+                try self.emitOp(.constant);
+                try self.emitU16(one_idx);
+            },
             .try_catch => try compiler_stmt.compileTryCatch(self, node),
             .catch_clause => {},
             .class_decl => try compiler_class.compileClassDecl(self, node),

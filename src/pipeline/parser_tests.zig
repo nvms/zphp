@@ -306,6 +306,11 @@ fn renderNode(ast: *const Ast, idx: u32, buf: *Buf) !void {
             try renderNode(ast, node.data.lhs, buf);
             try w.writeByte(')');
         },
+        .print_expr => {
+            try w.writeAll("(print ");
+            try renderNode(ast, node.data.lhs, buf);
+            try w.writeByte(')');
+        },
         .try_catch => try w.writeAll("(try/catch)"),
         .catch_clause => try w.writeAll("(catch)"),
         .class_decl => {

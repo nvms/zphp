@@ -2105,6 +2105,11 @@ const Parser = struct {
                 const operand = try self.parseExprPrec(1);
                 return self.addNode(.{ .tag = .throw_expr, .main_token = tok, .data = .{ .lhs = operand } });
             },
+            .kw_print => {
+                const tok = self.advance();
+                const operand = try self.parseExprPrec(2);
+                return self.addNode(.{ .tag = .print_expr, .main_token = tok, .data = .{ .lhs = operand } });
+            },
             .kw_new => return self.parseNewExpr(),
             .kw_yield => return self.parseYieldExpr(),
             .kw_require, .kw_require_once, .kw_include, .kw_include_once => {

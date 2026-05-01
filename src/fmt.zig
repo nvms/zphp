@@ -425,6 +425,10 @@ const Formatter = struct {
             .match_expr => self.formatMatch(node),
             .try_catch => self.formatTryCatch(node),
             .throw_expr => self.formatThrow(node),
+            .print_expr => {
+                self.write("print ");
+                self.formatNode(node.data.lhs);
+            },
             .namespace_decl => self.formatNamespaceDecl(node),
             .use_stmt => self.formatUseStmt(node, false),
             .use_fn_stmt => self.formatUseStmt(node, true),
