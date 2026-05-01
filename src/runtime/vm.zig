@@ -5547,7 +5547,16 @@ pub const VM = struct {
 
         const parent_idx = self.readU16();
         if (parent_idx != 0xffff) {
-            def.parent = self.currentChunk().constants.items[parent_idx].string;
+            const parent_name = self.currentChunk().constants.items[parent_idx].string;
+            def.parent = parent_name;
+            if (self.classes.get(parent_name)) |parent_cls| {
+                if (parent_cls.is_final) {
+                    const msg = try std.fmt.allocPrint(self.allocator, "Class {s} cannot extend final class {s}", .{ class_name, parent_name });
+                    try self.strings.append(self.allocator, msg);
+                    self.error_msg = msg;
+                    return error.RuntimeError;
+                }
+            }
         }
 
         const iface_count = self.readByte();
