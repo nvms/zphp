@@ -325,6 +325,7 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try rf_def.methods.put(a, "getNumberOfRequiredParameters", .{ .name = "getNumberOfRequiredParameters", .arity = 0 });
     try rf_def.methods.put(a, "isAnonymous", .{ .name = "isAnonymous", .arity = 0 });
     try rf_def.methods.put(a, "isClosure", .{ .name = "isClosure", .arity = 0 });
+    try rf_def.methods.put(a, "isGenerator", .{ .name = "isGenerator", .arity = 0 });
     try rf_def.methods.put(a, "getClosureScopeClass", .{ .name = "getClosureScopeClass", .arity = 0 });
     try rf_def.methods.put(a, "hasReturnType", .{ .name = "hasReturnType", .arity = 0 });
     try rf_def.methods.put(a, "getAttributes", .{ .name = "getAttributes", .arity = 0 });
@@ -338,6 +339,7 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try vm.native_fns.put(a, "ReflectionFunction::getNumberOfRequiredParameters", rfGetNumberOfRequiredParameters);
     try vm.native_fns.put(a, "ReflectionFunction::isAnonymous", rfIsAnonymous);
     try vm.native_fns.put(a, "ReflectionFunction::isClosure", rfIsAnonymous);
+    try vm.native_fns.put(a, "ReflectionFunction::isGenerator", rfIsGenerator);
     try vm.native_fns.put(a, "ReflectionFunction::getClosureScopeClass", rfGetClosureScopeClass);
     try vm.native_fns.put(a, "ReflectionFunction::hasReturnType", rfHasReturnType);
     try vm.native_fns.put(a, "ReflectionFunction::getAttributes", rfGetAttributes);
@@ -1839,6 +1841,13 @@ fn rfIsAnonymous(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
     const this = getThis(ctx) orelse return .{ .bool = false };
     const name = if (this.get("name") == .string) this.get("name").string else return .{ .bool = false };
     return .{ .bool = std.mem.startsWith(u8, name, "__closure_") };
+}
+
+fn rfIsGenerator(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const this = getThis(ctx) orelse return .{ .bool = false };
+    const func_name = if (this.get("name") == .string) this.get("name").string else return .{ .bool = false };
+    const func = ctx.vm.functions.get(func_name) orelse return .{ .bool = false };
+    return .{ .bool = func.is_generator };
 }
 
 fn rfGetClosureUsedVariables(ctx: *NativeContext, _: []const Value) RuntimeError!Value {

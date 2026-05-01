@@ -288,6 +288,8 @@ fn boolval(_: *NativeContext, args: []const Value) RuntimeError!Value {
 fn is_object(_: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len == 0) return .{ .bool = false };
     if (args[0] == .object) return .{ .bool = true };
+    if (args[0] == .generator) return .{ .bool = true };
+    if (args[0] == .fiber) return .{ .bool = true };
     if (args[0] == .string and std.mem.startsWith(u8, args[0].string, "__closure_")) return .{ .bool = true };
     return .{ .bool = false };
 }
@@ -404,11 +406,27 @@ fn method_exists(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len < 2 or args[1] != .string) return .{ .bool = false };
     var current: ?[]const u8 = if (args[0] == .object)
         args[0].object.class_name
+    else if (args[0] == .generator)
+        "Generator"
+    else if (args[0] == .fiber)
+        "Fiber"
     else if (args[0] == .string)
         args[0].string
     else
         return Value{ .bool = false };
     const method_name = args[1].string;
+    // Generator and Fiber are not registered as ClassDef. Hardcode their
+    // method tables so method_exists works on tagged values and "Generator"/"Fiber" strings.
+    if (std.mem.eql(u8, current.?, "Generator")) {
+        const gen_methods = [_][]const u8{ "current", "key", "next", "rewind", "send", "throw", "getReturn", "valid" };
+        for (gen_methods) |m| if (std.mem.eql(u8, m, method_name)) return .{ .bool = true };
+        return .{ .bool = false };
+    }
+    if (std.mem.eql(u8, current.?, "Fiber")) {
+        const fiber_methods = [_][]const u8{ "start", "resume", "throw", "getReturn", "isStarted", "isSuspended", "isRunning", "isTerminated", "suspend", "getCurrent" };
+        for (fiber_methods) |m| if (std.mem.eql(u8, m, method_name)) return .{ .bool = true };
+        return .{ .bool = false };
+    }
     var buf: [256]u8 = undefined;
     while (current) |cn| {
         const full = std.fmt.bufPrint(&buf, "{s}::{s}", .{ cn, method_name }) catch return Value{ .bool = false };

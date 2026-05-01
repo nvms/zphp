@@ -2707,6 +2707,8 @@ pub const VM = struct {
                             std.mem.eql(u8, t, "Iterator") or
                             std.mem.eql(u8, t, "Traversable");
                         self.push(.{ .bool = matches });
+                    } else if (obj_val == .fiber and class_name_val == .string) {
+                        self.push(.{ .bool = std.mem.eql(u8, class_name_val.string, "Fiber") });
                     } else if (obj_val == .string and class_name_val == .string and
                         std.mem.eql(u8, class_name_val.string, "Closure") and
                         std.mem.startsWith(u8, obj_val.string, "__closure_"))
