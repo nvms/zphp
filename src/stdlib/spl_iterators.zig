@@ -1644,7 +1644,8 @@ fn miConstruct(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
 
 fn miAttach(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     const obj = getThis(ctx) orelse return .null;
-    if (args.len < 1 or args[0] != .object) return .null;
+    if (args.len < 1) return .null;
+    if (args[0] != .object and args[0] != .generator) return .null;
     const iters_v = obj.get("__mi_iters");
     const keys_v = obj.get("__mi_keys");
     if (iters_v != .array or keys_v != .array) return .null;
@@ -1693,15 +1694,51 @@ fn miCountIterators(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
     return .{ .int = iters_v.array.length() };
 }
 
+fn miCallValid(ctx: *NativeContext, v: Value) !bool {
+    if (v == .object) {
+        const r = try ctx.vm.callMethod(v.object, "valid", &.{});
+        return r.isTruthy();
+    } else if (v == .generator) {
+        return v.generator.state != .completed;
+    }
+    return false;
+}
+
+fn miCallCurrent(ctx: *NativeContext, v: Value) !Value {
+    if (v == .object) return try ctx.vm.callMethod(v.object, "current", &.{});
+    if (v == .generator) return v.generator.current_value;
+    return .null;
+}
+
+fn miCallKey(ctx: *NativeContext, v: Value) !Value {
+    if (v == .object) return try ctx.vm.callMethod(v.object, "key", &.{});
+    if (v == .generator) return v.generator.current_key;
+    return .null;
+}
+
+fn miCallNext(ctx: *NativeContext, v: Value) !void {
+    if (v == .object) {
+        _ = try ctx.vm.callMethod(v.object, "next", &.{});
+    } else if (v == .generator) {
+        try ctx.vm.resumeGenerator(v.generator, .null);
+    }
+}
+
+fn miCallRewind(ctx: *NativeContext, v: Value) !void {
+    if (v == .object) {
+        _ = try ctx.vm.callMethod(v.object, "rewind", &.{});
+    } else if (v == .generator) {
+        // generator auto-starts on first valid()/current() call; if not yet
+        // started, kick it off so current/key are populated
+        if (v.generator.state == .created) try ctx.vm.resumeGenerator(v.generator, .null);
+    }
+}
+
 fn miRewind(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
     const obj = getThis(ctx) orelse return .null;
     const iters_v = obj.get("__mi_iters");
     if (iters_v != .array) return .null;
-    for (iters_v.array.entries.items) |e| {
-        if (e.value == .object) {
-            _ = try ctx.vm.callMethod(e.value.object, "rewind", &.{});
-        }
-    }
+    for (iters_v.array.entries.items) |e| try miCallRewind(ctx, e.value);
     return .null;
 }
 
@@ -1714,10 +1751,7 @@ fn miValid(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
     var any: bool = false;
     var all: bool = true;
     for (iters_v.array.entries.items) |e| {
-        if (e.value == .object) {
-            const v = try ctx.vm.callMethod(e.value.object, "valid", &.{});
-            if (v.isTruthy()) any = true else all = false;
-        }
+        if (try miCallValid(ctx, e.value)) any = true else all = false;
     }
     return .{ .bool = if (need_all) all else any };
 }
@@ -1735,10 +1769,7 @@ fn miCurrent(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
     var idx: i64 = 0;
     for (iters_v.array.entries.items, 0..) |e, i| {
         var v: Value = .null;
-        if (e.value == .object) {
-            const valid = try ctx.vm.callMethod(e.value.object, "valid", &.{});
-            if (valid.isTruthy()) v = try ctx.vm.callMethod(e.value.object, "current", &.{});
-        }
+        if (try miCallValid(ctx, e.value)) v = try miCallCurrent(ctx, e.value);
         if (assoc and keys_v == .array and i < keys_v.array.entries.items.len) {
             const k = keys_v.array.entries.items[i].value;
             if (k == .string) try result.set(ctx.allocator, .{ .string = k.string }, v)
@@ -1764,10 +1795,7 @@ fn miKey(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
     var idx: i64 = 0;
     for (iters_v.array.entries.items, 0..) |e, i| {
         var v: Value = .null;
-        if (e.value == .object) {
-            const valid = try ctx.vm.callMethod(e.value.object, "valid", &.{});
-            if (valid.isTruthy()) v = try ctx.vm.callMethod(e.value.object, "key", &.{});
-        }
+        if (try miCallValid(ctx, e.value)) v = try miCallKey(ctx, e.value);
         if (assoc and keys_v == .array and i < keys_v.array.entries.items.len) {
             const k = keys_v.array.entries.items[i].value;
             if (k == .string) try result.set(ctx.allocator, .{ .string = k.string }, v)
@@ -1784,11 +1812,7 @@ fn miNext(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
     const obj = getThis(ctx) orelse return .null;
     const iters_v = obj.get("__mi_iters");
     if (iters_v != .array) return .null;
-    for (iters_v.array.entries.items) |e| {
-        if (e.value == .object) {
-            _ = try ctx.vm.callMethod(e.value.object, "next", &.{});
-        }
-    }
+    for (iters_v.array.entries.items) |e| try miCallNext(ctx, e.value);
     return .null;
 }
 
