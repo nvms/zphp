@@ -5440,6 +5440,7 @@ pub const VM = struct {
             var new_vars: std.StringHashMapUnmanaged(Value) = .{};
             try new_vars.put(self.allocator, "$this", .{ .object = obj });
             self.frames[self.frame_count] = .{ .chunk = &func.chunk, .ip = 0, .vars = new_vars, .locals = try self.allocLocals(func, &new_vars), .func = func };
+            self.frames[self.frame_count].entry_sp = self.sp;
             self.frame_count += 1;
             try self.runLoop(self.frame_count - 1);
             const result = self.pop();
@@ -6333,6 +6334,7 @@ pub const VM = struct {
                 try self.fillDefaults(&new_vars, func, bind_count);
                 const inherit_cc = self.closureScopeByName(name) orelse self.currentFrame().called_class;
                 self.frames[self.frame_count] = .{ .chunk = &func.chunk, .ip = 0, .vars = new_vars, .locals = try self.allocLocals(func, &new_vars), .func = func, .ref_slots = closure_refs, .called_class = inherit_cc };
+                self.frames[self.frame_count].entry_sp = self.sp;
                 self.setFrameArgCount(arg_count);
                 self.frame_count += 1;
                 return;
@@ -6379,6 +6381,7 @@ pub const VM = struct {
         }
 
         self.frames[self.frame_count] = .{ .chunk = &func.chunk, .ip = 0, .vars = .{}, .locals = locals, .func = func, .called_class = self.closureScopeByName(name) orelse self.currentFrame().called_class };
+        self.frames[self.frame_count].entry_sp = self.sp;
         self.setFrameArgCount(arg_count);
         self.frame_count += 1;
         try self.fastLoop();
@@ -6460,6 +6463,7 @@ pub const VM = struct {
         const prev_floor = self.handler_floor;
         self.handler_floor = self.handler_count;
         self.frames[self.frame_count] = .{ .chunk = &func.chunk, .ip = 0, .vars = .{}, .locals = locals, .func = func };
+        self.frames[self.frame_count].entry_sp = self.sp;
         self.consumePendingArgCount();
         self.frame_count += 1;
         self.runUntilFrame(base_frame) catch |err| {
@@ -7737,6 +7741,7 @@ pub const VM = struct {
         const prev_floor = self.handler_floor;
         self.handler_floor = self.handler_count;
         self.frames[self.frame_count] = .{ .chunk = &func.chunk, .ip = 0, .vars = vars, .locals = try self.allocLocals(func, &vars), .func = func };
+        self.frames[self.frame_count].entry_sp = self.sp;
         self.consumePendingArgCount();
         self.frame_count += 1;
         self.runUntilFrame(base_frame) catch |err| {
@@ -7759,6 +7764,7 @@ pub const VM = struct {
         const prev_floor = self.handler_floor;
         self.handler_floor = self.handler_count;
         self.frames[self.frame_count] = .{ .chunk = &func.chunk, .ip = 0, .vars = vars, .locals = try self.allocLocals(func, &vars), .func = func, .ref_slots = ref_slots };
+        self.frames[self.frame_count].entry_sp = self.sp;
         self.consumePendingArgCount();
         self.frame_count += 1;
         self.runUntilFrame(base_frame) catch |err| {
@@ -8216,6 +8222,7 @@ pub const VM = struct {
         const prev_floor = self.handler_floor;
         self.handler_floor = self.handler_count;
         self.frames[self.frame_count] = .{ .chunk = &func.chunk, .ip = 0, .vars = .{}, .locals = locals, .func = func, .called_class = self.closureScopeByName(name) orelse self.currentFrame().called_class };
+        self.frames[self.frame_count].entry_sp = self.sp;
         self.consumePendingArgCount();
         self.frame_count += 1;
         self.fastLoop() catch |err| {
