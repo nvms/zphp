@@ -226,13 +226,19 @@ pub const Compiler = struct {
                     if (node.data.lhs != 0) {
                         try self.compileNode(node.data.lhs);
                     }
-                    // emit finally blocks (innermost first) before returning
+                    // emit finally blocks (innermost first) before returning;
+                    // temporarily lower finally_depth around each inline emit so
+                    // that a return inside the finally itself does not re-enter
+                    // its own finally block (would cause infinite recursion)
+                    const saved_fd = self.finally_depth;
                     var fd = self.finally_depth;
                     while (fd > 0) {
                         fd -= 1;
+                        self.finally_depth = fd;
                         try self.emitOp(.pop_handler);
                         try self.compileNode(self.finally_nodes[fd]);
                     }
+                    self.finally_depth = saved_fd;
                     if (node.data.lhs != 0) {
                         try self.emitOp(.return_val);
                     } else {

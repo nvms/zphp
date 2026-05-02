@@ -6411,6 +6411,7 @@ pub const VM = struct {
         self.saveFrameArgs(arg_count);
         self.sp -= ac;
         self.frames[self.frame_count] = .{ .chunk = &func.chunk, .ip = 0, .vars = .{}, .locals = locals, .func = func, .called_class = self.currentFrame().called_class };
+        self.frames[self.frame_count].entry_sp = self.sp;
         self.setFrameArgCount(arg_count);
         self.frame_count += 1;
         try self.fastLoop();
@@ -8043,6 +8044,7 @@ pub const VM = struct {
                 else
                     null;
                 self.frames[self.frame_count] = .{ .chunk = &func.chunk, .ip = 0, .vars = new_vars, .locals = try self.allocLocals(func, &new_vars), .func = func, .ref_slots = callee_refs, .ref_array_bindings = callee_array_bindings, .ref_object_bindings = callee_object_bindings, .called_class = inherit_cc };
+                self.frames[self.frame_count].entry_sp = self.sp;
                 self.setFrameArgCount(arg_count);
                 self.frame_count += 1;
             }
