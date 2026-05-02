@@ -449,6 +449,30 @@ fn json_decode(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     return result;
 }
 
+// Match PHP's array-key coercion: a string key that looks like a decimal
+// integer (no leading zeros, no plus sign, no whitespace) and fits in i64
+// becomes an int key. Used by json_decode in assoc mode.
+fn decodeKeyToArrayKey(s: []const u8) PhpArray.Key {
+    if (s.len == 0) return .{ .string = s };
+    var i: usize = 0;
+    if (s[0] == '-') {
+        if (s.len == 1) return .{ .string = s };
+        i = 1;
+    }
+    if (i >= s.len) return .{ .string = s };
+    if (s[i] == '0') {
+        if (s.len - i != 1) return .{ .string = s };
+    } else if (s[i] < '1' or s[i] > '9') {
+        return .{ .string = s };
+    }
+    var j: usize = i + 1;
+    while (j < s.len) : (j += 1) {
+        if (s[j] < '0' or s[j] > '9') return .{ .string = s };
+    }
+    const v = std.fmt.parseInt(i64, s, 10) catch return .{ .string = s };
+    return .{ .int = v };
+}
+
 fn setSyntaxError() void {
     last_error = 4;
     last_error_msg = "Syntax error";
@@ -679,7 +703,7 @@ fn parseObject(ctx: *NativeContext, s: []const u8, pos: *usize, assoc: bool, max
             }
             pos.* += 1;
             const val = try parseValue(ctx, s, pos, assoc, max_depth, cur_depth + 1, flags);
-            try arr.set(ctx.allocator, .{ .string = key_str }, val);
+            try arr.set(ctx.allocator, decodeKeyToArrayKey(key_str), val);
             skipWhitespace(s, pos);
             if (pos.* < s.len and s[pos.*] == ',') {
                 pos.* += 1;

@@ -24,6 +24,33 @@ pub const PhpArray = struct {
         }
     };
 
+    // PHP coerces array string keys that look like canonical decimal integers
+    // (no leading zeros, no plus, no whitespace, fits in i64) to int keys at
+    // both write and read time. This matches PHP's behavior so $arr['3'] and
+    // $arr[3] address the same slot.
+    pub fn normalizeKey(key: Key) Key {
+        if (key != .string) return key;
+        const s = key.string;
+        if (s.len == 0) return key;
+        var i: usize = 0;
+        if (s[0] == '-') {
+            if (s.len == 1) return key;
+            i = 1;
+        }
+        if (i >= s.len) return key;
+        if (s[i] == '0') {
+            if (s.len - i != 1) return key;
+        } else if (s[i] < '1' or s[i] > '9') {
+            return key;
+        }
+        var j: usize = i + 1;
+        while (j < s.len) : (j += 1) {
+            if (s[j] < '0' or s[j] > '9') return key;
+        }
+        const v = std.fmt.parseInt(i64, s, 10) catch return key;
+        return .{ .int = v };
+    }
+
     pub fn deinit(self: *PhpArray, allocator: std.mem.Allocator) void {
         self.entries.deinit(allocator);
         self.string_index.deinit(allocator);
@@ -34,7 +61,8 @@ pub const PhpArray = struct {
         self.next_int_key += 1;
     }
 
-    pub fn set(self: *PhpArray, allocator: std.mem.Allocator, key: Key, value: Value) !void {
+    pub fn set(self: *PhpArray, allocator: std.mem.Allocator, raw_key: Key, value: Value) !void {
+        const key = normalizeKey(raw_key);
         if (key == .int) {
             const idx = key.int;
             if (idx >= 0) {
@@ -71,7 +99,8 @@ pub const PhpArray = struct {
         }
     }
 
-    pub fn get(self: *const PhpArray, key: Key) Value {
+    pub fn get(self: *const PhpArray, raw_key: Key) Value {
+        const key = normalizeKey(raw_key);
         if (key == .int) {
             const idx = key.int;
             if (idx >= 0) {
