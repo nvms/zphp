@@ -661,7 +661,7 @@ fn native_glob(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     const pattern = args[0].string;
     const flags: i64 = if (args.len >= 2 and args[1] == .int) args[1].int else 0;
     const GLOB_BRACE: i64 = 128;
-    const GLOB_ONLYDIR: i64 = 8192;
+    const GLOB_ONLYDIR: i64 = 1073741824;
     const GLOB_NOSORT: i64 = 32;
 
     const result = try ctx.createArray();
@@ -691,7 +691,7 @@ fn native_glob(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
 }
 
 fn globAppend(ctx: *NativeContext, result: *PhpArray, pattern: []const u8, flags: i64) !void {
-    const GLOB_ONLYDIR: i64 = 8192;
+    const GLOB_ONLYDIR: i64 = 1073741824;
     const dir_path = if (std.mem.lastIndexOf(u8, pattern, "/")) |pos| pattern[0..pos] else ".";
     const file_pattern = if (std.mem.lastIndexOf(u8, pattern, "/")) |pos| pattern[pos + 1 ..] else pattern;
     var dir = std.fs.cwd().openDir(dir_path, .{ .iterate = true }) catch return;

@@ -1006,6 +1006,15 @@ fn sprintfImpl(ctx: *NativeContext, fmt_str: []const u8, args: []const Value) ![
 }
 
 fn formatFixedFloat(buf: *std.ArrayListUnmanaged(u8), a: std.mem.Allocator, val: f64, prec: usize) !void {
+    if (std.math.isNan(val)) {
+        try buf.appendSlice(a, "NaN");
+        return;
+    }
+    if (std.math.isInf(val)) {
+        if (val < 0) try buf.append(a, '-');
+        try buf.appendSlice(a, "INF");
+        return;
+    }
     const s = std.fmt.allocPrint(a, "{d:.[1]}", .{ val, prec }) catch {
         try buf.appendSlice(a, "0");
         return;
@@ -1015,6 +1024,15 @@ fn formatFixedFloat(buf: *std.ArrayListUnmanaged(u8), a: std.mem.Allocator, val:
 }
 
 fn formatScientific(buf: *std.ArrayListUnmanaged(u8), a: std.mem.Allocator, val: f64, prec: usize, e_char: u8) !void {
+    if (std.math.isNan(val)) {
+        try buf.appendSlice(a, "NaN");
+        return;
+    }
+    if (std.math.isInf(val)) {
+        if (val < 0) try buf.append(a, '-');
+        try buf.appendSlice(a, "INF");
+        return;
+    }
     if (val == 0) {
         try buf.appendSlice(a, "0.");
         for (0..prec) |_| try buf.append(a, '0');
@@ -1040,6 +1058,15 @@ fn formatScientific(buf: *std.ArrayListUnmanaged(u8), a: std.mem.Allocator, val:
 fn formatGeneral(buf: *std.ArrayListUnmanaged(u8), a: std.mem.Allocator, val: f64, prec: usize, g_char: u8) !void {
     if (val == 0) {
         try buf.append(a, '0');
+        return;
+    }
+    if (std.math.isNan(val)) {
+        try buf.appendSlice(a, "NaN");
+        return;
+    }
+    if (std.math.isInf(val)) {
+        if (val < 0) try buf.append(a, '-');
+        try buf.appendSlice(a, "INF");
         return;
     }
     const is_neg = val < 0;
