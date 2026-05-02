@@ -111,6 +111,17 @@ fn native_is_uploaded_file(_: *NativeContext, args: []const Value) RuntimeError!
 }
 
 fn native_sys_get_temp_dir(_: *NativeContext, _: []const Value) RuntimeError!Value {
+    // honor TMPDIR / TEMP / TMP env vars like PHP does, fall back to /tmp
+    const env_keys = [_][]const u8{ "TMPDIR", "TEMP", "TMP" };
+    for (env_keys) |k| {
+        if (std.posix.getenv(k)) |v| {
+            if (v.len > 0) {
+                // strip a trailing slash to match PHP
+                const trimmed = if (v.len > 1 and v[v.len - 1] == '/') v[0 .. v.len - 1] else v;
+                return .{ .string = trimmed };
+            }
+        }
+    }
     return .{ .string = "/tmp" };
 }
 

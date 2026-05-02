@@ -621,18 +621,38 @@ fn native_rename(_: *NativeContext, args: []const Value) RuntimeError!Value {
 
 fn native_scandir(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len == 0 or args[0] != .string) return .{ .bool = false };
+    // SCANDIR_SORT_ASCENDING=0, _DESCENDING=1, _NONE=2
+    const order: i64 = if (args.len >= 2 and args[1] == .int) args[1].int else 0;
     var dir = std.fs.cwd().openDir(args[0].string, .{ .iterate = true }) catch return Value{ .bool = false };
     defer dir.close();
 
-    var result = try ctx.createArray();
-    try result.append(ctx.allocator, .{ .string = "." });
-    try result.append(ctx.allocator, .{ .string = ".." });
+    var names = std.ArrayListUnmanaged([]const u8){};
+    defer names.deinit(ctx.allocator);
+    try names.append(ctx.allocator, ".");
+    try names.append(ctx.allocator, "..");
 
     var iter = dir.iterate();
     while (iter.next() catch null) |entry| {
         const name = try ctx.createString(entry.name);
-        try result.append(ctx.allocator, .{ .string = name });
+        try names.append(ctx.allocator, name);
     }
+
+    if (order == 0 or order == 1) {
+        const lessAsc = struct {
+            fn f(_: void, a: []const u8, b: []const u8) bool {
+                return std.mem.order(u8, a, b) == .lt;
+            }
+        }.f;
+        const lessDesc = struct {
+            fn f(_: void, a: []const u8, b: []const u8) bool {
+                return std.mem.order(u8, a, b) == .gt;
+            }
+        }.f;
+        if (order == 0) std.mem.sort([]const u8, names.items, {}, lessAsc) else std.mem.sort([]const u8, names.items, {}, lessDesc);
+    }
+
+    var result = try ctx.createArray();
+    for (names.items) |n| try result.append(ctx.allocator, .{ .string = n });
     return .{ .array = result };
 }
 

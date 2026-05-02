@@ -53,6 +53,10 @@ pub const entries = .{
     .{ "php_sapi_name", native_php_sapi_name },
     .{ "php_version", native_php_version },
     .{ "phpversion", native_php_version },
+    .{ "getmypid", native_getmypid },
+    .{ "getmyuid", native_getmyuid },
+    .{ "getmygid", native_getmygid },
+    .{ "getmyinode", native_noop_zero },
     .{ "ini_get", native_ini_get },
     .{ "get_cfg_var", native_get_cfg_var },
     .{ "ini_set", native_ini_set },
@@ -879,6 +883,20 @@ fn native_php_sapi_name(_: *NativeContext, _: []const Value) RuntimeError!Value 
 
 fn native_php_version(_: *NativeContext, _: []const Value) RuntimeError!Value {
     return .{ .string = "8.4.0" };
+}
+
+fn native_getmypid(_: *NativeContext, _: []const Value) RuntimeError!Value {
+    return .{ .int = @intCast(std.c.getpid()) };
+}
+
+fn native_getmyuid(_: *NativeContext, _: []const Value) RuntimeError!Value {
+    return .{ .int = @intCast(std.c.getuid()) };
+}
+
+extern "c" fn getgid() c_uint;
+
+fn native_getmygid(_: *NativeContext, _: []const Value) RuntimeError!Value {
+    return .{ .int = @intCast(getgid()) };
 }
 
 fn native_get_cfg_var(_: *NativeContext, _: []const Value) RuntimeError!Value {
