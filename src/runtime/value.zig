@@ -373,12 +373,37 @@ pub const Value = union(enum) {
     }
 
     pub fn power(a: Value, b: Value) Value {
+        // when both operands are int and exponent is non-negative, prefer int
+        // result if it fits in i64; matches PHP's behavior
+        if (a == .int and b == .int and b.int >= 0) {
+            const exp_u: u64 = @intCast(b.int);
+            var result: i64 = 1;
+            var base: i64 = a.int;
+            var e = exp_u;
+            var overflowed = false;
+            while (e > 0 and !overflowed) : (e >>= 1) {
+                if ((e & 1) == 1) {
+                    const r = @mulWithOverflow(result, base);
+                    if (r[1] != 0) { overflowed = true; break; }
+                    result = r[0];
+                }
+                if (e > 1) {
+                    const r = @mulWithOverflow(base, base);
+                    if (r[1] != 0) { overflowed = true; break; }
+                    base = r[0];
+                }
+            }
+            if (!overflowed) return .{ .int = result };
+        }
         return .{ .float = std.math.pow(f64, toFloat(a), toFloat(b)) };
     }
 
     pub fn negate(self: Value) Value {
         return switch (self) {
-            .int => |i| .{ .int = -i },
+            .int => |i| if (i == std.math.minInt(i64))
+                .{ .float = -@as(f64, @floatFromInt(i)) }
+            else
+                .{ .int = -i },
             .float => |f| .{ .float = -f },
             else => .{ .int = -toInt(self) },
         };
