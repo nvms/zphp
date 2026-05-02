@@ -151,14 +151,21 @@ fn compilePattern(pattern: []const u8, flags: u32) ?*pcre2.Code {
 }
 
 fn preg_match(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len < 2 or args[0] != .string or args[1] != .string) return .{ .int = 0 };
-    const info = parsePattern(args[0].string) orelse return Value{ .int = 0 };
+    if (args.len < 2 or args[0] != .string or args[1] != .string) return .{ .bool = false };
+    setPregError(0);
+    const info = parsePattern(args[0].string) orelse {
+        setPregError(1);
+        return Value{ .bool = false };
+    };
     const subject = args[1].string;
 
-    const code = compilePattern(info.pattern, info.flags) orelse return Value{ .int = 0 };
+    const code = compilePattern(info.pattern, info.flags) orelse {
+        setPregError(1);
+        return Value{ .bool = false };
+    };
     defer pcre2.pcre2_code_free_8(code);
 
-    const match_data = pcre2.pcre2_match_data_create_from_pattern_8(code, null) orelse return Value{ .int = 0 };
+    const match_data = pcre2.pcre2_match_data_create_from_pattern_8(code, null) orelse return Value{ .bool = false };
     defer pcre2.pcre2_match_data_free_8(match_data);
 
     const flags: u32 = if (args.len >= 4) @intCast(@max(0, Value.toInt(args[3]))) else 0;
@@ -166,7 +173,19 @@ fn preg_match(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     const unmatched_as_null = (flags & 512) != 0;
     const offset: usize = if (args.len >= 5 and args[4] == .int and args[4].int >= 0) @intCast(args[4].int) else 0;
     const rc = pcre2.pcre2_match_8(code, subject.ptr, subject.len, offset, 0, match_data, null);
-    if (rc < 0) return .{ .int = 0 };
+    if (rc < 0) {
+        // no match: $matches must still be set to an empty array so callers
+        // can safely iterate without an isset() guard
+        if (args.len >= 3) {
+            const matches_arr = if (args[2] == .array) args[2].array else try ctx.createArray();
+            matches_arr.entries.items.len = 0;
+            matches_arr.next_int_key = 0;
+            if (args[2] != .array) {
+                ctx.setCallerVar(2, args.len, .{ .array = matches_arr });
+            }
+        }
+        return .{ .int = 0 };
+    }
 
     if (args.len >= 3) {
         const matches_arr = if (args[2] == .array) args[2].array else try ctx.createArray();
@@ -287,15 +306,22 @@ fn addNamedGroups(ctx: *NativeContext, arr: *PhpArray, code: *pcre2.Code, ovecto
 }
 
 fn preg_match_all(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len < 2 or args[0] != .string or args[1] != .string) return .{ .int = 0 };
-    const info = parsePattern(args[0].string) orelse return Value{ .int = 0 };
+    if (args.len < 2 or args[0] != .string or args[1] != .string) return .{ .bool = false };
+    setPregError(0);
+    const info = parsePattern(args[0].string) orelse {
+        setPregError(1);
+        return Value{ .bool = false };
+    };
     const subject = args[1].string;
 
     const flags: u32 = if (args.len >= 4) @intCast(@max(0, Value.toInt(args[3]))) else 0;
     const set_order = (flags & 2) != 0; // PREG_SET_ORDER
     const offset_capture = (flags & 256) != 0; // PREG_OFFSET_CAPTURE
 
-    const code = compilePattern(info.pattern, info.flags) orelse return Value{ .int = 0 };
+    const code = compilePattern(info.pattern, info.flags) orelse {
+        setPregError(1);
+        return Value{ .bool = false };
+    };
     defer pcre2.pcre2_code_free_8(code);
 
     const match_data = pcre2.pcre2_match_data_create_from_pattern_8(code, null) orelse return Value{ .int = 0 };
@@ -966,12 +992,29 @@ fn preg_grep(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     return .{ .array = result };
 }
 
+// global preg_last_error state - mirrors PHP's per-thread last error
+threadlocal var preg_last_error_code: i64 = 0;
+
+fn setPregError(code: i64) void {
+    preg_last_error_code = code;
+}
+
 fn preg_last_error(_: *NativeContext, _: []const Value) RuntimeError!Value {
-    return .{ .int = 0 };
+    return .{ .int = preg_last_error_code };
 }
 
 fn preg_last_error_msg(_: *NativeContext, _: []const Value) RuntimeError!Value {
-    return .{ .string = "No error" };
+    const msg: []const u8 = switch (preg_last_error_code) {
+        0 => "No error",
+        1 => "Internal error",
+        2 => "Backtrack limit exhausted",
+        3 => "Recursion limit exhausted",
+        4 => "Malformed UTF-8 characters, possibly incorrectly encoded",
+        5 => "The offset did not correspond to the beginning of a valid UTF-8 code point",
+        6 => "JIT stack limit exhausted",
+        else => "Unknown error",
+    };
+    return .{ .string = msg };
 }
 
 fn mb_split(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
