@@ -617,10 +617,27 @@ fn native_get_class_methods(ctx: *NativeContext, args: []const Value) RuntimeErr
     if (args.len == 0) return Value{ .bool = false };
     const class_name = if (args[0] == .object)
         args[0].object.class_name
+    else if (args[0] == .generator)
+        "Generator"
+    else if (args[0] == .fiber)
+        "Fiber"
     else if (args[0] == .string)
         args[0].string
     else
         return Value{ .bool = false };
+
+    if (std.mem.eql(u8, class_name, "Generator")) {
+        var arr = try ctx.createArray();
+        const methods = [_][]const u8{ "rewind", "valid", "current", "key", "next", "send", "throw", "getReturn", "__debugInfo" };
+        for (methods) |m| try arr.append(ctx.allocator, .{ .string = m });
+        return .{ .array = arr };
+    }
+    if (std.mem.eql(u8, class_name, "Fiber")) {
+        var arr = try ctx.createArray();
+        const methods = [_][]const u8{ "__construct", "start", "resume", "throw", "isStarted", "isSuspended", "isRunning", "isTerminated", "getReturn", "getCurrent", "suspend" };
+        for (methods) |m| try arr.append(ctx.allocator, .{ .string = m });
+        return .{ .array = arr };
+    }
 
     var arr = try ctx.createArray();
     var seen = std.StringHashMapUnmanaged(void){};
@@ -667,6 +684,11 @@ fn native_get_parent_class(ctx: *NativeContext, args: []const Value) RuntimeErro
 
 fn native_is_a(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len < 2 or args[1] != .string) return .{ .bool = false };
+    if (args[0] == .generator) {
+        const t = args[1].string;
+        return .{ .bool = std.mem.eql(u8, t, "Generator") or std.mem.eql(u8, t, "Iterator") or std.mem.eql(u8, t, "Traversable") };
+    }
+    if (args[0] == .fiber) return .{ .bool = std.mem.eql(u8, args[1].string, "Fiber") };
     const class_name = if (args[0] == .object)
         args[0].object.class_name
     else if (args[0] == .string)
@@ -678,6 +700,11 @@ fn native_is_a(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
 
 fn native_is_subclass_of(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len < 2 or args[1] != .string) return .{ .bool = false };
+    if (args[0] == .generator) {
+        const t = args[1].string;
+        return .{ .bool = std.mem.eql(u8, t, "Iterator") or std.mem.eql(u8, t, "Traversable") };
+    }
+    if (args[0] == .fiber) return .{ .bool = false };
     const class_name = if (args[0] == .object)
         args[0].object.class_name
     else if (args[0] == .string)
@@ -690,8 +717,11 @@ fn native_is_subclass_of(ctx: *NativeContext, args: []const Value) RuntimeError!
 }
 
 fn native_spl_object_id(_: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len == 0 or args[0] != .object) return Value{ .int = 0 };
-    return .{ .int = @intCast(@intFromPtr(args[0].object)) };
+    if (args.len == 0) return Value{ .int = 0 };
+    if (args[0] == .object) return .{ .int = @intCast(@intFromPtr(args[0].object)) };
+    if (args[0] == .generator) return .{ .int = @intCast(@intFromPtr(args[0].generator)) };
+    if (args[0] == .fiber) return .{ .int = @intCast(@intFromPtr(args[0].fiber)) };
+    return Value{ .int = 0 };
 }
 
 fn native_exit(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
@@ -1472,8 +1502,13 @@ fn isResourceObject(name: []const u8) bool {
 }
 
 fn native_spl_object_hash(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len == 0 or args[0] != .object) return .{ .bool = false };
-    const ptr = @intFromPtr(args[0].object);
+    if (args.len == 0) return .{ .bool = false };
+    const ptr: usize = switch (args[0]) {
+        .object => |o| @intFromPtr(o),
+        .generator => |g| @intFromPtr(g),
+        .fiber => |f| @intFromPtr(f),
+        else => return .{ .bool = false },
+    };
     const hash = std.fmt.allocPrint(ctx.allocator, "{x:0>32}", .{ptr}) catch return .{ .bool = false };
     ctx.vm.strings.append(ctx.allocator, hash) catch {};
     return .{ .string = hash };
