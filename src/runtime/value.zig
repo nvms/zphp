@@ -387,15 +387,30 @@ pub const Value = union(enum) {
     fn arrayEqual(a: *PhpArray, b: *PhpArray, strict: bool) bool {
         if (a == b) return true;
         if (a.entries.items.len != b.entries.items.len) return false;
-        for (a.entries.items, b.entries.items) |ea, eb| {
-            if (!ea.key.eql(eb.key)) return false;
-            if (strict) {
+        if (strict) {
+            // strict: same key/value pairs in the same order
+            for (a.entries.items, b.entries.items) |ea, eb| {
+                if (!ea.key.eql(eb.key)) return false;
                 if (!identical(ea.value, eb.value)) return false;
-            } else {
-                if (!equal(ea.value, eb.value)) return false;
             }
+            return true;
+        }
+        // loose: same key/value pairs regardless of order
+        for (a.entries.items) |ea| {
+            const bv = b.get(ea.key);
+            if (bv == .null and equal(ea.value, .null)) {
+                // null may legitimately equal a missing entry; need explicit presence check
+                if (!hasKey(b, ea.key)) return false;
+            }
+            if (!equal(ea.value, bv)) return false;
         }
         return true;
+    }
+
+    fn hasKey(arr: *PhpArray, key: PhpArray.Key) bool {
+        if (key == .string) return arr.string_index.contains(key.string);
+        for (arr.entries.items) |e| if (e.key.eql(key)) return true;
+        return false;
     }
 
     pub fn equal(a: Value, b: Value) bool {
