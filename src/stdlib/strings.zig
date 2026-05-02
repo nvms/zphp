@@ -1006,26 +1006,12 @@ fn sprintfImpl(ctx: *NativeContext, fmt_str: []const u8, args: []const Value) ![
 }
 
 fn formatFixedFloat(buf: *std.ArrayListUnmanaged(u8), a: std.mem.Allocator, val: f64, prec: usize) !void {
-    const is_neg = val < 0;
-    const abs_val = @abs(val);
-    const int_part: u64 = @intFromFloat(abs_val);
-    const factor = std.math.pow(f64, 10.0, @as(f64, @floatFromInt(prec)));
-    const frac = @abs(abs_val - @as(f64, @floatFromInt(int_part)));
-    const frac_int: u64 = @intFromFloat(@round(frac * factor));
-
-    if (is_neg) try buf.append(a, '-');
-    var int_buf: [32]u8 = undefined;
-    const int_str = std.fmt.bufPrint(&int_buf, "{d}", .{int_part}) catch "0";
-    try buf.appendSlice(a, int_str);
-
-    if (prec > 0) {
-        try buf.append(a, '.');
-        var frac_buf: [32]u8 = undefined;
-        const frac_str = std.fmt.bufPrint(&frac_buf, "{d}", .{frac_int}) catch "0";
-        var pad: usize = if (prec > frac_str.len) prec - frac_str.len else 0;
-        while (pad > 0) : (pad -= 1) try buf.append(a, '0');
-        try buf.appendSlice(a, frac_str[0..@min(frac_str.len, prec)]);
-    }
+    const s = std.fmt.allocPrint(a, "{d:.[1]}", .{ val, prec }) catch {
+        try buf.appendSlice(a, "0");
+        return;
+    };
+    defer a.free(s);
+    try buf.appendSlice(a, s);
 }
 
 fn formatScientific(buf: *std.ArrayListUnmanaged(u8), a: std.mem.Allocator, val: f64, prec: usize, e_char: u8) !void {
