@@ -459,7 +459,13 @@ pub const Value = union(enum) {
         if (b == .null and a == .string) return a.string.len == 0;
         if (a == .null) return !b.isTruthy();
         if (b == .null) return !a.isTruthy();
-        if (a == .string and b == .string) return std.mem.eql(u8, a.string, b.string);
+        if (a == .string and b == .string) {
+            // PHP: when both strings are numeric, compare numerically (so '1' == '01')
+            if (isNumericString(a.string) and isNumericString(b.string)) {
+                return toFloat(a) == toFloat(b);
+            }
+            return std.mem.eql(u8, a.string, b.string);
+        }
         // php 8: int/float vs non-numeric string is always false
         if ((a == .int or a == .float) and b == .string) {
             if (!isNumericString(b.string)) return false;
@@ -510,6 +516,10 @@ pub const Value = union(enum) {
         if (a == .object and b == .object) return compare(a, b) < 0;
         if (a == .object or b == .object or a == .generator or b == .generator or a == .fiber or b == .fiber) return false;
         if (a == .string and b == .string) {
+            // PHP: when both strings are numeric, compare numerically
+            if (isNumericString(a.string) and isNumericString(b.string)) {
+                return toFloat(a) < toFloat(b);
+            }
             return std.mem.order(u8, a.string, b.string) == .lt;
         }
         return toFloat(a) < toFloat(b);
@@ -536,6 +546,14 @@ pub const Value = union(enum) {
         }
         if (a == .array or b == .array) return if (a == .array) 1 else -1;
         if (a == .string and b == .string) {
+            // PHP: when both strings are numeric, compare numerically
+            if (isNumericString(a.string) and isNumericString(b.string)) {
+                const af = toFloat(a);
+                const bf = toFloat(b);
+                if (af < bf) return -1;
+                if (af > bf) return 1;
+                return 0;
+            }
             return switch (std.mem.order(u8, a.string, b.string)) {
                 .lt => -1,
                 .eq => 0,
