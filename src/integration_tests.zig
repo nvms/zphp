@@ -1545,7 +1545,7 @@ test "password_hash with custom cost" {
         \\echo substr($h, 0, 7);
         \\echo " ";
         \\echo password_verify("test", $h) ? "ok" : "fail";
-    , "$2b$04$ ok");
+    , "$2y$04$ ok");
 }
 
 test "random_int equal bounds" {

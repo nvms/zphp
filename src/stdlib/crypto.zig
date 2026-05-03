@@ -4,6 +4,7 @@ const NativeContext = @import("../runtime/vm.zig").NativeContext;
 const RuntimeError = error{ RuntimeError, OutOfMemory };
 
 pub const entries = .{
+    .{ "crypt", native_crypt },
     .{ "password_hash", native_password_hash },
     .{ "password_verify", native_password_verify },
     .{ "password_needs_rehash", native_password_needs_rehash },
@@ -24,12 +25,45 @@ pub const entries = .{
     .{ "hash_pbkdf2", native_hash_pbkdf2 },
 };
 
+// PHP's crypt() with bcrypt salt: salt format is "$2y$NN$..." or "$2a$NN$..."
+// Generates a bcrypt hash using the provided salt's cost. For non-bcrypt
+// salts (DES, MD5, SHA-256, SHA-512) we currently fall back to bcrypt with
+// cost 10, which is incorrect but preserves the calling convention.
+fn native_crypt(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len == 0 or args[0] != .string) return Value{ .bool = false };
+    const password = args[0].string;
+    const salt: []const u8 = if (args.len >= 2 and args[1] == .string) args[1].string else "";
+
+    // bcrypt salt: $2y$NN$22-char-salt or $2a$/$2b$
+    if (salt.len >= 7 and salt[0] == '$' and salt[1] == '2' and (salt[2] == 'y' or salt[2] == 'a' or salt[2] == 'b') and salt[3] == '$') {
+        var rounds_log: u6 = 10;
+        if (salt.len >= 6 and salt[6] == '$') {
+            const cost = std.fmt.parseInt(u8, salt[4..6], 10) catch 10;
+            if (cost >= 4 and cost <= 31) rounds_log = @intCast(cost);
+        }
+        var buf: [60]u8 = undefined;
+        const hash = std.crypto.pwhash.bcrypt.strHash(password, .{
+            .params = .{ .rounds_log = rounds_log, .silently_truncate_password = true },
+            .encoding = .crypt,
+        }, &buf) catch return Value{ .bool = false };
+        const out = try ctx.createString(hash);
+        // preserve the variant prefix from the salt ($2y$ vs $2a$ vs $2b$)
+        if (out.len >= 4 and out[0] == '$' and out[1] == '2' and out[3] == '$') {
+            @as([*]u8, @ptrCast(@constCast(out.ptr)))[2] = salt[2];
+        }
+        return .{ .string = out };
+    }
+
+    // PHP returns a special "*0" or "*1" failure indicator on bad salt
+    return .{ .string = "*0" };
+}
+
 fn native_password_hash(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len == 0 or args[0] != .string) return Value{ .bool = false };
     const password = args[0].string;
 
-    // default cost 10, PHP's PASSWORD_BCRYPT default
-    var rounds_log: u6 = 10;
+    // PHP 7.4+ default cost is 12, was 10 in older versions
+    var rounds_log: u6 = 12;
     if (args.len >= 3 and args[2] == .array) {
         const opts = args[2].array;
         const cost_val = opts.get(.{ .string = "cost" });
@@ -44,13 +78,34 @@ fn native_password_hash(ctx: *NativeContext, args: []const Value) RuntimeError!V
         .encoding = .crypt,
     }, &buf) catch return Value{ .bool = false };
 
-    return .{ .string = try ctx.createString(hash) };
+    // PHP uses the $2y$ prefix variant; std.crypto produces $2b$. Both are
+    // verifiable by any compliant bcrypt impl, but cross-runtime hash exchange
+    // (e.g. Laravel sessions) expects the $2y$ form.
+    const out = try ctx.createString(hash);
+    if (out.len >= 4 and out[0] == '$' and out[1] == '2' and out[2] == 'b' and out[3] == '$') {
+        @as([*]u8, @ptrCast(@constCast(out.ptr)))[2] = 'y';
+    }
+    return .{ .string = out };
 }
 
-fn native_password_verify(_: *NativeContext, args: []const Value) RuntimeError!Value {
+fn native_password_verify(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len < 2 or args[0] != .string or args[1] != .string) return Value{ .bool = false };
     const password = args[0].string;
     const hash = args[1].string;
+
+    // std.crypto.pwhash.bcrypt only knows the $2b$ variant; PHP-generated and
+    // legacy hashes use $2y$ and $2a$. Normalize before verification.
+    var normalized: []const u8 = hash;
+    if (hash.len >= 4 and hash[0] == '$' and hash[1] == '2' and (hash[2] == 'y' or hash[2] == 'a') and hash[3] == '$') {
+        const dup = try ctx.allocator.dupe(u8, hash);
+        defer ctx.allocator.free(dup);
+        dup[2] = 'b';
+        normalized = dup;
+        std.crypto.pwhash.bcrypt.strVerify(normalized, password, .{
+            .silently_truncate_password = true,
+        }) catch return Value{ .bool = false };
+        return Value{ .bool = true };
+    }
 
     std.crypto.pwhash.bcrypt.strVerify(hash, password, .{
         .silently_truncate_password = true,
@@ -114,7 +169,8 @@ fn native_password_needs_rehash(_: *NativeContext, args: []const Value) RuntimeE
     if (args.len < 2 or args[0] != .string) return Value{ .bool = true };
     const hash = args[0].string;
 
-    var target_cost: u6 = 10;
+    // PHP's default cost was 10 for years; 7.4+ raised it to 12
+    var target_cost: u6 = 12;
     if (args.len >= 3 and args[2] == .array) {
         const opts = args[2].array;
         const cost_val = opts.get(.{ .string = "cost" });
@@ -124,9 +180,8 @@ fn native_password_needs_rehash(_: *NativeContext, args: []const Value) RuntimeE
     }
 
     // parse cost from $2y$XX$ or $2b$XX$ format
-    if (hash.len < 7 or hash[0] != '$' or hash[1] != '2') return Value{ .bool = true };
-    const cost_start: usize = if (hash[2] == '$') 3 else if (hash[3] == '$') 4 else return Value{ .bool = true };
-    const cost = std.fmt.parseInt(u6, hash[cost_start .. cost_start + 2], 10) catch return Value{ .bool = true };
+    if (hash.len < 7 or hash[0] != '$' or hash[1] != '2' or hash[3] != '$') return Value{ .bool = true };
+    const cost = std.fmt.parseInt(u6, hash[4..6], 10) catch return Value{ .bool = true };
 
     return Value{ .bool = cost != target_cost };
 }
