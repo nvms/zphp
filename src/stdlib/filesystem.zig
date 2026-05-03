@@ -82,6 +82,11 @@ pub const entries = .{
     .{ "proc_get_status", native_proc_get_status },
     .{ "proc_terminate", native_proc_terminate },
     .{ "stream_set_blocking", native_stream_set_blocking },
+    .{ "socket_set_blocking", native_stream_set_blocking },
+    .{ "stream_set_timeout", native_stream_set_timeout },
+    .{ "socket_set_timeout", native_stream_set_timeout },
+    .{ "stream_set_read_buffer", native_stream_set_read_buffer },
+    .{ "stream_set_write_buffer", native_stream_set_write_buffer },
     .{ "mime_content_type", native_mime_content_type },
     .{ "disk_free_space", native_disk_free_space },
     .{ "diskfreespace", native_disk_free_space },
@@ -959,6 +964,7 @@ fn native_fopen(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     try obj.set(ctx.allocator, "__fd", .{ .int = @intCast(file.handle) });
     try obj.set(ctx.allocator, "__open", .{ .bool = true });
     try obj.set(ctx.allocator, "__mode", .{ .string = mode });
+    try obj.set(ctx.allocator, "__path", .{ .string = try ctx.createString(path) });
     try ctx.vm.objects.append(ctx.allocator, obj);
     return .{ .object = obj };
 }
@@ -1277,15 +1283,37 @@ fn stream_get_meta_data(ctx: *NativeContext, args: []const Value) RuntimeError!V
     const obj = args[0].object;
     const mode_val = obj.get("__mode");
     const mode = if (mode_val == .string) mode_val.string else "r";
+    const path_val = obj.get("__path");
+    const uri = if (path_val == .string) path_val.string else "";
+    // derive wrapper_type/stream_type from the URI scheme
+    var wrapper_type: []const u8 = "plainfile";
+    var stream_type: []const u8 = "STDIO";
+    if (std.mem.indexOf(u8, uri, "://")) |colon| {
+        const scheme = uri[0..colon];
+        if (std.mem.eql(u8, scheme, "http") or std.mem.eql(u8, scheme, "https")) {
+            wrapper_type = "http";
+            stream_type = "tcp_socket/ssl";
+        } else if (std.mem.eql(u8, scheme, "php")) {
+            wrapper_type = "PHP";
+            stream_type = "STDIO";
+        } else if (std.mem.eql(u8, scheme, "data")) {
+            wrapper_type = "RFC2397";
+            stream_type = "RFC2397";
+        } else {
+            wrapper_type = scheme;
+            stream_type = scheme;
+        }
+    }
     const result = try ctx.createArray();
     try result.set(ctx.allocator, .{ .string = "timed_out" }, .{ .bool = false });
     try result.set(ctx.allocator, .{ .string = "blocked" }, .{ .bool = true });
     try result.set(ctx.allocator, .{ .string = "eof" }, .{ .bool = false });
-    try result.set(ctx.allocator, .{ .string = "stream_type" }, .{ .string = "STDIO" });
+    try result.set(ctx.allocator, .{ .string = "wrapper_type" }, .{ .string = wrapper_type });
+    try result.set(ctx.allocator, .{ .string = "stream_type" }, .{ .string = stream_type });
     try result.set(ctx.allocator, .{ .string = "mode" }, .{ .string = mode });
     try result.set(ctx.allocator, .{ .string = "unread_bytes" }, .{ .int = 0 });
     try result.set(ctx.allocator, .{ .string = "seekable" }, .{ .bool = true });
-    try result.set(ctx.allocator, .{ .string = "uri" }, .{ .string = "" });
+    try result.set(ctx.allocator, .{ .string = "uri" }, .{ .string = uri });
     return .{ .array = result };
 }
 
@@ -1498,14 +1526,39 @@ fn stream_wrapper_restore(ctx: *NativeContext, args: []const Value) RuntimeError
 fn stream_get_contents(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len == 0 or args[0] != .object) return .{ .bool = false };
     const obj = args[0].object;
+    // length: -1 (or null) means read until EOF; non-negative means cap
+    const length: i64 = if (args.len >= 2 and args[1] == .int) args[1].int else -1;
+    // offset: -1 (default) means start at current position; >=0 means seek
+    const offset: i64 = if (args.len >= 3 and args[2] == .int) args[2].int else -1;
+
     if (getBufferBacking(obj)) |buffer| {
+        if (offset >= 0) setBufferPos(obj, @intCast(offset));
         const pos = getBufferPos(obj);
         if (pos >= buffer.len) return .{ .string = "" };
         const remaining = buffer[pos..];
-        setBufferPos(obj, buffer.len);
-        return .{ .string = try ctx.createString(remaining) };
+        const take = if (length >= 0) @min(@as(usize, @intCast(length)), remaining.len) else remaining.len;
+        setBufferPos(obj, pos + take);
+        return .{ .string = try ctx.createString(remaining[0..take]) };
     }
     const file = getFileHandle(obj) orelse return Value{ .bool = false };
+    if (offset >= 0) {
+        file.seekTo(@intCast(offset)) catch return Value{ .bool = false };
+    }
+    if (length >= 0) {
+        const cap: usize = @intCast(length);
+        const buf = ctx.allocator.alloc(u8, cap) catch return Value{ .bool = false };
+        const n = file.read(buf) catch {
+            ctx.allocator.free(buf);
+            return Value{ .bool = false };
+        };
+        if (n < cap) {
+            const result = try ctx.createString(buf[0..n]);
+            ctx.allocator.free(buf);
+            return .{ .string = result };
+        }
+        try ctx.strings.append(ctx.allocator, buf);
+        return .{ .string = buf };
+    }
     const buf = file.readToEndAlloc(ctx.allocator, 10 * 1024 * 1024) catch return Value{ .bool = false };
     try ctx.strings.append(ctx.allocator, buf);
     return .{ .string = buf };
@@ -1963,6 +2016,18 @@ fn native_proc_terminate(_: *NativeContext, _: []const Value) RuntimeError!Value
 
 fn native_stream_set_blocking(_: *NativeContext, _: []const Value) RuntimeError!Value {
     return .{ .bool = true };
+}
+
+fn native_stream_set_timeout(_: *NativeContext, _: []const Value) RuntimeError!Value {
+    return .{ .bool = true };
+}
+
+fn native_stream_set_read_buffer(_: *NativeContext, _: []const Value) RuntimeError!Value {
+    return .{ .int = 0 };
+}
+
+fn native_stream_set_write_buffer(_: *NativeContext, _: []const Value) RuntimeError!Value {
+    return .{ .int = 0 };
 }
 
 const MimeEntry = struct { ext: []const u8, mime: []const u8 };

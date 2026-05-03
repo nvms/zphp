@@ -1529,8 +1529,13 @@ fn native_is_resource(_: *NativeContext, args: []const Value) RuntimeError!Value
 fn native_get_resource_type(_: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len < 1) return .{ .bool = false };
     if (args[0] == .object) {
-        if (std.mem.eql(u8, args[0].object.class_name, "FileHandle")) return .{ .string = "stream" };
-        return .{ .string = args[0].object.class_name };
+        const cn = args[0].object.class_name;
+        // map zphp internal class names to PHP-canonical resource type strings
+        if (std.mem.eql(u8, cn, "FileHandle")) return .{ .string = "stream" };
+        if (std.mem.eql(u8, cn, "StreamContext")) return .{ .string = "stream-context" };
+        if (std.mem.eql(u8, cn, "CurlHandle")) return .{ .string = "curl" };
+        if (std.mem.eql(u8, cn, "GdImage")) return .{ .string = "gd" };
+        return .{ .string = cn };
     }
     return .{ .bool = false };
 }
