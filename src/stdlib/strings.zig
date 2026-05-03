@@ -2438,6 +2438,19 @@ fn native_parse_url(ctx: *NativeContext, args: []const Value) RuntimeError!Value
         if (rest.len > 0 or url.len == 0) path = rest;
     }
 
+    // PHP rejects URLs whose authority section (after //) is invalid:
+    //   - no host but port or userinfo present ("http://:80", "http://user@:80")
+    //   - empty host with any non-file scheme ("http:///", "ftp:///")
+    //   - file:// is the one exception that allows an empty host
+    if (has_authority) {
+        const host_empty = if (host) |h| h.len == 0 else true;
+        if (host_empty) {
+            if (port != null or user != null or pass != null) return Value{ .bool = false };
+            const is_file_scheme = if (scheme) |s| std.ascii.eqlIgnoreCase(s, "file") else false;
+            if (scheme != null and !is_file_scheme) return Value{ .bool = false };
+        }
+    }
+
     if (component) |c| {
         return switch (c) {
             0 => if (scheme) |s| Value{ .string = try ctx.createString(s) } else .null,

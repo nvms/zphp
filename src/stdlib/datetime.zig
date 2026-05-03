@@ -2424,9 +2424,12 @@ fn native_idate(_: *NativeContext, args: []const Value) RuntimeError!Value {
     const day_num: i64 = @intCast(epoch_day.day);
     const dow: i64 = @intCast(@mod(day_num + 4, 7));
 
-    return .{ .int = switch (fmt) {
+    const v: i64 = switch (fmt) {
         'd' => @as(i64, month_day.day_index) + 1,
-        'h' => @mod(day_seconds.getHoursIntoDay(), 12),
+        'h' => blk: {
+            const h12 = @mod(day_seconds.getHoursIntoDay(), 12);
+            break :blk if (h12 == 0) @as(@TypeOf(h12), 12) else h12;
+        },
         'H' => day_seconds.getHoursIntoDay(),
         'i' => day_seconds.getMinutesIntoHour(),
         'm' => month_day.month.numeric(),
@@ -2436,8 +2439,19 @@ fn native_idate(_: *NativeContext, args: []const Value) RuntimeError!Value {
         'y' => @mod(year_day.year, 100),
         'Y' => year_day.year,
         't' => daysInMonth(month_day.month.numeric(), year_day.year),
-        else => 0,
-    } };
+        'z' => year_day.day,
+        'I' => 0, // DST flag - approximate as 0 (no DST awareness here)
+        'L' => if (isLeapYear(year_day.year)) @as(i64, 1) else 0,
+        'N' => if (dow == 0) @as(i64, 7) else dow, // ISO 8601 day of week, Monday=1..Sunday=7
+        'B' => @intCast(@mod(@divTrunc(day_seconds.secs, 86), 1000)), // Swatch internet time (rough)
+        'Z' => 0, // timezone offset in seconds; without TZ context, default to UTC
+        else => return .{ .bool = false },
+    };
+    return .{ .int = v };
+}
+
+fn isLeapYear(y: u16) bool {
+    return (y % 4 == 0 and y % 100 != 0) or (y % 400 == 0);
 }
 
 const IsoDuration = struct { y: i64, m: i64, d: i64, h: i64, mi: i64, s: i64, f: f64 };
