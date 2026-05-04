@@ -46,6 +46,23 @@ pub fn compileAssign(self: *Compiler, node: Ast.Node) Error!void {
             try emitCompoundOp(self, op_tag);
             try self.emitOp(.array_set);
         } else {
+            const target_lhs = self.ast.nodes[target.data.lhs];
+            if (target_lhs.tag == .variable) {
+                const var_name = self.ast.tokenSlice(target_lhs.main_token);
+                var slot_opt: ?u16 = null;
+                if (self.local_slots.get(var_name)) |s| {
+                    slot_opt = s;
+                } else if (!self.inFunctionScope() and var_name.len > 0 and var_name[0] == '$') {
+                    slot_opt = self.getOrCreateSlot(var_name);
+                }
+                if (slot_opt) |slot| {
+                    try self.compileNode(target.data.rhs);
+                    try self.compileNode(node.data.rhs);
+                    try self.emitOp(.array_set_local);
+                    try self.emitU16(slot);
+                    return;
+                }
+            }
             try compileVivifyChain(self,target.data.lhs);
             try self.compileNode(target.data.rhs);
             try self.compileNode(node.data.rhs);

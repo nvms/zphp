@@ -1729,6 +1729,111 @@ pub const VM = struct {
                     self.push(val);
                 },
 
+                .array_set_local => {
+                    const slot = self.readU16();
+                    const val = self.pop();
+                    const key = self.pop();
+                    const frame = self.currentFrame();
+
+                    var cur: Value = .null;
+                    var ref_cell: ?*Value = null;
+                    if (frame.func) |func| {
+                        if (slot < func.slot_names.len and func.slot_names[slot].len > 0) {
+                            if (frame.ref_slots.get(func.slot_names[slot])) |cell| {
+                                cur = cell.*;
+                                ref_cell = cell;
+                            }
+                        }
+                        if (ref_cell == null and slot < frame.locals.len) cur = frame.locals[slot];
+                    } else {
+                        cur = self.getLocalGlobal(slot, frame);
+                    }
+
+                    if (cur == .string) {
+                        const s = cur.string;
+                        var idx: i64 = Value.toInt(key);
+                        if (idx < 0) idx = @as(i64, @intCast(s.len)) + idx;
+                        if (idx < 0) {
+                            self.push(val);
+                            continue;
+                        }
+                        var write_byte: u8 = 0;
+                        if (val == .string) {
+                            if (val.string.len > 0) write_byte = val.string[0];
+                        } else {
+                            var tmp: std.ArrayListUnmanaged(u8) = .{};
+                            defer tmp.deinit(self.allocator);
+                            try val.format(&tmp, self.allocator);
+                            if (tmp.items.len > 0) write_byte = tmp.items[0];
+                        }
+                        const target_idx: usize = @intCast(idx);
+                        const new_len: usize = @max(s.len, target_idx + 1);
+                        const buf = try self.allocator.alloc(u8, new_len);
+                        @memcpy(buf[0..s.len], s);
+                        if (new_len > s.len) @memset(buf[s.len..], ' ');
+                        buf[target_idx] = write_byte;
+                        try self.strings.append(self.allocator, buf);
+                        const new_str = Value{ .string = buf };
+
+                        if (ref_cell) |cell| cell.* = new_str;
+                        if (frame.func) |func| {
+                            if (slot < func.slot_names.len) {
+                                const name = func.slot_names[slot];
+                                if (name.len > 0) try frame.vars.put(self.allocator, name, new_str);
+                            }
+                            if (slot < frame.locals.len) frame.locals[slot] = new_str;
+                        } else {
+                            if (slot < frame.locals.len) frame.locals[slot] = new_str;
+                            try self.setLocalGlobal(slot, new_str, frame);
+                        }
+                        self.push(val);
+                        continue;
+                    }
+
+                    if (cur == .int or cur == .float or (cur == .bool and cur.bool)) {
+                        if (try self.throwBuiltinException("Error", "Cannot use a scalar value as an array")) continue;
+                        return error.RuntimeError;
+                    }
+
+                    if (cur == .null or (cur == .bool and !cur.bool)) {
+                        const new_arr = try self.allocator.create(PhpArray);
+                        new_arr.* = .{};
+                        try self.arrays.append(self.allocator, new_arr);
+                        const arr_val = Value{ .array = new_arr };
+                        if (ref_cell) |cell| cell.* = arr_val;
+                        if (frame.func) |func| {
+                            if (slot < func.slot_names.len) {
+                                const name = func.slot_names[slot];
+                                if (name.len > 0) try frame.vars.put(self.allocator, name, arr_val);
+                            }
+                            if (slot < frame.locals.len) frame.locals[slot] = arr_val;
+                        } else {
+                            if (slot < frame.locals.len) frame.locals[slot] = arr_val;
+                            try self.setLocalGlobal(slot, arr_val, frame);
+                        }
+                        try new_arr.set(self.allocator, Value.toArrayKey(key), val);
+                        self.push(val);
+                        continue;
+                    }
+
+                    if (cur == .array) {
+                        try cur.array.set(self.allocator, Value.toArrayKey(key), val);
+                        self.push(val);
+                        continue;
+                    }
+
+                    if (cur == .object and self.hasMethod(cur.object.class_name, "offsetSet")) {
+                        _ = self.callMethod(cur.object, "offsetSet", &.{ key, val }) catch {
+                            if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
+                            return error.RuntimeError;
+                        };
+                        self.push(val);
+                        continue;
+                    }
+
+                    self.push(val);
+                },
+
                 .ensure_array_local => {
                     const slot = self.readU16();
                     const frame = self.currentFrame();

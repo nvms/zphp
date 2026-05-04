@@ -75,6 +75,7 @@ pub const OpCode = enum(u8) {
     array_get, // pop key, pop array, push value
     array_get_vivify, // pop key, pop array, push value (create intermediate arrays if missing)
     array_set, // pop value, pop key, pop array, set, push value
+    array_set_local, // u16: slot - pop value, pop key, set on local at slot (string char-write or array set with vivify), push value
     ensure_array_local, // u16: slot - read local, vivify null/false to array, error on scalar, push result
     ensure_array_var, // u16: name const - read var, vivify null/false to array, error on scalar, push result
 
