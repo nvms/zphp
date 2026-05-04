@@ -1847,8 +1847,10 @@ fn native_rawurldecode(ctx: *NativeContext, args: []const Value) RuntimeError!Va
 fn native_md5(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len == 0) return .{ .string = "" };
     const s = if (args[0] == .string) args[0].string else return Value{ .string = "" };
+    const raw_output = args.len >= 2 and args[1].isTruthy();
     var hash: [16]u8 = undefined;
     std.crypto.hash.Md5.hash(s, &hash, .{});
+    if (raw_output) return .{ .string = try ctx.createString(&hash) };
     const hex = "0123456789abcdef";
     var buf: [32]u8 = undefined;
     for (hash, 0..) |byte, i| {
@@ -1861,8 +1863,10 @@ fn native_md5(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
 fn native_sha1(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len == 0) return .{ .string = "" };
     const s = if (args[0] == .string) args[0].string else return Value{ .string = "" };
+    const raw_output = args.len >= 2 and args[1].isTruthy();
     var hash: [20]u8 = undefined;
     std.crypto.hash.Sha1.hash(s, &hash, .{});
+    if (raw_output) return .{ .string = try ctx.createString(&hash) };
     const hex = "0123456789abcdef";
     var buf: [40]u8 = undefined;
     for (hash, 0..) |byte, i| {
