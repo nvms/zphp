@@ -832,21 +832,24 @@ fn sprintfImpl(ctx: *NativeContext, fmt_str: []const u8, args: []const Value) ![
             var left_align = false;
             var show_sign = false;
 
-            if (i < fmt_str.len and fmt_str[i] == '-') {
-                left_align = true;
-                i += 1;
-            }
-            if (i < fmt_str.len and fmt_str[i] == '+') {
-                show_sign = true;
-                i += 1;
-            }
-            if (i < fmt_str.len and fmt_str[i] == '0') {
-                pad_char = '0';
-                i += 1;
-            }
-            if (i + 1 < fmt_str.len and fmt_str[i] == '\'') {
-                pad_char = fmt_str[i + 1];
-                i += 2;
+            // flags can appear in any order
+            while (i < fmt_str.len) {
+                const c = fmt_str[i];
+                if (c == '-') {
+                    left_align = true;
+                    i += 1;
+                } else if (c == '+') {
+                    show_sign = true;
+                    i += 1;
+                } else if (c == '0') {
+                    pad_char = '0';
+                    i += 1;
+                } else if (c == ' ') {
+                    i += 1;
+                } else if (c == '\'' and i + 1 < fmt_str.len) {
+                    pad_char = fmt_str[i + 1];
+                    i += 2;
+                } else break;
             }
 
             var width: usize = 0;
@@ -913,7 +916,9 @@ fn sprintfImpl(ctx: *NativeContext, fmt_str: []const u8, args: []const Value) ![
                     try tmp_buf.appendSlice(ctx.allocator, s);
                 },
                 'f' => {
-                    const v = Value.toFloat(arg);
+                    var v = Value.toFloat(arg);
+                    // php's %f drops the negative-zero sign
+                    if (v == 0 and std.math.signbit(v)) v = 0;
                     const prec = precision orelse 6;
                     if (show_sign and v >= 0) try tmp_buf.append(ctx.allocator, '+');
                     try formatFixedFloat(&tmp_buf, ctx.allocator, v, prec);
@@ -978,17 +983,20 @@ fn sprintfImpl(ctx: *NativeContext, fmt_str: []const u8, args: []const Value) ![
             }
 
             const formatted = tmp_buf.items;
+            // when left-align is combined with zero-pad flag, php ignores zero
+            // pad (left-align always right-pads with spaces)
+            const effective_pad: u8 = if (left_align and pad_char == '0') ' ' else pad_char;
             if (width > formatted.len) {
                 const padding = width - formatted.len;
                 if (left_align) {
                     try buf.appendSlice(ctx.allocator, formatted);
-                    for (0..padding) |_| try buf.append(ctx.allocator, pad_char);
-                } else if (pad_char == '0' and formatted.len > 0 and (formatted[0] == '+' or formatted[0] == '-')) {
+                    for (0..padding) |_| try buf.append(ctx.allocator, effective_pad);
+                } else if (effective_pad == '0' and formatted.len > 0 and (formatted[0] == '+' or formatted[0] == '-')) {
                     try buf.append(ctx.allocator, formatted[0]);
                     for (0..padding) |_| try buf.append(ctx.allocator, '0');
                     try buf.appendSlice(ctx.allocator, formatted[1..]);
                 } else {
-                    for (0..padding) |_| try buf.append(ctx.allocator, pad_char);
+                    for (0..padding) |_| try buf.append(ctx.allocator, effective_pad);
                     try buf.appendSlice(ctx.allocator, formatted);
                 }
             } else {
@@ -1091,11 +1099,22 @@ fn formatGeneral(buf: *std.ArrayListUnmanaged(u8), a: std.mem.Allocator, val: f6
     } else {
         const fixed_prec = if (sig > exp_val + 1) @as(usize, @intCast(sig - exp_val - 1)) else 0;
         const round_factor = std.math.pow(f64, 10.0, @as(f64, @floatFromInt(fixed_prec)));
-        const rounded = @round(abs_val * round_factor) / round_factor;
+        const rounded = roundHalfToEven(abs_val * round_factor) / round_factor;
         if (is_neg) try buf.append(a, '-');
         try formatFixedFloat(buf, a, rounded, fixed_prec);
         stripTrailingZeros(buf);
     }
+}
+
+fn roundHalfToEven(x: f64) f64 {
+    const fl = @floor(x);
+    const diff = x - fl;
+    if (diff < 0.5) return fl;
+    if (diff > 0.5) return fl + 1;
+    // exact half: round to even
+    const fl_i: i64 = @intFromFloat(fl);
+    if (@mod(fl_i, 2) == 0) return fl;
+    return fl + 1;
 }
 
 fn stripTrailingZeros(buf: *std.ArrayListUnmanaged(u8)) void {
