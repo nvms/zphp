@@ -110,11 +110,16 @@ fn encodeValue(buf: *std.ArrayListUnmanaged(u8), a: std.mem.Allocator, val: Valu
                 const s = formatJsonScientific(&tmp, f);
                 try buf.appendSlice(a, s);
             } else if (f == @trunc(f) and abs_f < 1e17) {
-                const i: i64 = @intFromFloat(f);
-                var tmp: [32]u8 = undefined;
-                const s = std.fmt.bufPrint(&tmp, "{d}", .{i}) catch return;
-                try buf.appendSlice(a, s);
-                if (preserve_zero) try buf.appendSlice(a, ".0");
+                if (f == 0 and std.math.signbit(f)) {
+                    try buf.appendSlice(a, "-0");
+                    if (preserve_zero) try buf.appendSlice(a, ".0");
+                } else {
+                    const i: i64 = @intFromFloat(f);
+                    var tmp: [32]u8 = undefined;
+                    const s = std.fmt.bufPrint(&tmp, "{d}", .{i}) catch return;
+                    try buf.appendSlice(a, s);
+                    if (preserve_zero) try buf.appendSlice(a, ".0");
+                }
             } else {
                 var tmp: [64]u8 = undefined;
                 const s = std.fmt.bufPrint(&tmp, "{d}", .{f}) catch return;
@@ -166,6 +171,8 @@ fn encodeValue(buf: *std.ArrayListUnmanaged(u8), a: std.mem.Allocator, val: Valu
                     '\n' => try buf.appendSlice(a, "\\n"),
                     '\r' => try buf.appendSlice(a, "\\r"),
                     '\t' => try buf.appendSlice(a, "\\t"),
+                    0x08 => try buf.appendSlice(a, "\\b"),
+                    0x0c => try buf.appendSlice(a, "\\f"),
                     '/' => {
                         if (unescape_slashes) {
                             try buf.append(a, '/');
@@ -373,25 +380,27 @@ fn encodeValue(buf: *std.ArrayListUnmanaged(u8), a: std.mem.Allocator, val: Valu
 }
 
 fn formatJsonScientific(buf: *[64]u8, f: f64) []const u8 {
-    const abs_f = @abs(f);
-    const exp: i32 = @intFromFloat(@floor(@log10(abs_f)));
-    const mantissa = f / std.math.pow(f64, 10.0, @floatFromInt(exp));
-    var mant_buf: [64]u8 = undefined;
-    var m = std.fmt.bufPrint(&mant_buf, "{d}", .{mantissa}) catch "0";
-    var has_dot = false;
-    for (m) |ch| {
-        if (ch == '.') {
-            has_dot = true;
-            break;
-        }
+    // zig {e} produces shortest round-trippable scientific form. post-process
+    // to match php's `1.0e+300` shape: ensure mantissa has a decimal point
+    // (append `.0` if integral) and exponent always carries an explicit sign.
+    var raw_buf: [64]u8 = undefined;
+    const raw = std.fmt.bufPrint(&raw_buf, "{e}", .{f}) catch return "0";
+    const e_idx = std.mem.indexOfScalar(u8, raw, 'e') orelse return std.fmt.bufPrint(buf, "{s}", .{raw}) catch "0";
+    const mant = raw[0..e_idx];
+    const exp = raw[e_idx + 1 ..];
+    const has_dot = std.mem.indexOfScalar(u8, mant, '.') != null;
+    const exp_has_sign = exp.len > 0 and (exp[0] == '+' or exp[0] == '-');
+    if (has_dot and exp_has_sign) {
+        return std.fmt.bufPrint(buf, "{s}", .{raw}) catch "0";
+    }
+    if (!has_dot and !exp_has_sign) {
+        return std.fmt.bufPrint(buf, "{s}.0e+{s}", .{ mant, exp }) catch "0";
     }
     if (!has_dot) {
-        const tmp = std.fmt.bufPrint(&mant_buf, "{d}.0", .{mantissa}) catch "0.0";
-        m = tmp;
+        return std.fmt.bufPrint(buf, "{s}.0e{s}", .{ mant, exp }) catch "0";
     }
-    const exp_sign: u8 = if (exp >= 0) '+' else '-';
-    const exp_abs: u32 = @intCast(if (exp >= 0) exp else -exp);
-    return std.fmt.bufPrint(buf, "{s}e{c}{d}", .{ m, exp_sign, exp_abs }) catch "0";
+    // has_dot, no sign on exp
+    return std.fmt.bufPrint(buf, "{s}e+{s}", .{ mant, exp }) catch "0";
 }
 
 fn isSequential(arr: *const PhpArray) bool {
