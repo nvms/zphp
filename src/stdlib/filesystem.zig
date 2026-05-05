@@ -1581,34 +1581,59 @@ fn native_fstat(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
 fn native_fgetcsv(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len == 0 or args[0] != .object) return .{ .bool = false };
     const file = getFileHandle(args[0].object) orelse return Value{ .bool = false };
-    // args: handle, [length], [delimiter], [enclosure], [escape]
     const delimiter: u8 = if (args.len >= 3 and args[2] == .string and args[2].string.len > 0) args[2].string[0] else ',';
     const enclosure: u8 = if (args.len >= 4 and args[3] == .string and args[3].string.len > 0) args[3].string[0] else '"';
 
-    // read a line
+    // read a CSV record, honoring quoted-field embedded newlines
     var line = std.ArrayListUnmanaged(u8){};
     var byte: [1]u8 = undefined;
-    while (line.items.len < 65536) {
+    var in_quotes = false;
+    var got_any = false;
+    while (true) {
         const n = file.read(&byte) catch break;
         if (n == 0) break;
-        try line.append(ctx.allocator, byte[0]);
-        if (byte[0] == '\n') break;
+        got_any = true;
+        const c = byte[0];
+        try line.append(ctx.allocator, c);
+        if (c == enclosure) {
+            if (in_quotes) {
+                // peek next byte for `""` escape
+                var peek: [1]u8 = undefined;
+                const np = file.read(&peek) catch 0;
+                if (np == 1) {
+                    try line.append(ctx.allocator, peek[0]);
+                    if (peek[0] != enclosure) {
+                        in_quotes = false;
+                        if (peek[0] == '\n') break;
+                    }
+                } else {
+                    in_quotes = false;
+                    break;
+                }
+            } else {
+                in_quotes = true;
+            }
+        } else if (c == '\n' and !in_quotes) {
+            break;
+        }
     }
-    if (line.items.len == 0) return .{ .bool = false };
+    if (!got_any) return .{ .bool = false };
 
-    // register the line buffer for cleanup
     const line_owned = try line.toOwnedSlice(ctx.allocator);
     try ctx.strings.append(ctx.allocator, line_owned);
 
-    // trim trailing newline
     var raw = line_owned;
     if (raw.len > 0 and raw[raw.len - 1] == '\n') raw = raw[0 .. raw.len - 1];
     if (raw.len > 0 and raw[raw.len - 1] == '\r') raw = raw[0 .. raw.len - 1];
 
-    // parse CSV fields
+    return parseCsvRecord(ctx, raw, delimiter, enclosure);
+}
+
+fn parseCsvRecord(ctx: *NativeContext, raw: []const u8, delimiter: u8, enclosure: u8) !Value {
     var result = try ctx.createArray();
     var field = std.ArrayListUnmanaged(u8){};
     var in_quotes = false;
+    var at_field_start = true;
     var i: usize = 0;
     while (i < raw.len) : (i += 1) {
         const c = raw[i];
@@ -1624,22 +1649,23 @@ fn native_fgetcsv(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
                 try field.append(ctx.allocator, c);
             }
         } else {
-            if (c == enclosure) {
+            if (c == enclosure and at_field_start) {
                 in_quotes = true;
+                at_field_start = false;
             } else if (c == delimiter) {
                 const s = try field.toOwnedSlice(ctx.allocator);
                 try ctx.strings.append(ctx.allocator, s);
                 try result.append(ctx.allocator, .{ .string = s });
+                at_field_start = true;
             } else {
                 try field.append(ctx.allocator, c);
+                at_field_start = false;
             }
         }
     }
-    // last field
     const s = try field.toOwnedSlice(ctx.allocator);
     try ctx.strings.append(ctx.allocator, s);
     try result.append(ctx.allocator, .{ .string = s });
-
     return .{ .array = result };
 }
 

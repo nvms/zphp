@@ -1617,36 +1617,48 @@ fn native_str_getcsv(ctx: *NativeContext, args: []const Value) RuntimeError!Valu
     const enc: u8 = if (args.len >= 3 and args[2] == .string and args[2].string.len > 0) args[2].string[0] else '"';
 
     var arr = try ctx.createArray();
-    var j: usize = 0;
-    while (j < s.len) {
-        if (s[j] == enc) {
-            j += 1;
-            var field = std.ArrayListUnmanaged(u8){};
-            while (j < s.len) {
-                if (s[j] == enc) {
-                    if (j + 1 < s.len and s[j + 1] == enc) {
-                        try field.append(ctx.allocator, enc);
-                        j += 2;
-                    } else {
-                        j += 1;
-                        break;
-                    }
+
+    if (s.len == 0) {
+        try arr.append(ctx.allocator, .{ .string = "" });
+        return .{ .array = arr };
+    }
+
+    var field = std.ArrayListUnmanaged(u8){};
+    var in_quotes = false;
+    var at_field_start = true;
+    var i: usize = 0;
+    while (i < s.len) : (i += 1) {
+        const c = s[i];
+        if (in_quotes) {
+            if (c == enc) {
+                if (i + 1 < s.len and s[i + 1] == enc) {
+                    try field.append(ctx.allocator, enc);
+                    i += 1;
                 } else {
-                    try field.append(ctx.allocator, s[j]);
-                    j += 1;
+                    in_quotes = false;
                 }
+            } else {
+                try field.append(ctx.allocator, c);
             }
-            const f = try field.toOwnedSlice(ctx.allocator);
-            try ctx.strings.append(ctx.allocator, f);
-            try arr.append(ctx.allocator, .{ .string = f });
-            if (j < s.len and s[j] == sep) j += 1;
         } else {
-            var end = j;
-            while (end < s.len and s[end] != sep) end += 1;
-            try arr.append(ctx.allocator, .{ .string = try ctx.createString(s[j..end]) });
-            j = if (end < s.len) end + 1 else end + 1;
+            if (c == enc and at_field_start) {
+                in_quotes = true;
+                at_field_start = false;
+            } else if (c == sep) {
+                const f = try field.toOwnedSlice(ctx.allocator);
+                try ctx.strings.append(ctx.allocator, f);
+                try arr.append(ctx.allocator, .{ .string = f });
+                at_field_start = true;
+            } else {
+                try field.append(ctx.allocator, c);
+                at_field_start = false;
+            }
         }
     }
+    const f = try field.toOwnedSlice(ctx.allocator);
+    try ctx.strings.append(ctx.allocator, f);
+    try arr.append(ctx.allocator, .{ .string = f });
+
     return .{ .array = arr };
 }
 
