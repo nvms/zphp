@@ -1190,13 +1190,141 @@ fn formatFixedFloat(buf: *std.ArrayListUnmanaged(u8), a: std.mem.Allocator, val:
         try buf.appendSlice(a, "INF");
         return;
     }
-    const s = std.fmt.allocPrint(a, "{d:.[1]}", .{ val, prec }) catch {
-        try buf.appendSlice(a, "0");
+    var int_buf: [128]u8 = undefined;
+    var frac_buf: [128]u8 = undefined;
+    const r = bankersRoundFloat(val, prec, &int_buf, &frac_buf) catch {
+        const s = std.fmt.allocPrint(a, "{d:.[1]}", .{ val, prec }) catch {
+            try buf.appendSlice(a, "0");
+            return;
+        };
+        defer a.free(s);
+        try buf.appendSlice(a, s);
         return;
     };
-    defer a.free(s);
-    try buf.appendSlice(a, s);
+    if (r.is_negative) try buf.append(a, '-');
+    try buf.appendSlice(a, r.int_part);
+    if (prec > 0) {
+        try buf.append(a, '.');
+        try buf.appendSlice(a, r.frac_part);
+    }
 }
+
+const RoundedFloatBanker = struct { is_negative: bool, int_part: []const u8, frac_part: []const u8 };
+
+// Round half-to-even (banker's) using shortest-roundtrip representation.
+fn bankersRoundFloat(num: f64, decimals: usize, int_buf: []u8, frac_buf: []u8) !RoundedFloatBanker {
+    const is_negative = num < 0;
+    var abs_val = @abs(num);
+    if (std.math.isNan(abs_val) or std.math.isInf(abs_val)) abs_val = 0;
+
+    var src_buf: [64]u8 = undefined;
+    var src = std.fmt.bufPrint(&src_buf, "{d}", .{abs_val}) catch "0";
+
+    var expanded_buf: [128]u8 = undefined;
+    if (std.mem.indexOfAny(u8, src, "eE")) |_| {
+        src = expandScientific(src, &expanded_buf) catch src;
+    }
+
+    const dot = std.mem.indexOfScalar(u8, src, '.');
+    const int_in: []const u8 = if (dot) |d| src[0..d] else src;
+    const frac_in: []const u8 = if (dot) |d| src[d + 1 ..] else "";
+
+    var combined: [256]u8 = undefined;
+    var c_len: usize = 0;
+    for (int_in) |b| {
+        if (c_len >= combined.len) break;
+        combined[c_len] = b;
+        c_len += 1;
+    }
+    var int_len = c_len;
+    if (int_len == 0) {
+        combined[0] = '0';
+        int_len = 1;
+        c_len = 1;
+    }
+    var fi: usize = 0;
+    while (fi < decimals + 1) : (fi += 1) {
+        if (c_len >= combined.len) break;
+        combined[c_len] = if (fi < frac_in.len) frac_in[fi] else '0';
+        c_len += 1;
+    }
+
+    const round_pos = int_len + decimals;
+    if (round_pos < c_len) {
+        const round_digit = combined[round_pos];
+        var should_round_up = false;
+        if (round_digit > '5') {
+            should_round_up = true;
+        } else if (round_digit == '5') {
+            // banker's: round up only if any digit beyond is non-zero,
+            // otherwise round to even (round up only when preceding digit is odd)
+            var has_more = false;
+            var k: usize = round_pos + 1;
+            while (k < c_len) : (k += 1) {
+                if (combined[k] != '0') {
+                    has_more = true;
+                    break;
+                }
+            }
+            if (!has_more) {
+                var fk: usize = decimals + 1;
+                while (fk < frac_in.len) : (fk += 1) {
+                    if (frac_in[fk] != '0') {
+                        has_more = true;
+                        break;
+                    }
+                }
+            }
+            if (has_more) {
+                should_round_up = true;
+            } else {
+                const prev_digit: u8 = if (round_pos == 0) '0' else combined[round_pos - 1];
+                if ((prev_digit - '0') % 2 == 1) should_round_up = true;
+            }
+        }
+        if (should_round_up) {
+            var k: usize = round_pos;
+            while (k > 0) {
+                k -= 1;
+                if (combined[k] < '9') {
+                    combined[k] += 1;
+                    break;
+                } else {
+                    combined[k] = '0';
+                    if (k == 0) {
+                        if (c_len >= combined.len) c_len = combined.len - 1;
+                        var j: usize = c_len;
+                        while (j > 0) : (j -= 1) combined[j] = combined[j - 1];
+                        combined[0] = '1';
+                        c_len += 1;
+                        int_len += 1;
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    var i_start: usize = 0;
+    while (i_start < int_len - 1 and combined[i_start] == '0') i_start += 1;
+    const ip_slice = combined[i_start..int_len];
+    if (ip_slice.len > int_buf.len) return error.Overflow;
+    @memcpy(int_buf[0..ip_slice.len], ip_slice);
+
+    if (decimals > frac_buf.len) return error.Overflow;
+    var fp_len: usize = 0;
+    while (fp_len < decimals) : (fp_len += 1) {
+        const idx = int_len + fp_len;
+        frac_buf[fp_len] = if (idx < c_len) combined[idx] else '0';
+    }
+
+    return .{
+        .is_negative = is_negative,
+        .int_part = int_buf[0..ip_slice.len],
+        .frac_part = frac_buf[0..fp_len],
+    };
+}
+
 
 fn formatScientific(buf: *std.ArrayListUnmanaged(u8), a: std.mem.Allocator, val: f64, prec: usize, e_char: u8) !void {
     if (std.math.isNan(val)) {
