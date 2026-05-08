@@ -214,11 +214,16 @@ fn array_search(_: *NativeContext, args: []const Value) RuntimeError!Value {
 fn array_reverse(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len == 0 or args[0] != .array) return .null;
     const src = args[0].array;
+    const preserve = args.len >= 2 and args[1].isTruthy();
     var arr = try ctx.createArray();
     var i: usize = src.entries.items.len;
     while (i > 0) {
         i -= 1;
-        try arr.append(ctx.allocator, src.entries.items[i].value);
+        const entry = src.entries.items[i];
+        switch (entry.key) {
+            .int => if (preserve) try arr.set(ctx.allocator, entry.key, entry.value) else try arr.append(ctx.allocator, entry.value),
+            .string => try arr.set(ctx.allocator, entry.key, entry.value),
+        }
     }
     return .{ .array = arr };
 }

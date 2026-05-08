@@ -2256,10 +2256,7 @@ fn native_base64_decode(ctx: *NativeContext, args: []const Value) RuntimeError!V
             return .{ .bool = false };
         }
         if (c == ' ' or c == '\n' or c == '\r' or c == '\t') {
-            if (strict) {
-                buf.deinit(ctx.allocator);
-                return .{ .bool = false };
-            }
+            // PHP allows whitespace in both strict and non-strict modes
             continue;
         }
         const val = base64Decode(c) orelse {

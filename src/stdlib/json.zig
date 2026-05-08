@@ -648,7 +648,7 @@ fn parseNull(s: []const u8, pos: *usize) !Value {
 }
 
 fn parseArray(ctx: *NativeContext, s: []const u8, pos: *usize, assoc: bool, max_depth: usize, cur_depth: usize, flags: i64) !Value {
-    if (cur_depth >= max_depth) {
+    if (cur_depth + 1 >= max_depth) {
         last_error = 1;
         last_error_msg = "Maximum stack depth exceeded";
         return error.RuntimeError;
@@ -683,7 +683,7 @@ fn parseArray(ctx: *NativeContext, s: []const u8, pos: *usize, assoc: bool, max_
 }
 
 fn parseObject(ctx: *NativeContext, s: []const u8, pos: *usize, assoc: bool, max_depth: usize, cur_depth: usize, flags: i64) !Value {
-    if (cur_depth >= max_depth) {
+    if (cur_depth + 1 >= max_depth) {
         last_error = 1;
         last_error_msg = "Maximum stack depth exceeded";
         return error.RuntimeError;
