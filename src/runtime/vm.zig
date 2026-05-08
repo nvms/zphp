@@ -3709,6 +3709,11 @@ pub const VM = struct {
                         } else if (std.mem.eql(u8, method_name, "rewind")) {
                             self.push(.null);
                         } else if (std.mem.eql(u8, method_name, "getReturn")) {
+                            if (gen.state != .completed) {
+                                try self.setPendingException("Exception", "Cannot get return value of a generator that hasn't returned");
+                                if (self.dispatchPendingException(base_frame)) continue;
+                                return error.RuntimeError;
+                            }
                             self.push(gen.return_value);
                         } else if (std.mem.eql(u8, method_name, "throw")) {
                             const ex = if (ac > 0) self.stack[self.sp + 1] else Value{ .null = {} };
