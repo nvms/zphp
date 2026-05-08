@@ -539,7 +539,6 @@ fn native_str_split(ctx: *NativeContext, args: []const Value) RuntimeError!Value
         try arr.append(ctx.allocator, .{ .string = try ctx.createString(s[i..end]) });
         i = end;
     }
-    if (s.len == 0) try arr.append(ctx.allocator, .{ .string = "" });
     return .{ .array = arr };
 }
 
@@ -2651,23 +2650,46 @@ fn native_quotemeta(ctx: *NativeContext, args: []const Value) RuntimeError!Value
 fn native_mb_ucfirst(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len == 0) return .{ .string = "" };
     const s = if (args[0] == .string) args[0].string else return Value{ .string = "" };
-    if (s.len == 0) return .{ .string = "" };
-    const buf = try ctx.allocator.alloc(u8, s.len);
-    @memcpy(buf, s);
-    buf[0] = std.ascii.toUpper(s[0]);
-    try ctx.strings.append(ctx.allocator, buf);
-    return .{ .string = buf };
+    return .{ .string = try mbCaseFirst(ctx, s, true) };
 }
 
 fn native_mb_lcfirst(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len == 0) return .{ .string = "" };
     const s = if (args[0] == .string) args[0].string else return Value{ .string = "" };
-    if (s.len == 0) return .{ .string = "" };
-    const buf = try ctx.allocator.alloc(u8, s.len);
-    @memcpy(buf, s);
-    buf[0] = std.ascii.toLower(s[0]);
+    return .{ .string = try mbCaseFirst(ctx, s, false) };
+}
+
+fn mbCaseFirst(ctx: *NativeContext, s: []const u8, to_upper: bool) ![]const u8 {
+    if (s.len == 0) return "";
+    const first_len = std.unicode.utf8ByteSequenceLength(s[0]) catch 1;
+    if (first_len > s.len) {
+        const buf = try ctx.allocator.alloc(u8, s.len);
+        @memcpy(buf, s);
+        try ctx.strings.append(ctx.allocator, buf);
+        return buf;
+    }
+    if (first_len == 1) {
+        const buf = try ctx.allocator.alloc(u8, s.len);
+        @memcpy(buf, s);
+        buf[0] = if (to_upper) std.ascii.toUpper(s[0]) else std.ascii.toLower(s[0]);
+        try ctx.strings.append(ctx.allocator, buf);
+        return buf;
+    }
+    const cp = std.unicode.utf8Decode(s[0..first_len]) catch {
+        const buf = try ctx.allocator.alloc(u8, s.len);
+        @memcpy(buf, s);
+        try ctx.strings.append(ctx.allocator, buf);
+        return buf;
+    };
+    const new_cp = if (to_upper) unicodeToUpper(cp) else unicodeToLower(cp);
+    var enc: [4]u8 = undefined;
+    const enc_len = std.unicode.utf8Encode(new_cp, &enc) catch first_len;
+    const total = (s.len - first_len) + enc_len;
+    const buf = try ctx.allocator.alloc(u8, total);
+    @memcpy(buf[0..enc_len], enc[0..enc_len]);
+    @memcpy(buf[enc_len..], s[first_len..]);
     try ctx.strings.append(ctx.allocator, buf);
-    return .{ .string = buf };
+    return buf;
 }
 
 fn native_strip_tags(ctx: *NativeContext, args: []const Value) RuntimeError!Value {

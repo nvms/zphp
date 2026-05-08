@@ -11,6 +11,7 @@ pub const entries = .{
     .{ "min", native_min },
     .{ "max", native_max },
     .{ "rand", native_rand },
+    .{ "lcg_value", native_lcg_value },
     .{ "pow", native_pow },
     .{ "sqrt", native_sqrt },
     .{ "log", native_log },
@@ -151,6 +152,10 @@ fn native_max(_: *NativeContext, args: []const Value) RuntimeError!Value {
         if (Value.lessThan(result, a)) result = a;
     }
     return result;
+}
+
+fn native_lcg_value(_: *NativeContext, _: []const Value) RuntimeError!Value {
+    return .{ .float = std.crypto.random.float(f64) };
 }
 
 fn native_rand(_: *NativeContext, args: []const Value) RuntimeError!Value {
