@@ -295,9 +295,11 @@ pub fn register(vm: *VM, a: Allocator) !void {
     var reuc_def = ClassDef{ .name = "ReflectionEnumUnitCase" };
     try reuc_def.properties.append(a, .{ .name = "name", .default = .{ .string = "" } });
     try reuc_def.properties.append(a, .{ .name = "class", .default = .{ .string = "" } });
+    try reuc_def.methods.put(a, "__construct", .{ .name = "__construct", .arity = 2 });
     try reuc_def.methods.put(a, "getName", .{ .name = "getName", .arity = 0 });
     try reuc_def.methods.put(a, "getValue", .{ .name = "getValue", .arity = 0 });
     try vm.classes.put(a, "ReflectionEnumUnitCase", reuc_def);
+    try vm.native_fns.put(a, "ReflectionEnumUnitCase::__construct", reucConstruct);
     try vm.native_fns.put(a, "ReflectionEnumUnitCase::getName", reucGetName);
     try vm.native_fns.put(a, "ReflectionEnumUnitCase::getValue", reucGetValue);
 
@@ -306,10 +308,12 @@ pub fn register(vm: *VM, a: Allocator) !void {
     rebc_def.parent = "ReflectionEnumUnitCase";
     try rebc_def.properties.append(a, .{ .name = "name", .default = .{ .string = "" } });
     try rebc_def.properties.append(a, .{ .name = "class", .default = .{ .string = "" } });
+    try rebc_def.methods.put(a, "__construct", .{ .name = "__construct", .arity = 2 });
     try rebc_def.methods.put(a, "getName", .{ .name = "getName", .arity = 0 });
     try rebc_def.methods.put(a, "getValue", .{ .name = "getValue", .arity = 0 });
     try rebc_def.methods.put(a, "getBackingValue", .{ .name = "getBackingValue", .arity = 0 });
     try vm.classes.put(a, "ReflectionEnumBackedCase", rebc_def);
+    try vm.native_fns.put(a, "ReflectionEnumBackedCase::__construct", reucConstruct);
     try vm.native_fns.put(a, "ReflectionEnumBackedCase::getName", reucGetName);
     try vm.native_fns.put(a, "ReflectionEnumBackedCase::getValue", reucGetValue);
     try vm.native_fns.put(a, "ReflectionEnumBackedCase::getBackingValue", rebcGetBackingValue);
@@ -2559,6 +2563,20 @@ fn buildEnumCase(ctx: *NativeContext, class_name: []const u8, case_name: []const
     try obj.set(ctx.allocator, "name", .{ .string = case_name });
     try obj.set(ctx.allocator, "class", .{ .string = class_name });
     return obj;
+}
+
+fn reucConstruct(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    const this = getThis(ctx) orelse return .null;
+    if (args.len < 2) return .null;
+    const class_name: []const u8 = switch (args[0]) {
+        .string => |s| s,
+        .object => |o| o.class_name,
+        else => return .null,
+    };
+    if (args[1] != .string) return .null;
+    try this.set(ctx.allocator, "class", .{ .string = class_name });
+    try this.set(ctx.allocator, "name", .{ .string = args[1].string });
+    return .null;
 }
 
 fn reucGetName(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
