@@ -695,7 +695,7 @@ pub const Value = union(enum) {
             .string => |s| .{ .string = s },
             .bool => |b| .{ .int = if (b) 1 else 0 },
             .float => |f| .{ .int = @intFromFloat(f) },
-            .null => .{ .int = 0 },
+            .null => .{ .string = "" },
             .array, .object, .generator, .fiber => .{ .int = 0 },
         };
     }

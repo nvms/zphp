@@ -34,6 +34,7 @@ pub const entries = .{
     .{ "strtotime", native_strtotime },
     .{ "time", native_time },
     .{ "microtime", native_microtime },
+    .{ "hrtime", native_hrtime },
     .{ "checkdate", native_checkdate },
     .{ "getdate", native_getdate },
     .{ "gmdate", native_gmdate },
@@ -1560,6 +1561,20 @@ fn native_getdate(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     try arr.set(ctx.allocator, .{ .string = "weekday" }, .{ .string = ([_][]const u8{ "Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday" })[@intCast(dow)] });
     try arr.set(ctx.allocator, .{ .string = "month" }, .{ .string = ([_][]const u8{ "January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December" })[@intCast(month_day.month.numeric() - 1)] });
     try arr.set(ctx.allocator, .{ .string = "0" }, .{ .int = timestamp });
+    return .{ .array = arr };
+}
+
+fn native_hrtime(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    const as_int = args.len >= 1 and args[0].isTruthy();
+    const ns = std.time.nanoTimestamp();
+    if (as_int) {
+        return .{ .int = @intCast(ns) };
+    }
+    const secs: i64 = @intCast(@divTrunc(ns, 1_000_000_000));
+    const remainder: i64 = @intCast(@mod(ns, 1_000_000_000));
+    var arr = try ctx.createArray();
+    try arr.append(ctx.allocator, .{ .int = secs });
+    try arr.append(ctx.allocator, .{ .int = remainder });
     return .{ .array = arr };
 }
 

@@ -836,7 +836,18 @@ fn array_combine(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
 
     var arr = try ctx.createArray();
     for (keys_arr.entries.items, vals_arr.entries.items) |k, v| {
-        const key = Value.toArrayKey(k.value);
+        // PHP array_combine casts each key to string first, then canonicalizes.
+        const key: PhpArray.Key = switch (k.value) {
+            .int => |i| .{ .int = i },
+            .string => |s| PhpArray.normalizeKey(.{ .string = s }),
+            else => blk: {
+                var buf = std.ArrayListUnmanaged(u8){};
+                try k.value.format(&buf, ctx.allocator);
+                const owned = try buf.toOwnedSlice(ctx.allocator);
+                try ctx.vm.strings.append(ctx.allocator, owned);
+                break :blk PhpArray.normalizeKey(.{ .string = owned });
+            },
+        };
         try arr.set(ctx.allocator, key, v.value);
     }
     return .{ .array = arr };
