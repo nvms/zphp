@@ -743,25 +743,17 @@ fn native_number_format(ctx: *NativeContext, args: []const Value) RuntimeError!V
     const dec_point = if (args.len >= 3 and args[2] == .string) args[2].string else ".";
     const thousands_sep = if (args.len >= 4 and args[3] == .string) args[3].string else ",";
 
-    const rounded = if (decimals == 0) @round(num) else blk: {
-        const factor = std.math.pow(f64, 10.0, @as(f64, @floatFromInt(decimals)));
-        break :blk @round(num * factor) / factor;
-    };
-    const is_negative = rounded < 0;
-    const abs_val = @abs(rounded);
-
-    const int_part: u64 = @intFromFloat(abs_val);
-    var int_buf: [32]u8 = undefined;
-    const int_str = std.fmt.bufPrint(&int_buf, "{d}", .{int_part}) catch return Value{ .string = "0" };
+    var int_part_buf: [64]u8 = undefined;
+    var frac_part_buf: [64]u8 = undefined;
+    const formatted = try roundFloatToDecimals(num, decimals, &int_part_buf, &frac_part_buf);
 
     var buf = std.ArrayListUnmanaged(u8){};
-    if (is_negative) try buf.append(ctx.allocator, '-');
+    if (formatted.is_negative) try buf.append(ctx.allocator, '-');
 
+    const int_str = formatted.int_part;
     if (thousands_sep.len > 0 and int_str.len > 3) {
         const first_group = int_str.len % 3;
-        if (first_group > 0) {
-            try buf.appendSlice(ctx.allocator, int_str[0..first_group]);
-        }
+        if (first_group > 0) try buf.appendSlice(ctx.allocator, int_str[0..first_group]);
         var i: usize = first_group;
         while (i < int_str.len) {
             if (i > 0) try buf.appendSlice(ctx.allocator, thousands_sep);
@@ -774,19 +766,187 @@ fn native_number_format(ctx: *NativeContext, args: []const Value) RuntimeError!V
 
     if (decimals > 0) {
         try buf.appendSlice(ctx.allocator, dec_point);
-        const frac = abs_val - @as(f64, @floatFromInt(int_part));
-        const factor = std.math.pow(f64, 10.0, @as(f64, @floatFromInt(decimals)));
-        const frac_int: u64 = @intFromFloat(@round(frac * factor));
-        var frac_buf: [32]u8 = undefined;
-        const frac_str = std.fmt.bufPrint(&frac_buf, "{d}", .{frac_int}) catch "0";
-        var pad: usize = if (decimals > frac_str.len) decimals - frac_str.len else 0;
-        while (pad > 0) : (pad -= 1) try buf.append(ctx.allocator, '0');
-        try buf.appendSlice(ctx.allocator, frac_str[0..@min(frac_str.len, decimals)]);
+        try buf.appendSlice(ctx.allocator, formatted.frac_part);
     }
 
     const result = try buf.toOwnedSlice(ctx.allocator);
     try ctx.strings.append(ctx.allocator, result);
     return .{ .string = result };
+}
+
+const RoundedFloat = struct { is_negative: bool, int_part: []const u8, frac_part: []const u8 };
+
+// Round a float to `decimals` places using string-based half-away-from-zero rounding
+// against the shortest round-trip representation (avoids 1.005 → 1.00 binary noise).
+fn roundFloatToDecimals(num: f64, decimals: usize, int_buf: []u8, frac_buf: []u8) !RoundedFloat {
+    const is_negative = num < 0 or (num == 0 and std.math.signbit(num));
+    var abs_val = @abs(num);
+    if (std.math.isNan(abs_val) or std.math.isInf(abs_val)) abs_val = 0;
+
+    var src_buf: [64]u8 = undefined;
+    var src = std.fmt.bufPrint(&src_buf, "{d}", .{abs_val}) catch "0";
+
+    // expand scientific form (e.g. "1e-5", "1.5e10") to plain decimal
+    var expanded_buf: [128]u8 = undefined;
+    if (std.mem.indexOfAny(u8, src, "eE")) |_| {
+        src = expandScientific(src, &expanded_buf) catch src;
+    }
+
+    const dot = std.mem.indexOfScalar(u8, src, '.');
+    const int_in: []const u8 = if (dot) |d| src[0..d] else src;
+    const frac_in: []const u8 = if (dot) |d| src[d + 1 ..] else "";
+
+    // build a digit buffer combining int + frac with `decimals + 1` frac digits to inspect rounding digit
+    var combined: [128]u8 = undefined;
+    var c_len: usize = 0;
+    for (int_in) |b| {
+        if (c_len >= combined.len) break;
+        combined[c_len] = b;
+        c_len += 1;
+    }
+    var int_len = c_len;
+    if (int_len == 0) {
+        combined[0] = '0';
+        int_len = 1;
+        c_len = 1;
+    }
+    var fi: usize = 0;
+    while (fi < decimals + 1) : (fi += 1) {
+        if (c_len >= combined.len) break;
+        combined[c_len] = if (fi < frac_in.len) frac_in[fi] else '0';
+        c_len += 1;
+    }
+
+    // round-half-away-from-zero based on the digit at position int_len + decimals
+    const round_pos = int_len + decimals;
+    if (round_pos < c_len and combined[round_pos] >= '5') {
+        var k: usize = round_pos;
+        while (k > 0) {
+            k -= 1;
+            if (combined[k] < '9') {
+                combined[k] += 1;
+                break;
+            } else {
+                combined[k] = '0';
+                if (k == 0) {
+                    // need to prepend '1'
+                    if (c_len >= combined.len) c_len = combined.len - 1;
+                    var j: usize = c_len;
+                    while (j > 0) : (j -= 1) combined[j] = combined[j - 1];
+                    combined[0] = '1';
+                    c_len += 1;
+                    int_len += 1;
+                    break;
+                }
+            }
+        }
+    }
+
+    // copy out int part (strip leading zeros, keep at least one)
+    var i_start: usize = 0;
+    while (i_start < int_len - 1 and combined[i_start] == '0') i_start += 1;
+    const ip_slice = combined[i_start..int_len];
+    const ip_len = ip_slice.len;
+    if (ip_len > int_buf.len) return .{ .is_negative = is_negative, .int_part = "0", .frac_part = "" };
+    @memcpy(int_buf[0..ip_len], ip_slice);
+
+    // copy frac part (exactly `decimals` digits)
+    if (decimals > frac_buf.len) return .{ .is_negative = is_negative, .int_part = int_buf[0..ip_len], .frac_part = "" };
+    var fp_len: usize = 0;
+    while (fp_len < decimals) : (fp_len += 1) {
+        const idx = int_len + fp_len;
+        frac_buf[fp_len] = if (idx < c_len) combined[idx] else '0';
+    }
+
+    // suppress -0
+    const all_zero = blk: {
+        for (int_buf[0..ip_len]) |b| if (b != '0') break :blk false;
+        for (frac_buf[0..fp_len]) |b| if (b != '0') break :blk false;
+        break :blk true;
+    };
+
+    return .{
+        .is_negative = is_negative and !all_zero,
+        .int_part = int_buf[0..ip_len],
+        .frac_part = frac_buf[0..fp_len],
+    };
+}
+
+fn expandScientific(src: []const u8, out: []u8) ![]const u8 {
+    const e_idx = std.mem.indexOfAny(u8, src, "eE") orelse return src;
+    const mant = src[0..e_idx];
+    const exp_str = src[e_idx + 1 ..];
+    const exp = std.fmt.parseInt(i32, exp_str, 10) catch return src;
+
+    const dot = std.mem.indexOfScalar(u8, mant, '.');
+    const ip = if (dot) |d| mant[0..d] else mant;
+    const fp = if (dot) |d| mant[d + 1 ..] else "";
+
+    var digits_buf: [128]u8 = undefined;
+    var dlen: usize = 0;
+    for (ip) |b| {
+        if (dlen >= digits_buf.len) break;
+        digits_buf[dlen] = b;
+        dlen += 1;
+    }
+    for (fp) |b| {
+        if (dlen >= digits_buf.len) break;
+        digits_buf[dlen] = b;
+        dlen += 1;
+    }
+    // current decimal point sits after ip.len digits; new position = ip.len + exp
+    const new_dot: i32 = @as(i32, @intCast(ip.len)) + exp;
+
+    var ol: usize = 0;
+    if (new_dot <= 0) {
+        if (ol >= out.len) return src;
+        out[ol] = '0';
+        ol += 1;
+        if (ol >= out.len) return src;
+        out[ol] = '.';
+        ol += 1;
+        var pad: i32 = -new_dot;
+        while (pad > 0) : (pad -= 1) {
+            if (ol >= out.len) return src;
+            out[ol] = '0';
+            ol += 1;
+        }
+        for (digits_buf[0..dlen]) |b| {
+            if (ol >= out.len) return src;
+            out[ol] = b;
+            ol += 1;
+        }
+    } else {
+        const nd: usize = @intCast(new_dot);
+        if (nd >= dlen) {
+            for (digits_buf[0..dlen]) |b| {
+                if (ol >= out.len) return src;
+                out[ol] = b;
+                ol += 1;
+            }
+            var pad: usize = nd - dlen;
+            while (pad > 0) : (pad -= 1) {
+                if (ol >= out.len) return src;
+                out[ol] = '0';
+                ol += 1;
+            }
+        } else {
+            for (digits_buf[0..nd]) |b| {
+                if (ol >= out.len) return src;
+                out[ol] = b;
+                ol += 1;
+            }
+            if (ol >= out.len) return src;
+            out[ol] = '.';
+            ol += 1;
+            for (digits_buf[nd..dlen]) |b| {
+                if (ol >= out.len) return src;
+                out[ol] = b;
+                ol += 1;
+            }
+        }
+    }
+    return out[0..ol];
 }
 
 fn native_sprintf(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
