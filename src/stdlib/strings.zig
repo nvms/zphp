@@ -1343,10 +1343,21 @@ fn native_htmlspecialchars(ctx: *NativeContext, args: []const Value) RuntimeErro
     const flags: i64 = if (args.len >= 2) Value.toInt(args[1]) else 3;
     const escape_double = (flags & 2) != 0;
     const escape_single = (flags & 1) != 0;
+    const double_encode: bool = if (args.len >= 4) args[3].isTruthy() else true;
     var buf = std.ArrayListUnmanaged(u8){};
-    for (s) |c| {
+    var i: usize = 0;
+    while (i < s.len) : (i += 1) {
+        const c = s[i];
         switch (c) {
-            '&' => try buf.appendSlice(ctx.allocator, "&amp;"),
+            '&' => {
+                const entity_len: ?usize = if (double_encode) null else htmlEntityAt(s, i);
+                if (entity_len) |elen| {
+                    try buf.appendSlice(ctx.allocator, s[i .. i + elen]);
+                    i += elen - 1;
+                } else {
+                    try buf.appendSlice(ctx.allocator, "&amp;");
+                }
+            },
             '"' => if (escape_double) try buf.appendSlice(ctx.allocator, "&quot;") else try buf.append(ctx.allocator, '"'),
             '\'' => if (escape_single) try buf.appendSlice(ctx.allocator, "&#039;") else try buf.append(ctx.allocator, '\''),
             '<' => try buf.appendSlice(ctx.allocator, "&lt;"),
@@ -1357,6 +1368,29 @@ fn native_htmlspecialchars(ctx: *NativeContext, args: []const Value) RuntimeErro
     const result = try buf.toOwnedSlice(ctx.allocator);
     try ctx.strings.append(ctx.allocator, result);
     return .{ .string = result };
+}
+
+// returns total entity length (including '&' and ';') if s[i..] starts with a valid HTML entity, else null
+fn htmlEntityAt(s: []const u8, i: usize) ?usize {
+    if (i >= s.len or s[i] != '&') return null;
+    var j: usize = i + 1;
+    if (j < s.len and s[j] == '#') {
+        j += 1;
+        const is_hex = j < s.len and (s[j] == 'x' or s[j] == 'X');
+        if (is_hex) j += 1;
+        const start = j;
+        while (j < s.len) : (j += 1) {
+            const c = s[j];
+            const ok = if (is_hex) std.ascii.isHex(c) else std.ascii.isDigit(c);
+            if (!ok) break;
+        }
+        if (j > start and j < s.len and s[j] == ';') return j - i + 1;
+        return null;
+    }
+    const start = j;
+    while (j < s.len and std.ascii.isAlphanumeric(s[j])) : (j += 1) {}
+    if (j > start and j < s.len and s[j] == ';' and (j - start) <= 8) return j - i + 1;
+    return null;
 }
 
 fn native_htmlspecialchars_decode(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
@@ -2580,60 +2614,81 @@ fn toLowerAscii(c: u8) u8 {
 fn native_http_build_query(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len == 0 or args[0] != .array) return .{ .string = "" };
     const arr = args[0].array;
+    const prefix_str: []const u8 = if (args.len >= 2 and args[1] == .string) args[1].string else "";
+    // arg_separator default "&"
+    const arg_sep: []const u8 = if (args.len >= 3 and args[2] == .string and args[2].string.len > 0) args[2].string else "&";
+    // encoding: PHP_QUERY_RFC1738 = 1 (default, space → +), PHP_QUERY_RFC3986 = 2 (space → %20)
+    const enc_type: i64 = if (args.len >= 4) Value.toInt(args[3]) else 1;
+    const rfc3986 = enc_type == 2;
+
     var buf = std.ArrayListUnmanaged(u8){};
     var first = true;
     for (arr.entries.items) |entry| {
-        var key_buf: [20]u8 = undefined;
-        const key_str = switch (entry.key) {
+        var key_buf: [32]u8 = undefined;
+        const key_str: []const u8 = switch (entry.key) {
             .string => |s| s,
-            .int => |n| std.fmt.bufPrint(&key_buf, "{d}", .{n}) catch "",
+            .int => |n| blk: {
+                // top-level integer key: prepend numeric prefix
+                if (prefix_str.len > 0) {
+                    const composed = std.fmt.bufPrint(&key_buf, "{s}{d}", .{ prefix_str, n }) catch "";
+                    break :blk composed;
+                }
+                break :blk std.fmt.bufPrint(&key_buf, "{d}", .{n}) catch "";
+            },
         };
-        try buildQueryPairs(&buf, ctx.allocator, key_str, entry.value, &first);
+        try buildQueryPairs(&buf, ctx.allocator, key_str, entry.value, &first, arg_sep, rfc3986);
     }
     const result = try buf.toOwnedSlice(ctx.allocator);
     try ctx.strings.append(ctx.allocator, result);
     return .{ .string = result };
 }
 
-fn buildQueryPairs(buf: *std.ArrayListUnmanaged(u8), a: std.mem.Allocator, prefix: []const u8, value: Value, first: *bool) !void {
+fn buildQueryPairs(buf: *std.ArrayListUnmanaged(u8), a: std.mem.Allocator, prefix: []const u8, value: Value, first: *bool, sep: []const u8, rfc3986: bool) !void {
+    // PHP omits keys with null values
+    if (value == .null) return;
     if (value == .array) {
         for (value.array.entries.items) |entry| {
-            var key_buf: [20]u8 = undefined;
+            var key_buf: [32]u8 = undefined;
             const sub_key = switch (entry.key) {
                 .string => |s| s,
                 .int => |n| std.fmt.bufPrint(&key_buf, "{d}", .{n}) catch "",
             };
-            // build "prefix[subkey]" into a temp buffer
             var nested_key = std.ArrayListUnmanaged(u8){};
             defer nested_key.deinit(a);
             try nested_key.appendSlice(a, prefix);
             try nested_key.appendSlice(a, "[");
             try nested_key.appendSlice(a, sub_key);
             try nested_key.appendSlice(a, "]");
-            try buildQueryPairs(buf, a, nested_key.items, entry.value, first);
+            try buildQueryPairs(buf, a, nested_key.items, entry.value, first, sep, rfc3986);
         }
     } else {
-        if (!first.*) try buf.append(a, '&');
+        if (!first.*) try buf.appendSlice(a, sep);
         first.* = false;
-        try appendUrlEncoded(buf, a, prefix);
+        try appendUrlEncodedMode(buf, a, prefix, rfc3986);
         try buf.append(a, '=');
-        if (value == .string) {
-            try appendUrlEncoded(buf, a, value.string);
-        } else {
-            var tmp = std.ArrayListUnmanaged(u8){};
-            try value.format(&tmp, a);
-            const s = try tmp.toOwnedSlice(a);
-            defer a.free(s);
-            try appendUrlEncoded(buf, a, s);
+        switch (value) {
+            .string => |s| try appendUrlEncodedMode(buf, a, s, rfc3986),
+            .bool => |b| try buf.append(a, if (b) '1' else '0'),
+            else => {
+                var tmp = std.ArrayListUnmanaged(u8){};
+                try value.format(&tmp, a);
+                const s = try tmp.toOwnedSlice(a);
+                defer a.free(s);
+                try appendUrlEncodedMode(buf, a, s, rfc3986);
+            },
         }
     }
 }
 
 fn appendUrlEncoded(buf: *std.ArrayListUnmanaged(u8), a: std.mem.Allocator, s: []const u8) !void {
+    try appendUrlEncodedMode(buf, a, s, false);
+}
+
+fn appendUrlEncodedMode(buf: *std.ArrayListUnmanaged(u8), a: std.mem.Allocator, s: []const u8, rfc3986: bool) !void {
     for (s) |c| {
         if (std.ascii.isAlphanumeric(c) or c == '-' or c == '_' or c == '.' or c == '~') {
             try buf.append(a, c);
-        } else if (c == ' ') {
+        } else if (c == ' ' and !rfc3986) {
             try buf.append(a, '+');
         } else {
             try buf.append(a, '%');
