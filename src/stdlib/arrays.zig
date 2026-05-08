@@ -845,7 +845,12 @@ fn array_combine(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
 fn array_chunk(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len < 2 or args[0] != .array) return .null;
     const src = args[0].array;
-    const size: usize = @intCast(@max(1, Value.toInt(args[1])));
+    const raw_size = Value.toInt(args[1]);
+    if (raw_size <= 0) {
+        try ctx.vm.setPendingException("ValueError", "array_chunk(): Argument #2 ($length) must be greater than 0");
+        return error.RuntimeError;
+    }
+    const size: usize = @intCast(raw_size);
     const preserve_keys = args.len >= 3 and Value.isTruthy(args[2]);
 
     var result = try ctx.createArray();

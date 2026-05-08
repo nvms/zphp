@@ -1375,15 +1375,22 @@ fn formatGeneral(buf: *std.ArrayListUnmanaged(u8), a: std.mem.Allocator, val: f6
     const is_neg = val < 0;
     const abs_val = @abs(val);
     const exp_val: i32 = @intFromFloat(@floor(std.math.log10(abs_val)));
-    const sig: i32 = @intCast(prec);
+    // C/PHP: precision 0 is treated as 1 for %g
+    const sig: i32 = @intCast(if (prec == 0) 1 else prec);
 
     if (exp_val >= sig or exp_val < -4) {
         if (is_neg) try buf.append(a, '-');
         const mantissa = abs_val / std.math.pow(f64, 10.0, @as(f64, @floatFromInt(exp_val)));
         const sci_prec = if (sig > 1) @as(usize, @intCast(sig - 1)) else 0;
+        const before_mant = buf.items.len;
         try formatFixedFloat(buf, a, mantissa, sci_prec);
         // strip trailing zeros after decimal point
         stripTrailingZeros(buf);
+        // ensure mantissa has at least ".0" so output is "1.0e+3" not "1e+3"
+        const mant_slice = buf.items[before_mant..];
+        var has_dot = false;
+        for (mant_slice) |c| if (c == '.') { has_dot = true; break; };
+        if (!has_dot) try buf.appendSlice(a, ".0");
         const e_char: u8 = if (g_char == 'G') 'E' else 'e';
         try buf.append(a, e_char);
         try buf.append(a, if (exp_val >= 0) '+' else '-');
