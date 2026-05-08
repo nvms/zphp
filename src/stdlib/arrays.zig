@@ -719,33 +719,45 @@ fn native_range(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (use_float) {
         const lo_f = Value.toFloat(args[0]);
         const hi_f = Value.toFloat(args[1]);
-        const step_f: f64 = if (args.len >= 3) blk: {
-            const s = Value.toFloat(args[2]);
-            break :blk if (s == 0) 1.0 else @abs(s);
-        } else 1.0;
+        const raw_step_f: f64 = if (args.len >= 3) Value.toFloat(args[2]) else 1.0;
+        if (raw_step_f == 0) {
+            try ctx.vm.setPendingException("ValueError", "range(): Argument #3 ($step) cannot be 0");
+            return error.RuntimeError;
+        }
+        const step_f = @abs(raw_step_f);
+        const span = @abs(hi_f - lo_f);
+        if (step_f > span and lo_f != hi_f) {
+            try ctx.vm.setPendingException("ValueError", "range(): Argument #3 ($step) must be less than the range spanned by argument #1 ($start) and argument #2 ($end)");
+            return error.RuntimeError;
+        }
         var arr = try ctx.createArray();
-        if (lo_f <= hi_f) {
-            var v = lo_f;
-            while (v <= hi_f + step_f * 0.0001) : (v += step_f) {
-                if (v > hi_f + step_f * 0.5) break;
-                try arr.append(ctx.allocator, .{ .float = v });
-            }
-        } else {
-            var v = lo_f;
-            while (v >= hi_f - step_f * 0.0001) : (v -= step_f) {
-                if (v < hi_f - step_f * 0.5) break;
-                try arr.append(ctx.allocator, .{ .float = v });
-            }
+        const direction: f64 = if (lo_f <= hi_f) 1.0 else -1.0;
+        const tol = step_f * 1e-9;
+        var i: i64 = 0;
+        while (true) {
+            const v = lo_f + direction * step_f * @as(f64, @floatFromInt(i));
+            if (direction > 0 and v > hi_f + tol) break;
+            if (direction < 0 and v < hi_f - tol) break;
+            try arr.append(ctx.allocator, .{ .float = v });
+            i += 1;
+            if (i > 100_000_000) break; // sanity cap
         }
         return .{ .array = arr };
     }
 
     const lo = Value.toInt(args[0]);
     const hi = Value.toInt(args[1]);
-    const step: i64 = if (args.len >= 3) blk: {
-        const s = Value.toInt(args[2]);
-        break :blk if (s == 0) 1 else if (s < 0) -s else s;
-    } else 1;
+    const raw_step: i64 = if (args.len >= 3) Value.toInt(args[2]) else 1;
+    if (raw_step == 0) {
+        try ctx.vm.setPendingException("ValueError", "range(): Argument #3 ($step) cannot be 0");
+        return error.RuntimeError;
+    }
+    const step: i64 = if (raw_step < 0) -raw_step else raw_step;
+    const span: i64 = if (lo <= hi) hi - lo else lo - hi;
+    if (step > span and lo != hi) {
+        try ctx.vm.setPendingException("ValueError", "range(): Argument #3 ($step) must be less than the range spanned by argument #1 ($start) and argument #2 ($end)");
+        return error.RuntimeError;
+    }
     var arr = try ctx.createArray();
     if (lo <= hi) {
         var i = lo;

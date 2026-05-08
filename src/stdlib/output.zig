@@ -194,11 +194,7 @@ fn printRValue(a: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8), val: Valu
             const s = std.fmt.bufPrint(&tmp, "{d}", .{i}) catch return;
             try out.appendSlice(a, s);
         },
-        .float => |f| {
-            var tmp: [64]u8 = undefined;
-            const s = formatFloat(&tmp, f);
-            try out.appendSlice(a, s);
-        },
+        .float => try val.format(out, a),
         .string => |s| try out.appendSlice(a, s),
         .array => |arr| {
             try out.appendSlice(a, "Array\n");
