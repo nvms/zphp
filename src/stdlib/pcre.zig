@@ -424,20 +424,39 @@ fn preg_match_all(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
             try out.append(ctx.allocator, .{ .array = arr });
         }
 
-        // PHP places the named key directly before its numeric counterpart
+        // PHP places the named key directly before its numeric counterpart.
+        // With (?J) duplicate-named groups, PHP keeps a single entry per name:
+        // value comes from the highest-numbered group, position is before the
+        // lowest-numbered group with that name.
+        var inserted_names: [64][]const u8 = undefined;
+        var inserted_count: usize = 0;
         for (named_groups[0..named_len]) |ng| {
-            if (ng.group_num < group_arrays.?.items.len) {
-                const insert_pos = ng.group_num;
-                const named_entry = PhpArray.Entry{
-                    .key = .{ .string = try ctx.createString(ng.name) },
-                    .value = .{ .array = group_arrays.?.items[ng.group_num] },
-                };
-                if (insert_pos < out.entries.items.len) {
-                    try out.entries.insert(ctx.allocator, insert_pos, named_entry);
-                } else {
-                    try out.entries.append(ctx.allocator, named_entry);
+            if (ng.group_num >= group_arrays.?.items.len) continue;
+            var dup = false;
+            for (inserted_names[0..inserted_count]) |n| {
+                if (std.mem.eql(u8, n, ng.name)) {
+                    dup = true;
+                    break;
                 }
             }
+            if (dup) continue;
+            // find lowest group_num among groups sharing this name (named_groups is desc by group_num)
+            var lowest = ng.group_num;
+            for (named_groups[0..named_len]) |other| {
+                if (std.mem.eql(u8, other.name, ng.name) and other.group_num < lowest) lowest = other.group_num;
+            }
+            const insert_pos = lowest;
+            const named_entry = PhpArray.Entry{
+                .key = .{ .string = try ctx.createString(ng.name) },
+                .value = .{ .array = group_arrays.?.items[ng.group_num] },
+            };
+            if (insert_pos < out.entries.items.len) {
+                try out.entries.insert(ctx.allocator, insert_pos, named_entry);
+            } else {
+                try out.entries.append(ctx.allocator, named_entry);
+            }
+            inserted_names[inserted_count] = ng.name;
+            inserted_count += 1;
         }
         try out.rebuildStringIndex(ctx.allocator);
     }
