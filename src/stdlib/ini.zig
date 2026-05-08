@@ -64,6 +64,8 @@ fn parseIni(ctx: *NativeContext, input: []const u8, process_sections: bool, mode
                     try result.set(ctx.allocator, .{ .string = section_name }, .{ .array = section_arr });
                     current_section = section_arr;
                 }
+            } else {
+                return .{ .bool = false };
             }
             continue;
         }

@@ -1675,28 +1675,19 @@ fn native_fputcsv(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     const arr = args[1].array;
     const delimiter: u8 = if (args.len >= 3 and args[2] == .string and args[2].string.len > 0) args[2].string[0] else ',';
     const enclosure: u8 = if (args.len >= 4 and args[3] == .string and args[3].string.len > 0) args[3].string[0] else '"';
+    const escape: ?u8 = if (args.len >= 5 and args[4] == .string and args[4].string.len > 0) args[4].string[0] else null;
 
     var buf = std.ArrayListUnmanaged(u8){};
     for (arr.entries.items, 0..) |entry, i| {
         if (i > 0) try buf.append(ctx.allocator, delimiter);
-        const val = switch (entry.value) {
-            .string => |sv| sv,
-            .int => |iv| blk: {
-                const tmp = try std.fmt.allocPrint(ctx.allocator, "{d}", .{iv});
-                try ctx.strings.append(ctx.allocator, tmp);
-                break :blk tmp;
-            },
-            .float => |fv| blk: {
-                const tmp = try std.fmt.allocPrint(ctx.allocator, "{d}", .{fv});
-                try ctx.strings.append(ctx.allocator, tmp);
-                break :blk tmp;
-            },
-            else => "",
-        };
+        var tmp_buf = std.ArrayListUnmanaged(u8){};
+        defer tmp_buf.deinit(ctx.allocator);
+        try entry.value.format(&tmp_buf, ctx.allocator);
+        const val = tmp_buf.items;
 
         var needs_quote = false;
         for (val) |c| {
-            if (c == delimiter or c == enclosure or c == '\n' or c == '\r' or c == ' ' or c == '\t') {
+            if (c == delimiter or c == enclosure or c == '\n' or c == '\r' or c == ' ' or c == '\t' or (escape != null and c == escape.?)) {
                 needs_quote = true;
                 break;
             }
