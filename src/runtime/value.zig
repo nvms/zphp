@@ -714,6 +714,7 @@ pub const Value = union(enum) {
                     const i: i64 = @intFromFloat(f);
                     var tmp: [32]u8 = undefined;
                     const s = std.fmt.bufPrint(&tmp, "{d}", .{i}) catch return;
+                    if (i == 0 and std.math.signbit(f)) try buf.append(allocator, '-');
                     try buf.appendSlice(allocator, s);
                 } else if (std.math.isNan(f)) {
                     try buf.appendSlice(allocator, "NAN");

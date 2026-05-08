@@ -211,12 +211,17 @@ fn native_fmod(_: *NativeContext, args: []const Value) RuntimeError!Value {
 
 fn native_intdiv(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len < 2) return .{ .int = 0 };
+    const a = Value.toInt(args[0]);
     const b = Value.toInt(args[1]);
     if (b == 0) {
         try ctx.vm.setPendingException("DivisionByZeroError", "Division by zero");
         return error.RuntimeError;
     }
-    return .{ .int = @divTrunc(Value.toInt(args[0]), b) };
+    if (a == std.math.minInt(i64) and b == -1) {
+        try ctx.vm.setPendingException("ArithmeticError", "Division of PHP_INT_MIN by -1 is not an integer");
+        return error.RuntimeError;
+    }
+    return .{ .int = @divTrunc(a, b) };
 }
 
 fn native_base_convert(ctx: *NativeContext, args: []const Value) RuntimeError!Value {

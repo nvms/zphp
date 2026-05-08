@@ -508,6 +508,9 @@ fn formatFloat(tmp: *[64]u8, f: f64) []const u8 {
     }
     if (f == @trunc(f) and abs_f < 1e15) {
         const i: i64 = @intFromFloat(f);
+        if (i == 0 and std.math.signbit(f)) {
+            return std.fmt.bufPrint(tmp, "-0", .{}) catch "0";
+        }
         return std.fmt.bufPrint(tmp, "{d}", .{i}) catch "0";
     }
     return std.fmt.bufPrint(tmp, "{d}", .{f}) catch "0";
