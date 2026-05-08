@@ -282,7 +282,7 @@ fn var_export(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len == 0) return .null;
     const return_str = args.len >= 2 and args[1].isTruthy();
     var buf = std.ArrayListUnmanaged(u8){};
-    try varExportValue(ctx.allocator, &buf, args[0], 0);
+    try varExportValue(ctx.allocator, &buf, args[0], 0, ctx);
     if (return_str) {
         const s = try buf.toOwnedSlice(ctx.allocator);
         try ctx.strings.append(ctx.allocator, s);
@@ -343,7 +343,7 @@ fn varExportString(a: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8), s: []
     if (first) try out.appendSlice(a, "''");
 }
 
-fn varExportValue(a: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8), val: Value, depth: usize) !void {
+fn varExportValue(a: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8), val: Value, depth: usize, ctx: *NativeContext) !void {
     switch (val) {
         .null => try out.appendSlice(a, "NULL"),
         .bool => |b| try out.appendSlice(a, if (b) "true" else "false"),
@@ -395,13 +395,25 @@ fn varExportValue(a: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8), val: V
                     try out.append(a, '\n');
                     for (0..(depth + 1) * 2) |_| try out.append(a, ' ');
                 }
-                try varExportValue(a, out, entry.value, depth + 1);
+                try varExportValue(a, out,entry.value, depth + 1, ctx);
                 try out.appendSlice(a, ",\n");
             }
             for (0..depth * 2) |_| try out.append(a, ' ');
             try out.append(a, ')');
         },
         .object => |obj| {
+            if (ctx.vm.classes.get(obj.class_name)) |cls| {
+                if (cls.is_enum) {
+                    const case_name = obj.get("name");
+                    if (case_name == .string) {
+                        try out.append(a, '\\');
+                        try out.appendSlice(a, obj.class_name);
+                        try out.appendSlice(a, "::");
+                        try out.appendSlice(a, case_name.string);
+                        return;
+                    }
+                }
+            }
             const is_std = std.mem.eql(u8, obj.class_name, "stdClass");
             if (is_std) {
                 try out.appendSlice(a, "(object) array(\n");
@@ -422,7 +434,7 @@ fn varExportValue(a: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8), val: V
                                 try out.append(a, '\n');
                                 for (0..(depth + 1) * 2) |_| try out.append(a, ' ');
                             }
-                            try varExportValue(a, out, slots[i], depth + 1);
+                            try varExportValue(a, out,slots[i], depth + 1, ctx);
                             try out.appendSlice(a, ",\n");
                         }
                     }
@@ -444,7 +456,7 @@ fn varExportValue(a: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8), val: V
                         try out.append(a, '\n');
                         for (0..(depth + 1) * 2) |_| try out.append(a, ' ');
                     }
-                    try varExportValue(a, out, entry.value_ptr.*, depth + 1);
+                    try varExportValue(a, out,entry.value_ptr.*, depth + 1, ctx);
                     try out.appendSlice(a, ",\n");
                 }
             }
@@ -502,22 +514,32 @@ fn formatFloat(tmp: *[64]u8, f: f64) []const u8 {
 }
 
 fn formatScientific(buf: *[64]u8, f: f64) []const u8 {
-    const abs_f = @abs(f);
-    const exp: i32 = @intFromFloat(@floor(@log10(abs_f)));
-    const mantissa = f / std.math.pow(f64, 10.0, @floatFromInt(exp));
-    var mant_buf: [64]u8 = undefined;
-    var m = std.fmt.bufPrint(&mant_buf, "{d}", .{mantissa}) catch "0";
-    var has_dot = false;
-    for (m) |ch| {
-        if (ch == '.') {
-            has_dot = true;
-            break;
-        }
+    // Use Zig's {e} which yields exact round-trip mantissa, then reshape to PHP style.
+    var src_buf: [64]u8 = undefined;
+    const src = std.fmt.bufPrint(&src_buf, "{e}", .{f}) catch return "0";
+    // Format is like "1e100", "1.234e-7", "-1.5e+10", etc. Find 'e'.
+    const e_idx = std.mem.indexOfScalar(u8, src, 'e') orelse return std.fmt.bufPrint(buf, "{d}", .{f}) catch "0";
+    var mant = src[0..e_idx];
+    const exp_part = src[e_idx + 1 ..];
+    // Trim trailing zeros after decimal point, but keep at least one digit after the dot.
+    if (std.mem.indexOfScalar(u8, mant, '.')) |dot| {
+        var end = mant.len;
+        while (end > dot + 2 and mant[end - 1] == '0') end -= 1;
+        mant = mant[0..end];
     }
-    if (!has_dot) {
-        m = std.fmt.bufPrint(&mant_buf, "{d}.0", .{mantissa}) catch "0.0";
+    // Ensure mantissa has a decimal part (PHP always shows "1.0E+...").
+    var mant_with_dot_buf: [64]u8 = undefined;
+    var mant_out: []const u8 = mant;
+    if (std.mem.indexOfScalar(u8, mant, '.') == null) {
+        mant_out = std.fmt.bufPrint(&mant_with_dot_buf, "{s}.0", .{mant}) catch mant;
     }
-    const exp_sign: u8 = if (exp >= 0) '+' else '-';
-    const exp_abs: u32 = @intCast(if (exp >= 0) exp else -exp);
-    return std.fmt.bufPrint(buf, "{s}E{c}{d}", .{ m, exp_sign, exp_abs }) catch "0";
+    // Normalize exponent sign + drop leading zeros but keep at least one digit.
+    var exp_sign: u8 = '+';
+    var exp_digits = exp_part;
+    if (exp_digits.len > 0 and (exp_digits[0] == '+' or exp_digits[0] == '-')) {
+        exp_sign = exp_digits[0];
+        exp_digits = exp_digits[1..];
+    }
+    while (exp_digits.len > 1 and exp_digits[0] == '0') exp_digits = exp_digits[1..];
+    return std.fmt.bufPrint(buf, "{s}E{c}{s}", .{ mant_out, exp_sign, exp_digits }) catch "0";
 }
