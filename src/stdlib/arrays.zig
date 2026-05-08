@@ -961,6 +961,19 @@ fn array_fill_keys(ctx: *NativeContext, args: []const Value) RuntimeError!Value 
     return .{ .array = result };
 }
 
+fn valuesEqualAsString(a: Value, b: Value) bool {
+    var ga = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = ga.deinit();
+    const alloc = ga.allocator();
+    var ba = std.ArrayListUnmanaged(u8){};
+    var bb = std.ArrayListUnmanaged(u8){};
+    defer ba.deinit(alloc);
+    defer bb.deinit(alloc);
+    a.format(&ba, alloc) catch return Value.equal(a, b);
+    b.format(&bb, alloc) catch return Value.equal(a, b);
+    return std.mem.eql(u8, ba.items, bb.items);
+}
+
 const ArrayCmp = enum { values, keys, assoc };
 
 fn arraySetOp(comptime cmp: ArrayCmp, comptime keep_matches: bool) fn (*NativeContext, []const Value) RuntimeError!Value {
@@ -997,9 +1010,9 @@ fn arraySetOp(comptime cmp: ArrayCmp, comptime keep_matches: bool) fn (*NativeCo
         fn foundIn(entry: PhpArray.Entry, arr: *const PhpArray) bool {
             for (arr.entries.items) |other| {
                 const hit = switch (cmp) {
-                    .values => Value.equal(entry.value, other.value),
+                    .values => valuesEqualAsString(entry.value, other.value),
                     .keys => entry.key.eql(other.key),
-                    .assoc => entry.key.eql(other.key) and Value.equal(entry.value, other.value),
+                    .assoc => entry.key.eql(other.key) and valuesEqualAsString(entry.value, other.value),
                 };
                 if (hit) return true;
             }
@@ -1093,17 +1106,38 @@ fn array_walk(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len < 2 or args[0] != .array) return .{ .bool = false };
     const arr = args[0].array;
     const callback = args[1];
+    const has_userdata = args.len >= 3;
 
-    for (arr.entries.items, 0..) |entry, idx| {
-        const key_val: Value = switch (entry.key) {
+    // snapshot keys so callback mutations to the array don't corrupt iteration
+    const initial_len = arr.entries.items.len;
+    var keys = try ctx.allocator.alloc(PhpArray.Key, initial_len);
+    defer ctx.allocator.free(keys);
+    for (arr.entries.items[0..initial_len], 0..) |entry, i| keys[i] = entry.key;
+
+    for (keys) |key| {
+        const cur_idx = findEntryIndex(arr, key) orelse continue;
+        const key_val: Value = switch (key) {
             .int => |k| .{ .int = k },
             .string => |s| .{ .string = s },
         };
-        var call_args = [2]Value{ entry.value, key_val };
-        _ = try ctx.invokeCallableRef(callback, &call_args);
-        arr.entries.items[idx].value = call_args[0];
+        var call_args = [3]Value{ arr.entries.items[cur_idx].value, key_val, if (has_userdata) args[2] else .null };
+        const slice: []Value = if (has_userdata) call_args[0..3] else call_args[0..2];
+        _ = try ctx.invokeCallableRef(callback, slice);
+        // entry may have been removed during the call
+        if (findEntryIndex(arr, key)) |i| arr.entries.items[i].value = call_args[0];
     }
     return .{ .bool = true };
+}
+
+fn findEntryIndex(arr: *PhpArray, key: PhpArray.Key) ?usize {
+    if (key == .string) {
+        if (arr.string_index.get(key.string)) |i| return i;
+        return null;
+    }
+    for (arr.entries.items, 0..) |e, i| {
+        if (e.key.eql(key)) return i;
+    }
+    return null;
 }
 
 fn array_unshift(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
@@ -1437,16 +1471,18 @@ fn array_replace_recursive(ctx: *NativeContext, args: []const Value) RuntimeErro
     return .{ .array = result };
 }
 
-fn walkRecursive(ctx: *NativeContext, arr: *PhpArray, callback: Value) RuntimeError!void {
+fn walkRecursive(ctx: *NativeContext, arr: *PhpArray, callback: Value, userdata: ?Value) RuntimeError!void {
     for (arr.entries.items, 0..) |entry, idx| {
         if (entry.value == .array) {
-            try walkRecursive(ctx, entry.value.array, callback);
+            try walkRecursive(ctx, entry.value.array, callback, userdata);
         } else {
-            var call_args = [2]Value{ entry.value, switch (entry.key) {
+            const key_val: Value = switch (entry.key) {
                 .int => |k| Value{ .int = k },
                 .string => |s| Value{ .string = s },
-            } };
-            _ = try ctx.invokeCallableRef(callback, &call_args);
+            };
+            var call_args = [3]Value{ entry.value, key_val, userdata orelse .null };
+            const slice: []Value = if (userdata != null) call_args[0..3] else call_args[0..2];
+            _ = try ctx.invokeCallableRef(callback, slice);
             arr.entries.items[idx].value = call_args[0];
         }
     }
@@ -1454,7 +1490,8 @@ fn walkRecursive(ctx: *NativeContext, arr: *PhpArray, callback: Value) RuntimeEr
 
 fn array_walk_recursive(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len < 2 or args[0] != .array) return .{ .bool = false };
-    try walkRecursive(ctx, args[0].array, args[1]);
+    const userdata: ?Value = if (args.len >= 3) args[2] else null;
+    try walkRecursive(ctx, args[0].array, args[1], userdata);
     return .{ .bool = true };
 }
 
