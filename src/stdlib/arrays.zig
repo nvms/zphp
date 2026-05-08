@@ -515,6 +515,7 @@ fn native_rsort(_: *NativeContext, args: []const Value) RuntimeError!Value {
 fn reindexArray(arr: *PhpArray) void {
     for (arr.entries.items, 0..) |*entry, i| entry.key = .{ .int = @intCast(i) };
     arr.next_int_key = @intCast(arr.entries.items.len);
+    arr.has_int_keys = arr.entries.items.len > 0;
     arr.string_index.clearRetainingCapacity();
 }
 
@@ -796,6 +797,7 @@ fn array_splice(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
         }
     }
     arr.next_int_key = next_int;
+    arr.has_int_keys = next_int > 0;
     try arr.rebuildStringIndex(ctx.allocator);
 
     return .{ .array = removed };
@@ -943,6 +945,7 @@ fn array_fill(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
         result.entries.appendAssumeCapacity(.{ .key = .{ .int = start_idx + @as(i64, @intCast(i)) }, .value = val });
     }
     result.next_int_key = start_idx + @as(i64, @intCast(count));
+    result.has_int_keys = count > 0;
     return .{ .array = result };
 }
 

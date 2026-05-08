@@ -7733,7 +7733,7 @@ pub const VM = struct {
 
     fn cloneArray(self: *VM, src: *PhpArray) RuntimeError!*PhpArray {
         const copy = self.allocator.create(PhpArray) catch return error.RuntimeError;
-        copy.* = .{ .next_int_key = src.next_int_key, .cursor = src.cursor };
+        copy.* = .{ .next_int_key = src.next_int_key, .has_int_keys = src.has_int_keys, .cursor = src.cursor };
         copy.entries.ensureTotalCapacity(self.allocator, src.entries.items.len) catch return error.RuntimeError;
         for (src.entries.items, 0..) |entry, i| {
             copy.entries.appendAssumeCapacity(.{

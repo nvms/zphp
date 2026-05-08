@@ -4,6 +4,7 @@ pub const PhpArray = struct {
     entries: std.ArrayListUnmanaged(Entry) = .{},
     string_index: std.StringHashMapUnmanaged(usize) = .{},
     next_int_key: i64 = 0,
+    has_int_keys: bool = false,
     cursor: usize = 0,
 
     pub const Entry = struct {
@@ -57,8 +58,10 @@ pub const PhpArray = struct {
     }
 
     pub fn append(self: *PhpArray, allocator: std.mem.Allocator, value: Value) !void {
-        try self.entries.append(allocator, .{ .key = .{ .int = self.next_int_key }, .value = value });
-        self.next_int_key += 1;
+        const k = if (self.has_int_keys) self.next_int_key else 0;
+        try self.entries.append(allocator, .{ .key = .{ .int = k }, .value = value });
+        self.next_int_key = k + 1;
+        self.has_int_keys = true;
     }
 
     pub fn set(self: *PhpArray, allocator: std.mem.Allocator, raw_key: Key, value: Value) !void {
@@ -71,7 +74,8 @@ pub const PhpArray = struct {
                     const entry = &self.entries.items[uidx];
                     if (entry.key == .int and entry.key.int == idx) {
                         entry.value = value;
-                        if (idx >= self.next_int_key) self.next_int_key = idx + 1;
+                        self.next_int_key = if (self.has_int_keys) @max(self.next_int_key, idx + 1) else idx + 1;
+                        self.has_int_keys = true;
                         return;
                     }
                 }
@@ -93,7 +97,8 @@ pub const PhpArray = struct {
         const new_idx = self.entries.items.len;
         try self.entries.append(allocator, .{ .key = key, .value = value });
         if (key == .int) {
-            if (key.int >= self.next_int_key) self.next_int_key = key.int + 1;
+            self.next_int_key = if (self.has_int_keys) @max(self.next_int_key, key.int + 1) else key.int + 1;
+            self.has_int_keys = true;
         } else if (key == .string) {
             try self.string_index.put(allocator, key.string, new_idx);
         }
