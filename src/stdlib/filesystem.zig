@@ -28,6 +28,7 @@ pub const entries = .{
     .{ "copy", native_copy },
     .{ "rename", native_rename },
     .{ "glob", native_glob },
+    .{ "fnmatch", native_fnmatch },
     .{ "scandir", native_scandir },
     .{ "file", native_file },
     .{ "readfile", native_readfile },
@@ -661,6 +662,11 @@ fn native_scandir(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     return .{ .array = result };
 }
 
+fn native_fnmatch(_: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len < 2 or args[0] != .string or args[1] != .string) return .{ .bool = false };
+    return .{ .bool = globMatch(args[0].string, args[1].string) };
+}
+
 fn native_glob(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len == 0 or args[0] != .string) return .{ .bool = false };
     const pattern = args[0].string;
@@ -741,6 +747,33 @@ fn globMatch(pattern: []const u8, name: []const u8) bool {
                 pi += 1;
                 ni += 1;
                 continue;
+            }
+            if (pattern[pi] == '[') {
+                if (std.mem.indexOfScalarPos(u8, pattern, pi + 1, ']')) |close| {
+                    var negate = false;
+                    var class_start = pi + 1;
+                    if (class_start < close and (pattern[class_start] == '!' or pattern[class_start] == '^')) {
+                        negate = true;
+                        class_start += 1;
+                    }
+                    const c = name[ni];
+                    var matched = false;
+                    var k = class_start;
+                    while (k < close) {
+                        if (k + 2 < close and pattern[k + 1] == '-') {
+                            if (c >= pattern[k] and c <= pattern[k + 2]) matched = true;
+                            k += 3;
+                        } else {
+                            if (pattern[k] == c) matched = true;
+                            k += 1;
+                        }
+                    }
+                    if (matched != negate) {
+                        pi = close + 1;
+                        ni += 1;
+                        continue;
+                    }
+                }
             }
         }
         if (star_pi) |sp| {

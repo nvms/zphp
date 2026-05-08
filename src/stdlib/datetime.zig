@@ -768,36 +768,41 @@ fn dtDiff(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (diff_secs < 0) diff_secs = -diff_secs;
 
     const total_days = @divFloor(diff_secs, 86400);
-    const rem = @mod(diff_secs, 86400);
-    const hours = @divFloor(rem, 3600);
-    const mins = @divFloor(@mod(rem, 3600), 60);
-    const secs = @mod(rem, 60);
 
-    // compute calendar-based y/m/d
+    // calendar-based y/m/d/h/i/s with borrowing - matches PHP's behaviour where
+    // wall-clock components are subtracted with carry, decrementing the larger
+    // unit on underflow.
     const early_ts = if (ts1 < ts2) ts1 else ts2;
     const late_ts = if (ts1 < ts2) ts2 else ts1;
     const c1 = baseComponents(early_ts);
     const c2 = baseComponents(late_ts);
-    var diff_y = c2.year - c1.year;
-    var diff_m = c2.month - c1.month;
-    var diff_d = c2.day - c1.day;
-    if (diff_d < 0) {
-        diff_m -= 1;
-        diff_d += daysInMonth(c1.month, c1.year);
+    var s = c2.sec - c1.sec;
+    var mi = c2.min - c1.min;
+    var hh = c2.hour - c1.hour;
+    var d = c2.day - c1.day;
+    var mo = c2.month - c1.month;
+    var y = c2.year - c1.year;
+    if (s < 0) { s += 60; mi -= 1; }
+    if (mi < 0) { mi += 60; hh -= 1; }
+    if (hh < 0) { hh += 24; d -= 1; }
+    if (d < 0) {
+        // borrow from month: use days in the month preceding c2 (i.e. month-1 of c2's year)
+        var prev_month = c2.month - 1;
+        var prev_year = c2.year;
+        if (prev_month == 0) { prev_month = 12; prev_year -= 1; }
+        d += daysInMonth(prev_month, prev_year);
+        mo -= 1;
     }
-    if (diff_m < 0) {
-        diff_y -= 1;
-        diff_m += 12;
-    }
+    if (mo < 0) { mo += 12; y -= 1; }
 
     const interval = try ctx.createObject("DateInterval");
-    try interval.set(ctx.allocator, "y", .{ .int = diff_y });
-    try interval.set(ctx.allocator, "m", .{ .int = diff_m });
-    try interval.set(ctx.allocator, "d", .{ .int = diff_d });
+    try interval.set(ctx.allocator, "y", .{ .int = y });
+    try interval.set(ctx.allocator, "m", .{ .int = mo });
+    try interval.set(ctx.allocator, "d", .{ .int = d });
     try interval.set(ctx.allocator, "days", .{ .int = total_days });
-    try interval.set(ctx.allocator, "h", .{ .int = hours });
-    try interval.set(ctx.allocator, "i", .{ .int = mins });
-    try interval.set(ctx.allocator, "s", .{ .int = secs });
+    try interval.set(ctx.allocator, "h", .{ .int = hh });
+    try interval.set(ctx.allocator, "i", .{ .int = mi });
+    try interval.set(ctx.allocator, "s", .{ .int = s });
     try interval.set(ctx.allocator, "invert", .{ .int = invert });
     return .{ .object = interval };
 }
