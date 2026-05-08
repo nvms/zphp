@@ -7601,7 +7601,7 @@ pub const VM = struct {
         }
     }
 
-    fn resolveMethod(self: *VM, class_name: []const u8, method_name: []const u8) RuntimeError![]const u8 {
+    pub fn resolveMethod(self: *VM, class_name: []const u8, method_name: []const u8) RuntimeError![]const u8 {
         // single-entry cache: skip string format + hashmap lookup on repeat calls.
         // verify content as well as pointer because callers may pass stack-local
         // bufPrint slices whose memory address gets reused across calls

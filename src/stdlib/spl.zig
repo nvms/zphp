@@ -1867,6 +1867,30 @@ fn sosObjKey(obj: *PhpObject) i64 {
     return @intCast(@intFromPtr(obj));
 }
 
+fn sosHashKey(ctx: *NativeContext, sos: *PhpObject, target: *PhpObject) !PhpArray.Key {
+    if (!std.mem.eql(u8, sos.class_name, "SplObjectStorage")) {
+        const resolved = ctx.vm.resolveMethod(sos.class_name, "getHash") catch null;
+        if (resolved) |r| {
+            if (!std.mem.eql(u8, r, "SplObjectStorage::getHash")) {
+                const result = try ctx.vm.callMethod(sos, "getHash", &.{.{ .object = target }});
+                if (result == .string) {
+                    const owned = try ctx.allocator.dupe(u8, result.string);
+                    try ctx.vm.strings.append(ctx.allocator, owned);
+                    return .{ .string = owned };
+                }
+            }
+        }
+    }
+    return .{ .int = sosObjKey(target) };
+}
+
+fn sosFindIndexByKey(objs: *PhpArray, key: PhpArray.Key) ?usize {
+    for (objs.entries.items, 0..) |entry, i| {
+        if (entry.key.eql(key)) return i;
+    }
+    return null;
+}
+
 fn sosConstruct(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
     const obj = getThis(ctx) orelse return .null;
     _ = try ensureData(ctx, obj);
@@ -1896,12 +1920,9 @@ fn sosGetInfo(obj: *PhpObject) ?*PhpArray {
     return v.array;
 }
 
-fn sosFindIndex(objs: *PhpArray, target: *PhpObject) ?usize {
-    const target_key = sosObjKey(target);
-    for (objs.entries.items, 0..) |entry, i| {
-        if (entry.value == .object and sosObjKey(entry.value.object) == target_key) return i;
-    }
-    return null;
+fn sosFindIndex(ctx: *NativeContext, sos: *PhpObject, objs: *PhpArray, target: *PhpObject) !?usize {
+    const key = try sosHashKey(ctx, sos, target);
+    return sosFindIndexByKey(objs, key);
 }
 
 fn sosAttach(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
@@ -1911,14 +1932,10 @@ fn sosAttach(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     const data = if (args.len >= 2) args[1] else Value.null;
     const objs = sosGetObjs(obj) orelse return .null;
     const info = sosGetInfo(obj) orelse return .null;
-    const key: PhpArray.Key = .{ .int = sosObjKey(target) };
+    const key = try sosHashKey(ctx, obj, target);
 
-    if (sosFindIndex(objs, target)) |_| {
-        try info.set(ctx.allocator, key, data);
-    } else {
-        try objs.append(ctx.allocator, .{ .object = target });
-        try info.set(ctx.allocator, key, data);
-    }
+    try objs.set(ctx.allocator, key, .{ .object = target });
+    try info.set(ctx.allocator, key, data);
     return .null;
 }
 
@@ -1928,10 +1945,16 @@ fn sosDetach(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     const target = args[0].object;
     const objs = sosGetObjs(obj) orelse return .null;
     const info = sosGetInfo(obj) orelse return .null;
+    const key = try sosHashKey(ctx, obj, target);
 
-    if (sosFindIndex(objs, target)) |idx| {
+    if (sosFindIndexByKey(objs, key)) |idx| {
         _ = objs.entries.orderedRemove(idx);
-        info.remove(.{ .int = sosObjKey(target) });
+        if (key == .string) _ = objs.string_index.remove(key.string);
+        info.remove(key);
+        // re-index any string-keyed entries shifted by the remove
+        if (key == .string) {
+            objs.rebuildStringIndex(ctx.allocator) catch {};
+        }
     }
     return .null;
 }
@@ -1940,7 +1963,8 @@ fn sosContains(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     const obj = getThis(ctx) orelse return .{ .bool = false };
     if (args.len == 0 or args[0] != .object) return .{ .bool = false };
     const objs = sosGetObjs(obj) orelse return .{ .bool = false };
-    return .{ .bool = sosFindIndex(objs, args[0].object) != null };
+    const key = try sosHashKey(ctx, obj, args[0].object);
+    return .{ .bool = sosFindIndexByKey(objs, key) != null };
 }
 
 fn sosCount(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
@@ -1955,9 +1979,7 @@ fn sosGetInfoMethod(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
     const info = sosGetInfo(obj) orelse return .null;
     const cursor = Value.toInt(obj.get("__cursor"));
     if (cursor < 0 or cursor >= @as(i64, @intCast(objs.entries.items.len))) return .null;
-    const cur_obj = objs.entries.items[@intCast(cursor)].value;
-    if (cur_obj != .object) return .null;
-    return info.get(.{ .int = sosObjKey(cur_obj.object) });
+    return info.get(objs.entries.items[@intCast(cursor)].key);
 }
 
 fn sosSetInfoMethod(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
@@ -1967,15 +1989,16 @@ fn sosSetInfoMethod(ctx: *NativeContext, args: []const Value) RuntimeError!Value
     const info = sosGetInfo(obj) orelse return .null;
     const cursor = Value.toInt(obj.get("__cursor"));
     if (cursor < 0 or cursor >= @as(i64, @intCast(objs.entries.items.len))) return .null;
-    const cur_obj = objs.entries.items[@intCast(cursor)].value;
-    if (cur_obj != .object) return .null;
-    try info.set(ctx.allocator, .{ .int = sosObjKey(cur_obj.object) }, args[0]);
+    try info.set(ctx.allocator, objs.entries.items[@intCast(cursor)].key, args[0]);
     return .null;
 }
 
-fn sosGetHash(_: *NativeContext, args: []const Value) RuntimeError!Value {
+fn sosGetHash(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len == 0 or args[0] != .object) return .null;
-    return .{ .int = sosObjKey(args[0].object) };
+    const ptr: usize = @intFromPtr(args[0].object);
+    const hash = std.fmt.allocPrint(ctx.allocator, "{x:0>32}", .{ptr}) catch return .null;
+    ctx.vm.strings.append(ctx.allocator, hash) catch {};
+    return .{ .string = hash };
 }
 
 fn sosRewind(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
@@ -2019,14 +2042,16 @@ fn sosRemoveAll(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     const objs = sosGetObjs(obj) orelse return .null;
     const info = sosGetInfo(obj) orelse return .null;
 
-    var i: usize = 0;
-    while (i < objs.entries.items.len) {
-        const entry = objs.entries.items[i];
-        if (entry.value == .object and sosFindIndex(other_objs, entry.value.object) != null) {
-            info.remove(.{ .int = sosObjKey(entry.value.object) });
-            _ = objs.entries.orderedRemove(i);
-        } else {
-            i += 1;
+    for (other_objs.entries.items) |o_entry| {
+        if (o_entry.value != .object) continue;
+        const key = try sosHashKey(ctx, obj, o_entry.value.object);
+        if (sosFindIndexByKey(objs, key)) |idx| {
+            _ = objs.entries.orderedRemove(idx);
+            if (key == .string) {
+                _ = objs.string_index.remove(key.string);
+                objs.rebuildStringIndex(ctx.allocator) catch {};
+            }
+            info.remove(key);
         }
     }
     return .null;
@@ -2043,13 +2068,32 @@ fn sosRemoveAllExcept(ctx: *NativeContext, args: []const Value) RuntimeError!Val
     var i: usize = 0;
     while (i < objs.entries.items.len) {
         const entry = objs.entries.items[i];
-        if (entry.value == .object and sosFindIndex(other_objs, entry.value.object) == null) {
-            info.remove(.{ .int = sosObjKey(entry.value.object) });
+        if (entry.value != .object) {
+            i += 1;
+            continue;
+        }
+        // is this object's hash present in other?
+        var found = false;
+        for (other_objs.entries.items) |o_entry| {
+            if (o_entry.value != .object) continue;
+            const other_key = try sosHashKey(ctx, obj, o_entry.value.object);
+            if (entry.key.eql(other_key)) {
+                found = true;
+                break;
+            }
+        }
+        if (!found) {
+            const key = entry.key;
             _ = objs.entries.orderedRemove(i);
+            if (key == .string) {
+                _ = objs.string_index.remove(key.string);
+            }
+            info.remove(key);
         } else {
             i += 1;
         }
     }
+    objs.rebuildStringIndex(ctx.allocator) catch {};
     return .null;
 }
 
@@ -2065,11 +2109,10 @@ fn sosAddAll(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     for (other_objs.entries.items) |entry| {
         if (entry.value == .object) {
             const target = entry.value.object;
-            if (sosFindIndex(objs, target) == null) {
-                try objs.append(ctx.allocator, .{ .object = target });
-            }
-            const data = other_info.get(.{ .int = sosObjKey(target) });
-            try info.set(ctx.allocator, .{ .int = sosObjKey(target) }, data);
+            const self_key = try sosHashKey(ctx, obj, target);
+            try objs.set(ctx.allocator, self_key, .{ .object = target });
+            const data = other_info.get(entry.key);
+            try info.set(ctx.allocator, self_key, data);
         }
     }
     return .null;
@@ -2079,7 +2122,8 @@ fn sosOffsetGet(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     const obj = getThis(ctx) orelse return .null;
     if (args.len == 0 or args[0] != .object) return .null;
     const info = sosGetInfo(obj) orelse return .null;
-    return info.get(.{ .int = sosObjKey(args[0].object) });
+    const key = try sosHashKey(ctx, obj, args[0].object);
+    return info.get(key);
 }
 
 fn sosOffsetSet(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
