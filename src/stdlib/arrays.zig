@@ -857,18 +857,23 @@ fn array_pad(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     const abs_target: usize = @intCast(if (target < 0) -target else target);
     const current: usize = src.entries.items.len;
 
+    var result = try ctx.createArray();
     if (current >= abs_target) {
-        var result = try ctx.createArray();
-        for (src.entries.items) |entry| try result.append(ctx.allocator, entry.value);
+        for (src.entries.items) |entry| try result.set(ctx.allocator, entry.key, entry.value);
         return .{ .array = result };
     }
 
-    var result = try ctx.createArray();
     const pad_count = abs_target - current;
     if (target < 0) {
         for (0..pad_count) |_| try result.append(ctx.allocator, pad_val);
     }
-    for (src.entries.items) |entry| try result.append(ctx.allocator, entry.value);
+    // preserve original keys (string keys retain, int keys reindex via append)
+    for (src.entries.items) |entry| {
+        switch (entry.key) {
+            .string => try result.set(ctx.allocator, entry.key, entry.value),
+            .int => try result.append(ctx.allocator, entry.value),
+        }
+    }
     if (target > 0) {
         for (0..pad_count) |_| try result.append(ctx.allocator, pad_val);
     }
