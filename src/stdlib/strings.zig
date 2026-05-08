@@ -64,6 +64,13 @@ pub const entries = .{
     .{ "mb_substr_count", native_mb_substr_count },
     .{ "mb_internal_encoding", native_mb_internal_encoding },
     .{ "mb_substitute_character", native_mb_substitute_character },
+    .{ "mb_chr", native_mb_chr },
+    .{ "mb_ord", native_mb_ord },
+    .{ "mb_stripos", native_mb_stripos },
+    .{ "mb_strstr", native_mb_strstr },
+    .{ "mb_stristr", native_mb_stristr },
+    .{ "mb_strcut", native_mb_strcut },
+    .{ "mb_str_pad", native_mb_str_pad },
     .{ "str_getcsv", native_str_getcsv },
     .{ "base64_encode", native_base64_encode },
     .{ "base64_decode", native_base64_decode },
@@ -1620,6 +1627,184 @@ fn native_mb_internal_encoding(_: *NativeContext, _: []const Value) RuntimeError
 
 fn native_mb_substitute_character(_: *NativeContext, _: []const Value) RuntimeError!Value {
     return .{ .bool = true };
+}
+
+fn native_mb_chr(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len == 0) return .{ .bool = false };
+    const cp_int = Value.toInt(args[0]);
+    if (cp_int < 0 or cp_int > 0x10FFFF) return .{ .bool = false };
+    const cp: u21 = @intCast(cp_int);
+    var buf: [4]u8 = undefined;
+    const n = std.unicode.utf8Encode(cp, &buf) catch return .{ .bool = false };
+    const out = try ctx.allocator.dupe(u8, buf[0..n]);
+    try ctx.strings.append(ctx.allocator, out);
+    return .{ .string = out };
+}
+
+fn native_mb_ord(_: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len == 0 or args[0] != .string) return .{ .bool = false };
+    const s = args[0].string;
+    if (s.len == 0) return .{ .bool = false };
+    const len = std.unicode.utf8ByteSequenceLength(s[0]) catch return .{ .bool = false };
+    if (len > s.len) return .{ .bool = false };
+    const cp = std.unicode.utf8Decode(s[0..len]) catch return .{ .bool = false };
+    return .{ .int = @intCast(cp) };
+}
+
+fn lowerCpUtf8(s: []const u8, i: usize) struct { cp: u21, len: usize } {
+    const b = s[i];
+    if (b < 0x80) return .{ .cp = std.ascii.toLower(b), .len = 1 };
+    const len = std.unicode.utf8ByteSequenceLength(b) catch return .{ .cp = b, .len = 1 };
+    if (i + len > s.len) return .{ .cp = b, .len = 1 };
+    const cp = std.unicode.utf8Decode(s[i .. i + len]) catch return .{ .cp = b, .len = 1 };
+    return .{ .cp = unicodeToLower(cp), .len = len };
+}
+
+fn matchAtCi(haystack: []const u8, hi: usize, needle: []const u8) bool {
+    var ni: usize = 0;
+    var hj: usize = hi;
+    while (ni < needle.len) {
+        if (hj >= haystack.len) return false;
+        const h = lowerCpUtf8(haystack, hj);
+        const n = lowerCpUtf8(needle, ni);
+        if (h.cp != n.cp) return false;
+        hj += h.len;
+        ni += n.len;
+    }
+    return true;
+}
+
+fn byteToCharPos(s: []const u8, byte_pos: usize) i64 {
+    var i: usize = 0;
+    var c: i64 = 0;
+    while (i < byte_pos and i < s.len) {
+        i += utf8CharLen(s[i]);
+        c += 1;
+    }
+    return c;
+}
+
+fn native_mb_stripos(_: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len < 2 or args[0] != .string or args[1] != .string) return .{ .bool = false };
+    const haystack = args[0].string;
+    const needle = args[1].string;
+    if (needle.len == 0) return .{ .bool = false };
+    const start_char: i64 = if (args.len >= 3) Value.toInt(args[2]) else 0;
+    var byte_offset: usize = 0;
+    var c: i64 = 0;
+    while (byte_offset < haystack.len and c < start_char) {
+        byte_offset += utf8CharLen(haystack[byte_offset]);
+        c += 1;
+    }
+    var i = byte_offset;
+    while (i < haystack.len) {
+        if (matchAtCi(haystack, i, needle)) return .{ .int = byteToCharPos(haystack, i) };
+        i += utf8CharLen(haystack[i]);
+    }
+    return .{ .bool = false };
+}
+
+fn native_mb_strstr(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len < 2 or args[0] != .string or args[1] != .string) return .{ .bool = false };
+    const haystack = args[0].string;
+    const needle = args[1].string;
+    if (needle.len == 0) return .{ .bool = false };
+    const before: bool = if (args.len >= 3) Value.isTruthy(args[2]) else false;
+    if (std.mem.indexOf(u8, haystack, needle)) |pos| {
+        const slice = if (before) haystack[0..pos] else haystack[pos..];
+        return .{ .string = try ctx.createString(slice) };
+    }
+    return .{ .bool = false };
+}
+
+fn native_mb_stristr(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len < 2 or args[0] != .string or args[1] != .string) return .{ .bool = false };
+    const haystack = args[0].string;
+    const needle = args[1].string;
+    if (needle.len == 0) return .{ .bool = false };
+    const before: bool = if (args.len >= 3) Value.isTruthy(args[2]) else false;
+    var i: usize = 0;
+    while (i < haystack.len) : (i += utf8CharLen(haystack[i])) {
+        if (matchAtCi(haystack, i, needle)) {
+            const slice = if (before) haystack[0..i] else haystack[i..];
+            return .{ .string = try ctx.createString(slice) };
+        }
+    }
+    return .{ .bool = false };
+}
+
+fn native_mb_strcut(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len == 0 or args[0] != .string) return .{ .string = "" };
+    const s = args[0].string;
+    var start: i64 = if (args.len >= 2) Value.toInt(args[1]) else 0;
+    if (start < 0) start = @max(0, @as(i64, @intCast(s.len)) + start);
+    var ustart: usize = @intCast(@min(start, @as(i64, @intCast(s.len))));
+    // align to leading byte
+    while (ustart < s.len and (s[ustart] & 0xC0) == 0x80) ustart += 1;
+    var end: usize = s.len;
+    if (args.len >= 3 and args[2] != .null) {
+        const len: i64 = Value.toInt(args[2]);
+        if (len < 0) {
+            const e_signed = @as(i64, @intCast(s.len)) + len;
+            end = @intCast(@max(@as(i64, @intCast(ustart)), e_signed));
+        } else {
+            const e = ustart + @as(usize, @intCast(len));
+            end = @min(e, s.len);
+        }
+        // align end to leading byte (don't split a multibyte char)
+        while (end > ustart and end < s.len and (s[end] & 0xC0) == 0x80) end -= 1;
+    }
+    if (end <= ustart) return .{ .string = "" };
+    return .{ .string = try ctx.createString(s[ustart..end]) };
+}
+
+fn native_mb_str_pad(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len < 2 or args[0] != .string) return args[0];
+    const s = args[0].string;
+    const target_chars: i64 = Value.toInt(args[1]);
+    const pad_str: []const u8 = if (args.len >= 3 and args[2] == .string) args[2].string else " ";
+    const pad_type: i64 = if (args.len >= 4) Value.toInt(args[3]) else 1; // STR_PAD_RIGHT
+    if (pad_str.len == 0 or target_chars <= 0) return args[0];
+
+    var s_chars: i64 = 0;
+    var i: usize = 0;
+    while (i < s.len) : (i += utf8CharLen(s[i])) s_chars += 1;
+    if (s_chars >= target_chars) return args[0];
+    const pad_needed: i64 = target_chars - s_chars;
+
+    var pad_chars: i64 = 0;
+    var pi: usize = 0;
+    while (pi < pad_str.len) : (pi += utf8CharLen(pad_str[pi])) pad_chars += 1;
+    if (pad_chars == 0) return args[0];
+
+    const left_chars: i64 = switch (pad_type) {
+        0 => pad_needed, // STR_PAD_LEFT
+        2 => @divFloor(pad_needed, 2), // STR_PAD_BOTH
+        else => 0,
+    };
+    const right_chars: i64 = pad_needed - left_chars;
+
+    var buf = std.ArrayListUnmanaged(u8){};
+    defer buf.deinit(ctx.allocator);
+
+    try appendPadChars(ctx, &buf, pad_str, left_chars);
+    try buf.appendSlice(ctx.allocator, s);
+    try appendPadChars(ctx, &buf, pad_str, right_chars);
+
+    return .{ .string = try ctx.createString(buf.items) };
+}
+
+fn appendPadChars(ctx: *NativeContext, buf: *std.ArrayListUnmanaged(u8), pad_str: []const u8, count: i64) !void {
+    var produced: i64 = 0;
+    var pi: usize = 0;
+    while (produced < count) {
+        if (pi >= pad_str.len) pi = 0;
+        const cl = utf8CharLen(pad_str[pi]);
+        const end = @min(pi + cl, pad_str.len);
+        try buf.appendSlice(ctx.allocator, pad_str[pi..end]);
+        pi += cl;
+        produced += 1;
+    }
 }
 
 fn utf8CharLen(byte: u8) usize {
