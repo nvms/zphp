@@ -1997,24 +1997,36 @@ fn closureFromCallable(ctx: *NativeContext, args: []const Value) RuntimeError!Va
     const callable = args[0];
     // if already a closure, return as-is
     if (callable == .string and std.mem.startsWith(u8, callable.string, "__closure_")) return callable;
-    // if it's a string function name, wrap it (just return the name - it's callable)
     if (callable == .string) {
         if (ctx.vm.functions.contains(callable.string) or ctx.vm.native_fns.contains(callable.string))
             return callable;
+        try ctx.vm.setPendingException("TypeError", "Failed to create closure from callable: function does not exist");
+        return error.RuntimeError;
     }
-    // array callable [obj, method] or [class, method]
+    if (callable == .object) {
+        if (ctx.vm.hasMethod(callable.object.class_name, "__invoke")) return callable;
+        try ctx.vm.setPendingException("TypeError", "Failed to create closure from callable");
+        return error.RuntimeError;
+    }
     if (callable == .array) {
         const entries = callable.array.entries.items;
         if (entries.len == 2 and entries[1].value == .string) {
+            const method = entries[1].value.string;
             if (entries[0].value == .string) {
-                // static method - return "Class::method" string
-                const full = std.fmt.allocPrint(ctx.allocator, "{s}::{s}", .{ entries[0].value.string, entries[1].value.string }) catch return .null;
-                try ctx.strings.append(ctx.allocator, full);
-                return .{ .string = full };
+                if (ctx.vm.hasMethod(entries[0].value.string, method)) {
+                    const full = std.fmt.allocPrint(ctx.allocator, "{s}::{s}", .{ entries[0].value.string, method }) catch return .null;
+                    try ctx.strings.append(ctx.allocator, full);
+                    return .{ .string = full };
+                }
+            } else if (entries[0].value == .object) {
+                if (ctx.vm.hasMethod(entries[0].value.object.class_name, method)) return callable;
             }
         }
+        try ctx.vm.setPendingException("TypeError", "Failed to create closure from callable");
+        return error.RuntimeError;
     }
-    return callable;
+    try ctx.vm.setPendingException("TypeError", "Failed to create closure from callable");
+    return error.RuntimeError;
 }
 
 fn reflectionNoop(_: *NativeContext, _: []const Value) RuntimeError!Value {
