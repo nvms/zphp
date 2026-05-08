@@ -265,7 +265,7 @@ pub const Fiber = struct {
 
 pub const PhpObject = struct {
     class_name: []const u8,
-    properties: std.StringHashMapUnmanaged(Value) = .{},
+    properties: std.StringArrayHashMapUnmanaged(Value) = .{},
     slots: ?[]Value = null,
     slot_layout: ?*const SlotLayout = null,
     lazy_initializer: Value = .null,

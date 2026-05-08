@@ -2073,10 +2073,10 @@ pub const VM = struct {
                                 if (obj.getSlotIndex(prop_name)) |idx| {
                                     s[idx] = .null;
                                 } else {
-                                    _ = obj.properties.remove(prop_name);
+                                    _ = obj.properties.orderedRemove(prop_name);
                                 }
                             } else {
-                                _ = obj.properties.remove(prop_name);
+                                _ = obj.properties.orderedRemove(prop_name);
                             }
                         }
                     }

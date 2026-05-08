@@ -289,7 +289,7 @@ fn serializeValue(ctx: *NativeContext, buf: *std.ArrayListUnmanaged(u8), sctx: *
                 total_count = @intCast(sp.entries.items.len);
             } else {
                 const slot_count: u32 = if (obj.slot_layout) |layout| @intCast(layout.names.len) else 0;
-                total_count = slot_count + obj.properties.count();
+                total_count = slot_count + @as(u32, @intCast(obj.properties.count()));
             }
             const cl = std.fmt.bufPrint(&tmp, "{d}", .{total_count}) catch return;
             try buf.appendSlice(a, cl);

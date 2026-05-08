@@ -895,22 +895,40 @@ fn array_column(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
 
     var result = try ctx.createArray();
     for (src.entries.items) |entry| {
-        if (entry.value != .array) continue;
-        const row = entry.value.array;
-        const val = if (col_key == .null) entry.value else blk: {
-            const v = row.get(Value.toArrayKey(col_key));
+        const row_val = entry.value;
+        const is_array = row_val == .array;
+        const is_object = row_val == .object;
+        if (!is_array and !is_object) continue;
+
+        const val = if (col_key == .null) row_val else v: {
+            const v = rowGet(row_val, col_key);
             if (v == .null) continue;
-            break :blk v;
+            break :v v;
         };
         if (args.len >= 3 and args[2] != .null) {
-            const idx_key = Value.toArrayKey(args[2]);
-            const idx_val = row.get(idx_key);
+            const idx_val = rowGet(row_val, args[2]);
             try result.set(ctx.allocator, Value.toArrayKey(idx_val), val);
         } else {
             try result.append(ctx.allocator, val);
         }
     }
     return .{ .array = result };
+}
+
+fn rowGet(row: Value, key: Value) Value {
+    return switch (row) {
+        .array => |a| a.get(Value.toArrayKey(key)),
+        .object => |o| switch (key) {
+            .string => |s| o.get(s),
+            .int => |i| blk: {
+                var buf: [32]u8 = undefined;
+                const s = std.fmt.bufPrint(&buf, "{d}", .{i}) catch break :blk .null;
+                break :blk o.get(s);
+            },
+            else => .null,
+        },
+        else => .null,
+    };
 }
 
 fn array_fill(ctx: *NativeContext, args: []const Value) RuntimeError!Value {

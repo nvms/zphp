@@ -220,13 +220,9 @@ fn printRValue(a: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8), val: Valu
                         try out.appendSlice(a, "] => ");
                     },
                 }
-                if (entry.value == .array) {
-                    try printRValue(a, out, entry.value, depth + 2);
-                    try out.appendSlice(a, "\n");
-                } else {
-                    try printRValue(a, out, entry.value, depth + 1);
-                    try out.appendSlice(a, "\n");
-                }
+                const nested = entry.value == .array or entry.value == .object;
+                try printRValue(a, out, entry.value, depth + if (nested) @as(usize, 2) else 1);
+                try out.appendSlice(a, "\n");
             }
             try appendIndent(out, a, depth * 4);
             try out.appendSlice(a, ")\n");
@@ -244,13 +240,9 @@ fn printRValue(a: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8), val: Valu
                             try out.appendSlice(a, "[");
                             try out.appendSlice(a, name);
                             try out.appendSlice(a, "] => ");
-                            if (slots[i] == .array) {
-                                try printRValue(a, out, slots[i], depth + 2);
-                                try out.appendSlice(a, "\n");
-                            } else {
-                                try printRValue(a, out, slots[i], depth + 1);
-                                try out.appendSlice(a, "\n");
-                            }
+                            const nested = slots[i] == .array or slots[i] == .object;
+                            try printRValue(a, out, slots[i], depth + if (nested) @as(usize, 2) else 1);
+                            try out.appendSlice(a, "\n");
                         }
                     }
                 }
@@ -268,13 +260,9 @@ fn printRValue(a: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8), val: Valu
                     try out.appendSlice(a, "[");
                     try out.appendSlice(a, entry.key_ptr.*);
                     try out.appendSlice(a, "] => ");
-                    if (entry.value_ptr.* == .array) {
-                        try printRValue(a, out, entry.value_ptr.*, depth + 2);
-                        try out.appendSlice(a, "\n");
-                    } else {
-                        try printRValue(a, out, entry.value_ptr.*, depth + 1);
-                        try out.appendSlice(a, "\n");
-                    }
+                    const nested = entry.value_ptr.* == .array or entry.value_ptr.* == .object;
+                    try printRValue(a, out, entry.value_ptr.*, depth + if (nested) @as(usize, 2) else 1);
+                    try out.appendSlice(a, "\n");
                 }
             }
             try appendIndent(out, a, depth * 4);
