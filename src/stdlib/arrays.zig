@@ -102,6 +102,12 @@ fn array_pop(_: *NativeContext, args: []const Value) RuntimeError!Value {
     if (arr.entries.items.len == 0) return .null;
     const entry = arr.entries.pop() orelse return .null;
     if (entry.key == .string) _ = arr.string_index.remove(entry.key.string);
+    // PHP: array_pop recomputes next int key from the remaining entries
+    var max_int: i64 = -1;
+    for (arr.entries.items) |e| {
+        if (e.key == .int and e.key.int > max_int) max_int = e.key.int;
+    }
+    arr.next_int_key = max_int + 1;
     return entry.value;
 }
 
@@ -1237,6 +1243,15 @@ fn array_unshift(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
         try arr.entries.insert(ctx.allocator, insert_idx, .{ .key = .{ .int = 0 }, .value = val });
         insert_idx += 1;
     }
+    // PHP renumbers all numeric keys starting from 0; string keys preserved
+    var next_int: i64 = 0;
+    for (arr.entries.items) |*entry| {
+        if (entry.key == .int) {
+            entry.key = .{ .int = next_int };
+            next_int += 1;
+        }
+    }
+    arr.next_int_key = next_int;
     try arr.rebuildStringIndex(ctx.allocator);
     return .{ .int = arr.length() };
 }
