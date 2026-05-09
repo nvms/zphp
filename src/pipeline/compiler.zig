@@ -275,7 +275,26 @@ pub const Compiler = struct {
             .continue_stmt => {
                 if (self.loop_start) |start| {
                     const level = if (node.data.lhs > 0) node.data.lhs else 1;
+                    // run any finally inside the loop(s) being continued/skipped
+                    const target_depth = self.loop_depth -| level;
+                    const saved_fd = self.finally_depth;
+                    var fd = self.finally_depth;
+                    while (fd > 0) {
+                        fd -= 1;
+                        if (self.finally_loop_depth[fd] <= target_depth) break;
+                        self.finally_depth = fd;
+                        try self.emitOp(.pop_handler);
+                        try self.compileNode(self.finally_nodes[fd]);
+                    }
+                    self.finally_depth = saved_fd;
                     if (level > 1) {
+                        // emit iter_end for inner foreach loops being skipped
+                        const skip_target = self.loop_depth -| (level - 1);
+                        for (skip_target..self.loop_depth) |d| {
+                            if (d < 32 and self.loop_is_foreach[d]) {
+                                try self.emitOp(.iter_end);
+                            }
+                        }
                         const j = try self.emitJump(.jump);
                         try self.continue_jumps.append(self.allocator, .{
                             .offset = j,
