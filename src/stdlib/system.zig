@@ -275,10 +275,25 @@ fn native_get_defined_vars(ctx: *NativeContext, _: []const Value) RuntimeError!V
 
     if (vm.frame_count == 0) return .{ .array = result };
     const frame = &vm.frames[vm.frame_count - 1];
+
+    // slot-based locals first (compile-time named slots)
+    const slot_names = if (frame.func) |func| func.slot_names else vm.global_slot_names;
+    for (slot_names, 0..) |sn, i| {
+        if (sn.len == 0) continue;
+        if (i >= frame.locals.len) break;
+        if (frame.locals[i] == .null) continue;
+        const name = if (sn.len > 0 and sn[0] == '$') sn[1..] else sn;
+        if (name.len == 0) continue;
+        try result.set(alloc, .{ .string = name }, frame.locals[i]);
+    }
+
+    // dynamic vars (extract'd, etc.)
     var iter = frame.vars.iterator();
     while (iter.next()) |entry| {
-        const name = entry.key_ptr.*;
-        if (name.len > 0 and name[0] == '$') continue;
+        const raw = entry.key_ptr.*;
+        const name = if (raw.len > 0 and raw[0] == '$') raw[1..] else raw;
+        if (name.len == 0) continue;
+        if (entry.value_ptr.* == .null) continue;
         try result.set(alloc, .{ .string = name }, entry.value_ptr.*);
     }
     return .{ .array = result };

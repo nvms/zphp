@@ -379,7 +379,10 @@ fn str_pad(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     const target_len: usize = @intCast(@max(0, Value.toInt(args[1])));
     if (s.len >= target_len) return args[0];
     const pad_str = if (args.len >= 3 and args[2] == .string) args[2].string else " ";
-    if (pad_str.len == 0) return args[0];
+    if (pad_str.len == 0) {
+        try ctx.vm.setPendingException("ValueError", "str_pad(): Argument #3 ($pad_string) must not be empty");
+        return error.RuntimeError;
+    }
     const pad_type = if (args.len >= 4) Value.toInt(args[3]) else 1;
     const diff = target_len - s.len;
 

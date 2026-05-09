@@ -45,6 +45,10 @@ pub const entries = .{
     .{ "is_infinite", native_is_infinite },
     .{ "is_nan", native_is_nan },
     .{ "mt_rand", native_rand },
+    .{ "mt_srand", native_srand_noop },
+    .{ "srand", native_srand_noop },
+    .{ "mt_getrandmax", native_getrandmax },
+    .{ "getrandmax", native_getrandmax },
     .{ "fpow", native_fpow },
     .{ "fdiv", native_fdiv },
 };
@@ -156,6 +160,15 @@ fn native_max(_: *NativeContext, args: []const Value) RuntimeError!Value {
 
 fn native_lcg_value(_: *NativeContext, _: []const Value) RuntimeError!Value {
     return .{ .float = std.crypto.random.float(f64) };
+}
+
+fn native_srand_noop(_: *NativeContext, _: []const Value) RuntimeError!Value {
+    // we use crypto.random which is not seedable; accept the call as a no-op
+    return .null;
+}
+
+fn native_getrandmax(_: *NativeContext, _: []const Value) RuntimeError!Value {
+    return .{ .int = 2147483647 };
 }
 
 fn native_rand(_: *NativeContext, args: []const Value) RuntimeError!Value {
