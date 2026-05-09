@@ -208,6 +208,12 @@ fn varDumpValue(ctx: *NativeContext, val: Value, depth: usize) !void {
 fn print_r(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len == 0) return .null;
     const return_str = args.len >= 2 and args[1].isTruthy();
+    visited_ptrs.deinit(ctx.allocator);
+    visited_ptrs = .{};
+    defer {
+        visited_ptrs.deinit(ctx.allocator);
+        visited_ptrs = .{};
+    }
     if (return_str) {
         var buf = std.ArrayListUnmanaged(u8){};
         try printRValue(ctx.allocator, &buf, args[0], 0);
@@ -231,6 +237,14 @@ fn printRValue(a: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8), val: Valu
         .float => try val.format(out, a),
         .string => |s| try out.appendSlice(a, s),
         .array => |arr| {
+            const arr_ptr = @intFromPtr(arr);
+            if (visitedContains(arr_ptr)) {
+                try out.appendSlice(a, "Array\n *RECURSION*");
+                return;
+            }
+            try visited_ptrs.append(a, arr_ptr);
+            defer _ = visited_ptrs.pop();
+
             try out.appendSlice(a, "Array\n");
             try appendIndent(out, a, depth * 4);
             try out.appendSlice(a, "(\n");
@@ -258,6 +272,15 @@ fn printRValue(a: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8), val: Valu
             try out.appendSlice(a, ")\n");
         },
         .object => |obj| {
+            const obj_ptr = @intFromPtr(obj);
+            if (visitedContains(obj_ptr)) {
+                try out.appendSlice(a, obj.class_name);
+                try out.appendSlice(a, " Object\n *RECURSION*");
+                return;
+            }
+            try visited_ptrs.append(a, obj_ptr);
+            defer _ = visited_ptrs.pop();
+
             try out.appendSlice(a, obj.class_name);
             try out.appendSlice(a, " Object\n");
             try appendIndent(out, a, depth * 4);
