@@ -2188,6 +2188,14 @@ fn utfCaseConvert(ctx: *NativeContext, s: []const u8, to_upper: bool) ![]u8 {
                 i += len;
                 continue;
             };
+            // expansion mappings: one codepoint to multiple codepoints
+            if (to_upper) {
+                if (caseExpansionUpper(cp)) |seq| {
+                    try buf.appendSlice(ctx.allocator, seq);
+                    i += len;
+                    continue;
+                }
+            }
             const mapped = if (to_upper) unicodeToUpper(cp) else unicodeToLower(cp);
             var enc: [4]u8 = undefined;
             const enc_len = std.unicode.utf8Encode(mapped, &enc) catch {
@@ -2202,6 +2210,25 @@ fn utfCaseConvert(ctx: *NativeContext, s: []const u8, to_upper: bool) ![]u8 {
     const result = try buf.toOwnedSlice(ctx.allocator);
     try ctx.strings.append(ctx.allocator, result);
     return result;
+}
+
+fn caseExpansionUpper(cp: u21) ?[]const u8 {
+    return switch (cp) {
+        0x00DF => "SS", // sharp s -> SS
+        0x0149 => "\xCA\xBCN", // n preceded by apostrophe
+        0x01F0 => "J\xCC\x8C", // j with caron
+        0x0390 => "\xCE\x99\xCC\x88\xCC\x81", // greek iota with dialytika tonos
+        0x03B0 => "\xCE\xA5\xCC\x88\xCC\x81", // greek upsilon with dialytika tonos
+        0x0587 => "\xD4\xB5\xD5\x92", // armenian small ligature ech yiwn
+        0xFB00 => "FF",
+        0xFB01 => "FI",
+        0xFB02 => "FL",
+        0xFB03 => "FFI",
+        0xFB04 => "FFL",
+        0xFB05 => "ST",
+        0xFB06 => "ST",
+        else => null,
+    };
 }
 
 fn unicodeToUpper(cp: u21) u21 {

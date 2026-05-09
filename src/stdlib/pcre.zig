@@ -13,6 +13,7 @@ const pcre2 = struct {
     const DOTALL: u32 = 0x00000020;
     const EXTENDED: u32 = 0x00000080;
     const UTF: u32 = 0x00080000;
+    const UCP: u32 = 0x00020000;
     const ANCHORED: u32 = 0x80000000;
 
     const SUBSTITUTE_GLOBAL: u32 = 0x00000100;
@@ -129,7 +130,7 @@ fn parsePattern(raw: []const u8) ?PatternInfo {
             'm' => flags |= pcre2.MULTILINE,
             's' => flags |= pcre2.DOTALL,
             'x' => flags |= pcre2.EXTENDED,
-            'u' => flags |= pcre2.UTF,
+            'u' => flags |= pcre2.UTF | pcre2.UCP,
             'A' => flags |= pcre2.ANCHORED,
             else => {},
         }
