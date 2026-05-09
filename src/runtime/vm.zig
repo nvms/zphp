@@ -3253,6 +3253,16 @@ pub const VM = struct {
                         if (try self.throwBuiltinException("Error", msg)) continue;
                         return error.RuntimeError;
                     }
+                    if (self.classes.get(class_name)) |cls_ref| {
+                        if (cls_ref.is_abstract) {
+                            const ac_drop: usize = arg_count;
+                            self.sp -= ac_drop;
+                            const msg = try std.fmt.allocPrint(self.allocator, "Cannot instantiate abstract class {s}", .{class_name});
+                            try self.strings.append(self.allocator, msg);
+                            if (try self.throwBuiltinException("Error", msg)) continue;
+                            return error.RuntimeError;
+                        }
+                    }
 
                     const obj = try self.allocator.create(PhpObject);
                     obj.* = .{ .class_name = class_name };
