@@ -109,6 +109,16 @@ pub fn register(vm: *VM, a: Allocator) !void {
     var def = ClassDef{ .name = "FileHandle" };
     try def.methods.put(a, "__toString", .{ .name = "__toString", .arity = 0 });
     try vm.classes.put(a, "FileHandle", def);
+
+    inline for (.{ .{ "STDIN", 0, "r" }, .{ "STDOUT", 1, "w" }, .{ "STDERR", 2, "w" } }) |spec| {
+        const obj = try a.create(PhpObject);
+        obj.* = .{ .class_name = "FileHandle" };
+        try obj.set(a, "__fd", .{ .int = spec[1] });
+        try obj.set(a, "__open", .{ .bool = true });
+        try obj.set(a, "__mode", .{ .string = spec[2] });
+        try vm.objects.append(a, obj);
+        try vm.php_constants.put(a, spec[0], .{ .object = obj });
+    }
 }
 
 fn getFileHandle(obj: *PhpObject) ?std.fs.File {

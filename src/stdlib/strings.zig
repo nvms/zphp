@@ -245,7 +245,10 @@ fn explode(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len < 2) return .null;
     const delim = if (args[0] == .string) args[0].string else return Value.null;
     const s = if (args[1] == .string) args[1].string else return Value.null;
-    if (delim.len == 0) return .{ .bool = false };
+    if (delim.len == 0) {
+        try ctx.vm.setPendingException("ValueError", "explode(): Argument #1 ($separator) must not be empty");
+        return error.RuntimeError;
+    }
 
     var limit: i64 = if (args.len >= 3) args[2].toInt() else std.math.maxInt(i64);
     // PHP: limit 0 is treated as 1
