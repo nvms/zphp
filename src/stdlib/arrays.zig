@@ -746,6 +746,13 @@ fn native_range(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
             try ctx.vm.setPendingException("ValueError", "range(): Argument #3 ($step) cannot be 0");
             return error.RuntimeError;
         }
+        if (raw_step_f < 0 and lo_f < hi_f) {
+            try ctx.vm.setPendingException("ValueError", "range(): Argument #3 ($step) must be greater than 0 for increasing ranges");
+            return error.RuntimeError;
+        }
+        if (raw_step_f > 0 and lo_f > hi_f and args.len >= 3 and args[2] != .null) {
+            // explicit positive step on a decreasing range is fine in PHP - no error
+        }
         const step_f = @abs(raw_step_f);
         const span = @abs(hi_f - lo_f);
         if (step_f > span and lo_f != hi_f) {
@@ -772,6 +779,10 @@ fn native_range(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     const raw_step: i64 = if (args.len >= 3) Value.toInt(args[2]) else 1;
     if (raw_step == 0) {
         try ctx.vm.setPendingException("ValueError", "range(): Argument #3 ($step) cannot be 0");
+        return error.RuntimeError;
+    }
+    if (raw_step < 0 and lo < hi) {
+        try ctx.vm.setPendingException("ValueError", "range(): Argument #3 ($step) must be greater than 0 for increasing ranges");
         return error.RuntimeError;
     }
     const step: i64 = if (raw_step < 0) -raw_step else raw_step;

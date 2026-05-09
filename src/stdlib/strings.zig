@@ -157,8 +157,11 @@ fn strpos(_: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len < 2) return .{ .bool = false };
     const haystack = if (args[0] == .string) args[0].string else return Value{ .bool = false };
     const needle = if (args[1] == .string) args[1].string else return Value{ .bool = false };
-    const offset: usize = if (args.len >= 3) @intCast(@max(0, Value.toInt(args[2]))) else 0;
-    if (offset >= haystack.len) return .{ .bool = false };
+    const hlen: i64 = @intCast(haystack.len);
+    const raw_off: i64 = if (args.len >= 3) Value.toInt(args[2]) else 0;
+    const off_i: i64 = if (raw_off < 0) @max(0, hlen + raw_off) else raw_off;
+    if (off_i > hlen) return .{ .bool = false };
+    const offset: usize = @intCast(off_i);
     if (std.mem.indexOf(u8, haystack[offset..], needle)) |pos| {
         return .{ .int = @intCast(pos + offset) };
     }
@@ -3179,8 +3182,12 @@ fn native_stripos(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len < 2) return .{ .bool = false };
     const haystack = if (args[0] == .string) args[0].string else return Value{ .bool = false };
     const needle = if (args[1] == .string) args[1].string else return Value{ .bool = false };
-    const offset: usize = if (args.len >= 3) @intCast(@max(0, Value.toInt(args[2]))) else 0;
-    if (offset >= haystack.len or needle.len == 0) return .{ .bool = false };
+    if (needle.len == 0) return .{ .bool = false };
+    const hlen: i64 = @intCast(haystack.len);
+    const raw_off: i64 = if (args.len >= 3) Value.toInt(args[2]) else 0;
+    const off_i: i64 = if (raw_off < 0) @max(0, hlen + raw_off) else raw_off;
+    if (off_i > hlen) return .{ .bool = false };
+    const offset: usize = @intCast(off_i);
     const h_lower = try toLowerBuf(ctx.allocator, haystack[offset..]);
     defer ctx.allocator.free(h_lower);
     const n_lower = try toLowerBuf(ctx.allocator, needle);
@@ -3196,8 +3203,31 @@ fn native_strrpos(_: *NativeContext, args: []const Value) RuntimeError!Value {
     const haystack = if (args[0] == .string) args[0].string else return Value{ .bool = false };
     const needle = if (args[1] == .string) args[1].string else return Value{ .bool = false };
     if (needle.len == 0 or haystack.len == 0) return .{ .bool = false };
-    if (std.mem.lastIndexOf(u8, haystack, needle)) |pos| {
-        return .{ .int = @intCast(pos) };
+    return strrposImpl(haystack, needle, args);
+}
+
+fn strrposImpl(haystack: []const u8, needle: []const u8, args: []const Value) Value {
+    const hlen: i64 = @intCast(haystack.len);
+    const raw_off: i64 = if (args.len >= 3) Value.toInt(args[2]) else 0;
+    // positive offset: match starting position must be >= offset
+    // negative offset: match starting position must be <= hlen + offset
+    var min_start: usize = 0;
+    var max_start_inclusive: i64 = hlen - @as(i64, @intCast(needle.len));
+    if (max_start_inclusive < 0) return .{ .bool = false };
+    if (raw_off >= 0) {
+        if (raw_off > hlen) return .{ .bool = false };
+        min_start = @intCast(raw_off);
+    } else {
+        const limit = hlen + raw_off;
+        if (limit < 0) return .{ .bool = false };
+        if (limit < max_start_inclusive) max_start_inclusive = limit;
+    }
+    var i: i64 = max_start_inclusive;
+    while (i >= @as(i64, @intCast(min_start))) : (i -= 1) {
+        const u: usize = @intCast(i);
+        if (std.mem.eql(u8, haystack[u .. u + needle.len], needle)) {
+            return .{ .int = i };
+        }
     }
     return .{ .bool = false };
 }
@@ -3211,10 +3241,7 @@ fn native_strripos(ctx: *NativeContext, args: []const Value) RuntimeError!Value 
     defer ctx.allocator.free(h_lower);
     const n_lower = try toLowerBuf(ctx.allocator, needle);
     defer ctx.allocator.free(n_lower);
-    if (std.mem.lastIndexOf(u8, h_lower, n_lower)) |pos| {
-        return .{ .int = @intCast(pos) };
-    }
-    return .{ .bool = false };
+    return strrposImpl(h_lower, n_lower, args);
 }
 
 fn native_str_ireplace(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
