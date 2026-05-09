@@ -536,6 +536,13 @@ fn native_chr(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
 fn native_str_split(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len == 0) return .null;
     const s = if (args[0] == .string) args[0].string else return Value.null;
+    if (args.len >= 2) {
+        const len = Value.toInt(args[1]);
+        if (len <= 0) {
+            try ctx.vm.setPendingException("ValueError", "str_split(): Argument #2 ($length) must be greater than 0");
+            return error.RuntimeError;
+        }
+    }
     const chunk_len: usize = if (args.len >= 2) @intCast(@max(1, Value.toInt(args[1]))) else 1;
 
     var arr = try ctx.createArray();
@@ -3665,7 +3672,7 @@ fn native_similar_text(ctx: *NativeContext, args: []const Value) RuntimeError!Va
 fn native_soundex(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len == 0 or args[0] != .string) return .{ .string = "" };
     const input = args[0].string;
-    if (input.len == 0) return .{ .string = "" };
+    if (input.len == 0) return .{ .string = "0000" };
 
     const correct_table = [26]u8{
         '0', '1', '2', '3', '0', '1', '2', '0', '0', '2', '2', '4', '5',
