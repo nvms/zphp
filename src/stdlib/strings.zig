@@ -111,6 +111,8 @@ pub const entries = .{
     .{ "strchr", native_strstr },
     .{ "strtr", native_strtr },
     .{ "vsprintf", native_vsprintf },
+    .{ "vprintf", native_vprintf },
+    .{ "sscanf", native_sscanf },
     .{ "levenshtein", native_levenshtein },
     .{ "similar_text", native_similar_text },
     .{ "soundex", native_soundex },
@@ -3419,6 +3421,130 @@ fn native_vsprintf(ctx: *NativeContext, args: []const Value) RuntimeError!Value 
     }
     const result = try sprintfImpl(ctx, fmt_str, vals);
     return .{ .string = result };
+}
+
+fn native_vprintf(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len < 2) return .{ .int = 0 };
+    const fmt_str = if (args[0] == .string) args[0].string else return Value{ .int = 0 };
+    if (args[1] != .array) return .{ .int = 0 };
+    const arr = args[1].array;
+    var vals = try ctx.allocator.alloc(Value, arr.entries.items.len);
+    defer ctx.allocator.free(vals);
+    for (arr.entries.items, 0..) |entry, i| vals[i] = entry.value;
+    const result = try sprintfImpl(ctx, fmt_str, vals);
+    try ctx.vm.output.appendSlice(ctx.allocator, result);
+    return .{ .int = @intCast(result.len) };
+}
+
+fn native_sscanf(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len < 2 or args[0] != .string or args[1] != .string) return .null;
+    const input = args[0].string;
+    const fmt = args[1].string;
+
+    var captures = std.ArrayListUnmanaged(Value){};
+    defer captures.deinit(ctx.allocator);
+    var ip: usize = 0;
+    var fp: usize = 0;
+    while (fp < fmt.len) {
+        const c = fmt[fp];
+        if (c == ' ' or c == '\t' or c == '\n') {
+            // whitespace in format matches any whitespace
+            fp += 1;
+            while (ip < input.len and (input[ip] == ' ' or input[ip] == '\t' or input[ip] == '\n')) ip += 1;
+            continue;
+        }
+        if (c != '%') {
+            if (ip >= input.len or input[ip] != c) break;
+            fp += 1;
+            ip += 1;
+            continue;
+        }
+        // % spec
+        fp += 1;
+        if (fp >= fmt.len) break;
+        // skip optional width
+        var width: usize = 0;
+        var has_width = false;
+        while (fp < fmt.len and fmt[fp] >= '0' and fmt[fp] <= '9') {
+            width = width * 10 + (fmt[fp] - '0');
+            has_width = true;
+            fp += 1;
+        }
+        if (fp >= fmt.len) break;
+        const spec = fmt[fp];
+        fp += 1;
+        // skip leading whitespace before number/string conversions
+        while (ip < input.len and (input[ip] == ' ' or input[ip] == '\t' or input[ip] == '\n')) ip += 1;
+        switch (spec) {
+            'd', 'i' => {
+                const start = ip;
+                if (ip < input.len and (input[ip] == '+' or input[ip] == '-')) ip += 1;
+                while (ip < input.len and input[ip] >= '0' and input[ip] <= '9') {
+                    if (has_width and ip - start >= width) break;
+                    ip += 1;
+                }
+                if (ip == start or (ip == start + 1 and (input[start] == '+' or input[start] == '-'))) {
+                    try captures.append(ctx.allocator, .null);
+                    continue;
+                }
+                const v = std.fmt.parseInt(i64, input[start..ip], 10) catch 0;
+                try captures.append(ctx.allocator, .{ .int = v });
+            },
+            'f', 'e', 'g' => {
+                const start = ip;
+                if (ip < input.len and (input[ip] == '+' or input[ip] == '-')) ip += 1;
+                while (ip < input.len and ((input[ip] >= '0' and input[ip] <= '9') or input[ip] == '.' or input[ip] == 'e' or input[ip] == 'E' or input[ip] == '+' or input[ip] == '-')) {
+                    if (has_width and ip - start >= width) break;
+                    ip += 1;
+                }
+                const v = std.fmt.parseFloat(f64, input[start..ip]) catch 0;
+                try captures.append(ctx.allocator, .{ .float = v });
+            },
+            's' => {
+                const start = ip;
+                while (ip < input.len and input[ip] != ' ' and input[ip] != '\t' and input[ip] != '\n') {
+                    if (has_width and ip - start >= width) break;
+                    ip += 1;
+                }
+                const s = try ctx.allocator.dupe(u8, input[start..ip]);
+                try ctx.strings.append(ctx.allocator, s);
+                try captures.append(ctx.allocator, .{ .string = s });
+            },
+            'c' => {
+                const want: usize = if (has_width) width else 1;
+                const end = @min(ip + want, input.len);
+                const s = try ctx.allocator.dupe(u8, input[ip..end]);
+                try ctx.strings.append(ctx.allocator, s);
+                ip = end;
+                try captures.append(ctx.allocator, .{ .string = s });
+            },
+            'x', 'X' => {
+                const start = ip;
+                while (ip < input.len and std.ascii.isHex(input[ip])) {
+                    if (has_width and ip - start >= width) break;
+                    ip += 1;
+                }
+                const v = std.fmt.parseInt(i64, input[start..ip], 16) catch 0;
+                try captures.append(ctx.allocator, .{ .int = v });
+            },
+            else => {},
+        }
+    }
+
+    // if optional output args provided, write to them and return count
+    if (args.len > 2) {
+        var written: i64 = 0;
+        for (captures.items, 0..) |v, i| {
+            if (2 + i >= args.len) break;
+            ctx.setCallerVar(2 + i, args.len, v);
+            written += 1;
+        }
+        return .{ .int = written };
+    }
+
+    var arr = try ctx.createArray();
+    for (captures.items) |v| try arr.append(ctx.allocator, v);
+    return .{ .array = arr };
 }
 
 fn native_levenshtein(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
