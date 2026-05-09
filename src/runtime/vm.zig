@@ -1976,6 +1976,10 @@ pub const VM = struct {
                 .iter_begin => {
                     var iterable = self.stack[self.sp - 1];
                     if (iterable == .generator) {
+                        if (iterable.generator.state == .completed) {
+                            if (try self.throwBuiltinException("Exception", "Cannot traverse an already closed generator")) continue;
+                            return error.RuntimeError;
+                        }
                         self.resumeGenerator(iterable.generator, .null) catch {
                             if (self.dispatchPendingException(base_frame)) continue;
                             return error.RuntimeError;

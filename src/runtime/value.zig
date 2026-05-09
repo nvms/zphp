@@ -464,6 +464,8 @@ pub const Value = union(enum) {
         if (b == .null and a == .string) return a.string.len == 0;
         if (a == .null) return !b.isTruthy();
         if (b == .null) return !a.isTruthy();
+        // when one side is bool, both are cast to bool (PHP rule)
+        if (a == .bool or b == .bool) return a.isTruthy() == b.isTruthy();
         if (a == .string and b == .string) {
             // PHP: when both strings are numeric, compare numerically (so '1' == '01')
             if (isNumericString(a.string) and isNumericString(b.string)) {
