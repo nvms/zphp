@@ -99,7 +99,7 @@ pub fn register(vm: *VM, a: Allocator) !void {
     var ao_def = ClassDef{ .name = "ArrayObject" };
     try ao_def.interfaces.append(a, "Countable");
     try ao_def.interfaces.append(a, "ArrayAccess");
-    try ao_def.methods.put(a, "__construct", .{ .name = "__construct", .arity = 1 });
+    try ao_def.methods.put(a, "__construct", .{ .name = "__construct", .arity = 3 });
     try ao_def.methods.put(a, "offsetGet", .{ .name = "offsetGet", .arity = 1 });
     try ao_def.methods.put(a, "offsetSet", .{ .name = "offsetSet", .arity = 2 });
     try ao_def.methods.put(a, "offsetExists", .{ .name = "offsetExists", .arity = 1 });
@@ -116,6 +116,14 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try ao_def.methods.put(a, "arsort", .{ .name = "arsort", .arity = 1 });
     try ao_def.methods.put(a, "uksort", .{ .name = "uksort", .arity = 1 });
     try ao_def.methods.put(a, "uasort", .{ .name = "uasort", .arity = 1 });
+    try ao_def.methods.put(a, "__get", .{ .name = "__get", .arity = 1 });
+    try ao_def.methods.put(a, "__set", .{ .name = "__set", .arity = 2 });
+    try ao_def.methods.put(a, "__isset", .{ .name = "__isset", .arity = 1 });
+    try ao_def.methods.put(a, "__unset", .{ .name = "__unset", .arity = 1 });
+    try ao_def.static_props.put(a, "STD_PROP_LIST", .{ .int = 1 });
+    try ao_def.static_props.put(a, "ARRAY_AS_PROPS", .{ .int = 2 });
+    try ao_def.constant_names.put(a, "STD_PROP_LIST", {});
+    try ao_def.constant_names.put(a, "ARRAY_AS_PROPS", {});
     try vm.classes.put(a, "ArrayObject", ao_def);
 
     try vm.native_fns.put(a, "ArrayObject::__construct", aoConstruct);
@@ -135,6 +143,10 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try vm.native_fns.put(a, "ArrayObject::arsort", aoArsort);
     try vm.native_fns.put(a, "ArrayObject::uksort", aoUksort);
     try vm.native_fns.put(a, "ArrayObject::uasort", aoUasort);
+    try vm.native_fns.put(a, "ArrayObject::__get", aoMagicGet);
+    try vm.native_fns.put(a, "ArrayObject::__set", aoMagicSet);
+    try vm.native_fns.put(a, "ArrayObject::__isset", aoMagicIsset);
+    try vm.native_fns.put(a, "ArrayObject::__unset", aoMagicUnset);
 
     // ArrayIterator
     var ai_def = ClassDef{ .name = "ArrayIterator" };
@@ -769,7 +781,61 @@ fn aoConstruct(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     } else {
         _ = try ensureData(ctx, obj);
     }
-    try obj.set(ctx.allocator, "__flags", .{ .int = 0 });
+    const flags: i64 = if (args.len >= 2) Value.toInt(args[1]) else 0;
+    try obj.set(ctx.allocator, "__flags", .{ .int = flags });
+    return .null;
+}
+
+fn aoMagicGet(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    const obj = getThis(ctx) orelse return .null;
+    if (args.len == 0) return .null;
+    const flags = obj.get("__flags");
+    const has_props = flags == .int and (flags.int & 2) != 0; // ArrayObject::ARRAY_AS_PROPS
+    if (!has_props) return .null;
+    const arr = getData(obj) orelse return .null;
+    return arr.get(args[0].toArrayKey());
+}
+
+fn aoMagicSet(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    const obj = getThis(ctx) orelse return .null;
+    if (args.len < 2) return .null;
+    const flags = obj.get("__flags");
+    const has_props = flags == .int and (flags.int & 2) != 0;
+    if (!has_props) {
+        try obj.set(ctx.allocator, args[0].string, args[1]);
+        return .null;
+    }
+    const arr = try ensureData(ctx, obj);
+    try arr.set(ctx.allocator, args[0].toArrayKey(), args[1]);
+    return .null;
+}
+
+fn aoMagicIsset(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    const obj = getThis(ctx) orelse return .{ .bool = false };
+    if (args.len == 0) return .{ .bool = false };
+    const flags = obj.get("__flags");
+    const has_props = flags == .int and (flags.int & 2) != 0;
+    if (!has_props) return .{ .bool = false };
+    const arr = getData(obj) orelse return .{ .bool = false };
+    const v = arr.get(args[0].toArrayKey());
+    return .{ .bool = v != .null };
+}
+
+fn aoMagicUnset(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    const obj = getThis(ctx) orelse return .null;
+    if (args.len == 0) return .null;
+    const flags = obj.get("__flags");
+    const has_props = flags == .int and (flags.int & 2) != 0;
+    if (!has_props) return .null;
+    const arr = getData(obj) orelse return .null;
+    const key = args[0].toArrayKey();
+    for (arr.entries.items, 0..) |entry, i| {
+        if (entry.key.eql(key)) {
+            _ = arr.entries.orderedRemove(i);
+            arr.rebuildStringIndex(ctx.allocator) catch {};
+            return .null;
+        }
+    }
     return .null;
 }
 
