@@ -335,6 +335,7 @@ pub const Compiler = struct {
             .array_access => try compiler_expr.compileArrayAccess(self, node),
             .array_push_target => {},
             .list_destructure => {},
+            .ref_target => try self.compileNode(node.data.lhs),
             .named_arg => try self.compileNode(node.data.lhs),
             .property_access => try compiler_expr.compilePropertyAccess(self, node),
             .nullsafe_property_access => try compiler_expr.compileNullsafePropertyAccess(self, node),
@@ -531,6 +532,10 @@ pub const Compiler = struct {
             for (slots, 0..) |slot, i| {
                 if (slot == 0) continue;
                 const slot_node = self.ast.nodes[slot];
+                if (slot_node.tag == .ref_target) {
+                    try self.compileDestructureRefSlot(slot_node, .{ .index = @intCast(i) });
+                    continue;
+                }
                 try self.emitOp(.dup);
                 const key_idx = try self.addConstant(.{ .int = @intCast(i) });
                 try self.emitOp(.constant);
@@ -540,9 +545,8 @@ pub const Compiler = struct {
                     try self.compileDestructure(slot_node);
                     try self.emitOp(.pop);
                 } else if (slot_node.tag == .property_access) {
-                    // stack: ..., src_array, value
-                    try self.compileNode(slot_node.data.lhs); // push object
-                    try self.emitOp(.swap); // stack: ..., src_array, object, value
+                    try self.compileNode(slot_node.data.lhs);
+                    try self.emitOp(.swap);
                     const prop_name = self.propName(slot_node);
                     const prop_idx = try self.addConstant(.{ .string = prop_name });
                     try self.emitOp(.set_prop);
@@ -561,6 +565,14 @@ pub const Compiler = struct {
                 const elem = self.ast.nodes[elem_idx];
                 if (elem.tag != .array_element) continue;
                 const val_node = self.ast.nodes[elem.data.lhs];
+                if (val_node.tag == .ref_target) {
+                    if (elem.data.rhs != 0) {
+                        try self.compileDestructureRefSlot(val_node, .{ .key_node = elem.data.rhs });
+                    } else {
+                        try self.compileDestructureRefSlot(val_node, .{ .index = @intCast(i) });
+                    }
+                    continue;
+                }
                 try self.emitOp(.dup);
                 if (elem.data.rhs != 0) {
                     try self.compileNode(elem.data.rhs);
@@ -588,6 +600,26 @@ pub const Compiler = struct {
                 }
             }
         }
+    }
+
+    const RefSlotKey = union(enum) { index: i64, key_node: u32 };
+
+    fn compileDestructureRefSlot(self: *Compiler, ref_node: Ast.Node, key: RefSlotKey) Error!void {
+        const inner = self.ast.nodes[ref_node.data.lhs];
+        if (inner.tag != .variable) return;
+        const name = self.ast.tokenSlice(inner.main_token);
+        const name_idx = try self.addConstant(.{ .string = name });
+        try self.emitOp(.dup);
+        switch (key) {
+            .index => |i| {
+                const ki = try self.addConstant(.{ .int = i });
+                try self.emitOp(.constant);
+                try self.emitU16(ki);
+            },
+            .key_node => |kn| try self.compileNode(kn),
+        }
+        try self.emitOp(.bind_array_ref);
+        try self.emitU16(name_idx);
     }
 
     // ==================================================================

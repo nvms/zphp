@@ -1,10 +1,10 @@
 <?php
 // trigger_error populates error_get_last
-@trigger_error("first", E_USER_NOTICE);
+trigger_error("first", E_USER_NOTICE);
 $e = error_get_last();
 echo $e['type'], " ", $e['message'], "\n";
 
-@trigger_error("second", E_USER_WARNING);
+trigger_error("second", E_USER_WARNING);
 $e2 = error_get_last();
 echo $e2['type'], " ", $e2['message'], "\n";
 
@@ -20,7 +20,7 @@ restore_error_handler();
 print_r($caught);
 
 // trigger_error returns true
-var_dump(@trigger_error("x", E_USER_NOTICE));
+var_dump(trigger_error("x", E_USER_NOTICE));
 
 // E_USER_* constants
 echo E_USER_NOTICE, " ", E_USER_WARNING, " ", E_USER_DEPRECATED, "\n";

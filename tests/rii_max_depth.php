@@ -52,6 +52,17 @@ $f = function() {
 };
 echo $f(), $f(), $f(), "\n";
 
+// list with refs (write-back to source array)
+$arr = [1, 2, 3];
+[, &$b] = $arr;
+$b = 99;
+print_r($arr);
+
+// list() with refs
+$arr = [10, 20, 30];
+list(&$a, &$b) = $arr;
+$a = 1; $b = 2;
+print_r($arr);
 
 // sscanf both modes
 $r = sscanf("alice 30", "%s %d");

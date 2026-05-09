@@ -641,16 +641,18 @@ fn native_get_object_vars(ctx: *NativeContext, args: []const Value) RuntimeError
         const sep = std.mem.indexOf(u8, cf.name, "::") orelse break :blk null;
         break :blk cf.name[0..sep];
     };
-    const can_see_all = caller_class != null and std.mem.eql(u8, caller_class.?, obj.class_name);
     const can_see_protected = caller_class != null and isInClassHierarchy(ctx.vm, caller_class.?, obj.class_name);
-    const class_def = ctx.vm.classes.get(obj.class_name);
 
     if (obj.slot_layout) |layout| {
         if (obj.slots) |slots| {
             for (layout.names, 0..) |name, i| {
                 if (name.len > 1 and name[0] == '_' and name[1] == '_') continue;
-                const vis = propVisibility(class_def, name);
-                if (vis == .private and !can_see_all) continue;
+                const vis = propVisibilityWithParents(ctx.vm, obj.class_name, name);
+                // private: caller must be the declaring class
+                if (vis == .private) {
+                    const decl = propDeclaringClass(ctx.vm, obj.class_name, name);
+                    if (caller_class == null or decl == null or !std.mem.eql(u8, caller_class.?, decl.?)) continue;
+                }
                 if (vis == .protected and !can_see_protected) continue;
                 try arr.set(ctx.allocator, .{ .string = name }, slots[i]);
             }
@@ -660,8 +662,11 @@ fn native_get_object_vars(ctx: *NativeContext, args: []const Value) RuntimeError
     while (iter.next()) |entry| {
         const name = entry.key_ptr.*;
         if (name.len > 1 and name[0] == '_' and name[1] == '_') continue;
-        const vis = propVisibility(class_def, name);
-        if (vis == .private and !can_see_all) continue;
+        const vis = propVisibilityWithParents(ctx.vm, obj.class_name, name);
+        if (vis == .private) {
+            const decl = propDeclaringClass(ctx.vm, obj.class_name, name);
+            if (caller_class == null or decl == null or !std.mem.eql(u8, caller_class.?, decl.?)) continue;
+        }
         if (vis == .protected and !can_see_protected) continue;
         try arr.set(ctx.allocator, .{ .string = name }, entry.value_ptr.*);
     }
@@ -676,12 +681,42 @@ fn propVisibility(class_def: ?@import("../runtime/vm.zig").ClassDef, name: []con
     return .public;
 }
 
+fn propVisibilityWithParents(vm: *@import("../runtime/vm.zig").VM, class_name: []const u8, name: []const u8) @import("../runtime/vm.zig").ClassDef.Visibility {
+    var current_name = class_name;
+    while (true) {
+        const cls = vm.classes.get(current_name) orelse return .public;
+        for (cls.properties.items) |pdef| {
+            if (std.mem.eql(u8, pdef.name, name)) return pdef.visibility;
+        }
+        const parent = cls.parent orelse return .public;
+        current_name = parent;
+    }
+}
+
+fn propDeclaringClass(vm: *@import("../runtime/vm.zig").VM, class_name: []const u8, name: []const u8) ?[]const u8 {
+    var current_name = class_name;
+    while (true) {
+        const cls = vm.classes.get(current_name) orelse return null;
+        for (cls.properties.items) |pdef| {
+            if (std.mem.eql(u8, pdef.name, name)) return current_name;
+        }
+        current_name = cls.parent orelse return null;
+    }
+}
+
 fn isInClassHierarchy(vm: *@import("../runtime/vm.zig").VM, candidate: []const u8, target: []const u8) bool {
     if (std.mem.eql(u8, candidate, target)) return true;
+    // walk target's ancestors (candidate is an ancestor of target)
     var current = vm.classes.get(target) orelse return false;
     while (current.parent) |p| {
         if (std.mem.eql(u8, p, candidate)) return true;
-        current = vm.classes.get(p) orelse return false;
+        current = vm.classes.get(p) orelse break;
+    }
+    // walk candidate's ancestors (candidate is a descendant of target)
+    var c = vm.classes.get(candidate) orelse return false;
+    while (c.parent) |p| {
+        if (std.mem.eql(u8, p, target)) return true;
+        c = vm.classes.get(p) orelse break;
     }
     return false;
 }
@@ -1067,32 +1102,66 @@ fn native_error_reporting(ctx: *NativeContext, args: []const Value) RuntimeError
 fn native_trigger_error(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len == 0 or args[0] != .string) return .{ .bool = false };
     const message = args[0].string;
-    const errno: i64 = if (args.len >= 2) Value.toInt(args[1]) else 256; // E_USER_ERROR
+    const errno: i64 = if (args.len >= 2) Value.toInt(args[1]) else 1024; // E_USER_NOTICE
 
-    // record as the most recent runtime error
+    const ip = if (ctx.vm.frame_count > 0) ctx.vm.currentFrame().ip else 0;
+    const line: i64 = if (ctx.vm.frame_count > 0)
+        if (ctx.vm.currentChunk().getSourceLocation(if (ip > 0) ip - 1 else 0, ctx.vm.source)) |loc| @intCast(loc.line) else 0
+    else
+        0;
+    const file = ctx.vm.file_path;
+
     ctx.vm.last_error_type = errno;
     ctx.vm.last_error_message = ctx.allocator.dupe(u8, message) catch message;
     ctx.vm.strings.append(ctx.allocator, ctx.vm.last_error_message) catch {};
-    ctx.vm.last_error_file = "";
-    ctx.vm.last_error_line = 0;
+    ctx.vm.last_error_file = file;
+    ctx.vm.last_error_line = line;
 
     if (ctx.vm.user_error_handler) |handler| {
         const call_args = &[_]Value{
             .{ .int = errno },
             .{ .string = message },
-            .{ .string = "" },
-            .{ .int = 0 },
+            .{ .string = file },
+            .{ .int = line },
         };
-        const result = ctx.invokeCallable(handler, call_args) catch Value{ .bool = false };
-        // PHP: if handler returns false, fall through to default handling
-        if (result == .bool and !result.bool) {
-            // (skip output for now; we don't have proper error formatting)
-        }
+        _ = ctx.invokeCallable(handler, call_args) catch {};
         return .{ .bool = true };
     }
 
-    // no handler: PHP would emit a formatted error; we silently record it.
+    if (ctx.vm.error_silenced_depth == 0) {
+        const label = errnoLabel(errno);
+        // flush any pending stdout so the merged 2>&1 ordering matches PHP
+        if (ctx.vm.output.items.len > 0) {
+            const stdout_file = std.fs.File{ .handle = 1 };
+            _ = stdout_file.write(ctx.vm.output.items) catch {};
+            ctx.vm.output.clearRetainingCapacity();
+        }
+        const stderr_text = std.fmt.allocPrint(ctx.allocator, "PHP {s}:  {s} in {s} on line {d}\n", .{ label, message, file, line }) catch return Value{ .bool = true };
+        try ctx.vm.strings.append(ctx.allocator, stderr_text);
+        const stderr_file = std.fs.File{ .handle = 2 };
+        _ = stderr_file.write(stderr_text) catch {};
+        const stdout_text = std.fmt.allocPrint(ctx.allocator, "\n{s}: {s} in {s} on line {d}\n", .{ label, message, file, line }) catch return Value{ .bool = true };
+        try ctx.vm.strings.append(ctx.allocator, stdout_text);
+        try ctx.vm.output.appendSlice(ctx.allocator, stdout_text);
+    }
     return .{ .bool = true };
+}
+
+fn errnoLabel(errno: i64) []const u8 {
+    return switch (errno) {
+        1, 256 => "Fatal error",
+        2, 512 => "Warning",
+        4 => "Parse error",
+        8, 1024 => "Notice",
+        16 => "Core error",
+        32 => "Core warning",
+        64 => "Compile error",
+        128 => "Compile warning",
+        2048 => "Strict standards",
+        4096 => "Recoverable fatal error",
+        8192, 16384 => "Deprecated",
+        else => "Notice",
+    };
 }
 
 fn native_error_get_last(ctx: *NativeContext, _: []const Value) RuntimeError!Value {

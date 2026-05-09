@@ -354,7 +354,9 @@ pub fn compilePrefixOp(self: *Compiler, node: Ast.Node) Error!void {
     }
 
     if (op_tag == .at) {
+        try self.emitOp(.silence_begin);
         try self.compileNode(node.data.lhs);
+        try self.emitOp(.silence_end);
         return;
     }
     if (op_tag == .kw_clone) {

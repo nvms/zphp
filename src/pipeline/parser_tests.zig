@@ -156,6 +156,11 @@ fn renderNode(ast: *const Ast, idx: u32, buf: *Buf) !void {
             }
             try w.writeByte(')');
         },
+        .ref_target => {
+            try w.writeAll("(ref ");
+            try renderNode(ast, node.data.lhs, buf);
+            try w.writeByte(')');
+        },
         .named_arg => {
             try w.writeAll("(named ");
             try w.writeAll(ast.tokenSlice(node.main_token));

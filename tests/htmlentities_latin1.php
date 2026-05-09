@@ -30,3 +30,9 @@ echo htmlspecialchars("café"), "\n";  // café (no entity)
 // special markers like ©, ®
 echo htmlentities("© 2024"), "\n";
 echo htmlentities("®"), "\n";
+
+// HTML5 entities beyond Latin-1
+echo htmlentities("™"), "\n";          // &trade;
+echo htmlentities("€100"), "\n";       // &euro;100
+echo htmlentities("a→b"), "\n";        // a&rarr;b
+echo htmlentities("a≤b"), "\n";        // a&le;b

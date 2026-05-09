@@ -45,6 +45,14 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                 continue :dispatch @as(OpCode, @enumFromInt(_next));
             },
             .set_local => {
+                // bail to runLoop when the frame has ref bindings — those need
+                // propagation through ref_slots / array bindings which fast_loop
+                // doesn't implement
+                if (frame.ref_array_bindings.items.len > 0 or frame.ref_object_bindings.items.len > 0 or frame.ref_slots.count() > 0) {
+                    frame.ip = ip - 1;
+                    self.sp = sp;
+                    return;
+                }
                 const slot = (@as(u16, code[ip]) << 8) | code[ip + 1];
                 ip += 2;
                 const val = self.stack[sp - 1];

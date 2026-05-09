@@ -17,6 +17,7 @@ echo sprintf("%.0f", 1.51), "\n";   // 2
 
 // float-noise classics
 echo sprintf("%.2f", 1.005), "\n";  // 1.00 (1.005 stored as 1.00499...)
+echo sprintf("%.2f", 2.675), "\n";  // 2.67 (2.675 stored as 2.6749999...)
 
 // rounding extending beyond shortest
 echo sprintf("%.4f", log(100) / log(2)), "\n";   // 6.6439

@@ -3,9 +3,17 @@
 echo mb_chr(0x1F600), "\n";
 echo mb_chr(0x4E2D), "\n";
 echo mb_chr(233), "\n";
+var_dump(mb_chr(-1));
+var_dump(mb_chr(0x110000));
 echo mb_ord("é"), "\n";
 echo mb_ord("中"), "\n";
 echo mb_ord("a"), "\n";
+try {
+    mb_ord("");
+    echo "no throw\n";
+} catch (\ValueError $e) {
+    echo "caught: ", $e->getMessage(), "\n";
+}
 
 // mb_stripos
 echo mb_stripos("Héllo Wörld", "WÖR"), "\n";

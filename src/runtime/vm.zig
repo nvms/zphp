@@ -355,6 +355,7 @@ pub const VM = struct {
     magic_call_guard: std.ArrayListUnmanaged(struct { obj_ptr: usize, method_name: []const u8 }) = .{},
     prop_hook_guard: std.ArrayListUnmanaged(struct { obj_ptr: usize, prop_name: []const u8 }) = .{},
     user_error_handler: ?Value = null,
+    error_silenced_depth: u32 = 0,
     last_error_type: i64 = 0,
     last_error_message: []const u8 = "",
     last_error_file: []const u8 = "",
@@ -1108,6 +1109,7 @@ pub const VM = struct {
                     const val = try self.copyValue(self.peek());
                     if (self.currentFrame().ref_slots.get(name)) |cell| {
                         cell.* = val;
+                        try self.propagateCellWrite(cell, val);
                     } else {
                         try self.currentFrame().vars.put(self.allocator, name, val);
                     }
@@ -2065,6 +2067,35 @@ pub const VM = struct {
                     _ = self.pop();
                 },
 
+                .silence_begin => {
+                    self.error_silenced_depth += 1;
+                },
+                .silence_end => {
+                    if (self.error_silenced_depth > 0) self.error_silenced_depth -= 1;
+                },
+
+                .bind_array_ref => {
+                    const idx = self.readU16();
+                    const name = self.currentChunk().constants.items[idx].string;
+                    const key_val = self.pop();
+                    const src_val = self.pop();
+                    if (src_val != .array) {
+                        self.push(.null);
+                    } else {
+                        const arr_ptr = src_val.array;
+                        const key: PhpArray.Key = switch (key_val) {
+                            .int => |i| .{ .int = i },
+                            .string => |s| .{ .string = s },
+                            else => .{ .int = Value.toInt(key_val) },
+                        };
+                        const cell = try self.allocator.create(Value);
+                        cell.* = arr_ptr.get(key);
+                        try self.ref_cells.append(self.allocator, cell);
+                        try self.currentFrame().ref_slots.put(self.allocator, name, cell);
+                        try self.currentFrame().ref_array_bindings.append(self.allocator, .{ .cell = cell, .array = arr_ptr, .key = key });
+                    }
+                },
+
                 .unset_var => {
                     const idx = self.readU16();
                     const name = self.currentChunk().constants.items[idx].string;
@@ -2258,6 +2289,7 @@ pub const VM = struct {
                             if (name.len > 0) {
                                 if (frame.ref_slots.get(name)) |cell| {
                                     cell.* = val;
+                                    try self.propagateCellWrite(cell, val);
                                 }
                                 try frame.vars.put(self.allocator, name, val);
                             }
@@ -5590,6 +5622,7 @@ pub const VM = struct {
                 if (frame.ref_slots.count() > 0) {
                     if (frame.ref_slots.get(name)) |cell| {
                         cell.* = val;
+                        try self.propagateCellWrite(cell, val);
                     }
                 }
                 try frame.vars.put(self.allocator, name, val);
@@ -6728,6 +6761,19 @@ pub const VM = struct {
             if (f.locals.len > 0) self.freeLocals(f.locals);
         }
         fiber.saved_frames.clearRetainingCapacity();
+    }
+
+    fn propagateCellWrite(self: *VM, cell: *Value, val: Value) !void {
+        for (self.currentFrame().ref_array_bindings.items) |binding| {
+            if (binding.cell == cell) {
+                try binding.array.set(self.allocator, binding.key, val);
+            }
+        }
+        for (self.currentFrame().ref_object_bindings.items) |binding| {
+            if (binding.cell == cell) {
+                try binding.object.set(self.allocator, binding.prop_name, val);
+            }
+        }
     }
 
     fn writebackRefs(self: *VM) !void {
@@ -8616,7 +8662,7 @@ pub const VM = struct {
         return (hi << 8) | lo;
     }
 
-    fn currentChunk(self: *const VM) *const Chunk {
+    pub fn currentChunk(self: *const VM) *const Chunk {
         return self.frames[self.frame_count - 1].chunk;
     }
 

@@ -126,6 +126,15 @@ pub const OpCode = enum(u8) {
     iter_advance, // pop index, push index+1
     iter_end, // pop index, pop array
 
+    silence_begin, // increment vm.error_silenced_depth
+    silence_end, // decrement vm.error_silenced_depth
+
+    // u16 name_idx: pops [src_array, key]. Allocates a heap Value cell initialized
+    // to src_array[key]. Registers ref_slots[name] = cell and a writeback binding
+    // so subsequent writes to $name propagate to src_array[key]. Used by list/array
+    // destructuring with `&` (e.g. `[, &$b] = $arr`).
+    bind_array_ref,
+
     // generators
     yield_value, // pop value, suspend generator, push received value on resume
     yield_pair, // pop value, pop key, suspend generator

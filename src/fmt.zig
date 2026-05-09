@@ -304,7 +304,7 @@ const Formatter = struct {
             .method_call, .nullsafe_method_call => self.findFirstToken(node.data.lhs),
             .call, .callable_ref => self.findFirstToken(node.data.lhs),
             .array_access, .array_push_target => self.findFirstToken(node.data.lhs),
-            .list_destructure, .named_arg => node.main_token,
+            .list_destructure, .named_arg, .ref_target => node.main_token,
             .postfix_op => self.findFirstToken(node.data.lhs),
             .static_call, .dynamic_static_call => self.findFirstToken(node.data.lhs),
             .static_prop_access => self.findFirstToken(node.data.lhs),
@@ -480,6 +480,10 @@ const Formatter = struct {
             .array_access => self.formatArrayAccess(node),
             .array_push_target => self.formatArrayPushTarget(node),
             .list_destructure => self.formatListDestructure(node),
+            .ref_target => {
+                self.write("&");
+                self.formatNode(node.data.lhs);
+            },
             .named_arg => self.formatNamedArg(node),
             .property_access => self.formatPropertyAccess(node, false),
             .nullsafe_property_access => self.formatPropertyAccess(node, true),

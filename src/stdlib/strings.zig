@@ -1,4 +1,6 @@
 const std = @import("std");
+
+extern "c" fn snprintf(buf: [*c]u8, size: usize, fmt: [*c]const u8, ...) c_int;
 const Value = @import("../runtime/value.zig").Value;
 const PhpArray = @import("../runtime/value.zig").PhpArray;
 const NativeContext = @import("../runtime/vm.zig").NativeContext;
@@ -1237,23 +1239,33 @@ fn formatFixedFloat(buf: *std.ArrayListUnmanaged(u8), a: std.mem.Allocator, val:
         try buf.appendSlice(a, "INF");
         return;
     }
-    var int_buf: [128]u8 = undefined;
-    var frac_buf: [128]u8 = undefined;
-    const r = bankersRoundFloat(val, prec, &int_buf, &frac_buf) catch {
-        const s = std.fmt.allocPrint(a, "{d:.[1]}", .{ val, prec }) catch {
-            try buf.appendSlice(a, "0");
-            return;
-        };
+    // Use C snprintf for bit-exact decimal expansion + banker's rounding,
+    // matching PHP's printf-derived behaviour for %.Nf (e.g. 1.005 → "1.00",
+    // 2.675 → "2.67"). On failure, fall back to Zig's formatter.
+    var fmt_buf: [16]u8 = undefined;
+    const fmt_str = std.fmt.bufPrintZ(&fmt_buf, "%.{d}f", .{prec}) catch {
+        const s = std.fmt.allocPrint(a, "{d:.[1]}", .{ val, prec }) catch return;
         defer a.free(s);
         try buf.appendSlice(a, s);
         return;
     };
-    if (r.is_negative) try buf.append(a, '-');
-    try buf.appendSlice(a, r.int_part);
-    if (prec > 0) {
-        try buf.append(a, '.');
-        try buf.appendSlice(a, r.frac_part);
+    var out_buf: [512]u8 = undefined;
+    const n = snprintf(&out_buf, out_buf.len, fmt_str.ptr, val);
+    if (n <= 0 or @as(usize, @intCast(n)) >= out_buf.len) {
+        const s = std.fmt.allocPrint(a, "{d:.[1]}", .{ val, prec }) catch return;
+        defer a.free(s);
+        try buf.appendSlice(a, s);
+        return;
     }
+    var slice = out_buf[0..@intCast(n)];
+    // PHP keeps the negative sign even when the rounded result is "0.00..." —
+    // C snprintf does the same, so just pass through.
+    // (Special: when val is -0.0 with no fraction part PHP does NOT show '-' for %f;
+    // C's printf may show -0. Detect and strip in that one case.)
+    if (val == 0 and std.math.signbit(val) and prec > 0 and slice[0] == '-') {
+        slice = slice[1..];
+    }
+    try buf.appendSlice(a, slice);
 }
 
 const RoundedFloatBanker = struct { is_negative: bool, int_part: []const u8, frac_part: []const u8 };
@@ -1610,6 +1622,42 @@ fn latin1NamedEntity(cp: u21) ?[]const u8 {
         0x00FD => "&yacute;",
         0x00FE => "&thorn;",
         0x00FF => "&yuml;",
+        // common HTML5 entities beyond Latin-1 that PHP's htmlentities emits by default
+        0x0152 => "&OElig;",   0x0153 => "&oelig;",
+        0x0160 => "&Scaron;",  0x0161 => "&scaron;",
+        0x0178 => "&Yuml;",
+        0x0192 => "&fnof;",
+        0x02C6 => "&circ;",    0x02DC => "&tilde;",
+        0x2002 => "&ensp;",    0x2003 => "&emsp;",   0x2009 => "&thinsp;",
+        0x200C => "&zwnj;",    0x200D => "&zwj;",
+        0x200E => "&lrm;",     0x200F => "&rlm;",
+        0x2013 => "&ndash;",   0x2014 => "&mdash;",
+        0x2018 => "&lsquo;",   0x2019 => "&rsquo;",  0x201A => "&sbquo;",
+        0x201C => "&ldquo;",   0x201D => "&rdquo;",  0x201E => "&bdquo;",
+        0x2020 => "&dagger;",  0x2021 => "&Dagger;",
+        0x2022 => "&bull;",    0x2026 => "&hellip;",
+        0x2030 => "&permil;",
+        0x2039 => "&lsaquo;",  0x203A => "&rsaquo;",
+        0x20AC => "&euro;",
+        0x2122 => "&trade;",
+        0x2190 => "&larr;",    0x2191 => "&uarr;",   0x2192 => "&rarr;",   0x2193 => "&darr;",
+        0x2194 => "&harr;",
+        0x21B5 => "&crarr;",
+        0x2208 => "&isin;",    0x2209 => "&notin;",  0x220B => "&ni;",
+        0x2211 => "&sum;",     0x2212 => "&minus;",
+        0x221A => "&radic;",   0x221E => "&infin;",
+        0x2245 => "&cong;",    0x2248 => "&asymp;",
+        0x2260 => "&ne;",      0x2261 => "&equiv;",
+        0x2264 => "&le;",      0x2265 => "&ge;",
+        0x2282 => "&sub;",     0x2283 => "&sup;",    0x2286 => "&sube;",   0x2287 => "&supe;",
+        0x2295 => "&oplus;",   0x2297 => "&otimes;",
+        0x22A5 => "&perp;",
+        0x22C5 => "&sdot;",
+        0x2308 => "&lceil;",   0x2309 => "&rceil;",
+        0x230A => "&lfloor;",  0x230B => "&rfloor;",
+        0x2329 => "&lang;",    0x232A => "&rang;",
+        0x25CA => "&loz;",
+        0x2660 => "&spades;",  0x2663 => "&clubs;",  0x2665 => "&hearts;", 0x2666 => "&diams;",
         else => null,
     };
 }
@@ -2423,10 +2471,13 @@ fn native_mb_chr(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     return .{ .string = out };
 }
 
-fn native_mb_ord(_: *NativeContext, args: []const Value) RuntimeError!Value {
+fn native_mb_ord(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len == 0 or args[0] != .string) return .{ .bool = false };
     const s = args[0].string;
-    if (s.len == 0) return .{ .bool = false };
+    if (s.len == 0) {
+        try ctx.vm.setPendingException("ValueError", "mb_ord(): Argument #1 ($string) must not be empty");
+        return error.RuntimeError;
+    }
     const len = std.unicode.utf8ByteSequenceLength(s[0]) catch return .{ .bool = false };
     if (len > s.len) return .{ .bool = false };
     const cp = std.unicode.utf8Decode(s[0..len]) catch return .{ .bool = false };

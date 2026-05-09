@@ -2216,12 +2216,20 @@ const Parser = struct {
         defer targets.deinit(self.allocator);
         while (self.peek() != .r_paren) {
             if (self.peek() == .comma) {
-                // skip slot (list(,$b) = ...)
                 try targets.append(self.allocator, 0);
-            } else if (self.peek() == .kw_list) {
-                try targets.append(self.allocator, try self.parseListDestructure());
             } else {
-                try targets.append(self.allocator, try self.parseExpression());
+                var ref_amp_tok: u32 = 0;
+                var is_ref = false;
+                if (self.peek() == .amp) {
+                    ref_amp_tok = self.advance();
+                    is_ref = true;
+                }
+                const inner = if (self.peek() == .kw_list) try self.parseListDestructure() else try self.parseExpression();
+                const target_node = if (is_ref)
+                    try self.addNode(.{ .tag = .ref_target, .main_token = ref_amp_tok, .data = .{ .lhs = inner } })
+                else
+                    inner;
+                try targets.append(self.allocator, target_node);
             }
             if (self.peek() == .comma) {
                 _ = self.advance();
@@ -2275,10 +2283,32 @@ const Parser = struct {
             const expr = try self.parseExpression();
             return self.addNode(.{ .tag = .array_spread, .main_token = 0, .data = .{ .lhs = expr } });
         }
-        const expr = try self.parseExpression();
+        // detect leading `&` for ref destructuring (e.g. `[, &$b] = $arr`)
+        var ref_tok: u32 = 0;
+        var is_ref = false;
+        if (self.peek() == .amp) {
+            ref_tok = self.advance();
+            is_ref = true;
+        }
+        const expr0 = try self.parseExpression();
+        const expr = if (is_ref)
+            try self.addNode(.{ .tag = .ref_target, .main_token = ref_tok, .data = .{ .lhs = expr0 } })
+        else
+            expr0;
         if (self.peek() == .fat_arrow) {
             _ = self.advance();
-            const value = try self.parseExpression();
+            // value side may also be `&$b` (e.g. `['k' => &$v] = $arr`)
+            var vref: u32 = 0;
+            var v_is_ref = false;
+            if (self.peek() == .amp) {
+                vref = self.advance();
+                v_is_ref = true;
+            }
+            const value0 = try self.parseExpression();
+            const value = if (v_is_ref)
+                try self.addNode(.{ .tag = .ref_target, .main_token = vref, .data = .{ .lhs = value0 } })
+            else
+                value0;
             return self.addNode(.{ .tag = .array_element, .main_token = 0, .data = .{ .lhs = value, .rhs = expr } });
         }
         return self.addNode(.{ .tag = .array_element, .main_token = 0, .data = .{ .lhs = expr } });

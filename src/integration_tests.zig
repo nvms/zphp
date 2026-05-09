@@ -1728,7 +1728,7 @@ test "get_included_files empty" {
 test "trigger_error sets error_get_last" {
     try expectOutput(
         \\<?php
-        \\trigger_error("something went wrong", E_USER_NOTICE);
+        \\@trigger_error("something went wrong", E_USER_NOTICE);
         \\$e = error_get_last();
         \\echo $e['message'];
     , "something went wrong");
