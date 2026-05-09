@@ -1523,20 +1523,25 @@ fn native_class_implements(ctx: *NativeContext, args: []const Value) RuntimeErro
     const cls = ctx.vm.classes.get(class_name) orelse return Value{ .bool = false };
 
     var result = try ctx.createArray();
-    for (cls.interfaces.items) |iface| {
-        try result.set(ctx.allocator, .{ .string = iface }, .{ .string = iface });
-    }
+    var queue = std.ArrayListUnmanaged([]const u8){};
+    defer queue.deinit(ctx.allocator);
+    for (cls.interfaces.items) |iface| try queue.append(ctx.allocator, iface);
 
-    // walk parent chain
     var parent = cls.parent;
     while (parent) |p| {
         const pcls = ctx.vm.classes.get(p) orelse break;
-        for (pcls.interfaces.items) |iface| {
-            if (result.get(.{ .string = iface }) == .null) {
-                try result.set(ctx.allocator, .{ .string = iface }, .{ .string = iface });
-            }
-        }
+        for (pcls.interfaces.items) |iface| try queue.append(ctx.allocator, iface);
         parent = pcls.parent;
+    }
+
+    var i: usize = 0;
+    while (i < queue.items.len) : (i += 1) {
+        const iface = queue.items[i];
+        if (result.get(.{ .string = iface }) != .null) continue;
+        try result.set(ctx.allocator, .{ .string = iface }, .{ .string = iface });
+        if (ctx.vm.classes.get(iface)) |idef| {
+            for (idef.interfaces.items) |sub| try queue.append(ctx.allocator, sub);
+        }
     }
 
     return .{ .array = result };

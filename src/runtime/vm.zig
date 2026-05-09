@@ -5210,7 +5210,11 @@ pub const VM = struct {
                     const prop_idx = self.readU16();
                     const prop_name = self.currentChunk().constants.items[prop_idx].string;
                     const class_val = self.pop();
-                    const class_name = if (class_val == .string) class_val.string else "";
+                    const class_name: []const u8 = switch (class_val) {
+                        .string => |s| s,
+                        .object => |o| o.class_name,
+                        else => "",
+                    };
 
                     if (class_name.len == 0) {
                         self.push(.null);

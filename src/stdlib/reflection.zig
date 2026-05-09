@@ -759,6 +759,14 @@ fn rcIsSubclassOf(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
 fn rcNewInstance(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     const this = getThis(ctx) orelse return .null;
     const class_name = if (this.get("name") == .string) this.get("name").string else return .null;
+    if (ctx.vm.classes.get(class_name)) |cd| {
+        if (cd.is_abstract) {
+            const msg = try std.fmt.allocPrint(ctx.allocator, "Cannot instantiate abstract class {s}", .{class_name});
+            try ctx.strings.append(ctx.allocator, msg);
+            try ctx.vm.setPendingException("Error", msg);
+            return error.RuntimeError;
+        }
+    }
     const obj = try ctx.vm.allocator.create(PhpObject);
     obj.* = .{ .class_name = class_name };
     try ctx.vm.objects.append(ctx.vm.allocator, obj);
@@ -776,6 +784,14 @@ fn rcNewInstance(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
 fn rcNewInstanceArgs(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     const this = getThis(ctx) orelse return .null;
     const class_name = if (this.get("name") == .string) this.get("name").string else return .null;
+    if (ctx.vm.classes.get(class_name)) |cd| {
+        if (cd.is_abstract) {
+            const msg = try std.fmt.allocPrint(ctx.allocator, "Cannot instantiate abstract class {s}", .{class_name});
+            try ctx.strings.append(ctx.allocator, msg);
+            try ctx.vm.setPendingException("Error", msg);
+            return error.RuntimeError;
+        }
+    }
 
     const arr = if (args.len >= 1 and args[0] == .array) args[0].array else return .null;
 
