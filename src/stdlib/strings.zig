@@ -757,9 +757,26 @@ fn native_chunk_split(ctx: *NativeContext, args: []const Value) RuntimeError!Val
 
 fn native_number_format(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len == 0) return .{ .string = "0" };
-    const decimals: usize = if (args.len >= 2) @intCast(@max(0, Value.toInt(args[1]))) else 0;
+    const decimals_signed: i64 = if (args.len >= 2) Value.toInt(args[1]) else 0;
+    const decimals: usize = if (decimals_signed > 0) @intCast(decimals_signed) else 0;
     const dec_point = if (args.len >= 3 and args[2] == .string) args[2].string else ".";
     const thousands_sep = if (args.len >= 4 and args[3] == .string) args[3].string else ",";
+
+    // negative decimals: round to nearest 10^|n| (half-up away from zero)
+    if (decimals_signed < 0) {
+        const num = Value.toFloat(args[0]);
+        const power = std.math.pow(f64, 10.0, @floatFromInt(-decimals_signed));
+        var rounded = @round(num / power) * power;
+        if (rounded == 0) rounded = 0; // normalize -0
+        // recurse with decimals=0
+        var combined: [4]Value = undefined;
+        combined[0] = .{ .float = rounded };
+        combined[1] = .{ .int = 0 };
+        var n: usize = 2;
+        if (args.len >= 3) { combined[2] = args[2]; n = 3; }
+        if (args.len >= 4) { combined[3] = args[3]; n = 4; }
+        return native_number_format(ctx, combined[0..n]);
+    }
 
     var int_part_buf: [64]u8 = undefined;
     var frac_part_buf: [64]u8 = undefined;
