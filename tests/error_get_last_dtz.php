@@ -1,4 +1,5 @@
 <?php
+ini_set('display_errors', '1');
 // trigger_error populates error_get_last
 trigger_error("first", E_USER_NOTICE);
 $e = error_get_last();
