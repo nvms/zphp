@@ -1057,7 +1057,8 @@ fn native_get_cfg_var(_: *NativeContext, _: []const Value) RuntimeError!Value {
 
 fn iniDefault(name: []const u8) ?[]const u8 {
     if (std.mem.eql(u8, name, "date.timezone")) return "UTC";
-    if (std.mem.eql(u8, name, "memory_limit")) return "128M";
+    // PHP CLI default is "-1" (no limit); web SAPI default is "128M"
+    if (std.mem.eql(u8, name, "memory_limit")) return "-1";
     if (std.mem.eql(u8, name, "max_execution_time")) return "0";
     if (std.mem.eql(u8, name, "display_errors")) return "1";
     if (std.mem.eql(u8, name, "error_reporting")) return "32767";

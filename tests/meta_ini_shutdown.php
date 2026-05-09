@@ -33,7 +33,8 @@ $out = tracer();
 echo strlen($out) > 0 ? "ok\n" : "empty\n";
 
 // ini_get/ini_set
-echo ini_get("memory_limit"), "\n";
+// memory_limit default differs between PHP CLI versions: -1 in 8.4, 128M in 8.5
+echo is_string(ini_get("memory_limit")) ? "ml-str" : "ml-other", "\n";
 echo ini_get("display_errors"), "\n";
 $old = ini_set("display_errors", "0");
 echo ini_get("display_errors"), "\n";

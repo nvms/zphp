@@ -1714,7 +1714,7 @@ test "ini_get known values" {
         \\echo ini_get("date.timezone") . "\n";
         \\echo ini_get("memory_limit") . "\n";
         \\var_dump(ini_get("nonexistent"));
-    , "UTC\n128M\nbool(false)\n");
+    , "UTC\n-1\nbool(false)\n");
 }
 
 test "get_included_files empty" {
