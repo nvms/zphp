@@ -7614,7 +7614,7 @@ pub const VM = struct {
         return null;
     }
 
-    fn currentDefiningClass(self: *VM) ?[]const u8 {
+    pub fn currentDefiningClass(self: *VM) ?[]const u8 {
         // bound closure scope takes priority over frame walk
         if (self.frame_count > 0) {
             if (self.closureScopeForFrame(&self.frames[self.frame_count - 1])) |scope|

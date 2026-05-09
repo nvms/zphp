@@ -776,14 +776,26 @@ fn native_get_class_methods(ctx: *NativeContext, args: []const Value) RuntimeErr
         return .{ .array = arr };
     }
 
+    // visibility: caller in same class sees all; subclass sees public+protected;
+    // outside sees only public. ancestor private methods don't appear regardless.
+    const caller = ctx.vm.currentDefiningClass();
     var arr = try ctx.createArray();
     var seen = std.StringHashMapUnmanaged(void){};
     defer seen.deinit(ctx.allocator);
     var current: ?[]const u8 = class_name;
+    var depth: usize = 0;
     while (current) |cn| {
         if (ctx.vm.classes.get(cn)) |cls| {
             var iter = cls.methods.iterator();
             while (iter.next()) |entry| {
+                const info = entry.value_ptr.*;
+                if (depth > 0 and info.visibility == .private) continue;
+                const visible = switch (info.visibility) {
+                    .public => true,
+                    .protected => caller != null and isInClassChain(ctx.vm, caller.?, class_name),
+                    .private => caller != null and std.mem.eql(u8, caller.?, cn),
+                };
+                if (!visible) continue;
                 if (!seen.contains(entry.key_ptr.*)) {
                     try seen.put(ctx.allocator, entry.key_ptr.*, {});
                     try arr.append(ctx.allocator, .{ .string = entry.key_ptr.* });
@@ -791,17 +803,47 @@ fn native_get_class_methods(ctx: *NativeContext, args: []const Value) RuntimeErr
             }
             current = cls.parent;
         } else break;
+        depth += 1;
     }
     return .{ .array = arr };
+}
+
+fn isInClassChain(vm: *@import("../runtime/vm.zig").VM, a: []const u8, b: []const u8) bool {
+    if (std.mem.eql(u8, a, b)) return true;
+    var current: ?[]const u8 = a;
+    while (current) |cn| {
+        if (std.mem.eql(u8, cn, b)) return true;
+        current = if (vm.classes.get(cn)) |cls| cls.parent else null;
+    }
+    current = b;
+    while (current) |cn| {
+        if (std.mem.eql(u8, cn, a)) return true;
+        current = if (vm.classes.get(cn)) |cls| cls.parent else null;
+    }
+    return false;
 }
 
 fn native_get_class_vars(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len == 0 or args[0] != .string) return Value{ .bool = false };
     const class_name = args[0].string;
     const cls = ctx.vm.classes.get(class_name) orelse return Value{ .bool = false };
+    const caller = ctx.vm.currentDefiningClass();
     var arr = try ctx.createArray();
     for (cls.properties.items) |prop| {
+        const visible = switch (prop.visibility) {
+            .public => true,
+            .protected => caller != null and isInClassChain(ctx.vm, caller.?, class_name),
+            .private => caller != null and std.mem.eql(u8, caller.?, class_name),
+        };
+        if (!visible) continue;
         try arr.set(ctx.allocator, .{ .string = prop.name }, prop.default);
+    }
+    // PHP's get_class_vars also includes static properties
+    var sit = cls.static_props.iterator();
+    while (sit.next()) |e| {
+        // class constants are also stored in static_props; skip them
+        if (cls.constant_names.contains(e.key_ptr.*)) continue;
+        try arr.set(ctx.allocator, .{ .string = e.key_ptr.* }, e.value_ptr.*);
     }
     return .{ .array = arr };
 }
