@@ -103,6 +103,7 @@ pub const entries = .{
     .{ "strip_tags", native_strip_tags },
     .{ "http_build_query", native_http_build_query },
     .{ "htmlentities", native_htmlentities },
+    .{ "get_html_translation_table", native_get_html_translation_table },
     .{ "quoted_printable_encode", native_qp_encode },
     .{ "quoted_printable_decode", native_qp_decode },
     .{ "parse_url", native_parse_url },
@@ -1611,6 +1612,37 @@ fn latin1NamedEntity(cp: u21) ?[]const u8 {
         0x00FF => "&yuml;",
         else => null,
     };
+}
+
+fn native_get_html_translation_table(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    const table_kind: i64 = if (args.len >= 1) Value.toInt(args[0]) else 0;
+    const flags: i64 = if (args.len >= 2) Value.toInt(args[1]) else 3;
+    const escape_double = (flags & 2) != 0;
+    const escape_single = (flags & 1) != 0;
+
+    var arr = try ctx.createArray();
+
+    // base 5 (always present): < > & " '
+    if (escape_double) try arr.set(ctx.allocator, .{ .string = "\"" }, .{ .string = "&quot;" });
+    if (escape_single) try arr.set(ctx.allocator, .{ .string = "'" }, .{ .string = "&#039;" });
+    try arr.set(ctx.allocator, .{ .string = "&" }, .{ .string = "&amp;" });
+    try arr.set(ctx.allocator, .{ .string = "<" }, .{ .string = "&lt;" });
+    try arr.set(ctx.allocator, .{ .string = ">" }, .{ .string = "&gt;" });
+
+    if (table_kind == 1) { // HTML_ENTITIES adds Latin-1 named entities
+        var cp: u21 = 0xA0;
+        while (cp <= 0xFF) : (cp += 1) {
+            if (latin1NamedEntity(cp)) |ent| {
+                var enc: [4]u8 = undefined;
+                const elen = std.unicode.utf8Encode(cp, &enc) catch continue;
+                const key = try ctx.allocator.dupe(u8, enc[0..elen]);
+                try ctx.vm.strings.append(ctx.allocator, key);
+                try arr.set(ctx.allocator, .{ .string = key }, .{ .string = ent });
+            }
+        }
+    }
+
+    return .{ .array = arr };
 }
 
 fn native_htmlentities(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
