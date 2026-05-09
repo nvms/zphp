@@ -780,6 +780,14 @@ fn preg_replace_callback(ctx: *NativeContext, args: []const Value) RuntimeError!
     _ = pcre2.pcre2_pattern_info_8(code, pcre2.INFO_CAPTURECOUNT, @ptrCast(&capture_count));
     const group_count: usize = capture_count + 1;
 
+    // collect named-group info once
+    var name_count: u32 = 0;
+    _ = pcre2.pcre2_pattern_info_8(code, pcre2.INFO_NAMECOUNT, @ptrCast(&name_count));
+    var name_entry_size: u32 = 0;
+    _ = pcre2.pcre2_pattern_info_8(code, pcre2.INFO_NAMEENTRYSIZE, @ptrCast(&name_entry_size));
+    var name_table_ptr: [*]const u8 = undefined;
+    if (name_count > 0) _ = pcre2.pcre2_pattern_info_8(code, pcre2.INFO_NAMETABLE, @ptrCast(&name_table_ptr));
+
     var result = std.ArrayListUnmanaged(u8){};
     var offset: usize = 0;
 
@@ -799,11 +807,23 @@ fn preg_replace_callback(ctx: *NativeContext, args: []const Value) RuntimeError!
         for (0..group_count) |gi| {
             const gs = ovector[gi * 2];
             const ge = ovector[gi * 2 + 1];
-            if (gs == pcre2.UNSET or ge == pcre2.UNSET or gs > subject.len or ge > subject.len) {
-                try matches_arr.append(ctx.allocator, .{ .string = "" });
-            } else {
-                try matches_arr.append(ctx.allocator, .{ .string = subject[gs..ge] });
+            const slice: []const u8 = if (gs == pcre2.UNSET or ge == pcre2.UNSET or gs > subject.len or ge > subject.len)
+                ""
+            else
+                subject[gs..ge];
+            // PHP places the named entry just before the numeric one
+            if (name_count > 0 and name_entry_size > 0) {
+                for (0..name_count) |ni| {
+                    const entry = name_table_ptr + ni * name_entry_size;
+                    const gn = (@as(usize, entry[0]) << 8) | @as(usize, entry[1]);
+                    if (gn == gi) {
+                        const ne = std.mem.indexOfScalar(u8, entry[2..name_entry_size], 0) orelse (name_entry_size - 2);
+                        const name = entry[2 .. 2 + ne];
+                        try matches_arr.set(ctx.allocator, .{ .string = try ctx.createString(name) }, .{ .string = slice });
+                    }
+                }
             }
+            try matches_arr.append(ctx.allocator, .{ .string = slice });
         }
 
         const cb_result = try ctx.invokeCallable(callback, &.{.{ .array = matches_arr }});
