@@ -187,9 +187,13 @@ fn native_password_needs_rehash(_: *NativeContext, args: []const Value) RuntimeE
 }
 
 fn native_random_bytes(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len == 0 or args[0] != .int) return Value{ .bool = false };
-    const length = args[0].int;
-    if (length < 1 or length > 1048576) return Value{ .bool = false };
+    if (args.len == 0) return Value{ .bool = false };
+    const length = Value.toInt(args[0]);
+    if (length < 1) {
+        try ctx.vm.setPendingException("ValueError", "random_bytes(): Argument #1 ($length) must be greater than 0");
+        return error.RuntimeError;
+    }
+    if (length > 1048576) return Value{ .bool = false };
 
     const len: usize = @intCast(length);
     const buf = try ctx.allocator.alloc(u8, len);
@@ -198,16 +202,26 @@ fn native_random_bytes(ctx: *NativeContext, args: []const Value) RuntimeError!Va
     return .{ .string = buf };
 }
 
-fn native_random_int(_: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len < 2 or args[0] != .int or args[1] != .int) return Value{ .bool = false };
-    const min = args[0].int;
-    const max = args[1].int;
-    if (min > max) return Value{ .bool = false };
+fn native_random_int(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len < 2) return Value{ .bool = false };
+    const min = Value.toInt(args[0]);
+    const max = Value.toInt(args[1]);
+    if (min > max) {
+        try ctx.vm.setPendingException("ValueError", "random_int(): Argument #1 ($min) must be less than or equal to argument #2 ($max)");
+        return error.RuntimeError;
+    }
     if (min == max) return Value{ .int = min };
 
-    const range: u64 = @intCast(max - min);
-    const random = std.crypto.random.intRangeAtMost(u64, 0, range);
-    return Value{ .int = min + @as(i64, @intCast(random)) };
+    // span as unsigned to avoid overflow on PHP_INT_MIN .. PHP_INT_MAX
+    const umin: u64 = @bitCast(min);
+    const umax: u64 = @bitCast(max);
+    const range: u64 = umax -% umin;
+    const random = if (range == std.math.maxInt(u64))
+        std.crypto.random.int(u64)
+    else
+        std.crypto.random.intRangeAtMost(u64, 0, range);
+    const result_u: u64 = umin +% random;
+    return Value{ .int = @bitCast(result_u) };
 }
 
 const HashAlgo = enum {
