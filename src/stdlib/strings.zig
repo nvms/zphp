@@ -65,6 +65,9 @@ pub const entries = .{
     .{ "mb_substr_count", native_mb_substr_count },
     .{ "mb_internal_encoding", native_mb_internal_encoding },
     .{ "mb_substitute_character", native_mb_substitute_character },
+    .{ "mb_strwidth", native_mb_strwidth },
+    .{ "mb_encode_numericentity", native_mb_encode_numericentity },
+    .{ "mb_decode_numericentity", native_mb_decode_numericentity },
     .{ "mb_chr", native_mb_chr },
     .{ "mb_ord", native_mb_ord },
     .{ "mb_stripos", native_mb_stripos },
@@ -1998,6 +2001,144 @@ fn native_mb_internal_encoding(_: *NativeContext, _: []const Value) RuntimeError
 
 fn native_mb_substitute_character(_: *NativeContext, _: []const Value) RuntimeError!Value {
     return .{ .bool = true };
+}
+
+fn cjkWidth(cp: u21) usize {
+    // East Asian Wide / Fullwidth ranges (subset matching PHP's mb_strwidth)
+    if (cp >= 0x1100 and cp <= 0x115F) return 2; // Hangul Jamo
+    if (cp >= 0x2E80 and cp <= 0x303E) return 2; // CJK radicals, kangxi, ideo desc
+    if (cp >= 0x3041 and cp <= 0x33FF) return 2; // Hiragana, Katakana, Bopomofo, etc.
+    if (cp >= 0x3400 and cp <= 0x4DBF) return 2; // CJK Ext A
+    if (cp >= 0x4E00 and cp <= 0x9FFF) return 2; // CJK Unified Ideographs
+    if (cp >= 0xA000 and cp <= 0xA4CF) return 2; // Yi
+    if (cp >= 0xAC00 and cp <= 0xD7A3) return 2; // Hangul Syllables
+    if (cp >= 0xF900 and cp <= 0xFAFF) return 2; // CJK Compatibility Ideographs
+    if (cp >= 0xFE30 and cp <= 0xFE4F) return 2; // CJK Compatibility Forms
+    if (cp >= 0xFF00 and cp <= 0xFF60) return 2; // Fullwidth Forms
+    if (cp >= 0xFFE0 and cp <= 0xFFE6) return 2; // Fullwidth signs
+    if (cp >= 0x20000 and cp <= 0x2FFFD) return 2; // CJK Ext B-F
+    if (cp >= 0x30000 and cp <= 0x3FFFD) return 2;
+    return 1;
+}
+
+fn native_mb_strwidth(_: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len == 0 or args[0] != .string) return .{ .int = 0 };
+    const s = args[0].string;
+    var width: i64 = 0;
+    var i: usize = 0;
+    while (i < s.len) {
+        const len = std.unicode.utf8ByteSequenceLength(s[i]) catch 1;
+        if (i + len > s.len) {
+            width += 1;
+            i += 1;
+            continue;
+        }
+        const cp = std.unicode.utf8Decode(s[i .. i + len]) catch {
+            width += 1;
+            i += 1;
+            continue;
+        };
+        width += @intCast(cjkWidth(cp));
+        i += len;
+    }
+    return .{ .int = width };
+}
+
+fn parseEntityMap(arr: *PhpArray) ?[4]i64 {
+    if (arr.entries.items.len < 4) return null;
+    var out: [4]i64 = .{ 0, 0, 0, 0 };
+    for (arr.entries.items[0..4], 0..) |entry, i| out[i] = Value.toInt(entry.value);
+    return out;
+}
+
+fn native_mb_encode_numericentity(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len < 2 or args[0] != .string or args[1] != .array) return if (args.len > 0) args[0] else .{ .string = "" };
+    const s = args[0].string;
+    const map = parseEntityMap(args[1].array) orelse return args[0];
+    const hex = args.len >= 4 and args[3].isTruthy();
+
+    var buf = std.ArrayListUnmanaged(u8){};
+    var i: usize = 0;
+    while (i < s.len) {
+        const len = std.unicode.utf8ByteSequenceLength(s[i]) catch 1;
+        if (i + len > s.len) {
+            try buf.append(ctx.allocator, s[i]);
+            i += 1;
+            continue;
+        }
+        const cp = std.unicode.utf8Decode(s[i .. i + len]) catch {
+            try buf.append(ctx.allocator, s[i]);
+            i += 1;
+            continue;
+        };
+        const cp_i: i64 = @intCast(cp);
+        if (cp_i >= map[0] and cp_i <= map[1]) {
+            const value = (cp_i - map[2]) & map[3];
+            var num_buf: [32]u8 = undefined;
+            const written = if (hex)
+                std.fmt.bufPrint(&num_buf, "&#x{X};", .{value}) catch null
+            else
+                std.fmt.bufPrint(&num_buf, "&#{d};", .{value}) catch null;
+            if (written) |w| {
+                try buf.appendSlice(ctx.allocator, w);
+            } else {
+                try buf.appendSlice(ctx.allocator, s[i .. i + len]);
+                i += len;
+                continue;
+            }
+        } else {
+            try buf.appendSlice(ctx.allocator, s[i .. i + len]);
+        }
+        i += len;
+    }
+    const out = try buf.toOwnedSlice(ctx.allocator);
+    try ctx.strings.append(ctx.allocator, out);
+    return .{ .string = out };
+}
+
+fn native_mb_decode_numericentity(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len < 2 or args[0] != .string or args[1] != .array) return if (args.len > 0) args[0] else .{ .string = "" };
+    const s = args[0].string;
+    const map = parseEntityMap(args[1].array) orelse return args[0];
+
+    var buf = std.ArrayListUnmanaged(u8){};
+    var i: usize = 0;
+    while (i < s.len) {
+        if (s[i] == '&' and i + 1 < s.len and s[i + 1] == '#') {
+            var j = i + 2;
+            const is_hex = j < s.len and (s[j] == 'x' or s[j] == 'X');
+            if (is_hex) j += 1;
+            const num_start = j;
+            while (j < s.len) : (j += 1) {
+                const c = s[j];
+                const ok = if (is_hex) std.ascii.isHex(c) else std.ascii.isDigit(c);
+                if (!ok) break;
+            }
+            if (j > num_start and j < s.len and s[j] == ';') {
+                const base: u8 = if (is_hex) 16 else 10;
+                const value = std.fmt.parseInt(i64, s[num_start..j], base) catch {
+                    try buf.append(ctx.allocator, s[i]);
+                    i += 1;
+                    continue;
+                };
+                const cp_i = (value & map[3]) + map[2];
+                if (cp_i >= map[0] and cp_i <= map[1] and cp_i >= 0 and cp_i <= 0x10FFFF) {
+                    var enc: [4]u8 = undefined;
+                    const elen = std.unicode.utf8Encode(@intCast(cp_i), &enc) catch 0;
+                    if (elen > 0) {
+                        try buf.appendSlice(ctx.allocator, enc[0..elen]);
+                        i = j + 1;
+                        continue;
+                    }
+                }
+            }
+        }
+        try buf.append(ctx.allocator, s[i]);
+        i += 1;
+    }
+    const out = try buf.toOwnedSlice(ctx.allocator);
+    try ctx.strings.append(ctx.allocator, out);
+    return .{ .string = out };
 }
 
 fn native_mb_chr(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
