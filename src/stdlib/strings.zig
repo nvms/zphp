@@ -397,7 +397,12 @@ fn str_ends_with(_: *NativeContext, args: []const Value) RuntimeError!Value {
 fn str_repeat(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len < 2) return .{ .string = "" };
     const s = if (args[0] == .string) args[0].string else return Value{ .string = "" };
-    const times = @max(0, Value.toInt(args[1]));
+    const raw_times = Value.toInt(args[1]);
+    if (raw_times < 0) {
+        try ctx.vm.setPendingException("ValueError", "str_repeat(): Argument #2 ($times) must be greater than or equal to 0");
+        return error.RuntimeError;
+    }
+    const times = raw_times;
     if (times == 0 or s.len == 0) return .{ .string = "" };
 
     var buf = std.ArrayListUnmanaged(u8){};
