@@ -723,12 +723,20 @@ fn native_str_word_count(ctx: *NativeContext, args: []const Value) RuntimeError!
     if (args.len == 0) return .{ .int = 0 };
     const s = if (args[0] == .string) args[0].string else return Value{ .int = 0 };
     const format: i64 = if (args.len > 1) Value.toInt(args[1]) else 0;
+    const charlist: []const u8 = if (args.len > 2 and args[2] == .string) args[2].string else "";
+    const extra = buildTrimSet(charlist);
+
+    const isWord = struct {
+        fn f(c: u8, ex: [256]bool) bool {
+            return std.ascii.isAlphabetic(c) or c == '\'' or c == '-' or ex[c];
+        }
+    }.f;
 
     if (format == 0) {
         var count: i64 = 0;
         var in_word = false;
         for (s) |c| {
-            if (std.ascii.isAlphabetic(c) or c == '\'' or c == '-') {
+            if (isWord(c, extra)) {
                 if (!in_word) {
                     count += 1;
                     in_word = true;
@@ -744,7 +752,7 @@ fn native_str_word_count(ctx: *NativeContext, args: []const Value) RuntimeError!
     var in_word = false;
     var word_start: usize = 0;
     for (s, 0..) |c, i| {
-        if (std.ascii.isAlphabetic(c) or c == '\'' or c == '-') {
+        if (isWord(c, extra)) {
             if (!in_word) {
                 word_start = i;
                 in_word = true;
@@ -4468,7 +4476,7 @@ fn native_levenshtein(ctx: *NativeContext, args: []const Value) RuntimeError!Val
     const s1 = args[0].string;
     const s2 = args[1].string;
 
-    if (s1.len > 255 or s2.len > 255) return .{ .int = -1 };
+    // PHP 8 lifted the historical 255-char cap; computes regardless of length.
     if (s1.len == 0) return .{ .int = @intCast(s2.len) };
     if (s2.len == 0) return .{ .int = @intCast(s1.len) };
 
@@ -5008,38 +5016,46 @@ fn native_substr_compare(_: *NativeContext, args: []const Value) RuntimeError!Va
     return .{ .int = 0 };
 }
 
+fn spanResolveRange(slen: i64, args: []const Value) struct { start: usize, end: usize } {
+    var s_off: i64 = if (args.len >= 3) Value.toInt(args[2]) else 0;
+    if (s_off < 0) s_off = @max(0, slen + s_off);
+    if (s_off > slen) s_off = slen;
+    const has_len = args.len >= 4 and args[3] != .null;
+    var l_val: i64 = if (has_len) Value.toInt(args[3]) else slen - s_off;
+    if (l_val < 0) l_val = @max(0, slen - s_off + l_val);
+    var end_i: i64 = s_off + l_val;
+    if (end_i > slen) end_i = slen;
+    return .{ .start = @intCast(s_off), .end = @intCast(end_i) };
+}
+
 fn native_strcspn(_: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len < 2 or args[0] != .string or args[1] != .string) return .{ .int = 0 };
     const s = args[0].string;
     const chars = args[1].string;
-    const start: usize = if (args.len >= 3) @intCast(@max(0, Value.toInt(args[2]))) else 0;
-    const length: usize = if (args.len >= 4) @intCast(@max(0, Value.toInt(args[3]))) else s.len;
-    const end = @min(start + length, s.len);
+    const r = spanResolveRange(@intCast(s.len), args);
 
-    for (start..end) |i| {
+    for (r.start..r.end) |i| {
         for (chars) |c| {
-            if (s[i] == c) return .{ .int = @intCast(i - start) };
+            if (s[i] == c) return .{ .int = @intCast(i - r.start) };
         }
     }
-    return .{ .int = @intCast(end - start) };
+    return .{ .int = @intCast(r.end - r.start) };
 }
 
 fn native_strspn(_: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len < 2 or args[0] != .string or args[1] != .string) return .{ .int = 0 };
     const s = args[0].string;
     const chars = args[1].string;
-    const start: usize = if (args.len >= 3) @intCast(@max(0, Value.toInt(args[2]))) else 0;
-    const length: usize = if (args.len >= 4) @intCast(@max(0, Value.toInt(args[3]))) else s.len;
-    const end = @min(start + length, s.len);
+    const r = spanResolveRange(@intCast(s.len), args);
 
-    for (start..end) |i| {
+    for (r.start..r.end) |i| {
         var found = false;
         for (chars) |c| {
             if (s[i] == c) { found = true; break; }
         }
-        if (!found) return .{ .int = @intCast(i - start) };
+        if (!found) return .{ .int = @intCast(i - r.start) };
     }
-    return .{ .int = @intCast(end - start) };
+    return .{ .int = @intCast(r.end - r.start) };
 }
 
 fn native_strpbrk(ctx: *NativeContext, args: []const Value) RuntimeError!Value {

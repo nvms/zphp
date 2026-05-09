@@ -1147,9 +1147,23 @@ fn native_restore_error_handler(ctx: *NativeContext, _: []const Value) RuntimeEr
     return .{ .bool = true };
 }
 
-fn native_assert(_: *NativeContext, args: []const Value) RuntimeError!Value {
+fn native_assert(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len == 0) return .{ .bool = true };
-    return .{ .bool = args[0].isTruthy() };
+    if (args[0].isTruthy()) return .{ .bool = true };
+    // PHP throws AssertionError on failure (zend.assertions=1, default in dev/CLI)
+    const msg: []const u8 = blk: {
+        if (args.len >= 2) {
+            if (args[1] == .string) break :blk args[1].string;
+            if (args[1] == .object) {
+                // assert($cond, new AssertionError("msg")) - throw the object
+                ctx.vm.pending_exception = args[1];
+                return error.RuntimeError;
+            }
+        }
+        break :blk "assert(false)";
+    };
+    try ctx.vm.setPendingException("AssertionError", msg);
+    return error.RuntimeError;
 }
 
 fn native_noop_true(_: *NativeContext, _: []const Value) RuntimeError!Value {
