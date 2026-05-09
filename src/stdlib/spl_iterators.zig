@@ -1619,13 +1619,12 @@ fn rxCurrent(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
     if (mode == 2 or mode == 3) {
         const subject = (try rxSubjectFromInner(ctx, obj)) orelse return .null;
         const regex = objGetStr(obj, "__rx_regex");
-        const out_arr = try ctx.allocator.create(PhpArray);
-        out_arr.* = .{};
-        try ctx.vm.arrays.append(ctx.allocator, out_arr);
         if (mode == 3) {
-            _ = try ctx.vm.callByName("preg_split", &.{ .{ .string = regex }, .{ .string = subject } });
-            return .{ .array = out_arr };
+            return ctx.vm.callByName("preg_split", &.{ .{ .string = regex }, .{ .string = subject } });
         } else {
+            const out_arr = try ctx.allocator.create(PhpArray);
+            out_arr.* = .{};
+            try ctx.vm.arrays.append(ctx.allocator, out_arr);
             _ = try ctx.vm.callByName("preg_match_all", &.{ .{ .string = regex }, .{ .string = subject }, .{ .array = out_arr } });
             return .{ .array = out_arr };
         }

@@ -174,6 +174,7 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try ai_def.methods.put(a, "arsort", .{ .name = "arsort", .arity = 1 });
     try ai_def.methods.put(a, "uksort", .{ .name = "uksort", .arity = 1 });
     try ai_def.methods.put(a, "uasort", .{ .name = "uasort", .arity = 1 });
+    try ai_def.methods.put(a, "seek", .{ .name = "seek", .arity = 1 });
     try vm.classes.put(a, "ArrayIterator", ai_def);
 
     try vm.native_fns.put(a, "ArrayIterator::__construct", aiConstruct);
@@ -197,6 +198,7 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try vm.native_fns.put(a, "ArrayIterator::arsort", aoArsort);
     try vm.native_fns.put(a, "ArrayIterator::uksort", aoUksort);
     try vm.native_fns.put(a, "ArrayIterator::uasort", aoUasort);
+    try vm.native_fns.put(a, "ArrayIterator::seek", aiSeek);
 
     // WeakMap (simplified - uses spl_object_id as key, no weak reference semantics)
     var wm_def = ClassDef{ .name = "WeakMap" };
@@ -1038,6 +1040,18 @@ fn aiValid(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
     const arr = getData(obj) orelse return .{ .bool = false };
     const cursor = Value.toInt(obj.get("__cursor"));
     return .{ .bool = cursor >= 0 and cursor < arr.length() };
+}
+
+fn aiSeek(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    const obj = getThis(ctx) orelse return .null;
+    const arr = getData(obj) orelse return .null;
+    const pos = if (args.len >= 1) Value.toInt(args[0]) else 0;
+    if (pos < 0 or pos >= arr.length()) {
+        try ctx.vm.setPendingException("OutOfBoundsException", "Seek position is out of range");
+        return error.RuntimeError;
+    }
+    try obj.set(ctx.allocator, "__cursor", .{ .int = pos });
+    return .null;
 }
 
 fn aiCount(ctx: *NativeContext, _: []const Value) RuntimeError!Value {

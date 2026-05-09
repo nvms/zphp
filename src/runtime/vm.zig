@@ -1708,7 +1708,7 @@ pub const VM = struct {
                         if (resolved) |ri| {
                             self.push(.{ .string = s[ri..][0..1] });
                         } else {
-                            self.push(.null);
+                            self.push(.{ .string = "" });
                         }
                     } else {
                         self.push(.null);
@@ -2447,8 +2447,13 @@ pub const VM = struct {
                         const v = arr_val.array.get(Value.toArrayKey(key));
                         self.push(.{ .bool = v != .null });
                     } else if (arr_val == .string) {
+                        const s = arr_val.string;
                         const idx = Value.toInt(key);
-                        self.push(.{ .bool = idx >= 0 and @as(usize, @intCast(idx)) < arr_val.string.len });
+                        const valid = if (idx >= 0)
+                            @as(usize, @intCast(idx)) < s.len
+                        else
+                            @as(usize, @intCast(-idx)) <= s.len;
+                        self.push(.{ .bool = valid });
                     } else {
                         self.push(.{ .bool = false });
                     }
