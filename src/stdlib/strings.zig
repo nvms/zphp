@@ -116,6 +116,7 @@ pub const entries = .{
     .{ "vsprintf", native_vsprintf },
     .{ "vprintf", native_vprintf },
     .{ "sscanf", native_sscanf },
+    .{ "fscanf", native_fscanf },
     .{ "levenshtein", native_levenshtein },
     .{ "similar_text", native_similar_text },
     .{ "soundex", native_soundex },
@@ -3607,6 +3608,20 @@ fn native_vprintf(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     const result = try sprintfImpl(ctx, fmt_str, vals);
     try ctx.vm.output.appendSlice(ctx.allocator, result);
     return .{ .int = @intCast(result.len) };
+}
+
+fn native_fscanf(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len < 2 or args[0] != .object) return .null;
+    // read one line via fgets
+    const line = try ctx.vm.callByName("fgets", &.{args[0]});
+    if (line == .bool and !line.bool) return .{ .bool = false };
+    if (line != .string) return .null;
+    // delegate to sscanf with the line as input
+    var sscanf_args = std.ArrayListUnmanaged(Value){};
+    defer sscanf_args.deinit(ctx.allocator);
+    try sscanf_args.append(ctx.allocator, line);
+    for (args[1..]) |a| try sscanf_args.append(ctx.allocator, a);
+    return native_sscanf(ctx, sscanf_args.items);
 }
 
 fn native_sscanf(ctx: *NativeContext, args: []const Value) RuntimeError!Value {

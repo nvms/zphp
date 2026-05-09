@@ -43,6 +43,7 @@ pub const entries = .{
     .{ "fclose", native_fclose },
     .{ "fread", native_fread },
     .{ "fwrite", native_fwrite },
+    .{ "fpassthru", native_fpassthru },
     .{ "fgets", native_fgets },
     .{ "fgetc", native_fgetc },
     .{ "feof", native_feof },
@@ -1069,6 +1070,20 @@ fn native_fclose(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
 fn isZlibWriting(obj: *PhpObject) bool {
     const v = obj.get("__zlib_writing");
     return v == .bool and v.bool;
+}
+
+fn native_fpassthru(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len == 0 or args[0] != .object) return .{ .int = 0 };
+    var total: i64 = 0;
+    const chunk: i64 = 4096;
+    while (true) {
+        const result = ctx.vm.callByName("fread", &.{ args[0], .{ .int = chunk } }) catch break;
+        if (result != .string or result.string.len == 0) break;
+        try ctx.vm.output.appendSlice(ctx.allocator, result.string);
+        total += @intCast(result.string.len);
+        if (result.string.len < @as(usize, @intCast(chunk))) break;
+    }
+    return .{ .int = total };
 }
 
 fn native_fread(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
