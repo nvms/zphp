@@ -336,6 +336,8 @@ pub const VM = struct {
     trait_static_props: std.StringHashMapUnmanaged([]const TraitStaticProp) = .{},
     trait_constants: std.StringHashMapUnmanaged([]const TraitStaticProp) = .{},
     statics: std.StringHashMapUnmanaged(Value) = .{},
+    statics_cells: std.StringHashMapUnmanaged(*Value) = .{},
+    pending_call_name: ?[]const u8 = null,
     static_vars: std.ArrayListUnmanaged(StaticEntry) = .{},
     global_vars: std.ArrayListUnmanaged(StaticEntry) = .{},
     file_loader: ?*const FileLoader = null,
@@ -462,6 +464,9 @@ pub const VM = struct {
         ref_array_bindings: std.ArrayListUnmanaged(ArrayRefBinding) = .{},
         ref_object_bindings: std.ArrayListUnmanaged(ObjectRefBinding) = .{},
         called_class: ?[]const u8 = null,
+        // name the function was looked up by - distinguishes closure instances
+        // (which all share the same ObjFunction) for per-instance static state.
+        call_name: ?[]const u8 = null,
         entry_sp: usize = 0,
     };
 
@@ -899,6 +904,9 @@ pub const VM = struct {
         while (tc_iter.next()) |props| self.allocator.free(props.*);
         self.trait_constants.deinit(self.allocator);
         self.statics.deinit(self.allocator);
+        var sc_iter = self.statics_cells.iterator();
+        while (sc_iter.next()) |entry| self.allocator.destroy(entry.value_ptr.*);
+        self.statics_cells.deinit(self.allocator);
         self.static_vars.deinit(self.allocator);
         self.global_vars.deinit(self.allocator);
         self.loaded_files.deinit(self.allocator);
@@ -2712,13 +2720,24 @@ pub const VM = struct {
                 .get_static => {
                     const name_idx = self.readU16();
                     const var_name = self.currentChunk().constants.items[name_idx].string;
-                    const val = self.getStaticVar(var_name);
-                    self.push(val);
-                    // register for writeback on frame exit
-                    try self.static_vars.append(self.allocator, .{
-                        .var_name = var_name,
-                        .frame_depth = self.frame_count,
-                    });
+                    // share a heap cell across all frames running the same function so
+                    // recursive calls and across-call state stay in sync (matches PHP's
+                    // static variable semantics).
+                    const func_name = self.currentFuncName() orelse "__main__";
+                    var key_buf: [256]u8 = undefined;
+                    const key = std.fmt.bufPrint(&key_buf, "{s}::{s}", .{ func_name, var_name }) catch "";
+                    var cell = self.statics_cells.get(key);
+                    if (cell == null) {
+                        const c = try self.allocator.create(Value);
+                        c.* = self.statics.get(key) orelse .null;
+                        const owned_key = try self.allocator.dupe(u8, key);
+                        try self.strings.append(self.allocator, owned_key);
+                        try self.statics_cells.put(self.allocator, owned_key, c);
+                        cell = c;
+                    }
+                    self.push(cell.?.*);
+                    // bind var_name as a true reference to the shared cell
+                    try self.currentFrame().ref_slots.put(self.allocator, var_name, cell.?);
                 },
 
                 .set_static => {},
@@ -6562,7 +6581,7 @@ pub const VM = struct {
                 self.sp -= ac;
                 try self.fillDefaults(&new_vars, func, bind_count);
                 const inherit_cc = self.closureScopeByName(name) orelse self.currentFrame().called_class;
-                self.frames[self.frame_count] = .{ .chunk = &func.chunk, .ip = 0, .vars = new_vars, .locals = try self.allocLocals(func, &new_vars), .func = func, .ref_slots = closure_refs, .called_class = inherit_cc };
+                self.frames[self.frame_count] = .{ .chunk = &func.chunk, .ip = 0, .vars = new_vars, .locals = try self.allocLocals(func, &new_vars), .func = func, .ref_slots = closure_refs, .called_class = inherit_cc, .call_name = name };
                 self.frames[self.frame_count].entry_sp = self.sp;
                 self.setFrameArgCount(arg_count);
                 self.frame_count += 1;
@@ -6609,7 +6628,7 @@ pub const VM = struct {
             }
         }
 
-        self.frames[self.frame_count] = .{ .chunk = &func.chunk, .ip = 0, .vars = .{}, .locals = locals, .func = func, .called_class = self.closureScopeByName(name) orelse self.currentFrame().called_class };
+        self.frames[self.frame_count] = .{ .chunk = &func.chunk, .ip = 0, .vars = .{}, .locals = locals, .func = func, .called_class = self.closureScopeByName(name) orelse self.currentFrame().called_class, .call_name = name };
         self.frames[self.frame_count].entry_sp = self.sp;
         self.setFrameArgCount(arg_count);
         self.frame_count += 1;
@@ -6691,9 +6710,10 @@ pub const VM = struct {
         const base_handler = self.handler_count;
         const prev_floor = self.handler_floor;
         self.handler_floor = self.handler_count;
-        self.frames[self.frame_count] = .{ .chunk = &func.chunk, .ip = 0, .vars = .{}, .locals = locals, .func = func };
+        self.frames[self.frame_count] = .{ .chunk = &func.chunk, .ip = 0, .vars = .{}, .locals = locals, .func = func, .call_name = self.pending_call_name };
         self.frames[self.frame_count].entry_sp = self.sp;
         self.consumePendingArgCount();
+        self.pending_call_name = null;
         self.frame_count += 1;
         self.runUntilFrame(base_frame) catch |err| {
             self.handler_count = base_handler;
@@ -7294,6 +7314,11 @@ pub const VM = struct {
     }
 
     fn currentFuncName(self: *VM) ?[]const u8 {
+        // prefer the per-frame call_name so closure instances (which share an
+        // ObjFunction) are distinguished for static-var ownership
+        if (self.frame_count > 0) {
+            if (self.frames[self.frame_count - 1].call_name) |n| return n;
+        }
         const chunk_ptr = self.currentChunk();
         var it = self.functions.iterator();
         while (it.next()) |entry| {
@@ -7982,9 +8007,10 @@ pub const VM = struct {
         const base_handler = self.handler_count;
         const prev_floor = self.handler_floor;
         self.handler_floor = self.handler_count;
-        self.frames[self.frame_count] = .{ .chunk = &func.chunk, .ip = 0, .vars = vars, .locals = try self.allocLocals(func, &vars), .func = func };
+        self.frames[self.frame_count] = .{ .chunk = &func.chunk, .ip = 0, .vars = vars, .locals = try self.allocLocals(func, &vars), .func = func, .call_name = self.pending_call_name };
         self.frames[self.frame_count].entry_sp = self.sp;
         self.consumePendingArgCount();
+        self.pending_call_name = null;
         self.frame_count += 1;
         self.runUntilFrame(base_frame) catch |err| {
             self.handler_count = base_handler;
@@ -8005,9 +8031,10 @@ pub const VM = struct {
         const base_handler = self.handler_count;
         const prev_floor = self.handler_floor;
         self.handler_floor = self.handler_count;
-        self.frames[self.frame_count] = .{ .chunk = &func.chunk, .ip = 0, .vars = vars, .locals = try self.allocLocals(func, &vars), .func = func, .ref_slots = ref_slots };
+        self.frames[self.frame_count] = .{ .chunk = &func.chunk, .ip = 0, .vars = vars, .locals = try self.allocLocals(func, &vars), .func = func, .ref_slots = ref_slots, .call_name = self.pending_call_name };
         self.frames[self.frame_count].entry_sp = self.sp;
         self.consumePendingArgCount();
+        self.pending_call_name = null;
         self.frame_count += 1;
         self.runUntilFrame(base_frame) catch |err| {
             self.handler_count = base_handler;
@@ -8230,6 +8257,7 @@ pub const VM = struct {
             if (g_type_info.count() > 0) {
                 if (try self.checkParamTypes(name, arg_count)) return;
             }
+            self.pending_call_name = name;
             if (func.locals_only) {
                 if (self.captures.items.len == 0 or !self.hasCaptures(name))
                     return self.callLocalsOnly(func, arg_count);
@@ -8291,7 +8319,7 @@ pub const VM = struct {
                     self.closureScopeByName(name) orelse self.currentFrame().called_class
                 else
                     null;
-                self.frames[self.frame_count] = .{ .chunk = &func.chunk, .ip = 0, .vars = new_vars, .locals = try self.allocLocals(func, &new_vars), .func = func, .ref_slots = callee_refs, .ref_array_bindings = callee_array_bindings, .ref_object_bindings = callee_object_bindings, .called_class = inherit_cc };
+                self.frames[self.frame_count] = .{ .chunk = &func.chunk, .ip = 0, .vars = new_vars, .locals = try self.allocLocals(func, &new_vars), .func = func, .ref_slots = callee_refs, .ref_array_bindings = callee_array_bindings, .ref_object_bindings = callee_object_bindings, .called_class = inherit_cc, .call_name = name };
                 self.frames[self.frame_count].entry_sp = self.sp;
                 self.setFrameArgCount(arg_count);
                 self.frame_count += 1;
@@ -8386,6 +8414,7 @@ pub const VM = struct {
         } else if (self.functions.get(name)) |func| {
             if (args.len < func.required_params) return error.RuntimeError;
             if (self.ic) |ic| ic.pending_arg_count = @intCast(@min(args.len, 255));
+            self.pending_call_name = name;
             if (func.locals_only) {
                 if (self.captures.items.len == 0)
                     return self.executeFunctionLocalsOnly(func, args);
