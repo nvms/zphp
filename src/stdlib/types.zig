@@ -626,20 +626,60 @@ fn native_get_object_vars(ctx: *NativeContext, args: []const Value) RuntimeError
     if (args.len == 0 or args[0] != .object) return Value{ .bool = false };
     const obj = args[0].object;
     var arr = try ctx.createArray();
+
+    // Determine caller's class scope via the calling frame's function name (which is
+    // "Class::method" for methods and a plain name for free functions).
+    const caller_class: ?[]const u8 = blk: {
+        // natives run inline, so the caller is the current frame
+        if (ctx.vm.frame_count < 1) break :blk null;
+        const caller_frame = ctx.vm.frames[ctx.vm.frame_count - 1];
+        const cf = caller_frame.func orelse break :blk null;
+        const sep = std.mem.indexOf(u8, cf.name, "::") orelse break :blk null;
+        break :blk cf.name[0..sep];
+    };
+    const can_see_all = caller_class != null and std.mem.eql(u8, caller_class.?, obj.class_name);
+    const can_see_protected = caller_class != null and isInClassHierarchy(ctx.vm, caller_class.?, obj.class_name);
+    const class_def = ctx.vm.classes.get(obj.class_name);
+
     if (obj.slot_layout) |layout| {
         if (obj.slots) |slots| {
             for (layout.names, 0..) |name, i| {
                 if (name.len > 1 and name[0] == '_' and name[1] == '_') continue;
+                const vis = propVisibility(class_def, name);
+                if (vis == .private and !can_see_all) continue;
+                if (vis == .protected and !can_see_protected) continue;
                 try arr.set(ctx.allocator, .{ .string = name }, slots[i]);
             }
         }
     }
     var iter = obj.properties.iterator();
     while (iter.next()) |entry| {
-        if (entry.key_ptr.*.len > 0 and entry.key_ptr.*[0] == '_' and entry.key_ptr.*.len > 1 and entry.key_ptr.*[1] == '_') continue;
-        try arr.set(ctx.allocator, .{ .string = entry.key_ptr.* }, entry.value_ptr.*);
+        const name = entry.key_ptr.*;
+        if (name.len > 1 and name[0] == '_' and name[1] == '_') continue;
+        const vis = propVisibility(class_def, name);
+        if (vis == .private and !can_see_all) continue;
+        if (vis == .protected and !can_see_protected) continue;
+        try arr.set(ctx.allocator, .{ .string = name }, entry.value_ptr.*);
     }
     return .{ .array = arr };
+}
+
+fn propVisibility(class_def: ?@import("../runtime/vm.zig").ClassDef, name: []const u8) @import("../runtime/vm.zig").ClassDef.Visibility {
+    const cls = class_def orelse return .public;
+    for (cls.properties.items) |pdef| {
+        if (std.mem.eql(u8, pdef.name, name)) return pdef.visibility;
+    }
+    return .public;
+}
+
+fn isInClassHierarchy(vm: *@import("../runtime/vm.zig").VM, candidate: []const u8, target: []const u8) bool {
+    if (std.mem.eql(u8, candidate, target)) return true;
+    var current = vm.classes.get(target) orelse return false;
+    while (current.parent) |p| {
+        if (std.mem.eql(u8, p, candidate)) return true;
+        current = vm.classes.get(p) orelse return false;
+    }
+    return false;
 }
 
 fn native_get_class_methods(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
