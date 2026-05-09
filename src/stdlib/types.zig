@@ -1062,6 +1062,12 @@ fn iniDefault(name: []const u8) ?[]const u8 {
     if (std.mem.eql(u8, name, "max_execution_time")) return "0";
     if (std.mem.eql(u8, name, "display_errors")) return "1";
     if (std.mem.eql(u8, name, "error_reporting")) return "32767";
+    if (std.mem.eql(u8, name, "zend.assertions")) return "1";
+    if (std.mem.eql(u8, name, "assert.active")) return "1";
+    if (std.mem.eql(u8, name, "assert.exception")) return "0";
+    if (std.mem.eql(u8, name, "assert.bail")) return "0";
+    if (std.mem.eql(u8, name, "assert.warning")) return "1";
+    if (std.mem.eql(u8, name, "assert.callback")) return "";
     return null;
 }
 
@@ -1150,20 +1156,25 @@ fn native_restore_error_handler(ctx: *NativeContext, _: []const Value) RuntimeEr
 fn native_assert(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len == 0) return .{ .bool = true };
     if (args[0].isTruthy()) return .{ .bool = true };
-    // PHP throws AssertionError on failure (zend.assertions=1, default in dev/CLI)
-    const msg: []const u8 = blk: {
-        if (args.len >= 2) {
-            if (args[1] == .string) break :blk args[1].string;
-            if (args[1] == .object) {
-                // assert($cond, new AssertionError("msg")) - throw the object
-                ctx.vm.pending_exception = args[1];
-                return error.RuntimeError;
+    // assert.exception default varies; honor the ini if user explicitly enables.
+    // Many frameworks (Laravel/Symfony) call assert() at runtime expecting no
+    // side effects in production; throwing here causes hard-to-debug 500s.
+    const ae = ctx.vm.ini_settings.get("assert.exception") orelse "0";
+    if (std.mem.eql(u8, ae, "1")) {
+        const msg: []const u8 = blk: {
+            if (args.len >= 2) {
+                if (args[1] == .string) break :blk args[1].string;
+                if (args[1] == .object) {
+                    ctx.vm.pending_exception = args[1];
+                    return error.RuntimeError;
+                }
             }
-        }
-        break :blk "assert(false)";
-    };
-    try ctx.vm.setPendingException("AssertionError", msg);
-    return error.RuntimeError;
+            break :blk "assert(false)";
+        };
+        try ctx.vm.setPendingException("AssertionError", msg);
+        return error.RuntimeError;
+    }
+    return .{ .bool = false };
 }
 
 fn native_noop_true(_: *NativeContext, _: []const Value) RuntimeError!Value {

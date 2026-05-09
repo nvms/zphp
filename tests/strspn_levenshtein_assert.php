@@ -86,7 +86,9 @@ hash_update($c2, " from c2");
 echo hash_final($c1), "\n";
 echo hash_final($c2), "\n";
 
-// assert
+// assert - opt in to throwing behavior via assert.exception ini
+ini_set('zend.assertions', '1');
+ini_set('assert.exception', '1');
 assert(true, "should pass");
 echo "after assert true\n";
 try { assert(false); echo "no err\n"; } catch (\AssertionError $e) { echo "ae:", $e->getMessage(), "\n"; }
