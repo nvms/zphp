@@ -4,6 +4,16 @@ const NativeContext = @import("../runtime/vm.zig").NativeContext;
 const ClassDef = @import("../runtime/vm.zig").ClassDef;
 const RuntimeError = error{ RuntimeError, OutOfMemory };
 
+// Per-call visited-pointer stack used to detect recursion during dump operations.
+// Single-threaded, so a module-level scratch list is fine. Cleared at the start of
+// each public entry point (var_dump / print_r / var_export).
+var visited_ptrs: std.ArrayListUnmanaged(usize) = .{};
+
+fn visitedContains(p: usize) bool {
+    for (visited_ptrs.items) |x| if (x == p) return true;
+    return false;
+}
+
 pub const entries = .{
     .{ "var_dump", var_dump },
     .{ "print_r", print_r },
@@ -11,6 +21,12 @@ pub const entries = .{
 };
 
 fn var_dump(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    visited_ptrs.deinit(ctx.allocator);
+    visited_ptrs = .{};
+    defer {
+        visited_ptrs.deinit(ctx.allocator);
+        visited_ptrs = .{};
+    }
     for (args) |arg| try varDumpValue(ctx, arg, 0);
     return .null;
 }
@@ -55,6 +71,15 @@ fn varDumpValue(ctx: *NativeContext, val: Value, depth: usize) !void {
             try out.appendSlice(a, "\"\n");
         },
         .array => |arr| {
+            const arr_ptr = @intFromPtr(arr);
+            if (visitedContains(arr_ptr)) {
+                try appendIndent(out, a, indent);
+                try out.appendSlice(a, "*RECURSION*\n");
+                return;
+            }
+            try visited_ptrs.append(a, arr_ptr);
+            defer _ = visited_ptrs.pop();
+
             try appendIndent(out, a, indent);
             try out.appendSlice(a, "array(");
             var tmp: [32]u8 = undefined;
@@ -82,6 +107,15 @@ fn varDumpValue(ctx: *NativeContext, val: Value, depth: usize) !void {
             try out.appendSlice(a, "}\n");
         },
         .object => |obj| {
+            const obj_ptr = @intFromPtr(obj);
+            if (visitedContains(obj_ptr)) {
+                try appendIndent(out, a, indent);
+                try out.appendSlice(a, "*RECURSION*\n");
+                return;
+            }
+            try visited_ptrs.append(a, obj_ptr);
+            defer _ = visited_ptrs.pop();
+
             // honor __debugInfo if defined
             var debug_arr: ?*@import("../runtime/value.zig").PhpArray = null;
             if (ctx.vm.hasMethod(obj.class_name, "__debugInfo")) {
