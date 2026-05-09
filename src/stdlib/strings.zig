@@ -156,12 +156,16 @@ fn substr(_: *NativeContext, args: []const Value) RuntimeError!Value {
     return .{ .string = s[ustart..] };
 }
 
-fn strpos(_: *NativeContext, args: []const Value) RuntimeError!Value {
+fn strpos(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len < 2) return .{ .bool = false };
     const haystack = if (args[0] == .string) args[0].string else return Value{ .bool = false };
     const needle = if (args[1] == .string) args[1].string else return Value{ .bool = false };
     const hlen: i64 = @intCast(haystack.len);
     const raw_off: i64 = if (args.len >= 3) Value.toInt(args[2]) else 0;
+    if (raw_off > hlen or raw_off < -hlen) {
+        try ctx.vm.setPendingException("ValueError", "strpos(): Argument #3 ($offset) must be contained in argument #1 ($haystack)");
+        return error.RuntimeError;
+    }
     const off_i: i64 = if (raw_off < 0) @max(0, hlen + raw_off) else raw_off;
     if (off_i > hlen) return .{ .bool = false };
     const offset: usize = @intCast(off_i);

@@ -132,6 +132,7 @@ fn parsePattern(raw: []const u8) ?PatternInfo {
             'x' => flags |= pcre2.EXTENDED,
             'u' => flags |= pcre2.UTF | pcre2.UCP,
             'A' => flags |= pcre2.ANCHORED,
+            'e' => return null,
             else => {},
         }
     }
