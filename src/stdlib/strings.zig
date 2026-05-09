@@ -1620,7 +1620,13 @@ fn native_addslashes(ctx: *NativeContext, args: []const Value) RuntimeError!Valu
     const s = if (args[0] == .string) args[0].string else return Value{ .string = "" };
     var buf = std.ArrayListUnmanaged(u8){};
     for (s) |c| {
-        if (c == '\'' or c == '"' or c == '\\' or c == 0) {
+        if (c == 0) {
+            // PHP encodes NUL as the literal sequence "\0" (backslash + zero digit)
+            try buf.append(ctx.allocator, '\\');
+            try buf.append(ctx.allocator, '0');
+            continue;
+        }
+        if (c == '\'' or c == '"' or c == '\\') {
             try buf.append(ctx.allocator, '\\');
         }
         try buf.append(ctx.allocator, c);
@@ -1886,6 +1892,8 @@ fn native_htmlspecialchars(ctx: *NativeContext, args: []const Value) RuntimeErro
     const flags: i64 = if (args.len >= 2) Value.toInt(args[1]) else 3;
     const escape_double = (flags & 2) != 0;
     const escape_single = (flags & 1) != 0;
+    // PHP outputs &apos; for single quotes when ENT_HTML5 (or XHTML/XML1) is set
+    const html5_mode = (flags & 48) != 0;
     const double_encode: bool = if (args.len >= 4) args[3].isTruthy() else true;
     var buf = std.ArrayListUnmanaged(u8){};
     var i: usize = 0;
@@ -1902,7 +1910,9 @@ fn native_htmlspecialchars(ctx: *NativeContext, args: []const Value) RuntimeErro
                 }
             },
             '"' => if (escape_double) try buf.appendSlice(ctx.allocator, "&quot;") else try buf.append(ctx.allocator, '"'),
-            '\'' => if (escape_single) try buf.appendSlice(ctx.allocator, "&#039;") else try buf.append(ctx.allocator, '\''),
+            '\'' => if (escape_single) {
+                try buf.appendSlice(ctx.allocator, if (html5_mode) "&apos;" else "&#039;");
+            } else try buf.append(ctx.allocator, '\''),
             '<' => try buf.appendSlice(ctx.allocator, "&lt;"),
             '>' => try buf.appendSlice(ctx.allocator, "&gt;"),
             else => try buf.append(ctx.allocator, c),

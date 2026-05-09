@@ -913,7 +913,11 @@ fn preg_split(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
         const match_end = ovector[1];
 
         const piece = try ctx.createString(subject[offset..match_start]);
-        if (!no_empty or piece.len > 0) {
+        // for zero-width matches the "piece before delim" duplicates the
+        // single-char emit below; skip the empty piece except at start/end
+        const is_zero_width = match_end == offset;
+        const skip_empty_piece = is_zero_width and offset > 0 and offset < subject.len;
+        if ((!no_empty or piece.len > 0) and !skip_empty_piece) {
             if (offset_capture) {
                 var pair = try ctx.createArray();
                 try pair.append(ctx.allocator, .{ .string = piece });
