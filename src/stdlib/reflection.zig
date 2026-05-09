@@ -595,7 +595,7 @@ fn buildPropertyObj(ctx: *NativeContext, class_name: []const u8, prop: ClassDef.
     try obj.set(ctx.allocator, "name", .{ .string = prop.name });
     try obj.set(ctx.allocator, "class", .{ .string = class_name });
     try obj.set(ctx.allocator, "_visibility", .{ .int = @intFromEnum(prop.visibility) });
-    try obj.set(ctx.allocator, "_has_default", .{ .bool = prop.default != .null });
+    try obj.set(ctx.allocator, "_has_default", .{ .bool = prop.has_default });
     try obj.set(ctx.allocator, "_default_value", prop.default);
     try obj.set(ctx.allocator, "_declaring_class", .{ .string = declaring_class });
     try obj.set(ctx.allocator, "_is_readonly", .{ .bool = prop.is_readonly });
@@ -1764,6 +1764,12 @@ fn rfConstruct(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
         if (ctx.vm.functions.get(func_name) == null and ctx.vm.native_fns.get(func_name) == null)
             return throwReflection(ctx, "Function does not exist");
         try this.set(ctx.allocator, "name", .{ .string = func_name });
+        // closures created inside a class method inherit that class as their scope
+        if (std.mem.startsWith(u8, func_name, "__closure_")) {
+            if (ctx.vm.closureScopeByName(func_name)) |scope| {
+                try this.set(ctx.allocator, "__scope_class", .{ .string = scope });
+            }
+        }
     } else if (args[0] == .array) {
         // array callable [$obj, 'method'] - store as method reference
         const arr = args[0].array;

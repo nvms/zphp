@@ -244,6 +244,7 @@ pub const ClassDef = struct {
     pub const PropertyDef = struct {
         name: []const u8,
         default: Value,
+        has_default: bool = false,
         visibility: Visibility = .public,
         set_visibility: Visibility = .public,
         is_readonly: bool = false,
@@ -5794,6 +5795,7 @@ pub const VM = struct {
             try def.properties.append(self.allocator, .{
                 .name = prop_names[pi],
                 .default = default_val,
+                .has_default = prop_has_default[pi] == 1,
                 .visibility = prop_vis[pi],
                 .set_visibility = prop_set_vis[pi],
                 .is_readonly = prop_readonly[pi] or def.is_readonly,
@@ -7524,7 +7526,7 @@ pub const VM = struct {
         return null;
     }
 
-    fn closureScopeByName(self: *VM, name: []const u8) ?[]const u8 {
+    pub fn closureScopeByName(self: *VM, name: []const u8) ?[]const u8 {
         if (self.capture_index.get(name)) |cr| {
             const caps = self.captures.items[cr.start .. cr.start + cr.len];
             for (caps) |cap| {

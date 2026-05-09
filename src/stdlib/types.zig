@@ -473,10 +473,25 @@ fn method_exists(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
         return .{ .bool = false };
     }
     var buf: [256]u8 = undefined;
+    var depth: usize = 0;
     while (current) |cn| {
-        const full = std.fmt.bufPrint(&buf, "{s}::{s}", .{ cn, method_name }) catch return Value{ .bool = false };
-        if (ctx.vm.native_fns.contains(full)) return .{ .bool = true };
-        if (ctx.vm.functions.contains(full)) return .{ .bool = true };
+        var private_at_this_class = false;
+        if (ctx.vm.classes.get(cn)) |cls| {
+            if (cls.methods.get(method_name)) |info| {
+                if (info.visibility == .private) private_at_this_class = true;
+            }
+        }
+        // ancestor private methods are not visible from a subclass
+        if (depth > 0 and private_at_this_class) {
+            // skip this class's match; continue up
+        } else {
+            const full = std.fmt.bufPrint(&buf, "{s}::{s}", .{ cn, method_name }) catch return Value{ .bool = false };
+            if (ctx.vm.native_fns.contains(full)) return .{ .bool = true };
+            if (ctx.vm.functions.contains(full)) return .{ .bool = true };
+            if (ctx.vm.classes.get(cn)) |cls| {
+                if (cls.methods.contains(method_name)) return .{ .bool = true };
+            }
+        }
         if (ctx.vm.classes.get(cn)) |cls| {
             current = cls.parent;
         } else {
@@ -485,6 +500,7 @@ fn method_exists(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
                 current = cls.parent;
             } else break;
         }
+        depth += 1;
     }
     return .{ .bool = false };
 }
