@@ -41,6 +41,7 @@ pub const entries = .{
     .{ "number_format", native_number_format },
     .{ "sprintf", native_sprintf },
     .{ "printf", native_printf },
+    .{ "fprintf", native_fprintf },
     .{ "addslashes", native_addslashes },
     .{ "stripslashes", native_stripslashes },
     .{ "htmlspecialchars", native_htmlspecialchars },
@@ -961,6 +962,14 @@ fn native_printf(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     const result = try sprintfImpl(ctx, fmt_str, args[1..]);
     try ctx.vm.output.appendSlice(ctx.allocator, result);
     return .{ .int = @intCast(result.len) };
+}
+
+fn native_fprintf(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len < 2) return .{ .int = 0 };
+    const fmt_str = if (args[1] == .string) args[1].string else return Value{ .int = 0 };
+    const result = try sprintfImpl(ctx, fmt_str, args[2..]);
+    const written = try ctx.vm.callByName("fwrite", &.{ args[0], .{ .string = result } });
+    return written;
 }
 
 fn sprintfImpl(ctx: *NativeContext, fmt_str: []const u8, args: []const Value) ![]const u8 {

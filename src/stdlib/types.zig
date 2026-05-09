@@ -235,7 +235,8 @@ fn gettype(_: *NativeContext, args: []const Value) RuntimeError!Value {
         .float => "double",
         .string => |s| if (std.mem.startsWith(u8, s, "__closure_")) "object" else "string",
         .array => "array",
-        .object, .generator, .fiber => "object",
+        .object => |o| if (std.mem.eql(u8, o.class_name, "FileHandle")) "resource" else "object",
+        .generator, .fiber => "object",
     } };
 }
 
@@ -594,7 +595,8 @@ fn native_settype(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
         }
         return .{ .object = obj };
     }
-    return val;
+    try ctx.vm.setPendingException("ValueError", "settype(): Argument #2 ($type) must be a valid type");
+    return error.RuntimeError;
 }
 
 fn native_call_user_func(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
