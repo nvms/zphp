@@ -84,6 +84,7 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try dt_def.methods.put(a, "getLastErrors", .{ .name = "getLastErrors", .arity = 0, .is_static = true });
     try dt_def.methods.put(a, "getTimezone", .{ .name = "getTimezone", .arity = 0 });
     try dt_def.methods.put(a, "setTimezone", .{ .name = "setTimezone", .arity = 1 });
+    try dt_def.methods.put(a, "createFromImmutable", .{ .name = "createFromImmutable", .arity = 1, .is_static = true });
     inline for (DT_FORMAT_CONSTS) |c| {
         try dt_def.static_props.put(a, c[0], .{ .string = c[1] });
     }
@@ -124,6 +125,7 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try dti_def.methods.put(a, "getTimezone", .{ .name = "getTimezone", .arity = 0 });
     try dti_def.methods.put(a, "setTimezone", .{ .name = "setTimezone", .arity = 1 });
     try dti_def.methods.put(a, "createFromFormat", .{ .name = "createFromFormat", .arity = 2, .is_static = true });
+    try dti_def.methods.put(a, "createFromMutable", .{ .name = "createFromMutable", .arity = 1, .is_static = true });
     inline for (DT_FORMAT_CONSTS) |c| {
         try dti_def.static_props.put(a, c[0], .{ .string = c[1] });
     }
@@ -145,6 +147,8 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try vm.native_fns.put(a, "DateTimeImmutable::setDate", dtiSetDate);
     try vm.native_fns.put(a, "DateTimeImmutable::setTime", dtiSetTime);
     try vm.native_fns.put(a, "DateTimeImmutable::setTimestamp", dtiSetTimestamp);
+    try vm.native_fns.put(a, "DateTimeImmutable::createFromMutable", dtiCreateFromMutable);
+    try vm.native_fns.put(a, "DateTime::createFromImmutable", dtCreateFromImmutable);
 
     // DateTimeZone class
     var dtz_def = ClassDef{ .name = "DateTimeZone" };
@@ -889,6 +893,24 @@ fn dtCreateFromTimestamp(ctx: *NativeContext, args: []const Value) RuntimeError!
 
 fn dtCreateFromFormat(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     return createFromFormatImpl(ctx, args, "DateTime");
+}
+
+fn dtCreateFromImmutable(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len == 0 or args[0] != .object) return .null;
+    const src = args[0].object;
+    const obj = try ctx.createObject("DateTime");
+    try obj.set(ctx.allocator, "timestamp", src.get("timestamp"));
+    if (src.get("__timezone") == .string) try obj.set(ctx.allocator, "__timezone", src.get("__timezone"));
+    return .{ .object = obj };
+}
+
+fn dtiCreateFromMutable(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len == 0 or args[0] != .object) return .null;
+    const src = args[0].object;
+    const obj = try ctx.createObject("DateTimeImmutable");
+    try obj.set(ctx.allocator, "timestamp", src.get("timestamp"));
+    if (src.get("__timezone") == .string) try obj.set(ctx.allocator, "__timezone", src.get("__timezone"));
+    return .{ .object = obj };
 }
 
 fn native_date_create_from_format(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
@@ -2667,20 +2689,24 @@ fn diFormat(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len == 0 or args[0] != .string) return .{ .string = "" };
     const fmt = args[0].string;
 
-    const y: i64 = @intCast(@abs(Value.toInt(obj.get("y"))));
-    const m: i64 = @intCast(@abs(Value.toInt(obj.get("m"))));
-    const d: i64 = @intCast(@abs(Value.toInt(obj.get("d"))));
-    const h: i64 = @intCast(@abs(Value.toInt(obj.get("h"))));
-    const mi: i64 = @intCast(@abs(Value.toInt(obj.get("i"))));
-    const s: i64 = @intCast(@abs(Value.toInt(obj.get("s"))));
-    const f_us: i64 = blk: {
+    // formatting uses unsigned values so `{d}` doesn't insert a '+' sign
+    const y: u64 = @intCast(@abs(Value.toInt(obj.get("y"))));
+    const m: u64 = @intCast(@abs(Value.toInt(obj.get("m"))));
+    const d: u64 = @intCast(@abs(Value.toInt(obj.get("d"))));
+    const h: u64 = @intCast(@abs(Value.toInt(obj.get("h"))));
+    const mi: u64 = @intCast(@abs(Value.toInt(obj.get("i"))));
+    const s: u64 = @intCast(@abs(Value.toInt(obj.get("s"))));
+    const f_us: u64 = blk: {
         const fv = obj.get("f");
-        if (fv == .float) break :blk @intFromFloat(fv.float * 1_000_000.0);
+        if (fv == .float) {
+            const us: i64 = @intFromFloat(fv.float * 1_000_000.0);
+            break :blk @intCast(@abs(us));
+        }
         break :blk 0;
     };
     const days_v = obj.get("days");
     const has_days = days_v == .int;
-    const days_total: i64 = if (has_days) @intCast(@abs(days_v.int)) else 0;
+    const days_total: u64 = if (has_days) @intCast(@abs(days_v.int)) else 0;
     const invert = Value.toInt(obj.get("invert")) != 0;
 
     var buf = std.array_list.Managed(u8).init(ctx.allocator);
@@ -2696,7 +2722,7 @@ fn diFormat(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
         }
         i += 1;
         switch (fmt[i]) {
-            'Y' => try w.print("{d:0>4}", .{y}),
+            'Y' => try w.print("{d:0>2}", .{y}),
             'y' => try w.print("{d}", .{y}),
             'M' => try w.print("{d:0>2}", .{m}),
             'm' => try w.print("{d}", .{m}),
