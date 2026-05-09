@@ -284,25 +284,57 @@ fn implode(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
 
 const default_trim_chars = " \t\n\r\x0b\x00";
 
+// build the trim char set, expanding `a..b` ranges
+fn buildTrimSet(chars: []const u8) [256]bool {
+    var set: [256]bool = .{false} ** 256;
+    var i: usize = 0;
+    while (i < chars.len) {
+        if (i + 3 < chars.len and chars[i + 1] == '.' and chars[i + 2] == '.') {
+            const lo = chars[i];
+            const hi = chars[i + 3];
+            if (lo <= hi) {
+                var c: usize = lo;
+                while (c <= hi) : (c += 1) set[c] = true;
+                i += 4;
+                continue;
+            }
+        }
+        set[chars[i]] = true;
+        i += 1;
+    }
+    return set;
+}
+
+fn trimWithSet(s: []const u8, set: [256]bool, left: bool, right: bool) []const u8 {
+    var lo: usize = 0;
+    var hi: usize = s.len;
+    if (left) while (lo < hi and set[s[lo]]) : (lo += 1) {};
+    if (right) while (hi > lo and set[s[hi - 1]]) : (hi -= 1) {};
+    return s[lo..hi];
+}
+
 fn trim(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len == 0) return .{ .string = "" };
     const s = if (args[0] == .string) args[0].string else return Value{ .string = "" };
     const chars = if (args.len >= 2 and args[1] == .string) args[1].string else default_trim_chars;
-    return .{ .string = try ctx.createString(std.mem.trim(u8, s, chars)) };
+    const set = buildTrimSet(chars);
+    return .{ .string = try ctx.createString(trimWithSet(s, set, true, true)) };
 }
 
 fn ltrim(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len == 0) return .{ .string = "" };
     const s = if (args[0] == .string) args[0].string else return Value{ .string = "" };
     const chars = if (args.len >= 2 and args[1] == .string) args[1].string else default_trim_chars;
-    return .{ .string = try ctx.createString(std.mem.trimLeft(u8, s, chars)) };
+    const set = buildTrimSet(chars);
+    return .{ .string = try ctx.createString(trimWithSet(s, set, true, false)) };
 }
 
 fn rtrim(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len == 0) return .{ .string = "" };
     const s = if (args[0] == .string) args[0].string else return Value{ .string = "" };
     const chars = if (args.len >= 2 and args[1] == .string) args[1].string else default_trim_chars;
-    return .{ .string = try ctx.createString(std.mem.trimRight(u8, s, chars)) };
+    const set = buildTrimSet(chars);
+    return .{ .string = try ctx.createString(trimWithSet(s, set, false, true)) };
 }
 
 fn strtolower(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
@@ -585,17 +617,62 @@ fn native_substr_count(_: *NativeContext, args: []const Value) RuntimeError!Valu
 
 fn native_substr_replace(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len < 3) return if (args.len > 0) args[0] else Value{ .string = "" };
+
+    if (args[0] == .array) {
+        const src_arr = args[0].array;
+        var out = try ctx.createArray();
+        for (src_arr.entries.items, 0..) |entry, i| {
+            const elem_str: []const u8 = if (entry.value == .string) entry.value.string else "";
+            const repl_str: []const u8 = blk: {
+                if (args[1] == .array) {
+                    if (i < args[1].array.entries.items.len) {
+                        const v = args[1].array.entries.items[i].value;
+                        if (v == .string) break :blk v.string;
+                    }
+                    break :blk "";
+                }
+                break :blk if (args[1] == .string) args[1].string else "";
+            };
+            const start_val: i64 = blk: {
+                if (args[2] == .array) {
+                    if (i < args[2].array.entries.items.len)
+                        break :blk Value.toInt(args[2].array.entries.items[i].value);
+                    break :blk 0;
+                }
+                break :blk Value.toInt(args[2]);
+            };
+            const len_val: ?i64 = if (args.len >= 4) blk: {
+                if (args[3] == .array) {
+                    if (i < args[3].array.entries.items.len)
+                        break :blk Value.toInt(args[3].array.entries.items[i].value);
+                    break :blk 0;
+                }
+                break :blk Value.toInt(args[3]);
+            } else null;
+
+            const replaced = try substrReplaceOne(ctx, elem_str, repl_str, start_val, len_val);
+            try out.append(ctx.allocator, .{ .string = replaced });
+        }
+        return .{ .array = out };
+    }
+
     const s = if (args[0] == .string) args[0].string else return Value{ .string = "" };
     const replacement = if (args[1] == .string) args[1].string else "";
+    const start_val = Value.toInt(args[2]);
+    const len_val: ?i64 = if (args.len >= 4) Value.toInt(args[3]) else null;
+    const result = try substrReplaceOne(ctx, s, replacement, start_val, len_val);
+    return .{ .string = result };
+}
+
+fn substrReplaceOne(ctx: *NativeContext, s: []const u8, replacement: []const u8, start_in: i64, len_opt: ?i64) ![]const u8 {
     const slen: i64 = @intCast(s.len);
-    var start = Value.toInt(args[2]);
+    var start = start_in;
     if (start < 0) start = @max(0, slen + start);
     if (start > slen) start = slen;
     const ustart: usize = @intCast(start);
 
     var end: usize = s.len;
-    if (args.len >= 4) {
-        const length = Value.toInt(args[3]);
+    if (len_opt) |length| {
         if (length < 0) {
             end = @intCast(@max(0, slen + length));
             if (end < ustart) end = ustart;
@@ -610,7 +687,7 @@ fn native_substr_replace(ctx: *NativeContext, args: []const Value) RuntimeError!
     if (end < s.len) try buf.appendSlice(ctx.allocator, s[end..]);
     const result = try buf.toOwnedSlice(ctx.allocator);
     try ctx.strings.append(ctx.allocator, result);
-    return .{ .string = result };
+    return result;
 }
 
 fn native_str_word_count(ctx: *NativeContext, args: []const Value) RuntimeError!Value {

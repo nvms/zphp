@@ -945,7 +945,7 @@ fn native_version_compare(ctx: *NativeContext, args: []const Value) RuntimeError
             cmp > 0
         else if (std.mem.eql(u8, op, ">=") or std.mem.eql(u8, op, "ge"))
             cmp >= 0
-        else if (std.mem.eql(u8, op, "==") or std.mem.eql(u8, op, "eq"))
+        else if (std.mem.eql(u8, op, "==") or std.mem.eql(u8, op, "=") or std.mem.eql(u8, op, "eq"))
             cmp == 0
         else if (std.mem.eql(u8, op, "!=") or std.mem.eql(u8, op, "ne") or std.mem.eql(u8, op, "<>"))
             cmp != 0
