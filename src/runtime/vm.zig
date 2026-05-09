@@ -3245,6 +3245,14 @@ pub const VM = struct {
                     if (!self.classes.contains(class_name)) {
                         try self.tryAutoload(class_name);
                     }
+                    if (self.interfaces.contains(class_name)) {
+                        const ac_drop: usize = arg_count;
+                        self.sp -= ac_drop;
+                        const msg = try std.fmt.allocPrint(self.allocator, "Cannot instantiate interface {s}", .{class_name});
+                        try self.strings.append(self.allocator, msg);
+                        if (try self.throwBuiltinException("Error", msg)) continue;
+                        return error.RuntimeError;
+                    }
                     if (!self.classes.contains(class_name)) {
                         const ac_drop: usize = arg_count;
                         self.sp -= ac_drop;
