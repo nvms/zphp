@@ -13,6 +13,7 @@ pub const entries = .{
     .{ "floatval", floatval },
     .{ "strval", strval },
     .{ "gettype", gettype },
+    .{ "get_debug_type", get_debug_type },
     .{ "is_array", is_array },
     .{ "is_null", is_null },
     .{ "is_int", is_int },
@@ -241,6 +242,21 @@ fn gettype(_: *NativeContext, args: []const Value) RuntimeError!Value {
         .array => "array",
         .object => |o| if (std.mem.eql(u8, o.class_name, "FileHandle")) "resource" else "object",
         .generator, .fiber => "object",
+    } };
+}
+
+fn get_debug_type(_: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len == 0) return .{ .string = "null" };
+    return .{ .string = switch (args[0]) {
+        .null => "null",
+        .bool => "bool",
+        .int => "int",
+        .float => "float",
+        .string => |s| if (std.mem.startsWith(u8, s, "__closure_")) "Closure" else "string",
+        .array => "array",
+        .object => |o| o.class_name,
+        .generator => "Generator",
+        .fiber => "Fiber",
     } };
 }
 
@@ -1061,7 +1077,7 @@ fn iniDefault(name: []const u8) ?[]const u8 {
     if (std.mem.eql(u8, name, "memory_limit")) return "-1";
     if (std.mem.eql(u8, name, "max_execution_time")) return "0";
     if (std.mem.eql(u8, name, "display_errors")) return "1";
-    if (std.mem.eql(u8, name, "error_reporting")) return "32767";
+    if (std.mem.eql(u8, name, "error_reporting")) return "30719";
     if (std.mem.eql(u8, name, "zend.assertions")) return "1";
     if (std.mem.eql(u8, name, "assert.active")) return "1";
     if (std.mem.eql(u8, name, "assert.exception")) return "0";
@@ -1210,6 +1226,19 @@ fn native_trigger_error(ctx: *NativeContext, args: []const Value) RuntimeError!V
     const message = args[0].string;
     const errno: i64 = if (args.len >= 2) Value.toInt(args[1]) else 1024; // E_USER_NOTICE
 
+    if (errno == 256) {
+        const dep_msg = "Passing E_USER_ERROR to trigger_error() is deprecated since 8.4, throw an exception or call exit with a string message instead";
+        if (ctx.vm.user_error_handler) |handler| {
+            const ip0 = if (ctx.vm.frame_count > 0) ctx.vm.currentFrame().ip else 0;
+            const line0: i64 = if (ctx.vm.frame_count > 0)
+                if (ctx.vm.currentChunk().getSourceLocation(if (ip0 > 0) ip0 - 1 else 0, ctx.vm.source)) |loc| @intCast(loc.line) else 0
+            else
+                0;
+            const args_dep = &[_]Value{ .{ .int = 8192 }, .{ .string = dep_msg }, .{ .string = ctx.vm.file_path }, .{ .int = line0 } };
+            _ = try ctx.invokeCallable(handler, args_dep);
+        }
+    }
+
     const ip = if (ctx.vm.frame_count > 0) ctx.vm.currentFrame().ip else 0;
     const line: i64 = if (ctx.vm.frame_count > 0)
         if (ctx.vm.currentChunk().getSourceLocation(if (ip > 0) ip - 1 else 0, ctx.vm.source)) |loc| @intCast(loc.line) else 0
@@ -1230,7 +1259,7 @@ fn native_trigger_error(ctx: *NativeContext, args: []const Value) RuntimeError!V
             .{ .string = file },
             .{ .int = line },
         };
-        _ = ctx.invokeCallable(handler, call_args) catch {};
+        _ = try ctx.invokeCallable(handler, call_args);
         return .{ .bool = true };
     }
 

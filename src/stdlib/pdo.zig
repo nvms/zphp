@@ -949,7 +949,18 @@ fn stmtBindValue(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     const idx: c_int = if (param == .int) @intCast(param.int) else blk: {
         if (param != .string) break :blk @as(c_int, 0);
         const name = param.string;
-        break :blk sqlite.sqlite3_bind_parameter_index(stmt, @ptrCast(name.ptr));
+        const has_prefix = name.len > 0 and (name[0] == ':' or name[0] == '@' or name[0] == '$');
+        const buf = ctx.allocator.alloc(u8, name.len + (if (has_prefix) @as(usize, 1) else @as(usize, 2))) catch break :blk @as(c_int, 0);
+        defer ctx.allocator.free(buf);
+        if (has_prefix) {
+            @memcpy(buf[0..name.len], name);
+            buf[name.len] = 0;
+        } else {
+            buf[0] = ':';
+            @memcpy(buf[1 .. 1 + name.len], name);
+            buf[1 + name.len] = 0;
+        }
+        break :blk sqlite.sqlite3_bind_parameter_index(stmt, @ptrCast(buf.ptr));
     };
     if (idx == 0) return .{ .bool = false };
     const rc = switch (val) {

@@ -368,7 +368,7 @@ pub const VM = struct {
     last_error_file: []const u8 = "",
     last_error_line: i64 = 0,
     prev_error_handler: ?Value = null,
-    error_reporting_level: i64 = 32767,
+    error_reporting_level: i64 = 30719,
     ob_stack: std.ArrayListUnmanaged(OutputBufferLevel) = .{},
     request_vars: std.StringHashMapUnmanaged(Value) = .{},
     exception_handlers: [1024]ExceptionHandler = undefined,
@@ -509,7 +509,7 @@ pub const VM = struct {
         try @import("../stdlib/curl.zig").register(vm, allocator);
         try @import("../stdlib/phar_class.zig").register(vm, allocator);
         try @import("../stdlib/random.zig").register(vm, allocator);
-        vm.error_reporting_level = 32767;
+        vm.error_reporting_level = 30719;
         vm.ic = try allocator.create(InlineCache);
         vm.ic.?.* = .{};
         const locals_buf = try allocator.alloc(Value, 8192);
@@ -634,7 +634,7 @@ pub const VM = struct {
         try c.put(a, "E_RECOVERABLE_ERROR", .{ .int = 4096 });
         try c.put(a, "E_DEPRECATED", .{ .int = 8192 });
         try c.put(a, "E_USER_DEPRECATED", .{ .int = 16384 });
-        try c.put(a, "E_ALL", .{ .int = 32767 });
+        try c.put(a, "E_ALL", .{ .int = 30719 });
         try c.put(a, "PHP_FLOAT_MAX", .{ .float = std.math.floatMax(f64) });
         try c.put(a, "PHP_FLOAT_MIN", .{ .float = std.math.floatMin(f64) });
         try c.put(a, "PHP_FLOAT_EPSILON", .{ .float = std.math.floatEps(f64) });
