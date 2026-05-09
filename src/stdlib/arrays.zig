@@ -85,6 +85,7 @@ pub const entries = .{
     .{ "array_uintersect_assoc", array_uintersect_assoc },
     .{ "array_uintersect_uassoc", array_uintersect_uassoc },
     .{ "array_intersect_ukey", array_intersect_ukey },
+    .{ "array_intersect_uassoc", array_intersect_uassoc },
     .{ "array_change_key_case", array_change_key_case },
 };
 
@@ -1905,6 +1906,27 @@ fn array_uintersect_uassoc(ctx: *NativeContext, args: []const Value) RuntimeErro
                 if (Value.toInt(kcmp) != 0) continue;
                 const vcmp = try ctx.invokeCallable(value_cb, &.{ entry.value, other.value });
                 if (Value.toInt(vcmp) == 0) { found = true; break; }
+            }
+            if (!found) { in_all = false; break; }
+        }
+        if (in_all) try result.set(ctx.allocator, entry.key, entry.value);
+    }
+    return .{ .array = result };
+}
+
+fn array_intersect_uassoc(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len < 3 or args[0] != .array) return .null;
+    const src = args[0].array;
+    const callback = args[args.len - 1];
+    var result = try ctx.createArray();
+    for (src.entries.items) |entry| {
+        var in_all = true;
+        for (args[1 .. args.len - 1]) |arg| {
+            if (arg != .array) { in_all = false; break; }
+            var found = false;
+            for (arg.array.entries.items) |other| {
+                const key_cmp = try ctx.invokeCallable(callback, &.{ keyToValue(entry.key), keyToValue(other.key) });
+                if (Value.toInt(key_cmp) == 0 and Value.equal(entry.value, other.value)) { found = true; break; }
             }
             if (!found) { in_all = false; break; }
         }
