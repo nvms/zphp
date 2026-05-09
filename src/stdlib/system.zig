@@ -166,17 +166,36 @@ fn native_sys_get_temp_dir(_: *NativeContext, _: []const Value) RuntimeError!Val
 fn native_tempnam(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     const dir = if (args.len >= 1 and args[0] == .string) args[0].string else "/tmp";
     const prefix = if (args.len >= 2 and args[1] == .string) args[1].string else "tmp";
-    var buf = std.ArrayListUnmanaged(u8){};
-    try buf.appendSlice(ctx.allocator, dir);
-    if (dir.len > 0 and dir[dir.len - 1] != '/') try buf.append(ctx.allocator, '/');
-    try buf.appendSlice(ctx.allocator, prefix);
-    const ts: u64 = @intCast(std.time.milliTimestamp());
-    var ts_buf: [20]u8 = undefined;
-    const ts_str = std.fmt.bufPrint(&ts_buf, "{d}", .{ts}) catch "0";
-    try buf.appendSlice(ctx.allocator, ts_str);
-    const result = try buf.toOwnedSlice(ctx.allocator);
-    try ctx.strings.append(ctx.allocator, result);
-    return .{ .string = result };
+    var seed_bytes: [8]u8 = undefined;
+    std.crypto.random.bytes(&seed_bytes);
+    var rng = std.Random.DefaultPrng.init(std.mem.readInt(u64, &seed_bytes, .little));
+    const r = rng.random();
+    var attempt: u8 = 0;
+    while (attempt < 16) : (attempt += 1) {
+        var hex_buf: [16]u8 = undefined;
+        const hex = "0123456789abcdef";
+        for (&hex_buf) |*b| b.* = hex[r.uintLessThan(u8, 16)];
+        const sep: []const u8 = if (dir.len > 0 and dir[dir.len - 1] == '/') "" else "/";
+        const candidate = std.fmt.allocPrint(ctx.allocator, "{s}{s}{s}{s}", .{ dir, sep, prefix, &hex_buf }) catch continue;
+        if (std.fs.cwd().createFile(candidate, .{ .exclusive = true, .mode = 0o600 })) |file| {
+            file.close();
+            var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+            const resolved = std.fs.cwd().realpath(candidate, &path_buf) catch {
+                try ctx.strings.append(ctx.allocator, candidate);
+                return .{ .string = candidate };
+            };
+            const dup = ctx.allocator.dupe(u8, resolved) catch {
+                try ctx.strings.append(ctx.allocator, candidate);
+                return .{ .string = candidate };
+            };
+            ctx.allocator.free(candidate);
+            try ctx.strings.append(ctx.allocator, dup);
+            return .{ .string = dup };
+        } else |_| {
+            ctx.allocator.free(candidate);
+        }
+    }
+    return .{ .bool = false };
 }
 
 fn buildBacktrace(ctx: *NativeContext, ignore_args: bool, limit: usize) RuntimeError!*PhpArray {

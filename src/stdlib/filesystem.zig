@@ -571,6 +571,7 @@ fn native_dirname(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     var levels: i64 = if (args.len >= 2) Value.toInt(args[1]) else 1;
     if (levels <= 0) return .{ .string = try ctx.createString(path) };
     while (levels > 0) : (levels -= 1) {
+        while (path.len > 1 and path[path.len - 1] == '/') path = path[0 .. path.len - 1];
         if (std.mem.lastIndexOf(u8, path, "/")) |pos| {
             if (pos == 0) {
                 path = "/";
@@ -588,23 +589,35 @@ fn native_dirname(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
 fn native_pathinfo(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len == 0 or args[0] != .string) return .null;
     const path = args[0].string;
-    var arr = try ctx.createArray();
 
-    const dir = if (std.mem.lastIndexOf(u8, path, "/")) |pos| blk: {
-        break :blk if (pos == 0) "/" else try ctx.createString(path[0..pos]);
-    } else ".";
-    try arr.set(ctx.allocator, .{ .string = "dirname" }, .{ .string = dir });
+    const dir: []const u8 = if (std.mem.lastIndexOf(u8, path, "/")) |pos|
+        (if (pos == 0) "/" else try ctx.createString(path[0..pos]))
+    else
+        ".";
+    const base: []const u8 = if (std.mem.lastIndexOf(u8, path, "/")) |pos| try ctx.createString(path[pos + 1 ..]) else path;
+    const has_dot = std.mem.lastIndexOf(u8, base, ".") != null;
+    const dot_pos: usize = if (has_dot) std.mem.lastIndexOf(u8, base, ".").? else 0;
+    const ext: []const u8 = if (has_dot) try ctx.createString(base[dot_pos + 1 ..]) else "";
+    const filename: []const u8 = if (has_dot) try ctx.createString(base[0..dot_pos]) else base;
 
-    const base = if (std.mem.lastIndexOf(u8, path, "/")) |pos| try ctx.createString(path[pos + 1 ..]) else path;
-    try arr.set(ctx.allocator, .{ .string = "basename" }, .{ .string = base });
-
-    if (std.mem.lastIndexOf(u8, base, ".")) |dot| {
-        try arr.set(ctx.allocator, .{ .string = "extension" }, .{ .string = try ctx.createString(base[dot + 1 ..]) });
-        try arr.set(ctx.allocator, .{ .string = "filename" }, .{ .string = try ctx.createString(base[0..dot]) });
-    } else {
-        try arr.set(ctx.allocator, .{ .string = "extension" }, .{ .string = "" });
-        try arr.set(ctx.allocator, .{ .string = "filename" }, .{ .string = base });
+    if (args.len >= 2 and args[1] == .int) {
+        const flag = args[1].int;
+        return switch (flag) {
+            1 => .{ .string = dir },
+            2 => .{ .string = base },
+            4 => .{ .string = ext },
+            8 => .{ .string = filename },
+            else => .null,
+        };
     }
+
+    var arr = try ctx.createArray();
+    try arr.set(ctx.allocator, .{ .string = "dirname" }, .{ .string = dir });
+    try arr.set(ctx.allocator, .{ .string = "basename" }, .{ .string = base });
+    if (has_dot) {
+        try arr.set(ctx.allocator, .{ .string = "extension" }, .{ .string = ext });
+    }
+    try arr.set(ctx.allocator, .{ .string = "filename" }, .{ .string = filename });
     return .{ .array = arr };
 }
 
@@ -2046,9 +2059,23 @@ fn native_tmpfile(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
 fn native_tempnam(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     const dir = if (args.len > 0 and args[0] == .string) args[0].string else "/tmp";
     const prefix = if (args.len > 1 and args[1] == .string) args[1].string else "tmp";
-    const result = std.fmt.allocPrint(ctx.vm.allocator, "{s}/{s}{d}", .{ dir, prefix, std.time.nanoTimestamp() }) catch return .{ .bool = false };
-    try ctx.vm.strings.append(ctx.vm.allocator, result);
-    return .{ .string = result };
+    var rng = std.Random.DefaultPrng.init(@intCast(std.time.nanoTimestamp() & 0x7fff_ffff_ffff_ffff));
+    const r = rng.random();
+    var attempt: u8 = 0;
+    while (attempt < 16) : (attempt += 1) {
+        var buf: [16]u8 = undefined;
+        const hex = "0123456789abcdef";
+        for (&buf) |*b| b.* = hex[r.uintLessThan(u8, 16)];
+        const candidate = std.fmt.allocPrint(ctx.vm.allocator, "{s}/{s}{s}", .{ dir, prefix, &buf }) catch continue;
+        if (std.fs.cwd().createFile(candidate, .{ .exclusive = true, .mode = 0o600 })) |file| {
+            file.close();
+            try ctx.vm.strings.append(ctx.vm.allocator, candidate);
+            return .{ .string = candidate };
+        } else |_| {
+            ctx.vm.allocator.free(candidate);
+        }
+    }
+    return .{ .bool = false };
 }
 
 
