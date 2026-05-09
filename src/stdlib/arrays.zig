@@ -284,11 +284,9 @@ fn array_unique(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
             const eq = switch (flag) {
                 1 => Value.toFloat(entry.value) == Value.toFloat(existing.value), // SORT_NUMERIC
                 2, 5, 6 => blk: { // SORT_STRING, SORT_LOCALE_STRING, SORT_NATURAL
-                    var ab: [64]u8 = undefined;
-                    var bb: [64]u8 = undefined;
-                    const as = valueAsString(entry.value, &ab);
-                    const bs = valueAsString(existing.value, &bb);
-                    break :blk std.mem.eql(u8, as, bs);
+                    const a_str = try valueAsStringForCompare(ctx, entry.value);
+                    const b_str = try valueAsStringForCompare(ctx, existing.value);
+                    break :blk std.mem.eql(u8, a_str, b_str);
                 },
                 else => Value.equal(entry.value, existing.value), // SORT_REGULAR
             };
@@ -311,6 +309,24 @@ fn valueAsString(v: Value, buf: *[64]u8) []const u8 {
         .null => "",
         else => "",
     };
+}
+
+fn valueAsStringForCompare(ctx: *NativeContext, v: Value) RuntimeError![]const u8 {
+    if (v == .object) {
+        if (ctx.vm.hasMethod(v.object.class_name, "__toString")) {
+            const result = try ctx.vm.callMethod(v.object, "__toString", &.{});
+            if (result == .string) return result.string;
+        }
+        var buf: [256]u8 = undefined;
+        const msg = std.fmt.bufPrint(&buf, "Object of class {s} could not be converted to string", .{v.object.class_name}) catch "Object could not be converted to string";
+        try ctx.vm.setPendingException("Error", msg);
+        return error.RuntimeError;
+    }
+    var buf = std.ArrayListUnmanaged(u8){};
+    try v.format(&buf, ctx.allocator);
+    const owned = try buf.toOwnedSlice(ctx.allocator);
+    try ctx.vm.strings.append(ctx.allocator, owned);
+    return owned;
 }
 
 const SortFlags = struct {
