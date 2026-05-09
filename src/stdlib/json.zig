@@ -99,6 +99,10 @@ fn encodeValue(buf: *std.ArrayListUnmanaged(u8), a: std.mem.Allocator, val: Valu
         },
         .float => |f| {
             if (std.math.isNan(f) or std.math.isInf(f)) {
+                if ((flags & 0x200) != 0) { // JSON_PARTIAL_OUTPUT_ON_ERROR
+                    try buf.appendSlice(a, "0");
+                    return;
+                }
                 last_error = 7;
                 last_error_msg = "Inf and NaN cannot be JSON encoded";
                 return error.RuntimeError;

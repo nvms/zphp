@@ -30,6 +30,10 @@ pub const entries = .{
     .{ "glob", native_glob },
     .{ "fnmatch", native_fnmatch },
     .{ "scandir", native_scandir },
+    .{ "opendir", native_opendir },
+    .{ "readdir", native_readdir },
+    .{ "closedir", native_closedir },
+    .{ "rewinddir", native_rewinddir },
     .{ "file", native_file },
     .{ "readfile", native_readfile },
     .{ "is_readable", native_is_readable },
@@ -716,6 +720,57 @@ fn native_scandir(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     var result = try ctx.createArray();
     for (names.items) |n| try result.append(ctx.allocator, .{ .string = n });
     return .{ .array = result };
+}
+
+fn native_opendir(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len == 0 or args[0] != .string) return .{ .bool = false };
+    var dir = std.fs.cwd().openDir(args[0].string, .{ .iterate = true }) catch return Value{ .bool = false };
+    defer dir.close();
+    const names_arr = try ctx.allocator.create(PhpArray);
+    names_arr.* = .{};
+    try ctx.vm.arrays.append(ctx.allocator, names_arr);
+    try names_arr.append(ctx.allocator, .{ .string = "." });
+    try names_arr.append(ctx.allocator, .{ .string = ".." });
+    var iter = dir.iterate();
+    while (iter.next() catch null) |entry| {
+        const name = try ctx.createString(entry.name);
+        try names_arr.append(ctx.allocator, .{ .string = name });
+    }
+    const obj = try ctx.allocator.create(PhpObject);
+    obj.* = .{ .class_name = "DirectoryHandle" };
+    try obj.set(ctx.allocator, "__entries", .{ .array = names_arr });
+    try obj.set(ctx.allocator, "__pos", .{ .int = 0 });
+    try obj.set(ctx.allocator, "__open", .{ .bool = true });
+    try ctx.vm.objects.append(ctx.allocator, obj);
+    return .{ .object = obj };
+}
+
+fn native_readdir(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len == 0 or args[0] != .object) return .{ .bool = false };
+    const obj = args[0].object;
+    const open = obj.get("__open");
+    if (open != .bool or !open.bool) return .{ .bool = false };
+    const dir_entries = obj.get("__entries");
+    if (dir_entries != .array) return .{ .bool = false };
+    const pos = Value.toInt(obj.get("__pos"));
+    if (pos < 0 or pos >= dir_entries.array.length()) return .{ .bool = false };
+    const entry = dir_entries.array.entries.items[@intCast(pos)].value;
+    try obj.set(ctx.allocator, "__pos", .{ .int = pos + 1 });
+    return entry;
+}
+
+fn native_closedir(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len == 0 or args[0] != .object) return .null;
+    const obj = args[0].object;
+    try obj.set(ctx.allocator, "__open", .{ .bool = false });
+    return .null;
+}
+
+fn native_rewinddir(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len == 0 or args[0] != .object) return .null;
+    const obj = args[0].object;
+    try obj.set(ctx.allocator, "__pos", .{ .int = 0 });
+    return .null;
 }
 
 fn native_fnmatch(_: *NativeContext, args: []const Value) RuntimeError!Value {
