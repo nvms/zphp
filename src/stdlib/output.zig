@@ -216,16 +216,20 @@ fn print_r(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     }
     if (return_str) {
         var buf = std.ArrayListUnmanaged(u8){};
-        try printRValue(ctx.allocator, &buf, args[0], 0);
+        try printRValueImpl(ctx.allocator, &buf, args[0], 0, ctx.vm);
         const s = try buf.toOwnedSlice(ctx.allocator);
         try ctx.strings.append(ctx.allocator, s);
         return .{ .string = s };
     }
-    try printRValue(ctx.allocator, &ctx.vm.output, args[0], 0);
+    try printRValueImpl(ctx.allocator, &ctx.vm.output, args[0], 0, ctx.vm);
     return .{ .bool = true };
 }
 
 fn printRValue(a: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8), val: Value, depth: usize) !void {
+    return printRValueImpl(a, out, val, depth, null);
+}
+
+fn printRValueImpl(a: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8), val: Value, depth: usize, vm: ?*@import("../runtime/vm.zig").VM) !void {
     switch (val) {
         .null => {},
         .bool => |b| if (b) try out.appendSlice(a, "1"),
@@ -265,7 +269,7 @@ fn printRValue(a: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8), val: Valu
                     },
                 }
                 const nested = entry.value == .array or entry.value == .object;
-                try printRValue(a, out, entry.value, depth + if (nested) @as(usize, 2) else 1);
+                try printRValueImpl(a, out, entry.value, depth + if (nested) @as(usize, 2) else 1, vm);
                 try out.appendSlice(a, "\n");
             }
             try appendIndent(out, a, depth * 4);
@@ -282,7 +286,20 @@ fn printRValue(a: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8), val: Valu
             defer _ = visited_ptrs.pop();
 
             try out.appendSlice(a, obj.class_name);
-            try out.appendSlice(a, " Object\n");
+            // enums print as "ClassName Enum:type" (or "ClassName Enum" for non-backed)
+            var label: []const u8 = " Object\n";
+            if (vm) |v| {
+                if (v.classes.get(obj.class_name)) |cls| {
+                    if (cls.is_enum) {
+                        label = switch (cls.backed_type) {
+                            .int_type => " Enum:int\n",
+                            .string_type => " Enum:string\n",
+                            .none => " Enum\n",
+                        };
+                    }
+                }
+            }
+            try out.appendSlice(a, label);
             try appendIndent(out, a, depth * 4);
             try out.appendSlice(a, "(\n");
             if (obj.slot_layout) |layout| {
@@ -294,7 +311,7 @@ fn printRValue(a: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8), val: Valu
                             try out.appendSlice(a, name);
                             try out.appendSlice(a, "] => ");
                             const nested = slots[i] == .array or slots[i] == .object;
-                            try printRValue(a, out, slots[i], depth + if (nested) @as(usize, 2) else 1);
+                            try printRValueImpl(a, out, slots[i], depth + if (nested) @as(usize, 2) else 1, vm);
                             try out.appendSlice(a, "\n");
                         }
                     }
@@ -314,7 +331,7 @@ fn printRValue(a: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8), val: Valu
                     try out.appendSlice(a, entry.key_ptr.*);
                     try out.appendSlice(a, "] => ");
                     const nested = entry.value_ptr.* == .array or entry.value_ptr.* == .object;
-                    try printRValue(a, out, entry.value_ptr.*, depth + if (nested) @as(usize, 2) else 1);
+                    try printRValueImpl(a, out, entry.value_ptr.*, depth + if (nested) @as(usize, 2) else 1, vm);
                     try out.appendSlice(a, "\n");
                 }
             }
