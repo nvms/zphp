@@ -1022,9 +1022,30 @@ fn array_fill_keys(ctx: *NativeContext, args: []const Value) RuntimeError!Value 
 
     var result = try ctx.createArray();
     for (keys_arr.entries.items) |entry| {
-        try result.set(ctx.allocator, Value.toArrayKey(entry.value), val);
+        const key = try arrayFillKeysKey(ctx, entry.value);
+        try result.set(ctx.allocator, key, val);
     }
     return .{ .array = result };
+}
+
+// PHP's array_fill_keys uses a different key conversion than normal array
+// assignment: floats become string "1.5" (instead of being truncated to 1),
+// and bool false / null both become the empty string "" (not 0).
+fn arrayFillKeysKey(ctx: *NativeContext, v: Value) !PhpArray.Key {
+    return switch (v) {
+        .int => |i| .{ .int = i },
+        .string => |s| .{ .string = s },
+        .bool => |b| if (b) PhpArray.Key{ .int = 1 } else PhpArray.Key{ .string = "" },
+        .null => .{ .string = "" },
+        .float => |f| blk: {
+            var buf = std.ArrayListUnmanaged(u8){};
+            try (Value{ .float = f }).format(&buf, ctx.allocator);
+            const s = try buf.toOwnedSlice(ctx.allocator);
+            try ctx.strings.append(ctx.allocator, s);
+            break :blk PhpArray.Key{ .string = s };
+        },
+        else => .{ .int = 0 },
+    };
 }
 
 fn valuesEqualAsString(a: Value, b: Value) bool {

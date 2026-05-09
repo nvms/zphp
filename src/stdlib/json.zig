@@ -418,9 +418,13 @@ fn json_decode(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len == 0 or args[0] != .string) return .null;
     const s = args[0].string;
     const flags = if (args.len >= 4) Value.toInt(args[3]) else 0;
-    var assoc = if (args.len >= 2) (args[1] == .bool and args[1].bool) else false;
-    if ((flags & JSON_OBJECT_AS_ARRAY) != 0) assoc = true;
-    if (args.len >= 2 and args[1] == .null and (flags & JSON_OBJECT_AS_ARRAY) != 0) assoc = true;
+    // PHP semantics: JSON_OBJECT_AS_ARRAY only applies when $associative is
+    // null (default); an explicit true/false wins over the flag.
+    const has_explicit_assoc = args.len >= 2 and args[1] == .bool;
+    const assoc = if (has_explicit_assoc)
+        args[1].bool
+    else
+        (flags & JSON_OBJECT_AS_ARRAY) != 0;
     const depth: usize = if (args.len >= 3) @intCast(@max(1, Value.toInt(args[2]))) else 512;
     last_error = 0;
     last_error_msg = "No error";

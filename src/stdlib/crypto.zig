@@ -230,7 +230,15 @@ const HashAlgo = enum {
     sha256,
     sha384,
     sha512,
+    sha3_224,
+    sha3_256,
+    sha3_384,
+    sha3_512,
     crc32,
+    crc32b,
+    xxh32,
+    xxh64,
+    xxh3,
     xxh128,
 
     fn fromString(name: []const u8) ?HashAlgo {
@@ -239,7 +247,15 @@ const HashAlgo = enum {
         if (std.mem.eql(u8, name, "sha256")) return .sha256;
         if (std.mem.eql(u8, name, "sha384")) return .sha384;
         if (std.mem.eql(u8, name, "sha512")) return .sha512;
+        if (std.mem.eql(u8, name, "sha3-224")) return .sha3_224;
+        if (std.mem.eql(u8, name, "sha3-256")) return .sha3_256;
+        if (std.mem.eql(u8, name, "sha3-384")) return .sha3_384;
+        if (std.mem.eql(u8, name, "sha3-512")) return .sha3_512;
         if (std.mem.eql(u8, name, "crc32")) return .crc32;
+        if (std.mem.eql(u8, name, "crc32b")) return .crc32b;
+        if (std.mem.eql(u8, name, "xxh32")) return .xxh32;
+        if (std.mem.eql(u8, name, "xxh64")) return .xxh64;
+        if (std.mem.eql(u8, name, "xxh3")) return .xxh3;
         if (std.mem.eql(u8, name, "xxh128")) return .xxh128;
         return null;
     }
@@ -248,10 +264,12 @@ const HashAlgo = enum {
         return switch (self) {
             .md5 => 16,
             .sha1 => 20,
-            .sha256 => 32,
-            .sha384 => 48,
-            .sha512 => 64,
-            .crc32 => 4,
+            .sha256, .sha3_256 => 32,
+            .sha384, .sha3_384 => 48,
+            .sha512, .sha3_512 => 64,
+            .sha3_224 => 28,
+            .crc32, .crc32b, .xxh32 => 4,
+            .xxh64, .xxh3 => 8,
             .xxh128 => 16,
         };
     }
@@ -264,12 +282,41 @@ fn computeHash(algo: HashAlgo, data: []const u8, out: []u8) void {
         .sha256 => std.crypto.hash.sha2.Sha256.hash(data, out[0..32], .{}),
         .sha384 => std.crypto.hash.sha2.Sha384.hash(data, out[0..48], .{}),
         .sha512 => std.crypto.hash.sha2.Sha512.hash(data, out[0..64], .{}),
+        .sha3_224 => std.crypto.hash.sha3.Sha3_224.hash(data, out[0..28], .{}),
+        .sha3_256 => std.crypto.hash.sha3.Sha3_256.hash(data, out[0..32], .{}),
+        .sha3_384 => std.crypto.hash.sha3.Sha3_384.hash(data, out[0..48], .{}),
+        .sha3_512 => std.crypto.hash.sha3.Sha3_512.hash(data, out[0..64], .{}),
         .crc32 => {
+            // PHP "crc32" uses CRC-32/BZIP2 polynomial with bytes in little-endian order
+            const c = std.hash.crc.Crc32Bzip2.hash(data);
+            out[0] = @intCast(c & 0xff);
+            out[1] = @intCast((c >> 8) & 0xff);
+            out[2] = @intCast((c >> 16) & 0xff);
+            out[3] = @intCast((c >> 24) & 0xff);
+        },
+        .crc32b => {
             const c = std.hash.crc.Crc32IsoHdlc.hash(data);
             out[0] = @intCast((c >> 24) & 0xff);
             out[1] = @intCast((c >> 16) & 0xff);
             out[2] = @intCast((c >> 8) & 0xff);
             out[3] = @intCast(c & 0xff);
+        },
+        .xxh32 => {
+            const c = std.hash.XxHash32.hash(0, data);
+            out[0] = @intCast((c >> 24) & 0xff);
+            out[1] = @intCast((c >> 16) & 0xff);
+            out[2] = @intCast((c >> 8) & 0xff);
+            out[3] = @intCast(c & 0xff);
+        },
+        .xxh64 => {
+            const c = std.hash.XxHash64.hash(0, data);
+            var i: usize = 0;
+            while (i < 8) : (i += 1) out[i] = @intCast((c >> @intCast((7 - i) * 8)) & 0xff);
+        },
+        .xxh3 => {
+            const c = std.hash.XxHash3.hash(0, data);
+            var i: usize = 0;
+            while (i < 8) : (i += 1) out[i] = @intCast((c >> @intCast((7 - i) * 8)) & 0xff);
         },
         .xxh128 => {
             // use first 128 bits of sha256 as xxh128 substitute
@@ -287,19 +334,9 @@ fn computeHmac(algo: HashAlgo, data: []const u8, key: []const u8, out: []u8) voi
         .sha256 => std.crypto.auth.hmac.sha2.HmacSha256.create(out[0..32], data, key),
         .sha384 => std.crypto.auth.hmac.sha2.HmacSha384.create(out[0..48], data, key),
         .sha512 => std.crypto.auth.hmac.sha2.HmacSha512.create(out[0..64], data, key),
-        .crc32 => {
-            // crc32 doesn't have hmac, just hash the data
-            const c = std.hash.crc.Crc32IsoHdlc.hash(data);
-            out[0] = @intCast((c >> 24) & 0xff);
-            out[1] = @intCast((c >> 16) & 0xff);
-            out[2] = @intCast((c >> 8) & 0xff);
-            out[3] = @intCast(c & 0xff);
-        },
-        .xxh128 => {
-            var full: [32]u8 = undefined;
-            std.crypto.auth.hmac.sha2.HmacSha256.create(&full, data, key);
-            @memcpy(out[0..16], full[0..16]);
-        },
+        // hmac is only defined for proper cryptographic hashes; for crc/xxh
+        // PHP rejects them, but we just hash the data without keying for now
+        .sha3_224, .sha3_256, .sha3_384, .sha3_512, .crc32, .crc32b, .xxh32, .xxh64, .xxh3, .xxh128 => computeHash(algo, data, out),
     }
 }
 
