@@ -779,11 +779,15 @@ fn dtDiff(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (mi < 0) { mi += 60; hh -= 1; }
     if (hh < 0) { hh += 24; d -= 1; }
     if (d < 0) {
-        // borrow from month: use days in the month preceding c2 (i.e. month-1 of c2's year)
-        var prev_month = c2.month - 1;
-        var prev_year = c2.year;
-        if (prev_month == 0) { prev_month = 12; prev_year -= 1; }
-        d += daysInMonth(prev_month, prev_year);
+        // borrow from month: PHP uses different anchors depending on direction.
+        // forward (receiver < arg): days from the month preceding the late date.
+        // reverse (receiver > arg): days from the early date's own month.
+        const borrow_month: i64 = if (invert == 0) c2.month - 1 else c1.month;
+        const borrow_year: i64 = if (invert == 0) c2.year else c1.year;
+        var bm = borrow_month;
+        var by = borrow_year;
+        if (bm == 0) { bm = 12; by -= 1; }
+        d += daysInMonth(bm, by);
         mo -= 1;
     }
     if (mo < 0) { mo += 12; y -= 1; }
