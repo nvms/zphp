@@ -1221,8 +1221,12 @@ fn native_compact(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     const arr = try ctx.createArray();
     const frame = ctx.vm.currentFrame();
     const slot_names = if (frame.func) |func| func.slot_names else ctx.vm.global_slot_names;
-    for (args) |arg| {
-        if (arg != .string) continue;
+    for (args) |arg| try compactValue(ctx, arg, arr, frame, slot_names);
+    return .{ .array = arr };
+}
+
+fn compactValue(ctx: *NativeContext, arg: Value, arr: *PhpArray, frame: anytype, slot_names: []const []const u8) RuntimeError!void {
+    if (arg == .string) {
         const name = arg.string;
         const var_name = try std.fmt.allocPrint(ctx.allocator, "${s}", .{name});
         try ctx.strings.append(ctx.allocator, var_name);
@@ -1241,29 +1245,51 @@ fn native_compact(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
                 try arr.set(ctx.allocator, .{ .string = name }, val);
             }
         }
+    } else if (arg == .array) {
+        for (arg.array.entries.items) |entry| try compactValue(ctx, entry.value, arr, frame, slot_names);
     }
-    return .{ .array = arr };
 }
 
 fn native_extract(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len == 0 or args[0] != .array) return .{ .int = 0 };
     const arr = args[0].array;
     const flags: i64 = if (args.len >= 2) Value.toInt(args[1]) else 0;
+    // strip EXTR_REFS bit (0x100) so the type bits stay intact
+    const type_flag = flags & 0xff;
     const prefix = if (args.len >= 3 and args[2] == .string) args[2].string else "";
     const frame = ctx.vm.currentFrame();
+    const slot_names = if (frame.func) |func| func.slot_names else ctx.vm.global_slot_names;
+
     var count_val: i64 = 0;
     for (arr.entries.items) |entry| {
         if (entry.key != .string) continue;
         const key = entry.key.string;
-        const var_name = switch (flags) {
-            2 => try std.fmt.allocPrint(ctx.allocator, "${s}_{s}", .{ prefix, key }), // EXTR_PREFIX_ALL
-            else => try std.fmt.allocPrint(ctx.allocator, "${s}", .{key}), // EXTR_OVERWRITE (default)
+        const var_name = switch (type_flag) {
+            2 => try std.fmt.allocPrint(ctx.allocator, "${s}_{s}", .{ prefix, key }), // EXTR_PREFIX_ALL (zphp's value)
+            else => try std.fmt.allocPrint(ctx.allocator, "${s}", .{key}),
         };
         try ctx.strings.append(ctx.allocator, var_name);
+
+        // EXTR_SKIP (=1): skip if variable already exists in current scope
+        if (type_flag == 1) {
+            var exists = false;
+            for (slot_names, 0..) |sn, i| {
+                if (std.mem.eql(u8, sn, var_name)) {
+                    if (i < frame.locals.len and frame.locals[i] != .null) exists = true;
+                    break;
+                }
+            }
+            if (!exists) {
+                if (frame.vars.get(var_name)) |v| {
+                    if (v != .null) exists = true;
+                }
+            }
+            if (exists) continue;
+        }
+
         try frame.vars.put(ctx.allocator, var_name, entry.value);
-        const sn = if (frame.func) |func| func.slot_names else ctx.vm.global_slot_names;
-        for (sn, 0..) |sn_name, si| {
-            if (std.mem.eql(u8, sn_name, var_name)) {
+        for (slot_names, 0..) |sn, si| {
+            if (std.mem.eql(u8, sn, var_name)) {
                 if (si < frame.locals.len) frame.locals[si] = entry.value;
                 break;
             }
