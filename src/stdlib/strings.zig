@@ -3303,11 +3303,28 @@ fn native_strripos(ctx: *NativeContext, args: []const Value) RuntimeError!Value 
 
 fn native_str_ireplace(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len < 3) return if (args.len >= 3) args[2] else Value{ .string = "" };
-    const search = if (args[0] == .string) args[0].string else return args[2];
-    const replace = if (args[1] == .string) args[1].string else return args[2];
-    const subject = if (args[2] == .string) args[2].string else return args[2];
-    if (search.len == 0) return args[2];
+    var total_count: i64 = 0;
 
+    if (args[2] == .array) {
+        const subject_arr = args[2].array;
+        const out = try ctx.createArray();
+        for (subject_arr.entries.items) |se| {
+            const elem_str: []const u8 = if (se.value == .string) se.value.string else "";
+            const replaced = try strIreplaceOnSingle(ctx, args[0], args[1], elem_str, &total_count);
+            try out.set(ctx.allocator, se.key, .{ .string = replaced });
+        }
+        if (args.len >= 4) ctx.setCallerVar(3, args.len, .{ .int = total_count });
+        return .{ .array = out };
+    }
+
+    const subject = if (args[2] == .string) args[2].string else return args[2];
+    const replaced = try strIreplaceOnSingle(ctx, args[0], args[1], subject, &total_count);
+    if (args.len >= 4) ctx.setCallerVar(3, args.len, .{ .int = total_count });
+    return .{ .string = replaced };
+}
+
+fn strIreplaceOne(ctx: *NativeContext, subject: []const u8, search: []const u8, replace: []const u8, count: *i64) ![]const u8 {
+    if (search.len == 0) return subject;
     const s_lower = try toLowerBuf(ctx.allocator, subject);
     defer ctx.allocator.free(s_lower);
     const n_lower = try toLowerBuf(ctx.allocator, search);
@@ -3319,14 +3336,35 @@ fn native_str_ireplace(ctx: *NativeContext, args: []const Value) RuntimeError!Va
         if (i + search.len <= subject.len and std.mem.eql(u8, s_lower[i .. i + search.len], n_lower)) {
             try buf.appendSlice(ctx.allocator, replace);
             i += search.len;
+            count.* += 1;
         } else {
             try buf.append(ctx.allocator, subject[i]);
             i += 1;
         }
     }
-    const s = try buf.toOwnedSlice(ctx.allocator);
-    try ctx.strings.append(ctx.allocator, s);
-    return .{ .string = s };
+    const out = try buf.toOwnedSlice(ctx.allocator);
+    try ctx.strings.append(ctx.allocator, out);
+    return out;
+}
+
+fn strIreplaceOnSingle(ctx: *NativeContext, search: Value, replace: Value, subject: []const u8, total_count: *i64) ![]const u8 {
+    if (search == .array) {
+        var result = subject;
+        for (search.array.entries.items, 0..) |entry, idx| {
+            const needle = if (entry.value == .string) entry.value.string else continue;
+            const replacement = if (replace == .array) blk: {
+                if (idx < replace.array.entries.items.len) {
+                    if (replace.array.entries.items[idx].value == .string) break :blk replace.array.entries.items[idx].value.string;
+                }
+                break :blk "";
+            } else if (replace == .string) replace.string else "";
+            result = try strIreplaceOne(ctx, result, needle, replacement, total_count);
+        }
+        return result;
+    }
+    const s = if (search == .string) search.string else return subject;
+    const rep = if (replace == .string) replace.string else "";
+    return strIreplaceOne(ctx, subject, s, rep, total_count);
 }
 
 fn native_ucwords(ctx: *NativeContext, args: []const Value) RuntimeError!Value {

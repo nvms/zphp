@@ -599,12 +599,18 @@ fn preg_replace(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
         return try pregReplaceArrayPattern(ctx, args);
     }
     if (args[0] != .string or args[2] != .string) return args[2];
-    const info = parsePattern(args[0].string) orelse return args[2];
+    const info = parsePattern(args[0].string) orelse {
+        setPregError(1);
+        return .null;
+    };
     const replacement = if (args[1] == .string) args[1].string else return args[2];
     const subject = args[2].string;
     const limit: i64 = if (args.len >= 4 and args[3] != .null) Value.toInt(args[3]) else -1;
 
-    const code = compilePattern(info.pattern, info.flags) orelse return args[2];
+    const code = compilePattern(info.pattern, info.flags) orelse {
+        setPregError(1);
+        return .null;
+    };
     defer pcre2.pcre2_code_free_8(code);
 
     const match_data = pcre2.pcre2_match_data_create_from_pattern_8(code, null) orelse return args[2];
