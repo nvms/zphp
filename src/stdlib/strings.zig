@@ -743,14 +743,36 @@ fn native_chunk_split(ctx: *NativeContext, args: []const Value) RuntimeError!Val
 
 fn native_number_format(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len == 0) return .{ .string = "0" };
-    const num = Value.toFloat(args[0]);
     const decimals: usize = if (args.len >= 2) @intCast(@max(0, Value.toInt(args[1]))) else 0;
     const dec_point = if (args.len >= 3 and args[2] == .string) args[2].string else ".";
     const thousands_sep = if (args.len >= 4 and args[3] == .string) args[3].string else ",";
 
     var int_part_buf: [64]u8 = undefined;
     var frac_part_buf: [64]u8 = undefined;
-    const formatted = try roundFloatToDecimals(num, decimals, &int_part_buf, &frac_part_buf);
+    var formatted: RoundedFloat = undefined;
+
+    // for int inputs, format the int directly to preserve full PHP_INT_MAX precision
+    if (args[0] == .int) {
+        const i = args[0].int;
+        const is_neg = i < 0;
+        var abs_u: u64 = undefined;
+        if (i == std.math.minInt(i64)) {
+            abs_u = @as(u64, std.math.maxInt(i64)) + 1;
+        } else {
+            abs_u = @intCast(if (i < 0) -i else i);
+        }
+        const ip_str = std.fmt.bufPrint(&int_part_buf, "{d}", .{abs_u}) catch return Value{ .string = "0" };
+        var fp_len: usize = 0;
+        while (fp_len < decimals and fp_len < frac_part_buf.len) : (fp_len += 1) frac_part_buf[fp_len] = '0';
+        formatted = .{
+            .is_negative = is_neg,
+            .int_part = int_part_buf[0..ip_str.len],
+            .frac_part = frac_part_buf[0..fp_len],
+        };
+    } else {
+        const num = Value.toFloat(args[0]);
+        formatted = try roundFloatToDecimals(num, decimals, &int_part_buf, &frac_part_buf);
+    }
 
     var buf = std.ArrayListUnmanaged(u8){};
     if (formatted.is_negative) try buf.append(ctx.allocator, '-');

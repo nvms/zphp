@@ -208,6 +208,10 @@ fn intval(_: *NativeContext, args: []const Value) RuntimeError!Value {
         const v = std.fmt.parseInt(i64, s, base) catch 0;
         return .{ .int = if (negative) -v else v };
     }
+    // PHP: intval(array) is 0 for empty array, 1 for non-empty
+    if (args[0] == .array) {
+        return .{ .int = if (args[0].array.entries.items.len == 0) @as(i64, 0) else @as(i64, 1) };
+    }
     return .{ .int = Value.toInt(args[0]) };
 }
 

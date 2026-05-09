@@ -61,6 +61,14 @@ fn native_abs(_: *NativeContext, args: []const Value) RuntimeError!Value {
         else
             .{ .int = if (i < 0) -i else i },
         .float => |f| .{ .float = @abs(f) },
+        .string => |s| blk: {
+            // numeric strings with '.' or exponent should use float path
+            const has_float_marker = std.mem.indexOfAny(u8, s, ".eE") != null;
+            if (has_float_marker) break :blk Value{ .float = @abs(Value.toFloat(args[0])) };
+            const i = Value.toInt(args[0]);
+            if (i == std.math.minInt(i64)) break :blk Value{ .float = -@as(f64, @floatFromInt(i)) };
+            break :blk Value{ .int = if (i < 0) -i else i };
+        },
         else => blk: {
             const i = Value.toInt(args[0]);
             if (i == std.math.minInt(i64)) break :blk Value{ .float = -@as(f64, @floatFromInt(i)) };
