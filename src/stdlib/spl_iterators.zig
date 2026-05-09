@@ -176,7 +176,11 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try rii_def.static_props.put(a, "CHILD_FIRST", .{ .int = 2 });
     try vm.classes.put(a, "RecursiveIteratorIterator", rii_def);
 
+    try rii_def.methods.put(a, "setMaxDepth", .{ .name = "setMaxDepth", .arity = 1 });
+    try rii_def.methods.put(a, "getMaxDepth", .{ .name = "getMaxDepth", .arity = 0 });
     try vm.native_fns.put(a, "RecursiveIteratorIterator::__construct", riiConstruct);
+    try vm.native_fns.put(a, "RecursiveIteratorIterator::setMaxDepth", riiSetMaxDepth);
+    try vm.native_fns.put(a, "RecursiveIteratorIterator::getMaxDepth", riiGetMaxDepth);
     try vm.native_fns.put(a, "RecursiveIteratorIterator::rewind", riiRewind);
     try vm.native_fns.put(a, "RecursiveIteratorIterator::current", riiCurrent);
     try vm.native_fns.put(a, "RecursiveIteratorIterator::key", riiKey);
@@ -1088,6 +1092,13 @@ fn riiDescend(ctx: *NativeContext, obj: *PhpObject) !void {
             return;
         }
 
+        // honor setMaxDepth: stop descending if depth+1 > max
+        const max_v = obj.get("__rii_max_depth");
+        if (max_v == .int and max_v.int >= 0) {
+            const cur_depth = objGetInt(obj, "__rii_depth");
+            if (cur_depth + 1 > max_v.int) return;
+        }
+
         const children = ctx.vm.callMethod(iter_obj, "getChildren", &.{}) catch return;
         if (children != .object) return;
 
@@ -1131,7 +1142,10 @@ fn riiAdvance(ctx: *NativeContext, obj: *PhpObject) !void {
     if (mode == 1) {
         // SELF_FIRST: try to descend into children first
         const iter_obj = riiCurrentIterator(obj) orelse return;
-        const has_children = ctx.vm.callMethod(iter_obj, "hasChildren", &.{}) catch Value{ .bool = false };
+        const max_v = obj.get("__rii_max_depth");
+        const cur_depth = objGetInt(obj, "__rii_depth");
+        const can_descend = !(max_v == .int and max_v.int >= 0 and cur_depth + 1 > max_v.int);
+        const has_children = if (can_descend) ctx.vm.callMethod(iter_obj, "hasChildren", &.{}) catch Value{ .bool = false } else Value{ .bool = false };
         if (has_children.isTruthy()) {
             const children = ctx.vm.callMethod(iter_obj, "getChildren", &.{}) catch {
                 try riiAdvanceFlat(ctx, obj, stack);
@@ -1155,8 +1169,7 @@ fn riiAdvance(ctx: *NativeContext, obj: *PhpObject) !void {
 }
 
 fn riiAdvanceFlat(ctx: *NativeContext, obj: *PhpObject, stack: *PhpArray) !void {
-    // advance current iterator
-    while (stack.length() > 0) {
+    advance: while (stack.length() > 0) {
         const iter_val = stack.get(.{ .int = @as(i64, @intCast(stack.length())) - 1 });
         if (iter_val != .object) break;
         _ = try ctx.vm.callMethod(iter_val.object, "next", &.{});
@@ -1164,12 +1177,16 @@ fn riiAdvanceFlat(ctx: *NativeContext, obj: *PhpObject, stack: *PhpArray) !void 
         if (valid.isTruthy()) {
             try obj.set(ctx.allocator, "__rii_valid", .{ .bool = true });
             const mode = objGetInt(obj, "__rii_mode");
-            if (mode != 1) {
-                try riiDescend(ctx, obj);
+            if (mode != 1) try riiDescend(ctx, obj);
+            // LEAVES_ONLY: skip arrays we couldn't descend into
+            if (mode == 0) {
+                if (riiCurrentIterator(obj)) |it| {
+                    const cur_v = try ctx.vm.callMethod(it, "current", &.{});
+                    if (cur_v == .array) continue :advance;
+                }
             }
             return;
         }
-        // pop exhausted iterator
         if (stack.entries.items.len > 1) {
             stack.entries.items.len -= 1;
             stack.next_int_key -= 1;
@@ -1185,6 +1202,21 @@ fn riiAdvanceFlat(ctx: *NativeContext, obj: *PhpObject, stack: *PhpArray) !void 
 fn riiValid(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
     const obj = getThis(ctx) orelse return .{ .bool = false };
     return obj.get("__rii_valid");
+}
+
+fn riiSetMaxDepth(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    const obj = getThis(ctx) orelse return .null;
+    const v: i64 = if (args.len >= 1) Value.toInt(args[0]) else -1;
+    try obj.set(ctx.allocator, "__rii_max_depth", .{ .int = v });
+    return .{ .bool = true };
+}
+
+fn riiGetMaxDepth(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const obj = getThis(ctx) orelse return .{ .bool = false };
+    const v = obj.get("__rii_max_depth");
+    if (v == .int and v.int < 0) return .{ .bool = false };
+    if (v == .null) return .{ .bool = false };
+    return v;
 }
 
 fn riiGetDepth(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
