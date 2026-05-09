@@ -1384,17 +1384,29 @@ fn native_strtotime(_: *NativeContext, args: []const Value) RuntimeError!Value {
         var min: i64 = 0;
         var sec: i64 = 0;
         var tz_offset: i64 = 0;
+        var consumed: usize = 10;
         if (input.len >= 19 and (input[10] == ' ' or input[10] == 'T') and input[13] == ':' and input[16] == ':') {
             hour = std.fmt.parseInt(i64, input[11..13], 10) catch 0;
             min = std.fmt.parseInt(i64, input[14..16], 10) catch 0;
             sec = std.fmt.parseInt(i64, input[17..19], 10) catch 0;
+            consumed = 19;
             var rest = input[19..];
-            while (rest.len > 0 and rest[0] == ' ') rest = rest[1..];
+            while (rest.len > 0 and rest[0] == ' ') { rest = rest[1..]; consumed += 1; }
             if (rest.len > 0) {
-                if (parseTimezoneOffset(rest)) |off| tz_offset = off;
+                if (parseTimezoneOffset(rest)) |off| {
+                    tz_offset = off;
+                    consumed = input.len;
+                }
             }
         }
-        return .{ .int = dateToTimestamp(year, month, day, hour, min, sec) - tz_offset };
+        var base_ts = dateToTimestamp(year, month, day, hour, min, sec) - tz_offset;
+        var trailing = input[consumed..];
+        while (trailing.len > 0 and trailing[0] == ' ') trailing = trailing[1..];
+        if (trailing.len > 0) {
+            const rel = parseRelativeTime(trailing, base_ts);
+            if (rel == .int) base_ts = rel.int;
+        }
+        return .{ .int = base_ts };
     }
 
     // MM/DD/YYYY US date format with optional timezone

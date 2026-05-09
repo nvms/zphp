@@ -1981,6 +1981,17 @@ pub const VM = struct {
 
                 .iter_begin => {
                     var iterable = self.stack[self.sp - 1];
+                    if (iterable == .array) {
+                        const src = iterable.array;
+                        const copy = try self.allocator.create(PhpArray);
+                        copy.* = .{};
+                        try self.arrays.append(self.allocator, copy);
+                        for (src.entries.items) |entry| {
+                            try copy.set(self.allocator, entry.key, entry.value);
+                        }
+                        self.stack[self.sp - 1] = .{ .array = copy };
+                        iterable = .{ .array = copy };
+                    }
                     if (iterable == .generator) {
                         if (iterable.generator.state == .completed) {
                             if (try self.throwBuiltinException("Exception", "Cannot traverse an already closed generator")) continue;
