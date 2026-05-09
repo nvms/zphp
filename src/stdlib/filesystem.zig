@@ -521,8 +521,10 @@ fn native_is_dir(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
 
 fn native_basename(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len == 0 or args[0] != .string) return .{ .string = "" };
-    const path = args[0].string;
+    var path = args[0].string;
     const suffix = if (args.len >= 2 and args[1] == .string) args[1].string else "";
+    // PHP strips trailing slashes before extracting the last segment
+    while (path.len > 1 and path[path.len - 1] == '/') path = path[0 .. path.len - 1];
     var name: []const u8 = path;
     if (std.mem.lastIndexOf(u8, path, "/")) |pos| {
         name = path[pos + 1 ..];
@@ -675,7 +677,8 @@ fn native_scandir(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
 
 fn native_fnmatch(_: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len < 2 or args[0] != .string or args[1] != .string) return .{ .bool = false };
-    return .{ .bool = globMatch(args[0].string, args[1].string) };
+    const flags: i64 = if (args.len >= 3) Value.toInt(args[2]) else 0;
+    return .{ .bool = globMatchFlags(args[0].string, args[1].string, flags) };
 }
 
 fn native_glob(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
@@ -714,16 +717,20 @@ fn native_glob(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
 
 fn globAppend(ctx: *NativeContext, result: *PhpArray, pattern: []const u8, flags: i64) !void {
     const GLOB_ONLYDIR: i64 = 1073741824;
+    const GLOB_MARK: i64 = 8;
+    const FNM_PERIOD: i64 = 4;
     const dir_path = if (std.mem.lastIndexOf(u8, pattern, "/")) |pos| pattern[0..pos] else ".";
     const file_pattern = if (std.mem.lastIndexOf(u8, pattern, "/")) |pos| pattern[pos + 1 ..] else pattern;
     var dir = std.fs.cwd().openDir(dir_path, .{ .iterate = true }) catch return;
     defer dir.close();
     var iter = dir.iterate();
     while (iter.next() catch null) |entry| {
-        if (!globMatch(file_pattern, entry.name)) continue;
+        // glob excludes dotfiles unless the pattern explicitly starts with '.'
+        if (!globMatchFlags(file_pattern, entry.name, FNM_PERIOD)) continue;
         if ((flags & GLOB_ONLYDIR) != 0 and entry.kind != .directory) continue;
         var path_buf: [4096]u8 = undefined;
-        const full = std.fmt.bufPrint(&path_buf, "{s}/{s}", .{ dir_path, entry.name }) catch continue;
+        const slash: []const u8 = if ((flags & GLOB_MARK) != 0 and entry.kind == .directory) "/" else "";
+        const full = std.fmt.bufPrint(&path_buf, "{s}/{s}{s}", .{ dir_path, entry.name, slash }) catch continue;
         try result.append(ctx.allocator, .{ .string = try ctx.createString(full) });
     }
 }
@@ -741,6 +748,32 @@ fn sortArrayValues(arr: *PhpArray) void {
 }
 
 fn globMatch(pattern: []const u8, name: []const u8) bool {
+    return globMatchFlags(pattern, name, 0);
+}
+
+fn globMatchFlags(pattern: []const u8, name: []const u8, flags: i64) bool {
+    const FNM_PATHNAME: i64 = 2;
+    const FNM_PERIOD: i64 = 4;
+    const FNM_CASEFOLD: i64 = 16;
+    const casefold = (flags & FNM_CASEFOLD) != 0;
+    const pathname = (flags & FNM_PATHNAME) != 0;
+    const period = (flags & FNM_PERIOD) != 0;
+
+    // FNM_PERIOD: a leading '.' must be matched explicitly (not by * ? or [class])
+    if (period and name.len > 0 and name[0] == '.') {
+        if (pattern.len == 0 or pattern[0] != '.') return false;
+    }
+
+    const eq = struct {
+        fn f(a: u8, b: u8, ci: bool) bool {
+            if (a == b) return true;
+            if (!ci) return false;
+            const al = if (a >= 'A' and a <= 'Z') a + 32 else a;
+            const bl = if (b >= 'A' and b <= 'Z') b + 32 else b;
+            return al == bl;
+        }
+    }.f;
+
     var pi: usize = 0;
     var ni: usize = 0;
     var star_pi: ?usize = null;
@@ -754,12 +787,14 @@ fn globMatch(pattern: []const u8, name: []const u8) bool {
             continue;
         }
         if (pi < pattern.len and ni < name.len) {
-            if (pattern[pi] == '?' or pattern[pi] == name[ni]) {
+            // FNM_PATHNAME: '/' in name must be matched literally; * and ? don't cross it
+            if (pathname and name[ni] == '/' and pattern[pi] != '/') {
+                // fall through to backtrack
+            } else if (pattern[pi] == '?' or eq(pattern[pi], name[ni], casefold)) {
                 pi += 1;
                 ni += 1;
                 continue;
-            }
-            if (pattern[pi] == '[') {
+            } else if (pattern[pi] == '[') {
                 if (std.mem.indexOfScalarPos(u8, pattern, pi + 1, ']')) |close| {
                     var negate = false;
                     var class_start = pi + 1;
@@ -772,10 +807,16 @@ fn globMatch(pattern: []const u8, name: []const u8) bool {
                     var k = class_start;
                     while (k < close) {
                         if (k + 2 < close and pattern[k + 1] == '-') {
-                            if (c >= pattern[k] and c <= pattern[k + 2]) matched = true;
+                            const lo = pattern[k];
+                            const hi = pattern[k + 2];
+                            if (c >= lo and c <= hi) matched = true;
+                            if (casefold) {
+                                const cl = if (c >= 'A' and c <= 'Z') c + 32 else c;
+                                if (cl >= lo and cl <= hi) matched = true;
+                            }
                             k += 3;
                         } else {
-                            if (pattern[k] == c) matched = true;
+                            if (eq(pattern[k], c, casefold)) matched = true;
                             k += 1;
                         }
                     }
