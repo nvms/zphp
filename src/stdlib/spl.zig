@@ -1484,18 +1484,24 @@ fn faOffsetGet(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     const obj = getThis(ctx) orelse return .null;
     const arr = getData(obj) orelse return .null;
     if (args.len == 0) return .null;
-    const idx: usize = @intCast(@max(Value.toInt(args[0]), 0));
-    if (idx >= arr.entries.items.len) return .null;
-    return arr.entries.items[idx].value;
+    const raw = Value.toInt(args[0]);
+    if (raw < 0 or @as(usize, @intCast(raw)) >= arr.entries.items.len) {
+        try ctx.vm.setPendingException("RuntimeException", "Index invalid or out of range");
+        return error.RuntimeError;
+    }
+    return arr.entries.items[@intCast(raw)].value;
 }
 
 fn faOffsetSet(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     const obj = getThis(ctx) orelse return .null;
     const arr = getData(obj) orelse return .null;
     if (args.len < 2) return .null;
-    const idx: usize = @intCast(@max(Value.toInt(args[0]), 0));
-    if (idx >= arr.entries.items.len) return .null;
-    arr.entries.items[idx].value = args[1];
+    const raw = Value.toInt(args[0]);
+    if (raw < 0 or @as(usize, @intCast(raw)) >= arr.entries.items.len) {
+        try ctx.vm.setPendingException("RuntimeException", "Index invalid or out of range");
+        return error.RuntimeError;
+    }
+    arr.entries.items[@intCast(raw)].value = args[1];
     return .null;
 }
 
