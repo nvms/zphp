@@ -73,7 +73,7 @@ pub const entries = .{
     .{ "set_exception_handler", native_set_exception_handler },
     .{ "restore_error_handler", native_restore_error_handler },
     .{ "restore_exception_handler", native_noop_true },
-    .{ "register_shutdown_function", native_noop_null },
+    .{ "register_shutdown_function", native_register_shutdown_function },
     .{ "error_reporting", native_error_reporting },
     .{ "error_get_last", native_error_get_last },
     .{ "error_clear_last", native_noop_null },
@@ -1015,7 +1015,7 @@ fn native_get_cfg_var(_: *NativeContext, _: []const Value) RuntimeError!Value {
 
 fn iniDefault(name: []const u8) ?[]const u8 {
     if (std.mem.eql(u8, name, "date.timezone")) return "UTC";
-    if (std.mem.eql(u8, name, "memory_limit")) return "-1";
+    if (std.mem.eql(u8, name, "memory_limit")) return "128M";
     if (std.mem.eql(u8, name, "max_execution_time")) return "0";
     if (std.mem.eql(u8, name, "display_errors")) return "1";
     if (std.mem.eql(u8, name, "error_reporting")) return "32767";
@@ -1068,8 +1068,17 @@ fn native_get_included_files(ctx: *NativeContext, _: []const Value) RuntimeError
     return .{ .array = arr };
 }
 
+fn native_register_shutdown_function(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len == 0) return .null;
+    try ctx.vm.shutdown_callbacks.append(ctx.allocator, args[0]);
+    return .null;
+}
+
 fn native_memory_get_usage(_: *NativeContext, _: []const Value) RuntimeError!Value {
-    return .{ .int = 0 };
+    // zphp uses an arena/request allocator and doesn't track byte-accurate
+    // process RSS; report a small non-zero stub so callers that gate on >0
+    // (the common pattern) keep working
+    return .{ .int = 1024 };
 }
 
 fn native_set_error_handler(ctx: *NativeContext, args: []const Value) RuntimeError!Value {

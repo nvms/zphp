@@ -330,6 +330,7 @@ pub const VM = struct {
     closure_instance_count: u32 = 0,
     php_constants: std.StringHashMapUnmanaged(Value) = .{},
     ini_settings: std.StringHashMapUnmanaged([]const u8) = .{},
+    shutdown_callbacks: std.ArrayListUnmanaged(Value) = .{},
     classes: std.StringHashMapUnmanaged(ClassDef) = .{},
     interfaces: std.StringHashMapUnmanaged(InterfaceDef) = .{},
     traits: std.StringHashMapUnmanaged(void) = .{},
@@ -890,6 +891,7 @@ pub const VM = struct {
         self.capture_index.deinit(self.allocator);
         self.php_constants.deinit(self.allocator);
         self.ini_settings.deinit(self.allocator);
+        self.shutdown_callbacks.deinit(self.allocator);
         self.arrays.deinit(self.allocator);
         self.objects.deinit(self.allocator);
         self.generators.deinit(self.allocator);
@@ -8465,6 +8467,22 @@ pub const VM = struct {
                 return;
             }
         }
+    }
+
+    pub fn runShutdownCallbacks(self: *VM) !void {
+        // PHP runs shutdown callbacks in registration order, after the script
+        // returns; errors in one don't prevent the others from firing.
+        for (self.shutdown_callbacks.items) |cb| {
+            const result = if (cb == .string) self.callByName(cb.string, &.{}) catch null
+                          else if (cb == .object) blk: {
+                              if (self.hasMethod(cb.object.class_name, "__invoke")) {
+                                  break :blk self.callMethod(cb.object, "__invoke", &.{}) catch null;
+                              }
+                              break :blk null;
+                          } else null;
+            _ = result;
+        }
+        self.shutdown_callbacks.clearRetainingCapacity();
     }
 
     pub fn callByName(self: *VM, name: []const u8, args: []const Value) RuntimeError!Value {

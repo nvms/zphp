@@ -289,6 +289,7 @@ fn runWithVM(allocator: std.mem.Allocator, result: *CompileResult, script_path: 
     try initCliServerVars(vm, allocator);
     try initArgv(vm, allocator, script_path, script_args);
     vm.interpret(result) catch {
+        vm.runShutdownCallbacks() catch {};
         if (vm.output.items.len > 0) try writeStdout(vm.output.items);
         if (vm.exit_requested) std.process.exit(0);
         const msg = error_format.formatRuntimeError(allocator, vm);
@@ -299,6 +300,7 @@ fn runWithVM(allocator: std.mem.Allocator, result: *CompileResult, script_path: 
         }
         std.process.exit(255);
     };
+    vm.runShutdownCallbacks() catch {};
     if (vm.output.items.len > 0) try writeStdout(vm.output.items);
 }
 
