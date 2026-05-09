@@ -334,6 +334,12 @@ fn printRValue(a: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8), val: Valu
 fn var_export(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len == 0) return .null;
     const return_str = args.len >= 2 and args[1].isTruthy();
+    visited_ptrs.deinit(ctx.allocator);
+    visited_ptrs = .{};
+    defer {
+        visited_ptrs.deinit(ctx.allocator);
+        visited_ptrs = .{};
+    }
     var buf = std.ArrayListUnmanaged(u8){};
     try varExportValue(ctx.allocator, &buf, args[0], 0, ctx);
     if (return_str) {
@@ -432,6 +438,13 @@ fn varExportValue(a: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8), val: V
         },
         .string => |s| try varExportString(a, out, s),
         .array => |arr| {
+            const arr_ptr = @intFromPtr(arr);
+            if (visitedContains(arr_ptr)) {
+                try out.appendSlice(a, "NULL");
+                return;
+            }
+            try visited_ptrs.append(a, arr_ptr);
+            defer _ = visited_ptrs.pop();
             try out.appendSlice(a, "array (\n");
             for (arr.entries.items) |entry| {
                 for (0..(depth + 1) * 2) |_| try out.append(a, ' ');
@@ -444,7 +457,12 @@ fn varExportValue(a: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8), val: V
                     .string => |ks| try varExportString(a, out, ks),
                 }
                 try out.appendSlice(a, " => ");
-                if (entry.value == .array or entry.value == .object) {
+                const ev_recurses = switch (entry.value) {
+                    .array => |aa| visitedContains(@intFromPtr(aa)),
+                    .object => |oo| visitedContains(@intFromPtr(oo)),
+                    else => false,
+                };
+                if ((entry.value == .array or entry.value == .object) and !ev_recurses) {
                     try out.append(a, '\n');
                     for (0..(depth + 1) * 2) |_| try out.append(a, ' ');
                 }
@@ -455,6 +473,13 @@ fn varExportValue(a: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8), val: V
             try out.append(a, ')');
         },
         .object => |obj| {
+            const obj_ptr = @intFromPtr(obj);
+            if (visitedContains(obj_ptr)) {
+                try out.appendSlice(a, "NULL");
+                return;
+            }
+            try visited_ptrs.append(a, obj_ptr);
+            defer _ = visited_ptrs.pop();
             if (ctx.vm.classes.get(obj.class_name)) |cls| {
                 if (cls.is_enum) {
                     const case_name = obj.get("name");
@@ -483,7 +508,12 @@ fn varExportValue(a: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8), val: V
                             for (0..item_indent) |_| try out.append(a, ' ');
                             try varExportString(a, out, name);
                             try out.appendSlice(a, " => ");
-                            if (slots[i] == .array or slots[i] == .object) {
+                            const sr = switch (slots[i]) {
+                                .array => |aa| visitedContains(@intFromPtr(aa)),
+                                .object => |oo| visitedContains(@intFromPtr(oo)),
+                                else => false,
+                            };
+                            if ((slots[i] == .array or slots[i] == .object) and !sr) {
                                 try out.append(a, '\n');
                                 for (0..(depth + 1) * 2) |_| try out.append(a, ' ');
                             }
@@ -505,7 +535,12 @@ fn varExportValue(a: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8), val: V
                     for (0..item_indent) |_| try out.append(a, ' ');
                     try varExportString(a, out, entry.key_ptr.*);
                     try out.appendSlice(a, " => ");
-                    if (entry.value_ptr.* == .array or entry.value_ptr.* == .object) {
+                    const er = switch (entry.value_ptr.*) {
+                        .array => |aa| visitedContains(@intFromPtr(aa)),
+                        .object => |oo| visitedContains(@intFromPtr(oo)),
+                        else => false,
+                    };
+                    if ((entry.value_ptr.* == .array or entry.value_ptr.* == .object) and !er) {
                         try out.append(a, '\n');
                         for (0..(depth + 1) * 2) |_| try out.append(a, ' ');
                     }
