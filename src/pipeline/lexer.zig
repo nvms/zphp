@@ -433,11 +433,40 @@ pub const Lexer = struct {
     // -- strings -----------------------------------------------------------
 
     fn lexStringBody(self: *Lexer, quote: u8, start: usize) Token {
+        var brace_depth: u32 = 0;
         while (self.pos < self.source.len) {
             const ch = self.source[self.pos];
             if (ch == '\\') {
                 self.pos += 1;
                 if (self.pos < self.source.len) self.pos += 1;
+            } else if (quote == '"' and brace_depth == 0 and ch == '{' and self.pos + 1 < self.source.len and self.source[self.pos + 1] == '$') {
+                brace_depth += 1;
+                self.pos += 2;
+            } else if (quote == '"' and brace_depth > 0) {
+                if (ch == '"' or ch == '\'') {
+                    const inner_quote = ch;
+                    self.pos += 1;
+                    while (self.pos < self.source.len) {
+                        const c2 = self.source[self.pos];
+                        if (c2 == '\\') {
+                            self.pos += 1;
+                            if (self.pos < self.source.len) self.pos += 1;
+                        } else if (c2 == inner_quote) {
+                            self.pos += 1;
+                            break;
+                        } else {
+                            self.pos += 1;
+                        }
+                    }
+                } else if (ch == '{') {
+                    brace_depth += 1;
+                    self.pos += 1;
+                } else if (ch == '}') {
+                    brace_depth -= 1;
+                    self.pos += 1;
+                } else {
+                    self.pos += 1;
+                }
             } else if (ch == quote) {
                 self.pos += 1;
                 return self.makeToken(.string, start);
