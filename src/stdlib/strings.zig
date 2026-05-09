@@ -1226,9 +1226,15 @@ fn sprintfImpl(ctx: *NativeContext, fmt_str: []const u8, args: []const Value) ![
                     const s = blk: {
                         if (arg == .string) break :blk arg.string;
                         if (arg == .object) {
-                            if (ctx.vm.callMethod(arg.object, "__toString", &.{})) |ret| {
+                            if (ctx.vm.hasMethod(arg.object.class_name, "__toString")) {
+                                const ret = try ctx.vm.callMethod(arg.object, "__toString", &.{});
                                 if (ret == .string) break :blk ret.string;
-                            } else |_| {}
+                            } else {
+                                const msg = std.fmt.allocPrint(ctx.allocator, "Object of class {s} could not be converted to string", .{arg.object.class_name}) catch "Object could not be converted to string";
+                                try ctx.strings.append(ctx.allocator, msg);
+                                try ctx.vm.setPendingException("Error", msg);
+                                return error.RuntimeError;
+                            }
                         }
                         try arg.format(&tmp_buf, ctx.allocator);
                         break :blk @as(?[]const u8, null);

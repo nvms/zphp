@@ -791,8 +791,11 @@ fn preg_replace_callback(ctx: *NativeContext, args: []const Value) RuntimeError!
 
     var result = std.ArrayListUnmanaged(u8){};
     var offset: usize = 0;
+    var replace_count: i64 = 0;
+    const limit: i64 = if (args.len >= 4) Value.toInt(args[3]) else -1;
 
     while (offset <= subject.len) {
+        if (limit >= 0 and replace_count >= limit) break;
         const rc = pcre2.pcre2_match_8(code, subject.ptr, subject.len, offset, 0, match_data, null);
         if (rc < 0) break;
 
@@ -838,6 +841,7 @@ fn preg_replace_callback(ctx: *NativeContext, args: []const Value) RuntimeError!
             try result.appendSlice(ctx.allocator, s);
         }
 
+        replace_count += 1;
         if (match_end == offset) {
             if (offset < subject.len) {
                 try result.append(ctx.allocator, subject[offset]);
@@ -851,6 +855,8 @@ fn preg_replace_callback(ctx: *NativeContext, args: []const Value) RuntimeError!
     if (offset < subject.len) {
         try result.appendSlice(ctx.allocator, subject[offset..]);
     }
+
+    if (args.len >= 5) ctx.setCallerVar(4, args.len, .{ .int = replace_count });
 
     const s = try result.toOwnedSlice(ctx.allocator);
     try ctx.strings.append(ctx.allocator, s);
