@@ -111,6 +111,9 @@ pub const entries = .{
     .{ "parse_url", native_parse_url },
     .{ "parse_str", native_parse_str },
     .{ "strstr", native_strstr },
+    .{ "strchr", native_strstr },
+    .{ "stristr", native_stristr },
+    .{ "strtok", native_strtok },
     .{ "strrchr", native_strrchr },
     .{ "addcslashes", native_addcslashes },
     .{ "stripcslashes", native_stripcslashes },
@@ -617,11 +620,14 @@ fn native_str_split(ctx: *NativeContext, args: []const Value) RuntimeError!Value
     return .{ .array = arr };
 }
 
-fn native_substr_count(_: *NativeContext, args: []const Value) RuntimeError!Value {
+fn native_substr_count(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len < 2) return .{ .int = 0 };
     const haystack = if (args[0] == .string) args[0].string else return Value{ .int = 0 };
     const needle = if (args[1] == .string) args[1].string else return Value{ .int = 0 };
-    if (needle.len == 0) return .{ .int = 0 };
+    if (needle.len == 0) {
+        try ctx.vm.setPendingException("ValueError", "substr_count(): Argument #2 ($needle) must not be empty");
+        return error.RuntimeError;
+    }
     const offset: usize = if (args.len >= 3) @intCast(@max(0, @min(Value.toInt(args[2]), @as(i64, @intCast(haystack.len))))) else 0;
     const end: usize = if (args.len >= 4) @intCast(@min(@as(i64, @intCast(haystack.len)), @max(0, Value.toInt(args[2]) + Value.toInt(args[3])))) else haystack.len;
     const search_region = haystack[offset..end];
@@ -843,12 +849,16 @@ fn native_chunk_split(ctx: *NativeContext, args: []const Value) RuntimeError!Val
     const end = if (args.len >= 3 and args[2] == .string) args[2].string else "\r\n";
 
     var buf = std.ArrayListUnmanaged(u8){};
-    var i: usize = 0;
-    while (i < s.len) {
-        const chunk_end = @min(i + chunklen, s.len);
-        try buf.appendSlice(ctx.allocator, s[i..chunk_end]);
+    if (s.len == 0) {
         try buf.appendSlice(ctx.allocator, end);
-        i = chunk_end;
+    } else {
+        var i: usize = 0;
+        while (i < s.len) {
+            const chunk_end = @min(i + chunklen, s.len);
+            try buf.appendSlice(ctx.allocator, s[i..chunk_end]);
+            try buf.appendSlice(ctx.allocator, end);
+            i = chunk_end;
+        }
     }
     const result = try buf.toOwnedSlice(ctx.allocator);
     try ctx.strings.append(ctx.allocator, result);
@@ -4123,6 +4133,56 @@ fn native_strstr(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
         if (before_needle) {
             return .{ .string = try ctx.createString(haystack[0..pos]) };
         }
+        return .{ .string = try ctx.createString(haystack[pos..]) };
+    }
+    return Value{ .bool = false };
+}
+
+fn native_strtok(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len == 0) return .{ .bool = false };
+    const tokens: []const u8 = blk: {
+        if (args.len >= 2) {
+            // strtok(str, tokens) - reset state with a new string
+            if (args[0] != .string or args[1] != .string) return Value{ .bool = false };
+            const owned = try ctx.allocator.dupe(u8, args[0].string);
+            try ctx.strings.append(ctx.allocator, owned);
+            ctx.vm.strtok_state = owned;
+            ctx.vm.strtok_pos = 0;
+            break :blk args[1].string;
+        }
+        // strtok(tokens) - continue with prior string
+        if (args[0] != .string) return Value{ .bool = false };
+        break :blk args[0].string;
+    };
+    const s = ctx.vm.strtok_state orelse return .{ .bool = false };
+    var p = ctx.vm.strtok_pos;
+    // skip leading delimiters
+    while (p < s.len and std.mem.indexOfScalar(u8, tokens, s[p]) != null) : (p += 1) {}
+    if (p >= s.len) {
+        ctx.vm.strtok_pos = s.len;
+        return .{ .bool = false };
+    }
+    const start = p;
+    while (p < s.len and std.mem.indexOfScalar(u8, tokens, s[p]) == null) : (p += 1) {}
+    // advance past the delimiter so the next call doesn't re-consider it
+    ctx.vm.strtok_pos = if (p < s.len) p + 1 else p;
+    return .{ .string = try ctx.createString(s[start..p]) };
+}
+
+fn native_stristr(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len < 2) return Value{ .bool = false };
+    const haystack = if (args[0] == .string) args[0].string else return Value{ .bool = false };
+    const needle = if (args[1] == .string) args[1].string else return Value{ .bool = false };
+    if (needle.len == 0) return Value{ .bool = false };
+    const before_needle: bool = args.len >= 3 and args[2].isTruthy();
+
+    const lower_h = try toLowerBuf(ctx.allocator, haystack);
+    defer ctx.allocator.free(lower_h);
+    const lower_n = try toLowerBuf(ctx.allocator, needle);
+    defer ctx.allocator.free(lower_n);
+    if (std.mem.indexOf(u8, lower_h, lower_n)) |pos| {
+        // return the original-case substring
+        if (before_needle) return .{ .string = try ctx.createString(haystack[0..pos]) };
         return .{ .string = try ctx.createString(haystack[pos..]) };
     }
     return Value{ .bool = false };
