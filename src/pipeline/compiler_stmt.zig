@@ -464,6 +464,7 @@ pub fn compileTryCatch(self: *Compiler, node: Ast.Node) Error!void {
 
     if (finally_node != 0 and self.finally_depth < 8) {
         self.finally_nodes[self.finally_depth] = finally_node;
+        self.finally_loop_depth[self.finally_depth] = self.loop_depth;
         self.finally_depth += 1;
     }
 

@@ -175,6 +175,7 @@ pub const Compiler = struct {
     current_function: []const u8 = "",
     in_trait: bool = false,
     finally_nodes: [8]u32 = [_]u32{0} ** 8,
+    finally_loop_depth: [8]u32 = [_]u32{0} ** 8,
     finally_depth: u32 = 0,
 
     pub const LoopJump = struct {
@@ -248,8 +249,18 @@ pub const Compiler = struct {
             },
             .break_stmt => {
                 const level = if (node.data.lhs > 0) node.data.lhs else 1;
-                // emit iter_end for each foreach loop we're breaking out of
                 const target_depth = self.loop_depth -| level;
+                // emit any finally blocks declared inside loops being broken
+                const saved_fd = self.finally_depth;
+                var fd = self.finally_depth;
+                while (fd > 0) {
+                    fd -= 1;
+                    if (self.finally_loop_depth[fd] <= target_depth) break;
+                    self.finally_depth = fd;
+                    try self.emitOp(.pop_handler);
+                    try self.compileNode(self.finally_nodes[fd]);
+                }
+                self.finally_depth = saved_fd;
                 for (target_depth..self.loop_depth) |d| {
                     if (d < 32 and self.loop_is_foreach[d]) {
                         try self.emitOp(.iter_end);
