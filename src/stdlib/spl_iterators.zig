@@ -87,6 +87,32 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try vm.native_fns.put(a, "DirectoryIterator::valid", diValid);
     try vm.native_fns.put(a, "DirectoryIterator::isDot", diIsDot);
 
+    // FilesystemIterator (DirectoryIterator with SKIP_DOTS by default)
+    var fsi_def = ClassDef{ .name = "FilesystemIterator" };
+    fsi_def.parent = "DirectoryIterator";
+    try fsi_def.interfaces.append(a, "Iterator");
+    for ([_][]const u8{
+        "__construct", "rewind", "current", "key", "next", "valid",
+    }) |m| {
+        const arity: u8 = if (std.mem.eql(u8, m, "__construct")) 2 else 0;
+        try fsi_def.methods.put(a, m, .{ .name = m, .arity = arity });
+    }
+    try fsi_def.static_props.put(a, "CURRENT_AS_PATHNAME", .{ .int = 0x0020 });
+    try fsi_def.static_props.put(a, "CURRENT_AS_FILEINFO", .{ .int = 0x0000 });
+    try fsi_def.static_props.put(a, "CURRENT_AS_SELF", .{ .int = 0x0010 });
+    try fsi_def.static_props.put(a, "KEY_AS_PATHNAME", .{ .int = 0x0000 });
+    try fsi_def.static_props.put(a, "KEY_AS_FILENAME", .{ .int = 0x0100 });
+    try fsi_def.static_props.put(a, "FOLLOW_SYMLINKS", .{ .int = 0x0200 });
+    try fsi_def.static_props.put(a, "SKIP_DOTS", .{ .int = 0x1000 });
+    try fsi_def.static_props.put(a, "UNIX_PATHS", .{ .int = 0x2000 });
+    try vm.classes.put(a, "FilesystemIterator", fsi_def);
+    try vm.native_fns.put(a, "FilesystemIterator::__construct", fsiConstruct);
+    try vm.native_fns.put(a, "FilesystemIterator::rewind", diRewind);
+    try vm.native_fns.put(a, "FilesystemIterator::current", diCurrent);
+    try vm.native_fns.put(a, "FilesystemIterator::key", diKey);
+    try vm.native_fns.put(a, "FilesystemIterator::next", diNext);
+    try vm.native_fns.put(a, "FilesystemIterator::valid", diValid);
+
     // RecursiveDirectoryIterator
     var rdi_def = ClassDef{ .name = "RecursiveDirectoryIterator" };
     rdi_def.parent = "DirectoryIterator";
@@ -660,6 +686,19 @@ fn syncCurrentEntry(ctx: *NativeContext, obj: *PhpObject) !void {
     if (path_val == .string) {
         try obj.set(ctx.allocator, "__pathname", .{ .string = path_val.string });
     }
+}
+
+fn fsiConstruct(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    const obj = getThis(ctx) orelse return .null;
+    if (args.len < 1 or args[0] != .string) return .null;
+    const path = args[0].string;
+    try obj.set(ctx.allocator, "__di_path", .{ .string = try createString(ctx, path) });
+    try obj.set(ctx.allocator, "__di_idx", .{ .int = 0 });
+    // FilesystemIterator skips dots by default
+    const entries = try loadDirectoryEntries(ctx, path, SKIP_DOTS);
+    try obj.set(ctx.allocator, "__di_entries", .{ .array = entries });
+    try syncCurrentEntry(ctx, obj);
+    return .null;
 }
 
 fn diRewind(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
