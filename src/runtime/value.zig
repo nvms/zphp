@@ -659,13 +659,26 @@ pub const Value = union(enum) {
             if (f >= max_f or f < -max_f) return 0;
             return @intFromFloat(f);
         }
+        // saturating parse: matches PHP's "(int)<numeric string>" which clamps
+        // overflow to PHP_INT_MAX / PHP_INT_MIN rather than wrapping
         var result: i64 = 0;
+        var overflow = false;
         var k = digits_start;
-        while (k < s.len and s[k] >= '0' and s[k] <= '9') {
-            result = result *% 10 +% @as(i64, s[k] - '0');
-            k += 1;
+        while (k < s.len and s[k] >= '0' and s[k] <= '9') : (k += 1) {
+            const d: i64 = s[k] - '0';
+            const m = @mulWithOverflow(result, 10);
+            if (m[1] != 0) { overflow = true; break; }
+            const a = @addWithOverflow(m[0], d);
+            if (a[1] != 0) { overflow = true; break; }
+            result = a[0];
         }
-        return if (neg) -result else result;
+        if (overflow) return if (neg) std.math.minInt(i64) else std.math.maxInt(i64);
+        if (neg) {
+            const n = @subWithOverflow(@as(i64, 0), result);
+            if (n[1] != 0) return std.math.minInt(i64);
+            return n[0];
+        }
+        return result;
     }
 
     fn parseLeadingFloat(s: []const u8) f64 {

@@ -1,0 +1,28 @@
+<?php
+echo PHP_INT_MAX, "\n";
+echo PHP_INT_MIN, "\n";
+var_dump(PHP_INT_MAX + 1);
+var_dump(PHP_INT_MAX * 2);
+var_dump(PHP_INT_MIN - 1);
+var_dump(intdiv(PHP_INT_MAX, 1));
+var_dump(abs(PHP_INT_MIN));
+var_dump(-PHP_INT_MIN);
+var_dump(PHP_INT_MAX < PHP_INT_MAX + 1);
+var_dump(PHP_INT_MAX == (float)PHP_INT_MAX);
+$a = 1; for ($i = 0; $i < 20; $i++) $a *= 10;
+var_dump($a);
+$b = 1; for ($i = 0; $i < 30; $i++) $b *= 10;
+var_dump($b);
+var_dump((int)"9223372036854775807");
+var_dump((int)"9223372036854775808");
+var_dump((int)"-9223372036854775808");
+var_dump((int)"-9223372036854775809");
+var_dump(hexdec("7fffffffffffffff"));
+var_dump(hexdec("8000000000000000"));
+var_dump(hexdec("ffffffffffffffff"));
+var_dump(octdec("777777777777777777777"));
+var_dump(bindec(str_repeat("1", 63)));
+var_dump(bindec(str_repeat("1", 64)));
+var_dump(floor(9.1e18));
+var_dump((int)floor(9.1e18));
+var_dump(PHP_INT_MIN % 1);

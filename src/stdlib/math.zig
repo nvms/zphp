@@ -273,22 +273,62 @@ fn native_base_convert(ctx: *NativeContext, args: []const Value) RuntimeError!Va
     return .{ .string = try ctx.createString(buf[pos..]) };
 }
 
+// parses digits in `base`, returning int if it fits in i64 and float on
+// overflow (matching PHP's bindec/octdec/hexdec behavior). non-digit chars
+// in PHP's accepted set are skipped silently.
+fn baseDecimal(s: []const u8, base: u8) Value {
+    var int_val: u64 = 0;
+    var float_val: f64 = 0;
+    var overflowed = false;
+    for (s) |c| {
+        const d: ?u8 = switch (base) {
+            2 => if (c == '0' or c == '1') c - '0' else null,
+            8 => if (c >= '0' and c <= '7') c - '0' else null,
+            16 => if (c >= '0' and c <= '9') c - '0'
+                else if (c >= 'a' and c <= 'f') 10 + (c - 'a')
+                else if (c >= 'A' and c <= 'F') 10 + (c - 'A')
+                else null,
+            else => null,
+        };
+        if (d == null) continue;
+        if (!overflowed) {
+            const m = @mulWithOverflow(int_val, base);
+            const a = if (m[1] == 0) @addWithOverflow(m[0], d.?) else .{ @as(u64, 0), @as(u1, 1) };
+            if (m[1] != 0 or a[1] != 0) {
+                overflowed = true;
+                float_val = @floatFromInt(int_val);
+            } else {
+                int_val = a[0];
+            }
+        }
+        if (overflowed) {
+            float_val = float_val * @as(f64, @floatFromInt(base)) + @as(f64, @floatFromInt(d.?));
+        }
+    }
+    if (overflowed) return .{ .float = float_val };
+    // i64 cast: values up to 2^63-1 stay int, 2^63..2^64-1 also stay int
+    // (PHP treats them as negative i64 for signed int max range), but
+    // PHP returns float for values > PHP_INT_MAX
+    if (int_val > std.math.maxInt(i64)) return .{ .float = @floatFromInt(int_val) };
+    return .{ .int = @intCast(int_val) };
+}
+
 fn native_bindec(_: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len == 0) return .{ .int = 0 };
     const s = if (args[0] == .string) args[0].string else return Value{ .int = 0 };
-    return .{ .int = std.fmt.parseInt(i64, s, 2) catch 0 };
+    return baseDecimal(s, 2);
 }
 
 fn native_octdec(_: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len == 0) return .{ .int = 0 };
     const s = if (args[0] == .string) args[0].string else return Value{ .int = 0 };
-    return .{ .int = std.fmt.parseInt(i64, s, 8) catch 0 };
+    return baseDecimal(s, 8);
 }
 
 fn native_hexdec(_: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len == 0) return .{ .int = 0 };
     const s = if (args[0] == .string) args[0].string else return Value{ .int = 0 };
-    return .{ .int = std.fmt.parseInt(i64, s, 16) catch 0 };
+    return baseDecimal(s, 16);
 }
 
 fn native_decbin(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
