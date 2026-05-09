@@ -75,7 +75,7 @@ pub const entries = .{
     .{ "restore_exception_handler", native_noop_true },
     .{ "register_shutdown_function", native_noop_null },
     .{ "error_reporting", native_error_reporting },
-    .{ "error_get_last", native_noop_null },
+    .{ "error_get_last", native_error_get_last },
     .{ "error_clear_last", native_noop_null },
     .{ "get_include_path", native_get_include_path },
     .{ "set_include_path", native_set_include_path },
@@ -1069,6 +1069,13 @@ fn native_trigger_error(ctx: *NativeContext, args: []const Value) RuntimeError!V
     const message = args[0].string;
     const errno: i64 = if (args.len >= 2) Value.toInt(args[1]) else 256; // E_USER_ERROR
 
+    // record as the most recent runtime error
+    ctx.vm.last_error_type = errno;
+    ctx.vm.last_error_message = ctx.allocator.dupe(u8, message) catch message;
+    ctx.vm.strings.append(ctx.allocator, ctx.vm.last_error_message) catch {};
+    ctx.vm.last_error_file = "";
+    ctx.vm.last_error_line = 0;
+
     if (ctx.vm.user_error_handler) |handler| {
         const call_args = &[_]Value{
             .{ .int = errno },
@@ -1076,12 +1083,26 @@ fn native_trigger_error(ctx: *NativeContext, args: []const Value) RuntimeError!V
             .{ .string = "" },
             .{ .int = 0 },
         };
-        _ = ctx.invokeCallable(handler, call_args) catch {};
+        const result = ctx.invokeCallable(handler, call_args) catch Value{ .bool = false };
+        // PHP: if handler returns false, fall through to default handling
+        if (result == .bool and !result.bool) {
+            // (skip output for now; we don't have proper error formatting)
+        }
         return .{ .bool = true };
     }
 
-    try ctx.vm.output.appendSlice(ctx.allocator, message);
+    // no handler: PHP would emit a formatted error; we silently record it.
     return .{ .bool = true };
+}
+
+fn native_error_get_last(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    if (ctx.vm.last_error_type == 0) return .null;
+    var arr = try ctx.createArray();
+    try arr.set(ctx.allocator, .{ .string = "type" }, .{ .int = ctx.vm.last_error_type });
+    try arr.set(ctx.allocator, .{ .string = "message" }, .{ .string = ctx.vm.last_error_message });
+    try arr.set(ctx.allocator, .{ .string = "file" }, .{ .string = ctx.vm.last_error_file });
+    try arr.set(ctx.allocator, .{ .string = "line" }, .{ .int = ctx.vm.last_error_line });
+    return .{ .array = arr };
 }
 
 fn native_class_alias(ctx: *NativeContext, args: []const Value) RuntimeError!Value {

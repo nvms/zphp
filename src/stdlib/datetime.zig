@@ -153,12 +153,14 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try dtz_def.methods.put(a, "getName", .{ .name = "getName", .arity = 0 });
     try dtz_def.methods.put(a, "getOffset", .{ .name = "getOffset", .arity = 1 });
     try dtz_def.methods.put(a, "__toString", .{ .name = "__toString", .arity = 0 });
+    try dtz_def.methods.put(a, "listIdentifiers", .{ .name = "listIdentifiers", .arity = 2, .is_static = true });
     try vm.classes.put(a, "DateTimeZone", dtz_def);
 
     try vm.native_fns.put(a, "DateTimeZone::__construct", dtzConstruct);
     try vm.native_fns.put(a, "DateTimeZone::getName", dtzGetName);
     try vm.native_fns.put(a, "DateTimeZone::getOffset", dtzGetOffset);
     try vm.native_fns.put(a, "DateTimeZone::__toString", dtzGetName);
+    try vm.native_fns.put(a, "DateTimeZone::listIdentifiers", dtzListIdentifiers);
 
     // DateInterval
     var di_def = ClassDef{ .name = "DateInterval" };
@@ -1236,6 +1238,33 @@ fn dtzConstruct(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
         try obj.set(ctx.allocator, "timezone", .{ .string = args[0].string });
     }
     return .null;
+}
+
+fn dtzListIdentifiers(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const ids = [_][]const u8{
+        "Africa/Cairo",         "Africa/Johannesburg", "Africa/Lagos",
+        "America/Anchorage",    "America/Argentina/Buenos_Aires", "America/Chicago",
+        "America/Denver",       "America/Halifax",     "America/Los_Angeles",
+        "America/Mexico_City",  "America/New_York",    "America/Phoenix",
+        "America/Sao_Paulo",    "America/Toronto",     "America/Vancouver",
+        "Asia/Bangkok",         "Asia/Dubai",          "Asia/Hong_Kong",
+        "Asia/Jakarta",         "Asia/Jerusalem",      "Asia/Karachi",
+        "Asia/Kolkata",         "Asia/Manila",         "Asia/Seoul",
+        "Asia/Shanghai",        "Asia/Singapore",      "Asia/Taipei",
+        "Asia/Tehran",          "Asia/Tokyo",          "Atlantic/Reykjavik",
+        "Australia/Adelaide",   "Australia/Brisbane",  "Australia/Melbourne",
+        "Australia/Perth",      "Australia/Sydney",    "Europe/Amsterdam",
+        "Europe/Athens",        "Europe/Berlin",       "Europe/Brussels",
+        "Europe/Dublin",        "Europe/Helsinki",     "Europe/Istanbul",
+        "Europe/Lisbon",        "Europe/London",       "Europe/Madrid",
+        "Europe/Moscow",        "Europe/Paris",        "Europe/Prague",
+        "Europe/Rome",          "Europe/Stockholm",    "Europe/Vienna",
+        "Europe/Warsaw",        "Europe/Zurich",       "Pacific/Auckland",
+        "Pacific/Fiji",         "Pacific/Honolulu",    "UTC",
+    };
+    var arr = try ctx.createArray();
+    for (ids) |id| try arr.append(ctx.allocator, .{ .string = id });
+    return .{ .array = arr };
 }
 
 fn dtzGetName(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
