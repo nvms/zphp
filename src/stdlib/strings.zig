@@ -3648,6 +3648,33 @@ fn buildQueryPairs(buf: *std.ArrayListUnmanaged(u8), a: std.mem.Allocator, prefi
             try nested_key.appendSlice(a, "]");
             try buildQueryPairs(buf, a, nested_key.items, entry.value, first, sep, rfc3986);
         }
+    } else if (value == .object) {
+        const obj = value.object;
+        if (obj.slot_layout) |layout| {
+            if (obj.slots) |slots| {
+                for (layout.names, 0..) |name, i| {
+                    var nested_key = std.ArrayListUnmanaged(u8){};
+                    defer nested_key.deinit(a);
+                    try nested_key.appendSlice(a, prefix);
+                    try nested_key.appendSlice(a, "[");
+                    try nested_key.appendSlice(a, name);
+                    try nested_key.appendSlice(a, "]");
+                    try buildQueryPairs(buf, a, nested_key.items, slots[i], first, sep, rfc3986);
+                }
+            }
+        }
+        var it = obj.properties.iterator();
+        while (it.next()) |kv| {
+            const name = kv.key_ptr.*;
+            if (name.len > 0 and name[0] == '_' and name.len > 1 and name[1] == '_') continue;
+            var nested_key = std.ArrayListUnmanaged(u8){};
+            defer nested_key.deinit(a);
+            try nested_key.appendSlice(a, prefix);
+            try nested_key.appendSlice(a, "[");
+            try nested_key.appendSlice(a, name);
+            try nested_key.appendSlice(a, "]");
+            try buildQueryPairs(buf, a, nested_key.items, kv.value_ptr.*, first, sep, rfc3986);
+        }
     } else {
         if (!first.*) try buf.appendSlice(a, sep);
         first.* = false;
