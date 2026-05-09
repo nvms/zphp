@@ -949,21 +949,36 @@ fn native_get_cfg_var(_: *NativeContext, _: []const Value) RuntimeError!Value {
     return Value{ .bool = false };
 }
 
-fn native_ini_get(_: *NativeContext, args: []const Value) RuntimeError!Value {
+fn iniDefault(name: []const u8) ?[]const u8 {
+    if (std.mem.eql(u8, name, "date.timezone")) return "UTC";
+    if (std.mem.eql(u8, name, "memory_limit")) return "-1";
+    if (std.mem.eql(u8, name, "max_execution_time")) return "0";
+    if (std.mem.eql(u8, name, "display_errors")) return "1";
+    if (std.mem.eql(u8, name, "error_reporting")) return "32767";
+    return null;
+}
+
+fn native_ini_get(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len == 0 or args[0] != .string) return Value{ .bool = false };
     const name = args[0].string;
-    if (std.mem.eql(u8, name, "date.timezone")) return .{ .string = "UTC" };
-    if (std.mem.eql(u8, name, "memory_limit")) return .{ .string = "-1" };
-    if (std.mem.eql(u8, name, "max_execution_time")) return .{ .string = "0" };
-    if (std.mem.eql(u8, name, "display_errors")) return .{ .string = "1" };
-    if (std.mem.eql(u8, name, "error_reporting")) return .{ .string = "32767" };
+    if (ctx.vm.ini_settings.get(name)) |stored| return .{ .string = stored };
+    if (iniDefault(name)) |def| return .{ .string = def };
     return Value{ .bool = false };
 }
 
-fn native_ini_set(_: *NativeContext, args: []const Value) RuntimeError!Value {
+fn native_ini_set(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len < 2 or args[0] != .string) return Value{ .bool = false };
-    // no-op, return the "old" value
-    return .{ .string = "" };
+    const name = args[0].string;
+    // PHP rejects unknown directives. Only allow known names.
+    const previous: []const u8 = if (ctx.vm.ini_settings.get(name)) |s| s else if (iniDefault(name)) |d| d else return Value{ .bool = false };
+    var buf = std.ArrayListUnmanaged(u8){};
+    try args[1].format(&buf, ctx.allocator);
+    const new_val = try buf.toOwnedSlice(ctx.allocator);
+    try ctx.vm.strings.append(ctx.allocator, new_val);
+    const owned_name = try ctx.allocator.dupe(u8, name);
+    try ctx.vm.strings.append(ctx.allocator, owned_name);
+    try ctx.vm.ini_settings.put(ctx.allocator, owned_name, new_val);
+    return .{ .string = previous };
 }
 
 fn native_extension_loaded(_: *NativeContext, args: []const Value) RuntimeError!Value {

@@ -535,12 +535,22 @@ fn native_basename(ctx: *NativeContext, args: []const Value) RuntimeError!Value 
 
 fn native_dirname(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len == 0 or args[0] != .string) return .{ .string = "" };
-    const path = args[0].string;
-    if (std.mem.lastIndexOf(u8, path, "/")) |pos| {
-        if (pos == 0) return .{ .string = "/" };
-        return .{ .string = try ctx.createString(path[0..pos]) };
+    var path = args[0].string;
+    var levels: i64 = if (args.len >= 2) Value.toInt(args[1]) else 1;
+    if (levels <= 0) return .{ .string = try ctx.createString(path) };
+    while (levels > 0) : (levels -= 1) {
+        if (std.mem.lastIndexOf(u8, path, "/")) |pos| {
+            if (pos == 0) {
+                path = "/";
+                break;
+            }
+            path = path[0..pos];
+        } else {
+            path = ".";
+            break;
+        }
     }
-    return .{ .string = "." };
+    return .{ .string = try ctx.createString(path) };
 }
 
 fn native_pathinfo(ctx: *NativeContext, args: []const Value) RuntimeError!Value {

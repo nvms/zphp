@@ -327,6 +327,7 @@ pub const VM = struct {
     capture_index: std.StringHashMapUnmanaged(CaptureRange) = .{},
     closure_instance_count: u32 = 0,
     php_constants: std.StringHashMapUnmanaged(Value) = .{},
+    ini_settings: std.StringHashMapUnmanaged([]const u8) = .{},
     classes: std.StringHashMapUnmanaged(ClassDef) = .{},
     interfaces: std.StringHashMapUnmanaged(InterfaceDef) = .{},
     traits: std.StringHashMapUnmanaged(void) = .{},
@@ -865,6 +866,7 @@ pub const VM = struct {
         self.captures.deinit(self.allocator);
         self.capture_index.deinit(self.allocator);
         self.php_constants.deinit(self.allocator);
+        self.ini_settings.deinit(self.allocator);
         self.arrays.deinit(self.allocator);
         self.objects.deinit(self.allocator);
         self.generators.deinit(self.allocator);
