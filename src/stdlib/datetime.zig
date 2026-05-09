@@ -632,6 +632,15 @@ pub fn formatTimestampTz(ctx: *NativeContext, timestamp: i64, format: []const u8
                 try appendOffsetCompact(&buf, a, tz_offset);
             },
             'I' => try buf.append(a, '0'),
+            'B' => {
+                // Swatch internet time: BMT = UTC+1; 1000 beats per day; .beats = (utc_secs+3600) / 86.4 % 1000
+                const utc_secs: i64 = @mod(timestamp, 86400);
+                const bmt = @mod(utc_secs + 3600, 86400);
+                const beats: u32 = @intFromFloat(@as(f64, @floatFromInt(bmt)) / 86.4);
+                var tmp: [4]u8 = undefined;
+                const s = std.fmt.bufPrint(&tmp, "{d:0>3}", .{beats}) catch "000";
+                try buf.appendSlice(a, s);
+            },
             '\\' => {
                 fi += 1;
                 if (fi < format.len) try buf.append(a, format[fi]);
