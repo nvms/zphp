@@ -3981,8 +3981,10 @@ fn native_sscanf(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
         if (fp >= fmt.len) break;
         const spec = fmt[fp];
         fp += 1;
-        // skip leading whitespace before number/string conversions
-        while (ip < input.len and (input[ip] == ' ' or input[ip] == '\t' or input[ip] == '\n')) ip += 1;
+        // %c, %% and %[ do not skip leading whitespace; everything else does
+        if (spec != 'c' and spec != '%' and spec != '[') {
+            while (ip < input.len and (input[ip] == ' ' or input[ip] == '\t' or input[ip] == '\n')) ip += 1;
+        }
         switch (spec) {
             'd', 'i' => {
                 const start = ip;
@@ -4027,6 +4029,8 @@ fn native_sscanf(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
                 try captures.append(ctx.allocator, .{ .string = s });
             },
             'x', 'X' => {
+                // optional 0x / 0X prefix
+                if (ip + 1 < input.len and input[ip] == '0' and (input[ip + 1] == 'x' or input[ip + 1] == 'X')) ip += 2;
                 const start = ip;
                 while (ip < input.len and std.ascii.isHex(input[ip])) {
                     if (has_width and ip - start >= width) break;
@@ -4034,6 +4038,60 @@ fn native_sscanf(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
                 }
                 const v = std.fmt.parseInt(i64, input[start..ip], 16) catch 0;
                 try captures.append(ctx.allocator, .{ .int = v });
+            },
+            'o' => {
+                const start = ip;
+                while (ip < input.len and input[ip] >= '0' and input[ip] <= '7') {
+                    if (has_width and ip - start >= width) break;
+                    ip += 1;
+                }
+                const v = std.fmt.parseInt(i64, input[start..ip], 8) catch 0;
+                try captures.append(ctx.allocator, .{ .int = v });
+            },
+            '%' => {
+                if (ip < input.len and input[ip] == '%') ip += 1;
+            },
+            '[' => {
+                // %[...] character class. supports leading ^ for negation and
+                // a-b ranges. terminated by literal ]; a leading ] is part of
+                // the set per traditional sscanf rules.
+                var negate = false;
+                if (fp < fmt.len and fmt[fp] == '^') {
+                    negate = true;
+                    fp += 1;
+                }
+                var class_set: [256]bool = .{false} ** 256;
+                var first = true;
+                while (fp < fmt.len) {
+                    const cc = fmt[fp];
+                    if (cc == ']' and !first) break;
+                    first = false;
+                    if (fp + 2 < fmt.len and fmt[fp + 1] == '-' and fmt[fp + 2] != ']') {
+                        const lo = cc;
+                        const hi = fmt[fp + 2];
+                        var x: usize = lo;
+                        while (x <= hi) : (x += 1) class_set[x] = true;
+                        fp += 3;
+                    } else {
+                        class_set[cc] = true;
+                        fp += 1;
+                    }
+                }
+                if (fp < fmt.len) fp += 1; // skip ]
+                const start = ip;
+                while (ip < input.len) {
+                    const matches = class_set[input[ip]];
+                    if (negate == matches) break;
+                    if (has_width and ip - start >= width) break;
+                    ip += 1;
+                }
+                if (ip == start) {
+                    try captures.append(ctx.allocator, .null);
+                    continue;
+                }
+                const s = try ctx.allocator.dupe(u8, input[start..ip]);
+                try ctx.strings.append(ctx.allocator, s);
+                try captures.append(ctx.allocator, .{ .string = s });
             },
             else => {},
         }
