@@ -349,6 +349,19 @@ fn is_countable(_: *NativeContext, args: []const Value) RuntimeError!Value {
 
 fn ctypeCheck(args: []const Value, comptime pred: fn (u8) bool) Value {
     if (args.len == 0) return .{ .bool = false };
+    // PHP 8.1+: int args in [-128, 255] are interpreted as a single ASCII char
+    // (negative gets +256). Other ints are interpreted as the decimal string.
+    if (args[0] == .int) {
+        const i = args[0].int;
+        if (i >= -128 and i <= 255) {
+            const code: u8 = if (i < 0) @intCast(i + 256) else @intCast(i);
+            return .{ .bool = pred(code) };
+        }
+        var buf: [32]u8 = undefined;
+        const s = std.fmt.bufPrint(&buf, "{d}", .{i}) catch return Value{ .bool = false };
+        for (s) |c| if (!pred(c)) return Value{ .bool = false };
+        return .{ .bool = true };
+    }
     if (args[0] != .string) return .{ .bool = false };
     const s = args[0].string;
     if (s.len == 0) return .{ .bool = false };

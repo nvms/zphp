@@ -812,14 +812,17 @@ fn rcGetMethods(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     defer seen.deinit(ctx.allocator);
 
     var current: ?[]const u8 = class_name;
+    var depth: usize = 0;
     while (current) |name| {
         const cls = ctx.vm.classes.get(name) orelse break;
         var it = cls.methods.iterator();
         while (it.next()) |entry| {
             const method_name = entry.key_ptr.*;
+            const info = entry.value_ptr.*;
+            // private methods of ancestor classes are not visible here
+            if (depth > 0 and info.visibility == .private) continue;
             if (!seen.contains(method_name)) {
                 try seen.put(ctx.allocator, method_name, {});
-                const info = entry.value_ptr.*;
                 if (filter) |f| {
                     if (!methodMatchesFilter(info, f)) continue;
                 }
@@ -829,6 +832,7 @@ fn rcGetMethods(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
             }
         }
         current = cls.parent;
+        depth += 1;
     }
     return .{ .array = arr };
 }

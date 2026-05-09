@@ -2503,11 +2503,14 @@ fn native_mb_strrpos(_: *NativeContext, args: []const Value) RuntimeError!Value 
     return .{ .bool = false };
 }
 
-fn native_mb_substr_count(_: *NativeContext, args: []const Value) RuntimeError!Value {
+fn native_mb_substr_count(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len < 2 or args[0] != .string or args[1] != .string) return .{ .int = 0 };
     const haystack = args[0].string;
     const needle = args[1].string;
-    if (needle.len == 0) return .{ .int = 0 };
+    if (needle.len == 0) {
+        try ctx.vm.setPendingException("ValueError", "mb_substr_count(): Argument #2 ($needle) must not be empty");
+        return error.RuntimeError;
+    }
     var count: i64 = 0;
     var i: usize = 0;
     while (i + needle.len <= haystack.len) {
