@@ -831,12 +831,17 @@ fn array_splice(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
         try removed.append(ctx.allocator, entry.value);
     }
 
-    if (args.len >= 4 and args[3] == .array) {
-        const replacement = args[3].array;
-        var insert_idx = uoffset;
-        for (replacement.entries.items) |entry| {
-            try arr.entries.insert(ctx.allocator, insert_idx, .{ .key = .{ .int = 0 }, .value = entry.value });
-            insert_idx += 1;
+    if (args.len >= 4) {
+        if (args[3] == .array) {
+            const replacement = args[3].array;
+            var insert_idx = uoffset;
+            for (replacement.entries.items) |entry| {
+                try arr.entries.insert(ctx.allocator, insert_idx, .{ .key = .{ .int = 0 }, .value = entry.value });
+                insert_idx += 1;
+            }
+        } else if (args[3] != .null) {
+            // PHP: a non-array, non-null replacement is treated as a single element
+            try arr.entries.insert(ctx.allocator, uoffset, .{ .key = .{ .int = 0 }, .value = args[3] });
         }
     }
 
@@ -1271,15 +1276,57 @@ fn native_shuffle(_: *NativeContext, args: []const Value) RuntimeError!Value {
     return .{ .bool = true };
 }
 
-fn array_rand(_: *NativeContext, args: []const Value) RuntimeError!Value {
+fn array_rand(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len == 0 or args[0] != .array) return .null;
     const arr = args[0].array;
     if (arr.entries.items.len == 0) return .null;
-    const idx = std.crypto.random.intRangeAtMost(usize, 0, arr.entries.items.len - 1);
-    return switch (arr.entries.items[idx].key) {
-        .int => |i| .{ .int = i },
-        .string => |s| .{ .string = s },
-    };
+    const num: i64 = if (args.len >= 2) Value.toInt(args[1]) else 1;
+    if (num < 1 or num > @as(i64, @intCast(arr.entries.items.len))) {
+        try ctx.vm.setPendingException("ValueError", "array_rand(): Argument #2 ($num) must be between 1 and the number of elements in argument #1 ($array)");
+        return error.RuntimeError;
+    }
+    if (num == 1 and (args.len < 2 or Value.toInt(args[1]) == 1 and args.len == 1)) {
+        // single-arg form returns scalar
+        const idx = std.crypto.random.intRangeAtMost(usize, 0, arr.entries.items.len - 1);
+        return switch (arr.entries.items[idx].key) {
+            .int => |i| .{ .int = i },
+            .string => |s| .{ .string = s },
+        };
+    }
+    // PHP returns scalar key when num=1 (default), array of keys otherwise.
+    if (num == 1) {
+        const out = try ctx.createArray();
+        const idx = std.crypto.random.intRangeAtMost(usize, 0, arr.entries.items.len - 1);
+        const v: Value = switch (arr.entries.items[idx].key) {
+            .int => |i| .{ .int = i },
+            .string => |s| .{ .string = s },
+        };
+        try out.append(ctx.allocator, v);
+        return .{ .array = out };
+    }
+    // Fisher-Yates partial shuffle for `num` distinct picks
+    var pool = try ctx.allocator.alloc(usize, arr.entries.items.len);
+    defer ctx.allocator.free(pool);
+    for (0..pool.len) |i| pool[i] = i;
+    var i: usize = 0;
+    const n: usize = @intCast(num);
+    while (i < n) : (i += 1) {
+        const j = std.crypto.random.intRangeAtMost(usize, i, pool.len - 1);
+        const tmp = pool[i];
+        pool[i] = pool[j];
+        pool[j] = tmp;
+    }
+    // PHP returns the picks in ascending order of their original index
+    std.mem.sort(usize, pool[0..n], {}, std.sort.asc(usize));
+    const out = try ctx.createArray();
+    for (pool[0..n]) |idx| {
+        const v: Value = switch (arr.entries.items[idx].key) {
+            .int => |k| .{ .int = k },
+            .string => |s| .{ .string = s },
+        };
+        try out.append(ctx.allocator, v);
+    }
+    return .{ .array = out };
 }
 
 fn native_compact(ctx: *NativeContext, args: []const Value) RuntimeError!Value {

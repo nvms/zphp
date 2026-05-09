@@ -33,11 +33,11 @@ $out = tracer();
 echo strlen($out) > 0 ? "ok\n" : "empty\n";
 
 // ini_get/ini_set
-// memory_limit default differs between PHP CLI versions: -1 in 8.4, 128M in 8.5
+// defaults vary across PHP versions and SAPI/CLI configs; assert types not values
 echo is_string(ini_get("memory_limit")) ? "ml-str" : "ml-other", "\n";
-echo ini_get("display_errors"), "\n";
 $old = ini_set("display_errors", "0");
-echo ini_get("display_errors"), "\n";
+echo is_string($old) ? "old-str" : "old-other", "\n";
+echo ini_get("display_errors") === "0" ? "set-ok" : "set-other", "\n";
 ini_set("display_errors", $old);
 
 // error_reporting
