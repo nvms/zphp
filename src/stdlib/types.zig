@@ -1659,7 +1659,7 @@ fn native_iterator_apply(ctx: *NativeContext, args: []const Value) RuntimeError!
     return .{ .int = 0 };
 }
 
-fn native_filter_var(_: *NativeContext, args: []const Value) RuntimeError!Value {
+fn native_filter_var(_ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len < 1) return .{ .bool = false };
     const value = args[0];
 
@@ -1710,13 +1710,59 @@ fn native_filter_var(_: *NativeContext, args: []const Value) RuntimeError!Value 
         },
         258 => { // FILTER_VALIDATE_BOOLEAN
             if (value == .bool) return value;
-            const s = if (value == .string) value.string else return .{ .null = {} };
+            if (value == .int) return .{ .bool = value.int != 0 };
+            const s = if (value == .string) value.string else return .{ .bool = false };
             if (std.mem.eql(u8, s, "true") or std.mem.eql(u8, s, "1") or std.mem.eql(u8, s, "yes") or std.mem.eql(u8, s, "on")) return .{ .bool = true };
             if (std.mem.eql(u8, s, "false") or std.mem.eql(u8, s, "0") or std.mem.eql(u8, s, "no") or std.mem.eql(u8, s, "off") or s.len == 0) return .{ .bool = false };
-            return .{ .null = {} };
+            // PHP returns false for invalid input (NULL only with FILTER_NULL_ON_FAILURE flag)
+            return .{ .bool = false };
+        },
+        515 => { // FILTER_SANITIZE_SPECIAL_CHARS
+            const s = if (value == .string) value.string else return .{ .bool = false };
+            return .{ .string = try sanitizeSpecialChars(_ctx, s) };
+        },
+        517 => { // FILTER_SANITIZE_EMAIL
+            const s = if (value == .string) value.string else return .{ .bool = false };
+            var buf = std.ArrayListUnmanaged(u8){};
+            for (s) |c| {
+                if (std.ascii.isAlphanumeric(c) or c == '@' or c == '.' or c == '!' or c == '#' or
+                    c == '$' or c == '%' or c == '&' or c == '\'' or c == '*' or c == '+' or
+                    c == '-' or c == '/' or c == '=' or c == '?' or c == '^' or c == '_' or
+                    c == '`' or c == '{' or c == '|' or c == '}' or c == '~' or c == '[' or c == ']') {
+                    try buf.append(_ctx.allocator, c);
+                }
+            }
+            const out = try buf.toOwnedSlice(_ctx.allocator);
+            try _ctx.strings.append(_ctx.allocator, out);
+            return .{ .string = out };
         },
         else => return value,
     }
+}
+
+fn sanitizeSpecialChars(ctx: *NativeContext, s: []const u8) ![]const u8 {
+    var buf = std.ArrayListUnmanaged(u8){};
+    for (s) |c| {
+        switch (c) {
+            '<' => try buf.appendSlice(ctx.allocator, "&#60;"),
+            '>' => try buf.appendSlice(ctx.allocator, "&#62;"),
+            '&' => try buf.appendSlice(ctx.allocator, "&#38;"),
+            '"' => try buf.appendSlice(ctx.allocator, "&#34;"),
+            '\'' => try buf.appendSlice(ctx.allocator, "&#39;"),
+            else => {
+                if (c < 32) {
+                    var tmp: [8]u8 = undefined;
+                    const n = std.fmt.bufPrint(&tmp, "&#{d};", .{c}) catch continue;
+                    try buf.appendSlice(ctx.allocator, n);
+                } else {
+                    try buf.append(ctx.allocator, c);
+                }
+            },
+        }
+    }
+    const out = try buf.toOwnedSlice(ctx.allocator);
+    try ctx.strings.append(ctx.allocator, out);
+    return out;
 }
 
 fn isValidIPv4(s: []const u8) bool {
