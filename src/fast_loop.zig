@@ -597,6 +597,7 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                 };
                 ic.arg_counts[self.frame_count] = ci_ac;
                 self.frame_count += 1;
+        if (self.frame_count > self.frame_high_water) self.frame_high_water = self.frame_count;
                 continue :reenter;
             },
             .get_prop => {
@@ -693,6 +694,7 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                             };
                             ic.arg_counts[self.frame_count] = mc_arg_count;
                             self.frame_count += 1;
+        if (self.frame_count > self.frame_high_water) self.frame_high_water = self.frame_count;
                             continue :reenter;
                         }
                     }
@@ -774,6 +776,7 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                 };
                 ic.arg_counts[self.frame_count] = arg_count;
                 self.frame_count += 1;
+        if (self.frame_count > self.frame_high_water) self.frame_high_water = self.frame_count;
                 continue :reenter;
             },
             .return_val => {

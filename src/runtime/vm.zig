@@ -308,6 +308,7 @@ pub const InterfaceDef = struct {
 pub const VM = struct {
     frames: [2048]CallFrame = undefined,
     frame_count: usize = 0,
+    frame_high_water: usize = 0,
     stack: [2048]Value = undefined,
     sp: usize = 0,
     functions: std.StringHashMapUnmanaged(*const ObjFunction) = .{},
@@ -840,14 +841,19 @@ pub const VM = struct {
     }
 
     fn releaseFrames(self: *VM) void {
-        for (0..self.frame_count) |i| {
-            self.frames[i].ref_slots.deinit(self.allocator);
-            self.frames[i].ref_array_bindings.deinit(self.allocator);
-            self.frames[i].ref_object_bindings.deinit(self.allocator);
-            self.frames[i].vars.deinit(self.allocator);
-            if (self.frames[i].locals.len > 0) {
-                self.freeLocals(self.frames[i].locals);
-                self.frames[i].locals = &.{};
+        for (0..self.frame_count) |i| self.deinitFrameSlot(i);
+        // sweep any maps left in slots above frame_count from non-popFrame
+        // paths (fast pops, exception unwinds, generator suspends).
+        // do not touch locals/vars - those are owned by the call path or
+        // already freed; only the ref_* maps can persist past pop.
+        if (self.frame_high_water > self.frame_count) {
+            for (self.frame_count..self.frame_high_water) |i| {
+                self.frames[i].ref_slots.deinit(self.allocator);
+                self.frames[i].ref_array_bindings.deinit(self.allocator);
+                self.frames[i].ref_object_bindings.deinit(self.allocator);
+                self.frames[i].ref_slots = .{};
+                self.frames[i].ref_array_bindings = .{};
+                self.frames[i].ref_object_bindings = .{};
             }
         }
     }
@@ -933,6 +939,7 @@ pub const VM = struct {
 
     pub fn reset(self: *VM) void {
         self.releaseFrames();
+        self.frame_high_water = 0;
         self.freeHeapItems();
         if (self.serve_mode) self.freeClassState();
         self.frame_count = 0;
@@ -962,6 +969,9 @@ pub const VM = struct {
         self.default_tz_name = "UTC";
         self.default_tz_offset = 0;
         self.statics.clearRetainingCapacity();
+        var sc_it = self.statics_cells.iterator();
+        while (sc_it.next()) |entry| self.allocator.destroy(entry.value_ptr.*);
+        self.statics_cells.clearRetainingCapacity();
         self.static_vars.clearRetainingCapacity();
         self.global_vars.clearRetainingCapacity();
         self.loaded_files.clearRetainingCapacity();
@@ -2665,11 +2675,7 @@ pub const VM = struct {
                     // unwind frames back to where handler was set
                     while (self.frame_count > handler.frame_count) {
                         self.frame_count -= 1;
-                        self.frames[self.frame_count].vars.deinit(self.allocator);
-                        if (self.frames[self.frame_count].locals.len > 0) {
-                            self.freeLocals(self.frames[self.frame_count].locals);
-                            self.frames[self.frame_count].locals = &.{};
-                        }
+                        self.deinitFrameSlot(self.frame_count);
                     }
 
                     // restore stack and push exception
@@ -2819,14 +2825,11 @@ pub const VM = struct {
                                 };
                                 self.frames[self.frame_count].entry_sp = self.sp;
                                 self.frame_count += 1;
+        if (self.frame_count > self.frame_high_water) self.frame_high_water = self.frame_count;
                                 self.runUntilFrame(return_frame) catch {
                                     while (self.frame_count > return_frame) {
                                         self.frame_count -= 1;
-                                        self.frames[self.frame_count].vars.deinit(self.allocator);
-                                        if (self.frames[self.frame_count].locals.len > 0) {
-                                            self.freeLocals(self.frames[self.frame_count].locals);
-                                            self.frames[self.frame_count].locals = &.{};
-                                        }
+                                        self.deinitFrameSlot(self.frame_count);
                                     }
                                     self.global_slot_names = saved_slot_names;
 
@@ -2838,11 +2841,7 @@ pub const VM = struct {
                                                 self.handler_count -= 1;
                                                 while (self.frame_count > handler.frame_count) {
                                                     self.frame_count -= 1;
-                                                    self.frames[self.frame_count].vars.deinit(self.allocator);
-                                                    if (self.frames[self.frame_count].locals.len > 0) {
-                                                        self.freeLocals(self.frames[self.frame_count].locals);
-                                                        self.frames[self.frame_count].locals = &.{};
-                                                    }
+                                                    self.deinitFrameSlot(self.frame_count);
                                                 }
                                                 self.sp = handler.sp;
                                                 self.push(exc);
@@ -2863,11 +2862,7 @@ pub const VM = struct {
                                 };
                                 while (self.frame_count > return_frame) {
                                     self.frame_count -= 1;
-                                    self.frames[self.frame_count].vars.deinit(self.allocator);
-                                    if (self.frames[self.frame_count].locals.len > 0) {
-                                        self.freeLocals(self.frames[self.frame_count].locals);
-                                        self.frames[self.frame_count].locals = &.{};
-                                    }
+                                    self.deinitFrameSlot(self.frame_count);
                                 }
                                 self.global_slot_names = saved_slot_names;
                                 if (self.sp <= sp_before) self.push(.{ .bool = true });
@@ -3277,6 +3272,7 @@ pub const VM = struct {
                             self.frames[self.frame_count] = .{ .chunk = self.currentChunk(), .ip = self.currentFrame().ip, .vars = tmp_vars };
                             self.frames[self.frame_count].entry_sp = self.sp;
                     self.frame_count += 1;
+        if (self.frame_count > self.frame_high_water) self.frame_high_water = self.frame_count;
 
                             const saved_fc = self.frame_count;
                             var ctx = self.makeContext(null);
@@ -3284,7 +3280,7 @@ pub const VM = struct {
                                 // clean up temp frame if throwBuiltinException didn't already unwind past it
                                 if (self.frame_count >= saved_fc) {
                                     self.frame_count -= 1;
-                                    self.frames[self.frame_count].vars.deinit(self.allocator);
+                                    self.deinitFrameSlot(self.frame_count);
                                 }
                                 if (self.pending_exception) |exc| {
                                     self.pending_exception = null;
@@ -3293,7 +3289,7 @@ pub const VM = struct {
                                         self.handler_count -= 1;
                                         while (self.frame_count > handler.frame_count) {
                                             self.frame_count -= 1;
-                                            self.frames[self.frame_count].vars.deinit(self.allocator);
+                                            self.deinitFrameSlot(self.frame_count);
                                         }
                                         self.sp = handler.sp;
                                         self.push(exc);
@@ -3309,7 +3305,7 @@ pub const VM = struct {
                             };
 
                             self.frame_count -= 1;
-                            self.frames[self.frame_count].vars.deinit(self.allocator);
+                            self.deinitFrameSlot(self.frame_count);
                         } else if (self.functions.get(cn)) |func| {
                             if (func.locals_only and self.ic != null) {
                                 const ctor_ic = self.ic.?;
@@ -3352,6 +3348,7 @@ pub const VM = struct {
                                 self.frames[self.frame_count] = .{ .chunk = &func.chunk, .ip = 0, .vars = .{}, .locals = ctor_locals, .func = func };
                                 self.frames[self.frame_count].entry_sp = self.sp;
                     self.frame_count += 1;
+        if (self.frame_count > self.frame_high_water) self.frame_high_water = self.frame_count;
                                 self.exception_dispatched = false;
                                 try self.fastLoop();
                                 const ctor_frame = &self.frames[self.frame_count - 1];
@@ -3395,6 +3392,7 @@ pub const VM = struct {
                                 self.frames[self.frame_count] = .{ .chunk = &func.chunk, .ip = 0, .vars = new_vars, .locals = try self.allocLocals(func, &new_vars), .func = func };
                                 self.frames[self.frame_count].entry_sp = self.sp;
                     self.frame_count += 1;
+        if (self.frame_count > self.frame_high_water) self.frame_high_water = self.frame_count;
                                 self.exception_dispatched = false;
                                 const ctor_base = self.frame_count - 1;
                                 try self.runUntilFrame(ctor_base);
@@ -3458,10 +3456,11 @@ pub const VM = struct {
                             self.frames[self.frame_count] = .{ .chunk = self.currentChunk(), .ip = self.currentFrame().ip, .vars = tmp_vars };
                             self.frames[self.frame_count].entry_sp = self.sp;
                     self.frame_count += 1;
+        if (self.frame_count > self.frame_high_water) self.frame_high_water = self.frame_count;
                             var ctx = self.makeContext(null);
                             _ = native(&ctx, args_buf[0..ac]) catch {
                                 self.frame_count -= 1;
-                                self.frames[self.frame_count].vars.deinit(self.allocator);
+                                self.deinitFrameSlot(self.frame_count);
                                 if (self.pending_exception) |exc| {
                                     self.pending_exception = null;
                                     if (self.handler_count > self.handler_floor) {
@@ -3469,7 +3468,7 @@ pub const VM = struct {
                                         self.handler_count -= 1;
                                         while (self.frame_count > handler.frame_count) {
                                             self.frame_count -= 1;
-                                            self.frames[self.frame_count].vars.deinit(self.allocator);
+                                            self.deinitFrameSlot(self.frame_count);
                                         }
                                         self.sp = handler.sp;
                                         self.push(exc);
@@ -3483,7 +3482,7 @@ pub const VM = struct {
                                 return error.RuntimeError;
                             };
                             self.frame_count -= 1;
-                            self.frames[self.frame_count].vars.deinit(self.allocator);
+                            self.deinitFrameSlot(self.frame_count);
                         } else if (self.functions.get(cn)) |func| {
                             var new_vars: std.StringHashMapUnmanaged(Value) = .{};
                             try new_vars.put(self.allocator, "$this", .{ .object = obj });
@@ -3498,6 +3497,7 @@ pub const VM = struct {
                             self.frames[self.frame_count] = .{ .chunk = &func.chunk, .ip = 0, .vars = new_vars, .locals = try self.allocLocals(func, &new_vars), .func = func };
                             self.frames[self.frame_count].entry_sp = self.sp;
                     self.frame_count += 1;
+        if (self.frame_count > self.frame_high_water) self.frame_high_water = self.frame_count;
                             self.exception_dispatched = false;
                             const ctor_base = self.frame_count - 1;
                             try self.runUntilFrame(ctor_base);
@@ -3961,6 +3961,7 @@ pub const VM = struct {
                                     self.setFrameArgCount(arg_count);
                                     self.frames[self.frame_count].entry_sp = self.sp;
                     self.frame_count += 1;
+        if (self.frame_count > self.frame_high_water) self.frame_high_water = self.frame_count;
                                     try self.fastLoop();
                                     continue;
                                 }
@@ -3975,12 +3976,13 @@ pub const VM = struct {
                                 self.setFrameArgCount(arg_count);
                                 self.frames[self.frame_count].entry_sp = self.sp;
                     self.frame_count += 1;
+        if (self.frame_count > self.frame_high_water) self.frame_high_water = self.frame_count;
                                 const saved_fc = self.frame_count;
                                 var ctx = self.makeContext(null);
                                 const result = try native(&ctx, args_buf[0..ac]);
                                 if (self.frame_count >= saved_fc) {
                                     self.frame_count -= 1;
-                                    self.frames[self.frame_count].vars.deinit(self.allocator);
+                                    self.deinitFrameSlot(self.frame_count);
                                     self.push(result);
                                 } else {
                                     continue;
@@ -4064,13 +4066,14 @@ pub const VM = struct {
                         self.setFrameArgCount(arg_count);
                         self.frames[self.frame_count].entry_sp = self.sp;
                     self.frame_count += 1;
+        if (self.frame_count > self.frame_high_water) self.frame_high_water = self.frame_count;
                         const saved_fc = self.frame_count;
 
                         var ctx = self.makeContext(null);
                         const result = native(&ctx, args_buf[0..ac]) catch {
                             if (self.frame_count >= saved_fc) {
                                 self.frame_count -= 1;
-                                self.frames[self.frame_count].vars.deinit(self.allocator);
+                                self.deinitFrameSlot(self.frame_count);
                             }
                             if (self.pending_exception) |exc| {
                                 self.pending_exception = null;
@@ -4079,7 +4082,7 @@ pub const VM = struct {
                                     self.handler_count -= 1;
                                     while (self.frame_count > handler.frame_count) {
                                         self.frame_count -= 1;
-                                        self.frames[self.frame_count].vars.deinit(self.allocator);
+                                        self.deinitFrameSlot(self.frame_count);
                                     }
                                     self.sp = handler.sp;
                                     self.push(exc);
@@ -4096,7 +4099,7 @@ pub const VM = struct {
                         // if throwBuiltinException unwound frames, skip cleanup
                         if (self.frame_count >= saved_fc) {
                             self.frame_count -= 1;
-                            self.frames[self.frame_count].vars.deinit(self.allocator);
+                            self.deinitFrameSlot(self.frame_count);
                             self.push(result);
                         } else {
                             continue;
@@ -4152,6 +4155,7 @@ pub const VM = struct {
                             self.setFrameArgCount(arg_count);
                             self.frames[self.frame_count].entry_sp = self.sp;
                     self.frame_count += 1;
+        if (self.frame_count > self.frame_high_water) self.frame_high_water = self.frame_count;
                         }
                     } else {
                         self.sp -= ac + 1;
@@ -4248,12 +4252,13 @@ pub const VM = struct {
                         self.setFrameArgCount(mcs_ac_u8);
                         self.frames[self.frame_count].entry_sp = self.sp;
                     self.frame_count += 1;
+        if (self.frame_count > self.frame_high_water) self.frame_high_water = self.frame_count;
                         const saved_fc = self.frame_count;
                         var ctx = self.makeContext(null);
                         const result = native(&ctx, args_buf[0..ac]) catch {
                             if (self.frame_count >= saved_fc) {
                                 self.frame_count -= 1;
-                                self.frames[self.frame_count].vars.deinit(self.allocator);
+                                self.deinitFrameSlot(self.frame_count);
                             }
                             if (self.pending_exception) |exc| {
                                 self.pending_exception = null;
@@ -4262,7 +4267,7 @@ pub const VM = struct {
                                     self.handler_count -= 1;
                                     while (self.frame_count > handler.frame_count) {
                                         self.frame_count -= 1;
-                                        self.frames[self.frame_count].vars.deinit(self.allocator);
+                                        self.deinitFrameSlot(self.frame_count);
                                     }
                                     self.sp = handler.sp;
                                     self.push(exc);
@@ -4277,7 +4282,7 @@ pub const VM = struct {
                         };
                         if (self.frame_count >= saved_fc) {
                             self.frame_count -= 1;
-                            self.frames[self.frame_count].vars.deinit(self.allocator);
+                            self.deinitFrameSlot(self.frame_count);
                             self.push(result);
                         } else continue;
                     } else if (self.functions.get(full_name)) |func| {
@@ -4309,6 +4314,7 @@ pub const VM = struct {
                         self.setFrameArgCount(mcs_ac_u8);
                         self.frames[self.frame_count].entry_sp = self.sp;
                     self.frame_count += 1;
+        if (self.frame_count > self.frame_high_water) self.frame_high_water = self.frame_count;
                     } else {
                         self.sp -= ac + 1;
                         self.setErrorMsg("Fatal error: Uncaught Error: Call to undefined method {s}::{s}()", .{ obj.class_name, method_name });
@@ -4373,12 +4379,13 @@ pub const VM = struct {
                         self.setFrameArgCount(arg_count);
                         self.frames[self.frame_count].entry_sp = self.sp;
                     self.frame_count += 1;
+        if (self.frame_count > self.frame_high_water) self.frame_high_water = self.frame_count;
                         const saved_fc = self.frame_count;
                         var ctx = self.makeContext(null);
                         const result = native(&ctx, args_buf[0..ac]) catch {
                             if (self.frame_count >= saved_fc) {
                                 self.frame_count -= 1;
-                                self.frames[self.frame_count].vars.deinit(self.allocator);
+                                self.deinitFrameSlot(self.frame_count);
                             }
                             if (self.pending_exception) |exc| {
                                 self.pending_exception = null;
@@ -4387,7 +4394,7 @@ pub const VM = struct {
                                     self.handler_count -= 1;
                                     while (self.frame_count > handler.frame_count) {
                                         self.frame_count -= 1;
-                                        self.frames[self.frame_count].vars.deinit(self.allocator);
+                                        self.deinitFrameSlot(self.frame_count);
                                     }
                                     self.sp = handler.sp;
                                     self.push(exc);
@@ -4402,7 +4409,7 @@ pub const VM = struct {
                         };
                         if (self.frame_count >= saved_fc) {
                             self.frame_count -= 1;
-                            self.frames[self.frame_count].vars.deinit(self.allocator);
+                            self.deinitFrameSlot(self.frame_count);
                             self.push(result);
                         } else continue;
                     } else if (self.functions.get(full_name)) |func| {
@@ -4436,6 +4443,7 @@ pub const VM = struct {
                         self.setFrameArgCount(arg_count);
                         self.frames[self.frame_count].entry_sp = self.sp;
                     self.frame_count += 1;
+        if (self.frame_count > self.frame_high_water) self.frame_high_water = self.frame_count;
                     } else {
                         self.sp -= ac + 1;
                         self.setErrorMsg("Fatal error: Uncaught Error: Call to undefined method {s}::{s}()", .{ obj.class_name, method_name });
@@ -4517,12 +4525,13 @@ pub const VM = struct {
                         self.setFrameArgCount(mcds_ac_u8);
                         self.frames[self.frame_count].entry_sp = self.sp;
                     self.frame_count += 1;
+        if (self.frame_count > self.frame_high_water) self.frame_high_water = self.frame_count;
                         const saved_fc = self.frame_count;
                         var ctx = self.makeContext(null);
                         const result = native(&ctx, args_buf[0..ac]) catch {
                             if (self.frame_count >= saved_fc) {
                                 self.frame_count -= 1;
-                                self.frames[self.frame_count].vars.deinit(self.allocator);
+                                self.deinitFrameSlot(self.frame_count);
                             }
                             if (self.pending_exception) |exc| {
                                 self.pending_exception = null;
@@ -4531,7 +4540,7 @@ pub const VM = struct {
                                     self.handler_count -= 1;
                                     while (self.frame_count > handler.frame_count) {
                                         self.frame_count -= 1;
-                                        self.frames[self.frame_count].vars.deinit(self.allocator);
+                                        self.deinitFrameSlot(self.frame_count);
                                     }
                                     self.sp = handler.sp;
                                     self.push(exc);
@@ -4546,7 +4555,7 @@ pub const VM = struct {
                         };
                         if (self.frame_count >= saved_fc) {
                             self.frame_count -= 1;
-                            self.frames[self.frame_count].vars.deinit(self.allocator);
+                            self.deinitFrameSlot(self.frame_count);
                             self.push(result);
                         } else continue;
                     } else if (self.functions.get(full_name)) |func| {
@@ -4580,6 +4589,7 @@ pub const VM = struct {
                         self.setFrameArgCount(mcds_ac_u8);
                         self.frames[self.frame_count].entry_sp = self.sp;
                     self.frame_count += 1;
+        if (self.frame_count > self.frame_high_water) self.frame_high_water = self.frame_count;
                     } else {
                         self.sp -= ac + 1;
                         self.setErrorMsg("Fatal error: Uncaught Error: Call to undefined method {s}::{s}()", .{ obj.class_name, method_name });
@@ -4725,6 +4735,7 @@ pub const VM = struct {
                                 self.setFrameArgCount(arg_count);
                                 self.frames[self.frame_count].entry_sp = self.sp;
                     self.frame_count += 1;
+        if (self.frame_count > self.frame_high_water) self.frame_high_water = self.frame_count;
                                 }
                             } else if (self.native_fns.get(full_name)) |native| {
                                 const ac: usize = arg_count;
@@ -4739,11 +4750,12 @@ pub const VM = struct {
                                 const sc_saved_fc = self.frame_count;
                                 self.frames[self.frame_count].entry_sp = self.sp;
                     self.frame_count += 1;
+        if (self.frame_count > self.frame_high_water) self.frame_high_water = self.frame_count;
                                 var ctx = self.makeContext(full_name);
                                 const result = native(&ctx, args_buf[0..ac]) catch {
                                     if (self.frame_count > sc_saved_fc) {
                                         self.frame_count -= 1;
-                                        self.frames[self.frame_count].vars.deinit(self.allocator);
+                                        self.deinitFrameSlot(self.frame_count);
                                     }
                                     if (self.pending_exception) |exc| {
                                         self.pending_exception = null;
@@ -4752,7 +4764,7 @@ pub const VM = struct {
                                             self.handler_count -= 1;
                                             while (self.frame_count > handler.frame_count) {
                                                 self.frame_count -= 1;
-                                                self.frames[self.frame_count].vars.deinit(self.allocator);
+                                                self.deinitFrameSlot(self.frame_count);
                                             }
                                             self.sp = handler.sp;
                                             self.push(exc);
@@ -4766,7 +4778,7 @@ pub const VM = struct {
                                     return error.RuntimeError;
                                 };
                                 self.frame_count -= 1;
-                                self.frames[self.frame_count].vars.deinit(self.allocator);
+                                self.deinitFrameSlot(self.frame_count);
                                 self.push(result);
                             } else {
                                 const msg = std.fmt.allocPrint(self.allocator, "Call to undefined method {s}::{s}()", .{ class_name, method_name }) catch "Call to undefined method";
@@ -4909,6 +4921,7 @@ pub const VM = struct {
                                 self.setFrameArgCount(scs_ac);
                                 self.frames[self.frame_count].entry_sp = self.sp;
                     self.frame_count += 1;
+        if (self.frame_count > self.frame_high_water) self.frame_high_water = self.frame_count;
                                 }
                             } else {
                                 self.setErrorMsg("Fatal error: Uncaught Error: Call to undefined method {s}::{s}()", .{ class_name, method_name });
@@ -5286,11 +5299,7 @@ pub const VM = struct {
                         self.push(val);
                         if (self.frame_count > 1) {
                             self.frame_count -= 1;
-                            self.frames[self.frame_count].vars.deinit(self.allocator);
-                            if (self.frames[self.frame_count].locals.len > 0) {
-                                self.freeLocals(self.frames[self.frame_count].locals);
-                                self.frames[self.frame_count].locals = &.{};
-                            }
+                            self.deinitFrameSlot(self.frame_count);
                         }
                         continue;
                     };
@@ -5447,7 +5456,7 @@ pub const VM = struct {
 
         while (self.frame_count > handler.frame_count) {
             self.frame_count -= 1;
-            self.frames[self.frame_count].vars.deinit(self.allocator);
+            self.deinitFrameSlot(self.frame_count);
         }
 
         self.sp = handler.sp;
@@ -5465,11 +5474,7 @@ pub const VM = struct {
         self.handler_count -= 1;
         while (self.frame_count > handler.frame_count) {
             self.frame_count -= 1;
-            self.frames[self.frame_count].vars.deinit(self.allocator);
-            if (self.frames[self.frame_count].locals.len > 0) {
-                self.freeLocals(self.frames[self.frame_count].locals);
-                self.frames[self.frame_count].locals = &.{};
-            }
+            self.deinitFrameSlot(self.frame_count);
         }
         self.sp = handler.sp;
         self.push(exc);
@@ -5548,6 +5553,7 @@ pub const VM = struct {
             .generator = gen,
         };
         self.frame_count += 1;
+        if (self.frame_count > self.frame_high_water) self.frame_high_water = self.frame_count;
 
         self.restoreGeneratorHandlers(gen);
 
@@ -5568,7 +5574,7 @@ pub const VM = struct {
                 self.handler_count = saved_handler_count;
                 while (self.frame_count > return_frame) {
                     self.frame_count -= 1;
-                    self.frames[self.frame_count].vars.deinit(self.allocator);
+                    self.deinitFrameSlot(self.frame_count);
                 }
                 self.sp = saved_sp;
                 self.handler_floor = prev_floor;
@@ -5591,7 +5597,7 @@ pub const VM = struct {
             // unwind any leftover generator frames
             while (self.frame_count > return_frame) {
                 self.frame_count -= 1;
-                self.frames[self.frame_count].vars.deinit(self.allocator);
+                self.deinitFrameSlot(self.frame_count);
             }
             self.sp = saved_sp;
             if (self.pending_exception != null) {
@@ -5690,6 +5696,7 @@ pub const VM = struct {
             self.frames[self.frame_count] = .{ .chunk = &func.chunk, .ip = 0, .vars = new_vars, .locals = try self.allocLocals(func, &new_vars), .func = func };
             self.frames[self.frame_count].entry_sp = self.sp;
             self.frame_count += 1;
+        if (self.frame_count > self.frame_high_water) self.frame_high_water = self.frame_count;
             try self.runLoop(self.frame_count - 1);
             const result = self.pop();
             if (result == .string) return result.string;
@@ -6529,6 +6536,15 @@ pub const VM = struct {
             self.allocator.free(frame.locals);
             self.currentFrame().locals = &.{};
         }
+        // generator doesn't preserve ref bindings - they re-bind via get_static
+        // on resume. drop the maps so frame_count -= 1 on suspend doesn't leak.
+        const f = self.currentFrame();
+        f.ref_slots.deinit(self.allocator);
+        f.ref_array_bindings.deinit(self.allocator);
+        f.ref_object_bindings.deinit(self.allocator);
+        f.ref_slots = .{};
+        f.ref_array_bindings = .{};
+        f.ref_object_bindings = .{};
     }
 
     fn saveGeneratorHandlers(self: *VM, gen: *Generator) void {
@@ -6585,6 +6601,7 @@ pub const VM = struct {
                 self.frames[self.frame_count].entry_sp = self.sp;
                 self.setFrameArgCount(arg_count);
                 self.frame_count += 1;
+        if (self.frame_count > self.frame_high_water) self.frame_high_water = self.frame_count;
                 return;
             }
         }
@@ -6632,6 +6649,7 @@ pub const VM = struct {
         self.frames[self.frame_count].entry_sp = self.sp;
         self.setFrameArgCount(arg_count);
         self.frame_count += 1;
+        if (self.frame_count > self.frame_high_water) self.frame_high_water = self.frame_count;
         try self.fastLoop();
     }
 
@@ -6665,6 +6683,7 @@ pub const VM = struct {
         self.frames[self.frame_count].entry_sp = self.sp;
         self.setFrameArgCount(arg_count);
         self.frame_count += 1;
+        if (self.frame_count > self.frame_high_water) self.frame_high_water = self.frame_count;
         try self.fastLoop();
     }
 
@@ -6715,6 +6734,7 @@ pub const VM = struct {
         self.consumePendingArgCount();
         self.pending_call_name = null;
         self.frame_count += 1;
+        if (self.frame_count > self.frame_high_water) self.frame_high_water = self.frame_count;
         self.runUntilFrame(base_frame) catch |err| {
             self.handler_count = base_handler;
             self.handler_floor = prev_floor;
@@ -6750,14 +6770,22 @@ pub const VM = struct {
         {
             self.handler_count -= 1;
         }
-        self.frames[self.frame_count].ref_slots.deinit(self.allocator);
-        self.frames[self.frame_count].ref_array_bindings.deinit(self.allocator);
-        self.frames[self.frame_count].ref_object_bindings.deinit(self.allocator);
-        self.frames[self.frame_count].vars.deinit(self.allocator);
-        if (self.frames[self.frame_count].locals.len > 0) {
-            self.freeLocals(self.frames[self.frame_count].locals);
-            self.frames[self.frame_count].locals = &.{};
+        self.deinitFrameSlot(self.frame_count);
+    }
+
+    pub fn deinitFrameSlot(self: *VM, idx: usize) void {
+        self.frames[idx].ref_slots.deinit(self.allocator);
+        self.frames[idx].ref_array_bindings.deinit(self.allocator);
+        self.frames[idx].ref_object_bindings.deinit(self.allocator);
+        self.frames[idx].vars.deinit(self.allocator);
+        if (self.frames[idx].locals.len > 0) {
+            self.freeLocals(self.frames[idx].locals);
+            self.frames[idx].locals = &.{};
         }
+        self.frames[idx].ref_slots = .{};
+        self.frames[idx].ref_array_bindings = .{};
+        self.frames[idx].ref_object_bindings = .{};
+        self.frames[idx].vars = .{};
     }
 
     pub fn freeLocals(self: *VM, locals: []Value) void {
@@ -8012,6 +8040,7 @@ pub const VM = struct {
         self.consumePendingArgCount();
         self.pending_call_name = null;
         self.frame_count += 1;
+        if (self.frame_count > self.frame_high_water) self.frame_high_water = self.frame_count;
         self.runUntilFrame(base_frame) catch |err| {
             self.handler_count = base_handler;
             self.handler_floor = prev_floor;
@@ -8036,6 +8065,7 @@ pub const VM = struct {
         self.consumePendingArgCount();
         self.pending_call_name = null;
         self.frame_count += 1;
+        if (self.frame_count > self.frame_high_water) self.frame_high_water = self.frame_count;
         self.runUntilFrame(base_frame) catch |err| {
             self.handler_count = base_handler;
             self.handler_floor = prev_floor;
@@ -8233,7 +8263,7 @@ pub const VM = struct {
                         self.handler_count -= 1;
                         while (self.frame_count > handler.frame_count) {
                             self.frame_count -= 1;
-                            self.frames[self.frame_count].vars.deinit(self.allocator);
+                            self.deinitFrameSlot(self.frame_count);
                         }
                         self.sp = handler.sp;
                         self.push(exc);
@@ -8323,6 +8353,7 @@ pub const VM = struct {
                 self.frames[self.frame_count].entry_sp = self.sp;
                 self.setFrameArgCount(arg_count);
                 self.frame_count += 1;
+        if (self.frame_count > self.frame_high_water) self.frame_high_water = self.frame_count;
             }
         } else {
             if (std.mem.lastIndexOfScalar(u8, name, '\\')) |pos| {
@@ -8348,10 +8379,11 @@ pub const VM = struct {
             try tmp_vars.put(self.allocator, "$this", .{ .object = obj });
             self.frames[self.frame_count] = .{ .chunk = self.currentChunk(), .ip = self.currentFrame().ip, .vars = tmp_vars };
             self.frame_count += 1;
+        if (self.frame_count > self.frame_high_water) self.frame_high_water = self.frame_count;
             var ctx = self.makeContext(null);
             const result = try native(&ctx, args);
             self.frame_count -= 1;
-            self.frames[self.frame_count].vars.deinit(self.allocator);
+            self.deinitFrameSlot(self.frame_count);
             return result;
         } else if (self.functions.get(full_name)) |func| {
             if (args.len < func.required_params) return error.RuntimeError;
@@ -8496,6 +8528,7 @@ pub const VM = struct {
         self.frames[self.frame_count].entry_sp = self.sp;
         self.consumePendingArgCount();
         self.frame_count += 1;
+        if (self.frame_count > self.frame_high_water) self.frame_high_water = self.frame_count;
         self.fastLoop() catch |err| {
             self.handler_count = base_handler;
             self.handler_floor = prev_floor;
