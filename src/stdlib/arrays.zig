@@ -522,6 +522,7 @@ fn reindexArray(arr: *PhpArray) void {
     arr.next_int_key = @intCast(arr.entries.items.len);
     arr.has_int_keys = arr.entries.items.len > 0;
     arr.string_index.clearRetainingCapacity();
+    arr.cursor = 0;
 }
 
 pub const SortField = enum { value, key };
@@ -1312,6 +1313,7 @@ fn native_ksort(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     const flags: i64 = if (args.len >= 2) Value.toInt(args[1]) else 0;
     sortKeysWithFlags(arr, flags, false);
     try arr.rebuildStringIndex(ctx.allocator);
+    arr.cursor = 0;
     return .{ .bool = true };
 }
 
@@ -1321,6 +1323,7 @@ fn native_krsort(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     const flags: i64 = if (args.len >= 2) Value.toInt(args[1]) else 0;
     sortKeysWithFlags(arr, flags, true);
     try arr.rebuildStringIndex(ctx.allocator);
+    arr.cursor = 0;
     return .{ .bool = true };
 }
 
@@ -1330,6 +1333,7 @@ fn native_asort(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     const flags: i64 = if (args.len >= 2) Value.toInt(args[1]) else 0;
     sortWithFlags(arr, flags, false);
     try arr.rebuildStringIndex(ctx.allocator);
+    arr.cursor = 0;
     return .{ .bool = true };
 }
 
@@ -1339,6 +1343,7 @@ fn native_arsort(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     const flags: i64 = if (args.len >= 2) Value.toInt(args[1]) else 0;
     sortWithFlags(arr, flags, true);
     try arr.rebuildStringIndex(ctx.allocator);
+    arr.cursor = 0;
     return .{ .bool = true };
 }
 
@@ -1378,6 +1383,7 @@ fn native_uasort(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     const callback = args[1];
     try mergeSort(PhpArray.Entry, arr.entries.items, ctx, callback, .value);
     try arr.rebuildStringIndex(ctx.allocator);
+    arr.cursor = 0;
     return .{ .bool = true };
 }
 
@@ -1387,6 +1393,7 @@ fn native_uksort(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     const callback = args[1];
     try mergeSort(PhpArray.Entry, arr.entries.items, ctx, callback, .key);
     try arr.rebuildStringIndex(ctx.allocator);
+    arr.cursor = 0;
     return .{ .bool = true };
 }
 
