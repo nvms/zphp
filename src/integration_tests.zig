@@ -1643,11 +1643,11 @@ test "random_int range" {
     , "ok");
 }
 
-test "hash unsupported algo returns false" {
+test "hash unsupported algo throws ValueError" {
     try expectOutput(
         \\<?php
-        \\var_dump(hash("nonexistent", "data"));
-    , "bool(false)\n");
+        \\try { hash("nonexistent", "data"); echo "no err\n"; } catch (\ValueError $e) { echo "v\n"; }
+    , "v\n");
 }
 
 test "hash_hmac sha512" {

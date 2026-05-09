@@ -1303,6 +1303,13 @@ fn native_fgetc(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
 fn native_feof(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len == 0 or args[0] != .object) return .{ .bool = true };
     const obj = args[0].object;
+    if (std.mem.eql(u8, obj.class_name, "FileHandle")) {
+        const open = obj.get("__open");
+        if (open != .bool or !open.bool) {
+            try ctx.vm.setPendingException("TypeError", "feof(): Argument #1 ($stream) must be an open stream resource");
+            return error.RuntimeError;
+        }
+    }
     if (fileHandleWrapper(obj)) |wrapper| {
         if (!ctx.vm.hasMethod(wrapper.class_name, "stream_eof")) return .{ .bool = false };
         const result = try ctx.callMethod(wrapper, "stream_eof", &.{});

@@ -357,7 +357,10 @@ fn native_hash(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     const data = args[1].string;
     const raw_output = args.len >= 3 and args[2].isTruthy();
 
-    const algo = HashAlgo.fromString(algo_name) orelse return Value{ .bool = false };
+    const algo = HashAlgo.fromString(algo_name) orelse {
+        try ctx.vm.setPendingException("ValueError", "hash(): Argument #1 ($algo) must be a valid hashing algorithm");
+        return error.RuntimeError;
+    };
     var digest: [64]u8 = undefined;
     const dlen = algo.digestLen();
     computeHash(algo, data, digest[0..dlen]);

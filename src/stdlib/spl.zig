@@ -1552,7 +1552,7 @@ fn faOffsetGet(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len == 0) return .null;
     const raw = Value.toInt(args[0]);
     if (raw < 0 or @as(usize, @intCast(raw)) >= arr.entries.items.len) {
-        try ctx.vm.setPendingException("RuntimeException", "Index invalid or out of range");
+        try ctx.vm.setPendingException("OutOfBoundsException", "Index invalid or out of range");
         return error.RuntimeError;
     }
     return arr.entries.items[@intCast(raw)].value;
@@ -1564,7 +1564,7 @@ fn faOffsetSet(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len < 2) return .null;
     const raw = Value.toInt(args[0]);
     if (raw < 0 or @as(usize, @intCast(raw)) >= arr.entries.items.len) {
-        try ctx.vm.setPendingException("RuntimeException", "Index invalid or out of range");
+        try ctx.vm.setPendingException("OutOfBoundsException", "Index invalid or out of range");
         return error.RuntimeError;
     }
     arr.entries.items[@intCast(raw)].value = args[1];
@@ -1835,6 +1835,18 @@ fn dllNext(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
     const obj = getThis(ctx) orelse return .null;
     const mode = Value.toInt(obj.get("__it_mode"));
     const is_lifo = (mode & DLL_IT_MODE_LIFO) != 0;
+    const is_delete = (mode & DLL_IT_MODE_DELETE) != 0;
+    if (is_delete) {
+        if (getData(obj)) |arr| {
+            if (is_lifo) {
+                if (arr.entries.items.len > 0) _ = arr.entries.pop();
+                try obj.set(ctx.allocator, "__cursor", .{ .int = @as(i64, @intCast(arr.entries.items.len)) - 1 });
+            } else if (arr.entries.items.len > 0) {
+                _ = arr.entries.orderedRemove(0);
+            }
+        }
+        return .null;
+    }
     const cursor = Value.toInt(obj.get("__cursor"));
     if (is_lifo) {
         try obj.set(ctx.allocator, "__cursor", .{ .int = cursor - 1 });
