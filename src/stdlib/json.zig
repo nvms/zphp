@@ -305,6 +305,17 @@ fn encodeValue(buf: *std.ArrayListUnmanaged(u8), a: std.mem.Allocator, val: Valu
         },
         .object => |obj| {
             if (vm) |v| {
+                if (v.classes.get(obj.class_name)) |cd| {
+                    if (cd.is_enum) {
+                        if (cd.backed_type == .none) {
+                            try v.setPendingException("JsonException", "Non-backed enums have no default serialization");
+                            return error.RuntimeError;
+                        }
+                        const enum_val = obj.get("value");
+                        try encodeValue(buf, a, enum_val, depth, max_depth, flags, vm, visited);
+                        return;
+                    }
+                }
                 if (v.isInstanceOf(obj.class_name, "JsonSerializable")) {
                     const result = v.callMethod(obj, "jsonSerialize", &.{}) catch {
                         try buf.appendSlice(a, "{}");
