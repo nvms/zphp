@@ -2241,10 +2241,7 @@ fn native_mb_str_split(ctx: *NativeContext, args: []const Value) RuntimeError!Va
     const s = if (args[0] == .string) args[0].string else return Value.null;
     const chunk_len: usize = if (args.len >= 2) @intCast(@max(1, Value.toInt(args[1]))) else 1;
     var arr = try ctx.createArray();
-    if (s.len == 0) {
-        try arr.append(ctx.allocator, .{ .string = "" });
-        return .{ .array = arr };
-    }
+    if (s.len == 0) return .{ .array = arr };
     var i: usize = 0;
     while (i < s.len) {
         const start = i;
