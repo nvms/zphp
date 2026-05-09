@@ -102,7 +102,7 @@ pub const entries = .{
     .{ "mb_lcfirst", native_mb_lcfirst },
     .{ "strip_tags", native_strip_tags },
     .{ "http_build_query", native_http_build_query },
-    .{ "htmlentities", native_htmlspecialchars },
+    .{ "htmlentities", native_htmlentities },
     .{ "quoted_printable_encode", native_qp_encode },
     .{ "quoted_printable_decode", native_qp_decode },
     .{ "parse_url", native_parse_url },
@@ -1509,6 +1509,165 @@ fn native_stripslashes(ctx: *NativeContext, args: []const Value) RuntimeError!Va
     const result = try buf.toOwnedSlice(ctx.allocator);
     try ctx.strings.append(ctx.allocator, result);
     return .{ .string = result };
+}
+
+fn latin1NamedEntity(cp: u21) ?[]const u8 {
+    return switch (cp) {
+        0x00A0 => "&nbsp;",
+        0x00A1 => "&iexcl;",
+        0x00A2 => "&cent;",
+        0x00A3 => "&pound;",
+        0x00A4 => "&curren;",
+        0x00A5 => "&yen;",
+        0x00A6 => "&brvbar;",
+        0x00A7 => "&sect;",
+        0x00A8 => "&uml;",
+        0x00A9 => "&copy;",
+        0x00AA => "&ordf;",
+        0x00AB => "&laquo;",
+        0x00AC => "&not;",
+        0x00AD => "&shy;",
+        0x00AE => "&reg;",
+        0x00AF => "&macr;",
+        0x00B0 => "&deg;",
+        0x00B1 => "&plusmn;",
+        0x00B2 => "&sup2;",
+        0x00B3 => "&sup3;",
+        0x00B4 => "&acute;",
+        0x00B5 => "&micro;",
+        0x00B6 => "&para;",
+        0x00B7 => "&middot;",
+        0x00B8 => "&cedil;",
+        0x00B9 => "&sup1;",
+        0x00BA => "&ordm;",
+        0x00BB => "&raquo;",
+        0x00BC => "&frac14;",
+        0x00BD => "&frac12;",
+        0x00BE => "&frac34;",
+        0x00BF => "&iquest;",
+        0x00C0 => "&Agrave;",
+        0x00C1 => "&Aacute;",
+        0x00C2 => "&Acirc;",
+        0x00C3 => "&Atilde;",
+        0x00C4 => "&Auml;",
+        0x00C5 => "&Aring;",
+        0x00C6 => "&AElig;",
+        0x00C7 => "&Ccedil;",
+        0x00C8 => "&Egrave;",
+        0x00C9 => "&Eacute;",
+        0x00CA => "&Ecirc;",
+        0x00CB => "&Euml;",
+        0x00CC => "&Igrave;",
+        0x00CD => "&Iacute;",
+        0x00CE => "&Icirc;",
+        0x00CF => "&Iuml;",
+        0x00D0 => "&ETH;",
+        0x00D1 => "&Ntilde;",
+        0x00D2 => "&Ograve;",
+        0x00D3 => "&Oacute;",
+        0x00D4 => "&Ocirc;",
+        0x00D5 => "&Otilde;",
+        0x00D6 => "&Ouml;",
+        0x00D7 => "&times;",
+        0x00D8 => "&Oslash;",
+        0x00D9 => "&Ugrave;",
+        0x00DA => "&Uacute;",
+        0x00DB => "&Ucirc;",
+        0x00DC => "&Uuml;",
+        0x00DD => "&Yacute;",
+        0x00DE => "&THORN;",
+        0x00DF => "&szlig;",
+        0x00E0 => "&agrave;",
+        0x00E1 => "&aacute;",
+        0x00E2 => "&acirc;",
+        0x00E3 => "&atilde;",
+        0x00E4 => "&auml;",
+        0x00E5 => "&aring;",
+        0x00E6 => "&aelig;",
+        0x00E7 => "&ccedil;",
+        0x00E8 => "&egrave;",
+        0x00E9 => "&eacute;",
+        0x00EA => "&ecirc;",
+        0x00EB => "&euml;",
+        0x00EC => "&igrave;",
+        0x00ED => "&iacute;",
+        0x00EE => "&icirc;",
+        0x00EF => "&iuml;",
+        0x00F0 => "&eth;",
+        0x00F1 => "&ntilde;",
+        0x00F2 => "&ograve;",
+        0x00F3 => "&oacute;",
+        0x00F4 => "&ocirc;",
+        0x00F5 => "&otilde;",
+        0x00F6 => "&ouml;",
+        0x00F7 => "&divide;",
+        0x00F8 => "&oslash;",
+        0x00F9 => "&ugrave;",
+        0x00FA => "&uacute;",
+        0x00FB => "&ucirc;",
+        0x00FC => "&uuml;",
+        0x00FD => "&yacute;",
+        0x00FE => "&thorn;",
+        0x00FF => "&yuml;",
+        else => null,
+    };
+}
+
+fn native_htmlentities(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len == 0) return .{ .string = "" };
+    if (args[0] == .null) return .{ .string = "" };
+    const s = if (args[0] == .string) args[0].string else blk: {
+        var buf = std.ArrayListUnmanaged(u8){};
+        try args[0].format(&buf, ctx.allocator);
+        const c = try buf.toOwnedSlice(ctx.allocator);
+        try ctx.strings.append(ctx.allocator, c);
+        break :blk c;
+    };
+    const flags: i64 = if (args.len >= 2) Value.toInt(args[1]) else 3;
+    const escape_double = (flags & 2) != 0;
+    const escape_single = (flags & 1) != 0;
+
+    var buf = std.ArrayListUnmanaged(u8){};
+    var i: usize = 0;
+    while (i < s.len) {
+        const b = s[i];
+        if (b < 0x80) {
+            switch (b) {
+                '&' => try buf.appendSlice(ctx.allocator, "&amp;"),
+                '"' => if (escape_double) try buf.appendSlice(ctx.allocator, "&quot;") else try buf.append(ctx.allocator, '"'),
+                '\'' => if (escape_single) try buf.appendSlice(ctx.allocator, "&#039;") else try buf.append(ctx.allocator, '\''),
+                '<' => try buf.appendSlice(ctx.allocator, "&lt;"),
+                '>' => try buf.appendSlice(ctx.allocator, "&gt;"),
+                else => try buf.append(ctx.allocator, b),
+            }
+            i += 1;
+            continue;
+        }
+        const len = std.unicode.utf8ByteSequenceLength(b) catch {
+            try buf.append(ctx.allocator, b);
+            i += 1;
+            continue;
+        };
+        if (i + len > s.len) {
+            try buf.append(ctx.allocator, b);
+            i += 1;
+            continue;
+        }
+        const cp = std.unicode.utf8Decode(s[i .. i + len]) catch {
+            try buf.appendSlice(ctx.allocator, s[i .. i + len]);
+            i += len;
+            continue;
+        };
+        if (latin1NamedEntity(cp)) |ent| {
+            try buf.appendSlice(ctx.allocator, ent);
+        } else {
+            try buf.appendSlice(ctx.allocator, s[i .. i + len]);
+        }
+        i += len;
+    }
+    const out = try buf.toOwnedSlice(ctx.allocator);
+    try ctx.strings.append(ctx.allocator, out);
+    return .{ .string = out };
 }
 
 fn native_htmlspecialchars(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
