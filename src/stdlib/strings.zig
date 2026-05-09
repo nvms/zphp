@@ -1807,7 +1807,10 @@ fn native_htmlspecialchars(ctx: *NativeContext, args: []const Value) RuntimeErro
     return .{ .string = result };
 }
 
-// returns total entity length (including '&' and ';') if s[i..] starts with a valid HTML entity, else null
+// returns total entity length (including '&' and ';') if s[i..] starts with a
+// valid htmlspecialchars entity (&amp;, &lt;, &gt;, &quot;, &#039;/&apos;, or
+// numeric &#NNN;/&#xNN;), else null. arbitrary &word; sequences are NOT valid
+// here (htmlspecialchars only preserves the five chars it actually encodes).
 fn htmlEntityAt(s: []const u8, i: usize) ?usize {
     if (i >= s.len or s[i] != '&') return null;
     var j: usize = i + 1;
@@ -1826,7 +1829,51 @@ fn htmlEntityAt(s: []const u8, i: usize) ?usize {
     }
     const start = j;
     while (j < s.len and std.ascii.isAlphanumeric(s[j])) : (j += 1) {}
-    if (j > start and j < s.len and s[j] == ';' and (j - start) <= 8) return j - i + 1;
+    if (j == start or j >= s.len or s[j] != ';') return null;
+    const name = s[start..j];
+    const is_hsc = std.mem.eql(u8, name, "amp") or std.mem.eql(u8, name, "lt") or
+        std.mem.eql(u8, name, "gt") or std.mem.eql(u8, name, "quot") or
+        std.mem.eql(u8, name, "apos");
+    if (is_hsc) return j - i + 1;
+    if (latin1EntityToCodepoint(name) != null) return j - i + 1;
+    if (html5EntityToCodepoint(name) != null) return j - i + 1;
+    return null;
+}
+
+fn html5EntityToCodepoint(name: []const u8) ?u21 {
+    const map = .{
+        .{ "OElig", 0x0152 },  .{ "oelig", 0x0153 },
+        .{ "Scaron", 0x0160 }, .{ "scaron", 0x0161 },
+        .{ "Yuml", 0x0178 },   .{ "fnof", 0x0192 },
+        .{ "circ", 0x02C6 },   .{ "tilde", 0x02DC },
+        .{ "ensp", 0x2002 },   .{ "emsp", 0x2003 },   .{ "thinsp", 0x2009 },
+        .{ "zwnj", 0x200C },   .{ "zwj", 0x200D },
+        .{ "lrm", 0x200E },    .{ "rlm", 0x200F },
+        .{ "ndash", 0x2013 },  .{ "mdash", 0x2014 },
+        .{ "lsquo", 0x2018 },  .{ "rsquo", 0x2019 },  .{ "sbquo", 0x201A },
+        .{ "ldquo", 0x201C },  .{ "rdquo", 0x201D },  .{ "bdquo", 0x201E },
+        .{ "dagger", 0x2020 }, .{ "Dagger", 0x2021 },
+        .{ "bull", 0x2022 },   .{ "hellip", 0x2026 }, .{ "permil", 0x2030 },
+        .{ "lsaquo", 0x2039 }, .{ "rsaquo", 0x203A },
+        .{ "euro", 0x20AC },   .{ "trade", 0x2122 },
+        .{ "larr", 0x2190 },   .{ "uarr", 0x2191 },   .{ "rarr", 0x2192 },   .{ "darr", 0x2193 },
+        .{ "harr", 0x2194 },   .{ "crarr", 0x21B5 },
+        .{ "isin", 0x2208 },   .{ "notin", 0x2209 },  .{ "ni", 0x220B },
+        .{ "sum", 0x2211 },    .{ "minus", 0x2212 },
+        .{ "radic", 0x221A },  .{ "infin", 0x221E },
+        .{ "cong", 0x2245 },   .{ "asymp", 0x2248 },
+        .{ "ne", 0x2260 },     .{ "equiv", 0x2261 },
+        .{ "le", 0x2264 },     .{ "ge", 0x2265 },
+        .{ "sub", 0x2282 },    .{ "sup", 0x2283 },    .{ "sube", 0x2286 },   .{ "supe", 0x2287 },
+        .{ "oplus", 0x2295 },  .{ "otimes", 0x2297 }, .{ "perp", 0x22A5 },   .{ "sdot", 0x22C5 },
+        .{ "lceil", 0x2308 },  .{ "rceil", 0x2309 },  .{ "lfloor", 0x230A }, .{ "rfloor", 0x230B },
+        .{ "lang", 0x2329 },   .{ "rang", 0x232A },
+        .{ "loz", 0x25CA },
+        .{ "spades", 0x2660 }, .{ "clubs", 0x2663 },  .{ "hearts", 0x2665 }, .{ "diams", 0x2666 },
+    };
+    inline for (map) |entry| {
+        if (std.mem.eql(u8, entry[0], name)) return @as(u21, entry[1]);
+    }
     return null;
 }
 
@@ -1874,6 +1921,9 @@ fn latin1EntityToCodepoint(name: []const u8) ?u21 {
 fn native_html_entity_decode(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len == 0) return .{ .string = "" };
     const s = if (args[0] == .string) args[0].string else return Value{ .string = "" };
+    const flags: i64 = if (args.len >= 2) Value.toInt(args[1]) else 11;
+    // HTML5/XHTML/XML1 modes (bits 4-5) recognize &apos;; HTML401 default does not
+    const html5_mode = (flags & 48) != 0;
     var buf = std.ArrayListUnmanaged(u8){};
     var j: usize = 0;
     while (j < s.len) {
@@ -1888,12 +1938,22 @@ fn native_html_entity_decode(ctx: *NativeContext, args: []const Value) RuntimeEr
                 j += ne.len;
                 continue;
             }
-            // Try named Latin-1 entity: scan to ';' looking up in table
+            // Try named entity: scan to ';' looking up in latin-1 then HTML5 tables
             var k = j + 1;
             while (k < s.len and k < j + 16 and (std.ascii.isAlphanumeric(s[k]))) : (k += 1) {}
             if (k < s.len and s[k] == ';' and k > j + 1) {
                 const name = s[j + 1 .. k];
+                if (html5_mode and std.mem.eql(u8, name, "apos")) {
+                    try buf.append(ctx.allocator, '\'');
+                    j = k + 1;
+                    continue;
+                }
                 if (latin1EntityToCodepoint(name)) |cp| {
+                    try appendCodepoint(&buf, ctx.allocator, @intCast(cp));
+                    j = k + 1;
+                    continue;
+                }
+                if (html5EntityToCodepoint(name)) |cp| {
                     try appendCodepoint(&buf, ctx.allocator, @intCast(cp));
                     j = k + 1;
                     continue;
@@ -1911,19 +1971,28 @@ fn native_html_entity_decode(ctx: *NativeContext, args: []const Value) RuntimeEr
 fn native_htmlspecialchars_decode(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len == 0) return .{ .string = "" };
     const s = if (args[0] == .string) args[0].string else return Value{ .string = "" };
+    const flags: i64 = if (args.len >= 2) Value.toInt(args[1]) else 3; // default ENT_QUOTES | ENT_HTML401
+    const decode_double = (flags & 2) != 0;
+    const decode_single = (flags & 1) != 0;
     var buf = std.ArrayListUnmanaged(u8){};
     var j: usize = 0;
     while (j < s.len) {
         if (s[j] == '&') {
             if (matchEntity(s[j..])) |ent| {
-                try buf.append(ctx.allocator, ent.char);
-                j += ent.len;
-                continue;
+                const skip = (ent.char == '"' and !decode_double) or (ent.char == '\'' and !decode_single);
+                if (!skip) {
+                    try buf.append(ctx.allocator, ent.char);
+                    j += ent.len;
+                    continue;
+                }
             }
             if (matchNumericEntity(s[j..])) |ne| {
-                try appendCodepoint(&buf, ctx.allocator, ne.code);
-                j += ne.len;
-                continue;
+                const skip = (ne.code == 34 and !decode_double) or (ne.code == 39 and !decode_single);
+                if (!skip) {
+                    try appendCodepoint(&buf, ctx.allocator, ne.code);
+                    j += ne.len;
+                    continue;
+                }
             }
         }
         try buf.append(ctx.allocator, s[j]);
@@ -3248,24 +3317,40 @@ fn native_strip_tags(ctx: *NativeContext, args: []const Value) RuntimeError!Valu
     var allowed_tags_buf: [64][64]u8 = undefined;
     var allowed_tags_lens: [64]usize = undefined;
     var n_allowed: usize = 0;
-    if (args.len >= 2 and args[1] == .string) {
-        const allow = args[1].string;
-        var ai: usize = 0;
-        while (ai < allow.len and n_allowed < 64) {
-            if (allow[ai] == '<') {
-                ai += 1;
+    if (args.len >= 2) {
+        if (args[1] == .string) {
+            const allow = args[1].string;
+            var ai: usize = 0;
+            while (ai < allow.len and n_allowed < 64) {
+                if (allow[ai] == '<') {
+                    ai += 1;
+                    var tlen: usize = 0;
+                    while (ai < allow.len and allow[ai] != '>') : (ai += 1) {
+                        if (tlen < 64) {
+                            allowed_tags_buf[n_allowed][tlen] = toLowerAscii(allow[ai]);
+                            tlen += 1;
+                        }
+                    }
+                    if (ai < allow.len) ai += 1;
+                    allowed_tags_lens[n_allowed] = tlen;
+                    n_allowed += 1;
+                } else {
+                    ai += 1;
+                }
+            }
+        } else if (args[1] == .array) {
+            for (args[1].array.entries.items) |e| {
+                if (e.value != .string or n_allowed >= 64) continue;
+                const tag = e.value.string;
                 var tlen: usize = 0;
-                while (ai < allow.len and allow[ai] != '>') : (ai += 1) {
+                for (tag) |c| {
                     if (tlen < 64) {
-                        allowed_tags_buf[n_allowed][tlen] = toLowerAscii(allow[ai]);
+                        allowed_tags_buf[n_allowed][tlen] = toLowerAscii(c);
                         tlen += 1;
                     }
                 }
-                if (ai < allow.len) ai += 1;
                 allowed_tags_lens[n_allowed] = tlen;
                 n_allowed += 1;
-            } else {
-                ai += 1;
             }
         }
     }
