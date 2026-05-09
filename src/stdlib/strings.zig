@@ -85,7 +85,7 @@ pub const entries = .{
     .{ "md5", native_md5 },
     .{ "sha1", native_sha1 },
     .{ "mb_substr", native_mb_substr },
-    .{ "html_entity_decode", native_htmlspecialchars_decode },
+    .{ "html_entity_decode", native_html_entity_decode },
     .{ "strrev", native_strrev },
     .{ "stripos", native_stripos },
     .{ "strrpos", native_strrpos },
@@ -1763,6 +1763,84 @@ fn htmlEntityAt(s: []const u8, i: usize) ?usize {
     while (j < s.len and std.ascii.isAlphanumeric(s[j])) : (j += 1) {}
     if (j > start and j < s.len and s[j] == ';' and (j - start) <= 8) return j - i + 1;
     return null;
+}
+
+fn latin1EntityToCodepoint(name: []const u8) ?u21 {
+    const map = .{
+        .{ "nbsp", 0x00A0 },  .{ "iexcl", 0x00A1 },  .{ "cent", 0x00A2 },
+        .{ "pound", 0x00A3 }, .{ "curren", 0x00A4 }, .{ "yen", 0x00A5 },
+        .{ "brvbar", 0x00A6 },.{ "sect", 0x00A7 },   .{ "uml", 0x00A8 },
+        .{ "copy", 0x00A9 },  .{ "ordf", 0x00AA },   .{ "laquo", 0x00AB },
+        .{ "not", 0x00AC },   .{ "shy", 0x00AD },    .{ "reg", 0x00AE },
+        .{ "macr", 0x00AF },  .{ "deg", 0x00B0 },    .{ "plusmn", 0x00B1 },
+        .{ "sup2", 0x00B2 },  .{ "sup3", 0x00B3 },   .{ "acute", 0x00B4 },
+        .{ "micro", 0x00B5 }, .{ "para", 0x00B6 },   .{ "middot", 0x00B7 },
+        .{ "cedil", 0x00B8 }, .{ "sup1", 0x00B9 },   .{ "ordm", 0x00BA },
+        .{ "raquo", 0x00BB }, .{ "frac14", 0x00BC }, .{ "frac12", 0x00BD },
+        .{ "frac34", 0x00BE },.{ "iquest", 0x00BF }, .{ "Agrave", 0x00C0 },
+        .{ "Aacute", 0x00C1 },.{ "Acirc", 0x00C2 },  .{ "Atilde", 0x00C3 },
+        .{ "Auml", 0x00C4 },  .{ "Aring", 0x00C5 },  .{ "AElig", 0x00C6 },
+        .{ "Ccedil", 0x00C7 },.{ "Egrave", 0x00C8 }, .{ "Eacute", 0x00C9 },
+        .{ "Ecirc", 0x00CA }, .{ "Euml", 0x00CB },   .{ "Igrave", 0x00CC },
+        .{ "Iacute", 0x00CD },.{ "Icirc", 0x00CE },  .{ "Iuml", 0x00CF },
+        .{ "ETH", 0x00D0 },   .{ "Ntilde", 0x00D1 }, .{ "Ograve", 0x00D2 },
+        .{ "Oacute", 0x00D3 },.{ "Ocirc", 0x00D4 },  .{ "Otilde", 0x00D5 },
+        .{ "Ouml", 0x00D6 },  .{ "times", 0x00D7 },  .{ "Oslash", 0x00D8 },
+        .{ "Ugrave", 0x00D9 },.{ "Uacute", 0x00DA }, .{ "Ucirc", 0x00DB },
+        .{ "Uuml", 0x00DC },  .{ "Yacute", 0x00DD }, .{ "THORN", 0x00DE },
+        .{ "szlig", 0x00DF }, .{ "agrave", 0x00E0 }, .{ "aacute", 0x00E1 },
+        .{ "acirc", 0x00E2 }, .{ "atilde", 0x00E3 }, .{ "auml", 0x00E4 },
+        .{ "aring", 0x00E5 }, .{ "aelig", 0x00E6 }, .{ "ccedil", 0x00E7 },
+        .{ "egrave", 0x00E8 },.{ "eacute", 0x00E9 }, .{ "ecirc", 0x00EA },
+        .{ "euml", 0x00EB },  .{ "igrave", 0x00EC }, .{ "iacute", 0x00ED },
+        .{ "icirc", 0x00EE }, .{ "iuml", 0x00EF }, .{ "eth", 0x00F0 },
+        .{ "ntilde", 0x00F1 },.{ "ograve", 0x00F2 }, .{ "oacute", 0x00F3 },
+        .{ "ocirc", 0x00F4 }, .{ "otilde", 0x00F5 }, .{ "ouml", 0x00F6 },
+        .{ "divide", 0x00F7 },.{ "oslash", 0x00F8 }, .{ "ugrave", 0x00F9 },
+        .{ "uacute", 0x00FA },.{ "ucirc", 0x00FB }, .{ "uuml", 0x00FC },
+        .{ "yacute", 0x00FD },.{ "thorn", 0x00FE }, .{ "yuml", 0x00FF },
+    };
+    inline for (map) |entry| {
+        if (std.mem.eql(u8, entry[0], name)) return @as(u21, entry[1]);
+    }
+    return null;
+}
+
+fn native_html_entity_decode(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len == 0) return .{ .string = "" };
+    const s = if (args[0] == .string) args[0].string else return Value{ .string = "" };
+    var buf = std.ArrayListUnmanaged(u8){};
+    var j: usize = 0;
+    while (j < s.len) {
+        if (s[j] == '&') {
+            if (matchEntity(s[j..])) |ent| {
+                try buf.append(ctx.allocator, ent.char);
+                j += ent.len;
+                continue;
+            }
+            if (matchNumericEntity(s[j..])) |ne| {
+                try appendCodepoint(&buf, ctx.allocator, ne.code);
+                j += ne.len;
+                continue;
+            }
+            // Try named Latin-1 entity: scan to ';' looking up in table
+            var k = j + 1;
+            while (k < s.len and k < j + 16 and (std.ascii.isAlphanumeric(s[k]))) : (k += 1) {}
+            if (k < s.len and s[k] == ';' and k > j + 1) {
+                const name = s[j + 1 .. k];
+                if (latin1EntityToCodepoint(name)) |cp| {
+                    try appendCodepoint(&buf, ctx.allocator, @intCast(cp));
+                    j = k + 1;
+                    continue;
+                }
+            }
+        }
+        try buf.append(ctx.allocator, s[j]);
+        j += 1;
+    }
+    const result = try buf.toOwnedSlice(ctx.allocator);
+    try ctx.strings.append(ctx.allocator, result);
+    return .{ .string = result };
 }
 
 fn native_htmlspecialchars_decode(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
