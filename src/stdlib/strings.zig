@@ -3528,7 +3528,7 @@ fn native_parse_url(ctx: *NativeContext, args: []const Value) RuntimeError!Value
             path = rest[pos..];
         }
 
-        if (std.mem.indexOf(u8, authority, "@")) |pos| {
+        if (std.mem.lastIndexOf(u8, authority, "@")) |pos| {
             const userinfo = authority[0..pos];
             authority = authority[pos + 1 ..];
             if (std.mem.indexOf(u8, userinfo, ":")) |cp| {
@@ -3664,14 +3664,32 @@ fn native_parse_str(ctx: *NativeContext, args: []const Value) RuntimeError!Value
     return .null;
 }
 
+// PHP coerces invalid PHP-variable chars in the base part of parse_str keys
+// (the bit before the first '[') to underscores: space, '.', '['. The chars
+// inside brackets are kept as-is.
+fn sanitizeParseStrKey(ctx: *NativeContext, name: []const u8) ![]const u8 {
+    var needs_fix = false;
+    for (name) |c| {
+        if (c == ' ' or c == '.' or c == '[') { needs_fix = true; break; }
+    }
+    if (!needs_fix) return name;
+    const buf = try ctx.allocator.alloc(u8, name.len);
+    for (name, 0..) |c, i| {
+        buf[i] = if (c == ' ' or c == '.' or c == '[') '_' else c;
+    }
+    try ctx.strings.append(ctx.allocator, buf);
+    return buf;
+}
+
 fn insertParsedKey(ctx: *NativeContext, root: *PhpArray, key: []const u8, value: Value) !void {
     // split "a[b][c]" -> base="a", segs=["b","c"]. an empty segment "[]" means append.
     const open = std.mem.indexOfScalar(u8, key, '[');
+    const raw_base = if (open) |o| key[0..o] else key;
+    const base_name = try sanitizeParseStrKey(ctx, raw_base);
     if (open == null) {
-        try root.set(ctx.allocator, .{ .string = key }, value);
+        try root.set(ctx.allocator, .{ .string = base_name }, value);
         return;
     }
-    const base_name = key[0..open.?];
     var segments: [16][]const u8 = undefined;
     var seg_count: usize = 0;
     var pos: usize = open.?;
