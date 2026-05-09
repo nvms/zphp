@@ -403,12 +403,11 @@ pub fn formatTimestamp(ctx: *NativeContext, timestamp: i64, format: []const u8) 
 
 pub fn formatTimestampTz(ctx: *NativeContext, timestamp: i64, format: []const u8, tz_offset: i32, tz_name: []const u8) RuntimeError!Value {
     const local_ts = timestamp + @as(i64, tz_offset);
-    const epoch_secs: u64 = @intCast(if (local_ts < 0) 0 else local_ts);
-    const es = std.time.epoch.EpochSeconds{ .secs = epoch_secs };
-    const day_seconds = es.getDaySeconds();
-    const epoch_day = es.getEpochDay();
-    const year_day = epoch_day.calculateYearDay();
-    const month_day = year_day.calculateMonthDay();
+    const dc = baseComponents(local_ts);
+    const day_seconds = FmtDaySec{ .h = @intCast(dc.hour), .mi = @intCast(dc.min), .s = @intCast(dc.sec) };
+    const epoch_day = FmtEpochDay{ .day = @divFloor(local_ts, 86400) };
+    const year_day = FmtYearDay{ .year = dc.year };
+    const month_day = FmtMonthDay{ .month = .{ .v = @intCast(dc.month) }, .day_index = @intCast(dc.day - 1) };
     const a = ctx.allocator;
 
     var buf = std.ArrayListUnmanaged(u8){};
@@ -570,19 +569,9 @@ pub fn formatTimestampTz(ctx: *NativeContext, timestamp: i64, format: []const u8
                 try buf.appendSlice(a, s);
             },
             'W' => {
-                // iso 8601 week number - week 1 contains the first thursday
-                const cur_day: i64 = @intCast(epoch_day.day);
-                const dow = @mod(cur_day + 3, 7); // 0=mon
-                // thursday of this week
-                const thu = cur_day + 3 - dow;
-                // jan 1 of the thursday's year
-                const thu_es = std.time.epoch.EpochSeconds{ .secs = @intCast(@max(0, thu * 86400)) };
-                const thu_year = thu_es.getEpochDay().calculateYearDay().year;
-                const jan1_ts = dateToTimestamp(thu_year, 1, 1, 0, 0, 0);
-                const jan1_day = @divFloor(jan1_ts, 86400);
-                const week = @divFloor(thu - jan1_day, 7) + 1;
+                const week = isoWeek(@intCast(epoch_day.day));
                 var tmp: [4]u8 = undefined;
-                const s = std.fmt.bufPrint(&tmp, "{d:0>2}", .{@as(u32, @intCast(@max(1, week)))}) catch "01";
+                const s = std.fmt.bufPrint(&tmp, "{d:0>2}", .{week.week}) catch "01";
                 try buf.appendSlice(a, s);
             },
             'w' => {
@@ -598,8 +587,9 @@ pub fn formatTimestampTz(ctx: *NativeContext, timestamp: i64, format: []const u8
                 try buf.append(a, if (leap) '1' else '0');
             },
             'o' => {
+                const week = isoWeek(@intCast(epoch_day.day));
                 var tmp: [8]u8 = undefined;
-                const s = std.fmt.bufPrint(&tmp, "{d}", .{year_day.year}) catch "0000";
+                const s = std.fmt.bufPrint(&tmp, "{d}", .{week.year}) catch "0000";
                 try buf.appendSlice(a, s);
             },
             'S' => {
@@ -1915,20 +1905,54 @@ fn resolveLastWeekday(base: i64, target_dow: u3) i64 {
 
 const DateComponents = struct { year: i64, month: i64, day: i64, hour: i64, min: i64, sec: i64 };
 
+const FmtDaySec = struct {
+    h: u32, mi: u32, s: u32,
+    pub fn getHoursIntoDay(self: @This()) u32 { return self.h; }
+    pub fn getMinutesIntoHour(self: @This()) u32 { return self.mi; }
+    pub fn getSecondsIntoMinute(self: @This()) u32 { return self.s; }
+};
+const FmtEpochDay = struct { day: i64 };
+const FmtYearDay = struct { year: i64 };
+const FmtMonth = struct { v: u32, pub fn numeric(s: @This()) u32 { return s.v; } };
+const FmtMonthDay = struct { month: FmtMonth, day_index: u32 };
+
+const IsoWeek = struct { year: i64, week: u32 };
+
+fn isoWeek(day_num: i64) IsoWeek {
+    // iso 8601 week-numbering: week 1 contains the year's first Thursday.
+    // the iso year is the calendar year of the Thursday in the same week.
+    const dow = @mod(day_num + 3, 7); // 0=mon
+    const thu = day_num + 3 - dow;
+    const thu_secs = thu * 86400;
+    const thu_dc = baseComponents(thu_secs);
+    const jan1_ts = dateToTimestamp(thu_dc.year, 1, 1, 0, 0, 0);
+    const jan1_day = @divFloor(jan1_ts, 86400);
+    const week_num: u32 = @intCast(@divFloor(thu - jan1_day, 7) + 1);
+    return .{ .year = thu_dc.year, .week = week_num };
+}
+
 fn baseComponents(base: i64) DateComponents {
-    const epoch_secs: u64 = @intCast(if (base < 0) 0 else base);
-    const es = std.time.epoch.EpochSeconds{ .secs = epoch_secs };
-    const day_seconds = es.getDaySeconds();
-    const epoch_day = es.getEpochDay();
-    const year_day = epoch_day.calculateYearDay();
-    const month_day = year_day.calculateMonthDay();
+    // Howard Hinnant's civil_from_days, works for any year including pre-1970
+    var days = @divFloor(base, 86400);
+    var sod: i64 = base - days * 86400; // seconds-of-day in [0,86400)
+    if (sod < 0) { sod += 86400; days -= 1; }
+    const z = days + 719468;
+    const era = @divFloor(z, 146097);
+    const doe: i64 = z - era * 146097;
+    const yoe: i64 = @divFloor(doe - @divFloor(doe, 1460) + @divFloor(doe, 36524) - @divFloor(doe, 146096), 365);
+    const y_civil: i64 = yoe + era * 400;
+    const doy: i64 = doe - (365 * yoe + @divFloor(yoe, 4) - @divFloor(yoe, 100));
+    const mp: i64 = @divFloor(5 * doy + 2, 153);
+    const d_civil: i64 = doy - @divFloor(153 * mp + 2, 5) + 1;
+    const m_civil: i64 = if (mp < 10) mp + 3 else mp - 9;
+    const year: i64 = if (m_civil <= 2) y_civil + 1 else y_civil;
     return .{
-        .year = @intCast(year_day.year),
-        .month = @intCast(month_day.month.numeric()),
-        .day = @intCast(month_day.day_index + 1),
-        .hour = @intCast(day_seconds.getHoursIntoDay()),
-        .min = @intCast(day_seconds.getMinutesIntoHour()),
-        .sec = @intCast(day_seconds.getSecondsIntoMinute()),
+        .year = year,
+        .month = m_civil,
+        .day = d_civil,
+        .hour = @divFloor(sod, 3600),
+        .min = @divFloor(@mod(sod, 3600), 60),
+        .sec = @mod(sod, 60),
     };
 }
 
@@ -2117,23 +2141,23 @@ fn nthWeekday(year: i64, month: i64, n: u8, target_dow: u8) i64 {
     return 1;
 }
 
-fn isDst(utc_ts: i64, rule: DstRule) bool {
-    if (rule == .none) return false;
+fn isDst(utc_ts: i64, tz: TzEntry) bool {
+    if (tz.dst_rule == .none) return false;
     const comps = baseComponents(utc_ts);
     const year = comps.year;
 
-    if (rule == .us) {
-        // second sunday of march at 2:00 local (in standard time, so 2:00+std_offset UTC)
-        // -> first sunday of november at 2:00 local
+    if (tz.dst_rule == .us) {
+        // 2:00 local on second Sunday of March -> 2:00 local on first Sunday of November.
+        // local 2:00 = UTC 2:00 - std_offset (subtracting a negative offset adds hours).
         const march_day = nthWeekday(year, 3, 2, 0);
         const nov_day = nthWeekday(year, 11, 1, 0);
-        const dst_start = dateToTimestamp(year, 3, march_day, 2, 0, 0);
-        const dst_end = dateToTimestamp(year, 11, nov_day, 2, 0, 0);
+        const dst_start = dateToTimestamp(year, 3, march_day, 2, 0, 0) - @as(i64, tz.std_offset);
+        const dst_end = dateToTimestamp(year, 11, nov_day, 2, 0, 0) - @as(i64, tz.dst_offset);
         return utc_ts >= dst_start and utc_ts < dst_end;
     }
 
-    if (rule == .eu) {
-        // last sunday of march at 1:00 UTC -> last sunday of october at 1:00 UTC
+    if (tz.dst_rule == .eu) {
+        // 1:00 UTC on last Sunday of March -> 1:00 UTC on last Sunday of October
         const march_day = nthWeekday(year, 3, 5, 0);
         const oct_day = nthWeekday(year, 10, 5, 0);
         const dst_start = dateToTimestamp(year, 3, march_day, 1, 0, 0);
@@ -2145,12 +2169,12 @@ fn isDst(utc_ts: i64, rule: DstRule) bool {
 }
 
 pub fn tzOffsetAt(tz: TzEntry, utc_ts: i64) i32 {
-    if (isDst(utc_ts, tz.dst_rule)) return tz.dst_offset;
+    if (isDst(utc_ts, tz)) return tz.dst_offset;
     return tz.std_offset;
 }
 
 fn tzAbbrevAt(tz: TzEntry, utc_ts: i64) []const u8 {
-    if (isDst(utc_ts, tz.dst_rule)) return tz.dst_abbrev;
+    if (isDst(utc_ts, tz)) return tz.dst_abbrev;
     return tz.std_abbrev;
 }
 
