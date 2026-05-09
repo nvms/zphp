@@ -3920,6 +3920,41 @@ pub const VM = struct {
                             self.push(.{ .bool = fiber.state == .suspended });
                         } else if (std.mem.eql(u8, method_name, "isTerminated")) {
                             self.push(.{ .bool = fiber.state == .terminated });
+                        } else if (std.mem.eql(u8, method_name, "throw")) {
+                            if (fiber.state != .suspended) {
+                                if (try self.throwBuiltinException("FiberError", "Cannot resume a fiber that is not suspended")) continue;
+                                return error.RuntimeError;
+                            }
+                            const exc_val = if (ac > 0) args_buf[0] else Value.null;
+                            if (exc_val != .object) {
+                                if (try self.throwBuiltinException("TypeError", "Fiber::throw() expects an object")) continue;
+                                return error.RuntimeError;
+                            }
+                            fiber.state = .running;
+                            const fb = self.frame_count;
+                            const sb = self.sp;
+                            const hb = self.handler_count;
+
+                            self.restoreFiberState(fiber, fb, sb);
+                            self.push(.null);
+                            const prev_fiber = self.current_fiber;
+                            const prev_floor = self.handler_floor;
+                            self.current_fiber = fiber;
+                            self.handler_floor = hb;
+                            self.pending_exception = exc_val;
+                            const dispatched = self.dispatchPendingException(fb);
+                            self.current_fiber = prev_fiber;
+                            self.handler_floor = prev_floor;
+                            if (!dispatched) {
+                                fiber.state = .terminated;
+                                if (self.dispatchPendingException(base_frame)) continue;
+                                return error.RuntimeError;
+                            }
+                            const result = self.executeFiber(fiber, fb, sb, hb) catch {
+                                if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
+                                return error.RuntimeError;
+                            };
+                            self.push(result);
                         } else {
                             self.setErrorMsg("Fatal error: Uncaught Error: Call to undefined method Fiber::{s}()", .{method_name});
                             return error.RuntimeError;
