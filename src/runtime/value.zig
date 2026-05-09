@@ -520,16 +520,7 @@ pub const Value = union(enum) {
     }
 
     pub fn lessThan(a: Value, b: Value) bool {
-        if (a == .object and b == .object) return compare(a, b) < 0;
-        if (a == .object or b == .object or a == .generator or b == .generator or a == .fiber or b == .fiber) return false;
-        if (a == .string and b == .string) {
-            // PHP: when both strings are numeric, compare numerically
-            if (isNumericString(a.string) and isNumericString(b.string)) {
-                return toFloat(a) < toFloat(b);
-            }
-            return std.mem.order(u8, a.string, b.string) == .lt;
-        }
-        return toFloat(a) < toFloat(b);
+        return compare(a, b) < 0;
     }
 
     pub fn compare(a: Value, b: Value) i64 {
@@ -565,6 +556,24 @@ pub const Value = union(enum) {
                 .lt => -1,
                 .eq => 0,
                 .gt => 1,
+            };
+        }
+        // PHP 8: number vs non-numeric string falls back to STRING comparison
+        // (the number is stringified). Number vs numeric string still numeric.
+        if ((a == .int or a == .float) and b == .string and !isNumericString(b.string)) {
+            var buf: [64]u8 = undefined;
+            const as: []const u8 = if (a == .int) (std.fmt.bufPrint(&buf, "{d}", .{a.int}) catch "")
+                                   else (std.fmt.bufPrint(&buf, "{d}", .{a.float}) catch "");
+            return switch (std.mem.order(u8, as, b.string)) {
+                .lt => -1, .eq => 0, .gt => 1,
+            };
+        }
+        if ((b == .int or b == .float) and a == .string and !isNumericString(a.string)) {
+            var buf: [64]u8 = undefined;
+            const bs: []const u8 = if (b == .int) (std.fmt.bufPrint(&buf, "{d}", .{b.int}) catch "")
+                                   else (std.fmt.bufPrint(&buf, "{d}", .{b.float}) catch "");
+            return switch (std.mem.order(u8, a.string, bs)) {
+                .lt => -1, .eq => 0, .gt => 1,
             };
         }
         const af = toFloat(a);
