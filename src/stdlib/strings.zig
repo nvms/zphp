@@ -3259,7 +3259,8 @@ fn native_strrpos(_: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len < 2) return .{ .bool = false };
     const haystack = if (args[0] == .string) args[0].string else return Value{ .bool = false };
     const needle = if (args[1] == .string) args[1].string else return Value{ .bool = false };
-    if (needle.len == 0 or haystack.len == 0) return .{ .bool = false };
+    if (needle.len == 0) return .{ .int = @intCast(haystack.len) };
+    if (haystack.len == 0) return .{ .bool = false };
     return strrposImpl(haystack, needle, args);
 }
 
@@ -3293,7 +3294,8 @@ fn native_strripos(ctx: *NativeContext, args: []const Value) RuntimeError!Value 
     if (args.len < 2) return .{ .bool = false };
     const haystack = if (args[0] == .string) args[0].string else return Value{ .bool = false };
     const needle = if (args[1] == .string) args[1].string else return Value{ .bool = false };
-    if (needle.len == 0 or haystack.len == 0) return .{ .bool = false };
+    if (needle.len == 0) return .{ .int = @intCast(haystack.len) };
+    if (haystack.len == 0) return .{ .bool = false };
     const h_lower = try toLowerBuf(ctx.allocator, haystack);
     defer ctx.allocator.free(h_lower);
     const n_lower = try toLowerBuf(ctx.allocator, needle);
