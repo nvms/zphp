@@ -195,32 +195,47 @@ fn str_replace(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
 
     var total_count: i64 = 0;
 
-    if (args[0] == .array) {
-        const searches = args[0].array;
-        var result = if (args[2] == .string) args[2].string else return args[2];
-        for (searches.entries.items, 0..) |entry, idx| {
-            const needle = if (entry.value == .string) entry.value.string else continue;
-            const replacement = if (args[1] == .array) blk: {
-                break :blk if (idx < args[1].array.entries.items.len)
-                    (if (args[1].array.entries.items[idx].value == .string) args[1].array.entries.items[idx].value.string else "")
-                else
-                    "";
-            } else if (args[1] == .string) args[1].string else "";
-            const r = try replaceOne(ctx, result, needle, replacement);
-            result = r.str;
-            total_count += r.count;
+    // subject is an array: apply replacement element-wise, return an array
+    if (args[2] == .array) {
+        const subject_arr = args[2].array;
+        const out = try ctx.createArray();
+        for (subject_arr.entries.items) |se| {
+            const elem_str: []const u8 = if (se.value == .string) se.value.string else "";
+            const replaced = try strReplaceOnSingle(ctx, args[0], args[1], elem_str, &total_count);
+            try out.set(ctx.allocator, se.key, .{ .string = replaced });
         }
         if (args.len >= 4) ctx.setCallerVar(3, args.len, .{ .int = total_count });
-        return .{ .string = result };
+        return .{ .array = out };
     }
 
-    const search = if (args[0] == .string) args[0].string else return args[2];
-    const replace = if (args[1] == .string) args[1].string else return args[2];
     const subject = if (args[2] == .string) args[2].string else return args[2];
-    const r = try replaceOne(ctx, subject, search, replace);
-    total_count = r.count;
+    const replaced = try strReplaceOnSingle(ctx, args[0], args[1], subject, &total_count);
     if (args.len >= 4) ctx.setCallerVar(3, args.len, .{ .int = total_count });
-    return .{ .string = r.str };
+    return .{ .string = replaced };
+}
+
+fn strReplaceOnSingle(ctx: *NativeContext, search: Value, replace: Value, subject: []const u8, total_count: *i64) ![]const u8 {
+    if (search == .array) {
+        var result = subject;
+        for (search.array.entries.items, 0..) |entry, idx| {
+            const needle = if (entry.value == .string) entry.value.string else continue;
+            const replacement = if (replace == .array) blk: {
+                break :blk if (idx < replace.array.entries.items.len)
+                    (if (replace.array.entries.items[idx].value == .string) replace.array.entries.items[idx].value.string else "")
+                else
+                    "";
+            } else if (replace == .string) replace.string else "";
+            const r = try replaceOne(ctx, result, needle, replacement);
+            result = r.str;
+            total_count.* += r.count;
+        }
+        return result;
+    }
+    const s = if (search == .string) search.string else return subject;
+    const rep = if (replace == .string) replace.string else "";
+    const r = try replaceOne(ctx, subject, s, rep);
+    total_count.* += r.count;
+    return r.str;
 }
 
 fn explode(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
