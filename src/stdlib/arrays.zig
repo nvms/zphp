@@ -643,6 +643,17 @@ fn array_map(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
         return .{ .array = result };
     }
 
+    // validate callable - PHP throws TypeError for unknown function names
+    if (callback == .string) {
+        const cb_name = callback.string;
+        if (!ctx.vm.functions.contains(cb_name) and !ctx.vm.native_fns.contains(cb_name)) {
+            const msg = std.fmt.allocPrint(ctx.allocator, "array_map(): Argument #1 ($callback) must be a valid callback or null, function \"{s}\" not found or invalid function name", .{cb_name}) catch "array_map(): Argument #1 ($callback) must be a valid callback or null";
+            try ctx.strings.append(ctx.allocator, msg);
+            try ctx.vm.setPendingException("TypeError", msg);
+            return error.RuntimeError;
+        }
+    }
+
     // multi-array: callback receives one element from each array
     if (args.len > 2) {
         var max_len: usize = 0;

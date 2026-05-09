@@ -1099,7 +1099,10 @@ fn native_fclose(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     const obj = args[0].object;
     if (!std.mem.eql(u8, obj.class_name, "FileHandle")) return .{ .bool = false };
     const open = obj.get("__open");
-    if (open != .bool or !open.bool) return .{ .bool = false };
+    if (open != .bool or !open.bool) {
+        try ctx.vm.setPendingException("TypeError", "fclose(): Argument #1 ($stream) must be an open stream resource");
+        return error.RuntimeError;
+    }
     if (fileHandleWrapper(obj)) |wrapper| {
         if (ctx.vm.hasMethod(wrapper.class_name, "stream_close")) {
             _ = try ctx.callMethod(wrapper, "stream_close", &.{});
@@ -1161,6 +1164,13 @@ fn native_fpassthru(ctx: *NativeContext, args: []const Value) RuntimeError!Value
 fn native_fread(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len < 2 or args[0] != .object or args[1] != .int) return .{ .bool = false };
     const obj = args[0].object;
+    if (std.mem.eql(u8, obj.class_name, "FileHandle")) {
+        const open = obj.get("__open");
+        if (open != .bool or !open.bool) {
+            try ctx.vm.setPendingException("TypeError", "fread(): Argument #1 ($stream) must be an open stream resource");
+            return error.RuntimeError;
+        }
+    }
     const length: usize = @intCast(@max(args[1].int, 0));
     if (length == 0) return .{ .string = "" };
     if (fileHandleWrapper(obj)) |wrapper| {
@@ -1203,6 +1213,13 @@ fn native_fread(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
 fn native_fwrite(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len < 2 or args[0] != .object or args[1] != .string) return .{ .bool = false };
     const obj = args[0].object;
+    if (std.mem.eql(u8, obj.class_name, "FileHandle")) {
+        const open = obj.get("__open");
+        if (open != .bool or !open.bool) {
+            try ctx.vm.setPendingException("TypeError", "fwrite(): Argument #1 ($stream) must be an open stream resource");
+            return error.RuntimeError;
+        }
+    }
     const data = args[1].string;
     if (fileHandleWrapper(obj)) |wrapper| {
         const result = try ctx.callMethod(wrapper, "stream_write", &[_]Value{.{ .string = data }});
