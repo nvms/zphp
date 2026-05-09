@@ -11,7 +11,10 @@ file_put_contents("$dir/sub/d.txt", "");
 // scandir
 print_r(scandir($dir));
 print_r(scandir($dir, SCANDIR_SORT_DESCENDING));
-print_r(scandir($dir, SCANDIR_SORT_NONE));
+// SCANDIR_SORT_NONE is OS-readdir-order and non-portable; assert set membership only
+$entries = scandir($dir, SCANDIR_SORT_NONE);
+sort($entries);
+print_r($entries);
 
 // glob
 $g = glob("$dir/*.txt");
