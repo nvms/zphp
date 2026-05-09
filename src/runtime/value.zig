@@ -620,7 +620,8 @@ pub const Value = union(enum) {
             .int => |i| i,
             .float => |f| @intFromFloat(f),
             .string => |s| parseLeadingInt(s),
-            .array, .object, .generator, .fiber => 0,
+            .array => |arr| if (arr.entries.items.len > 0) @as(i64, 1) else 0,
+            .object, .generator, .fiber => 1,
         };
     }
 

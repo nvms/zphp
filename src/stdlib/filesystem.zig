@@ -43,6 +43,7 @@ pub const entries = .{
     .{ "fclose", native_fclose },
     .{ "fread", native_fread },
     .{ "fwrite", native_fwrite },
+    .{ "fputs", native_fwrite },
     .{ "fpassthru", native_fpassthru },
     .{ "fgets", native_fgets },
     .{ "fgetc", native_fgetc },
@@ -62,6 +63,7 @@ pub const entries = .{
     .{ "stream_wrapper_restore", stream_wrapper_restore },
     .{ "fstat", native_fstat },
     .{ "stream_get_contents", stream_get_contents },
+    .{ "stream_copy_to_stream", stream_copy_to_stream },
     .{ "touch", native_touch },
     .{ "chmod", native_chmod },
     .{ "stat", native_stat },
@@ -73,6 +75,7 @@ pub const entries = .{
     .{ "stream_set_write_buffer", native_stream_set_buffer },
     .{ "clearstatcache", native_clearstatcache },
     .{ "tempnam", native_tempnam },
+    .{ "tmpfile", native_tmpfile },
     .{ "umask", native_umask },
     .{ "fileperms", native_fileperms },
     .{ "is_link", native_is_link },
@@ -382,6 +385,23 @@ fn native_file_get_contents(ctx: *NativeContext, args: []const Value) RuntimeErr
     }
     const content = std.fs.cwd().readFileAlloc(ctx.allocator, path, 1024 * 1024 * 64) catch return Value{ .bool = false };
     try ctx.strings.append(ctx.allocator, content);
+
+    // optional offset (4th arg) and length (5th arg)
+    if (args.len >= 4 and args[3] != .null) {
+        const total_i: i64 = @intCast(content.len);
+        var offset = Value.toInt(args[3]);
+        if (offset < 0) offset = @max(0, total_i + offset);
+        if (offset > total_i) offset = total_i;
+        const ustart: usize = @intCast(offset);
+        const have_len = args.len >= 5 and args[4] != .null;
+        const length: i64 = if (have_len) Value.toInt(args[4]) else total_i - offset;
+        if (length < 0) return .{ .bool = false };
+        const end = @min(content.len, ustart + @as(usize, @intCast(length)));
+        const slice = try ctx.allocator.dupe(u8, content[ustart..end]);
+        try ctx.strings.append(ctx.allocator, slice);
+        return .{ .string = slice };
+    }
+
     return .{ .string = content };
 }
 
@@ -1056,19 +1076,20 @@ fn native_fopen(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
 
 fn openWithMode(path: []const u8, mode: []const u8) !std.fs.File {
     if (mode.len == 0) return error.RuntimeError;
+    const has_plus = mode.len > 1 and (mode[1] == '+' or (mode.len > 2 and mode[2] == '+'));
     return switch (mode[0]) {
-        'r' => std.fs.cwd().openFile(path, .{ .mode = if (mode.len > 1 and mode[1] == '+') .read_write else .read_only }),
+        'r' => std.fs.cwd().openFile(path, .{ .mode = if (has_plus) .read_write else .read_only }),
         'w' => blk: {
-            const file = std.fs.cwd().createFile(path, .{ .truncate = true }) catch |err| break :blk err;
+            const file = std.fs.cwd().createFile(path, .{ .truncate = true, .read = has_plus }) catch |err| break :blk err;
             break :blk file;
         },
         'a' => blk: {
-            const file = std.fs.cwd().openFile(path, .{ .mode = .write_only }) catch
-                std.fs.cwd().createFile(path, .{}) catch |err| break :blk err;
+            const file = std.fs.cwd().openFile(path, .{ .mode = if (has_plus) .read_write else .write_only }) catch
+                std.fs.cwd().createFile(path, .{ .read = has_plus }) catch |err| break :blk err;
             file.seekFromEnd(0) catch {};
             break :blk file;
         },
-        'x' => std.fs.cwd().createFile(path, .{ .exclusive = true }),
+        'x' => std.fs.cwd().createFile(path, .{ .exclusive = true, .read = has_plus }),
         else => error.RuntimeError,
     };
 }
@@ -1622,6 +1643,20 @@ fn stream_wrapper_restore(ctx: *NativeContext, args: []const Value) RuntimeError
     return .{ .bool = true };
 }
 
+fn stream_copy_to_stream(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len < 2 or args[0] != .object or args[1] != .object) return .{ .bool = false };
+    const length: i64 = if (args.len >= 3 and args[2] != .null) Value.toInt(args[2]) else -1;
+    const offset: i64 = if (args.len >= 4 and args[3] != .null) Value.toInt(args[3]) else 0;
+
+    var src_args: [3]Value = .{ args[0], .{ .int = if (length < 0) -1 else length }, .{ .int = offset } };
+    const data_v = try stream_get_contents(ctx, src_args[0..3]);
+    const data: []const u8 = if (data_v == .string) data_v.string else return Value{ .bool = false };
+
+    var write_args: [2]Value = .{ args[1], .{ .string = data } };
+    const written = try native_fwrite(ctx, write_args[0..2]);
+    return written;
+}
+
 fn stream_get_contents(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len == 0 or args[0] != .object) return .{ .bool = false };
     const obj = args[0].object;
@@ -1963,6 +1998,15 @@ fn native_readlink(ctx: *NativeContext, args: []const Value) RuntimeError!Value 
     const result = ctx.vm.allocator.dupe(u8, target) catch return .{ .bool = false };
     try ctx.vm.strings.append(ctx.vm.allocator, result);
     return .{ .string = result };
+}
+
+fn native_tmpfile(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const dir = std.posix.getenv("TMPDIR") orelse "/tmp";
+    const path = std.fmt.allocPrint(ctx.vm.allocator, "{s}/zphp_tmpfile_{d}_{d}", .{ dir, std.time.nanoTimestamp(), std.crypto.random.int(u32) }) catch return .{ .bool = false };
+    try ctx.vm.strings.append(ctx.vm.allocator, path);
+    var open_args: [2]Value = .{ .{ .string = path }, .{ .string = "w+b" } };
+    const handle = try native_fopen(ctx, open_args[0..2]);
+    return handle;
 }
 
 fn native_tempnam(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
