@@ -109,6 +109,7 @@ pub fn register(vm: *VM, a: Allocator) !void {
     var ao_def = ClassDef{ .name = "ArrayObject" };
     try ao_def.interfaces.append(a, "Countable");
     try ao_def.interfaces.append(a, "ArrayAccess");
+    try ao_def.interfaces.append(a, "IteratorAggregate");
     try ao_def.methods.put(a, "__construct", .{ .name = "__construct", .arity = 3 });
     try ao_def.methods.put(a, "offsetGet", .{ .name = "offsetGet", .arity = 1 });
     try ao_def.methods.put(a, "offsetSet", .{ .name = "offsetSet", .arity = 2 });
@@ -126,6 +127,10 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try ao_def.methods.put(a, "arsort", .{ .name = "arsort", .arity = 1 });
     try ao_def.methods.put(a, "uksort", .{ .name = "uksort", .arity = 1 });
     try ao_def.methods.put(a, "uasort", .{ .name = "uasort", .arity = 1 });
+    try ao_def.methods.put(a, "natsort", .{ .name = "natsort", .arity = 0 });
+    try ao_def.methods.put(a, "natcasesort", .{ .name = "natcasesort", .arity = 0 });
+    try ao_def.methods.put(a, "exchangeArray", .{ .name = "exchangeArray", .arity = 1 });
+    try ao_def.methods.put(a, "setIteratorClass", .{ .name = "setIteratorClass", .arity = 1 });
     try ao_def.methods.put(a, "__get", .{ .name = "__get", .arity = 1 });
     try ao_def.methods.put(a, "__set", .{ .name = "__set", .arity = 2 });
     try ao_def.methods.put(a, "__isset", .{ .name = "__isset", .arity = 1 });
@@ -153,6 +158,10 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try vm.native_fns.put(a, "ArrayObject::arsort", aoArsort);
     try vm.native_fns.put(a, "ArrayObject::uksort", aoUksort);
     try vm.native_fns.put(a, "ArrayObject::uasort", aoUasort);
+    try vm.native_fns.put(a, "ArrayObject::natsort", aoNatsort);
+    try vm.native_fns.put(a, "ArrayObject::natcasesort", aoNatcasesort);
+    try vm.native_fns.put(a, "ArrayObject::exchangeArray", aoExchangeArray);
+    try vm.native_fns.put(a, "ArrayObject::setIteratorClass", aoSetIteratorClass);
     try vm.native_fns.put(a, "ArrayObject::__get", aoMagicGet);
     try vm.native_fns.put(a, "ArrayObject::__set", aoMagicSet);
     try vm.native_fns.put(a, "ArrayObject::__isset", aoMagicIsset);
@@ -990,6 +999,42 @@ fn aoUksort(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     try arrays_mod.mergeSort(PhpArray.Entry, arr.entries.items, ctx, args[0], .key);
     try arr.rebuildStringIndex(ctx.allocator);
     return .{ .bool = true };
+}
+
+fn aoNatsort(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const obj = getThis(ctx) orelse return .{ .bool = false };
+    const arr = getData(obj) orelse return .{ .bool = false };
+    arrays_mod.sortWithFlags(arr, 6, false); // SORT_NATURAL
+    try arr.rebuildStringIndex(ctx.allocator);
+    return .{ .bool = true };
+}
+
+fn aoNatcasesort(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const obj = getThis(ctx) orelse return .{ .bool = false };
+    const arr = getData(obj) orelse return .{ .bool = false };
+    arrays_mod.sortWithFlags(arr, 6 | 8, false); // SORT_NATURAL | SORT_FLAG_CASE
+    try arr.rebuildStringIndex(ctx.allocator);
+    return .{ .bool = true };
+}
+
+fn aoExchangeArray(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    const obj = getThis(ctx) orelse return .{ .bool = false };
+    if (args.len < 1 or args[0] != .array) return .{ .bool = false };
+    const old = getData(obj);
+    const old_copy = try ctx.createArray();
+    if (old) |o| {
+        for (o.entries.items) |e| try old_copy.set(ctx.allocator, e.key, e.value);
+    }
+    try obj.set(ctx.allocator, "__data", .{ .array = args[0].array });
+    return .{ .array = old_copy };
+}
+
+fn aoSetIteratorClass(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    const obj = getThis(ctx) orelse return .null;
+    if (args.len >= 1 and args[0] == .string) {
+        try obj.set(ctx.allocator, "__iter_class", .{ .string = args[0].string });
+    }
+    return .null;
 }
 
 fn aoGetIterator(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
