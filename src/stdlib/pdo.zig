@@ -46,6 +46,8 @@ const sqlite = struct {
     extern "sqlite3" fn sqlite3_changes(db: *Db) callconv(.c) c_int;
     extern "sqlite3" fn sqlite3_last_insert_rowid(db: *Db) callconv(.c) i64;
     extern "sqlite3" fn sqlite3_errmsg(db: *Db) callconv(.c) [*:0]const u8;
+    extern "sqlite3" fn sqlite3_errcode(db: *Db) callconv(.c) c_int;
+    extern "sqlite3" fn sqlite3_stmt_readonly(stmt: *Stmt) callconv(.c) c_int;
 };
 
 pub fn getOpaquePtr(comptime T: type, obj: *PhpObject, prop: []const u8) ?*T {
@@ -105,6 +107,7 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try pdo_def.methods.put(a, "beginTransaction", .{ .name = "beginTransaction", .arity = 0 });
     try pdo_def.methods.put(a, "commit", .{ .name = "commit", .arity = 0 });
     try pdo_def.methods.put(a, "rollBack", .{ .name = "rollBack", .arity = 0 });
+    try pdo_def.methods.put(a, "rollback", .{ .name = "rollback", .arity = 0 });
     try pdo_def.methods.put(a, "errorInfo", .{ .name = "errorInfo", .arity = 0 });
     try pdo_def.methods.put(a, "errorCode", .{ .name = "errorCode", .arity = 0 });
     try pdo_def.methods.put(a, "setAttribute", .{ .name = "setAttribute", .arity = 2 });
@@ -161,6 +164,7 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try vm.native_fns.put(a, "PDO::beginTransaction", pdoBeginTransaction);
     try vm.native_fns.put(a, "PDO::commit", pdoCommit);
     try vm.native_fns.put(a, "PDO::rollBack", pdoRollBack);
+    try vm.native_fns.put(a, "PDO::rollback", pdoRollBack);
     try vm.native_fns.put(a, "PDO::errorInfo", pdoErrorInfo);
     try vm.native_fns.put(a, "PDO::setAttribute", pdoSetAttribute);
     try vm.native_fns.put(a, "PDO::getAttribute", pdoGetAttribute);
@@ -501,9 +505,15 @@ fn pdoErrorInfo(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
     const db = getDbPtr(obj) orelse return .null;
     var arr = try ctx.createArray();
     const msg = std.mem.span(sqlite.sqlite3_errmsg(db));
-    try arr.append(ctx.allocator, .{ .string = "00000" });
-    try arr.append(ctx.allocator, .null);
-    try arr.append(ctx.allocator, .{ .string = try ctx.createString(msg) });
+    const has_err = !std.mem.eql(u8, msg, "not an error") and msg.len > 0;
+    try arr.append(ctx.allocator, .{ .string = if (has_err) "HY000" else "00000" });
+    if (has_err) {
+        try arr.append(ctx.allocator, .{ .int = sqlite.sqlite3_errcode(db) });
+        try arr.append(ctx.allocator, .{ .string = try ctx.createString(msg) });
+    } else {
+        try arr.append(ctx.allocator, .null);
+        try arr.append(ctx.allocator, .null);
+    }
     return .{ .array = arr };
 }
 
@@ -815,9 +825,13 @@ fn stmtFetchColumn(ctx: *NativeContext, args: []const Value) RuntimeError!Value 
 fn stmtRowCount(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
     const obj = getThis(ctx) orelse return .null;
     _ = getDriver(obj);
+    // for SELECT statements, sqlite doesn't track row count
+    const stmt = getStmtPtr(obj);
+    if (stmt) |s| {
+        if (sqlite.sqlite3_stmt_readonly(s) != 0) return .{ .int = 0 };
+    }
     const rc = obj.get("__row_count");
     if (rc == .int) return rc;
-    // for SELECT statements, SQLite doesn't provide row count before fetching
     return .{ .int = 0 };
 }
 
@@ -826,6 +840,9 @@ fn stmtColumnCount(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
     const drv = getDriver(obj);
     if (std.mem.eql(u8, drv, "mysql")) return pdo_mysql.stmtColumnCount(obj);
     if (std.mem.eql(u8, drv, "pgsql")) return pdo_pgsql.stmtColumnCount(obj);
+    // PHP returns 0 before execute
+    const stepped = obj.get("__stepped");
+    if (stepped != .bool or !stepped.bool) return .{ .int = 0 };
     const stmt = getStmtPtr(obj) orelse return .{ .int = 0 };
     return .{ .int = sqlite.sqlite3_column_count(stmt) };
 }
