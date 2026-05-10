@@ -287,7 +287,9 @@ fn array_unique(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len == 0 or args[0] != .array) return .null;
     const src = args[0].array;
     // default in PHP is SORT_STRING (2)
-    const flag = if (args.len >= 2) Value.toInt(args[1]) else 2;
+    const raw_flag: i64 = if (args.len >= 2) Value.toInt(args[1]) else 2;
+    const case_insensitive = (raw_flag & 8) != 0; // SORT_FLAG_CASE
+    const flag = raw_flag & ~@as(i64, 8);
     var arr = try ctx.createArray();
     for (src.entries.items) |entry| {
         var found = false;
@@ -297,7 +299,7 @@ fn array_unique(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
                 2, 5, 6 => blk: { // SORT_STRING, SORT_LOCALE_STRING, SORT_NATURAL
                     const a_str = try valueAsStringForCompare(ctx, entry.value);
                     const b_str = try valueAsStringForCompare(ctx, existing.value);
-                    break :blk std.mem.eql(u8, a_str, b_str);
+                    break :blk if (case_insensitive) std.ascii.eqlIgnoreCase(a_str, b_str) else std.mem.eql(u8, a_str, b_str);
                 },
                 else => Value.equal(entry.value, existing.value), // SORT_REGULAR
             };
