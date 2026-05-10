@@ -1997,10 +1997,12 @@ pub const VM = struct {
                             if (try self.throwBuiltinException("Exception", "Cannot traverse an already closed generator")) continue;
                             return error.RuntimeError;
                         }
-                        self.resumeGenerator(iterable.generator, .null) catch {
-                            if (self.dispatchPendingException(base_frame)) continue;
-                            return error.RuntimeError;
-                        };
+                        if (iterable.generator.state == .created) {
+                            self.resumeGenerator(iterable.generator, .null) catch {
+                                if (self.dispatchPendingException(base_frame)) continue;
+                                return error.RuntimeError;
+                            };
+                        }
                         self.push(.{ .int = -1 }); // sentinel: -1 means generator iteration
                     } else if (iterable == .object) {
                         // IteratorAggregate: replace iterable with getIterator() result
@@ -3826,6 +3828,17 @@ pub const VM = struct {
                             };
                             self.push(if (gen.state == .completed) .null else gen.current_value);
                         } else if (std.mem.eql(u8, method_name, "rewind")) {
+                            if (gen.state == .completed or (gen.state == .suspended and gen.ip > 0)) {
+                                try self.setPendingException("Exception", "Cannot rewind a generator that was already run");
+                                if (self.dispatchPendingException(base_frame)) continue;
+                                return error.RuntimeError;
+                            }
+                            if (gen.state == .created) {
+                                self.resumeGenerator(gen, .null) catch {
+                                    if (self.dispatchPendingException(base_frame)) continue;
+                                    return error.RuntimeError;
+                                };
+                            }
                             self.push(.null);
                         } else if (std.mem.eql(u8, method_name, "getReturn")) {
                             if (gen.state != .completed) {
@@ -7455,7 +7468,8 @@ pub const VM = struct {
         return null;
     }
 
-    pub fn tryAutoload(self: *VM, class_name: []const u8) RuntimeError!void {
+    pub fn tryAutoload(self: *VM, raw_class_name: []const u8) RuntimeError!void {
+        const class_name = if (raw_class_name.len > 0 and raw_class_name[0] == '\\') raw_class_name[1..] else raw_class_name;
         if (self.classes.contains(class_name)) return;
         if (self.interfaces.contains(class_name)) return;
         if (self.traits.contains(class_name)) return;
