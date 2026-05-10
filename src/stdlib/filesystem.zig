@@ -1007,7 +1007,8 @@ fn native_file(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
 
     const flags: i64 = if (args.len >= 2) Value.toInt(args[1]) else 0;
     const ignore_newlines = (flags & 2) != 0; // FILE_IGNORE_NEW_LINES = 2
-    const skip_empty = (flags & 4) != 0; // FILE_SKIP_EMPTY_LINES = 4
+    // PHP: FILE_SKIP_EMPTY_LINES only takes effect when combined with FILE_IGNORE_NEW_LINES
+    const skip_empty = (flags & 4) != 0 and ignore_newlines;
 
     var result = try ctx.createArray();
     var start: usize = 0;
@@ -1260,8 +1261,11 @@ fn native_fread(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
             return error.RuntimeError;
         }
     }
-    const length: usize = @intCast(@max(args[1].int, 0));
-    if (length == 0) return .{ .string = "" };
+    if (args[1].int <= 0) {
+        try ctx.vm.setPendingException("ValueError", "fread(): Argument #2 ($length) must be greater than 0");
+        return error.RuntimeError;
+    }
+    const length: usize = @intCast(args[1].int);
     if (fileHandleWrapper(obj)) |wrapper| {
         const result = try ctx.callMethod(wrapper, "stream_read", &[_]Value{.{ .int = @intCast(length) }});
         if (result == .string) return result;
@@ -1309,7 +1313,11 @@ fn native_fwrite(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
             return error.RuntimeError;
         }
     }
-    const data = args[1].string;
+    var data = args[1].string;
+    if (args.len >= 3 and args[2] == .int) {
+        const lim: i64 = args[2].int;
+        if (lim >= 0 and @as(usize, @intCast(lim)) < data.len) data = data[0..@intCast(lim)];
+    }
     if (fileHandleWrapper(obj)) |wrapper| {
         const result = try ctx.callMethod(wrapper, "stream_write", &[_]Value{.{ .string = data }});
         if (result == .int) return result;
@@ -1347,7 +1355,8 @@ fn native_fwrite(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
 fn native_fgets(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len == 0 or args[0] != .object) return .{ .bool = false };
     const obj = args[0].object;
-    const max_len: usize = if (args.len >= 2 and args[1] == .int) @intCast(@max(args[1].int, 1)) else 1024;
+    // PHP: fgets($f, length) reads up to length-1 bytes
+    const max_len: usize = if (args.len >= 2 and args[1] == .int) @intCast(@max(args[1].int - 1, 1)) else 1024;
     if (getBufferBacking(obj)) |buffer| {
         const pos = getBufferPos(obj);
         if (pos >= buffer.len) return .{ .bool = false };
