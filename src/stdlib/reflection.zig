@@ -700,13 +700,21 @@ fn rcImplementsInterface(ctx: *NativeContext, args: []const Value) RuntimeError!
     const this = getThis(ctx) orelse return .{ .bool = false };
     const class_name = if (this.get("name") == .string) this.get("name").string else return .{ .bool = false };
 
+    var queue = std.ArrayListUnmanaged([]const u8){};
+    defer queue.deinit(ctx.allocator);
     var current: ?[]const u8 = class_name;
     while (current) |name| {
         const cls = ctx.vm.classes.get(name) orelse break;
-        for (cls.interfaces.items) |iface| {
-            if (std.mem.eql(u8, iface, iface_name)) return .{ .bool = true };
-        }
+        for (cls.interfaces.items) |iface| try queue.append(ctx.allocator, iface);
         current = cls.parent;
+    }
+    var i: usize = 0;
+    while (i < queue.items.len) : (i += 1) {
+        const iface = queue.items[i];
+        if (std.mem.eql(u8, iface, iface_name)) return .{ .bool = true };
+        if (ctx.vm.classes.get(iface)) |idef| {
+            for (idef.interfaces.items) |sub| try queue.append(ctx.allocator, sub);
+        }
     }
     return .{ .bool = false };
 }
