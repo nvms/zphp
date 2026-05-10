@@ -203,9 +203,13 @@ fn count(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
             if (ctx.vm.hasMethod(obj.class_name, "count")) {
                 return ctx.vm.callMethod(obj, "count", &.{}) catch .{ .int = 1 };
             }
-            return .{ .int = 1 };
+            try ctx.vm.setPendingException("TypeError", "count(): Argument #1 ($value) must be of type Countable|array");
+            return error.RuntimeError;
         },
-        else => .{ .int = 1 },
+        else => {
+            try ctx.vm.setPendingException("TypeError", "count(): Argument #1 ($value) must be of type Countable|array");
+            return error.RuntimeError;
+        },
     };
 }
 

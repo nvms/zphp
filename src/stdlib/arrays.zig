@@ -167,7 +167,11 @@ fn array_is_list(_: *NativeContext, args: []const Value) RuntimeError!Value {
 }
 
 fn array_values(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len == 0 or args[0] != .array) return .null;
+    if (args.len == 0) return .null;
+    if (args[0] != .array) {
+        try ctx.vm.setPendingException("TypeError", "array_values(): Argument #1 ($array) must be of type array");
+        return error.RuntimeError;
+    }
     const src = args[0].array;
     var arr = try ctx.createArray();
     for (src.entries.items) |entry| {
@@ -950,7 +954,12 @@ fn array_pad(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     const src = args[0].array;
     const target: i64 = Value.toInt(args[1]);
     const pad_val = args[2];
-    const abs_target: usize = @intCast(if (target < 0) -target else target);
+    const abs_target_i64: i64 = if (target < 0) -target else target;
+    if (abs_target_i64 > 1_073_741_823) {
+        try ctx.vm.setPendingException("ValueError", "array_pad(): Argument #2 ($length) must be less than or equal to 1073741823");
+        return error.RuntimeError;
+    }
+    const abs_target: usize = @intCast(abs_target_i64);
     const current: usize = src.entries.items.len;
 
     var result = try ctx.createArray();
@@ -1225,7 +1234,12 @@ fn array_product(_: *NativeContext, args: []const Value) RuntimeError!Value {
 }
 
 fn array_walk(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len < 2 or args[0] != .array) return .{ .bool = false };
+    if (args.len < 2) return .{ .bool = false };
+    if (args[0] != .array and !(args[0] == .object and ctx.vm.isInstanceOf(args[0].object.class_name, "Traversable"))) {
+        try ctx.vm.setPendingException("TypeError", "array_walk(): Argument #1 ($array) must be of type array|object");
+        return error.RuntimeError;
+    }
+    if (args[0] != .array) return .{ .bool = false };
     const arr = args[0].array;
     const callback = args[1];
     const has_userdata = args.len >= 3;
