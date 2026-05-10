@@ -33,6 +33,16 @@ pub fn register(vm: *VM, a: Allocator) !void {
     const traversable = vm_mod.InterfaceDef{ .name = "Traversable" };
     try vm.interfaces.put(a, "Traversable", traversable);
 
+    // UnitEnum / BackedEnum (implemented automatically by every enum decl)
+    var unit_enum = vm_mod.InterfaceDef{ .name = "UnitEnum" };
+    try unit_enum.methods.append(a, "cases");
+    try vm.interfaces.put(a, "UnitEnum", unit_enum);
+
+    var backed_enum = vm_mod.InterfaceDef{ .name = "BackedEnum", .parent = "UnitEnum" };
+    try backed_enum.methods.append(a, "from");
+    try backed_enum.methods.append(a, "tryFrom");
+    try vm.interfaces.put(a, "BackedEnum", backed_enum);
+
     // Iterator interface
     var iterator = vm_mod.InterfaceDef{ .name = "Iterator" };
     iterator.parent = "Traversable";

@@ -6309,6 +6309,9 @@ pub const VM = struct {
         for (0..iface_count) |_| {
             try def.interfaces.append(self.allocator, self.currentChunk().constants.items[self.readU16()].string);
         }
+        // every enum implements UnitEnum; backed enums also implement BackedEnum
+        try def.interfaces.append(self.allocator, "UnitEnum");
+        if (backed_type_byte != 0) try def.interfaces.append(self.allocator, "BackedEnum");
 
         // enum-level attributes
         const enum_attrs = try self.readAttributeDefs();

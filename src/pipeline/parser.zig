@@ -637,7 +637,7 @@ const Parser = struct {
 
     fn parseConstDecl(self: *Parser) Error!u32 {
         _ = self.advance(); // const
-        const name_tok = try self.expect(.identifier);
+        const name_tok = try self.expectFunctionName();
         _ = try self.expect(.equal);
         const value = try self.parseExpression();
         _ = try self.expect(.semicolon);
