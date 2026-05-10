@@ -307,7 +307,12 @@ fn implode(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     var buf = std.ArrayListUnmanaged(u8){};
     for (arr.entries.items, 0..) |entry, i| {
         if (i > 0) try buf.appendSlice(ctx.allocator, glue);
-        try entry.value.format(&buf, ctx.allocator);
+        if (entry.value == .object and ctx.vm.hasMethod(entry.value.object.class_name, "__toString")) {
+            const r = try ctx.vm.callMethod(entry.value.object, "__toString", &.{});
+            if (r == .string) try buf.appendSlice(ctx.allocator, r.string) else try r.format(&buf, ctx.allocator);
+        } else {
+            try entry.value.format(&buf, ctx.allocator);
+        }
     }
     const s = try buf.toOwnedSlice(ctx.allocator);
     try ctx.strings.append(ctx.allocator, s);
