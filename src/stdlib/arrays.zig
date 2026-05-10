@@ -1837,14 +1837,26 @@ fn array_multisort(ctx: *NativeContext, args: []const Value) RuntimeError!Value 
         }
 
         fn cmpValues(a: Value, b: Value, k: i64) i32 {
-            if (k == 2) {
-                const sa = if (a == .string) a.string else "";
-                const sb = if (b == .string) b.string else "";
+            const kind = k & 0x7;
+            const ci = (k & 8) != 0;
+            if (kind == 2) {
+                var sa: []const u8 = if (a == .string) a.string else "";
+                var sb: []const u8 = if (b == .string) b.string else "";
+                var ba: [128]u8 = undefined;
+                var bb: [128]u8 = undefined;
+                if (ci) {
+                    const na = @min(ba.len, sa.len);
+                    for (sa[0..na], 0..) |c, i| ba[i] = if (c >= 'A' and c <= 'Z') c + 32 else c;
+                    sa = ba[0..na];
+                    const nb = @min(bb.len, sb.len);
+                    for (sb[0..nb], 0..) |c, i| bb[i] = if (c >= 'A' and c <= 'Z') c + 32 else c;
+                    sb = bb[0..nb];
+                }
                 return switch (std.mem.order(u8, sa, sb)) {
                     .lt => -1, .gt => 1, .eq => 0,
                 };
             }
-            if (k == 1) {
+            if (kind == 1) {
                 const fa = Value.toFloat(a);
                 const fb = Value.toFloat(b);
                 if (fa < fb) return -1;
