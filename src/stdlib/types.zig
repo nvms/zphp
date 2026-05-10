@@ -914,14 +914,23 @@ fn native_get_class_vars(ctx: *NativeContext, args: []const Value) RuntimeError!
 }
 
 fn native_get_parent_class(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len == 0) return Value{ .bool = false };
+    if (args.len == 0) {
+        // no-arg form: use the calling class
+        const caller = ctx.vm.currentDefiningClass() orelse return Value{ .bool = false };
+        const cls = ctx.vm.classes.get(caller) orelse return Value{ .bool = false };
+        if (cls.parent) |p| return Value{ .string = p };
+        return Value{ .bool = false };
+    }
     const class_name = if (args[0] == .object)
         args[0].object.class_name
     else if (args[0] == .string)
         args[0].string
     else
         return Value{ .bool = false };
-    const cls = ctx.vm.classes.get(class_name) orelse return Value{ .bool = false };
+    const cls = ctx.vm.classes.get(class_name) orelse {
+        try ctx.vm.setPendingException("TypeError", "get_parent_class(): Argument #1 ($object_or_class) must be an object or a valid class name");
+        return error.RuntimeError;
+    };
     if (cls.parent) |p| return Value{ .string = p };
     return Value{ .bool = false };
 }
