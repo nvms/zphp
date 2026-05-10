@@ -1578,12 +1578,37 @@ fn faFromArray(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
         return .{ .object = obj };
     }
     const src = args[0].array;
+    const preserve_keys = args.len >= 2 and args[1].isTruthy();
+    var max_idx: i64 = -1;
+    for (src.entries.items) |entry| {
+        if (entry.key != .int) {
+            try ctx.vm.setPendingException("InvalidArgumentException", "array must contain only positive integer keys");
+            return error.RuntimeError;
+        }
+        if (entry.key.int < 0) {
+            try ctx.vm.setPendingException("InvalidArgumentException", "array must contain only positive integer keys");
+            return error.RuntimeError;
+        }
+        if (entry.key.int > max_idx) max_idx = entry.key.int;
+    }
+    const size: usize = if (preserve_keys and max_idx >= 0)
+        @intCast(max_idx + 1)
+    else
+        src.entries.items.len;
     const obj = try ctx.createObject("SplFixedArray");
     const arr = try ensureData(ctx, obj);
-    for (src.entries.items) |entry| {
-        try arr.append(ctx.allocator, entry.value);
+    var i: usize = 0;
+    while (i < size) : (i += 1) try arr.append(ctx.allocator, .null);
+    if (preserve_keys) {
+        for (src.entries.items) |entry| {
+            arr.entries.items[@intCast(entry.key.int)].value = entry.value;
+        }
+    } else {
+        for (src.entries.items, 0..) |entry, idx| {
+            arr.entries.items[idx].value = entry.value;
+        }
     }
-    try obj.set(ctx.allocator, "__size", .{ .int = @intCast(src.entries.items.len) });
+    try obj.set(ctx.allocator, "__size", .{ .int = @intCast(size) });
     try obj.set(ctx.allocator, "__cursor", .{ .int = 0 });
     return .{ .object = obj };
 }
