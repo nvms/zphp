@@ -1729,11 +1729,14 @@ fn native_iterator_count(ctx: *NativeContext, args: []const Value) RuntimeError!
 fn native_iterator_apply(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len < 2) return .{ .int = 0 };
 
+    var tmp_buf: ?[]Value = null;
+    defer if (tmp_buf) |b| ctx.allocator.free(b);
     var call_args: []const Value = &.{};
     if (args.len >= 3 and args[2] == .array) {
         const arr = args[2].array;
         const tmp = try ctx.allocator.alloc(Value, arr.entries.items.len);
         for (arr.entries.items, 0..) |entry, i| tmp[i] = entry.value;
+        tmp_buf = tmp;
         call_args = tmp;
     }
 
@@ -1758,6 +1761,38 @@ fn native_iterator_apply(ctx: *NativeContext, args: []const Value) RuntimeError!
             n += 1;
         }
         return .{ .int = n };
+    }
+
+    if (args[0] == .object) {
+        const obj = args[0].object;
+        // try IteratorAggregate first
+        if (ctx.vm.hasMethod(obj.class_name, "getIterator")) {
+            const inner = try ctx.vm.callMethod(obj, "getIterator", &.{});
+            if (inner == .object) {
+                const inner_args = [_]Value{args[1]} ++ .{};
+                _ = inner_args;
+                const new_args: [3]Value = .{ inner, args[1], if (args.len >= 3) args[2] else Value.null };
+                return native_iterator_apply(ctx, new_args[0 .. if (args.len >= 3) 3 else 2]);
+            }
+            if (inner == .generator) {
+                const new_args: [3]Value = .{ inner, args[1], if (args.len >= 3) args[2] else Value.null };
+                return native_iterator_apply(ctx, new_args[0 .. if (args.len >= 3) 3 else 2]);
+            }
+        }
+        // Iterator protocol
+        if (ctx.vm.hasMethod(obj.class_name, "rewind")) {
+            _ = try ctx.vm.callMethod(obj, "rewind", &.{});
+            var n: i64 = 0;
+            while (true) {
+                const valid = try ctx.vm.callMethod(obj, "valid", &.{});
+                if (!valid.isTruthy()) break;
+                const r = try ctx.invokeCallable(args[1], call_args);
+                if (!r.isTruthy()) break;
+                n += 1;
+                _ = try ctx.vm.callMethod(obj, "next", &.{});
+            }
+            return .{ .int = n };
+        }
     }
 
     return .{ .int = 0 };
