@@ -279,10 +279,14 @@ fn dpGetIterator(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
     var ts = getTimestamp(start_v.object);
     if (exclude_start) {
         const di = obj.get("__interval");
-        if (di == .object) ts += intervalToSeconds(di.object);
+        if (di == .object) {
+            const tz_name = objTzName(start_v.object, ctx.vm.default_tz_name);
+            ts = applyIntervalTz(ts, di.object, 1, tz_name);
+        }
     }
     try iter.set(ctx.allocator, "__cursor_ts", .{ .int = ts });
     try iter.set(ctx.allocator, "__index", .{ .int = 0 });
+    try iter.set(ctx.allocator, "__exclude_start", .{ .bool = exclude_start });
     return .{ .object = iter };
 }
 
@@ -295,7 +299,9 @@ fn dpiTimestampInRange(this: *@import("../runtime/value.zig").PhpObject) bool {
     }
     const rec_v = this.get("__recurrences");
     if (rec_v == .int) {
-        return Value.toInt(this.get("__index")) <= rec_v.int;
+        const exclude_start = this.get("__exclude_start") == .bool and this.get("__exclude_start").bool;
+        const idx = Value.toInt(this.get("__index"));
+        return if (exclude_start) idx < rec_v.int else idx <= rec_v.int;
     }
     return false;
 }
@@ -324,7 +330,9 @@ fn dpiNext(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
     const di = this.get("__interval");
     if (di == .object) {
         const cur = Value.toInt(this.get("__cursor_ts"));
-        try this.set(ctx.allocator, "__cursor_ts", .{ .int = cur + intervalToSeconds(di.object) });
+        const start_v = this.get("__start");
+        const tz_name = if (start_v == .object) objTzName(start_v.object, ctx.vm.default_tz_name) else ctx.vm.default_tz_name;
+        try this.set(ctx.allocator, "__cursor_ts", .{ .int = applyIntervalTz(cur, di.object, 1, tz_name) });
     }
     const idx = Value.toInt(this.get("__index"));
     try this.set(ctx.allocator, "__index", .{ .int = idx + 1 });
