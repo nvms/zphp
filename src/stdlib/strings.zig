@@ -3797,12 +3797,6 @@ fn native_qp_encode(ctx: *NativeContext, args: []const Value) RuntimeError!Value
             i += 2;
             continue;
         }
-        if (s[i] == '\n') {
-            try buf.appendSlice(ctx.allocator, "\r\n");
-            line_len = 0;
-            i += 1;
-            continue;
-        }
         const c = s[i];
         const need: usize = if ((c >= 33 and c <= 126 and c != '=') or c == ' ' or c == '\t') 1 else 3;
         if (line_len + need > 75) {
