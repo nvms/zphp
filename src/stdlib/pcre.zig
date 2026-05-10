@@ -319,6 +319,7 @@ fn preg_match_all(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     const flags: u32 = if (args.len >= 4) @intCast(@max(0, Value.toInt(args[3]))) else 0;
     const set_order = (flags & 2) != 0; // PREG_SET_ORDER
     const offset_capture = (flags & 256) != 0; // PREG_OFFSET_CAPTURE
+    const unmatched_as_null = (flags & 512) != 0; // PREG_UNMATCHED_AS_NULL
 
     const code = compilePattern(info.pattern, info.flags) orelse {
         setPregError(1);
@@ -359,18 +360,22 @@ fn preg_match_all(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
 
         if (set_order) {
             const match_arr = try ctx.createArray();
-            // find last matched group (PHP omits trailing unmatched groups in SET_ORDER)
-            var last_matched: usize = 0;
-            for (0..group_count) |i| {
-                if (i < count) {
-                    const s = ovector[i * 2];
-                    const e = ovector[i * 2 + 1];
-                    if (s != pcre2.UNSET and e != pcre2.UNSET) {
-                        last_matched = i;
+            // PHP omits trailing unmatched groups in SET_ORDER unless
+            // PREG_UNMATCHED_AS_NULL is set, in which case they appear as null
+            const last_idx: usize = if (unmatched_as_null) group_count - 1 else blk: {
+                var last_matched: usize = 0;
+                for (0..group_count) |i| {
+                    if (i < count) {
+                        const s = ovector[i * 2];
+                        const e = ovector[i * 2 + 1];
+                        if (s != pcre2.UNSET and e != pcre2.UNSET) {
+                            last_matched = i;
+                        }
                     }
                 }
-            }
-            for (0..last_matched + 1) |i| {
+                break :blk last_matched;
+            };
+            for (0..last_idx + 1) |i| {
                 const val = try matchGroupValue(ctx, subject, ovector, count, i, offset_capture);
                 try match_arr.append(ctx.allocator, val);
             }
