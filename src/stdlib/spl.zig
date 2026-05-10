@@ -1311,8 +1311,8 @@ fn pqInsert(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     for (arr.entries.items) |entry| {
         if (entry.value != .array) break;
         const ep = entry.value.array.get(.{ .int = 1 });
-        // ties: insert before equal-priority items so later-inserted comes out first (matches PHP)
-        if (Value.compare(args[1], ep) >= 0) break;
+        // ties: insert after equal-priority items so earlier-inserted extracts first
+        if (Value.compare(args[1], ep) > 0) break;
         pos += 1;
     }
     try arr.entries.insert(ctx.allocator, pos, .{ .key = .{ .int = @intCast(arr.entries.items.len) }, .value = .{ .array = pair } });
