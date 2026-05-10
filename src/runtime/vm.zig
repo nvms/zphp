@@ -4265,7 +4265,10 @@ pub const VM = struct {
                         }
                     } else {
                         self.sp -= ac + 1;
-                        self.setErrorMsg("Fatal error: Uncaught Error: Call to undefined method {s}::{s}()", .{ obj.class_name, method_name });
+                        const msg = std.fmt.allocPrint(self.allocator, "Call to undefined method {s}::{s}()", .{ obj.class_name, method_name }) catch "Call to undefined method";
+                        try self.strings.append(self.allocator, msg);
+                        if (try self.throwBuiltinException("Error", msg)) continue;
+                        self.setErrorMsg("Fatal error: Uncaught Error: {s}", .{msg});
                         return error.RuntimeError;
                     }
                 },
@@ -4423,7 +4426,10 @@ pub const VM = struct {
         if (self.frame_count > self.frame_high_water) self.frame_high_water = self.frame_count;
                     } else {
                         self.sp -= ac + 1;
-                        self.setErrorMsg("Fatal error: Uncaught Error: Call to undefined method {s}::{s}()", .{ obj.class_name, method_name });
+                        const msg = std.fmt.allocPrint(self.allocator, "Call to undefined method {s}::{s}()", .{ obj.class_name, method_name }) catch "Call to undefined method";
+                        try self.strings.append(self.allocator, msg);
+                        if (try self.throwBuiltinException("Error", msg)) continue;
+                        self.setErrorMsg("Fatal error: Uncaught Error: {s}", .{msg});
                         return error.RuntimeError;
                     }
                 },
@@ -4470,7 +4476,10 @@ pub const VM = struct {
                             continue;
                         }
                         self.sp -= ac + 1;
-                        self.setErrorMsg("Fatal error: Uncaught Error: Call to undefined method {s}::{s}()", .{ obj.class_name, method_name });
+                        const msg = std.fmt.allocPrint(self.allocator, "Call to undefined method {s}::{s}()", .{ obj.class_name, method_name }) catch "Call to undefined method";
+                        try self.strings.append(self.allocator, msg);
+                        if (try self.throwBuiltinException("Error", msg)) continue;
+                        self.setErrorMsg("Fatal error: Uncaught Error: {s}", .{msg});
                         return error.RuntimeError;
                     };
                     if (self.native_fns.get(full_name)) |native| {
@@ -4552,7 +4561,10 @@ pub const VM = struct {
         if (self.frame_count > self.frame_high_water) self.frame_high_water = self.frame_count;
                     } else {
                         self.sp -= ac + 1;
-                        self.setErrorMsg("Fatal error: Uncaught Error: Call to undefined method {s}::{s}()", .{ obj.class_name, method_name });
+                        const msg = std.fmt.allocPrint(self.allocator, "Call to undefined method {s}::{s}()", .{ obj.class_name, method_name }) catch "Call to undefined method";
+                        try self.strings.append(self.allocator, msg);
+                        if (try self.throwBuiltinException("Error", msg)) continue;
+                        self.setErrorMsg("Fatal error: Uncaught Error: {s}", .{msg});
                         return error.RuntimeError;
                     }
                 },
@@ -4615,7 +4627,10 @@ pub const VM = struct {
                             }
                         }
                         self.sp -= ac + 1;
-                        self.setErrorMsg("Fatal error: Uncaught Error: Call to undefined method {s}::{s}()", .{ obj.class_name, method_name });
+                        const msg = std.fmt.allocPrint(self.allocator, "Call to undefined method {s}::{s}()", .{ obj.class_name, method_name }) catch "Call to undefined method";
+                        try self.strings.append(self.allocator, msg);
+                        if (try self.throwBuiltinException("Error", msg)) continue;
+                        self.setErrorMsg("Fatal error: Uncaught Error: {s}", .{msg});
                         return error.RuntimeError;
                     };
                     const mcds_ac_u8: u8 = @intCast(@min(ac, 255));
@@ -4698,7 +4713,10 @@ pub const VM = struct {
         if (self.frame_count > self.frame_high_water) self.frame_high_water = self.frame_count;
                     } else {
                         self.sp -= ac + 1;
-                        self.setErrorMsg("Fatal error: Uncaught Error: Call to undefined method {s}::{s}()", .{ obj.class_name, method_name });
+                        const msg = std.fmt.allocPrint(self.allocator, "Call to undefined method {s}::{s}()", .{ obj.class_name, method_name }) catch "Call to undefined method";
+                        try self.strings.append(self.allocator, msg);
+                        if (try self.throwBuiltinException("Error", msg)) continue;
+                        self.setErrorMsg("Fatal error: Uncaught Error: {s}", .{msg});
                         return error.RuntimeError;
                     }
                 },
