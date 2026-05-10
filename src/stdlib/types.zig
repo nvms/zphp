@@ -662,6 +662,11 @@ fn native_is_callable(ctx: *NativeContext, args: []const Value) RuntimeError!Val
             target.string
         else
             return .{ .bool = false };
+        if (ctx.vm.classes.get(class_name)) |cdef| {
+            if (cdef.methods.get(method)) |mi| {
+                if (mi.visibility != .public) return .{ .bool = false };
+            }
+        }
         var buf: [256]u8 = undefined;
         const full = std.fmt.bufPrint(&buf, "{s}::{s}", .{ class_name, method }) catch return .{ .bool = false };
         if (ctx.vm.native_fns.contains(full)) return .{ .bool = true };
