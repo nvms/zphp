@@ -546,6 +546,17 @@ fn translateReplacement(allocator: std.mem.Allocator, src: []const u8) ![]u8 {
     var i: usize = 0;
     while (i < src.len) {
         const c = src[i];
+        // PHP preg_replace only expands $N / ${N} (numeric) - keep ${name}
+        // literal so pcre2 doesn't substitute it as a named group reference.
+        // pcre2 uses `$$` to emit a literal `$`.
+        if (c == '$' and i + 1 < src.len and src[i + 1] == '{') {
+            if (i + 2 < src.len and !(src[i + 2] >= '0' and src[i + 2] <= '9')) {
+                try out.append(allocator, '$');
+                try out.append(allocator, '$');
+                i += 1;
+                continue;
+            }
+        }
         if (c == '\\' and i + 1 < src.len) {
             const n = src[i + 1];
             if (n >= '0' and n <= '9') {
