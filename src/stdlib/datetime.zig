@@ -713,6 +713,12 @@ fn intervalToSeconds(interval: *PhpObject) i64 {
 // add a DateInterval to a timestamp using calendar arithmetic for y/m/d so
 // month-length variation and 31st-of-month rollover behave like PHP
 fn applyInterval(ts: i64, interval: *PhpObject, sign: i64) i64 {
+    return applyIntervalTz(ts, interval, sign, ctx_default_tz);
+}
+
+var ctx_default_tz: []const u8 = "UTC";
+
+fn applyIntervalTz(ts: i64, interval: *PhpObject, sign: i64, tz_name: []const u8) i64 {
     const y = Value.toInt(interval.get("y"));
     const m = Value.toInt(interval.get("m"));
     const d = Value.toInt(interval.get("d"));
@@ -722,25 +728,37 @@ fn applyInterval(ts: i64, interval: *PhpObject, sign: i64) i64 {
     const invert = Value.toInt(interval.get("invert"));
     const direction: i64 = if (invert != 0) -sign else sign;
 
-    const c = baseComponents(ts);
+    // calendar arithmetic for y/m/d happens in the receiver's timezone so
+    // crossing DST doesn't bleed into the wall-clock time
+    const tz = lookupTimezone(tz_name);
+    const off_in: i64 = if (tz) |t| @as(i64, tzOffsetAt(t, ts)) else 0;
+    const c = baseComponents(ts + off_in);
     var year: i64 = c.year + direction * y;
     var month: i64 = c.month + direction * m;
     while (month > 12) : ({ month -= 12; year += 1; }) {}
     while (month < 1) : ({ month += 12; year -= 1; }) {}
     const day: i64 = c.day + direction * d;
 
-    // build a timestamp from the calendar components, letting dateToTimestamp
-    // normalize day overflow (Jan 32 -> Feb 1, Jan 31 with Feb target -> Mar 2/3)
-    var new_ts = dateToTimestamp(year, month, day, c.hour, c.min, c.sec);
-    new_ts += direction * (h * 3600 + i * 60 + s);
-    return new_ts;
+    var local_ts = dateToTimestamp(year, month, day, c.hour, c.min, c.sec);
+    // convert local back to UTC
+    if (tz) |t| {
+        const off_out: i64 = @as(i64, tzOffsetAt(t, local_ts));
+        local_ts -= off_out;
+    }
+    local_ts += direction * (h * 3600 + i * 60 + s);
+    return local_ts;
+}
+
+fn objTzName(obj: *PhpObject, fallback: []const u8) []const u8 {
+    const v = obj.get("__timezone");
+    return if (v == .string) v.string else fallback;
 }
 
 fn dtAdd(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     const obj = getThis(ctx) orelse return .null;
     if (args.len == 0 or args[0] != .object) return .{ .object = obj };
     const ts = getTimestamp(obj);
-    const new_ts = applyInterval(ts, args[0].object, 1);
+    const new_ts = applyIntervalTz(ts, args[0].object, 1, objTzName(obj, ctx.vm.default_tz_name));
     try obj.set(ctx.allocator, "timestamp", .{ .int = new_ts });
     return .{ .object = obj };
 }
@@ -749,7 +767,7 @@ fn dtSub(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     const obj = getThis(ctx) orelse return .null;
     if (args.len == 0 or args[0] != .object) return .{ .object = obj };
     const ts = getTimestamp(obj);
-    const new_ts = applyInterval(ts, args[0].object, -1);
+    const new_ts = applyIntervalTz(ts, args[0].object, -1, objTzName(obj, ctx.vm.default_tz_name));
     try obj.set(ctx.allocator, "timestamp", .{ .int = new_ts });
     return .{ .object = obj };
 }
@@ -758,9 +776,10 @@ fn dtiAdd(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     const obj = getThis(ctx) orelse return .null;
     if (args.len == 0 or args[0] != .object) return .{ .object = obj };
     const ts = getTimestamp(obj);
-    const new_ts = applyInterval(ts, args[0].object, 1);
+    const new_ts = applyIntervalTz(ts, args[0].object, 1, objTzName(obj, ctx.vm.default_tz_name));
     const new_obj = try ctx.createObject("DateTimeImmutable");
     try new_obj.set(ctx.allocator, "timestamp", .{ .int = new_ts });
+    if (obj.get("__timezone") == .string) try new_obj.set(ctx.allocator, "__timezone", obj.get("__timezone"));
     return .{ .object = new_obj };
 }
 
@@ -768,9 +787,10 @@ fn dtiSub(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     const obj = getThis(ctx) orelse return .null;
     if (args.len == 0 or args[0] != .object) return .{ .object = obj };
     const ts = getTimestamp(obj);
-    const new_ts = applyInterval(ts, args[0].object, -1);
+    const new_ts = applyIntervalTz(ts, args[0].object, -1, objTzName(obj, ctx.vm.default_tz_name));
     const new_obj = try ctx.createObject("DateTimeImmutable");
     try new_obj.set(ctx.allocator, "timestamp", .{ .int = new_ts });
+    if (obj.get("__timezone") == .string) try new_obj.set(ctx.allocator, "__timezone", obj.get("__timezone"));
     return .{ .object = new_obj };
 }
 
