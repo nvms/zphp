@@ -2076,12 +2076,21 @@ pub const VM = struct {
                         }
                     } else if (Value.toInt(idx_val) == -2 and iterable == .object) {
                         // Iterator protocol
-                        const valid = self.callMethod(iterable.object, "valid", &.{}) catch Value{ .bool = false };
+                        const valid = self.callMethod(iterable.object, "valid", &.{}) catch {
+                            if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
+                            return error.RuntimeError;
+                        };
                         if (!valid.isTruthy()) {
                             self.currentFrame().ip += offset;
                         } else {
-                            const key = self.callMethod(iterable.object, "key", &.{}) catch .null;
-                            const current = self.callMethod(iterable.object, "current", &.{}) catch .null;
+                            const key = self.callMethod(iterable.object, "key", &.{}) catch {
+                                if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
+                                return error.RuntimeError;
+                            };
+                            const current = self.callMethod(iterable.object, "current", &.{}) catch {
+                                if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
+                                return error.RuntimeError;
+                            };
                             self.push(key);
                             self.push(current);
                         }
@@ -2528,7 +2537,10 @@ pub const VM = struct {
                     if (v == .string) {
                         self.push(v);
                     } else if (v == .object) {
-                        const s = try self.objectToString(v.object);
+                        const s = self.objectToString(v.object) catch {
+                            if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
+                            return error.RuntimeError;
+                        };
                         self.push(.{ .string = s });
                     } else {
                         var buf = std.ArrayListUnmanaged(u8){};
