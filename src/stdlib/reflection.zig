@@ -1592,9 +1592,9 @@ fn rpGetPosition(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
 
 fn rpAllowsNull(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
     const this = getThis(ctx) orelse return .{ .bool = true };
-    // no type hint means allows null
     const type_val = this.get("_type_name");
     if (type_val != .string or type_val.string.len == 0) return .{ .bool = true };
+    if (std.mem.eql(u8, type_val.string, "mixed") or std.mem.eql(u8, type_val.string, "null")) return .{ .bool = true };
     const nullable = this.get("_nullable");
     return .{ .bool = nullable == .bool and nullable.bool };
 }
