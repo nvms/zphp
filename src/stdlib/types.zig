@@ -1741,6 +1741,34 @@ fn native_iterator_count(ctx: *NativeContext, args: []const Value) RuntimeError!
         return .{ .int = n };
     }
 
+    if (args[0] == .object) {
+        var obj = args[0].object;
+        if (ctx.vm.hasMethod(obj.class_name, "getIterator")) {
+            const inner = try ctx.vm.callMethod(obj, "getIterator", &.{});
+            if (inner == .object) obj = inner.object;
+            if (inner == .generator) {
+                const gen = inner.generator;
+                var n: i64 = 0;
+                if (gen.state == .created) try ctx.vm.resumeGenerator(gen, .null);
+                while (gen.state != .completed) {
+                    n += 1;
+                    try ctx.vm.resumeGenerator(gen, .null);
+                }
+                return .{ .int = n };
+            }
+        }
+        if (!ctx.vm.hasMethod(obj.class_name, "rewind")) return .{ .int = 0 };
+        _ = try ctx.vm.callMethod(obj, "rewind", &.{});
+        var n: i64 = 0;
+        while (true) {
+            const valid = try ctx.vm.callMethod(obj, "valid", &.{});
+            if (!valid.isTruthy()) break;
+            n += 1;
+            _ = try ctx.vm.callMethod(obj, "next", &.{});
+        }
+        return .{ .int = n };
+    }
+
     return .{ .int = 0 };
 }
 
