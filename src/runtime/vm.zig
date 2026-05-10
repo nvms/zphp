@@ -8359,7 +8359,16 @@ pub const VM = struct {
         if (std.mem.eql(u8, type_name, "false")) return val == .bool and !val.bool;
         if (std.mem.eql(u8, type_name, "true")) return val == .bool and val.bool;
         if (std.mem.eql(u8, type_name, "object")) return val == .object;
-        if (std.mem.eql(u8, type_name, "iterable")) return val == .array or val == .generator;
+        if (std.mem.eql(u8, type_name, "iterable")) {
+            if (val == .array or val == .generator) return true;
+            if (val == .object) {
+                if (self.hasMethod(val.object.class_name, "getIterator")) return true;
+                if (self.isInstanceOf(val.object.class_name, "Iterator")) return true;
+                if (self.isInstanceOf(val.object.class_name, "IteratorAggregate")) return true;
+                if (self.isInstanceOf(val.object.class_name, "Traversable")) return true;
+            }
+            return false;
+        }
         if (std.mem.eql(u8, type_name, "self") or std.mem.eql(u8, type_name, "static") or std.mem.eql(u8, type_name, "parent")) return val == .object;
         if (std.mem.eql(u8, type_name, "Traversable") or std.mem.eql(u8, type_name, "Iterator") or std.mem.eql(u8, type_name, "IteratorAggregate")) {
             return val == .object or val == .array or val == .generator;
