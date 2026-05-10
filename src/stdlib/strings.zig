@@ -4494,8 +4494,7 @@ fn native_sscanf(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
                     ip += 1;
                 }
                 if (ip == start or (ip == start + 1 and (input[start] == '+' or input[start] == '-'))) {
-                    try captures.append(ctx.allocator, .null);
-                    continue;
+                    break;
                 }
                 const v = std.fmt.parseInt(i64, input[start..ip], 10) catch 0;
                 try captures.append(ctx.allocator, .{ .int = v });
@@ -4507,10 +4506,14 @@ fn native_sscanf(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
                     if (has_width and ip - start >= width) break;
                     ip += 1;
                 }
+                if (ip == start or (ip == start + 1 and (input[start] == '+' or input[start] == '-'))) {
+                    break;
+                }
                 const v = std.fmt.parseFloat(f64, input[start..ip]) catch 0;
                 try captures.append(ctx.allocator, .{ .float = v });
             },
             's' => {
+                if (ip >= input.len) break;
                 const start = ip;
                 while (ip < input.len and input[ip] != ' ' and input[ip] != '\t' and input[ip] != '\n') {
                     if (has_width and ip - start >= width) break;
@@ -4593,20 +4596,52 @@ fn native_sscanf(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
                 try ctx.strings.append(ctx.allocator, s);
                 try captures.append(ctx.allocator, .{ .string = s });
             },
-            else => {},
+            else => {
+                const msg = try std.fmt.allocPrint(ctx.allocator, "Bad scan conversion character \"{c}\"", .{spec});
+                try ctx.vm.strings.append(ctx.allocator, msg);
+                try ctx.vm.setPendingException("ValueError", msg);
+                return error.RuntimeError;
+            },
         }
     }
 
-    // if optional output args provided, write to them and return count
+    const matched_count: i64 = @intCast(captures.items.len);
+
+    // if optional output args provided, write to them and return successful count
     if (args.len > 2) {
-        var written: i64 = 0;
         for (captures.items, 0..) |v, i| {
             if (2 + i >= args.len) break;
             ctx.setCallerVar(2 + i, args.len, v);
-            written += 1;
         }
-        return .{ .int = written };
+        return .{ .int = matched_count };
     }
+
+    // PHP returns null in array mode only when the input was empty
+    if (matched_count == 0 and input.len == 0) return .null;
+
+    // array-return mode: pad with null up to the total number of capturing specs
+    var total_specs: usize = 0;
+    var sp: usize = 0;
+    while (sp < fmt.len) {
+        if (fmt[sp] != '%') { sp += 1; continue; }
+        sp += 1;
+        while (sp < fmt.len and fmt[sp] >= '0' and fmt[sp] <= '9') sp += 1;
+        if (sp >= fmt.len) break;
+        const spec = fmt[sp];
+        sp += 1;
+        if (spec == '%') continue;
+        if (spec == '[') {
+            if (sp < fmt.len and fmt[sp] == '^') sp += 1;
+            var first = true;
+            while (sp < fmt.len) {
+                if (fmt[sp] == ']' and !first) { sp += 1; break; }
+                first = false;
+                sp += 1;
+            }
+        }
+        total_specs += 1;
+    }
+    while (captures.items.len < total_specs) try captures.append(ctx.allocator, .null);
 
     var arr = try ctx.createArray();
     for (captures.items) |v| try arr.append(ctx.allocator, v);
