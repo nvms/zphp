@@ -1593,7 +1593,8 @@ fn faFromArray(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
         return .{ .object = obj };
     }
     const src = args[0].array;
-    const preserve_keys = args.len >= 2 and args[1].isTruthy();
+    // PHP default: preserveKeys = true (sparse keys produce padded array)
+    const preserve_keys = if (args.len >= 2) args[1].isTruthy() else true;
     var max_idx: i64 = -1;
     for (src.entries.items) |entry| {
         if (entry.key != .int) {
