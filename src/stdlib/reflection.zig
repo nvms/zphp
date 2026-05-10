@@ -333,6 +333,8 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try rf_def.methods.put(a, "getClosureScopeClass", .{ .name = "getClosureScopeClass", .arity = 0 });
     try rf_def.methods.put(a, "hasReturnType", .{ .name = "hasReturnType", .arity = 0 });
     try rf_def.methods.put(a, "getAttributes", .{ .name = "getAttributes", .arity = 0 });
+    try rf_def.methods.put(a, "invoke", .{ .name = "invoke", .arity = 0 });
+    try rf_def.methods.put(a, "invokeArgs", .{ .name = "invokeArgs", .arity = 1 });
     try vm.classes.put(a, "ReflectionFunction", rf_def);
 
     try vm.native_fns.put(a, "ReflectionFunction::__construct", rfConstruct);
@@ -349,6 +351,8 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try vm.native_fns.put(a, "ReflectionFunction::getAttributes", rfGetAttributes);
     try vm.native_fns.put(a, "ReflectionFunction::getClosureUsedVariables", rfGetClosureUsedVariables);
     try vm.native_fns.put(a, "ReflectionFunction::getClosureCalledClass", rfGetClosureCalledClass);
+    try vm.native_fns.put(a, "ReflectionFunction::invoke", rfInvoke);
+    try vm.native_fns.put(a, "ReflectionFunction::invokeArgs", rfInvokeArgs);
 
     // ReflectionProperty
     var rprop_def = ClassDef{ .name = "ReflectionProperty" };
@@ -1815,6 +1819,23 @@ fn rfConstruct(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
         return throwReflection(ctx, "ReflectionFunction::__construct() expects a function name");
     }
     return .null;
+}
+
+fn rfInvoke(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    const this = getThis(ctx) orelse return .null;
+    const fn_name = if (this.get("name") == .string) this.get("name").string else return .null;
+    return ctx.vm.callByName(fn_name, args);
+}
+
+fn rfInvokeArgs(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    const this = getThis(ctx) orelse return .null;
+    const fn_name = if (this.get("name") == .string) this.get("name").string else return .null;
+    if (args.len < 1 or args[0] != .array) return .null;
+    const arr = args[0].array;
+    var call_args: [16]Value = undefined;
+    const count = @min(arr.entries.items.len, 16);
+    for (0..count) |i| call_args[i] = arr.entries.items[i].value;
+    return ctx.vm.callByName(fn_name, call_args[0..count]);
 }
 
 fn rfGetName(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
