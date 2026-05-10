@@ -2437,7 +2437,16 @@ pub const VM = struct {
                 .isset_index => {
                     const key = self.pop();
                     const arr_val = self.pop();
-                    if (arr_val == .object and self.hasMethod(arr_val.object.class_name, "offsetExists")) {
+                    if (arr_val == .object and (std.mem.eql(u8, arr_val.object.class_name, "ArrayObject") or std.mem.eql(u8, arr_val.object.class_name, "ArrayIterator"))) {
+                        // SPL ArrayObject/ArrayIterator: isset() is null-aware (PHP's spl_array_has_dimension semantics)
+                        const data = arr_val.object.get("__data");
+                        if (data == .array) {
+                            const v = data.array.get(Value.toArrayKey(key));
+                            self.push(.{ .bool = v != .null });
+                        } else {
+                            self.push(.{ .bool = false });
+                        }
+                    } else if (arr_val == .object and self.hasMethod(arr_val.object.class_name, "offsetExists")) {
                         const result = self.callMethod(arr_val.object, "offsetExists", &.{key}) catch {
                             if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
                             return error.RuntimeError;
