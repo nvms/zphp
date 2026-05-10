@@ -92,9 +92,25 @@ fn native_getenv(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     return .{ .string = val };
 }
 
-fn native_putenv(_: *NativeContext, args: []const Value) RuntimeError!Value {
+extern "c" fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int;
+extern "c" fn unsetenv(name: [*:0]const u8) c_int;
+
+fn native_putenv(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len == 0 or args[0] != .string) return .{ .bool = false };
-    return .{ .bool = true };
+    const setting = args[0].string;
+    if (std.mem.indexOfScalar(u8, setting, '=')) |eq| {
+        const name = setting[0..eq];
+        const val = setting[eq + 1 ..];
+        const name_z = ctx.allocator.dupeZ(u8, name) catch return Value{ .bool = false };
+        defer ctx.allocator.free(name_z);
+        const val_z = ctx.allocator.dupeZ(u8, val) catch return Value{ .bool = false };
+        defer ctx.allocator.free(val_z);
+        return .{ .bool = setenv(name_z.ptr, val_z.ptr, 1) == 0 };
+    } else {
+        const name_z = ctx.allocator.dupeZ(u8, setting) catch return Value{ .bool = false };
+        defer ctx.allocator.free(name_z);
+        return .{ .bool = unsetenv(name_z.ptr) == 0 };
+    }
 }
 
 fn native_uniqid(ctx: *NativeContext, args: []const Value) RuntimeError!Value {

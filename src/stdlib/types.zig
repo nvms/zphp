@@ -30,6 +30,7 @@ pub const entries = .{
     .{ "define", native_define },
     .{ "defined", native_defined },
     .{ "constant", native_constant },
+    .{ "get_defined_constants", native_get_defined_constants },
     .{ "is_object", is_object },
     .{ "get_class", get_class },
     .{ "get_called_class", get_called_class },
@@ -123,6 +124,8 @@ pub const entries = .{
 
 fn native_define(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len < 2 or args[0] != .string) return .{ .bool = false };
+    if (ctx.vm.php_constants.contains(args[0].string)) return .{ .bool = false };
+    try ctx.vm.user_constants.put(ctx.allocator, args[0].string, {});
     try ctx.vm.php_constants.put(ctx.allocator, args[0].string, args[1]);
     return .{ .bool = true };
 }
@@ -148,7 +151,37 @@ fn native_constant(ctx: *NativeContext, args: []const Value) RuntimeError!Value 
         const prop_name = name[sep + 2 ..];
         if (ctx.vm.getStaticProp(class_name, prop_name)) |v| return v;
     }
-    return .null;
+    const msg = try std.fmt.allocPrint(ctx.allocator, "Undefined constant \"{s}\"", .{name});
+    try ctx.strings.append(ctx.allocator, msg);
+    try ctx.vm.setPendingException("Error", msg);
+    return error.RuntimeError;
+}
+
+fn native_get_defined_constants(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    const categorize = args.len >= 1 and args[0].isTruthy();
+    if (categorize) {
+        const root = try ctx.createArray();
+        const internal = try ctx.createArray();
+        const user = try ctx.createArray();
+        var it = ctx.vm.php_constants.iterator();
+        while (it.next()) |entry| {
+            const name = entry.key_ptr.*;
+            if (ctx.vm.user_constants.contains(name)) {
+                try user.set(ctx.allocator, .{ .string = name }, entry.value_ptr.*);
+            } else {
+                try internal.set(ctx.allocator, .{ .string = name }, entry.value_ptr.*);
+            }
+        }
+        try root.set(ctx.allocator, .{ .string = "Core" }, .{ .array = internal });
+        try root.set(ctx.allocator, .{ .string = "user" }, .{ .array = user });
+        return .{ .array = root };
+    }
+    const flat = try ctx.createArray();
+    var it = ctx.vm.php_constants.iterator();
+    while (it.next()) |entry| {
+        try flat.set(ctx.allocator, .{ .string = entry.key_ptr.* }, entry.value_ptr.*);
+    }
+    return .{ .array = flat };
 }
 
 fn countRecursive(a: *const PhpArray) i64 {

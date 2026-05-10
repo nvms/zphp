@@ -329,6 +329,7 @@ pub const VM = struct {
     capture_index: std.StringHashMapUnmanaged(CaptureRange) = .{},
     closure_instance_count: u32 = 0,
     php_constants: std.StringHashMapUnmanaged(Value) = .{},
+    user_constants: std.StringHashMapUnmanaged(void) = .{},
     ini_settings: std.StringHashMapUnmanaged([]const u8) = .{},
     shutdown_callbacks: std.ArrayListUnmanaged(Value) = .{},
     strtok_state: ?[]const u8 = null,
@@ -894,6 +895,7 @@ pub const VM = struct {
         self.captures.deinit(self.allocator);
         self.capture_index.deinit(self.allocator);
         self.php_constants.deinit(self.allocator);
+        self.user_constants.deinit(self.allocator);
         self.ini_settings.deinit(self.allocator);
         self.shutdown_callbacks.deinit(self.allocator);
         self.arrays.deinit(self.allocator);

@@ -608,6 +608,14 @@ fn invokeSortCmp(comptime T: type, a: T, b: T, ctx: *NativeContext, callback: Va
 
 fn array_map(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len < 2) return .null;
+    for (args[1..], 1..) |a, i| {
+        if (a != .array) {
+            const msg = try std.fmt.allocPrint(ctx.allocator, "array_map(): Argument #{d} must be of type array", .{i + 1});
+            try ctx.strings.append(ctx.allocator, msg);
+            try ctx.vm.setPendingException("TypeError", msg);
+            return error.RuntimeError;
+        }
+    }
     const callback = args[0];
 
     // null callback with multiple arrays = zip
