@@ -3465,8 +3465,8 @@ fn native_crc32(_: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len == 0) return .{ .int = 0 };
     const s = if (args[0] == .string) args[0].string else return Value{ .int = 0 };
     const result = std.hash.crc.Crc32IsoHdlc.hash(s);
-    const signed: i32 = @bitCast(result);
-    return .{ .int = signed };
+    // PHP returns the unsigned 32-bit value (zero-extended into signed 64-bit)
+    return .{ .int = @as(i64, result) };
 }
 
 fn native_str_rot13(ctx: *NativeContext, args: []const Value) RuntimeError!Value {

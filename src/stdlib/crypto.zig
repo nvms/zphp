@@ -23,6 +23,7 @@ pub const entries = .{
     .{ "hash_final", native_hash_final },
     .{ "hash_copy", native_hash_copy },
     .{ "hash_pbkdf2", native_hash_pbkdf2 },
+    .{ "hash_hkdf", native_hash_hkdf },
 };
 
 // PHP's crypt() with bcrypt salt: salt format is "$2y$NN$..." or "$2a$NN$..."
@@ -389,6 +390,51 @@ fn native_hash_hmac(ctx: *NativeContext, args: []const Value) RuntimeError!Value
         return .{ .string = try ctx.createString(digest[0..dlen]) };
     }
     return .{ .string = try toHexString(ctx, digest[0..dlen]) };
+}
+
+fn native_hash_hkdf(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len < 2 or args[0] != .string or args[1] != .string) return .{ .bool = false };
+    const algo_name = args[0].string;
+    const ikm = args[1].string;
+    const length: i64 = if (args.len >= 3 and args[2] == .int) args[2].int else 0;
+    const info: []const u8 = if (args.len >= 4 and args[3] == .string) args[3].string else "";
+    const salt: []const u8 = if (args.len >= 5 and args[4] == .string) args[4].string else "";
+
+    const algo = HashAlgo.fromString(algo_name) orelse return .{ .bool = false };
+    if (algo == .crc32) return .{ .bool = false };
+    const hlen = algo.digestLen();
+
+    const out_len: usize = if (length > 0) @intCast(length) else hlen;
+    if (out_len > 255 * hlen) return .{ .bool = false };
+
+    // Extract: PRK = HMAC(salt, IKM)
+    const zero_salt = [_]u8{0} ** 64;
+    const effective_salt: []const u8 = if (salt.len > 0) salt else zero_salt[0..hlen];
+    var prk: [64]u8 = undefined;
+    computeHmac(algo, ikm, effective_salt, prk[0..hlen]);
+
+    // Expand
+    const out = try ctx.allocator.alloc(u8, out_len);
+    var t_prev: [64]u8 = undefined;
+    var t_prev_len: usize = 0;
+    var written: usize = 0;
+    var counter: u8 = 1;
+    while (written < out_len) : (counter += 1) {
+        var input = std.ArrayListUnmanaged(u8){};
+        defer input.deinit(ctx.allocator);
+        try input.appendSlice(ctx.allocator, t_prev[0..t_prev_len]);
+        try input.appendSlice(ctx.allocator, info);
+        try input.append(ctx.allocator, counter);
+        var t_cur: [64]u8 = undefined;
+        computeHmac(algo, input.items, prk[0..hlen], t_cur[0..hlen]);
+        const copy_len = @min(out_len - written, hlen);
+        @memcpy(out[written .. written + copy_len], t_cur[0..copy_len]);
+        @memcpy(t_prev[0..hlen], t_cur[0..hlen]);
+        t_prev_len = hlen;
+        written += copy_len;
+    }
+    try ctx.vm.strings.append(ctx.allocator, out);
+    return .{ .string = out };
 }
 
 fn native_hash_algos(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
