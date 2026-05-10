@@ -4828,7 +4828,10 @@ fn native_metaphone(ctx: *NativeContext, args: []const Value) RuntimeError!Value
                 i += 1;
             },
             'C' => {
-                if (next == 'I' or next == 'E' or next == 'Y') {
+                if (next == 'H') {
+                    try buf.append(ctx.allocator, 'X');
+                    i += 2;
+                } else if (next == 'I' or next == 'E' or next == 'Y') {
                     if (next == 'I' and i + 2 < upper.len and upper[i + 2] == 'A') {
                         try buf.append(ctx.allocator, 'X');
                         i += 3;
@@ -4879,11 +4882,9 @@ fn native_metaphone(ctx: *NativeContext, args: []const Value) RuntimeError!Value
                         continue;
                     }
                 }
-                if (i > 0 and (next == 'N' or (next == 0 and prev != 0))) {
-                    if (next == 0 or (i + 2 >= upper.len and next == 'N')) {
-                        i += 1;
-                        continue;
-                    }
+                if (i > 0 and next == 'N' and i + 2 >= upper.len) {
+                    i += 1;
+                    continue;
                 }
                 if (prev == 'G') {
                     i += 1;
