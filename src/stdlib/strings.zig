@@ -639,8 +639,26 @@ fn native_substr_count(ctx: *NativeContext, args: []const Value) RuntimeError!Va
         try ctx.vm.setPendingException("ValueError", "substr_count(): Argument #2 ($needle) must not be empty");
         return error.RuntimeError;
     }
-    const offset: usize = if (args.len >= 3) @intCast(@max(0, @min(Value.toInt(args[2]), @as(i64, @intCast(haystack.len))))) else 0;
-    const end: usize = if (args.len >= 4) @intCast(@min(@as(i64, @intCast(haystack.len)), @max(0, Value.toInt(args[2]) + Value.toInt(args[3])))) else haystack.len;
+    const hlen_i: i64 = @intCast(haystack.len);
+    const raw_offset: i64 = if (args.len >= 3) Value.toInt(args[2]) else 0;
+    const offset_resolved: i64 = if (raw_offset < 0) hlen_i + raw_offset else raw_offset;
+    if (offset_resolved < 0 or offset_resolved > hlen_i) {
+        try ctx.vm.setPendingException("ValueError", "substr_count(): Argument #3 ($offset) must be contained in argument #1 ($haystack)");
+        return error.RuntimeError;
+    }
+    const offset: usize = @intCast(offset_resolved);
+    const end: usize = blk: {
+        if (args.len >= 4) {
+            const raw_len = Value.toInt(args[3]);
+            const span: i64 = if (raw_len < 0) (hlen_i - offset_resolved) + raw_len else raw_len;
+            if (span < 0 or offset_resolved + span > hlen_i) {
+                try ctx.vm.setPendingException("ValueError", "substr_count(): Argument #4 ($length) must be contained in argument #1 ($haystack)");
+                return error.RuntimeError;
+            }
+            break :blk @intCast(offset_resolved + span);
+        }
+        break :blk haystack.len;
+    };
     const search_region = haystack[offset..end];
     var count: i64 = 0;
     var i: usize = 0;
@@ -4023,6 +4041,8 @@ fn insertParsedKey(ctx: *NativeContext, root: *PhpArray, key: []const u8, value:
     // split "a[b][c]" -> base="a", segs=["b","c"]. an empty segment "[]" means append.
     const open = std.mem.indexOfScalar(u8, key, '[');
     const raw_base = if (open) |o| key[0..o] else key;
+    // PHP drops keys with empty base name when bracket segments follow (e.g. "[a]=1")
+    if (raw_base.len == 0 and open != null) return;
     const base_name = try sanitizeParseStrKey(ctx, raw_base);
     if (open == null) {
         try root.set(ctx.allocator, .{ .string = base_name }, value);

@@ -252,9 +252,10 @@ fn native_intdiv(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
 
 fn native_base_convert(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len < 3) return .{ .string = "0" };
-    const num_str = if (args[0] == .string) args[0].string else return Value{ .string = "0" };
+    var num_str = if (args[0] == .string) args[0].string else return Value{ .string = "0" };
     const from_base: u8 = @intCast(@max(2, @min(36, Value.toInt(args[1]))));
     const to_base: u8 = @intCast(@max(2, @min(36, Value.toInt(args[2]))));
+    if (num_str.len > 0 and (num_str[0] == '-' or num_str[0] == '+')) num_str = num_str[1..];
     const val = std.fmt.parseInt(u64, num_str, from_base) catch return Value{ .string = "0" };
     const digits = "0123456789abcdefghijklmnopqrstuvwxyz";
     var buf: [65]u8 = undefined;

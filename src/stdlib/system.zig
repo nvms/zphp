@@ -99,12 +99,16 @@ fn native_putenv(_: *NativeContext, args: []const Value) RuntimeError!Value {
 
 fn native_uniqid(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     const prefix = if (args.len >= 1 and args[0] == .string) args[0].string else "";
+    const more_entropy = args.len >= 2 and args[1].isTruthy();
     const ns = std.time.nanoTimestamp();
     const abs_ns: u64 = @intCast(if (ns < 0) -ns else ns);
     const usec: u64 = @divTrunc(@mod(abs_ns, 1_000_000_000), 1_000);
     const sec: u64 = @divTrunc(abs_ns, 1_000_000_000);
-    var buf: [64]u8 = undefined;
-    const hex = std.fmt.bufPrint(&buf, "{s}{x:0>8}{x:0>5}", .{ prefix, sec, usec }) catch return Value{ .string = "" };
+    var buf: [128]u8 = undefined;
+    const hex = if (more_entropy)
+        std.fmt.bufPrint(&buf, "{s}{x:0>8}{x:0>5}.{d:0>8}", .{ prefix, sec, usec, std.crypto.random.intRangeAtMost(u32, 0, 99999999) }) catch return Value{ .string = "" }
+    else
+        std.fmt.bufPrint(&buf, "{s}{x:0>8}{x:0>5}", .{ prefix, sec, usec }) catch return Value{ .string = "" };
     return .{ .string = try ctx.createString(hex) };
 }
 
