@@ -27,7 +27,19 @@ const DT_FORMAT_CONSTS = .{
 
 pub const entries = .{
     .{ "date", native_date },
+    .{ "date_create", native_date_create },
+    .{ "date_create_immutable", native_date_create_immutable },
     .{ "date_create_from_format", native_date_create_from_format },
+    .{ "date_create_immutable_from_format", native_date_create_immutable_from_format },
+    .{ "date_format", native_date_format },
+    .{ "date_modify", native_date_modify },
+    .{ "date_add", native_date_add },
+    .{ "date_sub", native_date_sub },
+    .{ "date_diff", native_date_diff },
+    .{ "date_timestamp_get", native_date_timestamp_get },
+    .{ "date_timestamp_set", native_date_timestamp_set },
+    .{ "date_date_set", native_date_date_set },
+    .{ "date_time_set", native_date_time_set },
     .{ "date_parse", native_date_parse },
     .{ "date_parse_from_format", native_date_parse_from_format },
     .{ "mktime", native_mktime },
@@ -780,8 +792,15 @@ fn dtDiff(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     // unit on underflow.
     const early_ts = if (ts1 < ts2) ts1 else ts2;
     const late_ts = if (ts1 < ts2) ts2 else ts1;
-    const c1 = baseComponents(early_ts);
-    const c2 = baseComponents(late_ts);
+    // diff is calendar-based in the receiver's timezone so DST boundaries don't
+    // bleed into hour-of-day arithmetic
+    const tz_val = obj.get("__timezone");
+    const tz_name = if (tz_val == .string) tz_val.string else ctx.vm.default_tz_name;
+    const tz = lookupTimezone(tz_name);
+    const off_early: i64 = if (tz) |t| @as(i64, tzOffsetAt(t, early_ts)) else 0;
+    const off_late: i64 = if (tz) |t| @as(i64, tzOffsetAt(t, late_ts)) else 0;
+    const c1 = baseComponents(early_ts + off_early);
+    const c2 = baseComponents(late_ts + off_late);
     var s = c2.sec - c1.sec;
     var mi = c2.min - c1.min;
     var hh = c2.hour - c1.hour;
@@ -924,6 +943,169 @@ fn dtiCreateFromMutable(ctx: *NativeContext, args: []const Value) RuntimeError!V
 
 fn native_date_create_from_format(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     return createFromFormatImpl(ctx, args, "DateTime");
+}
+
+fn native_date_create_immutable_from_format(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    return createFromFormatImpl(ctx, args, "DateTimeImmutable");
+}
+
+fn createBareDt(ctx: *NativeContext, class_name: []const u8, args: []const Value) RuntimeError!Value {
+    const tz_name = if (args.len >= 2) extractTimezoneName(args[1..]) else ctx.vm.default_tz_name;
+    var ts: i64 = std.time.timestamp();
+    if (args.len >= 1 and args[0] == .string) {
+        const s = args[0].string;
+        if (s.len == 0 or std.mem.eql(u8, s, "now")) {
+            // current
+        } else if (s.len >= 2 and s[0] == '@') {
+            ts = std.fmt.parseInt(i64, s[1..], 10) catch ts;
+        } else if (s.len >= 10 and s[4] == '-' and s[7] == '-') {
+            const year = std.fmt.parseInt(i64, s[0..4], 10) catch 1970;
+            const month = std.fmt.parseInt(i64, s[5..7], 10) catch 1;
+            const day = std.fmt.parseInt(i64, s[8..10], 10) catch 1;
+            var hour: i64 = 0;
+            var min: i64 = 0;
+            var sec: i64 = 0;
+            if (s.len >= 19 and (s[10] == ' ' or s[10] == 'T') and s[13] == ':' and s[16] == ':') {
+                hour = std.fmt.parseInt(i64, s[11..13], 10) catch 0;
+                min = std.fmt.parseInt(i64, s[14..16], 10) catch 0;
+                sec = std.fmt.parseInt(i64, s[17..19], 10) catch 0;
+            }
+            ts = dateToTimestamp(year, month, day, hour, min, sec);
+            if (lookupTimezone(tz_name)) |tz| {
+                ts -= @as(i64, tzOffsetAt(tz, ts));
+            }
+        } else {
+            const result = parseRelativeTime(s, ts);
+            if (result == .int) ts = result.int;
+        }
+    }
+    const obj = try ctx.createObject(class_name);
+    try obj.set(ctx.allocator, "__timezone", .{ .string = tz_name });
+    try obj.set(ctx.allocator, "timestamp", .{ .int = ts });
+    return .{ .object = obj };
+}
+
+fn native_date_create(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    return createBareDt(ctx, "DateTime", args);
+}
+
+fn native_date_create_immutable(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    return createBareDt(ctx, "DateTimeImmutable", args);
+}
+
+fn argObj(args: []const Value) ?*PhpObject {
+    if (args.len == 0 or args[0] != .object) return null;
+    return args[0].object;
+}
+
+fn isImmutable(obj: *PhpObject) bool {
+    return std.mem.eql(u8, obj.class_name, "DateTimeImmutable");
+}
+
+fn native_date_format(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    const obj = argObj(args) orelse return .{ .bool = false };
+    if (args.len < 2 or args[1] != .string) return .{ .string = "" };
+    const ts = getTimestamp(obj);
+    const tz_val = obj.get("__timezone");
+    const tz_name = if (tz_val == .string) tz_val.string else ctx.vm.default_tz_name;
+    const offset = if (lookupTimezone(tz_name)) |tz| tzOffsetAt(tz, ts) else @as(i32, 0);
+    return formatTimestampTz(ctx, ts, args[1].string, offset, tz_name);
+}
+
+fn native_date_modify(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    const obj = argObj(args) orelse return .{ .bool = false };
+    if (args.len < 2 or args[1] != .string) return .{ .object = obj };
+    const ts = getTimestamp(obj);
+    const result = parseRelativeTime(args[1].string, ts);
+    if (result != .int) return .{ .bool = false };
+    if (isImmutable(obj)) {
+        const new_obj = try ctx.createObject("DateTimeImmutable");
+        try new_obj.set(ctx.allocator, "timestamp", result);
+        if (obj.get("__timezone") == .string) try new_obj.set(ctx.allocator, "__timezone", obj.get("__timezone"));
+        return .{ .object = new_obj };
+    }
+    try obj.set(ctx.allocator, "timestamp", result);
+    return .{ .object = obj };
+}
+
+fn applyIntervalProc(ctx: *NativeContext, args: []const Value, sign: i64) RuntimeError!Value {
+    const obj = argObj(args) orelse return .{ .bool = false };
+    if (args.len < 2 or args[1] != .object) return .{ .object = obj };
+    const ts = getTimestamp(obj);
+    const new_ts = applyInterval(ts, args[1].object, sign);
+    if (isImmutable(obj)) {
+        const new_obj = try ctx.createObject("DateTimeImmutable");
+        try new_obj.set(ctx.allocator, "timestamp", .{ .int = new_ts });
+        if (obj.get("__timezone") == .string) try new_obj.set(ctx.allocator, "__timezone", obj.get("__timezone"));
+        return .{ .object = new_obj };
+    }
+    try obj.set(ctx.allocator, "timestamp", .{ .int = new_ts });
+    return .{ .object = obj };
+}
+
+fn native_date_add(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    return applyIntervalProc(ctx, args, 1);
+}
+
+fn native_date_sub(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    return applyIntervalProc(ctx, args, -1);
+}
+
+fn native_date_diff(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len < 2 or args[0] != .object or args[1] != .object) return .{ .bool = false };
+    const synth = [_]Value{args[1]};
+    const saved_this = ctx.vm.currentFrame().vars.get("$this");
+    try ctx.vm.currentFrame().vars.put(ctx.allocator, "$this", args[0]);
+    defer {
+        if (saved_this) |v| {
+            ctx.vm.currentFrame().vars.put(ctx.allocator, "$this", v) catch {};
+        } else {
+            _ = ctx.vm.currentFrame().vars.remove("$this");
+        }
+    }
+    return dtDiff(ctx, &synth);
+}
+
+fn native_date_timestamp_get(_: *NativeContext, args: []const Value) RuntimeError!Value {
+    const obj = argObj(args) orelse return .{ .bool = false };
+    return .{ .int = getTimestamp(obj) };
+}
+
+fn native_date_timestamp_set(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    const obj = argObj(args) orelse return .{ .bool = false };
+    if (args.len < 2) return .{ .object = obj };
+    try obj.set(ctx.allocator, "timestamp", .{ .int = Value.toInt(args[1]) });
+    return .{ .object = obj };
+}
+
+fn native_date_date_set(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    const obj = argObj(args) orelse return .{ .bool = false };
+    if (args.len < 4) return .{ .object = obj };
+    const ts = getTimestamp(obj);
+    const epoch_secs: u64 = @intCast(if (ts < 0) 0 else ts);
+    const es = std.time.epoch.EpochSeconds{ .secs = epoch_secs };
+    const day_seconds = es.getDaySeconds();
+    const h: i64 = day_seconds.getHoursIntoDay();
+    const m: i64 = day_seconds.getMinutesIntoHour();
+    const s: i64 = day_seconds.getSecondsIntoMinute();
+    const new_ts = dateToTimestamp(Value.toInt(args[1]), Value.toInt(args[2]), Value.toInt(args[3]), h, m, s);
+    try obj.set(ctx.allocator, "timestamp", .{ .int = new_ts });
+    return .{ .object = obj };
+}
+
+fn native_date_time_set(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    const obj = argObj(args) orelse return .{ .bool = false };
+    if (args.len < 3) return .{ .object = obj };
+    const ts = getTimestamp(obj);
+    const epoch_secs: u64 = @intCast(if (ts < 0) 0 else ts);
+    const es = std.time.epoch.EpochSeconds{ .secs = epoch_secs };
+    const epoch_day = es.getEpochDay();
+    const year_day = epoch_day.calculateYearDay();
+    const month_day = year_day.calculateMonthDay();
+    const sec: i64 = if (args.len >= 4) Value.toInt(args[3]) else 0;
+    const new_ts = dateToTimestamp(@intCast(year_day.year), month_day.month.numeric(), month_day.day_index + 1, Value.toInt(args[1]), Value.toInt(args[2]), sec);
+    try obj.set(ctx.allocator, "timestamp", .{ .int = new_ts });
+    return .{ .object = obj };
 }
 
 fn dtiCreateFromFormat(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
