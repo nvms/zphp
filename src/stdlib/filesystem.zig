@@ -43,10 +43,13 @@ pub const entries = .{
     .{ "file", native_file },
     .{ "readfile", native_readfile },
     .{ "is_readable", native_is_readable },
+    .{ "is_executable", native_is_executable },
     .{ "is_writable", native_is_writable },
     .{ "is_writeable", native_is_writable },
     .{ "filesize", native_filesize },
     .{ "filemtime", native_filemtime },
+    .{ "fileatime", native_fileatime },
+    .{ "filectime", native_filectime },
     .{ "filetype", native_filetype },
     .{ "fileinode", native_fileinode },
     .{ "fopen", native_fopen },
@@ -965,6 +968,13 @@ fn native_is_writable(_: *NativeContext, args: []const Value) RuntimeError!Value
     return .{ .bool = true };
 }
 
+fn native_is_executable(_: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len == 0 or args[0] != .string) return .{ .bool = false };
+    const path = args[0].string;
+    std.posix.access(path, std.posix.X_OK) catch return Value{ .bool = false };
+    return .{ .bool = true };
+}
+
 fn native_filesize(_: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len == 0 or args[0] != .string) return .{ .bool = false };
     const stat = std.fs.cwd().statFile(args[0].string) catch return Value{ .bool = false };
@@ -975,6 +985,18 @@ fn native_filemtime(_: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len == 0 or args[0] != .string) return .{ .bool = false };
     const stat = std.fs.cwd().statFile(args[0].string) catch return Value{ .bool = false };
     return .{ .int = @intCast(@divFloor(stat.mtime, 1_000_000_000)) };
+}
+
+fn native_fileatime(_: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len == 0 or args[0] != .string) return .{ .bool = false };
+    const stat = std.fs.cwd().statFile(args[0].string) catch return Value{ .bool = false };
+    return .{ .int = @intCast(@divFloor(stat.atime, 1_000_000_000)) };
+}
+
+fn native_filectime(_: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len == 0 or args[0] != .string) return .{ .bool = false };
+    const stat = std.fs.cwd().statFile(args[0].string) catch return Value{ .bool = false };
+    return .{ .int = @intCast(@divFloor(stat.ctime, 1_000_000_000)) };
 }
 
 fn native_fileinode(_: *NativeContext, args: []const Value) RuntimeError!Value {
