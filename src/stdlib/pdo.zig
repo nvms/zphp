@@ -457,6 +457,11 @@ fn pdoLastInsertId(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
 
 fn pdoBeginTransaction(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
     const obj = getThis(ctx) orelse return .null;
+    const in_tx = obj.get("__in_transaction");
+    if (in_tx == .bool and in_tx.bool) {
+        try ctx.vm.setPendingException("PDOException", "There is already an active transaction");
+        return error.RuntimeError;
+    }
     const drv = getDriver(obj);
     if (std.mem.eql(u8, drv, "mysql")) return pdo_mysql.beginTransaction(ctx, obj);
     if (std.mem.eql(u8, drv, "pgsql")) return pdo_pgsql.beginTransaction(ctx, obj);
@@ -737,13 +742,14 @@ fn stmtFetchAll(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
 
     // FETCH_COLUMN (7): single column from each row, default col 0
     if (mode == 7) {
+        const col_idx: c_int = if (args.len >= 2 and args[1] == .int) @intCast(args[1].int) else 0;
         if (start_with_row) {
-            const val_v = try columnToValue(ctx, stmt, 0);
+            const val_v = try columnToValue(ctx, stmt, col_idx);
             try result.append(ctx.allocator, val_v);
         }
         var rc = sqlite.sqlite3_step(stmt);
         while (rc == sqlite.ROW) {
-            const val_v = try columnToValue(ctx, stmt, 0);
+            const val_v = try columnToValue(ctx, stmt, col_idx);
             try result.append(ctx.allocator, val_v);
             rc = sqlite.sqlite3_step(stmt);
         }
