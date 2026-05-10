@@ -1081,7 +1081,7 @@ pub fn compileClassDecl(self: *Compiler, node: Ast.Node) Error!void {
     try self.emitByte(@intCast(all_conflicts.items.len));
     for (all_conflicts.items) |cr| {
         const method_name = self.ast.tokenSlice(cr.node.main_token);
-        const trait_name = self.ast.tokenSlice(self.ast.nodes[cr.node.data.lhs].main_token);
+        const trait_name = if (cr.node.data.lhs == 0) "" else self.ast.tokenSlice(self.ast.nodes[cr.node.data.lhs].main_token);
         const method_idx = try self.addConstant(.{ .string = method_name });
         const trait_idx = try self.addConstant(.{ .string = trait_name });
         try self.emitU16(method_idx);
@@ -1470,7 +1470,7 @@ pub fn compileAnonymousClass(self: *Compiler, node: Ast.Node) Error!void {
     try self.emitByte(@intCast(all_conflicts.items.len));
     for (all_conflicts.items) |cr| {
         const method_name = self.ast.tokenSlice(cr.cnode.main_token);
-        const trait_name = self.ast.tokenSlice(self.ast.nodes[cr.cnode.data.lhs].main_token);
+        const trait_name = if (cr.cnode.data.lhs == 0) "" else self.ast.tokenSlice(self.ast.nodes[cr.cnode.data.lhs].main_token);
         const method_idx = try self.addConstant(.{ .string = method_name });
         const trait_idx = try self.addConstant(.{ .string = trait_name });
         try self.emitU16(method_idx);

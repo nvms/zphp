@@ -6567,7 +6567,7 @@ pub const VM = struct {
         for (pending[0..pending_count]) |tm| {
             var vis_override: ?ClassDef.Visibility = null;
             for (alias_rules) |rule| {
-                if (std.mem.eql(u8, rule.method, tm.name) and std.mem.eql(u8, rule.trait, trait_name)) {
+                if (std.mem.eql(u8, rule.method, tm.name) and (rule.trait.len == 0 or std.mem.eql(u8, rule.trait, trait_name))) {
                     if (std.mem.eql(u8, rule.alias, "public")) {
                         vis_override = .public;
                     } else if (std.mem.eql(u8, rule.alias, "protected")) {
