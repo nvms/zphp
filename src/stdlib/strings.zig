@@ -460,6 +460,10 @@ fn str_pad(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
         return error.RuntimeError;
     }
     const pad_type = if (args.len >= 4) Value.toInt(args[3]) else 1;
+    if (pad_type != 0 and pad_type != 1 and pad_type != 2) {
+        try ctx.vm.setPendingException("ValueError", "str_pad(): Argument #4 ($pad_type) must be a STR_PAD_* constant");
+        return error.RuntimeError;
+    }
     const diff = target_len - s.len;
 
     var buf = std.ArrayListUnmanaged(u8){};
@@ -2274,7 +2278,12 @@ fn native_bin2hex(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
 fn native_mb_str_split(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len == 0) return .null;
     const s = if (args[0] == .string) args[0].string else return Value.null;
-    const chunk_len: usize = if (args.len >= 2) @intCast(@max(1, Value.toInt(args[1]))) else 1;
+    const raw_len: i64 = if (args.len >= 2) Value.toInt(args[1]) else 1;
+    if (raw_len < 1) {
+        try ctx.vm.setPendingException("ValueError", "mb_str_split(): Argument #2 ($length) must be greater than 0");
+        return error.RuntimeError;
+    }
+    const chunk_len: usize = @intCast(raw_len);
     var arr = try ctx.createArray();
     if (s.len == 0) return .{ .array = arr };
     var i: usize = 0;
