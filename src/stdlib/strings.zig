@@ -4359,22 +4359,27 @@ fn native_strtr(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
         var out_len: usize = 0;
         var i: usize = 0;
         while (i < str.len) {
-            var matched = false;
+            // pick the longest matching key at the current position
+            var best_search: []const u8 = &.{};
+            var best_repl: []const u8 = &.{};
             for (replacements.entries.items) |entry| {
                 if (entry.key != .string) continue;
                 const search = entry.key.string;
                 if (search.len == 0) continue;
+                if (search.len <= best_search.len) continue;
                 if (i + search.len <= str.len and std.mem.eql(u8, str[i .. i + search.len], search)) {
-                    const repl = if (entry.value == .string) entry.value.string else "";
-                    if (out_len + repl.len > result.len) {
-                        result = try ctx.allocator.realloc(result, result.len * 2 + repl.len);
-                    }
-                    @memcpy(result[out_len .. out_len + repl.len], repl);
-                    out_len += repl.len;
-                    i += search.len;
-                    matched = true;
-                    break;
+                    best_search = search;
+                    best_repl = if (entry.value == .string) entry.value.string else "";
                 }
+            }
+            const matched = best_search.len > 0;
+            if (matched) {
+                if (out_len + best_repl.len > result.len) {
+                    result = try ctx.allocator.realloc(result, result.len * 2 + best_repl.len);
+                }
+                @memcpy(result[out_len .. out_len + best_repl.len], best_repl);
+                out_len += best_repl.len;
+                i += best_search.len;
             }
             if (!matched) {
                 if (out_len >= result.len) {
