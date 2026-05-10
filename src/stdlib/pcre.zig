@@ -608,6 +608,11 @@ fn preg_replace(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     const subject = args[2].string;
     const limit: i64 = if (args.len >= 4 and args[3] != .null) Value.toInt(args[3]) else -1;
 
+    if (limit == 0) {
+        if (args.len >= 5) ctx.setCallerVar(4, args.len, .{ .int = 0 });
+        return .{ .string = try ctx.createString(subject) };
+    }
+
     const code = compilePattern(info.pattern, info.flags) orelse {
         setPregError(1);
         return .null;
