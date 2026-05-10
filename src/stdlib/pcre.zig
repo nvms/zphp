@@ -701,28 +701,57 @@ fn preg_replace(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
 fn pregReplaceArrayPattern(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     const patterns = args[0].array;
     var current: Value = args[2];
+    var total_count: i64 = 0;
+    const limit_per: i64 = if (args.len >= 4) Value.toInt(args[3]) else -1;
     for (patterns.entries.items, 0..) |pe, idx| {
         if (pe.value != .string) continue;
-        // pick the matching replacement: same key if replacements is array, else scalar
         var replacement: Value = if (args[1] == .string) args[1] else Value{ .string = "" };
         if (args[1] == .array) {
             const rep_arr = args[1].array;
-            // PHP behaves as: replacement[i] for the i-th pattern (or "" past end)
             if (idx < rep_arr.entries.items.len and rep_arr.entries.items[idx].value == .string) {
                 replacement = rep_arr.entries.items[idx].value;
             }
         }
-        const single_args = [_]Value{ pe.value, replacement, current } ++ ([_]Value{.null} ** 0);
-        // recursive call with three-arg form
-        var rest: [4]Value = undefined;
+        // count matches against the current subject (respecting limit)
+        if (current == .string) {
+            const before = current.string;
+            if (parsePattern(pe.value.string)) |info| {
+                if (compilePattern(info.pattern, info.flags)) |code| {
+                    defer pcre2.pcre2_code_free_8(code);
+                    if (pcre2.pcre2_match_data_create_from_pattern_8(code, null)) |md| {
+                        defer pcre2.pcre2_match_data_free_8(md);
+                        var off: usize = 0;
+                        var matched: i64 = 0;
+                        while (off <= before.len) {
+                            if (limit_per >= 0 and matched >= limit_per) break;
+                            const rc = pcre2.pcre2_match_8(code, before.ptr, before.len, off, 0, md, null);
+                            if (rc < 0) break;
+                            const ov = pcre2.pcre2_get_ovector_pointer_8(md);
+                            const me = ov[1];
+                            matched += 1;
+                            if (me == off) off += 1 else off = me;
+                        }
+                        total_count += matched;
+                    }
+                }
+            }
+        }
+        var rest: [3]Value = undefined;
         rest[0] = pe.value;
         rest[1] = replacement;
         rest[2] = current;
+        var single_args: [4]Value = undefined;
+        single_args[0] = rest[0];
+        single_args[1] = rest[1];
+        single_args[2] = rest[2];
         var n: usize = 3;
-        if (args.len >= 4) { rest[3] = args[3]; n = 4; }
-        current = try preg_replace(ctx, rest[0..n]);
-        _ = single_args;
+        if (args.len >= 4) {
+            single_args[3] = args[3];
+            n = 4;
+        }
+        current = try preg_replace(ctx, single_args[0..n]);
     }
+    ctx.setCallerVar(4, args.len, .{ .int = total_count });
     return current;
 }
 
@@ -896,17 +925,48 @@ fn preg_replace_callback_array(ctx: *NativeContext, args: []const Value) Runtime
     const map = args[0].array;
     var current: Value = args[1];
     if (current != .string) return current;
+    var total_count: i64 = 0;
+    const limit: i64 = if (args.len >= 3) Value.toInt(args[2]) else -1;
 
     for (map.entries.items) |entry| {
         if (entry.key != .string) continue;
-        const sub_args = [_]Value{
-            .{ .string = entry.key.string },
-            entry.value,
-            current,
-        };
-        const r = try preg_replace_callback(ctx, &sub_args);
+        // count matches in current subject for this pattern
+        if (current == .string) {
+            const subject = current.string;
+            if (parsePattern(entry.key.string)) |info| {
+                if (compilePattern(info.pattern, info.flags)) |code| {
+                    defer pcre2.pcre2_code_free_8(code);
+                    if (pcre2.pcre2_match_data_create_from_pattern_8(code, null)) |md| {
+                        defer pcre2.pcre2_match_data_free_8(md);
+                        var off: usize = 0;
+                        var matched: i64 = 0;
+                        while (off <= subject.len) {
+                            if (limit >= 0 and matched >= limit) break;
+                            const rc = pcre2.pcre2_match_8(code, subject.ptr, subject.len, off, 0, md, null);
+                            if (rc < 0) break;
+                            const ov = pcre2.pcre2_get_ovector_pointer_8(md);
+                            const me = ov[1];
+                            matched += 1;
+                            if (me == off) off += 1 else off = me;
+                        }
+                        total_count += matched;
+                    }
+                }
+            }
+        }
+        var sub_args: [4]Value = undefined;
+        sub_args[0] = .{ .string = entry.key.string };
+        sub_args[1] = entry.value;
+        sub_args[2] = current;
+        var n: usize = 3;
+        if (args.len >= 3) {
+            sub_args[3] = args[2];
+            n = 4;
+        }
+        const r = try preg_replace_callback(ctx, sub_args[0..n]);
         if (r == .string) current = r;
     }
+    ctx.setCallerVar(3, args.len, .{ .int = total_count });
     return current;
 }
 
