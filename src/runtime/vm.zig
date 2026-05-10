@@ -1495,21 +1495,45 @@ pub const VM = struct {
                         if (self.functions.get(name)) |func| {
                             // resolve named args to positional
                             var resolved: [16]Value = .{.null} ** 16;
+                            var assigned: [16]bool = .{false} ** 16;
                             var pos: usize = 0;
+                            var ok = true;
                             for (arr.entries.items) |entry| {
                                 if (entry.key == .string) {
+                                    var found = false;
                                     for (func.params, 0..) |p, pi| {
                                         if (std.mem.eql(u8, p[1..], entry.key.string) or std.mem.eql(u8, p, entry.key.string)) {
+                                            if (assigned[pi]) {
+                                                const msg = try std.fmt.allocPrint(self.allocator, "Named argument ${s} overwrites previous argument", .{entry.key.string});
+                                                try self.strings.append(self.allocator, msg);
+                                                if (try self.throwBuiltinException("Error", msg)) { ok = false; break; }
+                                                return error.RuntimeError;
+                                            }
                                             resolved[pi] = entry.value;
+                                            assigned[pi] = true;
                                             if (pi >= pos) pos = pi + 1;
+                                            found = true;
                                             break;
                                         }
                                     }
+                                    if (!ok) break;
+                                    if (!found) {
+                                        const msg = try std.fmt.allocPrint(self.allocator, "Unknown named parameter ${s}", .{entry.key.string});
+                                        try self.strings.append(self.allocator, msg);
+                                        if (try self.throwBuiltinException("Error", msg)) { ok = false; break; }
+                                        return error.RuntimeError;
+                                    }
                                 } else {
+                                    if (assigned[pos]) {
+                                        // positional after a named that already filled this slot
+                                        ok = true;
+                                    }
                                     resolved[pos] = entry.value;
+                                    assigned[pos] = true;
                                     pos += 1;
                                 }
                             }
+                            if (!ok) continue;
                             // fill defaults
                             const count = @max(pos, func.required_params);
                             for (0..count) |i| {
