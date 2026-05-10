@@ -228,6 +228,7 @@ pub const ClassDef = struct {
     property_attributes: std.StringHashMapUnmanaged([]const AttributeDef) = .{},
     param_attributes: std.StringHashMapUnmanaged([]const AttributeDef) = .{},
     constant_names: std.StringHashMapUnmanaged(void) = .{},
+    constant_order: std.ArrayListUnmanaged([]const u8) = .{},
     const_visibility: std.StringHashMapUnmanaged(Visibility) = .{},
     constant_attributes: std.StringHashMapUnmanaged([]const AttributeDef) = .{},
 
@@ -284,6 +285,7 @@ pub const ClassDef = struct {
         }
         self.param_attributes.deinit(allocator);
         self.constant_names.deinit(allocator);
+        self.constant_order.deinit(allocator);
         self.const_visibility.deinit(allocator);
         var ca_iter = self.constant_attributes.valueIterator();
         while (ca_iter.next()) |attrs| freeAttributeDefs(allocator, attrs.*);
@@ -6036,6 +6038,9 @@ pub const VM = struct {
             } else Value{ .null = {} };
             try def.static_props.put(self.allocator, sprop_names[pi], default_val);
             if (sprop_is_const[pi] == 1) {
+                if (!def.constant_names.contains(sprop_names[pi])) {
+                    try def.constant_order.append(self.allocator, sprop_names[pi]);
+                }
                 try def.constant_names.put(self.allocator, sprop_names[pi], {});
                 if (sprop_visibility[pi] != 0) {
                     try def.const_visibility.put(self.allocator, sprop_names[pi], @enumFromInt(sprop_visibility[pi]));

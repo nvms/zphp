@@ -1198,10 +1198,19 @@ fn rcGetConstants(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
     var current: ?[]const u8 = class_name;
     while (current) |name| {
         const cls = ctx.vm.classes.get(name) orelse break;
-        var it = cls.constant_names.iterator();
-        while (it.next()) |entry| {
-            if (cls.static_props.get(entry.key_ptr.*)) |val| {
-                try arr.set(ctx.allocator, .{ .string = entry.key_ptr.* }, val);
+        // iterate in declaration order if available, else fall back to hashmap
+        if (cls.constant_order.items.len > 0) {
+            for (cls.constant_order.items) |cname| {
+                if (cls.static_props.get(cname)) |val| {
+                    try arr.set(ctx.allocator, .{ .string = cname }, val);
+                }
+            }
+        } else {
+            var it = cls.constant_names.iterator();
+            while (it.next()) |entry| {
+                if (cls.static_props.get(entry.key_ptr.*)) |val| {
+                    try arr.set(ctx.allocator, .{ .string = entry.key_ptr.* }, val);
+                }
             }
         }
         current = cls.parent;
@@ -1217,12 +1226,21 @@ fn rcGetReflectionConstants(ctx: *NativeContext, _: []const Value) RuntimeError!
     var current: ?[]const u8 = class_name;
     while (current) |name| {
         const cls = ctx.vm.classes.get(name) orelse break;
-        var it = cls.constant_names.iterator();
-        while (it.next()) |entry| {
-            const cname = entry.key_ptr.*;
-            if (cls.static_props.get(cname)) |val| {
-                const obj = try buildReflectionClassConstant(ctx, name, cname, val);
-                try arr.append(ctx.allocator, obj);
+        if (cls.constant_order.items.len > 0) {
+            for (cls.constant_order.items) |cname| {
+                if (cls.static_props.get(cname)) |val| {
+                    const obj = try buildReflectionClassConstant(ctx, name, cname, val);
+                    try arr.append(ctx.allocator, obj);
+                }
+            }
+        } else {
+            var it = cls.constant_names.iterator();
+            while (it.next()) |entry| {
+                const cname = entry.key_ptr.*;
+                if (cls.static_props.get(cname)) |val| {
+                    const obj = try buildReflectionClassConstant(ctx, name, cname, val);
+                    try arr.append(ctx.allocator, obj);
+                }
             }
         }
         current = cls.parent;
@@ -1779,7 +1797,15 @@ fn rntIsBuiltin(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
 fn rntAllowsNull(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
     const this = getThis(ctx) orelse return .{ .bool = false };
     const nullable = this.get("nullable");
-    return .{ .bool = nullable == .bool and nullable.bool };
+    if (nullable == .bool and nullable.bool) return .{ .bool = true };
+    // mixed and null types implicitly allow null
+    const tn = this.get("type_name");
+    if (tn == .string) {
+        if (std.mem.eql(u8, tn.string, "mixed") or std.mem.eql(u8, tn.string, "null")) {
+            return .{ .bool = true };
+        }
+    }
+    return .{ .bool = false };
 }
 
 // --- ReflectionUnionType ---
