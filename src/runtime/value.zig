@@ -629,7 +629,12 @@ pub const Value = union(enum) {
             .null => 0,
             .bool => |b| if (b) @as(i64, 1) else 0,
             .int => |i| i,
-            .float => |f| @intFromFloat(f),
+            .float => |f| blk: {
+                if (std.math.isNan(f)) break :blk 0;
+                if (f >= @as(f64, @floatFromInt(std.math.maxInt(i64)))) break :blk std.math.minInt(i64);
+                if (f <= @as(f64, @floatFromInt(std.math.minInt(i64)))) break :blk std.math.minInt(i64);
+                break :blk @as(i64, @intFromFloat(f));
+            },
             .string => |s| parseLeadingInt(s),
             .array => |arr| if (arr.entries.items.len > 0) @as(i64, 1) else 0,
             .object, .generator, .fiber => 1,

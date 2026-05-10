@@ -2555,14 +2555,28 @@ pub const VM = struct {
                             if (obj.slot_layout) |layout| {
                                 for (layout.names, 0..) |name, i| {
                                     if (i < slots.len) {
-                                        try arr.set(self.allocator, .{ .string = name }, slots[i]);
+                                        const vr = self.findPropertyVisibility(obj.class_name, name);
+                                        const key_str: []const u8 = switch (vr.visibility) {
+                                            .public => name,
+                                            .protected => try std.fmt.allocPrint(self.allocator, "\x00*\x00{s}", .{name}),
+                                            .private => try std.fmt.allocPrint(self.allocator, "\x00{s}\x00{s}", .{ vr.defining_class, name }),
+                                        };
+                                        if (vr.visibility != .public) try self.strings.append(self.allocator, key_str);
+                                        try arr.set(self.allocator, .{ .string = key_str }, slots[i]);
                                     }
                                 }
                             }
                         }
                         var it = obj.properties.iterator();
                         while (it.next()) |entry| {
-                            try arr.set(self.allocator, .{ .string = entry.key_ptr.* }, entry.value_ptr.*);
+                            const vr = self.findPropertyVisibility(obj.class_name, entry.key_ptr.*);
+                            const key_str: []const u8 = switch (vr.visibility) {
+                                .public => entry.key_ptr.*,
+                                .protected => try std.fmt.allocPrint(self.allocator, "\x00*\x00{s}", .{entry.key_ptr.*}),
+                                .private => try std.fmt.allocPrint(self.allocator, "\x00{s}\x00{s}", .{ vr.defining_class, entry.key_ptr.* }),
+                            };
+                            if (vr.visibility != .public) try self.strings.append(self.allocator, key_str);
+                            try arr.set(self.allocator, .{ .string = key_str }, entry.value_ptr.*);
                         }
                         self.push(.{ .array = arr });
                     } else if (v == .null) {
