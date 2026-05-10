@@ -85,7 +85,7 @@ pub fn throwPdo(ctx: *NativeContext, msg: []const u8) RuntimeError!Value {
             if (m != 2) return .{ .bool = false };
         }
     }
-    if (try ctx.vm.throwBuiltinException("PDOException", msg)) return .null;
+    _ = try ctx.vm.throwBuiltinException("PDOException", msg);
     return error.RuntimeError;
 }
 
