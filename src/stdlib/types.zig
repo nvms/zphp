@@ -625,12 +625,22 @@ fn property_exists(ctx: *NativeContext, args: []const Value) RuntimeError!Value 
     }
     if (args[0] == .string) {
         const class_name = args[0].string;
-        if (ctx.vm.classes.get(class_name)) |cls| {
-            if (cls.slot_layout) |layout| {
-                for (layout.names) |name| {
-                    if (std.mem.eql(u8, name, prop_name)) return .{ .bool = true };
+        var is_own = true;
+        var current: ?[]const u8 = class_name;
+        while (current) |name| {
+            const cls = ctx.vm.classes.get(name) orelse break;
+            for (cls.properties.items) |p| {
+                if (std.mem.eql(u8, p.name, prop_name)) {
+                    if (!is_own and p.visibility == .private) break;
+                    return .{ .bool = true };
                 }
             }
+            if (cls.static_props.get(prop_name)) |_| {
+                const vis = cls.const_visibility.get(prop_name) orelse @as(ClassDef.Visibility, .public);
+                if (is_own or vis != .private) return .{ .bool = true };
+            }
+            current = cls.parent;
+            is_own = false;
         }
         return .{ .bool = false };
     }
@@ -1660,6 +1670,9 @@ fn native_class_implements(ctx: *NativeContext, args: []const Value) RuntimeErro
         try result.set(ctx.allocator, .{ .string = iface }, .{ .string = iface });
         if (ctx.vm.classes.get(iface)) |idef| {
             for (idef.interfaces.items) |sub| try queue.append(ctx.allocator, sub);
+        }
+        if (ctx.vm.interfaces.get(iface)) |idef| {
+            if (idef.parent) |p| try queue.append(ctx.allocator, p);
         }
     }
 
