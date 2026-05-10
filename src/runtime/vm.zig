@@ -3717,6 +3717,11 @@ pub const VM = struct {
                         if (val != .null or obj.properties.contains(prop_name) or (obj.slots != null and obj.getSlotIndex(prop_name) != null)) {
                             const vr = self.findPropertyVisibility(obj.class_name, prop_name);
                             if (!self.checkVisibility(vr.defining_class, vr.visibility)) {
+                                if (self.hasMethod(obj.class_name, "__get")) {
+                                    const result = try self.callMagicGet(obj, prop_name);
+                                    self.push(result);
+                                    continue;
+                                }
                                 const msg = try std.fmt.allocPrint(self.allocator, "Cannot access {s} property {s}::${s}", .{
                                     @tagName(vr.visibility), vr.defining_class, prop_name,
                                 });
@@ -3819,6 +3824,11 @@ pub const VM = struct {
                         } else {
                             const vr = self.findPropertyVisibility(obj.class_name, prop_name);
                             if (!self.checkVisibility(vr.defining_class, vr.visibility)) {
+                                if (self.hasMethod(obj.class_name, "__set")) {
+                                    _ = self.callMethod(obj, "__set", &.{ .{ .string = prop_name }, val }) catch {};
+                                    self.push(val);
+                                    continue;
+                                }
                                 const msg = try std.fmt.allocPrint(self.allocator, "Cannot access {s} property {s}::${s}", .{
                                     @tagName(vr.visibility), vr.defining_class, prop_name,
                                 });
@@ -3827,6 +3837,11 @@ pub const VM = struct {
                                 return error.RuntimeError;
                             }
                             if (vr.set_visibility != vr.visibility and !self.checkVisibility(vr.defining_class, vr.set_visibility)) {
+                                if (self.hasMethod(obj.class_name, "__set")) {
+                                    _ = self.callMethod(obj, "__set", &.{ .{ .string = prop_name }, val }) catch {};
+                                    self.push(val);
+                                    continue;
+                                }
                                 const msg = try std.fmt.allocPrint(self.allocator, "Cannot modify {s}(set) property {s}::${s} from global scope", .{
                                     @tagName(vr.set_visibility), vr.defining_class, prop_name,
                                 });
