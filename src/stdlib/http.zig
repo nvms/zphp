@@ -18,6 +18,8 @@ pub const entries = .{
     .{ "ob_get_length", native_ob_get_length },
     .{ "ob_implicit_flush", native_ob_implicit_flush },
     .{ "ob_list_handlers", native_ob_list_handlers },
+    .{ "ob_get_status", native_ob_get_status },
+    .{ "flush", native_flush },
     .{ "header", native_header },
     .{ "http_response_code", native_http_response_code },
     .{ "setcookie", native_setcookie },
@@ -139,6 +141,44 @@ fn native_ob_get_length(ctx: *NativeContext, _: []const Value) RuntimeError!Valu
 
 fn native_ob_implicit_flush(_: *NativeContext, _: []const Value) RuntimeError!Value {
     return .null;
+}
+
+fn native_flush(_: *NativeContext, _: []const Value) RuntimeError!Value {
+    // CLI: nothing to flush at HTTP level
+    return .null;
+}
+
+fn native_ob_get_status(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    const full_status = args.len >= 1 and args[0].isTruthy();
+    const stack_len = ctx.vm.ob_stack.items.len;
+    if (stack_len == 0) {
+        return .{ .array = try ctx.createArray() };
+    }
+    if (!full_status) {
+        const arr = try ctx.createArray();
+        try arr.set(ctx.allocator, .{ .string = "name" }, .{ .string = "default output handler" });
+        try arr.set(ctx.allocator, .{ .string = "type" }, .{ .int = 0 });
+        try arr.set(ctx.allocator, .{ .string = "flags" }, .{ .int = 112 });
+        try arr.set(ctx.allocator, .{ .string = "level" }, .{ .int = @intCast(stack_len - 1) });
+        try arr.set(ctx.allocator, .{ .string = "chunk_size" }, .{ .int = 0 });
+        try arr.set(ctx.allocator, .{ .string = "buffer_size" }, .{ .int = 16384 });
+        try arr.set(ctx.allocator, .{ .string = "buffer_used" }, .{ .int = 0 });
+        return .{ .array = arr };
+    }
+    const result = try ctx.createArray();
+    var i: usize = 0;
+    while (i < stack_len) : (i += 1) {
+        const sub = try ctx.createArray();
+        try sub.set(ctx.allocator, .{ .string = "name" }, .{ .string = "default output handler" });
+        try sub.set(ctx.allocator, .{ .string = "type" }, .{ .int = 0 });
+        try sub.set(ctx.allocator, .{ .string = "flags" }, .{ .int = 112 });
+        try sub.set(ctx.allocator, .{ .string = "level" }, .{ .int = @intCast(i) });
+        try sub.set(ctx.allocator, .{ .string = "chunk_size" }, .{ .int = 0 });
+        try sub.set(ctx.allocator, .{ .string = "buffer_size" }, .{ .int = 16384 });
+        try sub.set(ctx.allocator, .{ .string = "buffer_used" }, .{ .int = 0 });
+        try result.append(ctx.allocator, .{ .array = sub });
+    }
+    return .{ .array = result };
 }
 
 fn native_ob_list_handlers(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
