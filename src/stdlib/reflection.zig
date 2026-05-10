@@ -59,6 +59,7 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try rc_def.methods.put(a, "isInterface", .{ .name = "isInterface", .arity = 0 });
     try rc_def.methods.put(a, "getInterfaceNames", .{ .name = "getInterfaceNames", .arity = 0 });
     try rc_def.methods.put(a, "getAttributes", .{ .name = "getAttributes", .arity = 0 });
+    try rc_def.methods.put(a, "getDocComment", .{ .name = "getDocComment", .arity = 0 });
     try rc_def.methods.put(a, "getProperties", .{ .name = "getProperties", .arity = 1 });
     try rc_def.methods.put(a, "getProperty", .{ .name = "getProperty", .arity = 1 });
     try rc_def.methods.put(a, "hasProperty", .{ .name = "hasProperty", .arity = 1 });
@@ -104,6 +105,7 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try vm.native_fns.put(a, "ReflectionClass::isInterface", rcIsInterface);
     try vm.native_fns.put(a, "ReflectionClass::getInterfaceNames", rcGetInterfaceNames);
     try vm.native_fns.put(a, "ReflectionClass::getAttributes", rcGetAttributes);
+    try vm.native_fns.put(a, "ReflectionClass::getDocComment", reflectionGetDocCommentFalse);
     try vm.native_fns.put(a, "ReflectionClass::getProperties", rcGetProperties);
     try vm.native_fns.put(a, "ReflectionClass::getProperty", rcGetProperty);
     try vm.native_fns.put(a, "ReflectionClass::hasProperty", rcHasProperty);
@@ -160,6 +162,7 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try rm_def.methods.put(a, "getDeclaringClass", .{ .name = "getDeclaringClass", .arity = 0 });
     try rm_def.methods.put(a, "getReturnType", .{ .name = "getReturnType", .arity = 0 });
     try rm_def.methods.put(a, "isConstructor", .{ .name = "isConstructor", .arity = 0 });
+    try rm_def.methods.put(a, "getDocComment", .{ .name = "getDocComment", .arity = 0 });
     try rm_def.methods.put(a, "getNumberOfParameters", .{ .name = "getNumberOfParameters", .arity = 0 });
     try rm_def.methods.put(a, "getNumberOfRequiredParameters", .{ .name = "getNumberOfRequiredParameters", .arity = 0 });
     try rm_def.methods.put(a, "setAccessible", .{ .name = "setAccessible", .arity = 1 });
@@ -183,6 +186,7 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try vm.native_fns.put(a, "ReflectionMethod::getDeclaringClass", rmGetDeclaringClass);
     try vm.native_fns.put(a, "ReflectionMethod::getReturnType", rmGetReturnType);
     try vm.native_fns.put(a, "ReflectionMethod::isConstructor", rmIsConstructor);
+    try vm.native_fns.put(a, "ReflectionMethod::getDocComment", reflectionGetDocCommentFalse);
     try vm.native_fns.put(a, "ReflectionMethod::getNumberOfParameters", rmGetNumberOfParameters);
     try vm.native_fns.put(a, "ReflectionMethod::getNumberOfRequiredParameters", rmGetNumberOfRequiredParameters);
     try vm.native_fns.put(a, "ReflectionMethod::setAccessible", reflectionNoop);
@@ -783,6 +787,12 @@ fn rcIsSubclassOf(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
 fn rcNewInstance(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     const this = getThis(ctx) orelse return .null;
     const class_name = if (this.get("name") == .string) this.get("name").string else return .null;
+    if (ctx.vm.interfaces.contains(class_name)) {
+        const msg = try std.fmt.allocPrint(ctx.allocator, "Cannot instantiate interface {s}", .{class_name});
+        try ctx.strings.append(ctx.allocator, msg);
+        try ctx.vm.setPendingException("Error", msg);
+        return error.RuntimeError;
+    }
     if (ctx.vm.classes.get(class_name)) |cd| {
         if (cd.is_abstract) {
             const msg = try std.fmt.allocPrint(ctx.allocator, "Cannot instantiate abstract class {s}", .{class_name});
@@ -1026,6 +1036,11 @@ fn buildAttributeArray(ctx: *NativeContext, attrs: []const AttributeDef, filter:
         try arr.append(ctx.allocator, try buildReflectionAttribute(ctx, attr, target, count > 1));
     }
     return .{ .array = arr };
+}
+
+fn reflectionGetDocCommentFalse(_: *NativeContext, _: []const Value) RuntimeError!Value {
+    // zphp doesn't preserve doc comments through compilation (architectural)
+    return .{ .bool = false };
 }
 
 fn rcGetAttributes(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
