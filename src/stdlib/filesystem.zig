@@ -82,8 +82,13 @@ pub const entries = .{
     .{ "tmpfile", native_tmpfile },
     .{ "umask", native_umask },
     .{ "fileperms", native_fileperms },
+    .{ "fileowner", native_fileowner },
+    .{ "filegroup", native_filegroup },
     .{ "is_link", native_is_link },
     .{ "readlink", native_readlink },
+    .{ "symlink", native_symlink },
+    .{ "link", native_link },
+    .{ "lstat", native_lstat },
     .{ "popen", native_popen },
     .{ "pclose", native_pclose },
     .{ "proc_open", native_proc_open },
@@ -1988,49 +1993,13 @@ fn native_chmod(_: *NativeContext, args: []const Value) RuntimeError!Value {
 fn native_stat(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len == 0 or args[0] != .string) return .{ .bool = false };
     const path = args[0].string;
-
-    const file = std.fs.cwd().openFile(path, .{}) catch
-        return Value{ .bool = false };
-    defer file.close();
-    const stat = file.stat() catch return Value{ .bool = false };
-
-    var result = try ctx.createArray();
-    const size: i64 = @intCast(stat.size);
-    const atime: i64 = @intCast(@divTrunc(stat.atime, 1_000_000_000));
-    const mtime: i64 = @intCast(@divTrunc(stat.mtime, 1_000_000_000));
-    const ctime: i64 = @intCast(@divTrunc(stat.ctime, 1_000_000_000));
-
-    // numeric indices (PHP stat format)
-    try result.append(ctx.allocator, .{ .int = 0 }); // 0: dev
-    try result.append(ctx.allocator, .{ .int = 0 }); // 1: ino
-    try result.append(ctx.allocator, .{ .int = 0 }); // 2: mode
-    try result.append(ctx.allocator, .{ .int = 1 }); // 3: nlink
-    try result.append(ctx.allocator, .{ .int = 0 }); // 4: uid
-    try result.append(ctx.allocator, .{ .int = 0 }); // 5: gid
-    try result.append(ctx.allocator, .{ .int = 0 }); // 6: rdev
-    try result.append(ctx.allocator, .{ .int = size }); // 7: size
-    try result.append(ctx.allocator, .{ .int = atime }); // 8: atime
-    try result.append(ctx.allocator, .{ .int = mtime }); // 9: mtime
-    try result.append(ctx.allocator, .{ .int = ctime }); // 10: ctime
-    try result.append(ctx.allocator, .{ .int = -1 }); // 11: blksize
-    try result.append(ctx.allocator, .{ .int = -1 }); // 12: blocks
-
-    // named keys
-    try result.set(ctx.allocator, .{ .string = "dev" }, .{ .int = 0 });
-    try result.set(ctx.allocator, .{ .string = "ino" }, .{ .int = 0 });
-    try result.set(ctx.allocator, .{ .string = "mode" }, .{ .int = 0 });
-    try result.set(ctx.allocator, .{ .string = "nlink" }, .{ .int = 1 });
-    try result.set(ctx.allocator, .{ .string = "uid" }, .{ .int = 0 });
-    try result.set(ctx.allocator, .{ .string = "gid" }, .{ .int = 0 });
-    try result.set(ctx.allocator, .{ .string = "rdev" }, .{ .int = 0 });
-    try result.set(ctx.allocator, .{ .string = "size" }, .{ .int = size });
-    try result.set(ctx.allocator, .{ .string = "atime" }, .{ .int = atime });
-    try result.set(ctx.allocator, .{ .string = "mtime" }, .{ .int = mtime });
-    try result.set(ctx.allocator, .{ .string = "ctime" }, .{ .int = ctime });
-    try result.set(ctx.allocator, .{ .string = "blksize" }, .{ .int = -1 });
-    try result.set(ctx.allocator, .{ .string = "blocks" }, .{ .int = -1 });
-
-    return .{ .array = result };
+    var pbuf: [std.fs.max_path_bytes:0]u8 = undefined;
+    if (path.len >= pbuf.len) return .{ .bool = false };
+    @memcpy(pbuf[0..path.len], path);
+    pbuf[path.len] = 0;
+    var st: std.c.Stat = undefined;
+    if (std.c.stat(&pbuf, &st) != 0) return .{ .bool = false };
+    return .{ .array = try buildStatArray(ctx, &st) };
 }
 
 fn native_chdir(_: *NativeContext, args: []const Value) RuntimeError!Value {
@@ -2087,10 +2056,112 @@ fn native_fileperms(_: *NativeContext, args: []const Value) RuntimeError!Value {
     return .{ .int = @intCast(stat.mode) };
 }
 
+extern "c" fn lstat(noalias path: [*:0]const u8, noalias buf: *std.c.Stat) c_int;
+
+fn native_fileowner(_: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len == 0 or args[0] != .string) return .{ .bool = false };
+    const path = args[0].string;
+    var pbuf: [std.fs.max_path_bytes:0]u8 = undefined;
+    if (path.len >= pbuf.len) return .{ .bool = false };
+    @memcpy(pbuf[0..path.len], path);
+    pbuf[path.len] = 0;
+    var st: std.c.Stat = undefined;
+    if (std.c.stat(&pbuf, &st) != 0) return .{ .bool = false };
+    return .{ .int = @intCast(st.uid) };
+}
+
+fn native_filegroup(_: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len == 0 or args[0] != .string) return .{ .bool = false };
+    const path = args[0].string;
+    var pbuf: [std.fs.max_path_bytes:0]u8 = undefined;
+    if (path.len >= pbuf.len) return .{ .bool = false };
+    @memcpy(pbuf[0..path.len], path);
+    pbuf[path.len] = 0;
+    var st: std.c.Stat = undefined;
+    if (std.c.stat(&pbuf, &st) != 0) return .{ .bool = false };
+    return .{ .int = @intCast(st.gid) };
+}
+
 fn native_is_link(_: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len == 0 or args[0] != .string) return .{ .bool = false };
-    const stat = std.fs.cwd().statFile(args[0].string) catch return Value{ .bool = false };
-    return .{ .bool = stat.kind == .sym_link };
+    const path = args[0].string;
+    var pbuf: [std.fs.max_path_bytes:0]u8 = undefined;
+    if (path.len >= pbuf.len) return .{ .bool = false };
+    @memcpy(pbuf[0..path.len], path);
+    pbuf[path.len] = 0;
+    var st: std.c.Stat = undefined;
+    if (lstat(&pbuf, &st) != 0) return .{ .bool = false };
+    return .{ .bool = (st.mode & 0o170000) == 0o120000 };
+}
+
+fn native_symlink(_: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len < 2 or args[0] != .string or args[1] != .string) return .{ .bool = false };
+    var t: [std.fs.max_path_bytes:0]u8 = undefined;
+    var l: [std.fs.max_path_bytes:0]u8 = undefined;
+    const target = args[0].string;
+    const linkpath = args[1].string;
+    if (target.len >= t.len or linkpath.len >= l.len) return .{ .bool = false };
+    @memcpy(t[0..target.len], target);
+    t[target.len] = 0;
+    @memcpy(l[0..linkpath.len], linkpath);
+    l[linkpath.len] = 0;
+    return .{ .bool = std.c.symlink(&t, &l) == 0 };
+}
+
+fn native_link(_: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len < 2 or args[0] != .string or args[1] != .string) return .{ .bool = false };
+    var t: [std.fs.max_path_bytes:0]u8 = undefined;
+    var l: [std.fs.max_path_bytes:0]u8 = undefined;
+    const target = args[0].string;
+    const linkpath = args[1].string;
+    if (target.len >= t.len or linkpath.len >= l.len) return .{ .bool = false };
+    @memcpy(t[0..target.len], target);
+    t[target.len] = 0;
+    @memcpy(l[0..linkpath.len], linkpath);
+    l[linkpath.len] = 0;
+    return .{ .bool = std.c.link(&t, &l) == 0 };
+}
+
+fn buildStatArray(ctx: *NativeContext, st: *const std.c.Stat) !*PhpArray {
+    var arr = try ctx.createArray();
+    const dev: i64 = @intCast(st.dev);
+    const ino: i64 = @intCast(st.ino);
+    const mode: i64 = @intCast(st.mode);
+    const nlink: i64 = @intCast(st.nlink);
+    const uid: i64 = @intCast(st.uid);
+    const gid: i64 = @intCast(st.gid);
+    const size: i64 = @intCast(st.size);
+    const atime: i64 = @intCast(st.atime().sec);
+    const mtime: i64 = @intCast(st.mtime().sec);
+    const ctime: i64 = @intCast(st.ctime().sec);
+    const blksize: i64 = @intCast(st.blksize);
+    const blocks: i64 = @intCast(st.blocks);
+    const pairs = [_]struct { name: []const u8, val: i64 }{
+        .{ .name = "dev", .val = dev }, .{ .name = "ino", .val = ino },
+        .{ .name = "mode", .val = mode }, .{ .name = "nlink", .val = nlink },
+        .{ .name = "uid", .val = uid }, .{ .name = "gid", .val = gid },
+        .{ .name = "rdev", .val = 0 }, .{ .name = "size", .val = size },
+        .{ .name = "atime", .val = atime }, .{ .name = "mtime", .val = mtime },
+        .{ .name = "ctime", .val = ctime }, .{ .name = "blksize", .val = blksize },
+        .{ .name = "blocks", .val = blocks },
+    };
+    for (pairs, 0..) |p, i| {
+        try arr.set(ctx.allocator, .{ .int = @intCast(i) }, .{ .int = p.val });
+        try arr.set(ctx.allocator, .{ .string = p.name }, .{ .int = p.val });
+    }
+    return arr;
+}
+
+fn native_lstat(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len == 0 or args[0] != .string) return .{ .bool = false };
+    const path = args[0].string;
+    var pbuf: [std.fs.max_path_bytes:0]u8 = undefined;
+    if (path.len >= pbuf.len) return .{ .bool = false };
+    @memcpy(pbuf[0..path.len], path);
+    pbuf[path.len] = 0;
+    var st: std.c.Stat = undefined;
+    if (lstat(&pbuf, &st) != 0) return .{ .bool = false };
+    return .{ .array = try buildStatArray(ctx, &st) };
 }
 
 fn native_readlink(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
