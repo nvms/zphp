@@ -1444,28 +1444,40 @@ fn userHeapTop(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
 fn minHeapExtract(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
     const obj = getThis(ctx) orelse return .null;
     const arr = getData(obj) orelse return .null;
-    const idx = findMinIdx(arr) orelse return .null;
+    const idx = findMinIdx(arr) orelse {
+        try ctx.vm.setPendingException("RuntimeException", "Can't extract from an empty heap");
+        return error.RuntimeError;
+    };
     return heapRemoveAt(arr, idx);
 }
 
 fn minHeapTop(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
     const obj = getThis(ctx) orelse return .null;
     const arr = getData(obj) orelse return .null;
-    const idx = findMinIdx(arr) orelse return .null;
+    const idx = findMinIdx(arr) orelse {
+        try ctx.vm.setPendingException("RuntimeException", "Can't peek at an empty heap");
+        return error.RuntimeError;
+    };
     return arr.entries.items[idx].value;
 }
 
 fn maxHeapExtract(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
     const obj = getThis(ctx) orelse return .null;
     const arr = getData(obj) orelse return .null;
-    const idx = findMaxIdx(arr) orelse return .null;
+    const idx = findMaxIdx(arr) orelse {
+        try ctx.vm.setPendingException("RuntimeException", "Can't extract from an empty heap");
+        return error.RuntimeError;
+    };
     return heapRemoveAt(arr, idx);
 }
 
 fn maxHeapTop(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
     const obj = getThis(ctx) orelse return .null;
     const arr = getData(obj) orelse return .null;
-    const idx = findMaxIdx(arr) orelse return .null;
+    const idx = findMaxIdx(arr) orelse {
+        try ctx.vm.setPendingException("RuntimeException", "Can't peek at an empty heap");
+        return error.RuntimeError;
+    };
     return arr.entries.items[idx].value;
 }
 
