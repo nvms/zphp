@@ -393,7 +393,7 @@ fn native_hash_hmac(ctx: *NativeContext, args: []const Value) RuntimeError!Value
 
 fn native_hash_algos(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
     var arr = try ctx.createArray();
-    const algos = [_][]const u8{ "md5", "sha1", "sha256", "sha384", "sha512", "crc32" };
+    const algos = [_][]const u8{ "md5", "sha1", "sha224", "sha256", "sha384", "sha512", "sha3-224", "sha3-256", "sha3-384", "sha3-512", "crc32", "crc32b", "xxh32", "xxh64", "xxh3", "xxh128" };
     for (algos) |name| {
         try arr.append(ctx.allocator, .{ .string = name });
     }

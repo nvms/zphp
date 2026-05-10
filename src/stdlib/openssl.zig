@@ -15,7 +15,55 @@ pub const entries = .{
     .{ "openssl_cipher_key_length", cipherKeyLength },
     .{ "openssl_get_cipher_methods", getCipherMethods },
     .{ "openssl_random_pseudo_bytes", opensslRandomPseudoBytes },
+    .{ "openssl_digest", opensslDigest },
+    .{ "openssl_get_md_methods", opensslGetMdMethods },
 };
+
+fn opensslDigest(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len < 2 or args[0] != .string or args[1] != .string) return .{ .bool = false };
+    const data = args[0].string;
+    const algo = args[1].string;
+    const raw_output = args.len >= 3 and args[2].isTruthy();
+
+    var name_buf: [64]u8 = undefined;
+    if (algo.len >= name_buf.len) return .{ .bool = false };
+    @memcpy(name_buf[0..algo.len], algo);
+    name_buf[algo.len] = 0;
+
+    const md = c.EVP_MD_fetch(null, &name_buf, null) orelse return .{ .bool = false };
+    defer c.EVP_MD_free(md);
+
+    const ctx_md = c.EVP_MD_CTX_new() orelse return .{ .bool = false };
+    defer c.EVP_MD_CTX_free(ctx_md);
+
+    if (c.EVP_DigestInit_ex(ctx_md, md, null) != 1) return .{ .bool = false };
+    if (data.len > 0 and c.EVP_DigestUpdate(ctx_md, data.ptr, data.len) != 1) return .{ .bool = false };
+
+    var out_buf: [c.EVP_MAX_MD_SIZE]u8 = undefined;
+    var out_len: c_uint = 0;
+    if (c.EVP_DigestFinal_ex(ctx_md, &out_buf, &out_len) != 1) return .{ .bool = false };
+
+    if (raw_output) {
+        const dup = try ctx.allocator.dupe(u8, out_buf[0..out_len]);
+        try ctx.vm.strings.append(ctx.allocator, dup);
+        return .{ .string = dup };
+    }
+    const hex = try ctx.allocator.alloc(u8, out_len * 2);
+    const hex_chars = "0123456789abcdef";
+    for (out_buf[0..out_len], 0..) |b, i| {
+        hex[i * 2] = hex_chars[b >> 4];
+        hex[i * 2 + 1] = hex_chars[b & 0xf];
+    }
+    try ctx.vm.strings.append(ctx.allocator, hex);
+    return .{ .string = hex };
+}
+
+fn opensslGetMdMethods(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    var arr = try ctx.createArray();
+    const names = [_][]const u8{ "md5", "sha1", "sha224", "sha256", "sha384", "sha512", "sha3-224", "sha3-256", "sha3-384", "sha3-512" };
+    for (names) |n| try arr.append(ctx.allocator, .{ .string = n });
+    return .{ .array = arr };
+}
 
 fn opensslRandomPseudoBytes(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len == 0 or args[0] != .int or args[0].int < 0) return .{ .bool = false };
