@@ -35,6 +35,9 @@ pub const entries = .{
     .{ "get_class", get_class },
     .{ "get_called_class", get_called_class },
     .{ "class_exists", class_exists },
+    .{ "get_declared_classes", native_get_declared_classes },
+    .{ "get_declared_interfaces", native_get_declared_interfaces },
+    .{ "get_declared_traits", native_get_declared_traits },
     .{ "method_exists", method_exists },
     .{ "property_exists", property_exists },
     .{ "is_callable", native_is_callable },
@@ -500,17 +503,53 @@ fn get_called_class(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
     return .{ .bool = false };
 }
 
+fn native_get_declared_classes(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const arr = try ctx.createArray();
+    var it = ctx.vm.classes.iterator();
+    while (it.next()) |e| {
+        try arr.append(ctx.allocator, .{ .string = e.key_ptr.* });
+    }
+    return .{ .array = arr };
+}
+
+fn native_get_declared_interfaces(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const arr = try ctx.createArray();
+    var it = ctx.vm.interfaces.iterator();
+    while (it.next()) |e| {
+        try arr.append(ctx.allocator, .{ .string = e.key_ptr.* });
+    }
+    return .{ .array = arr };
+}
+
+fn native_get_declared_traits(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const arr = try ctx.createArray();
+    var it = ctx.vm.traits.iterator();
+    while (it.next()) |e| {
+        try arr.append(ctx.allocator, .{ .string = e.key_ptr.* });
+    }
+    return .{ .array = arr };
+}
+
+fn classExistsCaseInsensitive(ctx: *NativeContext, name: []const u8) bool {
+    if (ctx.vm.classes.contains(name)) return true;
+    var it = ctx.vm.classes.iterator();
+    while (it.next()) |e| {
+        if (std.ascii.eqlIgnoreCase(e.key_ptr.*, name)) return true;
+    }
+    return false;
+}
+
 fn class_exists(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len == 0 or args[0] != .string) return .{ .bool = false };
     const name = args[0].string;
-    if (std.mem.eql(u8, name, "stdClass") or std.mem.eql(u8, name, "Attribute")) return .{ .bool = true };
+    if (std.ascii.eqlIgnoreCase(name, "stdClass") or std.ascii.eqlIgnoreCase(name, "Attribute")) return .{ .bool = true };
     if (ctx.vm.interfaces.contains(name)) return .{ .bool = false };
     if (ctx.vm.traits.contains(name)) return .{ .bool = false };
-    if (ctx.vm.classes.contains(name)) return .{ .bool = true };
+    if (classExistsCaseInsensitive(ctx, name)) return .{ .bool = true };
     const autoload = args.len < 2 or !(args[1] == .bool and !args[1].bool);
     if (autoload and ctx.vm.autoload_callbacks.items.len > 0) {
         try ctx.vm.tryAutoload(name);
-        return .{ .bool = ctx.vm.classes.contains(name) and !ctx.vm.interfaces.contains(name) };
+        return .{ .bool = classExistsCaseInsensitive(ctx, name) and !ctx.vm.interfaces.contains(name) };
     }
     return .{ .bool = false };
 }
