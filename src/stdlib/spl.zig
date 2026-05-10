@@ -122,9 +122,7 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try ao_def.methods.put(a, "setFlags", .{ .name = "setFlags", .arity = 1 });
     try ao_def.methods.put(a, "getFlags", .{ .name = "getFlags", .arity = 0 });
     try ao_def.methods.put(a, "ksort", .{ .name = "ksort", .arity = 1 });
-    try ao_def.methods.put(a, "krsort", .{ .name = "krsort", .arity = 1 });
     try ao_def.methods.put(a, "asort", .{ .name = "asort", .arity = 1 });
-    try ao_def.methods.put(a, "arsort", .{ .name = "arsort", .arity = 1 });
     try ao_def.methods.put(a, "uksort", .{ .name = "uksort", .arity = 1 });
     try ao_def.methods.put(a, "uasort", .{ .name = "uasort", .arity = 1 });
     try ao_def.methods.put(a, "natsort", .{ .name = "natsort", .arity = 0 });
@@ -153,9 +151,7 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try vm.native_fns.put(a, "ArrayObject::setFlags", aoSetFlags);
     try vm.native_fns.put(a, "ArrayObject::getFlags", aoGetFlags);
     try vm.native_fns.put(a, "ArrayObject::ksort", aoKsort);
-    try vm.native_fns.put(a, "ArrayObject::krsort", aoKrsort);
     try vm.native_fns.put(a, "ArrayObject::asort", aoAsort);
-    try vm.native_fns.put(a, "ArrayObject::arsort", aoArsort);
     try vm.native_fns.put(a, "ArrayObject::uksort", aoUksort);
     try vm.native_fns.put(a, "ArrayObject::uasort", aoUasort);
     try vm.native_fns.put(a, "ArrayObject::natsort", aoNatsort);
@@ -188,9 +184,7 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try ai_def.methods.put(a, "getFlags", .{ .name = "getFlags", .arity = 0 });
     try ai_def.methods.put(a, "setFlags", .{ .name = "setFlags", .arity = 1 });
     try ai_def.methods.put(a, "ksort", .{ .name = "ksort", .arity = 1 });
-    try ai_def.methods.put(a, "krsort", .{ .name = "krsort", .arity = 1 });
     try ai_def.methods.put(a, "asort", .{ .name = "asort", .arity = 1 });
-    try ai_def.methods.put(a, "arsort", .{ .name = "arsort", .arity = 1 });
     try ai_def.methods.put(a, "uksort", .{ .name = "uksort", .arity = 1 });
     try ai_def.methods.put(a, "uasort", .{ .name = "uasort", .arity = 1 });
     try ai_def.methods.put(a, "seek", .{ .name = "seek", .arity = 1 });
@@ -212,9 +206,7 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try vm.native_fns.put(a, "ArrayIterator::getFlags", aiGetFlags);
     try vm.native_fns.put(a, "ArrayIterator::setFlags", aiSetFlags);
     try vm.native_fns.put(a, "ArrayIterator::ksort", aoKsort);
-    try vm.native_fns.put(a, "ArrayIterator::krsort", aoKrsort);
     try vm.native_fns.put(a, "ArrayIterator::asort", aoAsort);
-    try vm.native_fns.put(a, "ArrayIterator::arsort", aoArsort);
     try vm.native_fns.put(a, "ArrayIterator::uksort", aoUksort);
     try vm.native_fns.put(a, "ArrayIterator::uasort", aoUasort);
     try vm.native_fns.put(a, "ArrayIterator::seek", aiSeek);
