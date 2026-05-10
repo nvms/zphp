@@ -2228,6 +2228,15 @@ pub const VM = struct {
                     const obj_val = self.pop();
                     if (obj_val == .object) {
                         const obj = obj_val.object;
+                        {
+                            const vr = self.findPropertyVisibility(obj.class_name, prop_name);
+                            if (vr.is_readonly and obj.get(prop_name) != .null) {
+                                const msg = try std.fmt.allocPrint(self.allocator, "Cannot unset readonly property {s}::${s}", .{ obj.class_name, prop_name });
+                                try self.strings.append(self.allocator, msg);
+                                if (try self.throwBuiltinException("Error", msg)) continue;
+                                return error.RuntimeError;
+                            }
+                        }
                         if (self.hasMethod(obj.class_name, "__unset")) {
                             _ = self.callMethod(obj, "__unset", &.{.{ .string = prop_name }}) catch {};
                         } else {
