@@ -116,6 +116,7 @@ pub const entries = .{
     .{ "iterator_count", native_iterator_count },
     .{ "iterator_apply", native_iterator_apply },
     .{ "filter_var", native_filter_var },
+    .{ "filter_var_array", native_filter_var_array },
     .{ "is_resource", native_is_resource },
     .{ "get_resource_type", native_get_resource_type },
     .{ "token_get_all", native_token_get_all },
@@ -1815,6 +1816,25 @@ fn native_iterator_apply(ctx: *NativeContext, args: []const Value) RuntimeError!
     return .{ .int = 0 };
 }
 
+fn native_filter_var_array(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len < 1 or args[0] != .array) return .{ .bool = false };
+    const data = args[0].array;
+    const result = try ctx.createArray();
+    if (args.len < 2 or args[1] != .array) {
+        for (data.entries.items) |entry| try result.set(ctx.allocator, entry.key, entry.value);
+        return .{ .array = result };
+    }
+    const rules = args[1].array;
+    for (rules.entries.items) |rule_entry| {
+        const key = rule_entry.key;
+        const data_v = data.get(key);
+        const sub_args = [_]Value{ data_v, rule_entry.value };
+        const filtered = try native_filter_var(ctx, &sub_args);
+        try result.set(ctx.allocator, key, filtered);
+    }
+    return .{ .array = result };
+}
+
 fn native_filter_var(_ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len < 1) return .{ .bool = false };
     const value = args[0];
@@ -1823,6 +1843,24 @@ fn native_filter_var(_ctx: *NativeContext, args: []const Value) RuntimeError!Val
 
     const filter = if (args[1] == .int) args[1].int else return .{ .bool = false };
     const flags: i64 = if (args.len > 2 and args[2] == .int) args[2].int else 0;
+
+    // resolve options array if 3rd arg is array: ["options" => [...], "flags" => ...]
+    var opts_arr: ?*PhpArray = null;
+    var opt_flags: i64 = 0;
+    var default_val: ?Value = null;
+    if (args.len > 2 and args[2] == .array) {
+        const top = args[2].array;
+        const fl = top.get(.{ .string = "flags" });
+        if (fl == .int) opt_flags = fl.int;
+        const o = top.get(.{ .string = "options" });
+        if (o == .array) {
+            opts_arr = o.array;
+            const dv = o.array.get(.{ .string = "default" });
+            if (dv != .null) default_val = dv;
+        }
+    }
+    const eff_flags = flags | opt_flags;
+    const fail_default = default_val orelse Value{ .bool = false };
 
     switch (filter) {
         275 => { // FILTER_VALIDATE_IP
@@ -1851,11 +1889,23 @@ fn native_filter_var(_ctx: *NativeContext, args: []const Value) RuntimeError!Val
             return .{ .bool = false };
         },
         257 => { // FILTER_VALIDATE_INT
-            if (value == .int) return value;
-            if (value == .float) return value;
-            const s = if (value == .string) value.string else return .{ .bool = false };
-            const trimmed = std.mem.trim(u8, s, " ");
-            const n = std.fmt.parseInt(i64, trimmed, 10) catch return .{ .bool = false };
+            const n: i64 = blk: {
+                if (value == .int) break :blk value.int;
+                if (value == .bool) return fail_default;
+                if (value == .float) return fail_default;
+                const s = if (value == .string) value.string else return fail_default;
+                const trimmed = std.mem.trim(u8, s, " \t\n\r");
+                if (trimmed.len > 1 and trimmed[0] == '0' and trimmed[1] != 'x' and trimmed[1] != 'X') return fail_default;
+                if (trimmed.len > 0 and (trimmed[0] == '+' or trimmed[0] == '-' or std.ascii.isDigit(trimmed[0]))) {} else return fail_default;
+                const parsed = std.fmt.parseInt(i64, trimmed, 10) catch return fail_default;
+                break :blk parsed;
+            };
+            if (opts_arr) |opts| {
+                const min_v = opts.get(.{ .string = "min_range" });
+                if (min_v != .null and n < Value.toInt(min_v)) return fail_default;
+                const max_v = opts.get(.{ .string = "max_range" });
+                if (max_v != .null and n > Value.toInt(max_v)) return fail_default;
+            }
             return .{ .int = n };
         },
         259 => { // FILTER_VALIDATE_FLOAT
@@ -1872,6 +1922,95 @@ fn native_filter_var(_ctx: *NativeContext, args: []const Value) RuntimeError!Val
             if (std.mem.eql(u8, s, "false") or std.mem.eql(u8, s, "0") or std.mem.eql(u8, s, "no") or std.mem.eql(u8, s, "off") or s.len == 0) return .{ .bool = false };
             // PHP returns false for invalid input (NULL only with FILTER_NULL_ON_FAILURE flag)
             return .{ .bool = false };
+        },
+        272 => { // FILTER_VALIDATE_REGEXP
+            const s = if (value == .string) value.string else if (value == .int) (try _ctx.createString(blk: {
+                var b: [32]u8 = undefined;
+                break :blk std.fmt.bufPrint(&b, "{d}", .{value.int}) catch "";
+            })) else return fail_default;
+            if (opts_arr) |opts| {
+                const re_v = opts.get(.{ .string = "regexp" });
+                if (re_v == .string) {
+                    const r = _ctx.vm.callByName("preg_match", &.{ re_v, .{ .string = s } }) catch return fail_default;
+                    if (r == .int and r.int > 0) return value;
+                }
+            }
+            return fail_default;
+        },
+        277 => { // FILTER_VALIDATE_DOMAIN
+            const s = if (value == .string) value.string else return fail_default;
+            if (s.len == 0 or s.len > 253) return fail_default;
+            const strict = (eff_flags & 1048576) != 0; // FILTER_FLAG_HOSTNAME
+            if (strict) {
+                for (s) |c| {
+                    if (!std.ascii.isAlphanumeric(c) and c != '.' and c != '-') return fail_default;
+                }
+            }
+            return value;
+        },
+        276 => { // FILTER_VALIDATE_MAC
+            const s = if (value == .string) value.string else return fail_default;
+            // colon: 6 hex pairs separated by ":" or "-", or 3 quads of 4 hex separated by "."
+            const HexHelpers = struct {
+                fn isHex(c: u8) bool { return std.ascii.isHex(c); }
+            };
+            const parts_colon: usize = std.mem.count(u8, s, ":") + 1;
+            const parts_dash: usize = std.mem.count(u8, s, "-") + 1;
+            const parts_dot: usize = std.mem.count(u8, s, ".") + 1;
+            if (parts_colon == 6 or parts_dash == 6) {
+                const sep: u8 = if (parts_colon == 6) ':' else '-';
+                var it = std.mem.splitScalar(u8, s, sep);
+                var n: usize = 0;
+                while (it.next()) |p| {
+                    if (p.len != 2) return fail_default;
+                    if (!HexHelpers.isHex(p[0]) or !HexHelpers.isHex(p[1])) return fail_default;
+                    n += 1;
+                }
+                if (n == 6) return value;
+                return fail_default;
+            }
+            if (parts_dot == 3) {
+                var it = std.mem.splitScalar(u8, s, '.');
+                var n: usize = 0;
+                while (it.next()) |p| {
+                    if (p.len != 4) return fail_default;
+                    for (p) |c| if (!HexHelpers.isHex(c)) return fail_default;
+                    n += 1;
+                }
+                if (n == 3) return value;
+            }
+            return fail_default;
+        },
+        519 => { // FILTER_SANITIZE_NUMBER_INT
+            const s = if (value == .string) value.string else return fail_default;
+            var buf = std.ArrayListUnmanaged(u8){};
+            for (s) |c| {
+                if (std.ascii.isDigit(c) or c == '+' or c == '-') try buf.append(_ctx.allocator, c);
+            }
+            const out = try buf.toOwnedSlice(_ctx.allocator);
+            try _ctx.strings.append(_ctx.allocator, out);
+            return .{ .string = out };
+        },
+        520 => { // FILTER_SANITIZE_NUMBER_FLOAT
+            const s = if (value == .string) value.string else return fail_default;
+            const allow_frac = (eff_flags & 4096) != 0;
+            const allow_thou = (eff_flags & 8192) != 0;
+            const allow_sci = (eff_flags & 16384) != 0;
+            var buf = std.ArrayListUnmanaged(u8){};
+            for (s) |c| {
+                if (std.ascii.isDigit(c) or c == '+' or c == '-') {
+                    try buf.append(_ctx.allocator, c);
+                } else if (c == '.' and allow_frac) {
+                    try buf.append(_ctx.allocator, c);
+                } else if (c == ',' and allow_thou) {
+                    try buf.append(_ctx.allocator, c);
+                } else if ((c == 'e' or c == 'E') and allow_sci) {
+                    try buf.append(_ctx.allocator, c);
+                }
+            }
+            const out = try buf.toOwnedSlice(_ctx.allocator);
+            try _ctx.strings.append(_ctx.allocator, out);
+            return .{ .string = out };
         },
         515 => { // FILTER_SANITIZE_SPECIAL_CHARS
             const s = if (value == .string) value.string else return .{ .bool = false };
