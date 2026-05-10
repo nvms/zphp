@@ -9,18 +9,40 @@ const RuntimeError = error{ RuntimeError, OutOfMemory };
 
 const SerCtx = struct {
     objects: std.AutoHashMapUnmanaged(*PhpObject, usize) = .{},
+    arrays: std.AutoHashMapUnmanaged(*PhpArray, usize) = .{},
     next_slot: usize = 1,
 
     fn deinit(self: *SerCtx, a: Allocator) void {
         self.objects.deinit(a);
+        self.arrays.deinit(a);
     }
+};
+
+const AllowedClasses = union(enum) {
+    all,
+    none,
+    list: []const []const u8,
 };
 
 const UnserCtx = struct {
     slots: std.ArrayListUnmanaged(Value) = .{},
+    allowed: AllowedClasses = .all,
 
     fn deinit(self: *UnserCtx, a: Allocator) void {
         self.slots.deinit(a);
+    }
+
+    fn classAllowed(self: *const UnserCtx, name: []const u8) bool {
+        return switch (self.allowed) {
+            .all => true,
+            .none => false,
+            .list => |names| blk: {
+                for (names) |n| {
+                    if (std.ascii.eqlIgnoreCase(n, name)) break :blk true;
+                }
+                break :blk false;
+            },
+        };
     }
 
     fn reserve(self: *UnserCtx, a: Allocator) !usize {
@@ -216,6 +238,18 @@ fn serializeValue(ctx: *NativeContext, buf: *std.ArrayListUnmanaged(u8), sctx: *
         },
         .string => |str| try emitLenString(buf, a, str),
         .array => |arr| {
+            // cycle guard: arrays only appear circular when zphp's limited
+            // by-reference support has aliased one into itself; emit a back
+            // reference instead of recursing forever
+            if (sctx.arrays.get(arr)) |existing_slot| {
+                try buf.appendSlice(a, "R:");
+                var tmp: [20]u8 = undefined;
+                const s = std.fmt.bufPrint(&tmp, "{d}", .{existing_slot}) catch return;
+                try buf.appendSlice(a, s);
+                try buf.append(a, ';');
+                return;
+            }
+            try sctx.arrays.put(a, arr, sctx.next_slot - 1);
             try buf.appendSlice(a, "a:");
             var tmp: [20]u8 = undefined;
             const len_s = std.fmt.bufPrint(&tmp, "{d}", .{arr.entries.items.len}) catch return;
@@ -347,6 +381,22 @@ fn native_unserialize(ctx: *NativeContext, args: []const Value) RuntimeError!Val
     const s = args[0].string;
     var uctx = UnserCtx{};
     defer uctx.deinit(ctx.allocator);
+    var name_storage: std.ArrayListUnmanaged([]const u8) = .{};
+    defer name_storage.deinit(ctx.allocator);
+    if (args.len >= 2 and args[1] == .array) {
+        const opts = args[1].array;
+        const ac = opts.get(.{ .string = "allowed_classes" });
+        switch (ac) {
+            .bool => |b| uctx.allowed = if (b) .all else .none,
+            .array => |a| {
+                for (a.entries.items) |entry| {
+                    if (entry.value == .string) try name_storage.append(ctx.allocator, entry.value.string);
+                }
+                uctx.allowed = .{ .list = name_storage.items };
+            },
+            else => {},
+        }
+    }
     const result = unserializeValue(ctx, &uctx, s, 0) catch return Value{ .bool = false };
     return result.value;
 }
@@ -443,14 +493,25 @@ fn unserializeValue(ctx: *NativeContext, uctx: *UnserCtx, s: []const u8, pos: us
             const colon1 = std.mem.indexOfPos(u8, s, pos + 2, ":") orelse return error.RuntimeError;
             const name_len = std.fmt.parseInt(usize, s[pos + 2 .. colon1], 10) catch return error.RuntimeError;
             if (colon1 + 2 + name_len + 1 >= s.len) return error.RuntimeError;
-            const class_name = try ctx.createString(s[colon1 + 2 .. colon1 + 2 + name_len]);
+            const orig_class = s[colon1 + 2 .. colon1 + 2 + name_len];
+            const class_allowed = uctx.classAllowed(orig_class) and ctx.vm.classes.contains(orig_class);
+            const class_name = try ctx.createString(if (class_allowed) orig_class else "__PHP_Incomplete_Class");
             var p = colon1 + 2 + name_len + 2;
             const count_end = std.mem.indexOfPos(u8, s, p, ":") orelse return error.RuntimeError;
             const prop_count = std.fmt.parseInt(usize, s[p..count_end], 10) catch return error.RuntimeError;
             if (count_end + 1 >= s.len or s[count_end + 1] != '{') return error.RuntimeError;
             p = count_end + 2;
 
+            // ensure __PHP_Incomplete_Class exists in the class table
+            if (!class_allowed and !ctx.vm.classes.contains("__PHP_Incomplete_Class")) {
+                var def = ClassDef{ .name = "__PHP_Incomplete_Class" };
+                try ctx.vm.classes.put(ctx.allocator, "__PHP_Incomplete_Class", def);
+                _ = &def;
+            }
             const obj = try ctx.createObject(class_name);
+            if (!class_allowed) {
+                try obj.set(ctx.allocator, "__PHP_Incomplete_Class_Name", .{ .string = try ctx.createString(orig_class) });
+            }
             if (obj.slots == null) {
                 if (ctx.vm.classes.get(class_name)) |cls| {
                     if (cls.slot_layout) |layout| {
