@@ -60,8 +60,7 @@ echo password_verify("wrong", $h1) ? "no\n" : "wrong-v1\n";
 // random_int
 $r1 = random_int(1, 100);
 echo gettype($r1), ":", ($r1 >= 1 && $r1 <= 100 ? "in-range" : "oob"), "\n";
-$r2 = random_int(1, 100);
-echo $r1 !== $r2 ? "diff" : "same", " (likely)\n"; // not guaranteed but usually
+// random_int two-call uniqueness check is flaky (1% chance of collision); skipped
 
 try { random_int(10, 1); echo "no err\n"; } catch (\ValueError $e) { echo "ve\n"; }
 
