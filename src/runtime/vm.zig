@@ -6666,12 +6666,13 @@ pub const VM = struct {
         try self.functions.put(self.allocator, new_name, func);
 
         if (self.capture_index.get(closure_name)) |cr| {
-            // copy source captures to a stack buffer to avoid dangling slice
+            // copy source captures to a heap buffer to avoid dangling slice
             // when self.captures reallocates during append
-            var src_buf: [32]CaptureEntry = undefined;
             const src_len = cr.len;
-            for (0..src_len) |i| src_buf[i] = self.captures.items[cr.start + i];
-            const src = src_buf[0..src_len];
+            const src_heap = try self.allocator.alloc(CaptureEntry, src_len);
+            defer self.allocator.free(src_heap);
+            for (0..src_len) |i| src_heap[i] = self.captures.items[cr.start + i];
+            const src = src_heap;
 
             const new_start: u32 = @intCast(self.captures.items.len);
             var has_this = false;
