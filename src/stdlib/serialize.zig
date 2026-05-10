@@ -283,6 +283,25 @@ fn serializeValue(ctx: *NativeContext, buf: *std.ArrayListUnmanaged(u8), sctx: *
             }
             try sctx.objects.put(a, obj, sctx.next_slot - 1);
 
+            // enum: emit E:<len>:"Class:Case"; per PHP 8.1
+            if (ctx.vm.classes.get(obj.class_name)) |cdef| {
+                if (cdef.is_enum) {
+                    const name_val = obj.get("name");
+                    const case_name: []const u8 = if (name_val == .string) name_val.string else "";
+                    const total_len = obj.class_name.len + 1 + case_name.len;
+                    try buf.appendSlice(a, "E:");
+                    var tmp: [20]u8 = undefined;
+                    const ls = std.fmt.bufPrint(&tmp, "{d}", .{total_len}) catch return;
+                    try buf.appendSlice(a, ls);
+                    try buf.appendSlice(a, ":\"");
+                    try buf.appendSlice(a, obj.class_name);
+                    try buf.append(a, ':');
+                    try buf.appendSlice(a, case_name);
+                    try buf.appendSlice(a, "\";");
+                    return;
+                }
+            }
+
             // PHP 7.4+ __serialize: returns the array used as the object's serialized payload
             if (ctx.vm.hasMethod(obj.class_name, "__serialize")) {
                 const ser_result = try ctx.vm.callMethod(obj, "__serialize", &.{});
@@ -487,6 +506,22 @@ fn unserializeValue(ctx: *NativeContext, uctx: *UnserCtx, s: []const u8, pos: us
             }
             if (p < s.len and s[p] == '}') p += 1;
             return .{ .value = .{ .array = arr }, .pos = p };
+        },
+        'E' => {
+            if (pos + 2 >= s.len or s[pos + 1] != ':') return error.RuntimeError;
+            const colon1 = std.mem.indexOfPos(u8, s, pos + 2, ":") orelse return error.RuntimeError;
+            const name_len = std.fmt.parseInt(usize, s[pos + 2 .. colon1], 10) catch return error.RuntimeError;
+            if (colon1 + 2 + name_len + 2 > s.len) return error.RuntimeError;
+            const payload = s[colon1 + 2 .. colon1 + 2 + name_len];
+            const sep = std.mem.indexOfScalar(u8, payload, ':') orelse return error.RuntimeError;
+            const cls_name = payload[0..sep];
+            const case_name = payload[sep + 1 ..];
+            const def = ctx.vm.classes.get(cls_name) orelse return error.RuntimeError;
+            const v = def.static_props.get(case_name) orelse return error.RuntimeError;
+            try uctx.slots.append(ctx.allocator, v);
+            var p = colon1 + 2 + name_len + 1;
+            if (p < s.len and s[p] == ';') p += 1;
+            return .{ .value = v, .pos = p };
         },
         'O' => {
             if (pos + 2 >= s.len or s[pos + 1] != ':') return error.RuntimeError;
