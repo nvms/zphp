@@ -1910,7 +1910,18 @@ fn rfIsGenerator(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
 }
 
 fn rfGetClosureUsedVariables(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    return .{ .array = try ctx.createArray() };
+    const this = getThis(ctx) orelse return .{ .array = try ctx.createArray() };
+    const fn_name = if (this.get("name") == .string) this.get("name").string else return .{ .array = try ctx.createArray() };
+    const result = try ctx.createArray();
+    for (ctx.vm.captures.items) |cap| {
+        if (std.mem.eql(u8, cap.closure_name, fn_name)) {
+            const name = if (cap.var_name.len > 0 and cap.var_name[0] == '$') cap.var_name[1..] else cap.var_name;
+            if (std.mem.eql(u8, name, "this")) continue;
+            const val = if (cap.ref_cell) |rc| rc.* else cap.value;
+            try result.set(ctx.allocator, .{ .string = name }, val);
+        }
+    }
+    return .{ .array = result };
 }
 
 fn rfGetClosureCalledClass(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
