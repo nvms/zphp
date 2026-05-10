@@ -2041,7 +2041,10 @@ pub const VM = struct {
                     } else if (iterable == .object) {
                         // IteratorAggregate: replace iterable with getIterator() result
                         if (self.hasMethod(iterable.object.class_name, "getIterator")) {
-                            const inner = self.callMethod(iterable.object, "getIterator", &.{}) catch .null;
+                            const inner = self.callMethod(iterable.object, "getIterator", &.{}) catch {
+                                if (self.dispatchPendingException(base_frame)) continue;
+                                return error.RuntimeError;
+                            };
                             self.stack[self.sp - 1] = inner;
                             iterable = inner;
                         }
@@ -5434,11 +5437,19 @@ pub const VM = struct {
                 },
 
                 .yield_from => {
-                    const iterable = self.pop();
+                    var iterable = self.pop();
                     const outer_gen = self.currentFrame().generator orelse {
                         self.setErrorMsg("Fatal error: Cannot use yield outside of a generator", .{});
                         return error.RuntimeError;
                     };
+
+                    // unwrap IteratorAggregate by calling getIterator
+                    if (iterable == .object and self.hasMethod(iterable.object.class_name, "getIterator")) {
+                        iterable = self.callMethod(iterable.object, "getIterator", &.{}) catch {
+                            if (self.dispatchPendingException(base_frame)) continue;
+                            return error.RuntimeError;
+                        };
+                    }
 
                     if (iterable == .generator) {
                         const inner = iterable.generator;
