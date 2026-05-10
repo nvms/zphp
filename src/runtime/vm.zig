@@ -8613,8 +8613,10 @@ pub const VM = struct {
                 }
                 const rest_arr = try self.allocator.create(PhpArray);
                 rest_arr.* = .{};
-                for (fixed..ac) |i| {
-                    try rest_arr.append(self.allocator, self.stack[self.sp - ac + i]);
+                if (ac > fixed) {
+                    for (fixed..ac) |i| {
+                        try rest_arr.append(self.allocator, self.stack[self.sp - ac + i]);
+                    }
                 }
                 try self.arrays.append(self.allocator, rest_arr);
                 try new_vars.put(self.allocator, func.params[fixed], .{ .array = rest_arr });
