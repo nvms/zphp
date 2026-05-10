@@ -102,7 +102,7 @@ fn native_round(_: *NativeContext, args: []const Value) RuntimeError!Value {
 
 fn roundWithMode(v: f64, mode: i64) f64 {
     if (std.math.isNan(v) or std.math.isInf(v)) return v;
-    const sign: f64 = if (v < 0) -1.0 else 1.0;
+    const sign: f64 = if (std.math.signbit(v)) -1.0 else 1.0;
     const av = @abs(v);
     const floor = @floor(av);
     const frac = av - floor;
