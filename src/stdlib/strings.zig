@@ -3746,7 +3746,7 @@ fn appendUrlEncoded(buf: *std.ArrayListUnmanaged(u8), a: std.mem.Allocator, s: [
 
 fn appendUrlEncodedMode(buf: *std.ArrayListUnmanaged(u8), a: std.mem.Allocator, s: []const u8, rfc3986: bool) !void {
     for (s) |c| {
-        if (std.ascii.isAlphanumeric(c) or c == '-' or c == '_' or c == '.' or c == '~') {
+        if (std.ascii.isAlphanumeric(c) or c == '-' or c == '_' or c == '.' or (c == '~' and rfc3986)) {
             try buf.append(a, c);
         } else if (c == ' ' and !rfc3986) {
             try buf.append(a, '+');
