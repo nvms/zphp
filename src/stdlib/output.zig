@@ -446,8 +446,12 @@ fn varExportValue(a: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8), val: V
                     try out.appendSlice(a, s);
                 } else if (f == @trunc(f) and abs_f < 1e15) {
                     const i: i64 = @intFromFloat(f);
-                    const s = std.fmt.bufPrint(&tmp, "{d}.0", .{i}) catch return;
-                    try out.appendSlice(a, s);
+                    if (i == 0 and std.math.signbit(f)) {
+                        try out.appendSlice(a, "-0.0");
+                    } else {
+                        const s = std.fmt.bufPrint(&tmp, "{d}.0", .{i}) catch return;
+                        try out.appendSlice(a, s);
+                    }
                 } else {
                     const s = std.fmt.bufPrint(&tmp, "{d}", .{f}) catch return;
                     try out.appendSlice(a, s);
