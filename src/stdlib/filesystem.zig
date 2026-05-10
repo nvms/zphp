@@ -583,6 +583,7 @@ fn native_basename(ctx: *NativeContext, args: []const Value) RuntimeError!Value 
 fn native_dirname(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len == 0 or args[0] != .string) return .{ .string = "" };
     var path = args[0].string;
+    if (path.len == 0) return .{ .string = "" };
     var levels: i64 = if (args.len >= 2) Value.toInt(args[1]) else 1;
     if (levels <= 0) return .{ .string = try ctx.createString(path) };
     while (levels > 0) : (levels -= 1) {
