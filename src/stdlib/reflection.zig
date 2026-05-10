@@ -59,7 +59,7 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try rc_def.methods.put(a, "isInterface", .{ .name = "isInterface", .arity = 0 });
     try rc_def.methods.put(a, "getInterfaceNames", .{ .name = "getInterfaceNames", .arity = 0 });
     try rc_def.methods.put(a, "getAttributes", .{ .name = "getAttributes", .arity = 0 });
-    try rc_def.methods.put(a, "getProperties", .{ .name = "getProperties", .arity = 0 });
+    try rc_def.methods.put(a, "getProperties", .{ .name = "getProperties", .arity = 1 });
     try rc_def.methods.put(a, "getProperty", .{ .name = "getProperty", .arity = 1 });
     try rc_def.methods.put(a, "hasProperty", .{ .name = "hasProperty", .arity = 1 });
     try rc_def.methods.put(a, "newInstanceWithoutConstructor", .{ .name = "newInstanceWithoutConstructor", .arity = 0 });
@@ -380,6 +380,18 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try rprop_def.methods.put(a, "getAttributes", .{ .name = "getAttributes", .arity = 0 });
     try rprop_def.methods.put(a, "getDocComment", .{ .name = "getDocComment", .arity = 0 });
     try rprop_def.methods.put(a, "isVirtual", .{ .name = "isVirtual", .arity = 0 });
+    try rprop_def.static_props.put(a, "IS_STATIC", .{ .int = 16 });
+    try rprop_def.static_props.put(a, "IS_PUBLIC", .{ .int = 1 });
+    try rprop_def.static_props.put(a, "IS_PROTECTED", .{ .int = 2 });
+    try rprop_def.static_props.put(a, "IS_PRIVATE", .{ .int = 4 });
+    try rprop_def.static_props.put(a, "IS_READONLY", .{ .int = 128 });
+    try rprop_def.static_props.put(a, "IS_VIRTUAL", .{ .int = 512 });
+    try rprop_def.constant_names.put(a, "IS_STATIC", {});
+    try rprop_def.constant_names.put(a, "IS_PUBLIC", {});
+    try rprop_def.constant_names.put(a, "IS_PROTECTED", {});
+    try rprop_def.constant_names.put(a, "IS_PRIVATE", {});
+    try rprop_def.constant_names.put(a, "IS_READONLY", {});
+    try rprop_def.constant_names.put(a, "IS_VIRTUAL", {});
     try vm.classes.put(a, "ReflectionProperty", rprop_def);
 
     try vm.native_fns.put(a, "ReflectionProperty::__construct", rpConstruct);
@@ -1024,9 +1036,10 @@ fn rcGetAttributes(ctx: *NativeContext, args: []const Value) RuntimeError!Value 
     return buildAttributeArray(ctx, cls.attributes.items, filter, 1); // TARGET_CLASS
 }
 
-fn rcGetProperties(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+fn rcGetProperties(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     const this = getThis(ctx) orelse return .null;
     const class_name = if (this.get("name") == .string) this.get("name").string else return .null;
+    const filter: i64 = if (args.len >= 1 and args[0] == .int) args[0].int else 0;
 
     const arr = try ctx.createArray();
     var seen = std.StringHashMapUnmanaged(void){};
@@ -1038,6 +1051,7 @@ fn rcGetProperties(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
         const cls = ctx.vm.classes.get(name) orelse break;
         for (cls.properties.items) |prop| {
             if (!is_own and prop.visibility == .private) continue;
+            if (!matchPropFilter(filter, prop.visibility, false)) continue;
             if (!seen.contains(prop.name)) {
                 try seen.put(ctx.allocator, prop.name, {});
                 const obj = try buildPropertyObj(ctx, class_name, prop, name);
@@ -1048,6 +1062,27 @@ fn rcGetProperties(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
         is_own = false;
     }
     return .{ .array = arr };
+}
+
+fn matchPropFilter(filter: i64, vis: ClassDef.Visibility, is_static: bool) bool {
+    if (filter == 0) return true;
+    const IS_STATIC: i64 = 16;
+    const IS_PUBLIC: i64 = 1;
+    const IS_PROTECTED: i64 = 2;
+    const IS_PRIVATE: i64 = 4;
+    const IS_READONLY: i64 = 128;
+    _ = IS_READONLY;
+    const want_static = (filter & IS_STATIC) != 0;
+    const want_public = (filter & IS_PUBLIC) != 0;
+    const want_protected = (filter & IS_PROTECTED) != 0;
+    const want_private = (filter & IS_PRIVATE) != 0;
+    const any_vis = want_public or want_protected or want_private;
+    const has_vis_match = (vis == .public and want_public) or
+        (vis == .protected and want_protected) or
+        (vis == .private and want_private);
+    if (any_vis and !has_vis_match) return false;
+    if (want_static and !is_static) return false;
+    return true;
 }
 
 fn rcGetProperty(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
@@ -1334,9 +1369,20 @@ fn rcGetDefaultProperties(ctx: *NativeContext, _: []const Value) RuntimeError!Va
     const this = getThis(ctx) orelse return .null;
     const class_name = if (this.get("name") == .string) this.get("name").string else return .null;
     const arr = try ctx.createArray();
-    const cls = ctx.vm.classes.get(class_name) orelse return .{ .array = arr };
-    for (cls.properties.items) |prop| {
-        try arr.set(ctx.allocator, .{ .string = prop.name }, prop.default);
+    var seen = std.StringHashMapUnmanaged(void){};
+    defer seen.deinit(ctx.allocator);
+    var is_own = true;
+    var current: ?[]const u8 = class_name;
+    while (current) |name| {
+        const cls = ctx.vm.classes.get(name) orelse break;
+        for (cls.properties.items) |prop| {
+            if (!is_own and prop.visibility == .private) continue;
+            if (seen.contains(prop.name)) continue;
+            try seen.put(ctx.allocator, prop.name, {});
+            try arr.set(ctx.allocator, .{ .string = prop.name }, prop.default);
+        }
+        current = cls.parent;
+        is_own = false;
     }
     return .{ .array = arr };
 }
