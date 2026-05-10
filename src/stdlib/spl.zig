@@ -1513,7 +1513,12 @@ fn heapValid(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
 fn faConstruct(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     const obj = getThis(ctx) orelse return .null;
     const arr = try ensureData(ctx, obj);
-    const size: usize = if (args.len >= 1) @intCast(@max(Value.toInt(args[0]), 0)) else 0;
+    const raw_size: i64 = if (args.len >= 1) Value.toInt(args[0]) else 0;
+    if (raw_size < 0) {
+        try ctx.vm.setPendingException("ValueError", "SplFixedArray::__construct(): Argument #1 ($size) must be greater than or equal to 0");
+        return error.RuntimeError;
+    }
+    const size: usize = @intCast(raw_size);
     var i: usize = 0;
     while (i < size) : (i += 1) {
         try arr.append(ctx.allocator, .null);
@@ -2293,8 +2298,19 @@ fn sosAddAll(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
 fn sosOffsetGet(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     const obj = getThis(ctx) orelse return .null;
     if (args.len == 0 or args[0] != .object) return .null;
-    const info = sosGetInfo(obj) orelse return .null;
+    const info = sosGetInfo(obj) orelse {
+        try ctx.vm.setPendingException("UnexpectedValueException", "Object not found");
+        return error.RuntimeError;
+    };
     const key = try sosHashKey(ctx, obj, args[0].object);
+    var found = false;
+    for (info.entries.items) |entry| {
+        if (entry.key.eql(key)) { found = true; break; }
+    }
+    if (!found) {
+        try ctx.vm.setPendingException("UnexpectedValueException", "Object not found");
+        return error.RuntimeError;
+    }
     return info.get(key);
 }
 
