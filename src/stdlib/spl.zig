@@ -658,7 +658,10 @@ fn stackPush(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
 fn stackPop(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
     const obj = getThis(ctx) orelse return .null;
     const arr = getData(obj) orelse return .null;
-    if (arr.entries.items.len == 0) return .null;
+    if (arr.entries.items.len == 0) {
+        try ctx.vm.setPendingException("RuntimeException", "Can't peek at an empty datastructure");
+        return error.RuntimeError;
+    }
     const last = arr.entries.items[arr.entries.items.len - 1].value;
     arr.entries.items.len -= 1;
     return last;
@@ -667,14 +670,20 @@ fn stackPop(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
 fn stackTop(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
     const obj = getThis(ctx) orelse return .null;
     const arr = getData(obj) orelse return .null;
-    if (arr.entries.items.len == 0) return .null;
+    if (arr.entries.items.len == 0) {
+        try ctx.vm.setPendingException("RuntimeException", "Can't peek at an empty datastructure");
+        return error.RuntimeError;
+    }
     return arr.entries.items[arr.entries.items.len - 1].value;
 }
 
 fn stackBottom(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
     const obj = getThis(ctx) orelse return .null;
     const arr = getData(obj) orelse return .null;
-    if (arr.entries.items.len == 0) return .null;
+    if (arr.entries.items.len == 0) {
+        try ctx.vm.setPendingException("RuntimeException", "Can't peek at an empty datastructure");
+        return error.RuntimeError;
+    }
     return arr.entries.items[0].value;
 }
 
@@ -693,7 +702,10 @@ fn stackIsEmpty(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
 fn stackShift(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
     const obj = getThis(ctx) orelse return .null;
     const arr = getData(obj) orelse return .null;
-    if (arr.entries.items.len == 0) return .null;
+    if (arr.entries.items.len == 0) {
+        try ctx.vm.setPendingException("RuntimeException", "Can't peek at an empty datastructure");
+        return error.RuntimeError;
+    }
     const first = arr.entries.items[0].value;
     std.mem.copyForwards(PhpArray.Entry, arr.entries.items[0 .. arr.entries.items.len - 1], arr.entries.items[1..arr.entries.items.len]);
     arr.entries.items.len -= 1;
@@ -1262,7 +1274,10 @@ fn pqInsert(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
 
 fn pqExtractValue(ctx: *NativeContext, obj: *PhpObject) RuntimeError!Value {
     const arr = getData(obj) orelse return .null;
-    if (arr.entries.items.len == 0) return .null;
+    if (arr.entries.items.len == 0) {
+        try ctx.vm.setPendingException("RuntimeException", "Can't peek at an empty datastructure");
+        return error.RuntimeError;
+    }
     const entry = arr.entries.items[0].value;
     std.mem.copyForwards(PhpArray.Entry, arr.entries.items[0 .. arr.entries.items.len - 1], arr.entries.items[1..arr.entries.items.len]);
     arr.entries.items.len -= 1;
@@ -1293,7 +1308,10 @@ fn pqExtract(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
 fn pqTop(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
     const obj = getThis(ctx) orelse return .null;
     const arr = getData(obj) orelse return .null;
-    if (arr.entries.items.len == 0) return .null;
+    if (arr.entries.items.len == 0) {
+        try ctx.vm.setPendingException("RuntimeException", "Can't peek at an empty datastructure");
+        return error.RuntimeError;
+    }
     return pqFormatEntry(ctx, obj, arr.entries.items[0].value);
 }
 
@@ -1323,7 +1341,10 @@ fn pqCurrent(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
 fn pqKey(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
     const obj = getThis(ctx) orelse return .null;
     const arr = getData(obj) orelse return .null;
-    if (arr.entries.items.len == 0) return .null;
+    if (arr.entries.items.len == 0) {
+        try ctx.vm.setPendingException("RuntimeException", "Can't peek at an empty datastructure");
+        return error.RuntimeError;
+    }
     return .{ .int = @intCast(arr.entries.items.len - 1) };
 }
 
@@ -1461,7 +1482,10 @@ fn heapCurrent(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
 fn heapKey(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
     const obj = getThis(ctx) orelse return .null;
     const arr = getData(obj) orelse return .null;
-    if (arr.entries.items.len == 0) return .null;
+    if (arr.entries.items.len == 0) {
+        try ctx.vm.setPendingException("RuntimeException", "Can't peek at an empty datastructure");
+        return error.RuntimeError;
+    }
     return .{ .int = @intCast(arr.entries.items.len - 1) };
 }
 
@@ -1663,7 +1687,10 @@ fn sqEnqueue(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
 fn sqDequeue(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
     const obj = getThis(ctx) orelse return .null;
     const arr = getData(obj) orelse return .null;
-    if (arr.entries.items.len == 0) return .null;
+    if (arr.entries.items.len == 0) {
+        try ctx.vm.setPendingException("RuntimeException", "Can't peek at an empty datastructure");
+        return error.RuntimeError;
+    }
     const first = arr.entries.items[0].value;
     std.mem.copyForwards(PhpArray.Entry, arr.entries.items[0 .. arr.entries.items.len - 1], arr.entries.items[1..arr.entries.items.len]);
     arr.entries.items.len -= 1;
@@ -1673,14 +1700,20 @@ fn sqDequeue(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
 fn sqBottom(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
     const obj = getThis(ctx) orelse return .null;
     const arr = getData(obj) orelse return .null;
-    if (arr.entries.items.len == 0) return .null;
+    if (arr.entries.items.len == 0) {
+        try ctx.vm.setPendingException("RuntimeException", "Can't peek at an empty datastructure");
+        return error.RuntimeError;
+    }
     return arr.entries.items[0].value;
 }
 
 fn sqTop(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
     const obj = getThis(ctx) orelse return .null;
     const arr = getData(obj) orelse return .null;
-    if (arr.entries.items.len == 0) return .null;
+    if (arr.entries.items.len == 0) {
+        try ctx.vm.setPendingException("RuntimeException", "Can't peek at an empty datastructure");
+        return error.RuntimeError;
+    }
     return arr.entries.items[arr.entries.items.len - 1].value;
 }
 
@@ -1757,7 +1790,10 @@ fn dllPush(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
 fn dllPop(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
     const obj = getThis(ctx) orelse return .null;
     const arr = getData(obj) orelse return .null;
-    if (arr.entries.items.len == 0) return .null;
+    if (arr.entries.items.len == 0) {
+        try ctx.vm.setPendingException("RuntimeException", "Can't peek at an empty datastructure");
+        return error.RuntimeError;
+    }
     const last = arr.entries.items[arr.entries.items.len - 1].value;
     arr.entries.items.len -= 1;
     return last;
@@ -1774,7 +1810,10 @@ fn dllUnshift(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
 fn dllShift(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
     const obj = getThis(ctx) orelse return .null;
     const arr = getData(obj) orelse return .null;
-    if (arr.entries.items.len == 0) return .null;
+    if (arr.entries.items.len == 0) {
+        try ctx.vm.setPendingException("RuntimeException", "Can't peek at an empty datastructure");
+        return error.RuntimeError;
+    }
     const first = arr.entries.items[0].value;
     std.mem.copyForwards(PhpArray.Entry, arr.entries.items[0 .. arr.entries.items.len - 1], arr.entries.items[1..arr.entries.items.len]);
     arr.entries.items.len -= 1;
@@ -1784,14 +1823,20 @@ fn dllShift(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
 fn dllTop(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
     const obj = getThis(ctx) orelse return .null;
     const arr = getData(obj) orelse return .null;
-    if (arr.entries.items.len == 0) return .null;
+    if (arr.entries.items.len == 0) {
+        try ctx.vm.setPendingException("RuntimeException", "Can't peek at an empty datastructure");
+        return error.RuntimeError;
+    }
     return arr.entries.items[arr.entries.items.len - 1].value;
 }
 
 fn dllBottom(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
     const obj = getThis(ctx) orelse return .null;
     const arr = getData(obj) orelse return .null;
-    if (arr.entries.items.len == 0) return .null;
+    if (arr.entries.items.len == 0) {
+        try ctx.vm.setPendingException("RuntimeException", "Can't peek at an empty datastructure");
+        return error.RuntimeError;
+    }
     return arr.entries.items[0].value;
 }
 

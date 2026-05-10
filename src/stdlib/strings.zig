@@ -1362,9 +1362,14 @@ fn sprintfImpl(ctx: *NativeContext, fmt_str: []const u8, args: []const Value) ![
                     try formatGeneral(&tmp_buf, ctx.allocator, v, prec, spec);
                 },
                 else => {
-                    try buf.append(ctx.allocator, '%');
-                    try buf.append(ctx.allocator, spec);
-                    continue;
+                    buf.deinit(ctx.allocator);
+                    tmp_buf.deinit(ctx.allocator);
+                    var msg_buf: [64]u8 = undefined;
+                    const msg = std.fmt.bufPrint(&msg_buf, "Unknown format specifier \"{c}\"", .{spec}) catch "Unknown format specifier";
+                    const msg_dup = try ctx.allocator.dupe(u8, msg);
+                    try ctx.strings.append(ctx.allocator, msg_dup);
+                    try ctx.vm.setPendingException("ValueError", msg_dup);
+                    return error.RuntimeError;
                 },
             }
 
