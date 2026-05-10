@@ -13,6 +13,12 @@ const Allocator = std.mem.Allocator;
 const RuntimeError = error{ RuntimeError, OutOfMemory };
 
 pub const entries = .{
+    .{ "gzcompress", native_gzcompress },
+    .{ "gzuncompress", native_gzuncompress },
+    .{ "gzdeflate", native_gzdeflate },
+    .{ "gzinflate", native_gzinflate },
+    .{ "gzencode", native_gzencode },
+    .{ "gzdecode", native_gzdecode },
     .{ "file_get_contents", native_file_get_contents },
     .{ "file_put_contents", native_file_put_contents },
     .{ "file_exists", native_file_exists },
@@ -1550,6 +1556,100 @@ const ZLIB_PREFIX = "compress.zlib://";
 
 // gzip-decode bytes. accepts both gzip-wrapped and zlib-wrapped streams via
 // auto-detection (windowBits=15+32). caller owns the returned buffer
+fn zlibDecodeWindow(a: Allocator, input: []const u8, window_bits: c_int) ![]u8 {
+    if (input.len == 0) return try a.alloc(u8, 0);
+    var stream: zlib.z_stream = std.mem.zeroes(zlib.z_stream);
+    if (zlib.inflateInit2_(&stream, window_bits, zlib.zlibVersion(), @sizeOf(zlib.z_stream)) != zlib.Z_OK) {
+        return error.InflateInitFailed;
+    }
+    defer _ = zlib.inflateEnd(&stream);
+    var out = std.ArrayListUnmanaged(u8){};
+    errdefer out.deinit(a);
+    stream.next_in = @constCast(input.ptr);
+    stream.avail_in = @intCast(input.len);
+    var chunk: [16 * 1024]u8 = undefined;
+    while (true) {
+        stream.next_out = &chunk;
+        stream.avail_out = chunk.len;
+        const rc = zlib.inflate(&stream, zlib.Z_NO_FLUSH);
+        const produced = chunk.len - stream.avail_out;
+        if (produced > 0) try out.appendSlice(a, chunk[0..produced]);
+        if (rc == zlib.Z_STREAM_END) break;
+        if (rc != zlib.Z_OK) return error.CorruptCompressedData;
+        if (stream.avail_in == 0 and produced == 0) break;
+    }
+    return try out.toOwnedSlice(a);
+}
+
+fn zlibEncodeWindow(a: Allocator, input: []const u8, window_bits: c_int) ![]u8 {
+    var stream: zlib.z_stream = std.mem.zeroes(zlib.z_stream);
+    if (zlib.deflateInit2_(
+        &stream,
+        zlib.Z_DEFAULT_COMPRESSION,
+        zlib.Z_DEFLATED,
+        window_bits,
+        8,
+        zlib.Z_DEFAULT_STRATEGY,
+        zlib.zlibVersion(),
+        @sizeOf(zlib.z_stream),
+    ) != zlib.Z_OK) {
+        return error.DeflateInitFailed;
+    }
+    defer _ = zlib.deflateEnd(&stream);
+    const bound = zlib.deflateBound(&stream, @intCast(input.len));
+    const out = try a.alloc(u8, bound + 32);
+    errdefer a.free(out);
+    stream.next_in = @constCast(input.ptr);
+    stream.avail_in = @intCast(input.len);
+    stream.next_out = out.ptr;
+    stream.avail_out = @intCast(out.len);
+    const rc = zlib.deflate(&stream, zlib.Z_FINISH);
+    if (rc != zlib.Z_STREAM_END) return error.DeflateFailed;
+    return try a.realloc(out, stream.total_out);
+}
+
+fn native_gzcompress(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len == 0 or args[0] != .string) return .{ .bool = false };
+    const out = zlibEncodeWindow(ctx.allocator, args[0].string, 15) catch return .{ .bool = false };
+    try ctx.vm.strings.append(ctx.allocator, out);
+    return .{ .string = out };
+}
+
+fn native_gzuncompress(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len == 0 or args[0] != .string) return .{ .bool = false };
+    const out = zlibDecodeWindow(ctx.allocator, args[0].string, 15) catch return .{ .bool = false };
+    try ctx.vm.strings.append(ctx.allocator, out);
+    return .{ .string = out };
+}
+
+fn native_gzdeflate(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len == 0 or args[0] != .string) return .{ .bool = false };
+    const out = zlibEncodeWindow(ctx.allocator, args[0].string, -15) catch return .{ .bool = false };
+    try ctx.vm.strings.append(ctx.allocator, out);
+    return .{ .string = out };
+}
+
+fn native_gzinflate(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len == 0 or args[0] != .string) return .{ .bool = false };
+    const out = zlibDecodeWindow(ctx.allocator, args[0].string, -15) catch return .{ .bool = false };
+    try ctx.vm.strings.append(ctx.allocator, out);
+    return .{ .string = out };
+}
+
+fn native_gzencode(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len == 0 or args[0] != .string) return .{ .bool = false };
+    const out = zlibEncodeWindow(ctx.allocator, args[0].string, 15 + 16) catch return .{ .bool = false };
+    try ctx.vm.strings.append(ctx.allocator, out);
+    return .{ .string = out };
+}
+
+fn native_gzdecode(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len == 0 or args[0] != .string) return .{ .bool = false };
+    const out = zlibDecodeWindow(ctx.allocator, args[0].string, 15 + 32) catch return .{ .bool = false };
+    try ctx.vm.strings.append(ctx.allocator, out);
+    return .{ .string = out };
+}
+
 fn gzipDecode(a: Allocator, input: []const u8) ![]u8 {
     if (input.len == 0) return try a.alloc(u8, 0);
     var stream: zlib.z_stream = std.mem.zeroes(zlib.z_stream);
