@@ -3184,9 +3184,28 @@ fn native_rawurldecode(ctx: *NativeContext, args: []const Value) RuntimeError!Va
     return .{ .string = result };
 }
 
+fn coerceToString(ctx: *NativeContext, v: Value) ![]const u8 {
+    return switch (v) {
+        .string => |s| s,
+        .int => |n| blk: {
+            const s = try std.fmt.allocPrint(ctx.allocator, "{d}", .{n});
+            try ctx.strings.append(ctx.allocator, s);
+            break :blk s;
+        },
+        .float => |f| blk: {
+            const s = try std.fmt.allocPrint(ctx.allocator, "{d}", .{f});
+            try ctx.strings.append(ctx.allocator, s);
+            break :blk s;
+        },
+        .bool => |b| if (b) "1" else "",
+        .null => "",
+        else => "",
+    };
+}
+
 fn native_md5(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len == 0) return .{ .string = "" };
-    const s = if (args[0] == .string) args[0].string else return Value{ .string = "" };
+    const s = try coerceToString(ctx, args[0]);
     const raw_output = args.len >= 2 and args[1].isTruthy();
     var hash: [16]u8 = undefined;
     std.crypto.hash.Md5.hash(s, &hash, .{});
