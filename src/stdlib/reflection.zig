@@ -1073,6 +1073,26 @@ fn rcGetProperties(ctx: *NativeContext, args: []const Value) RuntimeError!Value 
                 try arr.append(ctx.allocator, .{ .object = obj });
             }
         }
+        var sp_iter = cls.static_props.iterator();
+        while (sp_iter.next()) |entry| {
+            const sp_name = entry.key_ptr.*;
+            if (cls.constant_names.contains(sp_name)) continue;
+            const vis: ClassDef.Visibility = cls.const_visibility.get(sp_name) orelse .public;
+            if (!is_own and vis == .private) continue;
+            if (!matchPropFilter(filter, vis, true)) continue;
+            if (!seen.contains(sp_name)) {
+                try seen.put(ctx.allocator, sp_name, {});
+                const pdef = ClassDef.PropertyDef{
+                    .name = sp_name,
+                    .default = entry.value_ptr.*,
+                    .has_default = true,
+                    .visibility = vis,
+                };
+                const obj = try buildPropertyObj(ctx, class_name, pdef, name);
+                try obj.set(ctx.allocator, "__is_static", .{ .bool = true });
+                try arr.append(ctx.allocator, .{ .object = obj });
+            }
+        }
         current = cls.parent;
         is_own = false;
     }

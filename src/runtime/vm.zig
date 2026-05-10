@@ -6037,14 +6037,15 @@ pub const VM = struct {
                 break :blk v;
             } else Value{ .null = {} };
             try def.static_props.put(self.allocator, sprop_names[pi], default_val);
+            const vis_byte = sprop_visibility[pi] & 0x03;
+            if (vis_byte != 0) {
+                try def.const_visibility.put(self.allocator, sprop_names[pi], @enumFromInt(vis_byte));
+            }
             if (sprop_is_const[pi] == 1) {
                 if (!def.constant_names.contains(sprop_names[pi])) {
                     try def.constant_order.append(self.allocator, sprop_names[pi]);
                 }
                 try def.constant_names.put(self.allocator, sprop_names[pi], {});
-                if (sprop_visibility[pi] != 0) {
-                    try def.const_visibility.put(self.allocator, sprop_names[pi], @enumFromInt(sprop_visibility[pi]));
-                }
             }
         }
 
