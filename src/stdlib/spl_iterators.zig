@@ -42,8 +42,9 @@ pub fn register(vm: *VM, a: Allocator) !void {
         "getPathname", "getPath", "getRealPath", "getSize",
         "isDir", "isFile", "isLink", "isReadable", "isWritable",
         "getMTime", "getCTime", "getATime", "getType", "__toString",
+        "openFile",
     }) |m| {
-        const arity: u8 = if (std.mem.eql(u8, m, "__construct")) 1 else 0;
+        const arity: u8 = if (std.mem.eql(u8, m, "__construct")) 1 else if (std.mem.eql(u8, m, "openFile")) 1 else 0;
         try fi_def.methods.put(a, m, .{ .name = m, .arity = arity });
     }
     try vm.classes.put(a, "SplFileInfo", fi_def);
@@ -66,6 +67,7 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try vm.native_fns.put(a, "SplFileInfo::getATime", fiGetATime);
     try vm.native_fns.put(a, "SplFileInfo::getType", fiGetType);
     try vm.native_fns.put(a, "SplFileInfo::__toString", fiToString);
+    try vm.native_fns.put(a, "SplFileInfo::openFile", fiOpenFile);
 
     // DirectoryIterator
     var di_def = ClassDef{ .name = "DirectoryIterator" };
@@ -630,6 +632,19 @@ fn fiGetType(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
 fn fiToString(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
     const obj = getThis(ctx) orelse return .{ .string = "" };
     return .{ .string = objGetStr(obj, "__pathname") };
+}
+
+fn fiOpenFile(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    const this = getThis(ctx) orelse return .null;
+    const path = objGetStr(this, "__pathname");
+    const mode: Value = if (args.len >= 1 and args[0] == .string) args[0] else .{ .string = "r" };
+    const class_name = try createString(ctx, "SplFileObject");
+    const obj = try ctx.vm.allocator.create(@import("../runtime/value.zig").PhpObject);
+    obj.* = .{ .class_name = class_name };
+    try ctx.vm.objects.append(ctx.vm.allocator, obj);
+    try ctx.vm.initObjectProperties(obj, class_name);
+    _ = try ctx.vm.callMethod(obj, "__construct", &.{ .{ .string = path }, mode });
+    return .{ .object = obj };
 }
 
 // ==========================================
