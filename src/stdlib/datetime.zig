@@ -1260,7 +1260,20 @@ fn extractTimezoneName(args: []const Value) []const u8 {
 fn dtzConstruct(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     const obj = getThis(ctx) orelse return .null;
     if (args.len >= 1 and args[0] == .string) {
-        try obj.set(ctx.allocator, "timezone", .{ .string = args[0].string });
+        const name = args[0].string;
+        // accept fixed-offset forms (+HH, +HH:MM, UTC, GMT) or known zones
+        const valid = blk: {
+            if (parseTimezoneOffset(name) != null) break :blk true;
+            if (lookupTimezone(name) != null) break :blk true;
+            break :blk false;
+        };
+        if (!valid) {
+            const msg = try std.fmt.allocPrint(ctx.allocator, "DateTimeZone::__construct(): Unknown or bad timezone ({s})", .{name});
+            try ctx.strings.append(ctx.allocator, msg);
+            try ctx.vm.setPendingException("Exception", msg);
+            return error.RuntimeError;
+        }
+        try obj.set(ctx.allocator, "timezone", .{ .string = name });
     }
     return .null;
 }
@@ -2430,7 +2443,10 @@ fn startsWith(s: []const u8, prefix: []const u8) bool {
 
 // gmdate is identical to date since zphp timestamps are always UTC
 fn native_gmdate(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    return native_date(ctx, args);
+    if (args.len == 0 or args[0] != .string) return .{ .string = "" };
+    const format = args[0].string;
+    const timestamp: i64 = if (args.len >= 2) Value.toInt(args[1]) else std.time.timestamp();
+    return formatTimestampTz(ctx, timestamp, format, 0, "UTC");
 }
 
 fn native_tz_set(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
