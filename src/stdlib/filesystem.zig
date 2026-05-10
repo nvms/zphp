@@ -1176,7 +1176,8 @@ fn openWithMode(path: []const u8, mode: []const u8) !std.fs.File {
         'a' => blk: {
             const file = std.fs.cwd().openFile(path, .{ .mode = if (has_plus) .read_write else .write_only }) catch
                 std.fs.cwd().createFile(path, .{ .read = has_plus }) catch |err| break :blk err;
-            file.seekFromEnd(0) catch {};
+            // PHP keeps ftell at 0 after open with 'a' mode but writes always
+            // go to the end - the seek-to-end happens in fwrite when is_append is set
             break :blk file;
         },
         'x' => std.fs.cwd().createFile(path, .{ .exclusive = true, .read = has_plus }),
@@ -1334,6 +1335,11 @@ fn native_fwrite(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
         return .{ .int = @intCast(data.len) };
     }
     const file = getFileHandle(obj) orelse return Value{ .bool = false };
+    // 'a' / 'a+' modes: writes always append, regardless of where the read cursor is
+    const mode_v = obj.get("__mode");
+    if (mode_v == .string and mode_v.string.len > 0 and mode_v.string[0] == 'a') {
+        file.seekFromEnd(0) catch {};
+    }
     // route php://stdout and php://output through the VM output buffer so the order
     // matches echo. for php://stderr, flush the buffer first so anything echo'd before
     // this call lands before our stderr write
