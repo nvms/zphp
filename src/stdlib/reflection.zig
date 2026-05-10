@@ -956,11 +956,28 @@ fn rcIsInterface(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
 fn rcGetInterfaceNames(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
     const this = getThis(ctx) orelse return .null;
     const class_name = if (this.get("name") == .string) this.get("name").string else return .null;
-    const cls = ctx.vm.classes.get(class_name) orelse return .null;
 
     const arr = try ctx.createArray();
-    for (cls.interfaces.items) |iface| {
+    var seen = std.StringHashMapUnmanaged(void){};
+    defer seen.deinit(ctx.allocator);
+    var queue = std.ArrayListUnmanaged([]const u8){};
+    defer queue.deinit(ctx.allocator);
+
+    var current: ?[]const u8 = class_name;
+    while (current) |cn| {
+        const cls = ctx.vm.classes.get(cn) orelse break;
+        for (cls.interfaces.items) |iface| try queue.append(ctx.allocator, iface);
+        current = cls.parent;
+    }
+    var i: usize = 0;
+    while (i < queue.items.len) : (i += 1) {
+        const iface = queue.items[i];
+        if (seen.contains(iface)) continue;
+        try seen.put(ctx.allocator, iface, {});
         try arr.append(ctx.allocator, .{ .string = iface });
+        if (ctx.vm.classes.get(iface)) |idef| {
+            for (idef.interfaces.items) |sub| try queue.append(ctx.allocator, sub);
+        }
     }
     return .{ .array = arr };
 }

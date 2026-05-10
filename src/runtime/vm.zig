@@ -5104,7 +5104,10 @@ pub const VM = struct {
                     else if (class_val == .object)
                         class_val.object.class_name
                     else {
-                        self.setErrorMsg("Fatal error: Uncaught TypeError: {s}::method() requires a class name string", .{method_name});
+                        self.sp -= ac + 1;
+                        const msg = try std.fmt.allocPrint(self.allocator, "{s}::method() requires a class name string", .{method_name});
+                        try self.strings.append(self.allocator, msg);
+                        if (try self.throwBuiltinException("Error", msg)) continue;
                         return error.RuntimeError;
                     };
                     if (!self.classes.contains(class_name)) {

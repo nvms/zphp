@@ -499,11 +499,13 @@ fn class_exists(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len == 0 or args[0] != .string) return .{ .bool = false };
     const name = args[0].string;
     if (std.mem.eql(u8, name, "stdClass") or std.mem.eql(u8, name, "Attribute")) return .{ .bool = true };
+    if (ctx.vm.interfaces.contains(name)) return .{ .bool = false };
+    if (ctx.vm.traits.contains(name)) return .{ .bool = false };
     if (ctx.vm.classes.contains(name)) return .{ .bool = true };
     const autoload = args.len < 2 or !(args[1] == .bool and !args[1].bool);
     if (autoload and ctx.vm.autoload_callbacks.items.len > 0) {
         try ctx.vm.tryAutoload(name);
-        return .{ .bool = ctx.vm.classes.contains(name) };
+        return .{ .bool = ctx.vm.classes.contains(name) and !ctx.vm.interfaces.contains(name) };
     }
     return .{ .bool = false };
 }
@@ -518,8 +520,10 @@ fn method_exists(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
         "Fiber"
     else if (args[0] == .string)
         args[0].string
-    else
-        return Value{ .bool = false };
+    else {
+        try ctx.vm.setPendingException("TypeError", "method_exists(): Argument #1 ($object_or_class) must be of type object|string");
+        return error.RuntimeError;
+    };
     const method_name = args[1].string;
     // Generator and Fiber are not registered as ClassDef. Hardcode their
     // method tables so method_exists works on tagged values and "Generator"/"Fiber" strings.
