@@ -2037,14 +2037,20 @@ pub const VM = struct {
                                 if (obj.slot_layout) |layout| {
                                     for (layout.names, 0..) |name, i| {
                                         if (i < slots.len) {
-                                            try arr.set(self.allocator, .{ .string = name }, slots[i]);
+                                            const vr = self.findPropertyVisibility(obj.class_name, name);
+                                            if (vr.visibility == .public) {
+                                                try arr.set(self.allocator, .{ .string = name }, slots[i]);
+                                            }
                                         }
                                     }
                                 }
                             }
                             var it = obj.properties.iterator();
                             while (it.next()) |entry| {
-                                try arr.set(self.allocator, .{ .string = entry.key_ptr.* }, entry.value_ptr.*);
+                                const vr = self.findPropertyVisibility(obj.class_name, entry.key_ptr.*);
+                                if (vr.visibility == .public) {
+                                    try arr.set(self.allocator, .{ .string = entry.key_ptr.* }, entry.value_ptr.*);
+                                }
                             }
                             self.stack[self.sp - 1] = .{ .array = arr };
                             self.push(.{ .int = 0 });

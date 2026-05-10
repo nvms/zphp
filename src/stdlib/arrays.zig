@@ -895,6 +895,10 @@ fn array_combine(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
 
     var arr = try ctx.createArray();
     for (keys_arr.entries.items, vals_arr.entries.items) |k, v| {
+        if (k.value == .object or k.value == .array) {
+            try ctx.vm.setPendingException("TypeError", "array_combine(): Argument #1 ($keys) must contain only string and integer keys");
+            return error.RuntimeError;
+        }
         // PHP array_combine casts each key to string first, then canonicalizes.
         const key: PhpArray.Key = switch (k.value) {
             .int => |i| .{ .int = i },
