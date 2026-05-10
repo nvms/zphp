@@ -1242,7 +1242,7 @@ pub fn compileClassDecl(self: *Compiler, node: Ast.Node) Error!void {
 }
 
 pub fn compileAnonymousClass(self: *Compiler, node: Ast.Node) Error!void {
-    const anon_name = try std.fmt.allocPrint(self.allocator, "__anon_class_{d}", .{self.closure_count});
+    const anon_name = try std.fmt.allocPrint(self.allocator, "class@anonymous_{d}", .{self.closure_count});
     try self.string_allocs.append(self.allocator, anon_name);
     self.closure_count += 1;
 

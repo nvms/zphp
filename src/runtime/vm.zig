@@ -6232,7 +6232,7 @@ pub const VM = struct {
         // time the call site runs. their existing instances point at the old
         // slot_layout, so freeing it (as we do for regular re-registration)
         // would invalidate live objects. keep the first registration.
-        if (std.mem.startsWith(u8, class_name, "__anon_class_") and self.classes.contains(class_name)) {
+        if (std.mem.startsWith(u8, class_name, "class@anonymous_") and self.classes.contains(class_name)) {
             def.deinit(self.allocator);
             return;
         }
