@@ -973,8 +973,12 @@ fn aoUksort(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
 fn aoGetIterator(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
     const obj = getThis(ctx) orelse return .null;
     const arr = getData(obj) orelse return .null;
-    // return the underlying array for foreach iteration
-    return .{ .array = arr };
+    const it = try ctx.allocator.create(PhpObject);
+    it.* = .{ .class_name = "ArrayIterator" };
+    try it.set(ctx.allocator, "__data", .{ .array = arr });
+    try it.set(ctx.allocator, "__cursor", .{ .int = 0 });
+    try ctx.vm.objects.append(ctx.allocator, it);
+    return .{ .object = it };
 }
 
 fn aoSetFlags(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
