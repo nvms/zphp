@@ -33,6 +33,8 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try exc_def.methods.put(a, "getLine", .{ .name = "getLine", .arity = 0 });
     try exc_def.methods.put(a, "getTrace", .{ .name = "getTrace", .arity = 0 });
     try exc_def.methods.put(a, "getTraceAsString", .{ .name = "getTraceAsString", .arity = 0 });
+    try exc_def.methods.put(a, "__toString", .{ .name = "__toString", .arity = 0 });
+    try exc_def.interfaces.append(a, "Stringable");
     try vm.classes.put(a, "Exception", exc_def);
 
     try vm.native_fns.put(a, "Exception::__construct", exceptionConstruct);
@@ -43,6 +45,7 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try vm.native_fns.put(a, "Exception::getLine", exceptionGetLine);
     try vm.native_fns.put(a, "Exception::getTrace", exceptionGetTrace);
     try vm.native_fns.put(a, "Exception::getTraceAsString", exceptionGetTraceAsString);
+    try vm.native_fns.put(a, "Exception::__toString", exceptionToString);
 
     var err_def = ClassDef{ .name = "Error" };
     try err_def.properties.append(a, .{ .name = "message", .default = .{ .string = "" } });
@@ -59,6 +62,8 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try err_def.methods.put(a, "getLine", .{ .name = "getLine", .arity = 0 });
     try err_def.methods.put(a, "getTrace", .{ .name = "getTrace", .arity = 0 });
     try err_def.methods.put(a, "getTraceAsString", .{ .name = "getTraceAsString", .arity = 0 });
+    try err_def.methods.put(a, "__toString", .{ .name = "__toString", .arity = 0 });
+    try err_def.interfaces.append(a, "Stringable");
     try vm.classes.put(a, "Error", err_def);
 
     try vm.native_fns.put(a, "Error::__construct", exceptionConstruct);
@@ -69,6 +74,7 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try vm.native_fns.put(a, "Error::getLine", exceptionGetLine);
     try vm.native_fns.put(a, "Error::getTrace", exceptionGetTrace);
     try vm.native_fns.put(a, "Error::getTraceAsString", exceptionGetTraceAsString);
+    try vm.native_fns.put(a, "Error::__toString", exceptionToString);
 
     const subclasses = .{
         .{ "RuntimeException", "Exception" },
@@ -124,6 +130,21 @@ fn exceptionGetMessage(ctx: *NativeContext, _: []const Value) RuntimeError!Value
     const this_val = ctx.vm.currentFrame().vars.get("$this") orelse return .null;
     if (this_val != .object) return .null;
     return this_val.object.get("message");
+}
+
+fn exceptionToString(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const this_val = ctx.vm.currentFrame().vars.get("$this") orelse return .{ .string = "" };
+    if (this_val != .object) return .{ .string = "" };
+    const obj = this_val.object;
+    const msg = obj.get("message");
+    const msg_str = if (msg == .string) msg.string else "";
+    const file = obj.get("file");
+    const file_str = if (file == .string) file.string else "";
+    const line = obj.get("line");
+    const line_int = if (line == .int) line.int else 0;
+    const s = try std.fmt.allocPrint(ctx.allocator, "{s}: {s} in {s}:{d}\nStack trace:\n#0 {{main}}", .{ obj.class_name, msg_str, file_str, line_int });
+    try ctx.vm.strings.append(ctx.allocator, s);
+    return .{ .string = s };
 }
 
 fn exceptionGetCode(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
