@@ -1168,7 +1168,7 @@ fn native_fopen(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
         return .{ .object = obj };
     }
 
-    const file = if (std.mem.eql(u8, path, "php://temp") or std.mem.eql(u8, path, "php://memory")) blk: {
+    const file = if (std.mem.startsWith(u8, path, "php://temp") or std.mem.startsWith(u8, path, "php://memory")) blk: {
         const tmp = std.fmt.allocPrint(ctx.allocator, "/tmp/zphp_{d}", .{@as(u64, @truncate(@as(u128, @bitCast(std.time.nanoTimestamp()))))}) catch return Value{ .bool = false };
         defer ctx.allocator.free(tmp);
         const f = std.fs.cwd().createFile(tmp, .{ .read = true, .truncate = true }) catch return Value{ .bool = false };
@@ -1538,6 +1538,13 @@ fn native_ftruncate(_: *NativeContext, args: []const Value) RuntimeError!Value {
     const file = getFileHandle(args[0].object) orelse return Value{ .bool = false };
     const size: u64 = @intCast(@max(args[1].int, 0));
     file.setEndPos(size) catch return Value{ .bool = false };
+    // for php://memory / php://temp, snap the cursor to the new end rather than
+    // leaving it past EOF where subsequent writes would create null-padded holes
+    const path = args[0].object.get("__path");
+    if (path == .string and (std.mem.startsWith(u8, path.string, "php://memory") or std.mem.startsWith(u8, path.string, "php://temp"))) {
+        const cur = file.getPos() catch 0;
+        if (cur > size) file.seekTo(size) catch {};
+    }
     return .{ .bool = true };
 }
 
