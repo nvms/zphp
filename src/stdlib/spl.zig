@@ -1974,7 +1974,10 @@ fn dllOffsetGet(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     const arr = getData(obj) orelse return .null;
     if (args.len == 0) return .null;
     const idx = Value.toInt(args[0]);
-    if (idx < 0 or idx >= @as(i64, @intCast(arr.entries.items.len))) return .null;
+    if (idx < 0 or idx >= @as(i64, @intCast(arr.entries.items.len))) {
+        try ctx.vm.setPendingException("OutOfRangeException", "Offset invalid or out of range");
+        return error.RuntimeError;
+    }
     return arr.entries.items[@intCast(idx)].value;
 }
 
