@@ -81,7 +81,7 @@ pub const entries = .{
     .{ "register_shutdown_function", native_register_shutdown_function },
     .{ "error_reporting", native_error_reporting },
     .{ "error_get_last", native_error_get_last },
-    .{ "error_clear_last", native_noop_null },
+    .{ "error_clear_last", native_error_clear_last },
     .{ "get_include_path", native_get_include_path },
     .{ "set_include_path", native_set_include_path },
     .{ "restore_include_path", native_noop_null },
@@ -1256,7 +1256,16 @@ fn native_set_error_handler(ctx: *NativeContext, args: []const Value) RuntimeErr
     } else {
         ctx.vm.user_error_handler = null;
     }
+    ctx.vm.user_error_handler_mask = if (args.len >= 2 and args[1] == .int) args[1].int else -1;
     return prev;
+}
+
+fn native_error_clear_last(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    ctx.vm.last_error_type = 0;
+    ctx.vm.last_error_message = "";
+    ctx.vm.last_error_file = "";
+    ctx.vm.last_error_line = 0;
+    return .null;
 }
 
 fn native_set_exception_handler(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
@@ -1355,14 +1364,16 @@ fn native_trigger_error(ctx: *NativeContext, args: []const Value) RuntimeError!V
     ctx.vm.last_error_line = line;
 
     if (ctx.vm.user_error_handler) |handler| {
-        const call_args = &[_]Value{
-            .{ .int = errno },
-            .{ .string = message },
-            .{ .string = file },
-            .{ .int = line },
-        };
-        _ = try ctx.invokeCallable(handler, call_args);
-        return .{ .bool = true };
+        if ((ctx.vm.user_error_handler_mask & errno) != 0) {
+            const call_args = &[_]Value{
+                .{ .int = errno },
+                .{ .string = message },
+                .{ .string = file },
+                .{ .int = line },
+            };
+            _ = try ctx.invokeCallable(handler, call_args);
+            return .{ .bool = true };
+        }
     }
 
     if (ctx.vm.error_silenced_depth == 0) {

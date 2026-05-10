@@ -365,6 +365,7 @@ pub const VM = struct {
     magic_call_guard: std.ArrayListUnmanaged(struct { obj_ptr: usize, method_name: []const u8 }) = .{},
     prop_hook_guard: std.ArrayListUnmanaged(struct { obj_ptr: usize, prop_name: []const u8 }) = .{},
     user_error_handler: ?Value = null,
+    user_error_handler_mask: i64 = -1,
     error_silenced_depth: u32 = 0,
     last_error_type: i64 = 0,
     last_error_message: []const u8 = "",
