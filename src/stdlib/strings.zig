@@ -199,6 +199,10 @@ fn replaceOne(ctx: *NativeContext, subject: []const u8, search: []const u8, repl
 
 fn str_replace(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len < 3) return if (args.len >= 3) args[2] else Value{ .string = "" };
+    if (args[0] != .array and args[1] == .array) {
+        try ctx.vm.setPendingException("TypeError", "str_replace(): Argument #2 ($replace) must be of type string when argument #1 ($search) is a string");
+        return error.RuntimeError;
+    }
 
     var total_count: i64 = 0;
 

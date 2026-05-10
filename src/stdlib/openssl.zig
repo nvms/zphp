@@ -27,6 +27,7 @@ fn opensslRandomPseudoBytes(ctx: *NativeContext, args: []const Value) RuntimeErr
         return .{ .bool = false };
     }
     try ctx.vm.strings.append(ctx.allocator, buf);
+    if (args.len >= 2) ctx.setCallerVar(1, args.len, .{ .bool = true });
     return .{ .string = buf };
 }
 
