@@ -127,6 +127,7 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try pdo_def.static_props.put(a, "FETCH_GROUP", .{ .int = 65536 });
     try pdo_def.static_props.put(a, "FETCH_CLASS", .{ .int = 8 });
     try pdo_def.static_props.put(a, "FETCH_LAZY", .{ .int = 1 });
+    try pdo_def.static_props.put(a, "FETCH_INTO", .{ .int = 9 });
     try pdo_def.static_props.put(a, "FETCH_NAMED", .{ .int = 11 });
     try pdo_def.static_props.put(a, "ATTR_ERRMODE", .{ .int = 3 });
     try pdo_def.static_props.put(a, "ATTR_DEFAULT_FETCH_MODE", .{ .int = 19 });
@@ -616,6 +617,14 @@ fn stmtFetch(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
         return row;
     }
 
+    if (mode == 9) {
+        const target_v = obj.get("__fetch_into");
+        if (target_v == .object) try populateObjectFromRow(ctx, target_v.object, stmt);
+        const next_rc = sqlite.sqlite3_step(stmt);
+        try obj.set(ctx.allocator, "__has_row", .{ .bool = next_rc == sqlite.ROW });
+        return target_v;
+    }
+
     const row = try fetchRow(ctx, stmt, mode);
 
     // advance to next row
@@ -708,14 +717,39 @@ fn stmtFetchAll(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (mode == 8) {
         var class_name: []const u8 = "stdClass";
         if (args.len >= 2 and args[1] == .string) class_name = args[1].string;
+        const ctor_args_arr: ?*PhpArray = if (args.len >= 3 and args[2] == .array) args[2].array else null;
         if (start_with_row) {
             const inst = try fetchRowAsClass(ctx, stmt, class_name);
+            if (ctor_args_arr) |ca| try invokeCtorWithArgs(ctx, inst, class_name, ca);
             try result.append(ctx.allocator, inst);
         }
         var rc = sqlite.sqlite3_step(stmt);
         while (rc == sqlite.ROW) {
             const inst = try fetchRowAsClass(ctx, stmt, class_name);
+            if (ctor_args_arr) |ca| try invokeCtorWithArgs(ctx, inst, class_name, ca);
             try result.append(ctx.allocator, inst);
+            rc = sqlite.sqlite3_step(stmt);
+        }
+        try obj.set(ctx.allocator, "__has_row", .{ .bool = false });
+        return .{ .array = result };
+    }
+
+    // FETCH_INTO (9): populate the previously-set fetch-into target
+    if (mode == 9) {
+        const target_v = obj.get("__fetch_into");
+        if (target_v != .object) {
+            try obj.set(ctx.allocator, "__has_row", .{ .bool = false });
+            return .{ .array = result };
+        }
+        const target = target_v.object;
+        if (start_with_row) {
+            try populateObjectFromRow(ctx, target, stmt);
+            try result.append(ctx.allocator, .{ .object = target });
+        }
+        var rc = sqlite.sqlite3_step(stmt);
+        while (rc == sqlite.ROW) {
+            try populateObjectFromRow(ctx, target, stmt);
+            try result.append(ctx.allocator, .{ .object = target });
             rc = sqlite.sqlite3_step(stmt);
         }
         try obj.set(ctx.allocator, "__has_row", .{ .bool = false });
@@ -863,7 +897,41 @@ fn stmtSetFetchMode(ctx: *NativeContext, args: []const Value) RuntimeError!Value
     const obj = getThis(ctx) orelse return .{ .bool = false };
     const mode: Value = if (args.len >= 1) args[0] else .{ .int = 4 };
     try obj.set(ctx.allocator, "__fetch_mode", mode);
+    if (mode == .int and mode.int == 9 and args.len >= 2 and args[1] == .object) {
+        try obj.set(ctx.allocator, "__fetch_into", args[1]);
+    }
+    if (mode == .int and mode.int == 8 and args.len >= 2 and args[1] == .string) {
+        try obj.set(ctx.allocator, "__fetch_class", args[1]);
+        if (args.len >= 3 and args[2] == .array) try obj.set(ctx.allocator, "__fetch_class_args", args[2]);
+    }
     return .{ .bool = true };
+}
+
+fn invokeCtorWithArgs(ctx: *NativeContext, inst_val: Value, class_name: []const u8, ctor_args: *PhpArray) !void {
+    if (inst_val != .object) return;
+    if (!ctx.vm.hasMethod(class_name, "__construct")) return;
+    const obj = inst_val.object;
+    var args_buf: [16]Value = undefined;
+    var ai: usize = 0;
+    for (ctor_args.entries.items) |e| {
+        if (ai >= args_buf.len) break;
+        args_buf[ai] = e.value;
+        ai += 1;
+    }
+    _ = try ctx.vm.callMethod(obj, "__construct", args_buf[0..ai]);
+}
+
+fn populateObjectFromRow(ctx: *NativeContext, obj: *PhpObject, stmt: *sqlite.Stmt) !void {
+    const col_count = sqlite.sqlite3_column_count(stmt);
+    var i: c_int = 0;
+    while (i < col_count) : (i += 1) {
+        if (sqlite.sqlite3_column_name(stmt, i)) |name_ptr| {
+            const name = std.mem.span(name_ptr);
+            const owned = try ctx.createString(name);
+            const val = try columnToValue(ctx, stmt, i);
+            try obj.set(ctx.allocator, owned, val);
+        }
+    }
 }
 
 fn pdoQuote(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
@@ -1076,12 +1144,16 @@ fn fetchRow(ctx: *NativeContext, stmt: *sqlite.Stmt, mode: i64) !*PhpArray {
     var i: c_int = 0;
     while (i < col_count) : (i += 1) {
         const val = try columnToValue(ctx, stmt, i);
-        // FETCH_NUM (3) or FETCH_BOTH (4)
-        if (mode == 3 or mode == 4) {
+        // FETCH_BOTH places named key before numeric per column to match php
+        if (mode == 4) {
+            if (sqlite.sqlite3_column_name(stmt, i)) |name_ptr| {
+                const name = std.mem.span(name_ptr);
+                try row.set(ctx.allocator, .{ .string = try ctx.createString(name) }, val);
+            }
             try row.append(ctx.allocator, val);
-        }
-        // FETCH_ASSOC (2) or FETCH_BOTH (4)
-        if (mode == 2 or mode == 4) {
+        } else if (mode == 3) {
+            try row.append(ctx.allocator, val);
+        } else if (mode == 2) {
             if (sqlite.sqlite3_column_name(stmt, i)) |name_ptr| {
                 const name = std.mem.span(name_ptr);
                 try row.set(ctx.allocator, .{ .string = try ctx.createString(name) }, val);
