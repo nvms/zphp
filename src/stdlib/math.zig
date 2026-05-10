@@ -130,11 +130,14 @@ fn roundWithMode(v: f64, mode: i64) f64 {
     return out * sign;
 }
 
-fn native_min(_: *NativeContext, args: []const Value) RuntimeError!Value {
+fn native_min(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len == 0) return .null;
     if (args.len == 1 and args[0] == .array) {
         const arr = args[0].array;
-        if (arr.entries.items.len == 0) return .null;
+        if (arr.entries.items.len == 0) {
+            try ctx.vm.setPendingException("ValueError", "min(): Argument #1 ($value) must contain at least one element");
+            return error.RuntimeError;
+        }
         var result = arr.entries.items[0].value;
         for (arr.entries.items[1..]) |e| {
             if (Value.lessThan(e.value, result)) result = e.value;
@@ -148,11 +151,14 @@ fn native_min(_: *NativeContext, args: []const Value) RuntimeError!Value {
     return result;
 }
 
-fn native_max(_: *NativeContext, args: []const Value) RuntimeError!Value {
+fn native_max(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len == 0) return .null;
     if (args.len == 1 and args[0] == .array) {
         const arr = args[0].array;
-        if (arr.entries.items.len == 0) return .null;
+        if (arr.entries.items.len == 0) {
+            try ctx.vm.setPendingException("ValueError", "max(): Argument #1 ($value) must contain at least one element");
+            return error.RuntimeError;
+        }
         var result = arr.entries.items[0].value;
         for (arr.entries.items[1..]) |e| {
             if (Value.lessThan(result, e.value)) result = e.value;

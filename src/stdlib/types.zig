@@ -383,17 +383,29 @@ fn is_scalar(_: *NativeContext, args: []const Value) RuntimeError!Value {
     } };
 }
 
-fn is_iterable(_: *NativeContext, args: []const Value) RuntimeError!Value {
+fn is_iterable(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len == 0) return .{ .bool = false };
-    return .{ .bool = switch (args[0]) {
-        .array, .generator => true,
-        else => false,
-    } };
+    if (args[0] == .array or args[0] == .generator) return .{ .bool = true };
+    if (args[0] == .object) {
+        const cn = args[0].object.class_name;
+        if (ctx.vm.isInstanceOf(cn, "Traversable")) return .{ .bool = true };
+        if (ctx.vm.isInstanceOf(cn, "Iterator")) return .{ .bool = true };
+        if (ctx.vm.isInstanceOf(cn, "IteratorAggregate")) return .{ .bool = true };
+        if (ctx.vm.hasMethod(cn, "getIterator")) return .{ .bool = true };
+        if (ctx.vm.hasMethod(cn, "current") and ctx.vm.hasMethod(cn, "next")) return .{ .bool = true };
+    }
+    return .{ .bool = false };
 }
 
-fn is_countable(_: *NativeContext, args: []const Value) RuntimeError!Value {
+fn is_countable(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len == 0) return .{ .bool = false };
-    return .{ .bool = args[0] == .array };
+    if (args[0] == .array) return .{ .bool = true };
+    if (args[0] == .object) {
+        const cn = args[0].object.class_name;
+        if (ctx.vm.isInstanceOf(cn, "Countable")) return .{ .bool = true };
+        if (ctx.vm.hasMethod(cn, "count")) return .{ .bool = true };
+    }
+    return .{ .bool = false };
 }
 
 fn ctypeCheck(args: []const Value, comptime pred: fn (u8) bool) Value {
