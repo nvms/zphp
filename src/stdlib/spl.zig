@@ -70,7 +70,7 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try vm.interfaces.put(a, "Stringable", stringable);
 
     // SplStack
-    var stack_def = ClassDef{ .name = "SplStack" };
+    var stack_def = ClassDef{ .name = "SplStack", .parent = "SplDoublyLinkedList" };
     try stack_def.interfaces.append(a, "Countable");
     try stack_def.methods.put(a, "__construct", .{ .name = "__construct", .arity = 0 });
     try stack_def.methods.put(a, "push", .{ .name = "push", .arity = 1 });
@@ -385,7 +385,7 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try vm.native_fns.put(a, "SplFixedArray::valid", faValid);
 
     // SplQueue
-    var sq_def = ClassDef{ .name = "SplQueue" };
+    var sq_def = ClassDef{ .name = "SplQueue", .parent = "SplDoublyLinkedList" };
     try sq_def.interfaces.append(a, "Countable");
     try sq_def.methods.put(a, "__construct", .{ .name = "__construct", .arity = 0 });
     try sq_def.methods.put(a, "enqueue", .{ .name = "enqueue", .arity = 1 });
