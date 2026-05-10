@@ -43,6 +43,7 @@ pub const entries = .{
     .{ "date_parse", native_date_parse },
     .{ "date_parse_from_format", native_date_parse_from_format },
     .{ "mktime", native_mktime },
+    .{ "gmmktime", native_gmmktime },
     .{ "strtotime", native_strtotime },
     .{ "time", native_time },
     .{ "microtime", native_microtime },
@@ -1577,6 +1578,16 @@ fn native_mktime(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
         ts -= @as(i64, tzOffsetAt(tz, ts));
     }
     return .{ .int = ts };
+}
+
+fn native_gmmktime(_: *NativeContext, args: []const Value) RuntimeError!Value {
+    const hour: i64 = if (args.len > 0) Value.toInt(args[0]) else 0;
+    const min: i64 = if (args.len > 1) Value.toInt(args[1]) else 0;
+    const sec: i64 = if (args.len > 2) Value.toInt(args[2]) else 0;
+    const month: i64 = if (args.len > 3) Value.toInt(args[3]) else 1;
+    const day: i64 = if (args.len > 4) Value.toInt(args[4]) else 1;
+    const year: i64 = if (args.len > 5) Value.toInt(args[5]) else 1970;
+    return .{ .int = dateToTimestamp(year, month, day, hour, min, sec) };
 }
 
 fn native_strtotime(_: *NativeContext, args: []const Value) RuntimeError!Value {
