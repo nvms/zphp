@@ -367,8 +367,23 @@ pub const Value = union(enum) {
         }
         const av = toFloat(a);
         const result = av / bv;
-        if (result == @trunc(result)) return .{ .int = @intFromFloat(result) };
+        const both_int = (a == .int or (a == .string and isNumericIntString(a.string))) and
+            (b == .int or (b == .string and isNumericIntString(b.string)));
+        if (both_int and result == @trunc(result) and result >= @as(f64, @floatFromInt(std.math.minInt(i64))) and result <= @as(f64, @floatFromInt(std.math.maxInt(i64)))) {
+            return .{ .int = @intFromFloat(result) };
+        }
         return .{ .float = result };
+    }
+
+    fn isNumericIntString(s: []const u8) bool {
+        if (s.len == 0) return false;
+        var i: usize = 0;
+        if (s[0] == '+' or s[0] == '-') i = 1;
+        if (i >= s.len) return false;
+        while (i < s.len) : (i += 1) {
+            if (s[i] < '0' or s[i] > '9') return false;
+        }
+        return true;
     }
 
     pub fn modulo(a: Value, b: Value) Value {
