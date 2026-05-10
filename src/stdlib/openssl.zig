@@ -66,9 +66,11 @@ fn opensslGetMdMethods(ctx: *NativeContext, _: []const Value) RuntimeError!Value
 }
 
 fn opensslRandomPseudoBytes(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len == 0 or args[0] != .int or args[0].int < 0) return .{ .bool = false };
+    if (args.len == 0 or args[0] != .int or args[0].int <= 0) {
+        try ctx.vm.setPendingException("ValueError", "openssl_random_pseudo_bytes(): Argument #1 ($length) must be greater than 0");
+        return error.RuntimeError;
+    }
     const n: usize = @intCast(args[0].int);
-    if (n == 0) return .{ .string = "" };
     const buf = try ctx.allocator.alloc(u8, n);
     if (c.RAND_bytes(buf.ptr, @intCast(n)) != 1) {
         ctx.allocator.free(buf);
