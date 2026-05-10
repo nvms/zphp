@@ -494,10 +494,10 @@ fn str_pad(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     return .{ .string = result };
 }
 
-fn native_strcmp(_: *NativeContext, args: []const Value) RuntimeError!Value {
+fn native_strcmp(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len < 2) return .{ .int = 0 };
-    const a = if (args[0] == .string) args[0].string else "";
-    const b = if (args[1] == .string) args[1].string else "";
+    const a = try coerceToString(ctx, args[0]);
+    const b = try coerceToString(ctx, args[1]);
     const min_len = @min(a.len, b.len);
     for (0..min_len) |i| {
         if (a[i] != b[i]) return .{ .int = @as(i64, a[i]) - @as(i64, b[i]) };
