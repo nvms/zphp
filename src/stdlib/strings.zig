@@ -752,6 +752,10 @@ fn native_str_word_count(ctx: *NativeContext, args: []const Value) RuntimeError!
     if (args.len == 0) return .{ .int = 0 };
     const s = if (args[0] == .string) args[0].string else return Value{ .int = 0 };
     const format: i64 = if (args.len > 1) Value.toInt(args[1]) else 0;
+    if (format != 0 and format != 1 and format != 2) {
+        try ctx.vm.setPendingException("ValueError", "str_word_count(): Argument #2 ($format) must be a valid format value");
+        return error.RuntimeError;
+    }
     const charlist: []const u8 = if (args.len > 2 and args[2] == .string) args[2].string else "";
     const extra = buildTrimSet(charlist);
 
