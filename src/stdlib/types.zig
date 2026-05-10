@@ -345,6 +345,7 @@ fn is_numeric(_: *NativeContext, args: []const Value) RuntimeError!Value {
                 if (next == 'x' or next == 'X' or next == 'o' or next == 'O' or next == 'b' or next == 'B')
                     break :blk false;
             }
+            for (trimmed) |ch| if (ch == '_') break :blk false;
             break :blk if (std.fmt.parseFloat(f64, trimmed)) |_| true else |_| false;
         },
         else => false,
