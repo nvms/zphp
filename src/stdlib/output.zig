@@ -166,13 +166,13 @@ fn varDumpValue(ctx: *NativeContext, val: Value, depth: usize) !void {
                     try varDumpValue(ctx, entry.value, depth + 1);
                 }
             } else {
-                const class_def = ctx.vm.classes.get(obj.class_name);
                 if (obj.slot_layout) |layout| {
                     if (obj.slots) |slots| {
                         for (layout.names, 0..) |name, i| {
                             if (i >= slots.len) break;
                             try appendIndent(out, a, indent + 2);
-                            try emitDumpKey(out, a, name, obj.class_name, propVisibility(class_def, name));
+                            const vi = propVisibilityVm(ctx.vm, obj.class_name, name);
+                            try emitDumpKey(out, a, name, vi.declaring, vi.vis);
                             try varDumpValue(ctx, slots[i], depth + 1);
                         }
                     }
@@ -187,7 +187,8 @@ fn varDumpValue(ctx: *NativeContext, val: Value, depth: usize) !void {
                     }
                     if (!in_slots) {
                         try appendIndent(out, a, indent + 2);
-                        try emitDumpKey(out, a, entry.key_ptr.*, obj.class_name, propVisibility(class_def, entry.key_ptr.*));
+                        const vi = propVisibilityVm(ctx.vm, obj.class_name, entry.key_ptr.*);
+                        try emitDumpKey(out, a, entry.key_ptr.*, vi.declaring, vi.vis);
                         try varDumpValue(ctx, entry.value_ptr.*, depth + 1);
                     }
                 }
@@ -580,12 +581,17 @@ fn appendIndent(out: *std.ArrayListUnmanaged(u8), a: std.mem.Allocator, n: usize
     for (0..n) |_| try out.append(a, ' ');
 }
 
-fn propVisibility(class_def: ?ClassDef, name: []const u8) ClassDef.Visibility {
-    const cls = class_def orelse return .public;
-    for (cls.properties.items) |pdef| {
-        if (std.mem.eql(u8, pdef.name, name)) return pdef.visibility;
+fn propVisibilityVm(vm: *@import("../runtime/vm.zig").VM, class_name: []const u8, name: []const u8) struct { vis: ClassDef.Visibility, declaring: []const u8 } {
+    var current: ?[]const u8 = class_name;
+    while (current) |cn| {
+        if (vm.classes.get(cn)) |cls| {
+            for (cls.properties.items) |pdef| {
+                if (std.mem.eql(u8, pdef.name, name)) return .{ .vis = pdef.visibility, .declaring = cn };
+            }
+            current = cls.parent;
+        } else break;
     }
-    return .public;
+    return .{ .vis = .public, .declaring = class_name };
 }
 
 fn emitDumpKey(out: *std.ArrayListUnmanaged(u8), a: std.mem.Allocator, name: []const u8, class_name: []const u8, vis: ClassDef.Visibility) !void {
