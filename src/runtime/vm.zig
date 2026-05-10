@@ -228,6 +228,7 @@ pub const ClassDef = struct {
     property_attributes: std.StringHashMapUnmanaged([]const AttributeDef) = .{},
     param_attributes: std.StringHashMapUnmanaged([]const AttributeDef) = .{},
     constant_names: std.StringHashMapUnmanaged(void) = .{},
+    const_visibility: std.StringHashMapUnmanaged(Visibility) = .{},
     constant_attributes: std.StringHashMapUnmanaged([]const AttributeDef) = .{},
 
     pub const Visibility = enum(u8) { public = 0, protected = 1, private = 2 };
@@ -283,6 +284,7 @@ pub const ClassDef = struct {
         }
         self.param_attributes.deinit(allocator);
         self.constant_names.deinit(allocator);
+        self.const_visibility.deinit(allocator);
         var ca_iter = self.constant_attributes.valueIterator();
         while (ca_iter.next()) |attrs| freeAttributeDefs(allocator, attrs.*);
         self.constant_attributes.deinit(allocator);
@@ -5964,11 +5966,12 @@ pub const VM = struct {
         var sprop_names: [256][]const u8 = undefined;
         var sprop_has_default: [256]u8 = undefined;
         var sprop_is_const: [256]u8 = undefined;
+        var sprop_visibility: [256]u8 = undefined;
         for (0..static_prop_count) |pi| {
             const pname_idx = self.readU16();
             sprop_names[pi] = self.currentChunk().constants.items[pname_idx].string;
             sprop_has_default[pi] = self.readByte();
-            _ = self.readByte(); // visibility
+            sprop_visibility[pi] = self.readByte();
             sprop_is_const[pi] = self.readByte();
         }
 
@@ -6002,6 +6005,9 @@ pub const VM = struct {
             try def.static_props.put(self.allocator, sprop_names[pi], default_val);
             if (sprop_is_const[pi] == 1) {
                 try def.constant_names.put(self.allocator, sprop_names[pi], {});
+                if (sprop_visibility[pi] != 0) {
+                    try def.const_visibility.put(self.allocator, sprop_names[pi], @enumFromInt(sprop_visibility[pi]));
+                }
             }
         }
 
@@ -7629,6 +7635,33 @@ pub const VM = struct {
             if (std.mem.eql(u8, class_name, name)) return "Error";
         }
         return null;
+    }
+
+    fn checkConstVisibility(self: *VM, class_name: []const u8, const_name: []const u8) RuntimeError!bool {
+        var current: ?[]const u8 = class_name;
+        var declaring: []const u8 = class_name;
+        var vis: ClassDef.Visibility = .public;
+        while (current) |cn| {
+            if (self.classes.get(cn)) |cls| {
+                if (cls.const_visibility.get(const_name)) |v| {
+                    declaring = cn;
+                    vis = v;
+                    break;
+                }
+                if (cls.constant_names.contains(const_name)) {
+                    declaring = cn;
+                    vis = .public;
+                    break;
+                }
+                current = cls.parent;
+            } else break;
+        }
+        if (vis == .public) return true;
+        if (self.checkVisibility(declaring, vis)) return true;
+        const msg = try std.fmt.allocPrint(self.allocator, "Cannot access {s} const {s}::{s}", .{ @tagName(vis), declaring, const_name });
+        try self.strings.append(self.allocator, msg);
+        _ = try self.throwBuiltinException("Error", msg);
+        return false;
     }
 
     fn checkVisibility(self: *VM, target_class: []const u8, vis: ClassDef.Visibility) bool {
