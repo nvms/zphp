@@ -6339,6 +6339,7 @@ pub const VM = struct {
             }
             try def.static_props.put(self.allocator, case_names[ci], .{ .object = case_obj });
             try def.constant_names.put(self.allocator, case_names[ci], {});
+            try def.constant_order.append(self.allocator, case_names[ci]);
             try def.case_order.append(self.allocator, case_names[ci]);
         }
 
@@ -6375,6 +6376,9 @@ pub const VM = struct {
         for (0..enum_const_count) |_| {
             const ec_name_idx = self.readU16();
             const ec_name = self.currentChunk().constants.items[ec_name_idx].string;
+            if (!def.constant_names.contains(ec_name)) {
+                try def.constant_order.append(self.allocator, ec_name);
+            }
             try def.constant_names.put(self.allocator, ec_name, {});
         }
 
