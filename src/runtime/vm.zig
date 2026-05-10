@@ -1322,14 +1322,34 @@ pub const VM = struct {
                 .shift_left => {
                     const b = self.pop();
                     const a = self.pop();
-                    const shift: u6 = @intCast(@min(63, @max(0, Value.toInt(b))));
-                    self.push(.{ .int = Value.toInt(a) << shift });
+                    const sh = Value.toInt(b);
+                    if (sh < 0) {
+                        self.sp += 2;
+                        if (try self.throwBuiltinException("ArithmeticError", "Bit shift by negative number")) continue;
+                        return error.RuntimeError;
+                    }
+                    if (sh >= 64) { self.push(.{ .int = 0 }); } else {
+                        const shift: u6 = @intCast(sh);
+                        self.push(.{ .int = Value.toInt(a) << shift });
+                    }
                 },
                 .shift_right => {
                     const b = self.pop();
                     const a = self.pop();
-                    const shift: u6 = @intCast(@min(63, @max(0, Value.toInt(b))));
-                    self.push(.{ .int = Value.toInt(a) >> shift });
+                    const sh = Value.toInt(b);
+                    if (sh < 0) {
+                        self.sp += 2;
+                        if (try self.throwBuiltinException("ArithmeticError", "Bit shift by negative number")) continue;
+                        return error.RuntimeError;
+                    }
+                    if (sh >= 64) {
+                        // arithmetic shift: -1 stays -1, otherwise 0
+                        const v = Value.toInt(a);
+                        self.push(.{ .int = if (v < 0) -1 else 0 });
+                    } else {
+                        const shift: u6 = @intCast(sh);
+                        self.push(.{ .int = Value.toInt(a) >> shift });
+                    }
                 },
 
                 .equal => {
