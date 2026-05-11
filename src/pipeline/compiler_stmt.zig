@@ -466,6 +466,60 @@ pub fn compileThrow(self: *Compiler, node: Ast.Node) Error!void {
     try self.emitOp(.throw);
 }
 
+// resolve a catch clause's type-name node through the same namespace rules
+// the type-hint resolver uses: a leading `\` token means FQN; otherwise the
+// first identifier gets namespace/use-alias resolution applied, then any
+// subsequent `\Sub\Path` is appended verbatim
+fn resolveCatchClassName(self: *Compiler, node_idx: u32) Error![]const u8 {
+    const node = self.ast.nodes[node_idx];
+    // for a `.identifier` node the main_token is the first identifier and
+    // adjacent tokens might be `\`+identifier extending the qualified name.
+    // walk forward from main_token while we keep seeing `\` + identifier
+    var start = node.main_token;
+    // walk back past any leading `\`
+    var is_fqn = false;
+    if (start > 0 and self.ast.tokens[start - 1].tag == .backslash) {
+        is_fqn = true;
+        // back up to include preceding `\`
+        while (start > 0 and self.ast.tokens[start - 1].tag == .backslash) start -= 1;
+    }
+    var end = node.main_token + 1;
+    while (end + 1 < self.ast.tokens.len and
+        self.ast.tokens[end].tag == .backslash and
+        self.ast.tokens[end + 1].tag == .identifier)
+    {
+        end += 2;
+    }
+
+    var buf = std.ArrayListUnmanaged(u8){};
+    var first = true;
+    var i = start;
+    while (i < end) : (i += 1) {
+        const tag = self.ast.tokens[i].tag;
+        const lex = self.ast.tokens[i].lexeme(self.ast.source);
+        if (tag == .backslash) {
+            if (first and is_fqn) {
+                // drop leading FQN backslash; class registry stores names without it
+                first = false;
+                continue;
+            }
+            try buf.appendSlice(self.allocator, "\\");
+            continue;
+        }
+        if (tag == .identifier) {
+            if (first and !is_fqn) {
+                try buf.appendSlice(self.allocator, self.resolveClassName(lex));
+            } else {
+                try buf.appendSlice(self.allocator, lex);
+            }
+            first = false;
+        }
+    }
+    const s = try buf.toOwnedSlice(self.allocator);
+    try self.string_allocs.append(self.allocator, s);
+    return s;
+}
+
 pub fn compileTryCatch(self: *Compiler, node: Ast.Node) Error!void {
     const catch_count = self.ast.extra_data[node.data.rhs];
     const catch_nodes = self.ast.extra_data[node.data.rhs + 1 .. node.data.rhs + 1 + catch_count];
@@ -521,7 +575,12 @@ pub fn compileTryCatch(self: *Compiler, node: Ast.Node) Error!void {
 
             for (type_nodes) |tn| {
                 try self.emitOp(.dup); // [exc, exc]
-                const type_name = self.ast.tokenSlice(self.ast.nodes[tn].main_token);
+                // catch class names need namespace resolution: a `catch (Foo $e)`
+                // inside `namespace App` matches `App\Foo`, and `use Bar\Baz;`
+                // makes `catch (Baz $e)` match `Bar\Baz`. resolveCatchClassName
+                // walks the type-name node properly (handles FQN `\Foo`, relative
+                // `Sub\Foo`, and bare `Foo`)
+                const type_name = try resolveCatchClassName(self, tn);
                 const tidx = try self.addConstant(.{ .string = type_name });
                 try self.emitConstant(tidx); // [exc, exc, type]
                 try self.emitOp(.instance_check); // [exc, bool]
