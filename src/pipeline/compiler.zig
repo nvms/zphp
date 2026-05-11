@@ -703,6 +703,23 @@ pub const Compiler = struct {
                 }
                 break :blk .null;
             },
+            .binary_op => blk: {
+                const tok = self.ast.tokens[n.main_token];
+                const lhs = self.evalConstExpr(n.data.lhs);
+                const rhs = self.evalConstExpr(n.data.rhs);
+                if (lhs == .int and rhs == .int) {
+                    break :blk switch (tok.tag) {
+                        .pipe => Value{ .int = lhs.int | rhs.int },
+                        .amp => Value{ .int = lhs.int & rhs.int },
+                        .caret => Value{ .int = lhs.int ^ rhs.int },
+                        .plus => Value{ .int = lhs.int +% rhs.int },
+                        .minus => Value{ .int = lhs.int -% rhs.int },
+                        .star => Value{ .int = lhs.int *% rhs.int },
+                        else => Value.null,
+                    };
+                }
+                break :blk .null;
+            },
             .array_literal => blk: {
                 const elems = self.ast.extraSlice(n.data.lhs);
                 if (elems.len == 0) break :blk Value.empty_array_default;
@@ -742,6 +759,22 @@ pub const Compiler = struct {
                 const class_name = @import("compiler_expr.zig").resolveNodeClassName(self, class_node) catch break :blk Value.null;
                 var prop_name = self.ast.tokenSlice(n.main_token);
                 if (prop_name.len > 0 and prop_name[0] == '$') prop_name = prop_name[1..];
+                // resolve well-known builtin class constants eagerly so attribute
+                // arg expressions like `Attribute::TARGET_CLASS | Attribute::IS_REPEATABLE`
+                // can fold to a single int at compile time
+                if (std.mem.eql(u8, class_name, "Attribute")) {
+                    const known = [_]struct { n: []const u8, v: i64 }{
+                        .{ .n = "TARGET_CLASS", .v = 1 },
+                        .{ .n = "TARGET_FUNCTION", .v = 2 },
+                        .{ .n = "TARGET_METHOD", .v = 4 },
+                        .{ .n = "TARGET_PROPERTY", .v = 8 },
+                        .{ .n = "TARGET_CLASS_CONSTANT", .v = 16 },
+                        .{ .n = "TARGET_PARAMETER", .v = 32 },
+                        .{ .n = "TARGET_ALL", .v = 127 },
+                        .{ .n = "IS_REPEATABLE", .v = 128 },
+                    };
+                    for (known) |k| if (std.mem.eql(u8, k.n, prop_name)) break :blk Value{ .int = k.v };
+                }
                 // encode as deferred sentinel: "\x00CC\x00ClassName\x00CONST_NAME"
                 const sentinel = std.fmt.allocPrint(self.allocator, "\x00CC\x00{s}\x00{s}", .{ class_name, prop_name }) catch break :blk Value.null;
                 self.string_allocs.append(self.allocator, sentinel) catch break :blk Value.null;

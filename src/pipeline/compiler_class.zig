@@ -41,6 +41,52 @@ fn isTypeToken(tag: Token.Tag) bool {
 }
 
 fn parseAttrArgValue(tokens: []const Token, source: []const u8, pos: *usize, allocator: Allocator) Value {
+    var lhs = parseAttrArgAtom(tokens, source, pos, allocator);
+    // chain bitwise OR / AND / XOR (left-associative, no precedence between them
+    // since attribute args are simple flag expressions)
+    while (pos.* < tokens.len) {
+        const t = tokens[pos.*].tag;
+        if (t != .pipe and t != .amp and t != .caret) break;
+        pos.* += 1;
+        const rhs = parseAttrArgAtom(tokens, source, pos, allocator);
+        const li = resolveAttrFlag(lhs);
+        const ri = resolveAttrFlag(rhs);
+        if (li) |lv| if (ri) |rv| {
+            lhs = .{ .int = switch (t) {
+                .pipe => lv | rv,
+                .amp => lv & rv,
+                .caret => lv ^ rv,
+                else => unreachable,
+            } };
+            continue;
+        };
+        // can't fold, keep lhs as-is
+    }
+    return lhs;
+}
+
+fn resolveAttrFlag(v: Value) ?i64 {
+    if (v == .int) return v.int;
+    if (v == .string) {
+        if (std.mem.startsWith(u8, v.string, "Attribute::")) {
+            const cn = v.string[11..];
+            const known = [_]struct { n: []const u8, v: i64 }{
+                .{ .n = "TARGET_CLASS", .v = 1 },
+                .{ .n = "TARGET_FUNCTION", .v = 2 },
+                .{ .n = "TARGET_METHOD", .v = 4 },
+                .{ .n = "TARGET_PROPERTY", .v = 8 },
+                .{ .n = "TARGET_CLASS_CONSTANT", .v = 16 },
+                .{ .n = "TARGET_PARAMETER", .v = 32 },
+                .{ .n = "TARGET_ALL", .v = 127 },
+                .{ .n = "IS_REPEATABLE", .v = 128 },
+            };
+            for (known) |k| if (std.mem.eql(u8, k.n, cn)) return k.v;
+        }
+    }
+    return null;
+}
+
+fn parseAttrArgAtom(tokens: []const Token, source: []const u8, pos: *usize, allocator: Allocator) Value {
     if (pos.* >= tokens.len) return .null;
     const tag = tokens[pos.*].tag;
     switch (tag) {
