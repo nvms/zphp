@@ -99,6 +99,34 @@ extern fn zphp_msgfmt_format(locale: [*:0]const u8, pattern: [*]const UChar, pat
 extern fn zphp_msgfmt_format_positional(locale: [*:0]const u8, pattern: [*]const UChar, pat_len: i32, args: [*]const ArgEntry, arg_count: i32, result: [*]UChar, result_cap: i32, err: *UErrorCode) i32;
 
 const UIDNA = opaque {};
+const UCalendar = opaque {};
+
+extern fn zphp_ucal_open(zoneID: ?[*]const UChar, len: i32, locale: [*:0]const u8, cal_type: c_int, err: *UErrorCode) ?*UCalendar;
+extern fn zphp_ucal_close(cal: *UCalendar) void;
+extern fn zphp_ucal_get(cal: *const UCalendar, field: c_int, err: *UErrorCode) i32;
+extern fn zphp_ucal_set(cal: *UCalendar, field: c_int, value: i32) void;
+extern fn zphp_ucal_add(cal: *UCalendar, field: c_int, amount: i32, err: *UErrorCode) void;
+extern fn zphp_ucal_roll(cal: *UCalendar, field: c_int, amount: i32, err: *UErrorCode) void;
+extern fn zphp_ucal_getMillis(cal: *const UCalendar, err: *UErrorCode) f64;
+extern fn zphp_ucal_setMillis(cal: *UCalendar, dateTime: f64, err: *UErrorCode) void;
+extern fn zphp_ucal_setDate(cal: *UCalendar, year: i32, month: i32, date: i32, err: *UErrorCode) void;
+extern fn zphp_ucal_setDateTime(cal: *UCalendar, y: i32, mo: i32, d: i32, h: i32, mi: i32, s: i32, err: *UErrorCode) void;
+extern fn zphp_ucal_inDaylightTime(cal: *const UCalendar, err: *UErrorCode) u8;
+extern fn zphp_ucal_isSet(cal: *const UCalendar, field: c_int) u8;
+extern fn zphp_ucal_clear(cal: *UCalendar) void;
+extern fn zphp_ucal_clearField(cal: *UCalendar, field: c_int) void;
+extern fn zphp_ucal_getLimit(cal: *const UCalendar, field: c_int, limit_type: c_int, err: *UErrorCode) i32;
+extern fn zphp_ucal_equivalentTo(a: *const UCalendar, b: *const UCalendar) u8;
+extern fn zphp_ucal_getType(cal: *const UCalendar, buf: [*]u8, buf_len: i32, err: *UErrorCode) i32;
+extern fn zphp_ucal_getLocaleByType(cal: *const UCalendar, ltype: c_int, buf: [*]u8, buf_len: i32, err: *UErrorCode) i32;
+extern fn zphp_ucal_getTimeZoneID(cal: *const UCalendar, buf: [*]UChar, cap: i32, err: *UErrorCode) i32;
+extern fn zphp_ucal_setTimeZone(cal: *UCalendar, zoneID: [*]const UChar, len: i32, err: *UErrorCode) void;
+extern fn zphp_ucal_getFirstDayOfWeek(cal: *const UCalendar, err: *UErrorCode) i32;
+extern fn zphp_ucal_setFirstDayOfWeek(cal: *UCalendar, day: i32) void;
+extern fn zphp_ucal_isWeekend(cal: *const UCalendar, date: f64, err: *UErrorCode) u8;
+extern fn zphp_ucal_clone(cal: *const UCalendar, err: *UErrorCode) ?*UCalendar;
+extern fn zphp_ucal_getLenient(cal: *const UCalendar) u8;
+extern fn zphp_ucal_setLenient(cal: *UCalendar, lenient: i32) void;
 extern fn zphp_uidna_openUTS46(options: u32, err: *UErrorCode) ?*UIDNA;
 extern fn zphp_uidna_close(idna: *UIDNA) void;
 extern fn zphp_uidna_nameToASCII(idna: *const UIDNA, name: [*]const UChar, nameLen: i32, dest: [*]UChar, cap: i32, info: *anyopaque, err: *UErrorCode) i32;
@@ -800,6 +828,289 @@ fn mfGetLocale(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
     return .{ .string = try dupString(ctx, "") };
 }
 
+// ---------------- IntlCalendar ----------------
+
+fn getCal(obj: *const PhpObject) ?*UCalendar {
+    const v = obj.get("__cal");
+    if (v != .int or v.int == 0) return null;
+    return @ptrFromInt(@as(usize, @intCast(v.int)));
+}
+
+fn openCalendar(ctx: *NativeContext, tz_opt: ?[]const u8, locale: []const u8, cal_type: c_int) !?*UCalendar {
+    var status: UErrorCode = U_ZERO_ERROR;
+    const loc_z = try dupZ(ctx, locale);
+    const tz_u16: ?[]u16 = if (tz_opt) |t| try utf8ToU16(ctx, t) else null;
+    defer if (tz_u16) |b| ctx.allocator.free(b);
+    const tz_ptr: ?[*]const UChar = if (tz_u16) |b| b.ptr else null;
+    const tz_len: i32 = if (tz_u16) |b| @intCast(b.len) else 0;
+    const cal = zphp_ucal_open(tz_ptr, tz_len, loc_z.ptr, cal_type, &status);
+    if (status > U_ZERO_ERROR) return null;
+    return cal;
+}
+
+fn calCreateInstance(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    var tz_opt: ?[]const u8 = null;
+    if (args.len > 0 and args[0] == .string) tz_opt = args[0].string;
+    var locale: []const u8 = "";
+    if (args.len > 1 and args[1] == .string) locale = args[1].string;
+    if (locale.len == 0) {
+        const def = zphp_uloc_getDefault();
+        locale = def[0..cstrLen(def)];
+    }
+    const cal = (try openCalendar(ctx, tz_opt, locale, 0)) orelse return .null;
+    const obj = try ctx.createObject("IntlGregorianCalendar");
+    try obj.set(ctx.allocator, "__cal", .{ .int = @intCast(@intFromPtr(cal)) });
+    try obj.set(ctx.allocator, "__locale", .{ .string = try dupString(ctx, locale) });
+    return .{ .object = obj };
+}
+
+fn calConstruct(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    // PHP: new IntlGregorianCalendar(...) supports several arg shapes:
+    //   ()                          - default tz, default locale
+    //   (string $tz, string $loc)   - explicit
+    //   (int y, int m, int d)       - by-date
+    //   (int y, int m, int d, int h, int mi, int s)
+    const obj = getThis(ctx) orelse return .null;
+
+    // tz/locale form
+    if (args.len <= 2 and (args.len == 0 or args[0] == .string or args[0] == .null)) {
+        var tz_opt: ?[]const u8 = null;
+        if (args.len > 0 and args[0] == .string) tz_opt = args[0].string;
+        var locale: []const u8 = "";
+        if (args.len > 1 and args[1] == .string) locale = args[1].string;
+        if (locale.len == 0) {
+            const def = zphp_uloc_getDefault();
+            locale = def[0..cstrLen(def)];
+        }
+        const cal = (try openCalendar(ctx, tz_opt, locale, 0)) orelse return .null;
+        try obj.set(ctx.allocator, "__cal", .{ .int = @intCast(@intFromPtr(cal)) });
+        try obj.set(ctx.allocator, "__locale", .{ .string = try dupString(ctx, locale) });
+        return .null;
+    }
+
+    // integer form: y, m, d, [h, mi, s]
+    const def_locale_ptr = zphp_uloc_getDefault();
+    const def_locale = def_locale_ptr[0..cstrLen(def_locale_ptr)];
+    const cal = (try openCalendar(ctx, null, def_locale, 0)) orelse return .null;
+    try obj.set(ctx.allocator, "__cal", .{ .int = @intCast(@intFromPtr(cal)) });
+    try obj.set(ctx.allocator, "__locale", .{ .string = try dupString(ctx, def_locale) });
+    if (args.len >= 3 and args[0] == .int and args[1] == .int and args[2] == .int) {
+        var status: UErrorCode = U_ZERO_ERROR;
+        if (args.len >= 6 and args[3] == .int and args[4] == .int and args[5] == .int) {
+            zphp_ucal_setDateTime(cal, @intCast(args[0].int), @intCast(args[1].int), @intCast(args[2].int), @intCast(args[3].int), @intCast(args[4].int), @intCast(args[5].int), &status);
+        } else {
+            zphp_ucal_setDate(cal, @intCast(args[0].int), @intCast(args[1].int), @intCast(args[2].int), &status);
+        }
+    }
+    return .null;
+}
+
+fn calGet(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len < 1 or args[0] != .int) return .{ .bool = false };
+    const obj = getThis(ctx) orelse return .{ .bool = false };
+    const cal = getCal(obj) orelse return .{ .bool = false };
+    var status: UErrorCode = U_ZERO_ERROR;
+    const r = zphp_ucal_get(cal, @intCast(args[0].int), &status);
+    if (status > U_ZERO_ERROR) return .{ .bool = false };
+    return .{ .int = @intCast(r) };
+}
+
+fn calSet(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len < 2 or args[0] != .int or args[1] != .int) return .{ .bool = false };
+    const obj = getThis(ctx) orelse return .{ .bool = false };
+    const cal = getCal(obj) orelse return .{ .bool = false };
+    zphp_ucal_set(cal, @intCast(args[0].int), @intCast(args[1].int));
+    return .{ .bool = true };
+}
+
+fn calAdd(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len < 2 or args[0] != .int or args[1] != .int) return .{ .bool = false };
+    const obj = getThis(ctx) orelse return .{ .bool = false };
+    const cal = getCal(obj) orelse return .{ .bool = false };
+    var status: UErrorCode = U_ZERO_ERROR;
+    zphp_ucal_add(cal, @intCast(args[0].int), @intCast(args[1].int), &status);
+    return .{ .bool = status <= U_ZERO_ERROR };
+}
+
+fn calRoll(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len < 2 or args[0] != .int) return .{ .bool = false };
+    const obj = getThis(ctx) orelse return .{ .bool = false };
+    const cal = getCal(obj) orelse return .{ .bool = false };
+    const amount: i32 = switch (args[1]) {
+        .int => |i| @intCast(i),
+        .bool => |b| if (b) 1 else -1,
+        else => return .{ .bool = false },
+    };
+    var status: UErrorCode = U_ZERO_ERROR;
+    zphp_ucal_roll(cal, @intCast(args[0].int), amount, &status);
+    return .{ .bool = status <= U_ZERO_ERROR };
+}
+
+fn calGetTime(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const obj = getThis(ctx) orelse return .{ .bool = false };
+    const cal = getCal(obj) orelse return .{ .bool = false };
+    var status: UErrorCode = U_ZERO_ERROR;
+    const millis = zphp_ucal_getMillis(cal, &status);
+    if (status > U_ZERO_ERROR) return .{ .bool = false };
+    return .{ .float = millis };
+}
+
+fn calSetTime(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len < 1) return .{ .bool = false };
+    const obj = getThis(ctx) orelse return .{ .bool = false };
+    const cal = getCal(obj) orelse return .{ .bool = false };
+    const millis: f64 = switch (args[0]) {
+        .int => |i| @floatFromInt(i),
+        .float => |f| f,
+        else => return .{ .bool = false },
+    };
+    var status: UErrorCode = U_ZERO_ERROR;
+    zphp_ucal_setMillis(cal, millis, &status);
+    return .{ .bool = status <= U_ZERO_ERROR };
+}
+
+fn calInDaylightTime(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const obj = getThis(ctx) orelse return .{ .bool = false };
+    const cal = getCal(obj) orelse return .{ .bool = false };
+    var status: UErrorCode = U_ZERO_ERROR;
+    return .{ .bool = zphp_ucal_inDaylightTime(cal, &status) != 0 };
+}
+
+fn calIsSet(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len < 1 or args[0] != .int) return .{ .bool = false };
+    const obj = getThis(ctx) orelse return .{ .bool = false };
+    const cal = getCal(obj) orelse return .{ .bool = false };
+    return .{ .bool = zphp_ucal_isSet(cal, @intCast(args[0].int)) != 0 };
+}
+
+fn calClear(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    const obj = getThis(ctx) orelse return .{ .bool = false };
+    const cal = getCal(obj) orelse return .{ .bool = false };
+    if (args.len > 0 and args[0] == .int) {
+        zphp_ucal_clearField(cal, @intCast(args[0].int));
+    } else {
+        zphp_ucal_clear(cal);
+    }
+    return .{ .bool = true };
+}
+
+fn calGetTimeZoneId(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const obj = getThis(ctx) orelse return .{ .bool = false };
+    const cal = getCal(obj) orelse return .{ .bool = false };
+    var buf: [128]UChar = undefined;
+    var status: UErrorCode = U_ZERO_ERROR;
+    const n = zphp_ucal_getTimeZoneID(cal, &buf, @intCast(buf.len), &status);
+    if (status > U_ZERO_ERROR or n <= 0) return .{ .string = try dupString(ctx, "") };
+    const out = try u16ToUtf8(ctx, buf[0..@intCast(n)]);
+    return .{ .string = out };
+}
+
+fn calSetTimeZone(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len < 1 or args[0] != .string) return .{ .bool = false };
+    const obj = getThis(ctx) orelse return .{ .bool = false };
+    const cal = getCal(obj) orelse return .{ .bool = false };
+    const u16src = try utf8ToU16(ctx, args[0].string);
+    defer ctx.allocator.free(u16src);
+    var status: UErrorCode = U_ZERO_ERROR;
+    zphp_ucal_setTimeZone(cal, u16src.ptr, @intCast(u16src.len), &status);
+    return .{ .bool = status <= U_ZERO_ERROR };
+}
+
+fn calGetFirstDayOfWeek(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const obj = getThis(ctx) orelse return .{ .int = 0 };
+    const cal = getCal(obj) orelse return .{ .int = 0 };
+    var status: UErrorCode = U_ZERO_ERROR;
+    return .{ .int = @intCast(zphp_ucal_getFirstDayOfWeek(cal, &status)) };
+}
+
+fn calSetFirstDayOfWeek(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len < 1 or args[0] != .int) return .{ .bool = false };
+    const obj = getThis(ctx) orelse return .{ .bool = false };
+    const cal = getCal(obj) orelse return .{ .bool = false };
+    zphp_ucal_setFirstDayOfWeek(cal, @intCast(args[0].int));
+    return .{ .bool = true };
+}
+
+fn calIsWeekend(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    const obj = getThis(ctx) orelse return .{ .bool = false };
+    const cal = getCal(obj) orelse return .{ .bool = false };
+    var status: UErrorCode = U_ZERO_ERROR;
+    const date: f64 = if (args.len > 0) switch (args[0]) {
+        .int => |i| @floatFromInt(i),
+        .float => |f| f,
+        else => zphp_ucal_getMillis(cal, &status),
+    } else zphp_ucal_getMillis(cal, &status);
+    return .{ .bool = zphp_ucal_isWeekend(cal, date, &status) != 0 };
+}
+
+fn calGetType(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const obj = getThis(ctx) orelse return .{ .bool = false };
+    const cal = getCal(obj) orelse return .{ .bool = false };
+    var buf: [64]u8 = undefined;
+    var status: UErrorCode = U_ZERO_ERROR;
+    const n = zphp_ucal_getType(cal, &buf, @intCast(buf.len), &status);
+    if (status > U_ZERO_ERROR or n <= 0) return .{ .string = try dupString(ctx, "") };
+    return .{ .string = try dupString(ctx, buf[0..@intCast(n)]) };
+}
+
+fn calGetLocale(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    const obj = getThis(ctx) orelse return .{ .bool = false };
+    const cal = getCal(obj) orelse return .{ .bool = false };
+    var buf: [128]u8 = undefined;
+    var status: UErrorCode = U_ZERO_ERROR;
+    const ltype: c_int = if (args.len > 0 and args[0] == .int) @intCast(args[0].int) else 0;
+    const n = zphp_ucal_getLocaleByType(cal, ltype, &buf, @intCast(buf.len), &status);
+    if (status > U_ZERO_ERROR or n <= 0) return .{ .string = try dupString(ctx, "") };
+    return .{ .string = try dupString(ctx, buf[0..@intCast(n)]) };
+}
+
+fn calGetActualMaximum(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len < 1 or args[0] != .int) return .{ .bool = false };
+    const obj = getThis(ctx) orelse return .{ .bool = false };
+    const cal = getCal(obj) orelse return .{ .bool = false };
+    var status: UErrorCode = U_ZERO_ERROR;
+    // UCAL_ACTUAL_MAXIMUM = 5: this-calendar's actual maximum for the field
+    // (e.g. 29 for Feb in a leap year). UCAL_LEAST_MAXIMUM (3) would return
+    // 28 across all years which is the wrong thing
+    return .{ .int = @intCast(zphp_ucal_getLimit(cal, @intCast(args[0].int), 5, &status)) };
+}
+
+fn calGetActualMinimum(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len < 1 or args[0] != .int) return .{ .bool = false };
+    const obj = getThis(ctx) orelse return .{ .bool = false };
+    const cal = getCal(obj) orelse return .{ .bool = false };
+    var status: UErrorCode = U_ZERO_ERROR;
+    // UCAL_ACTUAL_MINIMUM = 4
+    return .{ .int = @intCast(zphp_ucal_getLimit(cal, @intCast(args[0].int), 4, &status)) };
+}
+
+fn calIsLenient(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const obj = getThis(ctx) orelse return .{ .bool = false };
+    const cal = getCal(obj) orelse return .{ .bool = false };
+    return .{ .bool = zphp_ucal_getLenient(cal) != 0 };
+}
+
+fn calSetLenient(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len < 1 or args[0] != .bool) return .{ .bool = false };
+    const obj = getThis(ctx) orelse return .{ .bool = false };
+    const cal = getCal(obj) orelse return .{ .bool = false };
+    zphp_ucal_setLenient(cal, if (args[0].bool) 1 else 0);
+    return .{ .bool = true };
+}
+
+fn calEquals(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    // PHP's IntlCalendar::equals compares calendars by their effective wall
+    // time. ucal_equivalentTo is the wrong check - it tests calendar-type
+    // and tz equivalence which is stricter than what PHP does
+    if (args.len < 1 or args[0] != .object) return .{ .bool = false };
+    const obj = getThis(ctx) orelse return .{ .bool = false };
+    const a = getCal(obj) orelse return .{ .bool = false };
+    const b = getCal(args[0].object) orelse return .{ .bool = false };
+    var s1: UErrorCode = U_ZERO_ERROR;
+    var s2: UErrorCode = U_ZERO_ERROR;
+    return .{ .bool = zphp_ucal_getMillis(a, &s1) == zphp_ucal_getMillis(b, &s2) };
+}
+
 // ---------------- registration ----------------
 
 pub const entries = .{
@@ -873,7 +1184,92 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try registerTransliteratorClass(vm, a);
     try registerDateFormatterClass(vm, a);
     try registerMessageFormatterClass(vm, a);
+    try registerIntlCalendarClass(vm, a);
     try registerConstants(vm, a);
+}
+
+fn registerIntlCalendarClass(vm: *VM, a: Allocator) !void {
+    inline for (.{ "IntlCalendar", "IntlGregorianCalendar" }) |cls_name| {
+        var def = ClassDef{ .name = cls_name };
+        if (comptime std.mem.eql(u8, cls_name, "IntlGregorianCalendar")) {
+            def.parent = "IntlCalendar";
+        }
+        try def.methods.put(a, "__construct", .{ .name = "__construct", .arity = 0 });
+        try def.methods.put(a, "createInstance", .{ .name = "createInstance", .arity = 0, .is_static = true });
+        try def.methods.put(a, "get", .{ .name = "get", .arity = 1 });
+        try def.methods.put(a, "set", .{ .name = "set", .arity = 2 });
+        try def.methods.put(a, "add", .{ .name = "add", .arity = 2 });
+        try def.methods.put(a, "roll", .{ .name = "roll", .arity = 2 });
+        try def.methods.put(a, "getTime", .{ .name = "getTime", .arity = 0 });
+        try def.methods.put(a, "setTime", .{ .name = "setTime", .arity = 1 });
+        try def.methods.put(a, "inDaylightTime", .{ .name = "inDaylightTime", .arity = 0 });
+        try def.methods.put(a, "isSet", .{ .name = "isSet", .arity = 1 });
+        try def.methods.put(a, "clear", .{ .name = "clear", .arity = 0 });
+        try def.methods.put(a, "setTimeZone", .{ .name = "setTimeZone", .arity = 1 });
+        try def.methods.put(a, "getFirstDayOfWeek", .{ .name = "getFirstDayOfWeek", .arity = 0 });
+        try def.methods.put(a, "setFirstDayOfWeek", .{ .name = "setFirstDayOfWeek", .arity = 1 });
+        try def.methods.put(a, "isWeekend", .{ .name = "isWeekend", .arity = 0 });
+        try def.methods.put(a, "getType", .{ .name = "getType", .arity = 0 });
+        try def.methods.put(a, "getLocale", .{ .name = "getLocale", .arity = 0 });
+        try def.methods.put(a, "getActualMaximum", .{ .name = "getActualMaximum", .arity = 1 });
+        try def.methods.put(a, "getActualMinimum", .{ .name = "getActualMinimum", .arity = 1 });
+        try def.methods.put(a, "isLenient", .{ .name = "isLenient", .arity = 0 });
+        try def.methods.put(a, "setLenient", .{ .name = "setLenient", .arity = 1 });
+        try def.methods.put(a, "equals", .{ .name = "equals", .arity = 1 });
+
+        // calendar field constants. these double as both class constants and
+        // PHP integer values the user passes to get()/set()/add()
+        const fields = .{
+            .{ "FIELD_ERA", 0 },             .{ "FIELD_YEAR", 1 },
+            .{ "FIELD_MONTH", 2 },           .{ "FIELD_WEEK_OF_YEAR", 3 },
+            .{ "FIELD_WEEK_OF_MONTH", 4 },   .{ "FIELD_DATE", 5 },
+            .{ "FIELD_DAY_OF_YEAR", 6 },     .{ "FIELD_DAY_OF_WEEK", 7 },
+            .{ "FIELD_DAY_OF_WEEK_IN_MONTH", 8 }, .{ "FIELD_AM_PM", 9 },
+            .{ "FIELD_HOUR", 10 },           .{ "FIELD_HOUR_OF_DAY", 11 },
+            .{ "FIELD_MINUTE", 12 },         .{ "FIELD_SECOND", 13 },
+            .{ "FIELD_MILLISECOND", 14 },    .{ "FIELD_ZONE_OFFSET", 15 },
+            .{ "FIELD_DST_OFFSET", 16 },     .{ "FIELD_YEAR_WOY", 17 },
+            .{ "FIELD_DOW_LOCAL", 18 },      .{ "FIELD_EXTENDED_YEAR", 19 },
+            .{ "FIELD_JULIAN_DAY", 20 },     .{ "FIELD_MILLISECONDS_IN_DAY", 21 },
+            .{ "FIELD_IS_LEAP_MONTH", 22 },
+            .{ "DOW_SUNDAY", 1 }, .{ "DOW_MONDAY", 2 }, .{ "DOW_TUESDAY", 3 },
+            .{ "DOW_WEDNESDAY", 4 }, .{ "DOW_THURSDAY", 5 }, .{ "DOW_FRIDAY", 6 },
+            .{ "DOW_SATURDAY", 7 },
+            .{ "DOW_TYPE_WEEKDAY", 0 }, .{ "DOW_TYPE_WEEKEND", 1 },
+            .{ "DOW_TYPE_WEEKEND_OFFSET", 2 }, .{ "DOW_TYPE_WEEKEND_CEASE", 3 },
+            .{ "WALLTIME_FIRST", 1 }, .{ "WALLTIME_LAST", 0 }, .{ "WALLTIME_NEXT_VALID", 2 },
+        };
+        inline for (fields) |k| {
+            try def.constant_order.append(a, k[0]);
+            try def.constant_names.put(a, k[0], {});
+            try def.static_props.put(a, k[0], .{ .int = k[1] });
+        }
+
+        try vm.classes.put(a, cls_name, def);
+
+        try vm.native_fns.put(a, cls_name ++ "::__construct", calConstruct);
+        try vm.native_fns.put(a, cls_name ++ "::createInstance", calCreateInstance);
+        try vm.native_fns.put(a, cls_name ++ "::get", calGet);
+        try vm.native_fns.put(a, cls_name ++ "::set", calSet);
+        try vm.native_fns.put(a, cls_name ++ "::add", calAdd);
+        try vm.native_fns.put(a, cls_name ++ "::roll", calRoll);
+        try vm.native_fns.put(a, cls_name ++ "::getTime", calGetTime);
+        try vm.native_fns.put(a, cls_name ++ "::setTime", calSetTime);
+        try vm.native_fns.put(a, cls_name ++ "::inDaylightTime", calInDaylightTime);
+        try vm.native_fns.put(a, cls_name ++ "::isSet", calIsSet);
+        try vm.native_fns.put(a, cls_name ++ "::clear", calClear);
+        try vm.native_fns.put(a, cls_name ++ "::setTimeZone", calSetTimeZone);
+        try vm.native_fns.put(a, cls_name ++ "::getFirstDayOfWeek", calGetFirstDayOfWeek);
+        try vm.native_fns.put(a, cls_name ++ "::setFirstDayOfWeek", calSetFirstDayOfWeek);
+        try vm.native_fns.put(a, cls_name ++ "::isWeekend", calIsWeekend);
+        try vm.native_fns.put(a, cls_name ++ "::getType", calGetType);
+        try vm.native_fns.put(a, cls_name ++ "::getLocale", calGetLocale);
+        try vm.native_fns.put(a, cls_name ++ "::getActualMaximum", calGetActualMaximum);
+        try vm.native_fns.put(a, cls_name ++ "::getActualMinimum", calGetActualMinimum);
+        try vm.native_fns.put(a, cls_name ++ "::isLenient", calIsLenient);
+        try vm.native_fns.put(a, cls_name ++ "::setLenient", calSetLenient);
+        try vm.native_fns.put(a, cls_name ++ "::equals", calEquals);
+    }
 }
 
 fn registerMessageFormatterClass(vm: *VM, a: Allocator) !void {
@@ -1091,6 +1487,8 @@ pub fn cleanupResources(objects: std.ArrayListUnmanaged(*PhpObject)) void {
             if (getTranslit(obj)) |t| zphp_utrans_close(t);
         } else if (std.mem.eql(u8, obj.class_name, "IntlDateFormatter")) {
             if (getDateFmt(obj)) |f| zphp_udat_close(f);
+        } else if (std.mem.eql(u8, obj.class_name, "IntlCalendar") or std.mem.eql(u8, obj.class_name, "IntlGregorianCalendar")) {
+            if (getCal(obj)) |c| zphp_ucal_close(c);
         }
     }
 }

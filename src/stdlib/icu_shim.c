@@ -13,6 +13,7 @@
 
 #include <stddef.h>
 #include <stdint.h>
+#include <string.h>
 #include <unicode/utypes.h>
 #include <unicode/uloc.h>
 #include <unicode/ustring.h>
@@ -23,6 +24,7 @@
 #include <unicode/udat.h>
 #include <unicode/umsg.h>
 #include <unicode/uidna.h>
+#include <unicode/ucal.h>
 
 /* ----- utf-16 / utf-8 conversion ----- */
 
@@ -156,4 +158,91 @@ size_t zphp_uidna_info_size(void) { return sizeof(UIDNAInfo); }
 void zphp_uidna_info_init(UIDNAInfo* info) {
     UIDNAInfo init = UIDNA_INFO_INITIALIZER;
     *info = init;
+}
+
+/* ----- IntlCalendar ----- */
+
+UCalendar* zphp_ucal_open(const UChar* zoneID, int32_t len, const char* locale, UCalendarType type, UErrorCode* err) {
+    return ucal_open(zoneID, len, locale, type, err);
+}
+void zphp_ucal_close(UCalendar* cal) { ucal_close(cal); }
+int32_t zphp_ucal_get(const UCalendar* cal, UCalendarDateFields field, UErrorCode* err) {
+    return ucal_get(cal, field, err);
+}
+void zphp_ucal_set(UCalendar* cal, UCalendarDateFields field, int32_t value) {
+    ucal_set(cal, field, value);
+}
+void zphp_ucal_add(UCalendar* cal, UCalendarDateFields field, int32_t amount, UErrorCode* err) {
+    ucal_add(cal, field, amount, err);
+}
+void zphp_ucal_roll(UCalendar* cal, UCalendarDateFields field, int32_t amount, UErrorCode* err) {
+    ucal_roll(cal, field, amount, err);
+}
+double zphp_ucal_getMillis(const UCalendar* cal, UErrorCode* err) {
+    return ucal_getMillis(cal, err);
+}
+void zphp_ucal_setMillis(UCalendar* cal, double dateTime, UErrorCode* err) {
+    ucal_setMillis(cal, dateTime, err);
+}
+void zphp_ucal_setDate(UCalendar* cal, int32_t year, int32_t month, int32_t date, UErrorCode* err) {
+    ucal_setDate(cal, year, month, date, err);
+}
+void zphp_ucal_setDateTime(UCalendar* cal, int32_t y, int32_t mo, int32_t d, int32_t h, int32_t mi, int32_t s, UErrorCode* err) {
+    ucal_setDateTime(cal, y, mo, d, h, mi, s, err);
+}
+UBool zphp_ucal_inDaylightTime(const UCalendar* cal, UErrorCode* err) {
+    return ucal_inDaylightTime(cal, err);
+}
+UBool zphp_ucal_isSet(const UCalendar* cal, UCalendarDateFields field) {
+    return ucal_isSet(cal, field);
+}
+void zphp_ucal_clear(UCalendar* cal) { ucal_clear(cal); }
+void zphp_ucal_clearField(UCalendar* cal, UCalendarDateFields field) { ucal_clearField(cal, field); }
+int32_t zphp_ucal_getLimit(const UCalendar* cal, UCalendarDateFields field, UCalendarLimitType type, UErrorCode* err) {
+    return ucal_getLimit(cal, field, type, err);
+}
+UBool zphp_ucal_equivalentTo(const UCalendar* a, const UCalendar* b) {
+    return ucal_equivalentTo(a, b);
+}
+int32_t zphp_ucal_getType(const UCalendar* cal, char* buf, int32_t buf_len, UErrorCode* err) {
+    const char* type = ucal_getType(cal, err);
+    if (!type) return -1;
+    size_t n = strlen(type);
+    if ((int32_t)n >= buf_len) return -1;
+    memcpy(buf, type, n);
+    buf[n] = 0;
+    return (int32_t)n;
+}
+int32_t zphp_ucal_getLocaleByType(const UCalendar* cal, ULocDataLocaleType type, char* buf, int32_t buf_len, UErrorCode* err) {
+    const char* loc = ucal_getLocaleByType(cal, type, err);
+    if (!loc) return -1;
+    size_t n = strlen(loc);
+    if ((int32_t)n >= buf_len) return -1;
+    memcpy(buf, loc, n);
+    buf[n] = 0;
+    return (int32_t)n;
+}
+int32_t zphp_ucal_getTimeZoneID(const UCalendar* cal, UChar* buf, int32_t cap, UErrorCode* err) {
+    return ucal_getTimeZoneID(cal, buf, cap, err);
+}
+void zphp_ucal_setTimeZone(UCalendar* cal, const UChar* zoneID, int32_t len, UErrorCode* err) {
+    ucal_setTimeZone(cal, zoneID, len, err);
+}
+int32_t zphp_ucal_getFirstDayOfWeek(const UCalendar* cal, UErrorCode* err) {
+    return ucal_getAttribute(cal, UCAL_FIRST_DAY_OF_WEEK);
+}
+void zphp_ucal_setFirstDayOfWeek(UCalendar* cal, int32_t day) {
+    ucal_setAttribute(cal, UCAL_FIRST_DAY_OF_WEEK, day);
+}
+UBool zphp_ucal_isWeekend(const UCalendar* cal, double date, UErrorCode* err) {
+    return ucal_isWeekend(cal, date, err);
+}
+UCalendar* zphp_ucal_clone(const UCalendar* cal, UErrorCode* err) {
+    return ucal_clone(cal, err);
+}
+UBool zphp_ucal_getLenient(const UCalendar* cal) {
+    return ucal_getAttribute(cal, UCAL_LENIENT);
+}
+void zphp_ucal_setLenient(UCalendar* cal, int32_t lenient) {
+    ucal_setAttribute(cal, UCAL_LENIENT, lenient);
 }
