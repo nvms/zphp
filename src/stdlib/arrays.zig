@@ -1021,7 +1021,11 @@ fn array_column(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
         };
         if (args.len >= 3 and args[2] != .null) {
             const idx_val = rowGet(row_val, args[2]);
-            try result.set(ctx.allocator, Value.toArrayKey(idx_val), val);
+            if (idx_val == .null) {
+                try result.append(ctx.allocator, val);
+            } else {
+                try result.set(ctx.allocator, Value.toArrayKey(idx_val), val);
+            }
         } else {
             try result.append(ctx.allocator, val);
         }
