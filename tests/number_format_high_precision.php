@@ -1,0 +1,21 @@
+<?php
+echo number_format(1234567.891, 2), "\n";
+echo number_format(1234567.891, 2, ",", "."), "\n";
+echo number_format(1234567.891, 2, ",", " "), "\n";
+echo number_format(1234567.891, 0), "\n";
+echo number_format(0.5), "\n";
+echo number_format(1.5), "\n";
+echo number_format(2.5), "\n";
+echo number_format(-1.5), "\n";
+echo number_format(1e10), "\n";
+echo number_format(1e15, 2), "\n";
+echo number_format(0.00001, 5), "\n";
+echo number_format(0.1 + 0.2, 20), "\n";
+echo number_format(1.005, 2), "\n";
+echo number_format(2.675, 2), "\n";
+echo number_format(0.4, 0), "\n";
+echo number_format(0.6, 0), "\n";
+echo number_format(1e-10, 12), "\n";
+echo number_format(1234.5, 2, "..", "**"), "\n";
+echo number_format(0.1, 25), "\n";
+echo number_format(1.0/3.0, 30), "\n";

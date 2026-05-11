@@ -1001,11 +1001,19 @@ fn roundFloatToDecimals(num: f64, decimals: usize, int_buf: []u8, frac_buf: []u8
     var abs_val = @abs(num);
     if (std.math.isNan(abs_val) or std.math.isInf(abs_val)) abs_val = 0;
 
-    var src_buf: [64]u8 = undefined;
-    var src = std.fmt.bufPrint(&src_buf, "{d}", .{abs_val}) catch "0";
+    var src_buf: [256]u8 = undefined;
+    var src: []const u8 = undefined;
+    if (decimals > 16) {
+        var fmt_buf: [16]u8 = undefined;
+        const fmt_str = std.fmt.bufPrintZ(&fmt_buf, "%.{d}f", .{decimals + 5}) catch unreachable;
+        const n = snprintf(&src_buf, src_buf.len, fmt_str.ptr, abs_val);
+        src = if (n > 0 and @as(usize, @intCast(n)) < src_buf.len) src_buf[0..@intCast(n)] else std.fmt.bufPrint(&src_buf, "{d}", .{abs_val}) catch "0";
+    } else {
+        src = std.fmt.bufPrint(&src_buf, "{d}", .{abs_val}) catch "0";
+    }
 
     // expand scientific form (e.g. "1e-5", "1.5e10") to plain decimal
-    var expanded_buf: [128]u8 = undefined;
+    var expanded_buf: [256]u8 = undefined;
     if (std.mem.indexOfAny(u8, src, "eE")) |_| {
         src = expandScientific(src, &expanded_buf) catch src;
     }
