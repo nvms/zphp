@@ -851,9 +851,16 @@ fn array_splice(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     length = @min(length, arr.entries.items.len - uoffset);
 
     var removed = try ctx.createArray();
+    var removed_int_idx: i64 = 0;
     for (0..length) |_| {
         const entry = arr.entries.orderedRemove(uoffset);
-        try removed.append(ctx.allocator, entry.value);
+        switch (entry.key) {
+            .string => try removed.set(ctx.allocator, entry.key, entry.value),
+            .int => {
+                try removed.set(ctx.allocator, .{ .int = removed_int_idx }, entry.value);
+                removed_int_idx += 1;
+            },
+        }
     }
 
     if (args.len >= 4) {
