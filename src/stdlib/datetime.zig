@@ -2983,13 +2983,20 @@ fn diFormat(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len == 0 or args[0] != .string) return .{ .string = "" };
     const fmt = args[0].string;
 
-    // formatting uses unsigned values so `{d}` doesn't insert a '+' sign
-    const y: u64 = @intCast(@abs(Value.toInt(obj.get("y"))));
-    const m: u64 = @intCast(@abs(Value.toInt(obj.get("m"))));
-    const d: u64 = @intCast(@abs(Value.toInt(obj.get("d"))));
-    const h: u64 = @intCast(@abs(Value.toInt(obj.get("h"))));
-    const mi: u64 = @intCast(@abs(Value.toInt(obj.get("i"))));
-    const s: u64 = @intCast(@abs(Value.toInt(obj.get("s"))));
+    // raw signed values (PHP's lowercase %d/%h/etc print signed values for
+    // intervals created from date strings); uppercase variants use abs/2-digit
+    const y_signed = Value.toInt(obj.get("y"));
+    const m_signed = Value.toInt(obj.get("m"));
+    const d_signed = Value.toInt(obj.get("d"));
+    const h_signed = Value.toInt(obj.get("h"));
+    const i_signed = Value.toInt(obj.get("i"));
+    const s_signed = Value.toInt(obj.get("s"));
+    const y: u64 = @intCast(@abs(y_signed));
+    const m: u64 = @intCast(@abs(m_signed));
+    const d: u64 = @intCast(@abs(d_signed));
+    const h: u64 = @intCast(@abs(h_signed));
+    const mi: u64 = @intCast(@abs(i_signed));
+    const s: u64 = @intCast(@abs(s_signed));
     const f_us: u64 = blk: {
         const fv = obj.get("f");
         if (fv == .float) {
@@ -3017,18 +3024,18 @@ fn diFormat(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
         i += 1;
         switch (fmt[i]) {
             'Y' => try w.print("{d:0>2}", .{y}),
-            'y' => try w.print("{d}", .{y}),
+            'y' => try w.print("{d}", .{y_signed}),
             'M' => try w.print("{d:0>2}", .{m}),
-            'm' => try w.print("{d}", .{m}),
+            'm' => try w.print("{d}", .{m_signed}),
             'D' => try w.print("{d:0>2}", .{d}),
-            'd' => try w.print("{d}", .{d}),
+            'd' => try w.print("{d}", .{d_signed}),
             'a' => if (has_days) try w.print("{d}", .{days_total}) else try w.writeAll("(unknown)"),
             'H' => try w.print("{d:0>2}", .{h}),
-            'h' => try w.print("{d}", .{h}),
+            'h' => try w.print("{d}", .{h_signed}),
             'I' => try w.print("{d:0>2}", .{mi}),
-            'i' => try w.print("{d}", .{mi}),
+            'i' => try w.print("{d}", .{i_signed}),
             'S' => try w.print("{d:0>2}", .{s}),
-            's' => try w.print("{d}", .{s}),
+            's' => try w.print("{d}", .{s_signed}),
             'F' => try w.print("{d:0>6}", .{f_us}),
             'f' => try w.print("{d}", .{f_us}),
             'R' => try w.writeByte(if (invert) '-' else '+'),
