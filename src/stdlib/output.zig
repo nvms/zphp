@@ -126,7 +126,18 @@ fn varDumpValue(ctx: *NativeContext, val: Value, depth: usize) !void {
             try appendIndent(out, a, indent);
             try out.appendSlice(a, "object(");
             try out.appendSlice(a, obj.class_name);
-            try out.appendSlice(a, ")#1 (");
+            try out.appendSlice(a, ")#");
+            var id_buf: [16]u8 = undefined;
+            var obj_id: usize = 1;
+            for (ctx.vm.objects.items, 0..) |o, i| {
+                if (o == obj) {
+                    obj_id = if (i >= ctx.vm.obj_id_base) i - ctx.vm.obj_id_base + 1 else 1;
+                    break;
+                }
+            }
+            const id_str = std.fmt.bufPrint(&id_buf, "{d}", .{obj_id}) catch "1";
+            try out.appendSlice(a, id_str);
+            try out.appendSlice(a, " (");
             var tmp: [32]u8 = undefined;
             var prop_count: usize = 0;
             if (debug_arr) |da| {
@@ -310,6 +321,30 @@ fn printRValueImpl(a: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8), val: 
                             try appendIndent(out, a, (depth + 1) * 4);
                             try out.appendSlice(a, "[");
                             try out.appendSlice(a, name);
+                            if (vm) |v| {
+                                var current: ?[]const u8 = obj.class_name;
+                                while (current) |cn| {
+                                    const cls = v.classes.get(cn) orelse break;
+                                    var found = false;
+                                    for (cls.properties.items) |pdef| {
+                                        if (std.mem.eql(u8, pdef.name, name)) {
+                                            switch (pdef.visibility) {
+                                                .public => {},
+                                                .protected => try out.appendSlice(a, ":protected"),
+                                                .private => {
+                                                    try out.append(a, ':');
+                                                    try out.appendSlice(a, cn);
+                                                    try out.appendSlice(a, ":private");
+                                                },
+                                            }
+                                            found = true;
+                                            break;
+                                        }
+                                    }
+                                    if (found) break;
+                                    current = cls.parent;
+                                }
+                            }
                             try out.appendSlice(a, "] => ");
                             const nested = slots[i] == .array or slots[i] == .object;
                             try printRValueImpl(a, out, slots[i], depth + if (nested) @as(usize, 2) else 1, vm);

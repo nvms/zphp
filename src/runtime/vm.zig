@@ -323,6 +323,7 @@ pub const VM = struct {
     strings: std.ArrayListUnmanaged([]const u8) = .{},
     arrays: std.ArrayListUnmanaged(*PhpArray) = .{},
     objects: std.ArrayListUnmanaged(*PhpObject) = .{},
+    obj_id_base: usize = 0,
     generators: std.ArrayListUnmanaged(*Generator) = .{},
     fibers: std.ArrayListUnmanaged(*Fiber) = .{},
     ref_cells: std.ArrayListUnmanaged(*Value) = .{},
@@ -1050,6 +1051,7 @@ pub const VM = struct {
         self.file_path = result.file_path;
         self.frames[0] = .{ .chunk = &result.chunk, .ip = 0, .vars = vars, .locals = locals };
         self.frame_count = 1;
+        self.obj_id_base = self.objects.items.len;
         try self.run();
     }
 

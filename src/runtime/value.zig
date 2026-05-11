@@ -274,6 +274,7 @@ pub const PhpObject = struct {
     slots: ?[]Value = null,
     slot_layout: ?*const SlotLayout = null,
     lazy_initializer: Value = .null,
+    id: u32 = 0,
 
     pub const SlotLayout = struct {
         names: []const []const u8,
