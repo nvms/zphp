@@ -38,6 +38,7 @@ pub fn build(b: *std.Build) void {
     addLibicu(b, exe_mod);
     addIcuShim(b, exe_mod);
     addLibgmp(b, exe_mod);
+    addLibgd(b, exe_mod);
     exe_mod.link_libc = true;
     exe_mod.addObject(fast_loop_obj);
 
@@ -83,6 +84,7 @@ pub fn build(b: *std.Build) void {
     addLibicu(b, test_mod);
     addIcuShim(b, test_mod);
     addLibgmp(b, test_mod);
+    addLibgd(b, test_mod);
     test_mod.link_libc = true;
     test_mod.addObject(fast_loop_test_obj);
 
@@ -183,6 +185,17 @@ fn addLibgmp(b: *std.Build, mod: *std.Build.Module) void {
         .file = b.path("src/stdlib/gmp_shim.c"),
         .flags = flags.items,
     });
+}
+
+// libgd uses simple unversioned symbols. pkg-config name is "gdlib"
+fn addLibgd(b: *std.Build, mod: *std.Build.Module) void {
+    mod.linkSystemLibrary("gd", .{ .use_pkg_config = .no });
+    if (pkgConfigCflagsIncludes(b, "gdlib")) |inc| {
+        mod.addSystemIncludePath(.{ .cwd_relative = inc });
+    }
+    if (pkgConfigVariable(b, "gdlib", "libdir")) |lib| {
+        mod.addLibraryPath(.{ .cwd_relative = lib });
+    }
 }
 
 fn pkgConfigCflagsIncludes(b: *std.Build, pkg: []const u8) ?[]const u8 {
