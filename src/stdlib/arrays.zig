@@ -1001,6 +1001,7 @@ fn array_flip(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     const src = args[0].array;
     var result = try ctx.createArray();
     for (src.entries.items) |entry| {
+        if (entry.value != .int and entry.value != .string) continue;
         const new_key = Value.toArrayKey(entry.value);
         const new_val: Value = switch (entry.key) {
             .int => |i| .{ .int = i },
