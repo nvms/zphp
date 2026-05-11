@@ -3779,6 +3779,17 @@ pub const VM = struct {
                                     self.push(result);
                                     continue;
                                 }
+                                // private members of a parent class are invisible to subclasses:
+                                // PHP treats access as "undefined property" rather than a fatal error.
+                                if (vr.visibility == .private) {
+                                    const scope = self.currentFrame().called_class orelse self.currentDefiningClass();
+                                    if (scope) |sc| {
+                                        if (!std.mem.eql(u8, sc, vr.defining_class) and self.isInstanceOf(sc, vr.defining_class)) {
+                                            self.push(.null);
+                                            continue;
+                                        }
+                                    }
+                                }
                                 const msg = try std.fmt.allocPrint(self.allocator, "Cannot access {s} property {s}::${s}", .{
                                     @tagName(vr.visibility), vr.defining_class, prop_name,
                                 });
