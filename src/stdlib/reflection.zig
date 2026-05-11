@@ -512,6 +512,41 @@ pub fn register(vm: *VM, a: Allocator) !void {
 
     try vm.native_fns.put(a, "ReflectionReference::fromArrayElement", rrefFromArrayElement);
     try vm.native_fns.put(a, "ReflectionReference::getId", rrefGetId);
+
+    // ReflectionGenerator wraps a Generator value and exposes the currently-
+    // executing position (file / line / function). zphp's Generator carries
+    // its compiled function + ip so we can derive everything from there
+    var rg_def = ClassDef{ .name = "ReflectionGenerator" };
+    try rg_def.methods.put(a, "__construct", .{ .name = "__construct", .arity = 1 });
+    try rg_def.methods.put(a, "getExecutingLine", .{ .name = "getExecutingLine", .arity = 0 });
+    try rg_def.methods.put(a, "getExecutingFile", .{ .name = "getExecutingFile", .arity = 0 });
+    try rg_def.methods.put(a, "getFunction", .{ .name = "getFunction", .arity = 0 });
+    try rg_def.methods.put(a, "getThis", .{ .name = "getThis", .arity = 0 });
+    try rg_def.methods.put(a, "getExecutingGenerator", .{ .name = "getExecutingGenerator", .arity = 0 });
+    try rg_def.methods.put(a, "getTrace", .{ .name = "getTrace", .arity = 0 });
+    try vm.classes.put(a, "ReflectionGenerator", rg_def);
+    try vm.native_fns.put(a, "ReflectionGenerator::__construct", rgConstruct);
+    try vm.native_fns.put(a, "ReflectionGenerator::getExecutingLine", rgGetExecutingLine);
+    try vm.native_fns.put(a, "ReflectionGenerator::getExecutingFile", rgGetExecutingFile);
+    try vm.native_fns.put(a, "ReflectionGenerator::getFunction", rgGetFunction);
+    try vm.native_fns.put(a, "ReflectionGenerator::getThis", rgGetThis);
+    try vm.native_fns.put(a, "ReflectionGenerator::getExecutingGenerator", rgGetExecutingGenerator);
+    try vm.native_fns.put(a, "ReflectionGenerator::getTrace", rgGetTrace);
+
+    var rfib_def = ClassDef{ .name = "ReflectionFiber" };
+    try rfib_def.methods.put(a, "__construct", .{ .name = "__construct", .arity = 1 });
+    try rfib_def.methods.put(a, "getExecutingLine", .{ .name = "getExecutingLine", .arity = 0 });
+    try rfib_def.methods.put(a, "getExecutingFile", .{ .name = "getExecutingFile", .arity = 0 });
+    try rfib_def.methods.put(a, "getCallable", .{ .name = "getCallable", .arity = 0 });
+    try rfib_def.methods.put(a, "getFiber", .{ .name = "getFiber", .arity = 0 });
+    try rfib_def.methods.put(a, "getTrace", .{ .name = "getTrace", .arity = 0 });
+    try vm.classes.put(a, "ReflectionFiber", rfib_def);
+    try vm.native_fns.put(a, "ReflectionFiber::__construct", rfibConstruct);
+    try vm.native_fns.put(a, "ReflectionFiber::getExecutingLine", rfibGetExecutingLine);
+    try vm.native_fns.put(a, "ReflectionFiber::getExecutingFile", rfibGetExecutingFile);
+    try vm.native_fns.put(a, "ReflectionFiber::getCallable", rfibGetCallable);
+    try vm.native_fns.put(a, "ReflectionFiber::getFiber", rfibGetFiber);
+    try vm.native_fns.put(a, "ReflectionFiber::getTrace", rfibGetTrace);
 }
 
 fn getThis(ctx: *NativeContext) ?*PhpObject {
@@ -2956,4 +2991,142 @@ fn rebcGetBackingValue(ctx: *NativeContext, _: []const Value) RuntimeError!Value
     const case_obj_v = cls.static_props.get(case_name) orelse return .null;
     if (case_obj_v != .object) return .null;
     return case_obj_v.object.get("value");
+}
+
+// ---------------- ReflectionGenerator ----------------
+
+fn rgConstruct(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len < 1 or args[0] != .generator) return throwReflection(ctx, "ReflectionGenerator::__construct expects a Generator");
+    const obj = getThis(ctx) orelse return .null;
+    try obj.set(ctx.allocator, "__gen", .{ .int = @intCast(@intFromPtr(args[0].generator)) });
+    return .null;
+}
+
+fn getGenPtr(obj: *PhpObject) ?*@import("../runtime/value.zig").Generator {
+    const v = obj.get("__gen");
+    if (v != .int or v.int == 0) return null;
+    return @ptrFromInt(@as(usize, @intCast(v.int)));
+}
+
+fn rgGetExecutingLine(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const obj = getThis(ctx) orelse return .null;
+    const gen = getGenPtr(obj) orelse return .null;
+    const chunk = &gen.func.chunk;
+    const ip = if (gen.ip > 0) gen.ip - 1 else 0;
+    if (chunk.getSourceLocation(ip, ctx.vm.source)) |loc| {
+        return .{ .int = @intCast(loc.line) };
+    }
+    return .{ .int = 0 };
+}
+
+fn rgGetExecutingFile(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const obj = getThis(ctx) orelse return .null;
+    const gen = getGenPtr(obj) orelse return .null;
+    _ = gen;
+    // zphp stores a single source per VM; surface that as the executing file
+    return .{ .string = try ctx.createString(ctx.vm.file_path) };
+}
+
+fn rgGetFunction(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const obj = getThis(ctx) orelse return .null;
+    const gen = getGenPtr(obj) orelse return .null;
+    const rf = try ctx.createObject("ReflectionFunction");
+    try rf.set(ctx.allocator, "name", .{ .string = try ctx.createString(gen.func.name) });
+    return .{ .object = rf };
+}
+
+fn rgGetThis(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const obj = getThis(ctx) orelse return .null;
+    const gen = getGenPtr(obj) orelse return .null;
+    if (gen.vars.get("$this")) |this_v| return this_v;
+    return .null;
+}
+
+fn rgGetExecutingGenerator(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const obj = getThis(ctx) orelse return .null;
+    var gen = getGenPtr(obj) orelse return .null;
+    // walk yield-from delegates to the innermost actually-executing generator
+    while (gen.delegate) |del| switch (del) {
+        .gen => |inner| gen = inner,
+        else => break,
+    };
+    return .{ .generator = gen };
+}
+
+fn rgGetTrace(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const obj = getThis(ctx) orelse return .null;
+    const gen = getGenPtr(obj) orelse return .null;
+    const arr = try ctx.createArray();
+    const frame = try ctx.createArray();
+    if (gen.func.chunk.getSourceLocation(if (gen.ip > 0) gen.ip - 1 else 0, ctx.vm.source)) |loc| {
+        try frame.set(ctx.allocator, .{ .string = try ctx.createString("line") }, .{ .int = @intCast(loc.line) });
+    }
+    try frame.set(ctx.allocator, .{ .string = try ctx.createString("file") }, .{ .string = try ctx.createString(ctx.vm.file_path) });
+    try frame.set(ctx.allocator, .{ .string = try ctx.createString("function") }, .{ .string = try ctx.createString(gen.func.name) });
+    try arr.append(ctx.allocator, .{ .array = frame });
+    return .{ .array = arr };
+}
+
+// ---------------- ReflectionFiber ----------------
+
+fn rfibConstruct(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len < 1 or args[0] != .fiber) return throwReflection(ctx, "ReflectionFiber::__construct expects a Fiber");
+    const obj = getThis(ctx) orelse return .null;
+    try obj.set(ctx.allocator, "__fib", .{ .int = @intCast(@intFromPtr(args[0].fiber)) });
+    return .null;
+}
+
+fn getFibPtr(obj: *PhpObject) ?*@import("../runtime/value.zig").Fiber {
+    const v = obj.get("__fib");
+    if (v != .int or v.int == 0) return null;
+    return @ptrFromInt(@as(usize, @intCast(v.int)));
+}
+
+fn rfibGetExecutingLine(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const obj = getThis(ctx) orelse return .null;
+    const fib = getFibPtr(obj) orelse return .null;
+    if (fib.saved_frames.items.len == 0) return .{ .int = 0 };
+    const top = &fib.saved_frames.items[fib.saved_frames.items.len - 1];
+    const ip = if (top.ip > 0) top.ip - 1 else 0;
+    if (top.chunk.getSourceLocation(ip, ctx.vm.source)) |loc| {
+        return .{ .int = @intCast(loc.line) };
+    }
+    return .{ .int = 0 };
+}
+
+fn rfibGetExecutingFile(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const obj = getThis(ctx) orelse return .null;
+    _ = getFibPtr(obj) orelse return .null;
+    return .{ .string = try ctx.createString(ctx.vm.file_path) };
+}
+
+fn rfibGetCallable(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const obj = getThis(ctx) orelse return .null;
+    const fib = getFibPtr(obj) orelse return .null;
+    return fib.callable;
+}
+
+fn rfibGetFiber(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const obj = getThis(ctx) orelse return .null;
+    const fib = getFibPtr(obj) orelse return .null;
+    return .{ .fiber = fib };
+}
+
+fn rfibGetTrace(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const obj = getThis(ctx) orelse return .null;
+    const fib = getFibPtr(obj) orelse return .null;
+    const arr = try ctx.createArray();
+    var i: usize = fib.saved_frames.items.len;
+    while (i > 0) {
+        i -= 1;
+        const sf = &fib.saved_frames.items[i];
+        const frame = try ctx.createArray();
+        const ip = if (sf.ip > 0) sf.ip - 1 else 0;
+        if (sf.chunk.getSourceLocation(ip, ctx.vm.source)) |loc| {
+            try frame.set(ctx.allocator, .{ .string = try ctx.createString("line") }, .{ .int = @intCast(loc.line) });
+        }
+        try frame.set(ctx.allocator, .{ .string = try ctx.createString("file") }, .{ .string = try ctx.createString(ctx.vm.file_path) });
+        try arr.append(ctx.allocator, .{ .array = frame });
+    }
+    return .{ .array = arr };
 }
