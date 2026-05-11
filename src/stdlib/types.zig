@@ -1173,7 +1173,9 @@ fn native_exit(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
         if (args[0] == .string) {
             try ctx.vm.output.appendSlice(ctx.allocator, args[0].string);
         } else if (args[0] == .int) {
-            // integer exit code - don't output, just set
+            // PHP truncates to u8 ([0,255]) for the process exit status
+            const code: i64 = args[0].int;
+            ctx.vm.exit_code = @intCast(@as(i64, @mod(code, 256)));
         }
     }
     ctx.vm.exit_requested = true;

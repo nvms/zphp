@@ -53,7 +53,13 @@ fn cHandler(sig: c_int) callconv(.c) void {
     if (idx < MAX_SIG) _ = pending_signals[idx].fetchAdd(1, .seq_cst);
 }
 
-fn native_pcntl_fork(_: *NativeContext, _: []const Value) RuntimeError!Value {
+fn native_pcntl_fork(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    // flush any buffered output BEFORE fork so the parent's stdout isn't
+    // re-emitted by every child when they exit
+    if (ctx.vm.output.items.len > 0) {
+        _ = std.posix.write(1, ctx.vm.output.items) catch {};
+        ctx.vm.output.clearRetainingCapacity();
+    }
     const pid = std.c.fork();
     if (pid < 0) {
         last_errno = std.c._errno().*;

@@ -363,6 +363,7 @@ pub const VM = struct {
     compile_results: std.ArrayListUnmanaged(*CompileResult) = .{},
     error_msg: ?[]const u8 = null,
     exit_requested: bool = false,
+    exit_code: u8 = 0,
     source: []const u8 = "",
     file_path: []const u8 = "",
     autoload_callbacks: std.ArrayListUnmanaged(Value) = .{},

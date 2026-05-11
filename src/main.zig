@@ -291,7 +291,7 @@ fn runWithVM(allocator: std.mem.Allocator, result: *CompileResult, script_path: 
     vm.interpret(result) catch {
         vm.runShutdownCallbacks() catch {};
         if (vm.output.items.len > 0) try writeStdout(vm.output.items);
-        if (vm.exit_requested) std.process.exit(0);
+        if (vm.exit_requested) std.process.exit(vm.exit_code);
         const msg = error_format.formatRuntimeError(allocator, vm);
         if (msg.len > 0) {
             try writeStderr(msg);
