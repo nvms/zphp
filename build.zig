@@ -40,6 +40,7 @@ pub fn build(b: *std.Build) void {
     addLibgmp(b, exe_mod);
     addLibgd(b, exe_mod);
     addLibsodium(b, exe_mod);
+    addLibldap(b, exe_mod);
     exe_mod.link_libc = true;
     exe_mod.addObject(fast_loop_obj);
 
@@ -87,6 +88,7 @@ pub fn build(b: *std.Build) void {
     addLibgmp(b, test_mod);
     addLibgd(b, test_mod);
     addLibsodium(b, test_mod);
+    addLibldap(b, test_mod);
     test_mod.link_libc = true;
     test_mod.addObject(fast_loop_test_obj);
 
@@ -221,6 +223,17 @@ fn addLibsodium(b: *std.Build, mod: *std.Build.Module) void {
         mod.addSystemIncludePath(.{ .cwd_relative = inc });
     }
     if (pkgConfigVariable(b, "libsodium", "libdir")) |lib| {
+        mod.addLibraryPath(.{ .cwd_relative = lib });
+    }
+}
+
+fn addLibldap(b: *std.Build, mod: *std.Build.Module) void {
+    mod.linkSystemLibrary("ldap", .{ .use_pkg_config = .no });
+    mod.linkSystemLibrary("lber", .{ .use_pkg_config = .no });
+    if (pkgConfigCflagsIncludes(b, "ldap")) |inc| {
+        mod.addSystemIncludePath(.{ .cwd_relative = inc });
+    }
+    if (pkgConfigVariable(b, "ldap", "libdir")) |lib| {
         mod.addLibraryPath(.{ .cwd_relative = lib });
     }
 }

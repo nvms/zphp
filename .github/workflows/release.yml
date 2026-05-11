@@ -42,11 +42,11 @@ jobs:
 
       - name: install system libs (ubuntu glibc)
         if: runner.os == 'Linux' && !matrix.alpine
-        run: sudo apt-get update && sudo apt-get install -y libpcre2-dev libsqlite3-dev zlib1g-dev libmysqlclient-dev libpq-dev libssl-dev libnghttp2-dev libcurl4-openssl-dev libxml2-dev libicu-dev libgmp-dev libgd-dev libsodium-dev
+        run: sudo apt-get update && sudo apt-get install -y libpcre2-dev libsqlite3-dev zlib1g-dev libmysqlclient-dev libpq-dev libssl-dev libnghttp2-dev libcurl4-openssl-dev libxml2-dev libicu-dev libgmp-dev libgd-dev libsodium-dev libldap2-dev
 
       - name: install system libs (macos)
         if: runner.os == 'macOS'
-        run: brew install mysql-client libpq openssl@3 nghttp2 curl libxml2 icu4c gmp gd libsodium
+        run: brew install mysql-client libpq openssl@3 nghttp2 curl libxml2 icu4c gmp gd libsodium openldap
 
       - name: setup alpine (musl)
         if: matrix.alpine
@@ -66,6 +66,7 @@ jobs:
             gmp-dev
             gd-dev
             libsodium-dev libsodium-static
+            openldap-dev
 
       - name: install zig (alpine)
         if: matrix.alpine
@@ -81,7 +82,7 @@ jobs:
         if: ${{ !matrix.alpine }}
         run: zig build -Doptimize=ReleaseFast
         env:
-          PKG_CONFIG_PATH: ${{ runner.os == 'macOS' && '/opt/homebrew/opt/mysql-client/lib/pkgconfig:/opt/homebrew/opt/libpq/lib/pkgconfig:/opt/homebrew/opt/curl/lib/pkgconfig:/opt/homebrew/opt/icu4c/lib/pkgconfig:/opt/homebrew/opt/gmp/lib/pkgconfig:/opt/homebrew/opt/gd/lib/pkgconfig:/usr/local/opt/mysql-client/lib/pkgconfig:/usr/local/opt/libpq/lib/pkgconfig:/usr/local/opt/icu4c/lib/pkgconfig:/usr/local/opt/gmp/lib/pkgconfig:/usr/local/opt/gd/lib/pkgconfig' || '' }}
+          PKG_CONFIG_PATH: ${{ runner.os == 'macOS' && '/opt/homebrew/opt/mysql-client/lib/pkgconfig:/opt/homebrew/opt/libpq/lib/pkgconfig:/opt/homebrew/opt/curl/lib/pkgconfig:/opt/homebrew/opt/icu4c/lib/pkgconfig:/opt/homebrew/opt/gmp/lib/pkgconfig:/opt/homebrew/opt/gd/lib/pkgconfig:/opt/homebrew/opt/libsodium/lib/pkgconfig:/opt/homebrew/opt/openldap/lib/pkgconfig:/usr/local/opt/mysql-client/lib/pkgconfig:/usr/local/opt/libpq/lib/pkgconfig:/usr/local/opt/icu4c/lib/pkgconfig:/usr/local/opt/gmp/lib/pkgconfig:/usr/local/opt/gd/lib/pkgconfig:/usr/local/opt/libsodium/lib/pkgconfig:/usr/local/opt/openldap/lib/pkgconfig' || '' }}
 
       - name: build (musl)
         if: matrix.alpine
