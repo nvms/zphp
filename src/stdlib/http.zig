@@ -39,7 +39,15 @@ fn isCallable(v: Value) bool {
 
 fn native_ob_start(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     var level: OutputBufferLevel = .{ .start = ctx.vm.output.items.len };
-    if (args.len >= 1 and args[0] != .null and isCallable(args[0])) {
+    if (args.len >= 1 and args[0] != .null) {
+        // verify the handler resolves to a real callable; PHP returns false
+        // and does not start a buffer when the handler can't be found
+        if (args[0] == .string) {
+            const name = args[0].string;
+            if (!ctx.vm.functions.contains(name) and !ctx.vm.native_fns.contains(name)) return .{ .bool = false };
+        } else if (!isCallable(args[0])) {
+            return .{ .bool = false };
+        }
         level.callback = args[0];
     }
     try ctx.vm.ob_stack.append(ctx.allocator, level);
