@@ -1964,13 +1964,15 @@ fn native_filter_var(_ctx: *NativeContext, args: []const Value) RuntimeError!Val
             const s = if (value == .string) value.string else return .{ .bool = false };
             const ipv4_only = (flags & 1048576) != 0;
             const ipv6_only = (flags & 2097152) != 0;
-            if (!ipv6_only) {
-                if (isValidIPv4(s)) return value;
-                if (ipv4_only) return .{ .bool = false };
+            const no_priv = (flags & 8388608) != 0;
+            const no_res = (flags & 4194304) != 0;
+            if (!ipv6_only and isValidIPv4(s)) {
+                if (no_priv and isPrivateIPv4(s)) return .{ .bool = false };
+                if (no_res and isReservedIPv4(s)) return .{ .bool = false };
+                return value;
             }
-            if (!ipv4_only) {
-                if (isValidIPv6(s)) return value;
-            }
+            if (ipv4_only) return .{ .bool = false };
+            if (!ipv4_only and isValidIPv6(s)) return value;
             return .{ .bool = false };
         },
         274 => { // FILTER_VALIDATE_EMAIL
@@ -2012,13 +2014,14 @@ fn native_filter_var(_ctx: *NativeContext, args: []const Value) RuntimeError!Val
             return .{ .float = f };
         },
         258 => { // FILTER_VALIDATE_BOOLEAN
+            const null_on_fail = (eff_flags & 134217728) != 0; // FILTER_NULL_ON_FAILURE
+            const fail_val: Value = if (null_on_fail) .null else .{ .bool = false };
             if (value == .bool) return value;
             if (value == .int) return .{ .bool = value.int != 0 };
-            const s = if (value == .string) value.string else return .{ .bool = false };
+            const s = if (value == .string) value.string else return fail_val;
             if (std.mem.eql(u8, s, "true") or std.mem.eql(u8, s, "1") or std.mem.eql(u8, s, "yes") or std.mem.eql(u8, s, "on")) return .{ .bool = true };
-            if (std.mem.eql(u8, s, "false") or std.mem.eql(u8, s, "0") or std.mem.eql(u8, s, "no") or std.mem.eql(u8, s, "off") or s.len == 0) return .{ .bool = false };
-            // PHP returns false for invalid input (NULL only with FILTER_NULL_ON_FAILURE flag)
-            return .{ .bool = false };
+            if (std.mem.eql(u8, s, "false") or std.mem.eql(u8, s, "0") or std.mem.eql(u8, s, "no") or std.mem.eql(u8, s, "off")) return .{ .bool = false };
+            return fail_val;
         },
         272 => { // FILTER_VALIDATE_REGEXP
             const s = if (value == .string) value.string else if (value == .int) (try _ctx.createString(blk: {
@@ -2113,6 +2116,23 @@ fn native_filter_var(_ctx: *NativeContext, args: []const Value) RuntimeError!Val
             const s = if (value == .string) value.string else return .{ .bool = false };
             return .{ .string = try sanitizeSpecialChars(_ctx, s) };
         },
+        522 => { // FILTER_SANITIZE_FULL_SPECIAL_CHARS
+            const s = if (value == .string) value.string else return .{ .bool = false };
+            var buf = std.ArrayListUnmanaged(u8){};
+            for (s) |c| {
+                switch (c) {
+                    '<' => try buf.appendSlice(_ctx.allocator, "&lt;"),
+                    '>' => try buf.appendSlice(_ctx.allocator, "&gt;"),
+                    '&' => try buf.appendSlice(_ctx.allocator, "&amp;"),
+                    '"' => try buf.appendSlice(_ctx.allocator, "&quot;"),
+                    '\'' => try buf.appendSlice(_ctx.allocator, "&#039;"),
+                    else => try buf.append(_ctx.allocator, c),
+                }
+            }
+            const out = try buf.toOwnedSlice(_ctx.allocator);
+            try _ctx.strings.append(_ctx.allocator, out);
+            return .{ .string = out };
+        },
         517 => { // FILTER_SANITIZE_EMAIL
             const s = if (value == .string) value.string else return .{ .bool = false };
             var buf = std.ArrayListUnmanaged(u8){};
@@ -2167,6 +2187,37 @@ fn isValidIPv4(s: []const u8) bool {
         parts += 1;
     }
     return parts == 4;
+}
+
+fn parseIPv4Octets(s: []const u8) ?[4]u8 {
+    var out: [4]u8 = .{ 0, 0, 0, 0 };
+    var it = std.mem.splitScalar(u8, s, '.');
+    var i: usize = 0;
+    while (it.next()) |part| : (i += 1) {
+        if (i >= 4) return null;
+        const n = std.fmt.parseInt(u16, part, 10) catch return null;
+        if (n > 255) return null;
+        out[i] = @intCast(n);
+    }
+    if (i != 4) return null;
+    return out;
+}
+
+fn isPrivateIPv4(s: []const u8) bool {
+    const o = parseIPv4Octets(s) orelse return false;
+    if (o[0] == 10) return true;
+    if (o[0] == 172 and o[1] >= 16 and o[1] <= 31) return true;
+    if (o[0] == 192 and o[1] == 168) return true;
+    return false;
+}
+
+fn isReservedIPv4(s: []const u8) bool {
+    const o = parseIPv4Octets(s) orelse return false;
+    if (o[0] == 0) return true;
+    if (o[0] == 127) return true;
+    if (o[0] >= 224) return true;
+    if (o[0] == 169 and o[1] == 254) return true;
+    return false;
 }
 
 fn isValidIPv6(s: []const u8) bool {
