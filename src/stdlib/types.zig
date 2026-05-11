@@ -1356,6 +1356,12 @@ fn native_ini_set(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     const owned_name = try ctx.allocator.dupe(u8, name);
     try ctx.vm.strings.append(ctx.allocator, owned_name);
     try ctx.vm.ini_settings.put(ctx.allocator, owned_name, new_val);
+    // a few ini directives map directly to live VM state. mirror them now so
+    // userland `ini_set('max_execution_time', '5')` actually arms the deadline
+    if (std.mem.eql(u8, name, "max_execution_time")) {
+        const seconds = std.fmt.parseInt(i64, std.mem.trim(u8, new_val, " \t\r\n"), 10) catch 0;
+        ctx.vm.setExecutionLimit(seconds);
+    }
     return .{ .string = previous };
 }
 

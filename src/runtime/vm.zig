@@ -386,6 +386,10 @@ pub const VM = struct {
     handler_count: usize = 0,
     handler_floor: usize = 0,
     pending_exception: ?Value = null,
+    // when true, the current pending_exception is a fatal that cannot be caught
+    // by user try/catch. used for execution-deadline timeouts; PHP's
+    // `Maximum execution time exceeded` is an uncatchable fatal there too
+    uncatchable_fatal: bool = false,
     exception_dispatched: bool = false,
     run_base_frame: usize = 0,
     allocator: Allocator,
@@ -396,6 +400,13 @@ pub const VM = struct {
     method_cache_result: []const u8 = "",
     ic: ?*InlineCache = null,
     serve_mode: bool = false,
+    // deadline enforcement for set_time_limit / max_execution_time. 0 means
+    // unlimited (PHP CLI default). non-zero is a monotonic-clock nanosecond
+    // wall (after which any backwards jump or function entry throws a fatal
+    // Error). polling is gated by deadline_tick_counter to keep overhead low
+    execution_deadline_ns: i64 = 0,
+    execution_limit_seconds: i64 = 0,
+    deadline_tick_counter: u32 = 0,
     serve_compile_cache: std.StringHashMapUnmanaged(*CompileResult) = .{},
     serve_cache_keys: std.ArrayListUnmanaged([]const u8) = .{},
     response_code: i64 = 200,
@@ -1521,6 +1532,7 @@ pub const VM = struct {
                 .jump_back => {
                     const offset = self.readU16();
                     self.currentFrame().ip -= offset;
+                    try self.pollExecutionDeadline();
                     if (self.currentFrame().locals.len > 0) {
                         try self.fastLoop();
                         if (self.frame_count <= base_frame) return;
@@ -5880,6 +5892,40 @@ pub const VM = struct {
         return null;
     }
 
+    // poll the execution deadline. backed by a tick counter so the actual
+    // monotonic-clock read only happens once every ~4096 backwards jumps -
+    // overhead under a percent of a tight loop but still well under a
+    // millisecond of slop on the deadline
+    pub inline fn pollExecutionDeadline(self: *VM) !void {
+        if (self.execution_deadline_ns == 0) return;
+        self.deadline_tick_counter +%= 1;
+        if (self.deadline_tick_counter & 0xFFF != 0) return;
+        const now_ns = std.time.nanoTimestamp();
+        if (now_ns < self.execution_deadline_ns) return;
+        const unit: []const u8 = if (self.execution_limit_seconds == 1) "second" else "seconds";
+        const msg = try std.fmt.allocPrint(self.allocator, "Maximum execution time of {d} {s} exceeded", .{ self.execution_limit_seconds, unit });
+        try self.strings.append(self.allocator, msg);
+        try self.setPendingException("Error", msg);
+        // PHP makes this fatal uncatchable: even user try/catch around an
+        // infinite loop won't keep the script alive past the deadline
+        self.uncatchable_fatal = true;
+        // disarm so a single overrun isn't reported repeatedly while the
+        // stack unwinds toward the run-loop boundary
+        self.execution_deadline_ns = 0;
+        return error.RuntimeError;
+    }
+
+    pub fn setExecutionLimit(self: *VM, seconds: i64) void {
+        self.execution_limit_seconds = seconds;
+        if (seconds <= 0) {
+            self.execution_deadline_ns = 0;
+            return;
+        }
+        const now_ns = std.time.nanoTimestamp();
+        self.execution_deadline_ns = @intCast(now_ns + @as(i128, seconds) * std.time.ns_per_s);
+        self.deadline_tick_counter = 0;
+    }
+
     pub fn setPendingException(self: *VM, class_name: []const u8, message: []const u8) !void {
         const obj = try self.allocator.create(PhpObject);
         obj.* = .{ .class_name = class_name };
@@ -5937,6 +5983,7 @@ pub const VM = struct {
     }
 
     fn dispatchPendingException(self: *VM, base_frame: usize) bool {
+        if (self.uncatchable_fatal) return false;
         const exc = self.pending_exception orelse return false;
         if (self.handler_count <= self.handler_floor) return false;
         const handler = self.exception_handlers[self.handler_count - 1];

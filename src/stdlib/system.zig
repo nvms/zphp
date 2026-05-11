@@ -388,7 +388,19 @@ fn native_get_defined_classes(ctx: *NativeContext, _: []const Value) RuntimeErro
     return .{ .array = result };
 }
 
-fn native_set_time_limit(_: *NativeContext, _: []const Value) RuntimeError!Value {
+fn native_set_time_limit(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    // PHP: set_time_limit(int $seconds): bool. 0 = no limit. each call resets
+    // the countdown from "now". negative is the same as 0
+    var seconds: i64 = 0;
+    if (args.len > 0 and args[0] == .int) seconds = args[0].int;
+    if (seconds < 0) seconds = 0;
+    ctx.vm.setExecutionLimit(seconds);
+    // mirror into the ini directive so subsequent ini_get sees the new value
+    const repr = std.fmt.allocPrint(ctx.allocator, "{d}", .{seconds}) catch return .{ .bool = false };
+    try ctx.vm.strings.append(ctx.allocator, repr);
+    const owned_name = ctx.allocator.dupe(u8, "max_execution_time") catch return .{ .bool = false };
+    try ctx.vm.strings.append(ctx.allocator, owned_name);
+    try ctx.vm.ini_settings.put(ctx.allocator, owned_name, repr);
     return .{ .bool = true };
 }
 

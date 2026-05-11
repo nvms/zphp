@@ -156,6 +156,18 @@ fn formatUncaughtException(buf: *Writer, alloc: std.mem.Allocator, vm: *const VM
     const source = vm.source;
     const path = displayPath(vm.file_path);
 
+    // uncatchable fatals (e.g. execution-time exceeded) are formatted as
+    // bare fatals without the "Uncaught Class:" prefix or stack trace - this
+    // matches how PHP prints `Maximum execution time of N seconds exceeded`
+    if (vm.uncatchable_fatal) {
+        if (frame.chunk.getSourceLocation(ip, source)) |loc| {
+            writeFmt(buf, alloc, "\nFatal error: {s} in {s} on line {d}\n", .{ message, path, loc.line });
+        } else {
+            writeFmt(buf, alloc, "\nFatal error: {s} in {s}\n", .{ message, path });
+        }
+        return;
+    }
+
     if (frame.chunk.getSourceLocation(ip, source)) |loc| {
         writeFmt(buf, alloc, "\nFatal error: Uncaught {s}: {s} in {s} on line {d}\n\n", .{ class_name, message, path, loc.line });
         const token_len: u32 = estimateTokenLength(source, loc);
