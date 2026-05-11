@@ -2348,15 +2348,17 @@ pub const VM = struct {
                         if (self.hasMethod(obj.class_name, "__unset")) {
                             _ = self.callMethod(obj, "__unset", &.{.{ .string = prop_name }}) catch {};
                         } else {
+                            // mark the property as unset so subsequent reads
+                            // fall through to __get (matching PHP's lazy-init
+                            // pattern). slot value remains its default; only
+                            // the unset_slots set decides "present"
+                            try obj.markUnset(self.allocator, prop_name);
                             if (obj.slots) |s| {
                                 if (obj.getSlotIndex(prop_name)) |idx| {
                                     s[idx] = .null;
-                                } else {
-                                    _ = obj.properties.orderedRemove(prop_name);
                                 }
-                            } else {
-                                _ = obj.properties.orderedRemove(prop_name);
                             }
+                            _ = obj.properties.orderedRemove(prop_name);
                         }
                     }
                 },
@@ -3824,12 +3826,14 @@ pub const VM = struct {
                             }
                         }
 
-                        // IC: slot-indexed fast path
+                        // IC: slot-indexed fast path. skip the cache when the
+                        // property was explicitly unset - the slot still holds
+                        // a value, but we need to fall through to __get
                         if (self.ic) |ic| {
                             const gp_idx = InlineCache.propIndex(@intFromPtr(self.currentChunk()), gp_ip);
                             const gp_entry = &ic.prop[gp_idx];
                             const gp_chunk_key = @intFromPtr(self.currentChunk());
-                            if (gp_entry.key == gp_ip and gp_entry.chunk_key == gp_chunk_key and gp_entry.class_ptr == @intFromPtr(obj.class_name.ptr)) {
+                            if (gp_entry.key == gp_ip and gp_entry.chunk_key == gp_chunk_key and gp_entry.class_ptr == @intFromPtr(obj.class_name.ptr) and !obj.isUnset(prop_name)) {
                                 if (gp_entry.slot_index != 0xFFFF) {
                                     if (obj.slots) |s| {
                                         const ic_val = s[gp_entry.slot_index];
@@ -3843,7 +3847,12 @@ pub const VM = struct {
                         }
 
                         const val = obj.get(prop_name);
-                        if (val != .null or obj.properties.contains(prop_name) or (obj.slots != null and obj.getSlotIndex(prop_name) != null)) {
+                        // if the property was explicitly unset, treat it as
+                        // absent so __get fires
+                        const is_present = !obj.isUnset(prop_name) and
+                            (val != .null or obj.properties.contains(prop_name) or
+                             (obj.slots != null and obj.getSlotIndex(prop_name) != null));
+                        if (is_present) {
                             const vr = self.findPropertyVisibility(obj.class_name, prop_name);
                             if (!self.checkVisibility(vr.defining_class, vr.visibility)) {
                                 if (self.hasMethod(obj.class_name, "__get")) {

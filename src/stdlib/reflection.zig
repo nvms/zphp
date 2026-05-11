@@ -59,6 +59,7 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try rc_def.methods.put(a, "isInterface", .{ .name = "isInterface", .arity = 0 });
     try rc_def.methods.put(a, "isAnonymous", .{ .name = "isAnonymous", .arity = 0 });
     try rc_def.methods.put(a, "getInterfaceNames", .{ .name = "getInterfaceNames", .arity = 0 });
+    try rc_def.methods.put(a, "getInterfaces", .{ .name = "getInterfaces", .arity = 0 });
     try rc_def.methods.put(a, "getAttributes", .{ .name = "getAttributes", .arity = 0 });
     try rc_def.methods.put(a, "getDocComment", .{ .name = "getDocComment", .arity = 0 });
     try rc_def.methods.put(a, "getProperties", .{ .name = "getProperties", .arity = 1 });
@@ -106,6 +107,7 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try vm.native_fns.put(a, "ReflectionClass::isInterface", rcIsInterface);
     try vm.native_fns.put(a, "ReflectionClass::isAnonymous", rcIsAnonymous);
     try vm.native_fns.put(a, "ReflectionClass::getInterfaceNames", rcGetInterfaceNames);
+    try vm.native_fns.put(a, "ReflectionClass::getInterfaces", rcGetInterfaces);
     try vm.native_fns.put(a, "ReflectionClass::getAttributes", rcGetAttributes);
     try vm.native_fns.put(a, "ReflectionClass::getDocComment", reflectionGetDocCommentFalse);
     try vm.native_fns.put(a, "ReflectionClass::getProperties", rcGetProperties);
@@ -1030,6 +1032,42 @@ fn rcIsAnonymous(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
     return .{ .bool = std.mem.startsWith(u8, name.string, "class@anonymous") };
 }
 
+// getInterfaces returns an array keyed by interface name with ReflectionClass
+// instances as values. PHP behaviour: includes all interfaces from the class
+// hierarchy plus their parents
+fn rcGetInterfaces(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const this = getThis(ctx) orelse return .null;
+    const class_name = if (this.get("name") == .string) this.get("name").string else return .null;
+
+    const arr = try ctx.createArray();
+    var seen = std.StringHashMapUnmanaged(void){};
+    defer seen.deinit(ctx.allocator);
+    var queue = std.ArrayListUnmanaged([]const u8){};
+    defer queue.deinit(ctx.allocator);
+
+    var current: ?[]const u8 = class_name;
+    while (current) |cn| {
+        const cls = ctx.vm.classes.get(cn) orelse break;
+        for (cls.interfaces.items) |iface| try queue.append(ctx.allocator, iface);
+        current = cls.parent;
+    }
+    var i: usize = 0;
+    while (i < queue.items.len) : (i += 1) {
+        const iface = queue.items[i];
+        if (seen.contains(iface)) continue;
+        try seen.put(ctx.allocator, iface, {});
+
+        const refobj = try ctx.createObject("ReflectionClass");
+        try refobj.set(ctx.allocator, "name", .{ .string = iface });
+        try arr.set(ctx.allocator, .{ .string = iface }, .{ .object = refobj });
+
+        if (ctx.vm.classes.get(iface)) |idef| {
+            for (idef.interfaces.items) |sub| try queue.append(ctx.allocator, sub);
+        }
+    }
+    return .{ .array = arr };
+}
+
 fn rcGetInterfaceNames(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
     const this = getThis(ctx) orelse return .null;
     const class_name = if (this.get("name") == .string) this.get("name").string else return .null;
@@ -1078,11 +1116,32 @@ fn buildReflectionAttribute(ctx: *NativeContext, attr: AttributeDef, target: i64
     return .{ .object = obj };
 }
 
+// IS_INSTANCEOF = 2 in PHP's ReflectionAttribute constants. When set, the
+// filter matches any attribute whose class extends/implements the given name.
+const REFLECTION_ATTRIBUTE_IS_INSTANCEOF: i64 = 2;
+
 fn buildAttributeArray(ctx: *NativeContext, attrs: []const AttributeDef, filter: ?[]const u8, target: i64) RuntimeError!Value {
+    return buildAttributeArrayWithFlags(ctx, attrs, filter, target, 0);
+}
+
+fn buildAttributeArrayWithFlags(ctx: *NativeContext, attrs: []const AttributeDef, filter: ?[]const u8, target: i64, flags: i64) RuntimeError!Value {
     const arr = try ctx.createArray();
     for (attrs) |attr| {
         if (filter) |f| {
-            if (!std.mem.eql(u8, attr.name, f)) continue;
+            if (flags & REFLECTION_ATTRIBUTE_IS_INSTANCEOF != 0) {
+                // ensure the attribute's class is loaded so isInstanceOf can
+                // walk its parent chain. PHP-side `class_exists()` triggers
+                // autoload implicitly; here we have to drive it ourselves
+                if (!ctx.vm.classes.contains(attr.name)) {
+                    ctx.vm.tryAutoload(attr.name) catch {};
+                }
+                if (!ctx.vm.classes.contains(f)) {
+                    ctx.vm.tryAutoload(f) catch {};
+                }
+                if (!ctx.vm.isInstanceOf(attr.name, f)) continue;
+            } else {
+                if (!std.mem.eql(u8, attr.name, f)) continue;
+            }
         }
         var count: usize = 0;
         for (attrs) |other| {
@@ -1103,7 +1162,8 @@ fn rcGetAttributes(ctx: *NativeContext, args: []const Value) RuntimeError!Value 
     const class_name = if (this.get("name") == .string) this.get("name").string else return .{ .array = try ctx.createArray() };
     const cls = ctx.vm.classes.get(class_name) orelse return .{ .array = try ctx.createArray() };
     const filter: ?[]const u8 = if (args.len >= 1 and args[0] == .string) args[0].string else null;
-    return buildAttributeArray(ctx, cls.attributes.items, filter, 1); // TARGET_CLASS
+    const flags: i64 = if (args.len >= 2 and args[1] == .int) args[1].int else 0;
+    return buildAttributeArrayWithFlags(ctx, cls.attributes.items, filter, 1, flags);
 }
 
 fn rcGetProperties(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
@@ -1838,7 +1898,8 @@ fn rpGetAttributes(ctx: *NativeContext, args: []const Value) RuntimeError!Value 
     const attrs = cls.param_attributes.get(key) orelse return .{ .array = try ctx.createArray() };
 
     const filter: ?[]const u8 = if (args.len >= 1 and args[0] == .string) args[0].string else null;
-    return buildAttributeArray(ctx, attrs, filter, 32); // TARGET_PARAMETER
+    const flags: i64 = if (args.len >= 2 and args[1] == .int) args[1].int else 0;
+    return buildAttributeArrayWithFlags(ctx, attrs, filter, 32, flags);
 }
 
 fn rpGetDeclaringClass(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
@@ -2120,7 +2181,8 @@ fn rfGetAttributes(ctx: *NativeContext, args: []const Value) RuntimeError!Value 
     const compile_name = ctx.vm.getOrigClosureName(func_name);
     const attrs = ctx.vm.function_attributes.get(compile_name) orelse return .{ .array = try ctx.createArray() };
     const filter: ?[]const u8 = if (args.len >= 1 and args[0] == .string) args[0].string else null;
-    return buildAttributeArray(ctx, attrs, filter, 2); // TARGET_FUNCTION
+    const flags: i64 = if (args.len >= 2 and args[1] == .int) args[1].int else 0;
+    return buildAttributeArrayWithFlags(ctx, attrs, filter, 2, flags);
 }
 
 fn rfGetClosureScopeClass(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
@@ -2470,7 +2532,8 @@ fn rpropGetAttributes(ctx: *NativeContext, args: []const Value) RuntimeError!Val
     const cls = ctx.vm.classes.get(declaring) orelse return .{ .array = try ctx.createArray() };
     const attrs = cls.property_attributes.get(prop_name) orelse return .{ .array = try ctx.createArray() };
     const filter: ?[]const u8 = if (args.len >= 1 and args[0] == .string) args[0].string else null;
-    return buildAttributeArray(ctx, attrs, filter, 8); // TARGET_PROPERTY
+    const flags: i64 = if (args.len >= 2 and args[1] == .int) args[1].int else 0;
+    return buildAttributeArrayWithFlags(ctx, attrs, filter, 8, flags);
 }
 
 fn rpropGetDocComment(_: *NativeContext, _: []const Value) RuntimeError!Value {
@@ -2589,7 +2652,8 @@ fn rmGetAttributes(ctx: *NativeContext, args: []const Value) RuntimeError!Value 
     const cls = ctx.vm.classes.get(declaring) orelse return .{ .array = try ctx.createArray() };
     const attrs = cls.method_attributes.get(method_name) orelse return .{ .array = try ctx.createArray() };
     const filter: ?[]const u8 = if (args.len >= 1 and args[0] == .string) args[0].string else null;
-    return buildAttributeArray(ctx, attrs, filter, 4); // TARGET_METHOD
+    const flags: i64 = if (args.len >= 2 and args[1] == .int) args[1].int else 0;
+    return buildAttributeArrayWithFlags(ctx, attrs, filter, 4, flags);
 }
 
 fn rpIsPromoted(_: *NativeContext, _: []const Value) RuntimeError!Value {
@@ -2696,6 +2760,14 @@ fn raNewInstance(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
 
     const obj = try ctx.createObject(attr_name);
     const args_val = this.get("_arguments");
+    // always call __construct even with zero attribute args - constructors
+    // commonly have all-optional params plus initialization side effects
+    // (e.g. Symfony's Constraint::__construct does `unset($this->groups)`
+    // to set up lazy default-group handling)
+    if (args_val != .array or args_val.array.entries.items.len == 0) {
+        _ = ctx.callMethod(obj, "__construct", &.{}) catch {};
+        return .{ .object = obj };
+    }
     if (args_val == .array) {
         const arr = args_val.array;
         var has_named = false;
@@ -2731,7 +2803,7 @@ fn raNewInstance(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
                 var call_args: [16]Value = undefined;
                 const count = @min(arr.entries.items.len, 16);
                 for (0..count) |i| call_args[i] = arr.entries.items[i].value;
-                if (count > 0) _ = ctx.callMethod(obj, "__construct", call_args[0..count]) catch {};
+                _ = ctx.callMethod(obj, "__construct", call_args[0..count]) catch {};
             }
         } else {
             var call_args: [16]Value = undefined;

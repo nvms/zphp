@@ -226,15 +226,17 @@ fn extractAttributes(self: *Compiler, main_token: u32) []const ParsedAttr {
         while (inner < rb_pos) {
             var name_parts = std.ArrayListUnmanaged(u8){};
             while (inner < rb_pos and (self.ast.tokens[inner].tag == .identifier or self.ast.tokens[inner].tag == .backslash)) {
-                if (name_parts.items.len > 0 and self.ast.tokens[inner].tag == .identifier) {
-                    name_parts.appendSlice(self.allocator, "\\") catch break;
-                } else if (self.ast.tokens[inner].tag == .backslash) {
-                    if (name_parts.items.len == 0) {
+                if (self.ast.tokens[inner].tag == .backslash) {
+                    // emit a backslash separator only if one isn't already at
+                    // the tail (`\Foo` produces a single leading `\`; `Foo\Bar`
+                    // produces a single `\` between segments)
+                    if (name_parts.items.len == 0 or name_parts.items[name_parts.items.len - 1] != '\\') {
                         name_parts.appendSlice(self.allocator, "\\") catch break;
                     }
                     inner += 1;
                     continue;
                 }
+                // identifier: separator handled by the backslash branch already
                 name_parts.appendSlice(self.allocator, self.ast.tokens[inner].lexeme(self.ast.source)) catch break;
                 inner += 1;
             }
@@ -243,8 +245,11 @@ fn extractAttributes(self: *Compiler, main_token: u32) []const ParsedAttr {
                 continue;
             }
 
-            const owned_name = name_parts.toOwnedSlice(self.allocator) catch "";
-            self.string_allocs.append(self.allocator, @constCast(owned_name)) catch {};
+            const raw_name = name_parts.toOwnedSlice(self.allocator) catch "";
+            self.string_allocs.append(self.allocator, @constCast(raw_name)) catch {};
+            // apply namespace + use-alias resolution so #[Assert\NotBlank]
+            // inside `use ... as Assert` becomes the fully-qualified class name
+            const owned_name = self.resolveClassName(raw_name);
 
             var args = std.ArrayListUnmanaged(Value){};
             var arg_names = std.ArrayListUnmanaged(?[]const u8){};
@@ -280,6 +285,17 @@ fn extractAttributes(self: *Compiler, main_token: u32) []const ParsedAttr {
 
 fn freeAttrSlice(allocator: Allocator, attrs: []const ParsedAttr) void {
     for (attrs) |attr| {
+        // parseAttrArgAtom allocates PhpArrays directly via the compiler's
+        // allocator (it doesn't have a vm.arrays handle). those arrays get
+        // serialized into the bytecode by emitAttributeData and then read back
+        // into fresh PhpArrays at runtime, so the compile-time allocations
+        // are throwaway and must be cleaned up here
+        for (attr.args) |v| {
+            if (v == .array) {
+                v.array.deinit(allocator);
+                allocator.destroy(v.array);
+            }
+        }
         if (attr.args.len > 0) allocator.free(attr.args);
         if (attr.arg_names.len > 0) allocator.free(attr.arg_names);
     }
@@ -1211,7 +1227,8 @@ pub fn compileClassDecl(self: *Compiler, node: Ast.Node) Error!void {
     }
     for (methods_with_attrs.items) |ma| freeAttrSlice(self.allocator, ma.attrs);
 
-    // property attributes
+    // property attributes (includes promoted constructor params - PHP exposes
+    // their attributes via ReflectionProperty as well as ReflectionParameter)
     var props_with_attrs = std.ArrayListUnmanaged(MemberAttr){};
     defer props_with_attrs.deinit(self.allocator);
     for (members) |member_idx| {
@@ -1227,6 +1244,19 @@ pub fn compileClassDecl(self: *Compiler, node: Ast.Node) Error!void {
                 });
             }
         }
+    }
+    for (constructor_params) |p| {
+        const pnode = self.ast.nodes[p];
+        const promotion = (pnode.data.rhs >> 2) & 3;
+        if (promotion == 0) continue;
+        const pattrs = extractAttributes(self, pnode.main_token);
+        if (pattrs.len == 0) continue;
+        var pname = self.ast.tokenSlice(pnode.main_token);
+        if (pname.len > 0 and pname[0] == '$') pname = pname[1..];
+        try props_with_attrs.append(self.allocator, .{
+            .name = pname,
+            .attrs = pattrs,
+        });
     }
     try self.emitByte(@intCast(props_with_attrs.items.len));
     for (props_with_attrs.items) |pa| {

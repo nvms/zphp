@@ -279,6 +279,12 @@ pub const PhpObject = struct {
     properties: std.StringArrayHashMapUnmanaged(Value) = .{},
     slots: ?[]Value = null,
     slot_layout: ?*const SlotLayout = null,
+    // tracks which named properties have been explicitly unset by user code.
+    // a slot can hold a default value of `.null` AND be considered "present"
+    // (no __get triggered), so we need a side-channel to distinguish "unset"
+    // from "null". needed by PHP's lazy-init via `unset($this->x); ... $this->x`
+    // pattern that triggers __get
+    unset_slots: std.StringHashMapUnmanaged(void) = .{},
     lazy_initializer: Value = .null,
     id: u32 = 0,
 
@@ -289,7 +295,20 @@ pub const PhpObject = struct {
 
     pub fn deinit(self: *PhpObject, allocator: std.mem.Allocator) void {
         self.properties.deinit(allocator);
+        self.unset_slots.deinit(allocator);
         if (self.slots) |s| allocator.free(s);
+    }
+
+    pub fn isUnset(self: *const PhpObject, name: []const u8) bool {
+        return self.unset_slots.contains(name);
+    }
+
+    pub fn markUnset(self: *PhpObject, allocator: std.mem.Allocator, name: []const u8) !void {
+        try self.unset_slots.put(allocator, name, {});
+    }
+
+    pub fn clearUnset(self: *PhpObject, name: []const u8) void {
+        _ = self.unset_slots.remove(name);
     }
 
     pub fn getSlotIndex(self: *const PhpObject, name: []const u8) ?u16 {
@@ -308,6 +327,8 @@ pub const PhpObject = struct {
     }
 
     pub fn set(self: *PhpObject, allocator: std.mem.Allocator, name: []const u8, value: Value) !void {
+        // a write resurrects a previously-unset property
+        self.clearUnset(name);
         if (self.slots) |s| {
             if (self.getSlotIndex(name)) |idx| {
                 s[idx] = value;

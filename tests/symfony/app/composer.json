@@ -4,13 +4,14 @@
     "type": "project",
     "require": {
         "php": ">=8.2",
-        "symfony/intl": "^7.0",
-        "symfony/string": "^7.0",
-        "symfony/dom-crawler": "^7.0",
         "symfony/css-selector": "^7.0",
-        "symfony/serializer": "^7.0",
+        "symfony/dom-crawler": "^7.0",
+        "symfony/intl": "^7.0",
         "symfony/property-access": "^7.0",
-        "symfony/translation": "^7.0"
+        "symfony/serializer": "^7.0",
+        "symfony/string": "^7.0",
+        "symfony/translation": "^7.0",
+        "symfony/validator": "^8.0"
     },
     "config": {
         "preferred-install": "dist",

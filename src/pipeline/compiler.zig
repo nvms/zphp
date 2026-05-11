@@ -843,6 +843,18 @@ pub const Compiler = struct {
         }
         if (std.mem.eql(u8, name, "static")) return name;
         if (self.use_aliases.get(name)) |fqn| return fqn;
+        // for multi-segment names like `Assert\NotBlank` look up just the first
+        // segment in use_aliases. PHP applies the alias to that prefix then
+        // appends the remainder verbatim
+        if (std.mem.indexOfScalar(u8, name, '\\')) |slash_pos| {
+            const head = name[0..slash_pos];
+            const tail = name[slash_pos..]; // includes leading `\`
+            if (self.use_aliases.get(head)) |fqn| {
+                const qualified = std.fmt.allocPrint(self.allocator, "{s}{s}", .{ fqn, tail }) catch return name;
+                self.string_allocs.append(self.allocator, qualified) catch return name;
+                return qualified;
+            }
+        }
         if (self.namespace.len == 0) return name;
         const qualified = std.fmt.allocPrint(self.allocator, "{s}\\{s}", .{ self.namespace, name }) catch return name;
         self.string_allocs.append(self.allocator, qualified) catch return name;
