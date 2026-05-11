@@ -665,6 +665,7 @@ fn stackConstruct(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
     const obj = getThis(ctx) orelse return .null;
     _ = try ensureData(ctx, obj);
     try obj.set(ctx.allocator, "__cursor", .{ .int = 0 });
+    try obj.set(ctx.allocator, "__it_mode", .{ .int = DLL_IT_MODE_LIFO | DLL_IT_MODE_KEEP | 4 });
     return .null;
 }
 
@@ -1773,6 +1774,7 @@ fn sqConstruct(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
     const obj = getThis(ctx) orelse return .null;
     _ = try ensureData(ctx, obj);
     try obj.set(ctx.allocator, "__cursor", .{ .int = 0 });
+    try obj.set(ctx.allocator, "__it_mode", .{ .int = DLL_IT_MODE_FIFO | DLL_IT_MODE_KEEP | 4 });
     return .null;
 }
 
