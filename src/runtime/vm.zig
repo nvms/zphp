@@ -3567,6 +3567,9 @@ pub const VM = struct {
                                     for (0..@min(ac, fixed)) |i| {
                                         ctor_locals[i + 1] = self.stack[self.sp - ac + i];
                                     }
+                                    for (@min(ac, fixed)..fixed) |i| {
+                                        if (i < func.defaults.len) ctor_locals[i + 1] = try self.resolveDefault(func.defaults[i]);
+                                    }
                                     const rest_arr = try self.allocator.create(PhpArray);
                                     rest_arr.* = .{};
                                     try self.arrays.append(self.allocator, rest_arr);
@@ -3608,6 +3611,9 @@ pub const VM = struct {
                                     const fixed: usize = func.arity - 1;
                                     for (0..@min(ac, fixed)) |i| {
                                         try new_vars.put(self.allocator, func.params[i], self.stack[self.sp - ac + i]);
+                                    }
+                                    for (@min(ac, fixed)..fixed) |i| {
+                                        if (i < func.defaults.len) try new_vars.put(self.allocator, func.params[i], try self.resolveDefault(func.defaults[i]));
                                     }
                                     const rest_arr = try self.allocator.create(PhpArray);
                                     rest_arr.* = .{};
@@ -4438,6 +4444,9 @@ pub const VM = struct {
                             for (0..@min(ac, fixed)) |i| {
                                 try new_vars.put(self.allocator, func.params[i], self.stack[self.sp - ac + i]);
                             }
+                            for (@min(ac, fixed)..fixed) |i| {
+                                if (i < func.defaults.len) try new_vars.put(self.allocator, func.params[i], try self.resolveDefault(func.defaults[i]));
+                            }
                             const rest_arr = try self.allocator.create(PhpArray);
                             rest_arr.* = .{};
                             try self.arrays.append(self.allocator, rest_arr);
@@ -4611,6 +4620,9 @@ pub const VM = struct {
                             for (0..@min(ac, fixed)) |i| {
                                 try new_vars.put(self.allocator, func.params[i], self.stack[self.sp - ac + i]);
                             }
+                            for (@min(ac, fixed)..fixed) |i| {
+                                if (i < func.defaults.len) try new_vars.put(self.allocator, func.params[i], try self.resolveDefault(func.defaults[i]));
+                            }
                             const rest_arr = try self.allocator.create(PhpArray);
                             rest_arr.* = .{};
                             try self.arrays.append(self.allocator, rest_arr);
@@ -4743,6 +4755,9 @@ pub const VM = struct {
                             const fixed: usize = func.arity - 1;
                             for (0..@min(ac, fixed)) |ai| {
                                 try new_vars.put(self.allocator, func.params[ai], self.stack[self.sp - ac + ai]);
+                            }
+                            for (@min(ac, fixed)..fixed) |ai| {
+                                if (ai < func.defaults.len) try new_vars.put(self.allocator, func.params[ai], try self.resolveDefault(func.defaults[ai]));
                             }
                             const rest_arr = try self.allocator.create(PhpArray);
                             rest_arr.* = .{};
@@ -4895,6 +4910,9 @@ pub const VM = struct {
                             const fixed: usize = func.arity - 1;
                             for (0..@min(ac, fixed)) |ai| {
                                 try new_vars.put(self.allocator, func.params[ai], self.stack[self.sp - ac + ai]);
+                            }
+                            for (@min(ac, fixed)..fixed) |ai| {
+                                if (ai < func.defaults.len) try new_vars.put(self.allocator, func.params[ai], try self.resolveDefault(func.defaults[ai]));
                             }
                             const rest_arr = try self.allocator.create(PhpArray);
                             rest_arr.* = .{};
@@ -8765,6 +8783,9 @@ pub const VM = struct {
                 const fixed: usize = func.arity - 1;
                 for (0..@min(ac, fixed)) |i| {
                     try new_vars.put(self.allocator, func.params[i], try self.copyValue(self.stack[self.sp - ac + i]));
+                }
+                for (@min(ac, fixed)..fixed) |i| {
+                    if (i < func.defaults.len) try new_vars.put(self.allocator, func.params[i], try self.resolveDefault(func.defaults[i]));
                 }
                 const rest_arr = try self.allocator.create(PhpArray);
                 rest_arr.* = .{};
