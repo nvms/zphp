@@ -42,11 +42,11 @@ jobs:
 
       - name: install system libs (ubuntu glibc)
         if: runner.os == 'Linux' && !matrix.alpine
-        run: sudo apt-get update && sudo apt-get install -y libpcre2-dev libsqlite3-dev zlib1g-dev libmysqlclient-dev libpq-dev libssl-dev libnghttp2-dev libcurl4-openssl-dev libxml2-dev libicu-dev libgmp-dev libgd-dev
+        run: sudo apt-get update && sudo apt-get install -y libpcre2-dev libsqlite3-dev zlib1g-dev libmysqlclient-dev libpq-dev libssl-dev libnghttp2-dev libcurl4-openssl-dev libxml2-dev libicu-dev libgmp-dev libgd-dev libsodium-dev
 
       - name: install system libs (macos)
         if: runner.os == 'macOS'
-        run: brew install mysql-client libpq openssl@3 nghttp2 curl libxml2 icu4c gmp gd
+        run: brew install mysql-client libpq openssl@3 nghttp2 curl libxml2 icu4c gmp gd libsodium
 
       - name: setup alpine (musl)
         if: matrix.alpine
@@ -65,6 +65,7 @@ jobs:
             icu-dev icu-static icu-libs
             gmp-dev
             gd-dev
+            libsodium-dev libsodium-static
 
       - name: install zig (alpine)
         if: matrix.alpine

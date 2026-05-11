@@ -27,9 +27,9 @@ jobs:
       - name: install system libs
         run: |
           if [ "$RUNNER_OS" = "Linux" ]; then
-            sudo apt-get update && sudo apt-get install -y libpcre2-dev libsqlite3-dev zlib1g-dev libmysqlclient-dev libpq-dev libssl-dev libnghttp2-dev libcurl4-openssl-dev libxml2-dev libicu-dev libgmp-dev libgd-dev
+            sudo apt-get update && sudo apt-get install -y libpcre2-dev libsqlite3-dev zlib1g-dev libmysqlclient-dev libpq-dev libssl-dev libnghttp2-dev libcurl4-openssl-dev libxml2-dev libicu-dev libgmp-dev libgd-dev libsodium-dev
           else
-            brew install mysql-client libpq nghttp2 curl icu4c gmp gd
+            brew install mysql-client libpq nghttp2 curl icu4c gmp gd libsodium
             echo "PKG_CONFIG_PATH=/opt/homebrew/opt/mysql-client/lib/pkgconfig:/opt/homebrew/opt/libpq/lib/pkgconfig:/opt/homebrew/opt/curl/lib/pkgconfig:/opt/homebrew/opt/icu4c/lib/pkgconfig:/opt/homebrew/opt/gmp/lib/pkgconfig:/opt/homebrew/opt/gd/lib/pkgconfig:$PKG_CONFIG_PATH" >> $GITHUB_ENV
           fi
       - run: zig build test
@@ -43,7 +43,7 @@ jobs:
         with:
           version: 0.15.1
       - name: install system libs
-        run: sudo apt-get update && sudo apt-get install -y libpcre2-dev libsqlite3-dev zlib1g-dev libmysqlclient-dev libpq-dev libssl-dev libnghttp2-dev libcurl4-openssl-dev libxml2-dev libicu-dev libgmp-dev libgd-dev
+        run: sudo apt-get update && sudo apt-get install -y libpcre2-dev libsqlite3-dev zlib1g-dev libmysqlclient-dev libpq-dev libssl-dev libnghttp2-dev libcurl4-openssl-dev libxml2-dev libicu-dev libgmp-dev libgd-dev libsodium-dev
       - run: zig build
       - run: ./tests/serve_test
 
@@ -55,7 +55,7 @@ jobs:
         with:
           version: 0.15.1
       - name: install system libs
-        run: sudo apt-get update && sudo apt-get install -y libpcre2-dev libsqlite3-dev zlib1g-dev libmysqlclient-dev libpq-dev libssl-dev libnghttp2-dev libcurl4-openssl-dev libxml2-dev libicu-dev libgmp-dev libgd-dev
+        run: sudo apt-get update && sudo apt-get install -y libpcre2-dev libsqlite3-dev zlib1g-dev libmysqlclient-dev libpq-dev libssl-dev libnghttp2-dev libcurl4-openssl-dev libxml2-dev libicu-dev libgmp-dev libgd-dev libsodium-dev
       - run: zig build
       - run: ./tests/test_runner_test
       - run: ./tests/dotenv_test
@@ -68,7 +68,7 @@ jobs:
         with:
           version: 0.15.1
       - name: install system libs
-        run: sudo apt-get update && sudo apt-get install -y libpcre2-dev libsqlite3-dev zlib1g-dev libmysqlclient-dev libpq-dev libssl-dev libnghttp2-dev libcurl4-openssl-dev libxml2-dev libicu-dev libgmp-dev libgd-dev
+        run: sudo apt-get update && sudo apt-get install -y libpcre2-dev libsqlite3-dev zlib1g-dev libmysqlclient-dev libpq-dev libssl-dev libnghttp2-dev libcurl4-openssl-dev libxml2-dev libicu-dev libgmp-dev libgd-dev libsodium-dev
       - run: zig build
       - run: ./tests/pkg_test
 
@@ -80,7 +80,7 @@ jobs:
         with:
           version: 0.15.1
       - name: install system libs
-        run: sudo apt-get update && sudo apt-get install -y libpcre2-dev libsqlite3-dev zlib1g-dev libmysqlclient-dev libpq-dev libssl-dev libnghttp2-dev libcurl4-openssl-dev libxml2-dev libicu-dev libgmp-dev libgd-dev
+        run: sudo apt-get update && sudo apt-get install -y libpcre2-dev libsqlite3-dev zlib1g-dev libmysqlclient-dev libpq-dev libssl-dev libnghttp2-dev libcurl4-openssl-dev libxml2-dev libicu-dev libgmp-dev libgd-dev libsodium-dev
       - run: zig build
       - run: ./tests/fmt_test
 
@@ -92,7 +92,7 @@ jobs:
         with:
           version: 0.15.1
       - name: install system libs
-        run: sudo apt-get update && sudo apt-get install -y libpcre2-dev libsqlite3-dev zlib1g-dev libmysqlclient-dev libpq-dev libssl-dev libnghttp2-dev libcurl4-openssl-dev libxml2-dev libicu-dev libgmp-dev libgd-dev
+        run: sudo apt-get update && sudo apt-get install -y libpcre2-dev libsqlite3-dev zlib1g-dev libmysqlclient-dev libpq-dev libssl-dev libnghttp2-dev libcurl4-openssl-dev libxml2-dev libicu-dev libgmp-dev libgd-dev libsodium-dev
       - uses: shivammathur/setup-php@v2
         with:
           php-version: '8.5'
@@ -108,7 +108,7 @@ jobs:
         with:
           version: 0.15.1
       - name: install system libs
-        run: sudo apt-get update && sudo apt-get install -y libpcre2-dev libsqlite3-dev zlib1g-dev libmysqlclient-dev libpq-dev libssl-dev libnghttp2-dev libcurl4-openssl-dev libxml2-dev libicu-dev libgmp-dev libgd-dev
+        run: sudo apt-get update && sudo apt-get install -y libpcre2-dev libsqlite3-dev zlib1g-dev libmysqlclient-dev libpq-dev libssl-dev libnghttp2-dev libcurl4-openssl-dev libxml2-dev libicu-dev libgmp-dev libgd-dev libsodium-dev
       - uses: shivammathur/setup-php@v2
         with:
           php-version: '8.5'
@@ -123,7 +123,7 @@ jobs:
         with:
           version: 0.15.1
       - name: install system libs
-        run: sudo apt-get update && sudo apt-get install -y libpcre2-dev libsqlite3-dev zlib1g-dev libmysqlclient-dev libpq-dev libssl-dev libnghttp2-dev libcurl4-openssl-dev libxml2-dev libicu-dev libgmp-dev libgd-dev
+        run: sudo apt-get update && sudo apt-get install -y libpcre2-dev libsqlite3-dev zlib1g-dev libmysqlclient-dev libpq-dev libssl-dev libnghttp2-dev libcurl4-openssl-dev libxml2-dev libicu-dev libgmp-dev libgd-dev libsodium-dev
       - uses: shivammathur/setup-php@v2
         with:
           php-version: '8.5'
@@ -140,7 +140,7 @@ jobs:
         with:
           version: 0.15.1
       - name: install system libs
-        run: sudo apt-get update && sudo apt-get install -y libpcre2-dev libsqlite3-dev zlib1g-dev libmysqlclient-dev libpq-dev libssl-dev libnghttp2-dev libcurl4-openssl-dev libxml2-dev libicu-dev libgmp-dev libgd-dev
+        run: sudo apt-get update && sudo apt-get install -y libpcre2-dev libsqlite3-dev zlib1g-dev libmysqlclient-dev libpq-dev libssl-dev libnghttp2-dev libcurl4-openssl-dev libxml2-dev libicu-dev libgmp-dev libgd-dev libsodium-dev
       - uses: shivammathur/setup-php@v2
         with:
           php-version: '8.5'
@@ -157,7 +157,7 @@ jobs:
         with:
           version: 0.15.1
       - name: install system libs
-        run: sudo apt-get update && sudo apt-get install -y libpcre2-dev libsqlite3-dev zlib1g-dev libmysqlclient-dev libpq-dev libssl-dev libnghttp2-dev libcurl4-openssl-dev libxml2-dev libicu-dev libgmp-dev libgd-dev
+        run: sudo apt-get update && sudo apt-get install -y libpcre2-dev libsqlite3-dev zlib1g-dev libmysqlclient-dev libpq-dev libssl-dev libnghttp2-dev libcurl4-openssl-dev libxml2-dev libicu-dev libgmp-dev libgd-dev libsodium-dev
       - uses: shivammathur/setup-php@v2
         with:
           php-version: '8.5'
@@ -192,6 +192,6 @@ jobs:
         with:
           version: 0.15.1
       - name: install system libs
-        run: sudo apt-get update && sudo apt-get install -y libpcre2-dev libsqlite3-dev zlib1g-dev libmysqlclient-dev libpq-dev libssl-dev libnghttp2-dev libcurl4-openssl-dev libxml2-dev libicu-dev libgmp-dev libgd-dev
+        run: sudo apt-get update && sudo apt-get install -y libpcre2-dev libsqlite3-dev zlib1g-dev libmysqlclient-dev libpq-dev libssl-dev libnghttp2-dev libcurl4-openssl-dev libxml2-dev libicu-dev libgmp-dev libgd-dev libsodium-dev
       - run: zig build
       - run: ./tests/pdo_test
