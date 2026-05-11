@@ -1574,11 +1574,14 @@ fn callablesEqual(a: Value, b: Value) bool {
         if (aa.entries.items.len != ba.entries.items.len) return false;
         for (aa.entries.items, ba.entries.items) |ae, be| {
             if (ae.value == .string and be.value == .string) {
-                if (!std.mem.eql(u8, ae.value.string, be.value.string)) return false;
+                if (!std.mem.eql(u8, ae.value.string, be.value.string)) continue;
+            } else if (ae.value == .object and be.value == .object) {
+                if (ae.value.object != be.value.object) return false;
             } else return false;
         }
         return true;
     }
+    if (a == .object and b == .object) return a.object == b.object;
     return false;
 }
 
