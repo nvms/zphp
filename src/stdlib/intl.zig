@@ -68,6 +68,22 @@ extern fn zphp_utrans_openU(id: [*]const UChar, idLen: i32, dir: i32, rules: ?[*
 extern fn zphp_utrans_close(t: *UTransliterator) void;
 extern fn zphp_utrans_transUChars(t: *const UTransliterator, text: [*]UChar, textLen: *i32, textCap: i32, start: i32, limit: *i32, err: *UErrorCode) void;
 
+const UDateFormat = opaque {};
+extern fn zphp_udat_open(timeStyle: i32, dateStyle: i32, locale: [*:0]const u8, tzId: ?[*]const UChar, tzIdLen: i32, pattern: ?[*]const UChar, patternLen: i32, err: *UErrorCode) ?*UDateFormat;
+extern fn zphp_udat_close(f: *UDateFormat) void;
+extern fn zphp_udat_format(f: *const UDateFormat, date: f64, result: [*]UChar, resultLen: i32, pos: ?*anyopaque, err: *UErrorCode) i32;
+extern fn zphp_udat_parse(f: *const UDateFormat, text: [*]const UChar, textLen: i32, parsePos: ?*i32, err: *UErrorCode) f64;
+extern fn zphp_udat_applyPattern(f: *UDateFormat, localized: u8, pattern: [*]const UChar, patternLen: i32) void;
+extern fn zphp_udat_toPattern(f: *const UDateFormat, localized: u8, result: [*]UChar, resultLen: i32, err: *UErrorCode) i32;
+
+const UIDNA = opaque {};
+extern fn zphp_uidna_openUTS46(options: u32, err: *UErrorCode) ?*UIDNA;
+extern fn zphp_uidna_close(idna: *UIDNA) void;
+extern fn zphp_uidna_nameToASCII(idna: *const UIDNA, name: [*]const UChar, nameLen: i32, dest: [*]UChar, cap: i32, info: *anyopaque, err: *UErrorCode) i32;
+extern fn zphp_uidna_nameToUnicode(idna: *const UIDNA, name: [*]const UChar, nameLen: i32, dest: [*]UChar, cap: i32, info: *anyopaque, err: *UErrorCode) i32;
+extern fn zphp_uidna_info_size() usize;
+extern fn zphp_uidna_info_init(info: *anyopaque) void;
+
 // ---------------- helpers ----------------
 
 fn dupString(ctx: *NativeContext, s: []const u8) ![]const u8 {
@@ -486,6 +502,149 @@ fn transTransliterate(ctx: *NativeContext, args: []const Value) RuntimeError!Val
     return .{ .string = out };
 }
 
+// ---------------- IntlDateFormatter ----------------
+
+fn getDateFmt(obj: *const PhpObject) ?*UDateFormat {
+    const v = obj.get("__dfmt");
+    if (v != .int or v.int == 0) return null;
+    return @ptrFromInt(@as(usize, @intCast(v.int)));
+}
+
+fn openDateFmt(ctx: *NativeContext, locale: []const u8, date_style: i32, time_style: i32, tz: ?[]const u8, pattern: ?[]const u8) !?*UDateFormat {
+    const loc_z = try dupZ(ctx, locale);
+    const tz_u16: ?[]u16 = if (tz) |t| try utf8ToU16(ctx, t) else null;
+    defer if (tz_u16) |b| ctx.allocator.free(b);
+    const pat_u16: ?[]u16 = if (pattern) |p| try utf8ToU16(ctx, p) else null;
+    defer if (pat_u16) |b| ctx.allocator.free(b);
+
+    const tz_ptr: ?[*]const UChar = if (tz_u16) |b| b.ptr else null;
+    const tz_len: i32 = if (tz_u16) |b| @intCast(b.len) else -1;
+    const pat_ptr: ?[*]const UChar = if (pat_u16) |b| b.ptr else null;
+    const pat_len: i32 = if (pat_u16) |b| @intCast(b.len) else -1;
+
+    // when a pattern is supplied PHP forces both styles to UDAT_PATTERN (-2);
+    // otherwise honor the requested style constants
+    const t_style: i32 = if (pat_u16 != null) -2 else time_style;
+    const d_style: i32 = if (pat_u16 != null) -2 else date_style;
+
+    var status: UErrorCode = U_ZERO_ERROR;
+    const f = zphp_udat_open(t_style, d_style, loc_z.ptr, tz_ptr, tz_len, pat_ptr, pat_len, &status);
+    if (status > U_ZERO_ERROR) return null;
+    return f;
+}
+
+fn dfConstruct(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len < 3 or args[0] != .string) return .null;
+    const obj = getThis(ctx) orelse return .null;
+    const date_style: i32 = if (args[1] == .int) @intCast(args[1].int) else 0;
+    const time_style: i32 = if (args[2] == .int) @intCast(args[2].int) else 0;
+    const tz_opt: ?[]const u8 = if (args.len > 3 and args[3] == .string and args[3].string.len > 0) args[3].string else null;
+    // skip args[4] (calendar) for now
+    const pat_opt: ?[]const u8 = if (args.len > 5 and args[5] == .string and args[5].string.len > 0) args[5].string else null;
+
+    const f = (try openDateFmt(ctx, args[0].string, date_style, time_style, tz_opt, pat_opt)) orelse return .null;
+    try obj.set(ctx.allocator, "__dfmt", .{ .int = @intCast(@intFromPtr(f)) });
+    return .null;
+}
+
+fn dfCreateStatic(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len < 3 or args[0] != .string) return .null;
+    const obj = try ctx.createObject("IntlDateFormatter");
+    const date_style: i32 = if (args[1] == .int) @intCast(args[1].int) else 0;
+    const time_style: i32 = if (args[2] == .int) @intCast(args[2].int) else 0;
+    const tz_opt: ?[]const u8 = if (args.len > 3 and args[3] == .string and args[3].string.len > 0) args[3].string else null;
+    const pat_opt: ?[]const u8 = if (args.len > 5 and args[5] == .string and args[5].string.len > 0) args[5].string else null;
+    const f = (try openDateFmt(ctx, args[0].string, date_style, time_style, tz_opt, pat_opt)) orelse return .null;
+    try obj.set(ctx.allocator, "__dfmt", .{ .int = @intCast(@intFromPtr(f)) });
+    return .{ .object = obj };
+}
+
+fn dfFormat(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len < 1) return .{ .bool = false };
+    const obj = getThis(ctx) orelse return .{ .bool = false };
+    const f = getDateFmt(obj) orelse return .{ .bool = false };
+    const millis: f64 = switch (args[0]) {
+        .int => |i| @as(f64, @floatFromInt(i)) * 1000.0,
+        .float => |fl| fl * 1000.0,
+        else => return .{ .bool = false },
+    };
+    var buf: [256]UChar = undefined;
+    var status: UErrorCode = U_ZERO_ERROR;
+    const n = zphp_udat_format(f, millis, &buf, @intCast(buf.len), null, &status);
+    if (status > U_ZERO_ERROR) return .{ .bool = false };
+    const out = try u16ToUtf8(ctx, buf[0..@intCast(n)]);
+    return .{ .string = out };
+}
+
+fn dfParse(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len < 1 or args[0] != .string) return .{ .bool = false };
+    const obj = getThis(ctx) orelse return .{ .bool = false };
+    const f = getDateFmt(obj) orelse return .{ .bool = false };
+    const u16src = try utf8ToU16(ctx, args[0].string);
+    defer ctx.allocator.free(u16src);
+    var pos: i32 = 0;
+    var status: UErrorCode = U_ZERO_ERROR;
+    const millis = zphp_udat_parse(f, u16src.ptr, @intCast(u16src.len), &pos, &status);
+    if (status > U_ZERO_ERROR) return .{ .bool = false };
+    return .{ .int = @intFromFloat(millis / 1000.0) };
+}
+
+fn dfGetPattern(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const obj = getThis(ctx) orelse return .{ .bool = false };
+    const f = getDateFmt(obj) orelse return .{ .bool = false };
+    var buf: [256]UChar = undefined;
+    var status: UErrorCode = U_ZERO_ERROR;
+    const n = zphp_udat_toPattern(f, 0, &buf, @intCast(buf.len), &status);
+    if (status > U_ZERO_ERROR) return .{ .bool = false };
+    const out = try u16ToUtf8(ctx, buf[0..@intCast(n)]);
+    return .{ .string = out };
+}
+
+fn dfSetPattern(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len < 1 or args[0] != .string) return .{ .bool = false };
+    const obj = getThis(ctx) orelse return .{ .bool = false };
+    const f = getDateFmt(obj) orelse return .{ .bool = false };
+    const u16src = try utf8ToU16(ctx, args[0].string);
+    defer ctx.allocator.free(u16src);
+    zphp_udat_applyPattern(f, 0, u16src.ptr, @intCast(u16src.len));
+    return .{ .bool = true };
+}
+
+// ---------------- IDNA (idn_to_ascii / idn_to_utf8) ----------------
+
+fn idnConvert(ctx: *NativeContext, args: []const Value, to_ascii: bool) RuntimeError!Value {
+    if (args.len < 1 or args[0] != .string) return .{ .bool = false };
+    var status: UErrorCode = U_ZERO_ERROR;
+    const idna = zphp_uidna_openUTS46(0, &status) orelse return .{ .bool = false };
+    defer zphp_uidna_close(idna);
+    if (status > U_ZERO_ERROR) return .{ .bool = false };
+
+    const info_size = zphp_uidna_info_size();
+    const info_buf = try ctx.allocator.alloc(u8, info_size);
+    defer ctx.allocator.free(info_buf);
+    zphp_uidna_info_init(@ptrCast(info_buf.ptr));
+
+    const u16src = try utf8ToU16(ctx, args[0].string);
+    defer ctx.allocator.free(u16src);
+    var dest: [512]UChar = undefined;
+    status = U_ZERO_ERROR;
+    const n = if (to_ascii)
+        zphp_uidna_nameToASCII(idna, u16src.ptr, @intCast(u16src.len), &dest, @intCast(dest.len), @ptrCast(info_buf.ptr), &status)
+    else
+        zphp_uidna_nameToUnicode(idna, u16src.ptr, @intCast(u16src.len), &dest, @intCast(dest.len), @ptrCast(info_buf.ptr), &status);
+    if (status > U_ZERO_ERROR or n < 0) return .{ .bool = false };
+    const out = try u16ToUtf8(ctx, dest[0..@intCast(n)]);
+    return .{ .string = out };
+}
+
+fn idnToAscii(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    return idnConvert(ctx, args, true);
+}
+
+fn idnToUtf8(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    return idnConvert(ctx, args, false);
+}
+
 // ---------------- registration ----------------
 
 pub const entries = .{
@@ -501,6 +660,8 @@ pub const entries = .{
     .{ "locale_get_display_script", localeGetDisplayScript },
     .{ "normalizer_normalize", normalizerNormalize },
     .{ "normalizer_is_normalized", normalizerIsNormalized },
+    .{ "idn_to_ascii", idnToAscii },
+    .{ "idn_to_utf8", idnToUtf8 },
 };
 
 pub fn register(vm: *VM, a: Allocator) !void {
@@ -509,7 +670,38 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try registerCollatorClass(vm, a);
     try registerNumberFormatterClass(vm, a);
     try registerTransliteratorClass(vm, a);
+    try registerDateFormatterClass(vm, a);
     try registerConstants(vm, a);
+}
+
+fn registerDateFormatterClass(vm: *VM, a: Allocator) !void {
+    var def = ClassDef{ .name = "IntlDateFormatter" };
+    try def.methods.put(a, "__construct", .{ .name = "__construct", .arity = 3 });
+    try def.methods.put(a, "create", .{ .name = "create", .arity = 3, .is_static = true });
+    try def.methods.put(a, "format", .{ .name = "format", .arity = 1 });
+    try def.methods.put(a, "parse", .{ .name = "parse", .arity = 1 });
+    try def.methods.put(a, "getPattern", .{ .name = "getPattern", .arity = 0 });
+    try def.methods.put(a, "setPattern", .{ .name = "setPattern", .arity = 1 });
+
+    const dfs = .{
+        .{ "FULL", 0 }, .{ "LONG", 1 }, .{ "MEDIUM", 2 }, .{ "SHORT", 3 }, .{ "NONE", -1 },
+        .{ "RELATIVE_FULL", 128 }, .{ "RELATIVE_LONG", 129 },
+        .{ "RELATIVE_MEDIUM", 130 }, .{ "RELATIVE_SHORT", 131 },
+        .{ "GREGORIAN", 1 }, .{ "TRADITIONAL", 0 },
+    };
+    inline for (dfs) |k| {
+        try def.constant_order.append(a, k[0]);
+        try def.constant_names.put(a, k[0], {});
+        try def.static_props.put(a, k[0], .{ .int = k[1] });
+    }
+
+    try vm.classes.put(a, "IntlDateFormatter", def);
+    try vm.native_fns.put(a, "IntlDateFormatter::__construct", dfConstruct);
+    try vm.native_fns.put(a, "IntlDateFormatter::create", dfCreateStatic);
+    try vm.native_fns.put(a, "IntlDateFormatter::format", dfFormat);
+    try vm.native_fns.put(a, "IntlDateFormatter::parse", dfParse);
+    try vm.native_fns.put(a, "IntlDateFormatter::getPattern", dfGetPattern);
+    try vm.native_fns.put(a, "IntlDateFormatter::setPattern", dfSetPattern);
 }
 
 fn registerNormalizerClass(vm: *VM, a: Allocator) !void {
@@ -673,6 +865,8 @@ pub fn cleanupResources(objects: std.ArrayListUnmanaged(*PhpObject)) void {
             if (getNumFmt(obj)) |f| zphp_unum_close(f);
         } else if (std.mem.eql(u8, obj.class_name, "Transliterator")) {
             if (getTranslit(obj)) |t| zphp_utrans_close(t);
+        } else if (std.mem.eql(u8, obj.class_name, "IntlDateFormatter")) {
+            if (getDateFmt(obj)) |f| zphp_udat_close(f);
         }
     }
 }

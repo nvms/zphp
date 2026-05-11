@@ -63,3 +63,20 @@ echo "to-greek: ", $t3->transliterate('hello'), "\n";
 // procedural API
 echo "loc fn: ", locale_get_primary_language('es_ES'), "\n";
 echo "norm fn: ", normalizer_normalize("é") === "é" ? "ok" : "fail", "\n";
+
+// IntlDateFormatter
+$ts = 1700000000; // 2023-11-14 22:13:20 UTC
+$df = new IntlDateFormatter('en_US', IntlDateFormatter::SHORT, IntlDateFormatter::NONE, 'UTC');
+echo "us-short: ", $df->format($ts), "\n";
+
+$df2 = new IntlDateFormatter('de_DE', IntlDateFormatter::MEDIUM, IntlDateFormatter::NONE, 'UTC');
+echo "de-medium: ", $df2->format($ts), "\n";
+
+$df3 = new IntlDateFormatter('en_US', IntlDateFormatter::NONE, IntlDateFormatter::NONE, 'UTC', IntlDateFormatter::GREGORIAN, "yyyy-MM-dd HH:mm:ss");
+echo "pattern: ", $df3->format($ts), "\n";
+
+echo "pattern back: ", $df3->getPattern(), "\n";
+
+// IDNA
+echo "to ascii: ", idn_to_ascii("bücher.de"), "\n";
+echo "to utf8: ", idn_to_utf8("xn--bcher-kva.de"), "\n";

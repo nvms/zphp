@@ -20,6 +20,9 @@
 #include <unicode/ucol.h>
 #include <unicode/unum.h>
 #include <unicode/utrans.h>
+#include <unicode/udat.h>
+#include <unicode/umsg.h>
+#include <unicode/uidna.h>
 
 /* ----- utf-16 / utf-8 conversion ----- */
 
@@ -114,4 +117,43 @@ UTransliterator* zphp_utrans_openU(const UChar* id, int32_t idLen, UTransDirecti
 void zphp_utrans_close(UTransliterator* t) { utrans_close(t); }
 void zphp_utrans_transUChars(const UTransliterator* t, UChar* text, int32_t* textLen, int32_t textCap, int32_t start, int32_t* limit, UErrorCode* err) {
     utrans_transUChars(t, text, textLen, textCap, start, limit, err);
+}
+
+/* ----- IntlDateFormatter ----- */
+
+UDateFormat* zphp_udat_open(UDateFormatStyle timeStyle, UDateFormatStyle dateStyle, const char* locale, const UChar* tzID, int32_t tzIDLen, const UChar* pattern, int32_t patternLen, UErrorCode* err) {
+    return udat_open(timeStyle, dateStyle, locale, tzID, tzIDLen, pattern, patternLen, err);
+}
+void zphp_udat_close(UDateFormat* f) { udat_close(f); }
+int32_t zphp_udat_format(const UDateFormat* f, double date, UChar* result, int32_t resultLen, void* pos, UErrorCode* err) {
+    return udat_format(f, date, result, resultLen, pos, err);
+}
+double zphp_udat_parse(const UDateFormat* f, const UChar* text, int32_t textLen, int32_t* parsePos, UErrorCode* err) {
+    return udat_parse(f, text, textLen, parsePos, err);
+}
+void zphp_udat_applyPattern(UDateFormat* f, UBool localized, const UChar* pattern, int32_t patternLen) {
+    udat_applyPattern(f, localized, pattern, patternLen);
+}
+int32_t zphp_udat_toPattern(const UDateFormat* f, UBool localized, UChar* result, int32_t resultLen, UErrorCode* err) {
+    return udat_toPattern(f, localized, result, resultLen, err);
+}
+
+/* ----- IDNA (UTS46) ----- */
+
+UIDNA* zphp_uidna_openUTS46(uint32_t options, UErrorCode* err) {
+    return uidna_openUTS46(options, err);
+}
+void zphp_uidna_close(UIDNA* idna) { uidna_close(idna); }
+int32_t zphp_uidna_nameToASCII(const UIDNA* idna, const UChar* name, int32_t nameLen, UChar* dest, int32_t cap, UIDNAInfo* info, UErrorCode* err) {
+    return uidna_nameToASCII(idna, name, nameLen, dest, cap, info, err);
+}
+int32_t zphp_uidna_nameToUnicode(const UIDNA* idna, const UChar* name, int32_t nameLen, UChar* dest, int32_t cap, UIDNAInfo* info, UErrorCode* err) {
+    return uidna_nameToUnicode(idna, name, nameLen, dest, cap, info, err);
+}
+
+/* sizeof(UIDNAInfo) so zig can allocate it without knowing struct layout */
+size_t zphp_uidna_info_size(void) { return sizeof(UIDNAInfo); }
+void zphp_uidna_info_init(UIDNAInfo* info) {
+    UIDNAInfo init = UIDNA_INFO_INITIALIZER;
+    *info = init;
 }
