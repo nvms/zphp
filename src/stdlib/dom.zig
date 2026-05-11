@@ -472,6 +472,33 @@ fn collectByName(allocator: Allocator, node: *c.xmlNode, name: []const u8, out: 
     }
 }
 
+fn collectByNameNS(allocator: Allocator, node: *c.xmlNode, ns: []const u8, name: []const u8, out: *std.ArrayList(*c.xmlNode)) !void {
+    const want_any_name = std.mem.eql(u8, name, "*");
+    const want_any_ns = std.mem.eql(u8, ns, "*");
+    if (node.type == c.XML_ELEMENT_NODE) {
+        var name_ok = want_any_name;
+        if (!name_ok) {
+            const nn = node.name;
+            name_ok = nn != null and std.mem.eql(u8, nn[0..cstrLen(nn)], name);
+        }
+        var ns_ok = want_any_ns;
+        if (!ns_ok) {
+            const node_ns = node.ns;
+            if (node_ns != null and node_ns.*.href != null) {
+                const href = node_ns.*.href;
+                ns_ok = std.mem.eql(u8, href[0..cstrLen(href)], ns);
+            } else {
+                ns_ok = ns.len == 0;
+            }
+        }
+        if (name_ok and ns_ok) try out.append(allocator, node);
+    }
+    var child = node.children;
+    while (child != null) : (child = child.*.next) {
+        try collectByNameNS(allocator, child, ns, name, out);
+    }
+}
+
 fn domDocNormalizeDocument(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
     _ = ctx;
     // PHP's normalizeDocument coalesces adjacent text nodes; libxml2 does this on saveXML.
@@ -923,6 +950,25 @@ fn domElementGetElementsByTagName(ctx: *NativeContext, args: []const Value) Runt
     return try makeNodeList(ctx, getOwnerDocObj(obj) orelse obj, list.items);
 }
 
+fn domGetElementsByTagNameNS(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len < 2 or args[1] != .string) return .{ .bool = false };
+    const obj = getThis(ctx) orelse return .{ .bool = false };
+    const ns = if (args[0] == .string) args[0].string else "*";
+    const name = args[1].string;
+    var node = getNodePtr(obj) orelse return .{ .bool = false };
+    // for DOMDocument, the wrapping node may not have children walking the doc;
+    // start at the root element
+    if (node.type == c.XML_DOCUMENT_NODE) {
+        const root = c.xmlDocGetRootElement(@ptrCast(node));
+        if (root == null) return try makeNodeList(ctx, obj, &.{});
+        node = root;
+    }
+    var list = std.ArrayList(*c.xmlNode){};
+    defer list.deinit(ctx.allocator);
+    try collectByNameNS(ctx.allocator, node, ns, name, &list);
+    return try makeNodeList(ctx, getOwnerDocObj(obj) orelse obj, list.items);
+}
+
 fn domElementGetAttributeNode(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len < 1 or args[0] != .string) return .null;
     const obj = getThis(ctx) orelse return .null;
@@ -1296,6 +1342,7 @@ fn registerDocClass(vm: *VM, a: Allocator) !void {
     try def.methods.put(a, "createDocumentFragment", .{ .name = "createDocumentFragment", .arity = 0 });
     try def.methods.put(a, "importNode", .{ .name = "importNode", .arity = 1 });
     try def.methods.put(a, "getElementsByTagName", .{ .name = "getElementsByTagName", .arity = 1 });
+    try def.methods.put(a, "getElementsByTagNameNS", .{ .name = "getElementsByTagNameNS", .arity = 2 });
     try def.methods.put(a, "getElementById", .{ .name = "getElementById", .arity = 1 });
     try def.methods.put(a, "normalizeDocument", .{ .name = "normalizeDocument", .arity = 0 });
     try def.methods.put(a, "appendChild", .{ .name = "appendChild", .arity = 1 });
@@ -1326,6 +1373,7 @@ fn registerDocClass(vm: *VM, a: Allocator) !void {
     try vm.native_fns.put(a, "DOMDocument::createDocumentFragment", domDocCreateDocumentFragment);
     try vm.native_fns.put(a, "DOMDocument::importNode", domDocImportNode);
     try vm.native_fns.put(a, "DOMDocument::getElementsByTagName", domDocGetElementsByTagName);
+    try vm.native_fns.put(a, "DOMDocument::getElementsByTagNameNS", domGetElementsByTagNameNS);
     try vm.native_fns.put(a, "DOMDocument::getElementById", domDocGetElementById);
     try vm.native_fns.put(a, "DOMDocument::normalizeDocument", domDocNormalizeDocument);
     try vm.native_fns.put(a, "DOMDocument::appendChild", domNodeAppendChild);
@@ -1394,6 +1442,7 @@ fn registerElementClass(vm: *VM, a: Allocator) !void {
     try def.methods.put(a, "hasAttributeNS", .{ .name = "hasAttributeNS", .arity = 2 });
     try def.methods.put(a, "removeAttributeNS", .{ .name = "removeAttributeNS", .arity = 2 });
     try def.methods.put(a, "getElementsByTagName", .{ .name = "getElementsByTagName", .arity = 1 });
+    try def.methods.put(a, "getElementsByTagNameNS", .{ .name = "getElementsByTagNameNS", .arity = 2 });
     try def.methods.put(a, "getAttributeNode", .{ .name = "getAttributeNode", .arity = 1 });
     // also need all DOMNode methods (parent walk handles dispatch but we register the natives directly)
     try def.methods.put(a, "appendChild", .{ .name = "appendChild", .arity = 1 });
@@ -1420,6 +1469,7 @@ fn registerElementClass(vm: *VM, a: Allocator) !void {
     try vm.native_fns.put(a, "DOMElement::hasAttributeNS", domElementHasAttributeNS);
     try vm.native_fns.put(a, "DOMElement::removeAttributeNS", domElementRemoveAttributeNS);
     try vm.native_fns.put(a, "DOMElement::getElementsByTagName", domElementGetElementsByTagName);
+    try vm.native_fns.put(a, "DOMElement::getElementsByTagNameNS", domGetElementsByTagNameNS);
     try vm.native_fns.put(a, "DOMElement::getAttributeNode", domElementGetAttributeNode);
     try registerNodeNativeFns(vm, a, "DOMElement");
 }

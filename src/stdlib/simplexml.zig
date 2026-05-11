@@ -269,13 +269,28 @@ fn sxmlCount(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
 }
 
 fn sxmlChildren(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    _ = args;
     const obj = getThis(ctx) orelse return .null;
     const node = getNodePtr(obj) orelse return .null;
     const doc = getDocPtr(obj) orelse return .null;
-    // PHP returns a SimpleXMLElement representing the same node; iteration over it
-    // yields child elements. We just clone the wrapper.
     const wrapper = try buildWrapper(ctx, doc, node);
+    // optional namespace filter. PHP: children(string $ns = null, bool $isPrefix = false)
+    if (args.len >= 1 and args[0] == .string and args[0].string.len > 0) {
+        const ns_or_prefix = args[0].string;
+        const is_prefix = args.len >= 2 and args[1] == .bool and args[1].bool;
+        var resolved_ns: []const u8 = ns_or_prefix;
+        if (is_prefix) {
+            // resolve prefix to URI via the document's namespace map
+            const prefix_z = try dupZ(ctx, ns_or_prefix);
+            const ns = c.xmlSearchNs(doc, node, @ptrCast(prefix_z.ptr));
+            if (ns != null and ns.*.href != null) {
+                const href = ns.*.href;
+                resolved_ns = href[0..cstrLen(href)];
+            }
+        }
+        const owned = try ctx.allocator.dupe(u8, resolved_ns);
+        try ctx.strings.append(ctx.allocator, owned);
+        try wrapper.set(ctx.allocator, "__ns", .{ .string = owned });
+    }
     return .{ .object = wrapper };
 }
 
@@ -443,6 +458,14 @@ fn sxmlToString(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
 
 // ---------------- magic __get / __set / iteration / offset ----------------
 
+fn nodeInNs(n: *c.xmlNode, ns: []const u8) bool {
+    if (n.ns != null and n.ns.*.href != null) {
+        const href = n.ns.*.href;
+        return std.mem.eql(u8, href[0..cstrLen(href)], ns);
+    }
+    return ns.len == 0;
+}
+
 fn sxmlGet(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len < 1 or args[0] != .string) return .null;
     const obj = getThis(ctx) orelse return .null;
@@ -450,13 +473,23 @@ fn sxmlGet(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     const node = getNodePtr(obj) orelse return .null;
     const doc = getDocPtr(obj) orelse return .null;
 
-    // find first child element with matching name
+    // honor namespace filter set by children($ns)
+    const ns_v = obj.get("__ns");
+    const ns_filter: ?[]const u8 = if (ns_v == .string) ns_v.string else null;
+
     var ch = node.children;
     while (ch != null) : (ch = ch.*.next) {
-        if (ch.*.type == c.XML_ELEMENT_NODE and nameMatches(ch, name)) {
-            const wrapper = try buildWrapper(ctx, doc, ch);
-            return .{ .object = wrapper };
+        if (ch.*.type != c.XML_ELEMENT_NODE) continue;
+        if (!nameMatches(ch, name)) continue;
+        if (ns_filter) |ns| if (!nodeInNs(ch, ns)) continue;
+        const wrapper = try buildWrapper(ctx, doc, ch);
+        // propagate namespace filter so chained child accesses keep working
+        if (ns_filter) |ns| {
+            const owned = try ctx.allocator.dupe(u8, ns);
+            try ctx.strings.append(ctx.allocator, owned);
+            try wrapper.set(ctx.allocator, "__ns", .{ .string = owned });
         }
+        return .{ .object = wrapper };
     }
     return .null;
 }

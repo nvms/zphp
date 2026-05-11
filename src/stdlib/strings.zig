@@ -352,7 +352,7 @@ fn trimWithSet(s: []const u8, set: [256]bool, left: bool, right: bool) []const u
 
 fn trim(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len == 0) return .{ .string = "" };
-    const s = if (args[0] == .string) args[0].string else return Value{ .string = "" };
+    const s = try coerceToString(ctx, args[0]);
     const chars = if (args.len >= 2 and args[1] == .string) args[1].string else default_trim_chars;
     const set = buildTrimSet(chars);
     return .{ .string = try ctx.createString(trimWithSet(s, set, true, true)) };
@@ -360,7 +360,7 @@ fn trim(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
 
 fn ltrim(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len == 0) return .{ .string = "" };
-    const s = if (args[0] == .string) args[0].string else return Value{ .string = "" };
+    const s = try coerceToString(ctx, args[0]);
     const chars = if (args.len >= 2 and args[1] == .string) args[1].string else default_trim_chars;
     const set = buildTrimSet(chars);
     return .{ .string = try ctx.createString(trimWithSet(s, set, true, false)) };
@@ -368,7 +368,7 @@ fn ltrim(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
 
 fn rtrim(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len == 0) return .{ .string = "" };
-    const s = if (args[0] == .string) args[0].string else return Value{ .string = "" };
+    const s = try coerceToString(ctx, args[0]);
     const chars = if (args.len >= 2 and args[1] == .string) args[1].string else default_trim_chars;
     const set = buildTrimSet(chars);
     return .{ .string = try ctx.createString(trimWithSet(s, set, false, true)) };
@@ -3212,6 +3212,13 @@ fn coerceToString(ctx: *NativeContext, v: Value) ![]const u8 {
         },
         .bool => |b| if (b) "1" else "",
         .null => "",
+        .object => |o| blk: {
+            if (ctx.vm.hasMethod(o.class_name, "__toString")) {
+                const r = try ctx.vm.callMethod(o, "__toString", &.{});
+                if (r == .string) break :blk r.string;
+            }
+            break :blk "";
+        },
         else => "",
     };
 }
