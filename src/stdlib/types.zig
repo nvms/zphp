@@ -2295,6 +2295,71 @@ const T_CONSTANT_ENCAPSED_STRING: i64 = 314;
 const T_COMMENT: i64 = 393;
 const T_DOC_COMMENT: i64 = 394;
 
+const Keyword = struct { name: []const u8, id: i64 };
+const PHP_KEYWORDS = [_]Keyword{
+    .{ .name = "echo", .id = 400 },
+    .{ .name = "function", .id = 401 },
+    .{ .name = "class", .id = 402 },
+    .{ .name = "return", .id = 403 },
+    .{ .name = "if", .id = 404 },
+    .{ .name = "else", .id = 405 },
+    .{ .name = "elseif", .id = 406 },
+    .{ .name = "while", .id = 407 },
+    .{ .name = "for", .id = 408 },
+    .{ .name = "foreach", .id = 409 },
+    .{ .name = "do", .id = 410 },
+    .{ .name = "switch", .id = 411 },
+    .{ .name = "case", .id = 412 },
+    .{ .name = "break", .id = 413 },
+    .{ .name = "continue", .id = 414 },
+    .{ .name = "default", .id = 415 },
+    .{ .name = "public", .id = 416 },
+    .{ .name = "protected", .id = 417 },
+    .{ .name = "private", .id = 418 },
+    .{ .name = "static", .id = 419 },
+    .{ .name = "abstract", .id = 420 },
+    .{ .name = "final", .id = 421 },
+    .{ .name = "namespace", .id = 422 },
+    .{ .name = "use", .id = 423 },
+    .{ .name = "extends", .id = 424 },
+    .{ .name = "implements", .id = 425 },
+    .{ .name = "new", .id = 426 },
+    .{ .name = "throw", .id = 427 },
+    .{ .name = "try", .id = 428 },
+    .{ .name = "catch", .id = 429 },
+    .{ .name = "finally", .id = 430 },
+    .{ .name = "null", .id = 431 },
+    .{ .name = "true", .id = 432 },
+    .{ .name = "false", .id = 433 },
+    .{ .name = "const", .id = 434 },
+    .{ .name = "interface", .id = 435 },
+    .{ .name = "trait", .id = 436 },
+    .{ .name = "enum", .id = 437 },
+    .{ .name = "global", .id = 438 },
+    .{ .name = "require", .id = 439 },
+    .{ .name = "require_once", .id = 440 },
+    .{ .name = "include", .id = 441 },
+    .{ .name = "include_once", .id = 442 },
+    .{ .name = "print", .id = 443 },
+    .{ .name = "readonly", .id = 444 },
+    .{ .name = "yield", .id = 445 },
+    .{ .name = "fn", .id = 446 },
+    .{ .name = "match", .id = 447 },
+    .{ .name = "as", .id = 448 },
+    .{ .name = "instanceof", .id = 449 },
+};
+
+fn keywordTokenId(ident: []const u8) ?i64 {
+    var lower_buf: [32]u8 = undefined;
+    if (ident.len > lower_buf.len) return null;
+    for (ident, 0..) |c, i| lower_buf[i] = std.ascii.toLower(c);
+    const lower = lower_buf[0..ident.len];
+    for (PHP_KEYWORDS) |kw| {
+        if (std.mem.eql(u8, lower, kw.name)) return kw.id;
+    }
+    return null;
+}
+
 fn makeToken(ctx: *NativeContext, id: i64, text: []const u8, line: i64) RuntimeError!Value {
     const arr = try ctx.createArray();
     try arr.append(ctx.allocator, .{ .int = id });
@@ -2409,7 +2474,9 @@ fn native_token_get_all(ctx: *NativeContext, args: []const Value) RuntimeError!V
             } else if (std.ascii.isAlphabetic(input[pos]) or input[pos] == '_') {
                 const start = pos;
                 while (pos < input.len and (std.ascii.isAlphanumeric(input[pos]) or input[pos] == '_')) pos += 1;
-                try result.append(ctx.allocator, try makeToken(ctx, T_STRING, input[start..pos], line));
+                const ident = input[start..pos];
+                const tok_id = keywordTokenId(ident) orelse T_STRING;
+                try result.append(ctx.allocator, try makeToken(ctx, tok_id, ident, line));
             } else {
                 // single character token returned as string
                 const s = try std.fmt.allocPrint(ctx.allocator, "{c}", .{input[pos]});
@@ -2435,8 +2502,59 @@ fn native_token_name(_: *NativeContext, args: []const Value) RuntimeError!Value 
         311 => "T_LNUMBER",
         313 => "T_DNUMBER",
         314 => "T_CONSTANT_ENCAPSED_STRING",
+        315 => "T_ENCAPSED_AND_WHITESPACE",
         393 => "T_COMMENT",
         394 => "T_DOC_COMMENT",
+        400 => "T_ECHO",
+        401 => "T_FUNCTION",
+        402 => "T_CLASS",
+        403 => "T_RETURN",
+        404 => "T_IF",
+        405 => "T_ELSE",
+        406 => "T_ELSEIF",
+        407 => "T_WHILE",
+        408 => "T_FOR",
+        409 => "T_FOREACH",
+        410 => "T_DO",
+        411 => "T_SWITCH",
+        412 => "T_CASE",
+        413 => "T_BREAK",
+        414 => "T_CONTINUE",
+        415 => "T_DEFAULT",
+        416 => "T_PUBLIC",
+        417 => "T_PROTECTED",
+        418 => "T_PRIVATE",
+        419 => "T_STATIC",
+        420 => "T_ABSTRACT",
+        421 => "T_FINAL",
+        422 => "T_NAMESPACE",
+        423 => "T_USE",
+        424 => "T_EXTENDS",
+        425 => "T_IMPLEMENTS",
+        426 => "T_NEW",
+        427 => "T_THROW",
+        428 => "T_TRY",
+        429 => "T_CATCH",
+        430 => "T_FINALLY",
+        431 => "T_NULL",
+        432 => "T_TRUE",
+        433 => "T_FALSE",
+        434 => "T_CONST",
+        435 => "T_INTERFACE",
+        436 => "T_TRAIT",
+        437 => "T_ENUM",
+        438 => "T_GLOBAL",
+        439 => "T_REQUIRE",
+        440 => "T_REQUIRE_ONCE",
+        441 => "T_INCLUDE",
+        442 => "T_INCLUDE_ONCE",
+        443 => "T_PRINT",
+        444 => "T_READONLY",
+        445 => "T_YIELD",
+        446 => "T_FN",
+        447 => "T_MATCH",
+        448 => "T_AS",
+        449 => "T_INSTANCEOF",
         else => "UNKNOWN",
     } };
 }
