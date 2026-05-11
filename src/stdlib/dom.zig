@@ -1517,6 +1517,59 @@ fn registerConstants(vm: *VM, a: Allocator) !void {
     try vm.php_constants.put(a, "LIBXML_DOTTED_VERSION", .{ .string = std.mem.span(@as([*:0]const u8, c.LIBXML_DOTTED_VERSION)) });
 }
 
+// ---------------- libxml error-handling stubs ----------------
+//
+// Symfony, Laravel, and most frameworks call libxml_use_internal_errors(true)
+// before parsing untrusted HTML/XML to suppress warning output and collect
+// errors. We don't surface libxml warnings at all (silentErrorHandler eats
+// them), so these are minimal-state shims that satisfy the call signature
+
+var libxml_internal_errors_enabled: bool = false;
+
+pub const libxml_entries = .{
+    .{ "libxml_use_internal_errors", libxmlUseInternalErrors },
+    .{ "libxml_clear_errors", libxmlClearErrors },
+    .{ "libxml_get_errors", libxmlGetErrors },
+    .{ "libxml_get_last_error", libxmlGetLastError },
+    .{ "libxml_disable_entity_loader", libxmlDisableEntityLoader },
+    .{ "libxml_set_external_entity_loader", libxmlSetExternalEntityLoader },
+};
+
+fn libxmlUseInternalErrors(_: *NativeContext, args: []const Value) RuntimeError!Value {
+    const prev = libxml_internal_errors_enabled;
+    if (args.len > 0) {
+        switch (args[0]) {
+            .bool => |b| libxml_internal_errors_enabled = b,
+            .int => |i| libxml_internal_errors_enabled = i != 0,
+            else => {},
+        }
+    }
+    return .{ .bool = prev };
+}
+
+fn libxmlClearErrors(_: *NativeContext, _: []const Value) RuntimeError!Value {
+    return .null;
+}
+
+fn libxmlGetErrors(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const arr = try ctx.createArray();
+    return .{ .array = arr };
+}
+
+fn libxmlGetLastError(_: *NativeContext, _: []const Value) RuntimeError!Value {
+    return .{ .bool = false };
+}
+
+fn libxmlDisableEntityLoader(_: *NativeContext, args: []const Value) RuntimeError!Value {
+    // deprecated in PHP 8.0+ and a noop on modern libxml. accept and return true
+    _ = args;
+    return .{ .bool = true };
+}
+
+fn libxmlSetExternalEntityLoader(_: *NativeContext, _: []const Value) RuntimeError!Value {
+    return .{ .bool = true };
+}
+
 pub fn cleanupResources(objects: std.ArrayListUnmanaged(*PhpObject)) void {
     for (objects.items) |obj| {
         if (std.mem.eql(u8, obj.class_name, "DOMDocument")) {

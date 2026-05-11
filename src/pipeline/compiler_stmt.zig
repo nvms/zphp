@@ -47,12 +47,18 @@ pub fn compileWhile(self: *Compiler, node: Ast.Node) Error!void {
     const exit_jump = try self.emitJump(.jump_if_false);
     try self.emitOp(.pop);
     try self.compileNode(node.data.rhs);
+
+    // patch continue jumps BEFORE the loop-back jump so they fall through
+    // into emitLoop and re-evaluate the condition (PHP's continue semantics).
+    // patching them after the loop body would land them at the post-loop
+    // cleanup, turning continue into break
+    try self.patchContinues(&prev_continues);
+
     try self.emitLoop(loop_top);
     self.patchJump(exit_jump);
     try self.emitOp(.pop);
 
     try self.patchBreaks(&prev_breaks);
-    try self.patchContinues(&prev_continues);
     self.break_jumps = prev_breaks;
     self.continue_jumps = prev_continues;
     self.loop_depth -= 1;
@@ -71,6 +77,10 @@ pub fn compileDoWhile(self: *Compiler, node: Ast.Node) Error!void {
     self.loop_start = loop_top;
 
     try self.compileNode(node.data.lhs);
+
+    // do-while continue jumps to the condition, not the body top
+    try self.patchContinues(&prev_continues);
+
     try self.compileNode(node.data.rhs);
     const exit_jump = try self.emitJump(.jump_if_false);
     try self.emitOp(.pop);
@@ -79,7 +89,6 @@ pub fn compileDoWhile(self: *Compiler, node: Ast.Node) Error!void {
     try self.emitOp(.pop);
 
     try self.patchBreaks(&prev_breaks);
-    try self.patchContinues(&prev_continues);
     self.break_jumps = prev_breaks;
     self.continue_jumps = prev_continues;
     self.loop_depth -= 1;

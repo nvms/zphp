@@ -377,21 +377,33 @@ fn buildTypeString(self: *Compiler, start_tok: u32, end_tok: u32) Error![]const 
         return lexeme;
     }
 
-    // check if leading backslash means fully qualified
+    // check if (after an optional `?` nullable marker) the leading token is a
+    // backslash, indicating a fully-qualified type name that should not be
+    // namespace-prefixed
     var is_fqn = false;
-    if (start_tok < end_tok) {
-        const first_lex = self.ast.tokens[start_tok].lexeme(self.ast.source);
-        if (std.mem.eql(u8, first_lex, "\\")) is_fqn = true;
+    var probe = start_tok;
+    if (probe < end_tok) {
+        const lex0 = self.ast.tokens[probe].lexeme(self.ast.source);
+        if (std.mem.eql(u8, lex0, "?")) probe += 1;
+    }
+    if (probe < end_tok) {
+        const lex1 = self.ast.tokens[probe].lexeme(self.ast.source);
+        if (std.mem.eql(u8, lex1, "\\")) is_fqn = true;
     }
 
     var buf = std.ArrayListUnmanaged(u8){};
+    // for a relative type name like `Sub\Type`, only the first identifier gets
+    // namespace-resolved (turning `Sub` into `Ns\Sub`). subsequent identifiers
+    // are sub-namespace components and append verbatim. otherwise we'd produce
+    // `Ns\Sub\Ns\Type` instead of `Ns\Sub\Type`
+    var first_identifier_resolved = false;
     for (start_tok..end_tok) |t| {
         const tag = self.ast.tokens[t].tag;
         const lexeme = self.ast.tokens[t].lexeme(self.ast.source);
-        // skip leading backslash in FQN types (it just means "absolute")
         if (is_fqn and std.mem.eql(u8, lexeme, "\\") and buf.items.len == 0) continue;
-        if (tag == .identifier and !isPrimitiveType(lexeme) and !is_fqn) {
+        if (tag == .identifier and !isPrimitiveType(lexeme) and !is_fqn and !first_identifier_resolved) {
             try buf.appendSlice(self.allocator, self.resolveClassName(lexeme));
+            first_identifier_resolved = true;
         } else {
             try buf.appendSlice(self.allocator, lexeme);
         }

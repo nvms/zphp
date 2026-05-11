@@ -8647,7 +8647,13 @@ pub const VM = struct {
         if (std.mem.eql(u8, type_name, "Generator")) return val == .generator;
         if (std.mem.eql(u8, type_name, "Fiber")) return val == .fiber;
         if (std.mem.eql(u8, type_name, "Closure")) return val == .string and if (val.string.len > 10) std.mem.startsWith(u8, val.string, "__closure_") else false;
-        if (val == .object) return self.isInstanceOf(val.object.class_name, type_name);
+        if (val == .object) {
+            // a leading backslash in a type name (e.g. `\DOMNode`) is a fully-qualified
+            // marker carried over from the source; class names in the registry never
+            // include it. strip it before the instanceof walk
+            const stripped = if (type_name.len > 0 and type_name[0] == '\\') type_name[1..] else type_name;
+            return self.isInstanceOf(val.object.class_name, stripped);
+        }
         return false;
     }
 

@@ -145,11 +145,14 @@ fn u16ToUtf8(ctx: *NativeContext, s: []const u16) ![]const u8 {
 
 fn getNormalizer(form: i64) ?*const UNormalizer2 {
     var status: UErrorCode = U_ZERO_ERROR;
+    // PHP's Normalizer constants:
+    //   NONE = 1, FORM_D = NFD = 2, FORM_KD = NFKD = 3,
+    //   FORM_C = NFC = 4 (default), FORM_KC = NFKC = 5, FORM_KC_CF = 48
     const n = switch (form) {
-        1 => zphp_unorm2_getNFCInstance(&status),
         2 => zphp_unorm2_getNFDInstance(&status),
+        3 => zphp_unorm2_getNFKDInstance(&status),
+        4 => zphp_unorm2_getNFCInstance(&status),
         5 => zphp_unorm2_getNFKCInstance(&status),
-        6 => zphp_unorm2_getNFKDInstance(&status),
         48 => zphp_unorm2_getNFKCCasefoldInstance(&status),
         else => zphp_unorm2_getNFCInstance(&status),
     };
@@ -662,7 +665,51 @@ pub const entries = .{
     .{ "normalizer_is_normalized", normalizerIsNormalized },
     .{ "idn_to_ascii", idnToAscii },
     .{ "idn_to_utf8", idnToUtf8 },
+    .{ "transliterator_transliterate", transliteratorTransliterate },
+    .{ "transliterator_create", transCreateStatic },
 };
+
+// procedural shim: accepts a Transliterator instance or an ID string
+fn transliteratorTransliterate(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len < 2 or args[1] != .string) return .{ .bool = false };
+
+    var t_obj: ?*PhpObject = null;
+    var owned = false;
+    defer if (owned and t_obj != null) {
+        if (getTranslit(t_obj.?)) |tr| zphp_utrans_close(tr);
+    };
+
+    switch (args[0]) {
+        .object => |o| {
+            if (!std.mem.eql(u8, o.class_name, "Transliterator")) return .{ .bool = false };
+            t_obj = o;
+        },
+        .string => {
+            const created = try transCreateStatic(ctx, args[0..1]);
+            if (created != .object) return .{ .bool = false };
+            t_obj = created.object;
+            owned = false; // the wrapper is tracked by ctx; native close would double-free
+        },
+        else => return .{ .bool = false },
+    }
+
+    const t = getTranslit(t_obj.?) orelse return .{ .bool = false };
+    const u16src = try utf8ToU16(ctx, args[1].string);
+    defer ctx.allocator.free(u16src);
+
+    const cap: i32 = @intCast(u16src.len * 4 + 16);
+    const buf = try ctx.allocator.alloc(u16, @intCast(cap));
+    defer ctx.allocator.free(buf);
+    @memcpy(buf[0..u16src.len], u16src);
+
+    var text_len: i32 = @intCast(u16src.len);
+    var limit: i32 = text_len;
+    var status: UErrorCode = U_ZERO_ERROR;
+    zphp_utrans_transUChars(t, buf.ptr, &text_len, cap, 0, &limit, &status);
+    if (status > U_ZERO_ERROR) return .{ .bool = false };
+    const out = try u16ToUtf8(ctx, buf[0..@intCast(text_len)]);
+    return .{ .string = out };
+}
 
 pub fn register(vm: *VM, a: Allocator) !void {
     try registerNormalizerClass(vm, a);
@@ -710,9 +757,12 @@ fn registerNormalizerClass(vm: *VM, a: Allocator) !void {
     try def.methods.put(a, "isNormalized", .{ .name = "isNormalized", .arity = 0, .is_static = true });
 
     const ncs = .{
-        .{ "FORM_C", 1 }, .{ "FORM_D", 2 }, .{ "FORM_KC", 5 }, .{ "FORM_KD", 6 },
-        .{ "FORM_KC_CF", 48 }, .{ "FORM_DEFAULT", 1 },
-        .{ "NONE", 1 }, .{ "NFC", 4 }, .{ "NFD", 8 }, .{ "NFKC", 16 }, .{ "NFKD", 32 },
+        .{ "NONE", 1 },
+        .{ "FORM_D", 2 }, .{ "NFD", 2 },
+        .{ "FORM_KD", 3 }, .{ "NFKD", 3 },
+        .{ "FORM_C", 4 }, .{ "NFC", 4 }, .{ "FORM_DEFAULT", 4 },
+        .{ "FORM_KC", 5 }, .{ "NFKC", 5 },
+        .{ "FORM_KC_CF", 48 },
     };
     inline for (ncs) |k| {
         try def.constant_order.append(a, k[0]);

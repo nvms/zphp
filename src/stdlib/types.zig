@@ -110,6 +110,9 @@ pub const entries = .{
     .{ "ctype_punct", ctype_punct },
     .{ "ctype_cntrl", ctype_cntrl },
     .{ "ctype_graph", ctype_graph },
+    .{ "setlocale", native_setlocale },
+    .{ "localeconv", native_localeconv },
+    .{ "nl_langinfo", native_nl_langinfo },
     .{ "func_get_args", native_func_get_args },
     .{ "func_num_args", native_func_num_args },
     .{ "func_get_arg", native_func_get_arg },
@@ -489,6 +492,100 @@ fn ctype_cntrl(_: *NativeContext, args: []const Value) RuntimeError!Value {
 }
 fn ctype_graph(_: *NativeContext, args: []const Value) RuntimeError!Value {
     return ctypeCheck(args, isGraph);
+}
+
+// PHP's setlocale wraps libc setlocale. zphp doesn't actually flip the process
+// locale (libc setlocale isn't thread-safe and can cause surprising interactions
+// with intl/ICU), but applications use the return value to detect whether a
+// locale was accepted. return the requested locale string verbatim, or the
+// previous locale when querying with "0"
+var current_locale: [128]u8 = [_]u8{0} ** 128;
+var current_locale_len: usize = 1;
+var current_locale_initialized: bool = false;
+
+fn ensureLocaleInit() void {
+    if (current_locale_initialized) return;
+    current_locale[0] = 'C';
+    current_locale_len = 1;
+    current_locale_initialized = true;
+}
+
+fn native_setlocale(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    ensureLocaleInit();
+    // PHP: setlocale($category, ...$locales). first arg is category (int)
+    if (args.len < 1) return .{ .string = try dupString(ctx, current_locale[0..current_locale_len]) };
+
+    // collect candidate locale strings from args 1..n. each may be a string or an
+    // array (variadic / array form). first one that "works" wins; "0" queries
+    var i: usize = 1;
+    while (i < args.len) : (i += 1) {
+        switch (args[i]) {
+            .string => |s| {
+                if (std.mem.eql(u8, s, "0")) {
+                    return .{ .string = try dupString(ctx, current_locale[0..current_locale_len]) };
+                }
+                // accept the string verbatim. empty string maps to "C"
+                const new = if (s.len == 0) "C" else s;
+                if (new.len <= current_locale.len) {
+                    @memcpy(current_locale[0..new.len], new);
+                    current_locale_len = new.len;
+                }
+                return .{ .string = try dupString(ctx, new) };
+            },
+            .array => |arr| {
+                for (arr.entries.items) |e| {
+                    if (e.value != .string) continue;
+                    const s = e.value.string;
+                    if (s.len == 0) continue;
+                    if (s.len <= current_locale.len) {
+                        @memcpy(current_locale[0..s.len], s);
+                        current_locale_len = s.len;
+                    }
+                    return .{ .string = try dupString(ctx, s) };
+                }
+            },
+            else => continue,
+        }
+    }
+    // no acceptable locale provided
+    return .{ .bool = false };
+}
+
+// minimal localeconv: returns a default "C" locale info array. real apps use
+// this for currency formatting fallbacks; the intl extension is the real path
+fn native_localeconv(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const arr = try ctx.createArray();
+    const empty = try dupString(ctx, "");
+    try arr.set(ctx.allocator, .{ .string = try dupString(ctx, "decimal_point") }, .{ .string = try dupString(ctx, ".") });
+    try arr.set(ctx.allocator, .{ .string = try dupString(ctx, "thousands_sep") }, .{ .string = empty });
+    try arr.set(ctx.allocator, .{ .string = try dupString(ctx, "int_curr_symbol") }, .{ .string = empty });
+    try arr.set(ctx.allocator, .{ .string = try dupString(ctx, "currency_symbol") }, .{ .string = empty });
+    try arr.set(ctx.allocator, .{ .string = try dupString(ctx, "mon_decimal_point") }, .{ .string = empty });
+    try arr.set(ctx.allocator, .{ .string = try dupString(ctx, "mon_thousands_sep") }, .{ .string = empty });
+    try arr.set(ctx.allocator, .{ .string = try dupString(ctx, "positive_sign") }, .{ .string = empty });
+    try arr.set(ctx.allocator, .{ .string = try dupString(ctx, "negative_sign") }, .{ .string = empty });
+    try arr.set(ctx.allocator, .{ .string = try dupString(ctx, "int_frac_digits") }, .{ .int = 127 });
+    try arr.set(ctx.allocator, .{ .string = try dupString(ctx, "frac_digits") }, .{ .int = 127 });
+    try arr.set(ctx.allocator, .{ .string = try dupString(ctx, "p_cs_precedes") }, .{ .int = 127 });
+    try arr.set(ctx.allocator, .{ .string = try dupString(ctx, "p_sep_by_space") }, .{ .int = 127 });
+    try arr.set(ctx.allocator, .{ .string = try dupString(ctx, "n_cs_precedes") }, .{ .int = 127 });
+    try arr.set(ctx.allocator, .{ .string = try dupString(ctx, "n_sep_by_space") }, .{ .int = 127 });
+    try arr.set(ctx.allocator, .{ .string = try dupString(ctx, "p_sign_posn") }, .{ .int = 127 });
+    try arr.set(ctx.allocator, .{ .string = try dupString(ctx, "n_sign_posn") }, .{ .int = 127 });
+    try arr.set(ctx.allocator, .{ .string = try dupString(ctx, "grouping") }, .{ .array = try ctx.createArray() });
+    try arr.set(ctx.allocator, .{ .string = try dupString(ctx, "mon_grouping") }, .{ .array = try ctx.createArray() });
+    return .{ .array = arr };
+}
+
+fn native_nl_langinfo(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    _ = args;
+    return .{ .string = try dupString(ctx, "") };
+}
+
+fn dupString(ctx: *NativeContext, s: []const u8) ![]const u8 {
+    const owned = try ctx.allocator.dupe(u8, s);
+    try ctx.strings.append(ctx.allocator, owned);
+    return owned;
 }
 
 fn isPunct(c: u8) bool {
