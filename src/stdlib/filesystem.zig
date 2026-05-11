@@ -2105,14 +2105,18 @@ fn native_touch(_: *NativeContext, args: []const Value) RuntimeError!Value {
     // if file doesn't exist, create it
     const file = std.fs.cwd().createFile(path, .{ .exclusive = true }) catch |err| switch (err) {
         error.PathAlreadyExists => {
-            // file exists - update access and modification times
-            if (args.len >= 2 and args[1] != .null) {
-                const mtime: i128 = @as(i128, Value.toInt(args[1])) * 1_000_000_000;
-                const f = std.fs.cwd().openFile(path, .{ .mode = .write_only }) catch return Value{ .bool = false };
-                defer f.close();
-                const atime = if (args.len >= 3 and args[2] != .null) @as(i128, Value.toInt(args[2])) * 1_000_000_000 else mtime;
-                f.updateTimes(atime, mtime) catch return Value{ .bool = true };
-            }
+            const f = std.fs.cwd().openFile(path, .{ .mode = .write_only }) catch return Value{ .bool = false };
+            defer f.close();
+            const now: i128 = std.time.nanoTimestamp();
+            const mtime: i128 = if (args.len >= 2 and args[1] != .null)
+                @as(i128, Value.toInt(args[1])) * 1_000_000_000
+            else
+                now;
+            const atime: i128 = if (args.len >= 3 and args[2] != .null)
+                @as(i128, Value.toInt(args[2])) * 1_000_000_000
+            else
+                mtime;
+            f.updateTimes(atime, mtime) catch return Value{ .bool = true };
             return .{ .bool = true };
         },
         else => return .{ .bool = false },
