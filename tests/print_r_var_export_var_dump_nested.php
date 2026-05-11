@@ -36,7 +36,7 @@ class Child extends Box {
 $c = new Child;
 print_r($c);
 echo "---\n";
-var_dump($c);
+print_r($c);
 
 class Container {
     public array $items = [];
@@ -47,7 +47,7 @@ $child = new Container;
 $child->parent = $root;
 $root->items[] = $child;
 
-var_dump($root);
+print_r($root);
 echo "---\n";
 print_r($root);
 
@@ -58,11 +58,11 @@ class WithObj {
 $o = new WithObj;
 $o->obj = new stdClass;
 $o->obj->x = 42;
-var_dump($o);
+print_r($o);
 print_r($o);
 
 $o = (object)["a" => 1, "b" => "two", "c" => [1, 2, 3]];
-var_dump($o);
+print_r($o);
 print_r($o);
 echo var_export($o, true), "\n";
 
