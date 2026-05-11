@@ -325,7 +325,12 @@ pub const Compiler = struct {
             .function_decl => try compiler_class.compileFunction(self, node),
             .const_decl => {
                 try self.compileNode(node.data.lhs);
-                const name = self.ast.tokenSlice(node.main_token);
+                const raw = self.ast.tokenSlice(node.main_token);
+                const name = if (self.namespace.len > 0)
+                    try std.fmt.allocPrint(self.allocator, "{s}\\{s}", .{ self.namespace, raw })
+                else
+                    raw;
+                if (self.namespace.len > 0) try self.string_allocs.append(self.allocator, name);
                 const name_idx = try self.addConstant(.{ .string = name });
                 try self.emitOp(.define_const);
                 try self.emitU16(name_idx);
