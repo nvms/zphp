@@ -1520,10 +1520,7 @@ fn registerConstants(vm: *VM, a: Allocator) !void {
 pub fn cleanupResources(objects: std.ArrayListUnmanaged(*PhpObject)) void {
     for (objects.items) |obj| {
         if (std.mem.eql(u8, obj.class_name, "DOMDocument")) {
-            if (getDocPtr(obj)) |doc| {
-                c.xmlFreeDoc(doc);
-                obj.set(std.heap.page_allocator, "__node", .{ .int = 0 }) catch {};
-            }
+            if (getDocPtr(obj)) |doc| c.xmlFreeDoc(doc);
         }
     }
 }

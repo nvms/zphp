@@ -27,6 +27,7 @@ pub fn register(map: *std.StringHashMapUnmanaged(NativeFn), allocator: std.mem.A
         @import("openssl.zig").entries,
         @import("curl.zig").entries,
         @import("network.zig").entries,
+        @import("simplexml.zig").entries,
     };
     inline for (modules) |entries| {
         inline for (entries) |f| try map.put(allocator, f[0], f[1]);
