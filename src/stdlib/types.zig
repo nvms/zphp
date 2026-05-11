@@ -247,7 +247,13 @@ fn intval(_: *NativeContext, args: []const Value) RuntimeError!Value {
             if (base == 2 and s.len >= 2 and s[0] == '0' and (s[1] == 'b' or s[1] == 'B')) s = s[2..];
         }
         if (base < 2) base = 10;
-        const v = std.fmt.parseInt(i64, s, base) catch 0;
+        var end: usize = 0;
+        while (end < s.len) : (end += 1) {
+            const c = s[end];
+            const digit: u8 = if (c >= '0' and c <= '9') c - '0' else if (c >= 'a' and c <= 'z') 10 + (c - 'a') else if (c >= 'A' and c <= 'Z') 10 + (c - 'A') else 255;
+            if (digit >= base) break;
+        }
+        const v = if (end == 0) @as(i64, 0) else (std.fmt.parseInt(i64, s[0..end], base) catch 0);
         return .{ .int = if (negative) -v else v };
     }
     // PHP: intval(array) is 0 for empty array, 1 for non-empty
