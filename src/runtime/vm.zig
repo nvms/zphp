@@ -6258,7 +6258,9 @@ pub const VM = struct {
                 insteadof_rules[insteadof_count] = rule;
                 insteadof_count += 1;
             } else {
-                alias_rules[alias_count] = .{ .method = method_name, .trait = rule_trait, .alias = self.currentChunk().constants.items[self.readU16()].string };
+                const alias_name = self.currentChunk().constants.items[self.readU16()].string;
+                const vis_kind = self.readByte();
+                alias_rules[alias_count] = .{ .method = method_name, .trait = rule_trait, .alias = alias_name, .visibility = vis_kind };
                 alias_count += 1;
             }
         }
@@ -6698,7 +6700,7 @@ pub const VM = struct {
     }
 
     const InsteadofRule = struct { method: []const u8, preferred: []const u8, excluded: [16][]const u8, excluded_count: u8 };
-    const AliasRule = struct { method: []const u8, trait: []const u8, alias: []const u8 };
+    const AliasRule = struct { method: []const u8, trait: []const u8, alias: []const u8, visibility: u8 = 0 };
 
     fn applyTrait(self: *VM, def: *ClassDef, class_name: []const u8, trait_name: []const u8, alias_rules: []const AliasRule, insteadof_rules: []const InsteadofRule) !void {
         // autoload the trait if it hasn't been loaded yet
@@ -6733,18 +6735,21 @@ pub const VM = struct {
             var vis_override: ?ClassDef.Visibility = null;
             for (alias_rules) |rule| {
                 if (std.mem.eql(u8, rule.method, tm.name) and (rule.trait.len == 0 or std.mem.eql(u8, rule.trait, trait_name))) {
-                    if (std.mem.eql(u8, rule.alias, "public")) {
-                        vis_override = .public;
-                    } else if (std.mem.eql(u8, rule.alias, "protected")) {
-                        vis_override = .protected;
-                    } else if (std.mem.eql(u8, rule.alias, "private")) {
-                        vis_override = .private;
+                    const rule_vis: ClassDef.Visibility = switch (rule.visibility) {
+                        1 => .protected,
+                        2 => .private,
+                        3 => .public,
+                        else => .public,
+                    };
+                    if (std.mem.eql(u8, rule.alias, rule.method) and rule.visibility != 0) {
+                        // visibility-only change on same name
+                        vis_override = rule_vis;
                     } else {
                         const alias_method = try std.fmt.allocPrint(self.allocator, "{s}::{s}", .{ class_name, rule.alias });
                         try self.strings.append(self.allocator, alias_method);
                         if (!self.functions.contains(alias_method)) {
                             try self.functions.put(self.allocator, alias_method, tm.func);
-                            try def.methods.put(self.allocator, rule.alias, .{ .name = rule.alias, .arity = tm.func.arity });
+                            try def.methods.put(self.allocator, rule.alias, .{ .name = rule.alias, .arity = tm.func.arity, .visibility = if (rule.visibility != 0) rule_vis else .public });
                         }
                     }
                 }

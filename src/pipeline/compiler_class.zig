@@ -1097,9 +1097,12 @@ pub fn compileClassDecl(self: *Compiler, node: Ast.Node) Error!void {
             }
         } else {
             try self.emitByte(2);
-            const alias = self.ast.tokenSlice(cr.node.data.rhs);
+            const alias_token: u32 = cr.node.data.rhs & 0x3FFFFFFF;
+            const vis_kind: u8 = @intCast(cr.node.data.rhs >> 30);
+            const alias = self.ast.tokenSlice(alias_token);
             const aidx = try self.addConstant(.{ .string = alias });
             try self.emitU16(aidx);
+            try self.emitByte(vis_kind);
         }
     }
 
@@ -1486,9 +1489,12 @@ pub fn compileAnonymousClass(self: *Compiler, node: Ast.Node) Error!void {
             }
         } else {
             try self.emitByte(2);
-            const alias = self.ast.tokenSlice(cr.cnode.data.rhs);
+            const alias_token: u32 = cr.cnode.data.rhs & 0x3FFFFFFF;
+            const vis_kind: u8 = @intCast(cr.cnode.data.rhs >> 30);
+            const alias = self.ast.tokenSlice(alias_token);
             const aidx = try self.addConstant(.{ .string = alias });
             try self.emitU16(aidx);
+            try self.emitByte(vis_kind);
         }
     }
 

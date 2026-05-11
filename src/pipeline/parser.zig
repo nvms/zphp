@@ -1612,25 +1612,32 @@ const Parser = struct {
                     }));
                 } else if (self.peek() == .kw_as) {
                     _ = self.advance();
-                    // optional visibility modifier before alias
-                    var vis_tok: u32 = 0;
-                    if (self.peek() == .kw_public or self.peek() == .kw_protected or self.peek() == .kw_private) {
-                        vis_tok = self.advance();
+                    // optional visibility modifier before alias (use kind 3 = "public seen")
+                    // to differentiate from "no visibility seen"
+                    const vis_tag = self.peek();
+                    var vis_kind: u32 = 0; // 0=none, 1=protected, 2=private, 3=public-explicit
+                    var vis_seen = false;
+                    if (vis_tag == .kw_public or vis_tag == .kw_protected or vis_tag == .kw_private) {
+                        _ = self.advance();
+                        vis_seen = true;
+                        vis_kind = switch (vis_tag) {
+                            .kw_protected => 1,
+                            .kw_private => 2,
+                            else => 3,
+                        };
                     }
-                    // alias name (may be absent if only visibility change)
                     var alias_tok: u32 = 0;
                     if (self.peek() == .identifier) {
                         alias_tok = self.advance();
-                    } else if (vis_tok != 0) {
-                        alias_tok = vis_tok;
-                        vis_tok = 0;
+                    } else if (vis_seen) {
+                        alias_tok = method_tok;
                     } else {
                         alias_tok = self.advance();
                     }
                     try conflicts.append(self.allocator, try self.addNode(.{
                         .tag = .trait_as,
                         .main_token = method_tok,
-                        .data = .{ .lhs = trait_node, .rhs = alias_tok },
+                        .data = .{ .lhs = trait_node, .rhs = alias_tok | (vis_kind << 30) },
                     }));
                 }
                 _ = try self.expect(.semicolon);
