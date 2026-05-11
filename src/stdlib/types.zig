@@ -370,10 +370,17 @@ fn native_empty(_: *NativeContext, args: []const Value) RuntimeError!Value {
     return .{ .bool = !args[0].isTruthy() };
 }
 
-fn strlen(_: *NativeContext, args: []const Value) RuntimeError!Value {
+fn strlen(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len == 0) return .{ .int = 0 };
     return switch (args[0]) {
         .string => |s| .{ .int = @intCast(s.len) },
+        .object => |obj| blk: {
+            if (ctx.vm.hasMethod(obj.class_name, "__toString")) {
+                const result = try ctx.vm.callMethod(obj, "__toString", &.{});
+                if (result == .string) break :blk .{ .int = @intCast(result.string.len) };
+            }
+            break :blk .{ .int = 0 };
+        },
         else => .{ .int = 0 },
     };
 }

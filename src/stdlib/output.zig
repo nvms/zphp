@@ -303,6 +303,35 @@ fn printRValueImpl(a: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8), val: 
             try out.appendSlice(a, label);
             try appendIndent(out, a, depth * 4);
             try out.appendSlice(a, "(\n");
+
+            // honor __debugInfo if defined - it replaces the property listing
+            if (vm) |v| {
+                if (v.hasMethod(obj.class_name, "__debugInfo")) {
+                    const result = v.callMethod(obj, "__debugInfo", &.{}) catch Value.null;
+                    if (result == .array) {
+                        for (result.array.entries.items) |entry| {
+                            try appendIndent(out, a, (depth + 1) * 4);
+                            try out.appendSlice(a, "[");
+                            switch (entry.key) {
+                                .string => |s| try out.appendSlice(a, s),
+                                .int => |i| {
+                                    var tmp: [32]u8 = undefined;
+                                    const ki = std.fmt.bufPrint(&tmp, "{d}", .{i}) catch return;
+                                    try out.appendSlice(a, ki);
+                                },
+                            }
+                            try out.appendSlice(a, "] => ");
+                            const nested = entry.value == .array or entry.value == .object;
+                            try printRValueImpl(a, out, entry.value, depth + if (nested) @as(usize, 2) else 1, vm);
+                            try out.appendSlice(a, "\n");
+                        }
+                        try appendIndent(out, a, depth * 4);
+                        try out.appendSlice(a, ")\n");
+                        return;
+                    }
+                }
+            }
+
             if (obj.slot_layout) |layout| {
                 if (obj.slots) |slots| {
                     for (layout.names, 0..) |name, i| {
