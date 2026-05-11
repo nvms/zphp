@@ -341,18 +341,65 @@ const Parser = struct {
     fn parseUseStmt(self: *Parser) Error!u32 {
         const tok = self.advance(); // use
 
-        const is_fn = self.peek() == .kw_function;
-        if (is_fn or self.peek() == .kw_const) _ = self.advance();
+        const outer_is_fn = self.peek() == .kw_function;
+        const outer_is_const = self.peek() == .kw_const;
+        if (outer_is_fn or outer_is_const) _ = self.advance();
 
-        var parts = std.ArrayListUnmanaged(u32){};
-        defer parts.deinit(self.allocator);
+        var prefix = std.ArrayListUnmanaged(u32){};
+        defer prefix.deinit(self.allocator);
 
-        try parts.append(self.allocator, self.pos);
+        try prefix.append(self.allocator, self.pos);
         _ = try self.expect(.identifier);
         while (self.peek() == .backslash) {
             _ = self.advance();
-            try parts.append(self.allocator, self.pos);
+            if (self.peek() == .l_brace) break;
+            try prefix.append(self.allocator, self.pos);
             _ = try self.expect(.identifier);
+        }
+
+        // group use: use Prefix\{Name [as Alias], ...};
+        if (self.peek() == .l_brace) {
+            _ = self.advance();
+            var stmts = std.ArrayListUnmanaged(u32){};
+            defer stmts.deinit(self.allocator);
+
+            while (self.peek() != .r_brace and self.peek() != .eof) {
+                var item_is_fn = outer_is_fn;
+                var item_is_const = outer_is_const;
+                if (self.peek() == .kw_function) {
+                    _ = self.advance();
+                    item_is_fn = true;
+                    item_is_const = false;
+                } else if (self.peek() == .kw_const) {
+                    _ = self.advance();
+                    item_is_const = true;
+                    item_is_fn = false;
+                }
+                var item_parts = std.ArrayListUnmanaged(u32){};
+                defer item_parts.deinit(self.allocator);
+                try item_parts.appendSlice(self.allocator, prefix.items);
+                try item_parts.append(self.allocator, self.pos);
+                _ = try self.expect(.identifier);
+                while (self.peek() == .backslash) {
+                    _ = self.advance();
+                    try item_parts.append(self.allocator, self.pos);
+                    _ = try self.expect(.identifier);
+                }
+                var alias: u32 = 0;
+                if (self.peek() == .kw_as) {
+                    _ = self.advance();
+                    alias = self.pos;
+                    _ = try self.expect(.identifier);
+                }
+                const ex = try self.addExtraList(item_parts.items);
+                const t: Ast.Node.Tag = if (item_is_fn) .use_fn_stmt else if (item_is_const) .use_const_stmt else .use_stmt;
+                try stmts.append(self.allocator, try self.addNode(.{ .tag = t, .main_token = tok, .data = .{ .lhs = ex, .rhs = alias } }));
+                if (self.peek() == .comma) _ = self.advance() else break;
+            }
+            _ = try self.expect(.r_brace);
+            _ = try self.expect(.semicolon);
+            const block_extra = try self.addExtraList(stmts.items);
+            return self.addNode(.{ .tag = .block, .main_token = tok, .data = .{ .lhs = block_extra } });
         }
 
         var alias: u32 = 0;
@@ -363,8 +410,8 @@ const Parser = struct {
         }
         _ = try self.expect(.semicolon);
 
-        const extra = try self.addExtraList(parts.items);
-        const tag: Ast.Node.Tag = if (is_fn) .use_fn_stmt else .use_stmt;
+        const extra = try self.addExtraList(prefix.items);
+        const tag: Ast.Node.Tag = if (outer_is_fn) .use_fn_stmt else if (outer_is_const) .use_const_stmt else .use_stmt;
         return self.addNode(.{ .tag = tag, .main_token = tok, .data = .{ .lhs = extra, .rhs = alias } });
     }
 

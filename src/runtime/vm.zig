@@ -3650,10 +3650,12 @@ pub const VM = struct {
                     }
                     const ac: usize = arg_count;
                     const name_val = self.stack[self.sp - ac - 1];
-                    const class_name = if (name_val == .string) name_val.string else if (name_val == .object) name_val.object.class_name else {
+                    const raw_class_name = if (name_val == .string) name_val.string else if (name_val == .object) name_val.object.class_name else {
                         self.setErrorMsg("Fatal error: Class name must be a valid object or a string", .{});
                         return error.RuntimeError;
                     };
+                    // strip leading backslash from fully-qualified class names
+                    const class_name = if (raw_class_name.len > 0 and raw_class_name[0] == '\\') raw_class_name[1..] else raw_class_name;
                     if (!self.classes.contains(class_name)) try self.tryAutoload(class_name);
                     if (!self.classes.contains(class_name)) {
                         self.sp -= ac + 1;

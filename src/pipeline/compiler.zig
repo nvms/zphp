@@ -110,6 +110,7 @@ pub fn compileWithPath(ast: *const Ast, allocator: Allocator, file_path: []const
         c.continue_jumps.deinit(allocator);
         c.use_aliases.deinit(allocator);
         c.use_fn_aliases.deinit(allocator);
+        c.use_const_aliases.deinit(allocator);
         c.pending_gotos.deinit(allocator);
         c.labels.deinit(allocator);
     }
@@ -134,6 +135,7 @@ pub fn compileWithPath(ast: *const Ast, allocator: Allocator, file_path: []const
     c.trait_properties.deinit(allocator);
     c.use_aliases.deinit(allocator);
     c.use_fn_aliases.deinit(allocator);
+    c.use_const_aliases.deinit(allocator);
     const slot_names = try c.buildSlotNames();
     const local_count = c.next_slot;
     c.local_slots.deinit(allocator);
@@ -160,6 +162,7 @@ pub const Compiler = struct {
     namespace: []const u8 = "",
     use_aliases: std.StringHashMapUnmanaged([]const u8) = .{},
     use_fn_aliases: std.StringHashMapUnmanaged([]const u8) = .{},
+    use_const_aliases: std.StringHashMapUnmanaged([]const u8) = .{},
     labels: std.StringHashMapUnmanaged(usize) = .{},
     pending_gotos: std.ArrayListUnmanaged(PendingGoto) = .{},
     file_path: []const u8 = "",
@@ -421,6 +424,7 @@ pub const Compiler = struct {
             .namespace_decl => try compiler_stmt.compileNamespace(self, node),
             .use_stmt => try compiler_stmt.compileUse(self, node),
             .use_fn_stmt => try compiler_stmt.compileUseFn(self, node),
+            .use_const_stmt => try compiler_stmt.compileUseConst(self, node),
             .label_stmt => {
                 try self.labels.put(self.allocator, self.ast.tokenSlice(node.main_token), self.chunk.offset());
             },
@@ -911,7 +915,9 @@ pub const Compiler = struct {
             try self.emitU16(slot);
             return;
         }
-        const idx = try self.addConstant(.{ .string = name });
+        // non-$ name: may be a namespaced constant aliased by `use const`
+        const resolved = if (name.len == 0 or name[0] != '$') (self.use_const_aliases.get(name) orelse name) else name;
+        const idx = try self.addConstant(.{ .string = resolved });
         try self.emitOp(.get_var);
         try self.emitU16(idx);
     }

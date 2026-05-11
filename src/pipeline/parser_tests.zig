@@ -484,8 +484,8 @@ fn renderNode(ast: *const Ast, idx: u32, buf: *Buf) !void {
             }
             try w.writeByte(')');
         },
-        .use_stmt, .use_fn_stmt => {
-            if (node.tag == .use_fn_stmt) try w.writeAll("(use function ") else try w.writeAll("(use ");
+        .use_stmt, .use_fn_stmt, .use_const_stmt => {
+            if (node.tag == .use_fn_stmt) try w.writeAll("(use function ") else if (node.tag == .use_const_stmt) try w.writeAll("(use const ") else try w.writeAll("(use ");
             for (ast.extraSlice(node.data.lhs), 0..) |tok_idx, i| {
                 if (i > 0) try w.writeByte('\\');
                 try w.writeAll(ast.tokenSlice(tok_idx));

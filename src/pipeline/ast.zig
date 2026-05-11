@@ -180,6 +180,7 @@ pub const Ast = struct {
             namespace_decl, // main_token = namespace keyword, lhs = extra index -> {count, name_token_indices...}
             use_stmt, // main_token = use keyword, lhs = extra index -> {count, name_token_indices...}, rhs = alias token (0 = no alias)
             use_fn_stmt, // same layout as use_stmt but for 'use function'
+            use_const_stmt, // same layout as use_stmt but for 'use const'
             goto_stmt, // main_token = label identifier
             label_stmt, // main_token = label identifier
             qualified_name, // main_token = first identifier, lhs = extra index -> {count, token_indices...} for multi-part names

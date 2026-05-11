@@ -432,6 +432,7 @@ const Formatter = struct {
             .namespace_decl => self.formatNamespaceDecl(node),
             .use_stmt => self.formatUseStmt(node, false),
             .use_fn_stmt => self.formatUseStmt(node, true),
+            .use_const_stmt => self.formatUseStmt(node, false),
             .goto_stmt => {
                 self.write("goto ");
                 self.write(self.ast.tokens[node.main_token].lexeme(self.source));
