@@ -33,10 +33,10 @@ echo "no-handler-yet\n";
 echo E_ERROR, " ", E_WARNING, " ", E_NOTICE, " ", E_USER_ERROR, " ", E_USER_WARNING, " ", E_USER_NOTICE, " ", E_USER_DEPRECATED, "\n";
 echo E_DEPRECATED, " ", E_RECOVERABLE_ERROR, "\n";
 
-echo error_reporting(0), "\n";
+error_reporting(0);
 echo error_reporting(), "\n";
 error_reporting(E_ALL);
-echo error_reporting(), "\n";
+echo error_reporting() === E_ALL ? "y" : "n", "\n";
 
 echo defined("E_ALL") ? "y" : "n", "\n";
 echo defined("E_USER_ERROR") ? "y" : "n", "\n";
