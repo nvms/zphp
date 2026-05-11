@@ -36,6 +36,8 @@ pub const OutputBufferLevel = struct {
     callback: ?Value = null,
 };
 
+pub const ErrorHandlerEntry = struct { handler: Value, mask: i64 };
+
 pub const NativeContext = struct {
     allocator: Allocator,
     arrays: *std.ArrayListUnmanaged(*PhpArray),
@@ -369,6 +371,7 @@ pub const VM = struct {
     prop_hook_guard: std.ArrayListUnmanaged(struct { obj_ptr: usize, prop_name: []const u8 }) = .{},
     user_error_handler: ?Value = null,
     user_error_handler_mask: i64 = -1,
+    error_handler_stack: std.ArrayListUnmanaged(ErrorHandlerEntry) = .{},
     error_silenced_depth: u32 = 0,
     last_error_type: i64 = 0,
     last_error_message: []const u8 = "",
@@ -970,6 +973,7 @@ pub const VM = struct {
         self.user_constants.deinit(self.allocator);
         self.ini_settings.deinit(self.allocator);
         self.shutdown_callbacks.deinit(self.allocator);
+        self.error_handler_stack.deinit(self.allocator);
         self.arrays.deinit(self.allocator);
         self.objects.deinit(self.allocator);
         self.generators.deinit(self.allocator);

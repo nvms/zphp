@@ -106,6 +106,36 @@ pub fn register(vm: *VM, a: Allocator) !void {
         def.parent = entry[1];
         try vm.classes.put(a, entry[0], def);
     }
+
+    // ErrorException: extends Exception, adds $severity + getSeverity()
+    var ee_def = ClassDef{ .name = "ErrorException" };
+    ee_def.parent = "Exception";
+    try ee_def.properties.append(a, .{ .name = "severity", .default = .{ .int = 0 } });
+    try ee_def.methods.put(a, "__construct", .{ .name = "__construct", .arity = 0 });
+    try ee_def.methods.put(a, "getSeverity", .{ .name = "getSeverity", .arity = 0 });
+    try vm.classes.put(a, "ErrorException", ee_def);
+    try vm.native_fns.put(a, "ErrorException::__construct", errorExceptionConstruct);
+    try vm.native_fns.put(a, "ErrorException::getSeverity", errorExceptionGetSeverity);
+}
+
+fn errorExceptionConstruct(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    const this_val = ctx.vm.currentFrame().vars.get("$this") orelse return .null;
+    if (this_val != .object) return .null;
+    const obj = this_val.object;
+    if (args.len >= 1) try obj.set(ctx.allocator, "message", args[0]);
+    if (args.len >= 2) try obj.set(ctx.allocator, "code", args[1]);
+    if (args.len >= 3) try obj.set(ctx.allocator, "severity", args[2]);
+    if (args.len >= 4) try obj.set(ctx.allocator, "file", args[3]);
+    if (args.len >= 5) try obj.set(ctx.allocator, "line", args[4]);
+    if (args.len >= 6) try obj.set(ctx.allocator, "previous", args[5]);
+    return .null;
+}
+
+fn errorExceptionGetSeverity(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const this_val = ctx.vm.currentFrame().vars.get("$this") orelse return .{ .int = 0 };
+    if (this_val != .object) return .{ .int = 0 };
+    const sev = this_val.object.get("severity");
+    return if (sev == .int) sev else .{ .int = 0 };
 }
 
 fn exceptionConstruct(ctx: *NativeContext, args: []const Value) RuntimeError!Value {

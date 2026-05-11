@@ -1273,7 +1273,9 @@ fn native_memory_get_usage(_: *NativeContext, _: []const Value) RuntimeError!Val
 
 fn native_set_error_handler(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     const prev = ctx.vm.user_error_handler orelse Value.null;
-    ctx.vm.prev_error_handler = ctx.vm.user_error_handler;
+    if (ctx.vm.user_error_handler) |h| {
+        try ctx.vm.error_handler_stack.append(ctx.allocator, .{ .handler = h, .mask = ctx.vm.user_error_handler_mask });
+    }
     if (args.len > 0 and args[0] != .null) {
         ctx.vm.user_error_handler = args[0];
     } else {
@@ -1298,8 +1300,14 @@ fn native_set_exception_handler(ctx: *NativeContext, args: []const Value) Runtim
 }
 
 fn native_restore_error_handler(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    ctx.vm.user_error_handler = ctx.vm.prev_error_handler;
-    ctx.vm.prev_error_handler = null;
+    if (ctx.vm.error_handler_stack.items.len > 0) {
+        const entry = ctx.vm.error_handler_stack.pop().?;
+        ctx.vm.user_error_handler = entry.handler;
+        ctx.vm.user_error_handler_mask = entry.mask;
+    } else {
+        ctx.vm.user_error_handler = null;
+        ctx.vm.user_error_handler_mask = -1;
+    }
     return .{ .bool = true };
 }
 
@@ -1388,8 +1396,9 @@ fn native_trigger_error(ctx: *NativeContext, args: []const Value) RuntimeError!V
                 .{ .string = file },
                 .{ .int = line },
             };
-            _ = try ctx.invokeCallable(handler, call_args);
-            return .{ .bool = true };
+            const result = try ctx.invokeCallable(handler, call_args);
+            // returning false (or null in PHP 8+) lets the default handler run
+            if (result != .bool or result.bool) return .{ .bool = true };
         }
     }
 
@@ -1399,7 +1408,7 @@ fn native_trigger_error(ctx: *NativeContext, args: []const Value) RuntimeError!V
     ctx.vm.last_error_file = file;
     ctx.vm.last_error_line = line;
 
-    if (ctx.vm.error_silenced_depth == 0) {
+    if (ctx.vm.error_silenced_depth == 0 and (ctx.vm.error_reporting_level & errno) != 0) {
         const label = errnoLabel(errno);
         // flush any pending stdout so the merged 2>&1 ordering matches PHP
         if (ctx.vm.output.items.len > 0) {
