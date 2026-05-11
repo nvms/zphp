@@ -1774,7 +1774,8 @@ fn native_iterator_to_array(ctx: *NativeContext, args: []const Value) RuntimeErr
             if (args.len > 1) { inner_args[1] = args[1]; n = 2; }
             return native_iterator_to_array(ctx, inner_args[0..n]);
         }
-        if (!is_iterator) return .{ .array = arr };
+        const has_traversal = ctx.vm.hasMethod(obj.class_name, "rewind") and ctx.vm.hasMethod(obj.class_name, "valid") and ctx.vm.hasMethod(obj.class_name, "current");
+        if (!is_iterator and !has_traversal) return .{ .array = arr };
         if (!ctx.vm.hasMethod(obj.class_name, "rewind")) return .{ .array = arr };
         _ = try ctx.vm.callMethod(obj, "rewind", &.{});
         var valid_v = try ctx.vm.callMethod(obj, "valid", &.{});
