@@ -519,6 +519,9 @@ fn getThis(ctx: *NativeContext) ?*PhpObject {
 }
 
 fn throwReflection(ctx: *NativeContext, msg: []const u8) RuntimeError {
+    // ensure the message buffer is tracked for cleanup. callers typically pass
+    // an allocPrint'd slice that would otherwise leak past throwBuiltinException
+    ctx.strings.append(ctx.allocator, msg) catch {};
     _ = ctx.vm.throwBuiltinException("ReflectionException", msg) catch {};
     return error.RuntimeError;
 }

@@ -3990,14 +3990,31 @@ pub const VM = struct {
                                 return error.RuntimeError;
                             }
                             if (vr.is_readonly) {
+                                // a readonly property can be initialized once from within
+                                // its declaring class's scope. PHP additionally treats the
+                                // same property name redeclared in a subclass as a fresh
+                                // slot (separate readonly init permitted from the subclass).
+                                // since zphp shares one slot per name, we instead allow any
+                                // write that originates from inside the object's hierarchy
+                                // and let external writes fail per PHP semantics
                                 const existing = obj.get(prop_name);
                                 if (existing != .null) {
-                                    const msg = try std.fmt.allocPrint(self.allocator, "Cannot modify readonly property {s}::${s}", .{
-                                        vr.defining_class, prop_name,
-                                    });
-                                    try self.strings.append(self.allocator, msg);
-                                    if (try self.throwBuiltinException("Error", msg)) continue;
-                                    return error.RuntimeError;
+                                    const scope_in_hierarchy = blk: {
+                                        const scope = self.currentFrame().called_class orelse self.currentDefiningClass();
+                                        if (scope) |s| {
+                                            if (self.isInstanceOf(obj.class_name, s)) break :blk true;
+                                            if (self.isInstanceOf(s, obj.class_name)) break :blk true;
+                                        }
+                                        break :blk false;
+                                    };
+                                    if (!scope_in_hierarchy) {
+                                        const msg = try std.fmt.allocPrint(self.allocator, "Cannot modify readonly property {s}::${s}", .{
+                                            vr.defining_class, prop_name,
+                                        });
+                                        try self.strings.append(self.allocator, msg);
+                                        if (try self.throwBuiltinException("Error", msg)) continue;
+                                        return error.RuntimeError;
+                                    }
                                 }
                             }
                             try obj.set(self.allocator, prop_name, val);
@@ -7956,6 +7973,24 @@ pub const VM = struct {
     pub const VisResult = struct { visibility: ClassDef.Visibility, defining_class: []const u8, is_readonly: bool = false, set_visibility: ClassDef.Visibility = .public };
 
     pub fn findPropertyVisibility(self: *VM, class_name: []const u8, prop_name: []const u8) VisResult {
+        // PHP rule for private properties: each declaring class gets its own
+        // slot. When `$this->prop` is read from inside a method of class S,
+        // S's own private declaration of `prop` (if any) is preferred over
+        // any descendant's, because they're separate slots. Use the current
+        // execution scope (the running method's class) to pick the right one
+        const scope = if (self.frame_count > 0)
+            self.frames[self.frame_count - 1].called_class orelse self.currentDefiningClass()
+        else
+            null;
+        if (scope) |sc| {
+            if (self.classes.get(sc)) |scls| {
+                for (scls.properties.items) |prop| {
+                    if (std.mem.eql(u8, prop.name, prop_name) and prop.visibility == .private) {
+                        return .{ .visibility = prop.visibility, .defining_class = sc, .is_readonly = prop.is_readonly, .set_visibility = prop.set_visibility };
+                    }
+                }
+            }
+        }
         var current: ?[]const u8 = class_name;
         while (current) |cn| {
             if (self.classes.get(cn)) |cls| {
@@ -8532,6 +8567,7 @@ pub const VM = struct {
     }
 
     fn fillDefaults(self: *VM, vars: *std.StringHashMapUnmanaged(Value), func: *const ObjFunction, arg_count: usize) !void {
+        if (arg_count >= func.arity) return;
         for (arg_count..func.arity) |i| {
             if (i < func.defaults.len) {
                 try vars.put(self.allocator, func.params[i], try self.resolveDefault(func.defaults[i]));

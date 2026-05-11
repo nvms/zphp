@@ -154,6 +154,11 @@ pub const Compiler = struct {
     break_jumps: std.ArrayListUnmanaged(LoopJump),
     continue_jumps: std.ArrayListUnmanaged(LoopJump),
     use_continue_jumps: bool = false,
+    // when set, nullsafe operators inside the current chain forward their
+    // short-circuit jumps here instead of patching them locally. lets a
+    // `$x?->y()->z()` chain short-circuit ALL of `z()` (and further links)
+    // when $x is null, matching PHP's nullsafe semantics
+    nullsafe_chain_jumps: ?*std.ArrayListUnmanaged(usize) = null,
     loop_depth: u32 = 0,
     foreach_depth: u32 = 0,
     loop_is_foreach: [32]bool = [_]bool{false} ** 32,

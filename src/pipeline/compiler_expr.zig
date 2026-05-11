@@ -825,6 +825,18 @@ pub fn compileArrayLiteral(self: *Compiler, node: Ast.Node) Error!void {
 }
 
 pub fn compilePropertyAccess(self: *Compiler, node: Ast.Node) Error!void {
+    // outermost chain link sets up the nullsafe-jump collection. inner nullsafe
+    // links append their short-circuit jumps to this list so a `$x?->y()->z`
+    // chain skips both `y()` and `z` when $x is null
+    var local_jumps: std.ArrayListUnmanaged(usize) = .{};
+    const owns_chain = self.nullsafe_chain_jumps == null and lhsIsChainLink(self.ast, node);
+    if (owns_chain) self.nullsafe_chain_jumps = &local_jumps;
+    defer if (owns_chain) {
+        for (local_jumps.items) |j| self.patchJump(j);
+        self.nullsafe_chain_jumps = null;
+        local_jumps.deinit(self.allocator);
+    };
+
     try self.compileNode(node.data.lhs);
     if (self.isDynamicProp(node)) {
         if (node.main_token == 0) {
@@ -842,9 +854,27 @@ pub fn compilePropertyAccess(self: *Compiler, node: Ast.Node) Error!void {
         try self.emitOp(.get_prop);
         try self.emitU16(name_idx);
     }
+
+}
+
+fn lhsIsChainLink(ast: anytype, node: Ast.Node) bool {
+    const lhs = ast.nodes[node.data.lhs];
+    return switch (lhs.tag) {
+        .property_access, .method_call, .nullsafe_property_access, .nullsafe_method_call => true,
+        else => false,
+    };
 }
 
 pub fn compileMethodCall(self: *Compiler, node: Ast.Node) Error!void {
+    var local_jumps: std.ArrayListUnmanaged(usize) = .{};
+    const owns_chain = self.nullsafe_chain_jumps == null and lhsIsChainLink(self.ast, node);
+    if (owns_chain) self.nullsafe_chain_jumps = &local_jumps;
+    defer if (owns_chain) {
+        for (local_jumps.items) |j| self.patchJump(j);
+        self.nullsafe_chain_jumps = null;
+        local_jumps.deinit(self.allocator);
+    };
+
     try self.compileNode(node.data.lhs);
     const args = self.ast.extraSlice(node.data.rhs);
 
@@ -878,6 +908,17 @@ pub fn compileMethodCall(self: *Compiler, node: Ast.Node) Error!void {
 }
 
 pub fn compileNullsafePropertyAccess(self: *Compiler, node: Ast.Node) Error!void {
+    // create or reuse the chain jump-list. when an outer chain link is
+    // collecting, append our short-circuit jump there; otherwise patch locally
+    var local_jumps: std.ArrayListUnmanaged(usize) = .{};
+    const owns_chain = self.nullsafe_chain_jumps == null;
+    if (owns_chain) self.nullsafe_chain_jumps = &local_jumps;
+    defer if (owns_chain) {
+        for (local_jumps.items) |j| self.patchJump(j);
+        self.nullsafe_chain_jumps = null;
+        local_jumps.deinit(self.allocator);
+    };
+
     try self.compileNode(node.data.lhs);
     const skip_jump = try self.emitJump(.jump_if_not_null);
     const end_jump = try self.emitJump(.jump);
@@ -885,10 +926,19 @@ pub fn compileNullsafePropertyAccess(self: *Compiler, node: Ast.Node) Error!void
     const name_idx = try self.addConstant(.{ .string = self.propName(node) });
     try self.emitOp(.get_prop);
     try self.emitU16(name_idx);
-    self.patchJump(end_jump);
+    try self.nullsafe_chain_jumps.?.append(self.allocator, end_jump);
 }
 
 pub fn compileNullsafeMethodCall(self: *Compiler, node: Ast.Node) Error!void {
+    var local_jumps: std.ArrayListUnmanaged(usize) = .{};
+    const owns_chain = self.nullsafe_chain_jumps == null;
+    if (owns_chain) self.nullsafe_chain_jumps = &local_jumps;
+    defer if (owns_chain) {
+        for (local_jumps.items) |j| self.patchJump(j);
+        self.nullsafe_chain_jumps = null;
+        local_jumps.deinit(self.allocator);
+    };
+
     try self.compileNode(node.data.lhs);
     const skip_jump = try self.emitJump(.jump_if_not_null);
     const end_jump = try self.emitJump(.jump);
@@ -907,7 +957,7 @@ pub fn compileNullsafeMethodCall(self: *Compiler, node: Ast.Node) Error!void {
         try self.emitU16(name_idx);
         try self.emitByte(@intCast(args.len));
     }
-    self.patchJump(end_jump);
+    try self.nullsafe_chain_jumps.?.append(self.allocator, end_jump);
 }
 
 pub fn compileStaticCall(self: *Compiler, node: Ast.Node) Error!void {
