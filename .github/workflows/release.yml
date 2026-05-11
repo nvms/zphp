@@ -42,11 +42,11 @@ jobs:
 
       - name: install system libs (ubuntu glibc)
         if: runner.os == 'Linux' && !matrix.alpine
-        run: sudo apt-get update && sudo apt-get install -y libpcre2-dev libsqlite3-dev zlib1g-dev libmysqlclient-dev libpq-dev libssl-dev libnghttp2-dev libcurl4-openssl-dev
+        run: sudo apt-get update && sudo apt-get install -y libpcre2-dev libsqlite3-dev zlib1g-dev libmysqlclient-dev libpq-dev libssl-dev libnghttp2-dev libcurl4-openssl-dev libxml2-dev
 
       - name: install system libs (macos)
         if: runner.os == 'macOS'
-        run: brew install mysql-client libpq openssl@3 nghttp2 curl
+        run: brew install mysql-client libpq openssl@3 nghttp2 curl libxml2
 
       - name: setup alpine (musl)
         if: matrix.alpine
@@ -61,6 +61,7 @@ jobs:
             mariadb-connector-c-dev libpq-dev
             openssl-dev openssl-libs-static
             nghttp2-dev nghttp2-static curl-dev curl-static
+            libxml2-dev libxml2-static
 
       - name: install zig (alpine)
         if: matrix.alpine
