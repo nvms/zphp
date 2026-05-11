@@ -496,6 +496,29 @@ fn domGenericGet(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
 }
 
 fn readProperty(ctx: *NativeContext, obj: *PhpObject, prop: []const u8) RuntimeError!Value {
+    // namespace pseudo-nodes are stored as standalone PhpObjects with their
+    // prefix+href captured as properties (not via __node, since the underlying
+    // xmlNs is freed when the XPath result is). short-circuit before any
+    // __node-based dereference
+    if (obj.get("__ns_kind") == .bool and obj.get("__ns_kind").bool) {
+        if (std.mem.eql(u8, prop, "nodeName")) {
+            const px = obj.get("__ns_prefix");
+            if (px == .string and px.string.len > 0) {
+                const out = try std.fmt.allocPrint(ctx.allocator, "xmlns:{s}", .{px.string});
+                try ctx.strings.append(ctx.allocator, out);
+                return .{ .string = out };
+            }
+            return .{ .string = try dupString(ctx, "xmlns") };
+        }
+        if (std.mem.eql(u8, prop, "nodeValue") or std.mem.eql(u8, prop, "value")) {
+            const href = obj.get("__ns_href");
+            if (href == .string) return href;
+            return .{ .string = try dupString(ctx, "") };
+        }
+        if (std.mem.eql(u8, prop, "nodeType")) return .{ .int = @intCast(c.XML_NAMESPACE_DECL) };
+        return .null;
+    }
+
     const owner = getOwnerDocObj(obj) orelse obj;
     const node_opt = getNodePtr(obj);
     if (node_opt == null) return .null;
@@ -1138,14 +1161,48 @@ fn domXpathQuery(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     const ns = result.*.nodesetval;
     if (ns == null) return try makeNodeList(ctx, doc_v.object, &.{});
 
-    var list = std.ArrayList(*c.xmlNode){};
-    defer list.deinit(ctx.allocator);
+    return try buildXpathNodeList(ctx, doc_v.object, ns);
+}
+
+// build a DOMNodeList from an xmlXPath nodeset. namespace pseudo-nodes get
+// converted into standalone PhpObjects right away because the underlying
+// xmlNs entries are freed when xmlXPathFreeObject runs on this result
+fn buildXpathNodeList(ctx: *NativeContext, owner_doc: *PhpObject, xset: *c.xmlNodeSet) !Value {
+    const list_obj = try ctx.createObject("DOMNodeList");
+    const arr = try ctx.createArray();
     var i: usize = 0;
-    while (i < @as(usize, @intCast(ns.*.nodeNr))) : (i += 1) {
-        const n = ns.*.nodeTab[i];
-        if (n != null) try list.append(ctx.allocator, n);
+    while (i < @as(usize, @intCast(xset.nodeNr))) : (i += 1) {
+        const n = xset.nodeTab[i];
+        if (n == null) continue;
+        const wrapped = if (n.*.type == c.XML_NAMESPACE_DECL)
+            try wrapNamespaceNode(ctx, owner_doc, @ptrCast(n))
+        else
+            try wrapNode(ctx, n, owner_doc);
+        try arr.set(ctx.allocator, .{ .int = @intCast(i) }, wrapped);
     }
-    return try makeNodeList(ctx, doc_v.object, list.items);
+    try list_obj.set(ctx.allocator, "__items", .{ .array = arr });
+    try list_obj.set(ctx.allocator, "__pos", .{ .int = 0 });
+    try list_obj.set(ctx.allocator, "length", .{ .int = @intCast(xset.nodeNr) });
+    return .{ .object = list_obj };
+}
+
+fn wrapNamespaceNode(ctx: *NativeContext, owner_doc: *PhpObject, ns: *c.xmlNs) !Value {
+    const obj = try ctx.createObject("DOMNameSpaceNode");
+    try obj.set(ctx.allocator, "__ns_kind", .{ .bool = true });
+    try obj.set(ctx.allocator, "__owner", .{ .object = owner_doc });
+    if (ns.prefix != null) {
+        const slice = ns.prefix[0..cstrLen(ns.prefix)];
+        try obj.set(ctx.allocator, "__ns_prefix", .{ .string = try dupString(ctx, slice) });
+    } else {
+        try obj.set(ctx.allocator, "__ns_prefix", .{ .string = try dupString(ctx, "") });
+    }
+    if (ns.href != null) {
+        const slice = ns.href[0..cstrLen(ns.href)];
+        try obj.set(ctx.allocator, "__ns_href", .{ .string = try dupString(ctx, slice) });
+    } else {
+        try obj.set(ctx.allocator, "__ns_href", .{ .string = try dupString(ctx, "") });
+    }
+    return .{ .object = obj };
 }
 
 fn domXpathEvaluate(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
@@ -1179,16 +1236,9 @@ fn domXpathEvaluate(ctx: *NativeContext, args: []const Value) RuntimeError!Value
 
     switch (result.*.type) {
         c.XPATH_NODESET => {
-            const ns = result.*.nodesetval;
-            if (ns == null) return try makeNodeList(ctx, doc_v.object, &.{});
-            var list = std.ArrayList(*c.xmlNode){};
-            defer list.deinit(ctx.allocator);
-            var i: usize = 0;
-            while (i < @as(usize, @intCast(ns.*.nodeNr))) : (i += 1) {
-                const n = ns.*.nodeTab[i];
-                if (n != null) try list.append(ctx.allocator, n);
-            }
-            return try makeNodeList(ctx, doc_v.object, list.items);
+            const xs = result.*.nodesetval;
+            if (xs == null) return try makeNodeList(ctx, doc_v.object, &.{});
+            return try buildXpathNodeList(ctx, doc_v.object, xs);
         },
         c.XPATH_BOOLEAN => return .{ .bool = result.*.boolval != 0 },
         c.XPATH_NUMBER => return .{ .float = result.*.floatval },
@@ -1212,6 +1262,15 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try registerElementClass(vm, a);
     try registerCharacterDataClasses(vm, a);
     try registerAttrClass(vm, a);
+
+    // DOMNameSpaceNode wraps libxml2 XPath namespace results (xmlNs entries
+    // freed alongside the xmlNodeSet that produced them). zphp captures their
+    // prefix+href into PhpObject properties so the wrapper outlives the result
+    var ns_def = ClassDef{ .name = "DOMNameSpaceNode" };
+    ns_def.parent = "DOMNode";
+    try ns_def.methods.put(a, "__get", .{ .name = "__get", .arity = 1 });
+    try vm.classes.put(a, "DOMNameSpaceNode", ns_def);
+    try vm.native_fns.put(a, "DOMNameSpaceNode::__get", domGenericGet);
     try registerNodeListClass(vm, a);
     try registerNamedNodeMapClass(vm, a);
     try registerXPathClass(vm, a);

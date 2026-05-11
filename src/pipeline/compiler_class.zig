@@ -369,45 +369,63 @@ fn emitAttrValue(self: *Compiler, val: Value) Error!void {
 
 fn buildTypeString(self: *Compiler, start_tok: u32, end_tok: u32) Error![]const u8 {
     if (start_tok == end_tok) return "";
-    if (start_tok + 1 == end_tok) {
-        const lexeme = self.ast.tokens[start_tok].lexeme(self.ast.source);
-        if (self.ast.tokens[start_tok].tag == .identifier and !isPrimitiveType(lexeme)) {
-            return self.resolveClassName(lexeme);
-        }
-        return lexeme;
-    }
 
-    // check if (after an optional `?` nullable marker) the leading token is a
-    // backslash, indicating a fully-qualified type name that should not be
-    // namespace-prefixed
-    var is_fqn = false;
-    var probe = start_tok;
-    if (probe < end_tok) {
-        const lex0 = self.ast.tokens[probe].lexeme(self.ast.source);
-        if (std.mem.eql(u8, lex0, "?")) probe += 1;
-    }
-    if (probe < end_tok) {
-        const lex1 = self.ast.tokens[probe].lexeme(self.ast.source);
-        if (std.mem.eql(u8, lex1, "\\")) is_fqn = true;
-    }
-
+    // A type expression is structured as:
+    //   ?T   |   T1|T2|T3   |   T1&T2   |   (T1&T2)|T3
+    // where each T is either a primitive ("string"), a backslash-prefixed FQN
+    // (`\A\B\C`), or a relative name (`A\B\C`) that needs its first segment
+    // namespace-resolved exactly once. Process the token stream piecewise so
+    // each side of a union/intersection gets resolved independently
     var buf = std.ArrayListUnmanaged(u8){};
-    // for a relative type name like `Sub\Type`, only the first identifier gets
-    // namespace-resolved (turning `Sub` into `Ns\Sub`). subsequent identifiers
-    // are sub-namespace components and append verbatim. otherwise we'd produce
-    // `Ns\Sub\Ns\Type` instead of `Ns\Sub\Type`
-    var first_identifier_resolved = false;
-    for (start_tok..end_tok) |t| {
-        const tag = self.ast.tokens[t].tag;
-        const lexeme = self.ast.tokens[t].lexeme(self.ast.source);
-        if (is_fqn and std.mem.eql(u8, lexeme, "\\") and buf.items.len == 0) continue;
-        if (tag == .identifier and !isPrimitiveType(lexeme) and !is_fqn and !first_identifier_resolved) {
-            try buf.appendSlice(self.allocator, self.resolveClassName(lexeme));
-            first_identifier_resolved = true;
-        } else {
+    var i: u32 = start_tok;
+    var at_segment_start: bool = true; // true between separators/parens/`?`
+    var segment_first_ident_done: bool = false;
+    var segment_is_fqn: bool = false;
+
+    while (i < end_tok) : (i += 1) {
+        const tag = self.ast.tokens[i].tag;
+        const lexeme = self.ast.tokens[i].lexeme(self.ast.source);
+
+        // separators reset the per-segment state
+        const is_separator = std.mem.eql(u8, lexeme, "|") or std.mem.eql(u8, lexeme, "&") or
+            std.mem.eql(u8, lexeme, "(") or std.mem.eql(u8, lexeme, ")");
+
+        if (is_separator) {
             try buf.appendSlice(self.allocator, lexeme);
+            at_segment_start = true;
+            segment_first_ident_done = false;
+            segment_is_fqn = false;
+            continue;
         }
+
+        // nullable marker is allowed at segment start; emit and stay at start
+        if (at_segment_start and std.mem.eql(u8, lexeme, "?")) {
+            try buf.appendSlice(self.allocator, lexeme);
+            continue;
+        }
+
+        // leading backslash means FQN for this segment - emit it but mark so
+        // we don't apply namespace resolution to the first identifier
+        if (at_segment_start and std.mem.eql(u8, lexeme, "\\")) {
+            segment_is_fqn = true;
+            // we drop the leading backslash; resolveClassName outputs without it
+            // and the rest of the runtime treats FQN and resolved equivalently
+            at_segment_start = false;
+            continue;
+        }
+
+        if (tag == .identifier and !isPrimitiveType(lexeme) and !segment_is_fqn and !segment_first_ident_done) {
+            try buf.appendSlice(self.allocator, self.resolveClassName(lexeme));
+            segment_first_ident_done = true;
+            at_segment_start = false;
+            continue;
+        }
+
+        try buf.appendSlice(self.allocator, lexeme);
+        at_segment_start = false;
+        if (tag == .identifier) segment_first_ident_done = true;
     }
+
     const s = try buf.toOwnedSlice(self.allocator);
     try self.string_allocs.append(self.allocator, s);
     return s;
