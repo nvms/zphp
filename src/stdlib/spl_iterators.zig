@@ -674,9 +674,23 @@ fn loadDirectoryEntries(ctx: *NativeContext, path: []const u8, flags: i64) Runti
     var dir = std.fs.cwd().openDir(path, .{ .iterate = true }) catch return arr;
     defer dir.close();
 
+    const skip_dots = (flags & SKIP_DOTS) != 0;
+    if (!skip_dots) {
+        inline for (.{ ".", ".." }) |dot_name| {
+            const dot_full = try std.fmt.allocPrint(ctx.allocator, "{s}/{s}", .{ path, dot_name });
+            try ctx.vm.strings.append(ctx.allocator, dot_full);
+            const dot_entry = try ctx.allocator.create(PhpArray);
+            dot_entry.* = .{};
+            try ctx.vm.arrays.append(ctx.allocator, dot_entry);
+            try dot_entry.set(ctx.allocator, .{ .string = "name" }, .{ .string = dot_name });
+            try dot_entry.set(ctx.allocator, .{ .string = "path" }, .{ .string = dot_full });
+            try dot_entry.set(ctx.allocator, .{ .string = "is_dir" }, .{ .bool = true });
+            try arr.append(ctx.allocator, .{ .array = dot_entry });
+        }
+    }
+
     var iter = dir.iterate();
     while (iter.next() catch null) |entry| {
-        const skip_dots = (flags & SKIP_DOTS) != 0;
         if (skip_dots and (std.mem.eql(u8, entry.name, ".") or std.mem.eql(u8, entry.name, ".."))) continue;
 
         const full = try std.fmt.allocPrint(ctx.allocator, "{s}/{s}", .{ path, entry.name });
@@ -728,17 +742,13 @@ fn diRewind(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
 }
 
 fn diCurrent(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    // PHP's DirectoryIterator::current() returns the iterator itself
+    // so methods like isDot(), getFilename(), getPathname() work on $entry
     const obj = getThis(ctx) orelse return .null;
     const entries = if (obj.get("__di_entries") == .array) obj.get("__di_entries").array else return .null;
     const idx: usize = @intCast(@max(0, objGetInt(obj, "__di_idx")));
     if (idx >= entries.length()) return .{ .bool = false };
-    const entry = entries.get(.{ .int = @intCast(idx) });
-    if (entry != .array) return .null;
-    const path_val = entry.array.get(.{ .string = "path" });
-    if (path_val != .string) return .null;
-
-    const fi = try createFileInfoObj(ctx, path_val.string);
-    return .{ .object = fi };
+    return .{ .object = obj };
 }
 
 fn diKey(ctx: *NativeContext, _: []const Value) RuntimeError!Value {

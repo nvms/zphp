@@ -2623,8 +2623,16 @@ fn detectMimeFromBytes(data: []const u8) ?[]const u8 {
     if (data.len >= 4 and std.mem.eql(u8, data[0..4], "PK\x03\x04")) return "application/zip";
     if (data.len >= 2 and std.mem.eql(u8, data[0..2], "\x1f\x8b")) return "application/gzip";
     if (data.len >= 4 and std.mem.eql(u8, data[0..4], "RIFF") and data.len >= 12 and std.mem.eql(u8, data[8..12], "WEBP")) return "image/webp";
-    if (data.len >= 5 and std.mem.eql(u8, data[0..5], "<?xml")) return "application/xml";
+    if (data.len >= 5 and std.mem.eql(u8, data[0..5], "<?xml")) return "text/xml";
     if (data.len >= 5 and std.mem.eql(u8, data[0..5], "<?php")) return "text/x-php";
+    // text heuristic: all bytes printable ASCII or common whitespace
+    if (data.len > 0) {
+        for (data) |b| {
+            if (b == '\t' or b == '\n' or b == '\r') continue;
+            if (b < 0x20 or b > 0x7e) return null;
+        }
+        return "text/plain";
+    }
     return null;
 }
 
