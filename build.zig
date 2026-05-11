@@ -37,6 +37,7 @@ pub fn build(b: *std.Build) void {
     addLibxml2(b, exe_mod);
     addLibicu(b, exe_mod);
     addIcuShim(b, exe_mod);
+    addLibgmp(b, exe_mod);
     exe_mod.link_libc = true;
     exe_mod.addObject(fast_loop_obj);
 
@@ -81,6 +82,7 @@ pub fn build(b: *std.Build) void {
     addLibxml2(b, test_mod);
     addLibicu(b, test_mod);
     addIcuShim(b, test_mod);
+    addLibgmp(b, test_mod);
     test_mod.link_libc = true;
     test_mod.addObject(fast_loop_test_obj);
 
@@ -153,6 +155,32 @@ fn addIcuShim(b: *std.Build, mod: *std.Build.Module) void {
     }
     mod.addCSourceFile(.{
         .file = b.path("src/stdlib/icu_shim.c"),
+        .flags = flags.items,
+    });
+}
+
+// libgmp ships a clean pkg-config and uses static `mpz_*` -> `__gmpz_*` macros
+// (no per-version renaming). zig's translate-c handles simple macro renames
+fn addLibgmp(b: *std.Build, mod: *std.Build.Module) void {
+    mod.linkSystemLibrary("gmp", .{ .use_pkg_config = .no });
+    if (pkgConfigCflagsIncludes(b, "gmp")) |inc| {
+        mod.addSystemIncludePath(.{ .cwd_relative = inc });
+    }
+    if (pkgConfigVariable(b, "gmp", "libdir")) |lib| {
+        mod.addLibraryPath(.{ .cwd_relative = lib });
+    }
+
+    // shim file: compiled by C compiler so the `mpz_*` -> `__gmpz_*` macros
+    // resolve correctly. zig then links against the unversioned zphp_mpz_*
+    var flags = std.ArrayList([]const u8){};
+    defer flags.deinit(b.allocator);
+    flags.append(b.allocator, "-std=c11") catch return;
+    if (pkgConfigCflagsIncludes(b, "gmp")) |inc| {
+        const f = std.fmt.allocPrint(b.allocator, "-I{s}", .{inc}) catch return;
+        flags.append(b.allocator, f) catch return;
+    }
+    mod.addCSourceFile(.{
+        .file = b.path("src/stdlib/gmp_shim.c"),
         .flags = flags.items,
     });
 }
