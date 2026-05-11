@@ -1419,37 +1419,81 @@ fn native_extract(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len == 0 or args[0] != .array) return .{ .int = 0 };
     const arr = args[0].array;
     const flags: i64 = if (args.len >= 2) Value.toInt(args[1]) else 0;
-    // strip EXTR_REFS bit (0x100) so the type bits stay intact
+    // strip EXTR_REFS bit (256) so the type bits stay intact
     const type_flag = flags & 0xff;
     const prefix = if (args.len >= 3 and args[2] == .string) args[2].string else "";
     const frame = ctx.vm.currentFrame();
     const slot_names = if (frame.func) |func| func.slot_names else ctx.vm.global_slot_names;
 
+    const existsInScope = struct {
+        fn f(fr: anytype, names: []const []const u8, name: []const u8) bool {
+            for (names, 0..) |sn, i| {
+                if (std.mem.eql(u8, sn, name)) {
+                    if (i < fr.locals.len and fr.locals[i] != .null) return true;
+                    break;
+                }
+            }
+            if (fr.vars.get(name)) |v| if (v != .null) return true;
+            return false;
+        }
+    }.f;
+
+    const isValidIdent = struct {
+        fn f(name: []const u8) bool {
+            if (name.len <= 1) return false;
+            const c0 = name[1];
+            if (!(c0 == '_' or (c0 >= 'a' and c0 <= 'z') or (c0 >= 'A' and c0 <= 'Z'))) return false;
+            var i: usize = 2;
+            while (i < name.len) : (i += 1) {
+                const c = name[i];
+                if (!(c == '_' or (c >= 'a' and c <= 'z') or (c >= 'A' and c <= 'Z') or (c >= '0' and c <= '9'))) return false;
+            }
+            return true;
+        }
+    }.f;
+
     var count_val: i64 = 0;
     for (arr.entries.items) |entry| {
         if (entry.key != .string) continue;
         const key = entry.key.string;
-        const var_name = switch (type_flag) {
-            2 => try std.fmt.allocPrint(ctx.allocator, "${s}_{s}", .{ prefix, key }), // EXTR_PREFIX_ALL (zphp's value)
-            else => try std.fmt.allocPrint(ctx.allocator, "${s}", .{key}),
-        };
-        try ctx.strings.append(ctx.allocator, var_name);
+        const base = try std.fmt.allocPrint(ctx.allocator, "${s}", .{key});
+        try ctx.strings.append(ctx.allocator, base);
+        const prefixed = try std.fmt.allocPrint(ctx.allocator, "${s}_{s}", .{ prefix, key });
+        try ctx.strings.append(ctx.allocator, prefixed);
 
-        // EXTR_SKIP (=1): skip if variable already exists in current scope
-        if (type_flag == 1) {
-            var exists = false;
-            for (slot_names, 0..) |sn, i| {
-                if (std.mem.eql(u8, sn, var_name)) {
-                    if (i < frame.locals.len and frame.locals[i] != .null) exists = true;
-                    break;
+        var var_name: []const u8 = base;
+        const base_valid = isValidIdent(base);
+
+        switch (type_flag) {
+            1 => { // EXTR_SKIP
+                if (!base_valid or existsInScope(frame, slot_names, base)) continue;
+            },
+            2 => { // EXTR_PREFIX_SAME
+                if (existsInScope(frame, slot_names, base)) var_name = prefixed;
+                if (!isValidIdent(var_name)) continue;
+            },
+            3 => { // EXTR_PREFIX_ALL
+                var_name = prefixed;
+                if (!isValidIdent(var_name)) continue;
+            },
+            4 => { // EXTR_PREFIX_INVALID
+                if (!base_valid) var_name = prefixed;
+                if (!isValidIdent(var_name)) continue;
+            },
+            5 => { // EXTR_IF_EXISTS
+                if (!base_valid or !existsInScope(frame, slot_names, base)) continue;
+            },
+            6 => { // EXTR_PREFIX_IF_EXISTS
+                if (existsInScope(frame, slot_names, base)) {
+                    var_name = prefixed;
+                    if (!isValidIdent(var_name)) continue;
+                } else {
+                    if (!base_valid) continue;
                 }
-            }
-            if (!exists) {
-                if (frame.vars.get(var_name)) |v| {
-                    if (v != .null) exists = true;
-                }
-            }
-            if (exists) continue;
+            },
+            else => { // EXTR_OVERWRITE
+                if (!base_valid) continue;
+            },
         }
 
         try frame.vars.put(ctx.allocator, var_name, entry.value);
