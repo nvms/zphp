@@ -1,5 +1,7 @@
 <?php
 error_reporting(0);
+assert_options(ASSERT_ACTIVE, 1);
+assert_options(ASSERT_EXCEPTION, 1);
 
 assert(true);
 assert(1 + 1 === 2);
@@ -11,8 +13,6 @@ try {
     echo "caught: ", $e->getMessage(), "\n";
 }
 
-assert_options(ASSERT_ACTIVE, 1);
-assert_options(ASSERT_EXCEPTION, 1);
 echo assert_options(ASSERT_ACTIVE), "\n";
 echo assert_options(ASSERT_EXCEPTION), "\n";
 

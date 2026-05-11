@@ -1338,7 +1338,7 @@ fn native_assert(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
         var cb_args = [_]Value{ .{ .string = file }, .{ .int = line }, .{ .string = expr } };
         _ = ctx.invokeCallable(cb, &cb_args) catch {};
     }
-    const ae = ctx.vm.ini_settings.get("assert.exception") orelse "1";
+    const ae = ctx.vm.ini_settings.get("assert.exception") orelse "0";
     if (std.mem.eql(u8, ae, "1")) {
         const msg: []const u8 = if (args.len >= 2 and args[1] == .string) args[1].string else "assert(false)";
         try ctx.vm.setPendingException("AssertionError", msg);
