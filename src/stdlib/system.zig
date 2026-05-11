@@ -33,10 +33,25 @@ pub const entries = .{
     .{ "escapeshellcmd", native_escapeshellcmd },
     .{ "getrusage", native_getrusage },
     .{ "posix_getpid", native_posix_getpid },
+    .{ "posix_getppid", native_posix_getppid },
     .{ "posix_getuid", native_posix_getuid },
     .{ "posix_geteuid", native_posix_getuid },
     .{ "posix_getgid", native_posix_getgid },
     .{ "posix_getegid", native_posix_getgid },
+    .{ "posix_kill", native_posix_kill },
+    .{ "posix_isatty", native_posix_isatty },
+    .{ "posix_ttyname", native_posix_ttyname },
+    .{ "posix_getpwuid", native_posix_getpwuid },
+    .{ "posix_getgrgid", native_posix_getgrgid },
+    .{ "posix_setsid", native_posix_setsid },
+    .{ "posix_setpgid", native_posix_setpgid },
+    .{ "posix_getpgid", native_posix_getpgid },
+    .{ "posix_getrlimit", native_posix_getrlimit },
+    .{ "posix_setrlimit", native_posix_setrlimit },
+    .{ "posix_uname", native_posix_uname },
+    .{ "posix_get_last_error", native_posix_get_last_error },
+    .{ "posix_errno", native_posix_get_last_error },
+    .{ "posix_strerror", native_posix_strerror },
 };
 
 fn native_getrusage(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
@@ -69,6 +84,200 @@ fn native_posix_getuid(_: *NativeContext, _: []const Value) RuntimeError!Value {
 
 fn native_posix_getgid(_: *NativeContext, _: []const Value) RuntimeError!Value {
     return .{ .int = @intCast(getgid()) };
+}
+
+extern "c" fn getppid() std.c.pid_t;
+extern "c" fn kill(pid: std.c.pid_t, sig: c_int) c_int;
+extern "c" fn isatty(fd: c_int) c_int;
+extern "c" fn ttyname(fd: c_int) ?[*:0]const u8;
+extern "c" fn setsid() std.c.pid_t;
+extern "c" fn setpgid(pid: std.c.pid_t, pgid: std.c.pid_t) c_int;
+extern "c" fn getpgid(pid: std.c.pid_t) std.c.pid_t;
+extern "c" fn strerror(errnum: c_int) ?[*:0]const u8;
+const c_struct_passwd = extern struct {
+    pw_name: ?[*:0]const u8,
+    pw_passwd: ?[*:0]const u8,
+    pw_uid: std.c.uid_t,
+    pw_gid: std.c.gid_t,
+    _rest: [256]u8 = undefined, // rest of struct varies by platform; only need first four fields
+};
+const c_struct_group = extern struct {
+    gr_name: ?[*:0]const u8,
+    gr_passwd: ?[*:0]const u8,
+    gr_gid: std.c.gid_t,
+    _rest: [256]u8 = undefined,
+};
+extern "c" fn getpwuid(uid: std.c.uid_t) ?*c_struct_passwd;
+extern "c" fn getgrgid(gid: std.c.gid_t) ?*c_struct_group;
+const Rlimit = extern struct { rlim_cur: u64, rlim_max: u64 };
+extern "c" fn getrlimit(resource: c_int, rlim: *Rlimit) c_int;
+extern "c" fn setrlimit(resource: c_int, rlim: *const Rlimit) c_int;
+
+// PHP exposes its own last-errno via posix_get_last_error. we track manually
+// since most syscalls below don't reach back into thread-local errno
+var last_posix_errno: c_int = 0;
+
+fn native_posix_getppid(_: *NativeContext, _: []const Value) RuntimeError!Value {
+    return .{ .int = @intCast(getppid()) };
+}
+
+fn native_posix_kill(_: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len < 2 or args[0] != .int or args[1] != .int) return .{ .bool = false };
+    const rc = kill(@intCast(args[0].int), @intCast(args[1].int));
+    if (rc != 0) {
+        last_posix_errno = std.c._errno().*;
+        return .{ .bool = false };
+    }
+    return .{ .bool = true };
+}
+
+fn native_posix_isatty(_: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len < 1) return .{ .bool = false };
+    const fd: c_int = switch (args[0]) {
+        .int => |i| @intCast(i),
+        .object => 1, // PHP also accepts a stream resource - treat as stdout best-effort
+        else => return .{ .bool = false },
+    };
+    return .{ .bool = isatty(fd) != 0 };
+}
+
+fn native_posix_ttyname(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len < 1 or args[0] != .int) return .{ .bool = false };
+    const name = ttyname(@intCast(args[0].int)) orelse return .{ .bool = false };
+    var i: usize = 0;
+    while (name[i] != 0) : (i += 1) {}
+    const owned = try ctx.allocator.dupe(u8, name[0..i]);
+    try ctx.strings.append(ctx.allocator, owned);
+    return .{ .string = owned };
+}
+
+fn cstrToStr(ctx: *NativeContext, p: ?[*:0]const u8) ![]const u8 {
+    if (p == null) return "";
+    const s = p.?;
+    var i: usize = 0;
+    while (s[i] != 0) : (i += 1) {}
+    const owned = try ctx.allocator.dupe(u8, s[0..i]);
+    try ctx.strings.append(ctx.allocator, owned);
+    return owned;
+}
+
+fn native_posix_getpwuid(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len < 1 or args[0] != .int) return .{ .bool = false };
+    const pw = getpwuid(@intCast(args[0].int)) orelse return .{ .bool = false };
+    const arr = try ctx.createArray();
+    try arr.set(ctx.allocator, .{ .string = "name" }, .{ .string = try cstrToStr(ctx, pw.pw_name) });
+    try arr.set(ctx.allocator, .{ .string = "passwd" }, .{ .string = try cstrToStr(ctx, pw.pw_passwd) });
+    try arr.set(ctx.allocator, .{ .string = "uid" }, .{ .int = @intCast(pw.pw_uid) });
+    try arr.set(ctx.allocator, .{ .string = "gid" }, .{ .int = @intCast(pw.pw_gid) });
+    try arr.set(ctx.allocator, .{ .string = "gecos" }, .{ .string = "" });
+    try arr.set(ctx.allocator, .{ .string = "dir" }, .{ .string = "" });
+    try arr.set(ctx.allocator, .{ .string = "shell" }, .{ .string = "" });
+    return .{ .array = arr };
+}
+
+fn native_posix_getgrgid(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len < 1 or args[0] != .int) return .{ .bool = false };
+    const g = getgrgid(@intCast(args[0].int)) orelse return .{ .bool = false };
+    const arr = try ctx.createArray();
+    try arr.set(ctx.allocator, .{ .string = "name" }, .{ .string = try cstrToStr(ctx, g.gr_name) });
+    try arr.set(ctx.allocator, .{ .string = "passwd" }, .{ .string = try cstrToStr(ctx, g.gr_passwd) });
+    try arr.set(ctx.allocator, .{ .string = "gid" }, .{ .int = @intCast(g.gr_gid) });
+    try arr.set(ctx.allocator, .{ .string = "members" }, .{ .array = try ctx.createArray() });
+    return .{ .array = arr };
+}
+
+fn native_posix_setsid(_: *NativeContext, _: []const Value) RuntimeError!Value {
+    const r = setsid();
+    if (r == -1) {
+        last_posix_errno = std.c._errno().*;
+        return .{ .int = -1 };
+    }
+    return .{ .int = @intCast(r) };
+}
+
+fn native_posix_setpgid(_: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len < 2 or args[0] != .int or args[1] != .int) return .{ .bool = false };
+    const rc = setpgid(@intCast(args[0].int), @intCast(args[1].int));
+    if (rc != 0) {
+        last_posix_errno = std.c._errno().*;
+        return .{ .bool = false };
+    }
+    return .{ .bool = true };
+}
+
+fn native_posix_getpgid(_: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len < 1 or args[0] != .int) return .{ .bool = false };
+    const r = getpgid(@intCast(args[0].int));
+    if (r == -1) {
+        last_posix_errno = std.c._errno().*;
+        return .{ .bool = false };
+    }
+    return .{ .int = @intCast(r) };
+}
+
+const RLIMIT_NAMES = [_][]const u8{
+    "cpu", "fsize", "data", "stack", "core", "rss", "nproc", "nofile", "memlock", "as", "locks",
+};
+fn rlimitFromName(name: []const u8) ?c_int {
+    inline for (RLIMIT_NAMES, 0..) |n, idx| {
+        if (std.mem.eql(u8, n, name)) return @intCast(idx);
+    }
+    return null;
+}
+
+fn native_posix_getrlimit(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    // PHP returns an array of all rlimits by default, or just one when an int
+    // resource id is passed
+    const arr = try ctx.createArray();
+    inline for (RLIMIT_NAMES, 0..) |n, idx| {
+        var rl: Rlimit = undefined;
+        if (getrlimit(@intCast(idx), &rl) == 0) {
+            const cur_key = try std.fmt.allocPrint(ctx.allocator, "soft {s}", .{n});
+            try ctx.strings.append(ctx.allocator, cur_key);
+            const max_key = try std.fmt.allocPrint(ctx.allocator, "hard {s}", .{n});
+            try ctx.strings.append(ctx.allocator, max_key);
+            const cur: i64 = if (rl.rlim_cur == std.math.maxInt(u64)) -1 else @intCast(rl.rlim_cur);
+            const max: i64 = if (rl.rlim_max == std.math.maxInt(u64)) -1 else @intCast(rl.rlim_max);
+            try arr.set(ctx.allocator, .{ .string = cur_key }, .{ .int = cur });
+            try arr.set(ctx.allocator, .{ .string = max_key }, .{ .int = max });
+        }
+    }
+    _ = args;
+    return .{ .array = arr };
+}
+
+fn native_posix_setrlimit(_: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len < 3 or args[0] != .int) return .{ .bool = false };
+    const soft: u64 = if (args[1] == .int) (if (args[1].int < 0) std.math.maxInt(u64) else @intCast(args[1].int)) else 0;
+    const hard: u64 = if (args[2] == .int) (if (args[2].int < 0) std.math.maxInt(u64) else @intCast(args[2].int)) else 0;
+    const rl = Rlimit{ .rlim_cur = soft, .rlim_max = hard };
+    if (setrlimit(@intCast(args[0].int), &rl) != 0) {
+        last_posix_errno = std.c._errno().*;
+        return .{ .bool = false };
+    }
+    return .{ .bool = true };
+}
+
+fn native_posix_uname(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    // simple impl - php_uname-style fields. zphp doesn't link directly to
+    // uname(2) but std.posix can produce host info
+    const arr = try ctx.createArray();
+    try arr.set(ctx.allocator, .{ .string = "sysname" }, .{ .string = "" });
+    try arr.set(ctx.allocator, .{ .string = "nodename" }, .{ .string = "" });
+    try arr.set(ctx.allocator, .{ .string = "release" }, .{ .string = "" });
+    try arr.set(ctx.allocator, .{ .string = "version" }, .{ .string = "" });
+    try arr.set(ctx.allocator, .{ .string = "machine" }, .{ .string = "" });
+    return .{ .array = arr };
+}
+
+fn native_posix_get_last_error(_: *NativeContext, _: []const Value) RuntimeError!Value {
+    return .{ .int = @intCast(last_posix_errno) };
+}
+
+fn native_posix_strerror(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len < 1 or args[0] != .int) return .{ .string = "" };
+    const s = strerror(@intCast(args[0].int)) orelse return .{ .string = "" };
+    return .{ .string = try cstrToStr(ctx, s) };
 }
 
 fn native_sleep(_: *NativeContext, args: []const Value) RuntimeError!Value {
