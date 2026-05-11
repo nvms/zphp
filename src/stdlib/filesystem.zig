@@ -158,7 +158,11 @@ fn getBufferPos(obj: *PhpObject) usize {
 }
 
 fn setBufferPos(obj: *PhpObject, pos: usize) void {
-    obj.properties.put(std.heap.page_allocator, "__pos", .{ .int = @intCast(pos) }) catch {};
+    // mutate the existing entry to avoid allocator mismatch (the properties
+    // map was allocated by the VM allocator; we don't have access here)
+    if (obj.properties.getPtr("__pos")) |slot| {
+        slot.* = .{ .int = @intCast(pos) };
+    }
 }
 
 fn hexNibble(c: u8) ?u8 {
@@ -2477,20 +2481,24 @@ fn native_proc_open(ctx: *NativeContext, args: []const Value) RuntimeError!Value
     try ctx.vm.strings.append(ctx.allocator, result.stdout);
     try ctx.vm.strings.append(ctx.allocator, result.stderr);
 
-    if (args[2] == .array) {
-        const pipes = args[2].array;
-        // stdin (write-only no-op handle - process already ran)
-        const stdin_obj = try ctx.allocator.create(PhpObject);
-        stdin_obj.* = .{ .class_name = "FileHandle" };
-        try ctx.vm.objects.append(ctx.allocator, stdin_obj);
-        try stdin_obj.set(ctx.allocator, "__buffer", .{ .string = "" });
-        try stdin_obj.set(ctx.allocator, "__pos", .{ .int = 0 });
-        try stdin_obj.set(ctx.allocator, "__open", .{ .bool = true });
-        try stdin_obj.set(ctx.allocator, "__mode", .{ .string = "w" });
-        try pipes.set(ctx.allocator, .{ .int = 0 }, .{ .object = stdin_obj });
-        try pipes.set(ctx.allocator, .{ .int = 1 }, .{ .object = try makeReadBufferHandle(ctx, result.stdout) });
-        try pipes.set(ctx.allocator, .{ .int = 2 }, .{ .object = try makeReadBufferHandle(ctx, result.stderr) });
-    }
+    const pipes = if (args[2] == .array) args[2].array else blk: {
+        const a = try ctx.allocator.create(PhpArray);
+        a.* = .{};
+        try ctx.vm.arrays.append(ctx.allocator, a);
+        break :blk a;
+    };
+    // stdin (write-only no-op handle - process already ran)
+    const stdin_obj = try ctx.allocator.create(PhpObject);
+    stdin_obj.* = .{ .class_name = "FileHandle" };
+    try ctx.vm.objects.append(ctx.allocator, stdin_obj);
+    try stdin_obj.set(ctx.allocator, "__buffer", .{ .string = "" });
+    try stdin_obj.set(ctx.allocator, "__pos", .{ .int = 0 });
+    try stdin_obj.set(ctx.allocator, "__open", .{ .bool = true });
+    try stdin_obj.set(ctx.allocator, "__mode", .{ .string = "w" });
+    try pipes.set(ctx.allocator, .{ .int = 0 }, .{ .object = stdin_obj });
+    try pipes.set(ctx.allocator, .{ .int = 1 }, .{ .object = try makeReadBufferHandle(ctx, result.stdout) });
+    try pipes.set(ctx.allocator, .{ .int = 2 }, .{ .object = try makeReadBufferHandle(ctx, result.stderr) });
+    if (args[2] != .array) ctx.setCallerVar(2, args.len, .{ .array = pipes });
 
     const proc = try ctx.allocator.create(PhpObject);
     proc.* = .{ .class_name = "ProcessResource" };

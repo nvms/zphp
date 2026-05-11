@@ -452,13 +452,20 @@ fn native_exec(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
         _ = lines.pop();
     }
 
-    // optional output array (param 2, by-ref) - we append lines if it's an array
-    if (args.len >= 2 and args[1] == .array) {
+    // optional output array (param 2, by-ref)
+    if (args.len >= 2) {
+        const arr = if (args[1] == .array) args[1].array else blk: {
+            const a = try ctx.allocator.create(@import("../runtime/value.zig").PhpArray);
+            a.* = .{};
+            try ctx.vm.arrays.append(ctx.allocator, a);
+            break :blk a;
+        };
         for (lines.items) |line| {
             const copy = try ctx.allocator.dupe(u8, line);
             try ctx.vm.strings.append(ctx.allocator, copy);
-            try args[1].array.append(ctx.allocator, .{ .string = copy });
+            try arr.append(ctx.allocator, .{ .string = copy });
         }
+        if (args[1] != .array) ctx.setCallerVar(1, args.len, .{ .array = arr });
     }
     // optional result_code (param 3, by-ref)
     const exit_code: i64 = switch (result.term) {
@@ -466,9 +473,7 @@ fn native_exec(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
         .Signal => |c| @as(i64, @intCast(c)) + 128,
         else => -1,
     };
-    if (args.len >= 3 and args[2] == .array) {
-        try args[2].array.append(ctx.allocator, .{ .int = exit_code });
-    }
+    if (args.len >= 3) ctx.setCallerVar(2, args.len, .{ .int = exit_code });
 
     if (lines.items.len == 0) return .{ .string = "" };
     const last = lines.items[lines.items.len - 1];
@@ -490,9 +495,7 @@ fn native_system(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
         .Signal => |c| @as(i64, @intCast(c)) + 128,
         else => -1,
     };
-    if (args.len >= 2 and args[1] == .array) {
-        try args[1].array.append(ctx.allocator, .{ .int = exit_code });
-    }
+    if (args.len >= 2) ctx.setCallerVar(1, args.len, .{ .int = exit_code });
 
     // last line of output
     var last_line: []const u8 = "";
