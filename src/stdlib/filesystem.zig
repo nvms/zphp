@@ -294,7 +294,9 @@ pub fn cleanupHandles(objects: std.ArrayListUnmanaged(*PhpObject)) void {
                         _ = std.posix.system.close(file.handle);
                     }
                 }
-                obj.set(std.heap.page_allocator, "__open", .{ .bool = false }) catch {};
+                // mutate the existing entry rather than grow the map (the map's
+                // allocator is owned by the VM and isn't available here)
+                if (obj.properties.getPtr("__open")) |slot| slot.* = .{ .bool = false };
             }
         }
     }

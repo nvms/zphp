@@ -56,7 +56,11 @@ fn throwBuiltin(ctx: *NativeContext, class: []const u8, msg: []const u8) Runtime
 
 fn argDisplayString(ctx: *NativeContext, arg: Value) ![]const u8 {
     return switch (arg) {
-        .string => |s| s,
+        .string => |s| blk: {
+            const out = try std.fmt.allocPrint(ctx.allocator, "\"{s}\"", .{s});
+            try ctx.vm.strings.append(ctx.allocator, out);
+            break :blk out;
+        },
         .int => |n| blk: {
             const s = try std.fmt.allocPrint(ctx.allocator, "{d}", .{n});
             try ctx.vm.strings.append(ctx.allocator, s);
@@ -122,7 +126,7 @@ pub fn enumFrom(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
         }
     }
     const arg_str = try argDisplayString(ctx, args[0]);
-    const msg = try std.fmt.allocPrint(ctx.allocator, "{s} is not a valid backing value for enum \"{s}\"", .{ arg_str, enum_name });
+    const msg = try std.fmt.allocPrint(ctx.allocator, "{s} is not a valid backing value for enum {s}", .{ arg_str, enum_name });
     try ctx.vm.strings.append(ctx.allocator, msg);
     return throwBuiltin(ctx, "ValueError", msg);
 }

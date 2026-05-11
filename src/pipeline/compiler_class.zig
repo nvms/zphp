@@ -1894,6 +1894,28 @@ pub fn compileEnumDecl(self: *Compiler, node: Ast.Node) Error!void {
         try self.emitU16(iname_idx);
     }
 
+    // trait names
+    var enum_traits = std.ArrayListUnmanaged([]const u8){};
+    defer enum_traits.deinit(self.allocator);
+    for (members) |member_idx| {
+        const member = self.ast.nodes[member_idx];
+        if (member.tag == .trait_use) {
+            for (self.ast.extraSlice(member.data.lhs)) |tn| {
+                const tn_node = self.ast.nodes[tn];
+                const raw_name = if (tn_node.tag == .qualified_name) blk: {
+                    const parts = self.ast.extraSlice(tn_node.data.lhs);
+                    break :blk try self.buildQualifiedString(parts);
+                } else self.ast.tokenSlice(tn_node.main_token);
+                try enum_traits.append(self.allocator, self.resolveClassName(raw_name));
+            }
+        }
+    }
+    try self.emitByte(@intCast(enum_traits.items.len));
+    for (enum_traits.items) |tname| {
+        const tname_idx = try self.addConstant(.{ .string = tname });
+        try self.emitU16(tname_idx);
+    }
+
     // enum-level attributes
     const enum_attrs = extractAttributes(self, node.main_token);
     try emitAttributeData(self, enum_attrs);

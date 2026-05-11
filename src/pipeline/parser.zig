@@ -1472,6 +1472,8 @@ const Parser = struct {
                 }));
             } else if (self.peek() == .kw_const) {
                 try members.append(self.allocator, try self.parseConstDecl());
+            } else if (self.peek() == .kw_use) {
+                try members.append(self.allocator, try self.parseTraitUse());
             } else {
                 var is_static = false;
                 var visibility: u32 = 0;

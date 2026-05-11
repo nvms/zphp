@@ -6493,6 +6493,16 @@ pub const VM = struct {
         try def.interfaces.append(self.allocator, "UnitEnum");
         if (backed_type_byte != 0) try def.interfaces.append(self.allocator, "BackedEnum");
 
+        // traits
+        const enum_trait_count = self.readByte();
+        var enum_trait_names: [16][]const u8 = undefined;
+        for (0..enum_trait_count) |ti| {
+            enum_trait_names[ti] = self.currentChunk().constants.items[self.readU16()].string;
+        }
+        for (enum_trait_names[0..enum_trait_count]) |trait_name| {
+            try self.applyTrait(&def, enum_name, trait_name, &.{}, &.{});
+        }
+
         // enum-level attributes
         const enum_attrs = try self.readAttributeDefs();
         for (enum_attrs) |a| try def.attributes.append(self.allocator, a);
