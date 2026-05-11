@@ -823,7 +823,34 @@ fn pregReplaceLimited(ctx: *NativeContext, code: *pcre2.Code, match_data: *pcre2
 }
 
 fn preg_replace_callback(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len < 3 or args[0] != .string or args[2] != .string) return if (args.len >= 3) args[2] else Value.null;
+    if (args.len < 3) return if (args.len >= 3) args[2] else Value.null;
+    if (args[2] == .array) {
+        const result = try ctx.createArray();
+        for (args[2].array.entries.items) |entry| {
+            var sub_args: [5]Value = undefined;
+            sub_args[0] = args[0];
+            sub_args[1] = args[1];
+            sub_args[2] = entry.value;
+            if (args.len >= 4) sub_args[3] = args[3];
+            const replaced = try preg_replace_callback(ctx, sub_args[0..args.len]);
+            try result.set(ctx.allocator, entry.key, replaced);
+        }
+        return .{ .array = result };
+    }
+    if (args[0] == .array) {
+        var current = args[2];
+        for (args[0].array.entries.items) |pat_entry| {
+            if (pat_entry.value != .string) continue;
+            var sub_args: [5]Value = undefined;
+            sub_args[0] = pat_entry.value;
+            sub_args[1] = args[1];
+            sub_args[2] = current;
+            if (args.len >= 4) sub_args[3] = args[3];
+            current = try preg_replace_callback(ctx, sub_args[0..@min(args.len, 4)]);
+        }
+        return current;
+    }
+    if (args[0] != .string or args[2] != .string) return args[2];
     const info = parsePattern(args[0].string) orelse return args[2];
     const callback = args[1];
     const subject = args[2].string;
@@ -923,6 +950,18 @@ fn preg_replace_callback(ctx: *NativeContext, args: []const Value) RuntimeError!
 fn preg_replace_callback_array(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len < 2 or args[0] != .array) return if (args.len >= 2) args[1] else Value.null;
     const map = args[0].array;
+    if (args[1] == .array) {
+        const result = try ctx.createArray();
+        for (args[1].array.entries.items) |entry| {
+            var sub_args: [4]Value = undefined;
+            sub_args[0] = args[0];
+            sub_args[1] = entry.value;
+            if (args.len >= 3) sub_args[2] = args[2];
+            const replaced = try preg_replace_callback_array(ctx, sub_args[0..args.len]);
+            try result.set(ctx.allocator, entry.key, replaced);
+        }
+        return .{ .array = result };
+    }
     var current: Value = args[1];
     if (current != .string) return current;
     var total_count: i64 = 0;
