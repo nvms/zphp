@@ -138,6 +138,7 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try ao_def.methods.put(a, "natcasesort", .{ .name = "natcasesort", .arity = 0 });
     try ao_def.methods.put(a, "exchangeArray", .{ .name = "exchangeArray", .arity = 1 });
     try ao_def.methods.put(a, "setIteratorClass", .{ .name = "setIteratorClass", .arity = 1 });
+    try ao_def.methods.put(a, "getIteratorClass", .{ .name = "getIteratorClass", .arity = 0 });
     try ao_def.methods.put(a, "__get", .{ .name = "__get", .arity = 1 });
     try ao_def.methods.put(a, "__set", .{ .name = "__set", .arity = 2 });
     try ao_def.methods.put(a, "__isset", .{ .name = "__isset", .arity = 1 });
@@ -167,6 +168,7 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try vm.native_fns.put(a, "ArrayObject::natcasesort", aoNatcasesort);
     try vm.native_fns.put(a, "ArrayObject::exchangeArray", aoExchangeArray);
     try vm.native_fns.put(a, "ArrayObject::setIteratorClass", aoSetIteratorClass);
+    try vm.native_fns.put(a, "ArrayObject::getIteratorClass", aoGetIteratorClass);
     try vm.native_fns.put(a, "ArrayObject::__get", aoMagicGet);
     try vm.native_fns.put(a, "ArrayObject::__set", aoMagicSet);
     try vm.native_fns.put(a, "ArrayObject::__isset", aoMagicIsset);
@@ -818,6 +820,9 @@ fn aoConstruct(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     }
     const flags: i64 = if (args.len >= 2) Value.toInt(args[1]) else 0;
     try obj.set(ctx.allocator, "__flags", .{ .int = flags });
+    if (args.len >= 3 and args[2] == .string) {
+        try obj.set(ctx.allocator, "__iter_class", args[2]);
+    }
     return .null;
 }
 
@@ -1042,12 +1047,23 @@ fn aoSetIteratorClass(ctx: *NativeContext, args: []const Value) RuntimeError!Val
 fn aoGetIterator(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
     const obj = getThis(ctx) orelse return .null;
     const arr = getData(obj) orelse return .null;
+    const ic = obj.get("__iter_class");
+    const cls_name = if (ic == .string and ic.string.len > 0) ic.string else "ArrayIterator";
     const it = try ctx.allocator.create(PhpObject);
-    it.* = .{ .class_name = "ArrayIterator" };
+    it.* = .{ .class_name = cls_name };
+    try ctx.vm.objects.append(ctx.allocator, it);
+    try ctx.vm.initObjectProperties(it, cls_name);
     try it.set(ctx.allocator, "__data", .{ .array = arr });
     try it.set(ctx.allocator, "__cursor", .{ .int = 0 });
-    try ctx.vm.objects.append(ctx.allocator, it);
+    try it.set(ctx.allocator, "__flags", .{ .int = 0 });
     return .{ .object = it };
+}
+
+fn aoGetIteratorClass(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const obj = getThis(ctx) orelse return .{ .string = "ArrayIterator" };
+    const ic = obj.get("__iter_class");
+    if (ic == .string and ic.string.len > 0) return ic;
+    return .{ .string = "ArrayIterator" };
 }
 
 fn aoSetFlags(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
