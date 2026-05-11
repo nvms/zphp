@@ -57,6 +57,7 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try rc_def.methods.put(a, "hasMethod", .{ .name = "hasMethod", .arity = 1 });
     try rc_def.methods.put(a, "isAbstract", .{ .name = "isAbstract", .arity = 0 });
     try rc_def.methods.put(a, "isInterface", .{ .name = "isInterface", .arity = 0 });
+    try rc_def.methods.put(a, "isAnonymous", .{ .name = "isAnonymous", .arity = 0 });
     try rc_def.methods.put(a, "getInterfaceNames", .{ .name = "getInterfaceNames", .arity = 0 });
     try rc_def.methods.put(a, "getAttributes", .{ .name = "getAttributes", .arity = 0 });
     try rc_def.methods.put(a, "getDocComment", .{ .name = "getDocComment", .arity = 0 });
@@ -103,6 +104,7 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try vm.native_fns.put(a, "ReflectionClass::hasMethod", rcHasMethod);
     try vm.native_fns.put(a, "ReflectionClass::isAbstract", rcIsAbstract);
     try vm.native_fns.put(a, "ReflectionClass::isInterface", rcIsInterface);
+    try vm.native_fns.put(a, "ReflectionClass::isAnonymous", rcIsAnonymous);
     try vm.native_fns.put(a, "ReflectionClass::getInterfaceNames", rcGetInterfaceNames);
     try vm.native_fns.put(a, "ReflectionClass::getAttributes", rcGetAttributes);
     try vm.native_fns.put(a, "ReflectionClass::getDocComment", reflectionGetDocCommentFalse);
@@ -990,6 +992,13 @@ fn rcIsInterface(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
     const this = getThis(ctx) orelse return .{ .bool = false };
     const is_iface = this.get("_is_interface");
     return .{ .bool = is_iface == .bool and is_iface.bool };
+}
+
+fn rcIsAnonymous(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const this = getThis(ctx) orelse return .{ .bool = false };
+    const name = this.get("name");
+    if (name != .string) return .{ .bool = false };
+    return .{ .bool = std.mem.startsWith(u8, name.string, "class@anonymous") };
 }
 
 fn rcGetInterfaceNames(ctx: *NativeContext, _: []const Value) RuntimeError!Value {

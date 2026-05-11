@@ -655,7 +655,7 @@ pub fn compileCall(self: *Compiler, node: Ast.Node) Error!void {
     }
 }
 
-fn hasSplatOrNamed(ast: *const Ast, args: []const u32) bool {
+pub fn hasSplatOrNamed(ast: *const Ast, args: []const u32) bool {
     for (args) |arg_idx| {
         const tag = ast.nodes[arg_idx].tag;
         if (tag == .splat_expr or tag == .named_arg) return true;
@@ -663,7 +663,7 @@ fn hasSplatOrNamed(ast: *const Ast, args: []const u32) bool {
     return false;
 }
 
-fn emitSpreadArgs(self: *Compiler, args: []const u32) Error!void {
+pub fn emitSpreadArgs(self: *Compiler, args: []const u32) Error!void {
     try self.emitOp(.array_new);
     for (args) |arg_idx| {
         const arg_node = self.ast.nodes[arg_idx];

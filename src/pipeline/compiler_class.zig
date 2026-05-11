@@ -1552,12 +1552,20 @@ pub fn compileAnonymousClass(self: *Compiler, node: Ast.Node) Error!void {
     try self.emitByte(0); // param attrs
 
     // now instantiate with constructor args
-    for (0..ctor_arg_count) |i| {
-        try self.compileNode(self.ast.extra_data[ctor_args_start + i]);
+    const ctor_args_slice = self.ast.extra_data[ctor_args_start..ctor_args_start + ctor_arg_count];
+    if (@import("compiler_expr.zig").hasSplatOrNamed(self.ast, ctor_args_slice)) {
+        try @import("compiler_expr.zig").emitSpreadArgs(self, ctor_args_slice);
+        try self.emitOp(.new_obj);
+        try self.emitU16(name_idx);
+        try self.emitByte(0xFF);
+    } else {
+        for (0..ctor_arg_count) |i| {
+            try self.compileNode(self.ast.extra_data[ctor_args_start + i]);
+        }
+        try self.emitOp(.new_obj);
+        try self.emitU16(name_idx);
+        try self.emitByte(@intCast(ctor_arg_count));
     }
-    try self.emitOp(.new_obj);
-    try self.emitU16(name_idx);
-    try self.emitByte(@intCast(ctor_arg_count));
 }
 
 pub fn compileInterfaceDecl(self: *Compiler, node: Ast.Node) Error!void {
