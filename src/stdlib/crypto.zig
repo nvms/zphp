@@ -228,9 +228,12 @@ fn native_random_int(ctx: *NativeContext, args: []const Value) RuntimeError!Valu
 const HashAlgo = enum {
     md5,
     sha1,
+    sha224,
     sha256,
     sha384,
     sha512,
+    sha512_224,
+    sha512_256,
     sha3_224,
     sha3_256,
     sha3_384,
@@ -245,9 +248,12 @@ const HashAlgo = enum {
     fn fromString(name: []const u8) ?HashAlgo {
         if (std.mem.eql(u8, name, "md5")) return .md5;
         if (std.mem.eql(u8, name, "sha1")) return .sha1;
+        if (std.mem.eql(u8, name, "sha224")) return .sha224;
         if (std.mem.eql(u8, name, "sha256")) return .sha256;
         if (std.mem.eql(u8, name, "sha384")) return .sha384;
         if (std.mem.eql(u8, name, "sha512")) return .sha512;
+        if (std.mem.eql(u8, name, "sha512/224")) return .sha512_224;
+        if (std.mem.eql(u8, name, "sha512/256")) return .sha512_256;
         if (std.mem.eql(u8, name, "sha3-224")) return .sha3_224;
         if (std.mem.eql(u8, name, "sha3-256")) return .sha3_256;
         if (std.mem.eql(u8, name, "sha3-384")) return .sha3_384;
@@ -265,10 +271,10 @@ const HashAlgo = enum {
         return switch (self) {
             .md5 => 16,
             .sha1 => 20,
-            .sha256, .sha3_256 => 32,
+            .sha224, .sha3_224, .sha512_224 => 28,
+            .sha256, .sha3_256, .sha512_256 => 32,
             .sha384, .sha3_384 => 48,
             .sha512, .sha3_512 => 64,
-            .sha3_224 => 28,
             .crc32, .crc32b, .xxh32 => 4,
             .xxh64, .xxh3 => 8,
             .xxh128 => 16,
@@ -280,9 +286,12 @@ fn computeHash(algo: HashAlgo, data: []const u8, out: []u8) void {
     switch (algo) {
         .md5 => std.crypto.hash.Md5.hash(data, out[0..16], .{}),
         .sha1 => std.crypto.hash.Sha1.hash(data, out[0..20], .{}),
+        .sha224 => std.crypto.hash.sha2.Sha224.hash(data, out[0..28], .{}),
         .sha256 => std.crypto.hash.sha2.Sha256.hash(data, out[0..32], .{}),
         .sha384 => std.crypto.hash.sha2.Sha384.hash(data, out[0..48], .{}),
         .sha512 => std.crypto.hash.sha2.Sha512.hash(data, out[0..64], .{}),
+        .sha512_224 => std.crypto.hash.sha2.Sha512T224.hash(data, out[0..28], .{}),
+        .sha512_256 => std.crypto.hash.sha2.Sha512T256.hash(data, out[0..32], .{}),
         .sha3_224 => std.crypto.hash.sha3.Sha3_224.hash(data, out[0..28], .{}),
         .sha3_256 => std.crypto.hash.sha3.Sha3_256.hash(data, out[0..32], .{}),
         .sha3_384 => std.crypto.hash.sha3.Sha3_384.hash(data, out[0..48], .{}),
@@ -335,9 +344,9 @@ fn computeHmac(algo: HashAlgo, data: []const u8, key: []const u8, out: []u8) voi
         .sha256 => std.crypto.auth.hmac.sha2.HmacSha256.create(out[0..32], data, key),
         .sha384 => std.crypto.auth.hmac.sha2.HmacSha384.create(out[0..48], data, key),
         .sha512 => std.crypto.auth.hmac.sha2.HmacSha512.create(out[0..64], data, key),
-        // hmac is only defined for proper cryptographic hashes; for crc/xxh
-        // PHP rejects them, but we just hash the data without keying for now
-        .sha3_224, .sha3_256, .sha3_384, .sha3_512, .crc32, .crc32b, .xxh32, .xxh64, .xxh3, .xxh128 => computeHash(algo, data, out),
+        // hmac is only defined for proper cryptographic hashes; for unsupported
+        // hmac variants we fall back to plain hashing of the data
+        .sha224, .sha512_224, .sha512_256, .sha3_224, .sha3_256, .sha3_384, .sha3_512, .crc32, .crc32b, .xxh32, .xxh64, .xxh3, .xxh128 => computeHash(algo, data, out),
     }
 }
 
@@ -453,6 +462,7 @@ fn native_hash_file(ctx: *NativeContext, args: []const Value) RuntimeError!Value
     const raw_output = args.len >= 3 and args[2].isTruthy();
     const algo = HashAlgo.fromString(algo_name) orelse return Value{ .bool = false };
     const data = std.fs.cwd().readFileAlloc(ctx.allocator, filename, 10 * 1024 * 1024) catch return Value{ .bool = false };
+    defer ctx.allocator.free(data);
     var digest: [64]u8 = undefined;
     const dlen = algo.digestLen();
     computeHash(algo, data, digest[0..dlen]);
