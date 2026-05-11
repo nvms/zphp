@@ -87,6 +87,7 @@ pub const entries = .{
     .{ "preg_match", preg_match },
     .{ "preg_match_all", preg_match_all },
     .{ "preg_replace", preg_replace },
+    .{ "preg_filter", preg_filter },
     .{ "preg_replace_callback", preg_replace_callback },
     .{ "preg_replace_callback_array", preg_replace_callback_array },
     .{ "preg_split", preg_split },
@@ -616,6 +617,29 @@ fn translateReplacement(allocator: std.mem.Allocator, src: []const u8) ![]u8 {
         i += 1;
     }
     return out.toOwnedSlice(allocator);
+}
+
+fn preg_filter(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len < 3) return .null;
+    if (args[2] == .array) {
+        const subj_arr = args[2].array;
+        const out = try ctx.allocator.create(@import("../runtime/value.zig").PhpArray);
+        out.* = .{};
+        try ctx.vm.arrays.append(ctx.allocator, out);
+        for (subj_arr.entries.items) |se| {
+            var sub_args: [3]Value = .{ args[0], args[1], se.value };
+            const replaced = try preg_replace(ctx, sub_args[0..3]);
+            // PHP preg_filter keeps only entries where the replacement actually
+            // changed the string (i.e. at least one match)
+            if (replaced == .string and se.value == .string and !std.mem.eql(u8, replaced.string, se.value.string)) {
+                try out.set(ctx.allocator, se.key, replaced);
+            }
+        }
+        return .{ .array = out };
+    }
+    const replaced = try preg_replace(ctx, args);
+    if (replaced == .string and args[2] == .string and !std.mem.eql(u8, replaced.string, args[2].string)) return replaced;
+    return .null;
 }
 
 fn preg_replace(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
