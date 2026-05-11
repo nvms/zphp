@@ -203,12 +203,19 @@ fn sfoRewind(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
     const fh = getHandle(obj) orelse return .null;
     _ = try ctx.vm.callByName("fseek", &.{ fh, .{ .int = 0 } });
     try obj.set(ctx.allocator, "__sfo_line", .{ .int = 0 });
-    try readOneLine(ctx, obj);
+    // mark current as "unread" so the first current()/valid() call lazily fetches
+    try obj.set(ctx.allocator, "__sfo_current", .null);
     return .null;
+}
+
+fn ensureCurrent(ctx: *NativeContext, obj: *@import("../runtime/value.zig").PhpObject) !void {
+    const cur = obj.get("__sfo_current");
+    if (cur == .null) try readOneLine(ctx, obj);
 }
 
 fn sfoValid(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
     const obj = getThis(ctx) orelse return .{ .bool = false };
+    try ensureCurrent(ctx, obj);
     const cur = obj.get("__sfo_current");
     if (cur == .bool and !cur.bool) return .{ .bool = false };
     if (cur == .null) return .{ .bool = false };
@@ -217,6 +224,7 @@ fn sfoValid(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
 
 fn sfoCurrent(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
     const obj = getThis(ctx) orelse return .null;
+    try ensureCurrent(ctx, obj);
     return obj.get("__sfo_current");
 }
 
@@ -389,6 +397,8 @@ fn sfoSeek(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len < 1) return .null;
     const target = Value.toInt(args[0]);
     _ = try sfoRewind(ctx, &.{});
+    // populate line 0 first (rewind no longer pre-reads); then next() to advance
+    try ensureCurrent(ctx, obj);
     while (objGetInt(obj, "__sfo_line") < target) {
         const cur = obj.get("__sfo_current");
         if (cur == .bool and !cur.bool) break;
