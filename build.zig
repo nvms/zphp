@@ -159,6 +159,21 @@ fn addIcuShim(b: *std.Build, mod: *std.Build.Module) void {
         .file = b.path("src/stdlib/icu_shim.c"),
         .flags = flags.items,
     });
+
+    // MessageFormat shim is C++ since ICU's named-arg MessageFormat is only
+    // exposed in the C++ API. link libc++ once for the whole module
+    var cpp_flags = std.ArrayList([]const u8){};
+    defer cpp_flags.deinit(b.allocator);
+    cpp_flags.append(b.allocator, "-std=c++17") catch {};
+    if (pkgConfigCflagsIncludes(b, "icu-i18n")) |inc| {
+        const flag = std.fmt.allocPrint(b.allocator, "-I{s}", .{inc}) catch return;
+        cpp_flags.append(b.allocator, flag) catch {};
+    }
+    mod.addCSourceFile(.{
+        .file = b.path("src/stdlib/icu_msg_shim.cpp"),
+        .flags = cpp_flags.items,
+    });
+    mod.link_libcpp = true;
 }
 
 // libgmp ships a clean pkg-config and uses static `mpz_*` -> `__gmpz_*` macros

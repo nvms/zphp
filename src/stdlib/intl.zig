@@ -76,6 +76,28 @@ extern fn zphp_udat_parse(f: *const UDateFormat, text: [*]const UChar, textLen: 
 extern fn zphp_udat_applyPattern(f: *UDateFormat, localized: u8, pattern: [*]const UChar, patternLen: i32) void;
 extern fn zphp_udat_toPattern(f: *const UDateFormat, localized: u8, result: [*]UChar, resultLen: i32, err: *UErrorCode) i32;
 
+// MessageFormat lives in ICU's C++ API (the C entry points are variadic).
+// icu_msg_shim.cpp wraps the named-args and positional-args formatters
+// behind a stable C ABI. ArgEntry must match the C++ struct byte-for-byte
+const ArgEntry = extern struct {
+    type: i32,
+    _pad: u32 = 0,
+    ival: i64,
+    dval: f64,
+    sval: ?[*]const UChar,
+    slen: i32,
+    _pad2: u32 = 0,
+    name: ?[*]const UChar,
+    name_len: i32,
+    _pad3: u32 = 0,
+};
+const ARG_INT: i32 = 0;
+const ARG_DOUBLE: i32 = 1;
+const ARG_STRING: i32 = 2;
+
+extern fn zphp_msgfmt_format(locale: [*:0]const u8, pattern: [*]const UChar, pat_len: i32, args: [*]const ArgEntry, arg_count: i32, result: [*]UChar, result_cap: i32, err: *UErrorCode) i32;
+extern fn zphp_msgfmt_format_positional(locale: [*:0]const u8, pattern: [*]const UChar, pat_len: i32, args: [*]const ArgEntry, arg_count: i32, result: [*]UChar, result_cap: i32, err: *UErrorCode) i32;
+
 const UIDNA = opaque {};
 extern fn zphp_uidna_openUTS46(options: u32, err: *UErrorCode) ?*UIDNA;
 extern fn zphp_uidna_close(idna: *UIDNA) void;
@@ -648,6 +670,136 @@ fn idnToUtf8(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     return idnConvert(ctx, args, false);
 }
 
+// ---------------- MessageFormatter ----------------
+
+fn buildArgEntries(ctx: *NativeContext, arr: *PhpArray, owned_u16: *std.ArrayListUnmanaged([]u16)) ![]ArgEntry {
+    const out = try ctx.allocator.alloc(ArgEntry, arr.entries.items.len);
+    for (arr.entries.items, 0..) |e, i| {
+        var ent = ArgEntry{ .type = ARG_STRING, .ival = 0, .dval = 0, .sval = null, .slen = 0, .name = null, .name_len = 0 };
+
+        if (e.key == .string) {
+            const name_u16 = try utf8ToU16(ctx, e.key.string);
+            try owned_u16.append(ctx.allocator, name_u16);
+            ent.name = name_u16.ptr;
+            ent.name_len = @intCast(name_u16.len);
+        }
+
+        switch (e.value) {
+            .int => |n| {
+                ent.type = ARG_INT;
+                ent.ival = n;
+            },
+            .float => |f| {
+                ent.type = ARG_DOUBLE;
+                ent.dval = f;
+            },
+            .string => |s| {
+                ent.type = ARG_STRING;
+                const u16s = try utf8ToU16(ctx, s);
+                try owned_u16.append(ctx.allocator, u16s);
+                ent.sval = u16s.ptr;
+                ent.slen = @intCast(u16s.len);
+            },
+            .bool => |b| {
+                ent.type = ARG_INT;
+                ent.ival = if (b) 1 else 0;
+            },
+            else => {
+                ent.type = ARG_STRING;
+                const u16s = try utf8ToU16(ctx, "");
+                try owned_u16.append(ctx.allocator, u16s);
+                ent.sval = u16s.ptr;
+                ent.slen = 0;
+            },
+        }
+        out[i] = ent;
+    }
+    return out;
+}
+
+fn msgFormatCommon(ctx: *NativeContext, locale: []const u8, pattern: []const u8, args_val: Value) RuntimeError!Value {
+    if (args_val != .array) return .{ .bool = false };
+    const arr = args_val.array;
+
+    const loc_z = try dupZ(ctx, locale);
+    const pat_u16 = try utf8ToU16(ctx, pattern);
+    defer ctx.allocator.free(pat_u16);
+
+    var owned_u16 = std.ArrayListUnmanaged([]u16){};
+    defer {
+        for (owned_u16.items) |b| ctx.allocator.free(b);
+        owned_u16.deinit(ctx.allocator);
+    }
+
+    const arg_entries = try buildArgEntries(ctx, arr, &owned_u16);
+    defer ctx.allocator.free(arg_entries);
+
+    var any_named = false;
+    for (arr.entries.items) |e| if (e.key == .string) { any_named = true; break; };
+
+    var status: UErrorCode = U_ZERO_ERROR;
+    var buf: [4096]UChar = undefined;
+    const n = if (any_named)
+        zphp_msgfmt_format(loc_z.ptr, pat_u16.ptr, @intCast(pat_u16.len), arg_entries.ptr, @intCast(arg_entries.len), &buf, @intCast(buf.len), &status)
+    else
+        zphp_msgfmt_format_positional(loc_z.ptr, pat_u16.ptr, @intCast(pat_u16.len), arg_entries.ptr, @intCast(arg_entries.len), &buf, @intCast(buf.len), &status);
+
+    if (status > U_ZERO_ERROR or n < 0) return .{ .bool = false };
+    const out = try u16ToUtf8(ctx, buf[0..@intCast(n)]);
+    return .{ .string = out };
+}
+
+fn mfConstruct(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len < 2 or args[0] != .string or args[1] != .string) return .null;
+    const obj = getThis(ctx) orelse return .null;
+    try obj.set(ctx.allocator, "__locale", .{ .string = try dupString(ctx, args[0].string) });
+    try obj.set(ctx.allocator, "__pattern", .{ .string = try dupString(ctx, args[1].string) });
+    return .null;
+}
+
+fn mfCreate(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len < 2 or args[0] != .string or args[1] != .string) return .{ .bool = false };
+    const obj = try ctx.createObject("MessageFormatter");
+    try obj.set(ctx.allocator, "__locale", .{ .string = try dupString(ctx, args[0].string) });
+    try obj.set(ctx.allocator, "__pattern", .{ .string = try dupString(ctx, args[1].string) });
+    return .{ .object = obj };
+}
+
+fn mfFormat(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len < 1) return .{ .bool = false };
+    const obj = getThis(ctx) orelse return .{ .bool = false };
+    const loc = obj.get("__locale");
+    const pat = obj.get("__pattern");
+    if (loc != .string or pat != .string) return .{ .bool = false };
+    return msgFormatCommon(ctx, loc.string, pat.string, args[0]);
+}
+
+fn mfFormatMessage(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len < 3 or args[0] != .string or args[1] != .string) return .{ .bool = false };
+    return msgFormatCommon(ctx, args[0].string, args[1].string, args[2]);
+}
+
+fn mfGetPattern(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const obj = getThis(ctx) orelse return .{ .string = try dupString(ctx, "") };
+    const v = obj.get("__pattern");
+    if (v == .string) return v;
+    return .{ .string = try dupString(ctx, "") };
+}
+
+fn mfSetPattern(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len < 1 or args[0] != .string) return .{ .bool = false };
+    const obj = getThis(ctx) orelse return .{ .bool = false };
+    try obj.set(ctx.allocator, "__pattern", .{ .string = try dupString(ctx, args[0].string) });
+    return .{ .bool = true };
+}
+
+fn mfGetLocale(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const obj = getThis(ctx) orelse return .{ .string = try dupString(ctx, "") };
+    const v = obj.get("__locale");
+    if (v == .string) return v;
+    return .{ .string = try dupString(ctx, "") };
+}
+
 // ---------------- registration ----------------
 
 pub const entries = .{
@@ -667,6 +819,8 @@ pub const entries = .{
     .{ "idn_to_utf8", idnToUtf8 },
     .{ "transliterator_transliterate", transliteratorTransliterate },
     .{ "transliterator_create", transCreateStatic },
+    .{ "msgfmt_create", mfCreate },
+    .{ "msgfmt_format_message", mfFormatMessage },
 };
 
 // procedural shim: accepts a Transliterator instance or an ID string
@@ -718,7 +872,27 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try registerNumberFormatterClass(vm, a);
     try registerTransliteratorClass(vm, a);
     try registerDateFormatterClass(vm, a);
+    try registerMessageFormatterClass(vm, a);
     try registerConstants(vm, a);
+}
+
+fn registerMessageFormatterClass(vm: *VM, a: Allocator) !void {
+    var def = ClassDef{ .name = "MessageFormatter" };
+    try def.methods.put(a, "__construct", .{ .name = "__construct", .arity = 2 });
+    try def.methods.put(a, "create", .{ .name = "create", .arity = 2, .is_static = true });
+    try def.methods.put(a, "format", .{ .name = "format", .arity = 1 });
+    try def.methods.put(a, "formatMessage", .{ .name = "formatMessage", .arity = 3, .is_static = true });
+    try def.methods.put(a, "getPattern", .{ .name = "getPattern", .arity = 0 });
+    try def.methods.put(a, "setPattern", .{ .name = "setPattern", .arity = 1 });
+    try def.methods.put(a, "getLocale", .{ .name = "getLocale", .arity = 0 });
+    try vm.classes.put(a, "MessageFormatter", def);
+    try vm.native_fns.put(a, "MessageFormatter::__construct", mfConstruct);
+    try vm.native_fns.put(a, "MessageFormatter::create", mfCreate);
+    try vm.native_fns.put(a, "MessageFormatter::format", mfFormat);
+    try vm.native_fns.put(a, "MessageFormatter::formatMessage", mfFormatMessage);
+    try vm.native_fns.put(a, "MessageFormatter::getPattern", mfGetPattern);
+    try vm.native_fns.put(a, "MessageFormatter::setPattern", mfSetPattern);
+    try vm.native_fns.put(a, "MessageFormatter::getLocale", mfGetLocale);
 }
 
 fn registerDateFormatterClass(vm: *VM, a: Allocator) !void {
