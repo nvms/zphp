@@ -530,7 +530,7 @@ pub fn compileCall(self: *Compiler, node: Ast.Node) Error!void {
                 } else {
                     try self.compileNode(arg_idx);
                     try self.emitOp(.op_null);
-                    try self.emitOp(.not_equal);
+                    try self.emitOp(.not_identical);
                 }
                 if (i < args.len - 1 and jump_count < end_jumps.len) {
                     end_jumps[jump_count] = try self.emitJump(.jump_if_false);
