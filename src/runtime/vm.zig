@@ -874,6 +874,9 @@ pub const VM = struct {
         @import("../stdlib/pdo.zig").cleanupResources(self.objects);
         @import("../stdlib/curl.zig").cleanupResources(self.objects);
         @import("../stdlib/filesystem.zig").cleanupHandles(self.objects);
+        // clean up fiber frames before strings/arrays/objects since fiber frames
+        // may reference values that get freed by those passes
+        for (self.fibers.items) |f| self.cleanupFiberFrames(f);
         for (self.strings.items) |s| self.allocator.free(s);
         for (self.arrays.items) |a| {
             a.deinit(self.allocator);
@@ -888,7 +891,6 @@ pub const VM = struct {
             self.allocator.destroy(g);
         }
         for (self.fibers.items) |f| {
-            self.cleanupFiberFrames(f);
             f.deinit(self.allocator);
             self.allocator.destroy(f);
         }
@@ -4098,7 +4100,7 @@ pub const VM = struct {
 
                         if (std.mem.eql(u8, method_name, "start")) {
                             if (fiber.state != .created) {
-                                if (try self.throwBuiltinException("FiberError", "Cannot start a fiber that is not in the created state")) continue;
+                                if (try self.throwBuiltinException("FiberError", "Cannot start a fiber that has already been started")) continue;
                                 return error.RuntimeError;
                             }
                             fiber.state = .running;
@@ -9141,7 +9143,7 @@ pub const VM = struct {
         fiber.saved_handlers.clearRetainingCapacity();
 
         // save frames (move ownership of vars/ref_bindings/locals to fiber)
-        for (self.frames[base_frame..self.frame_count]) |frame| {
+        for (self.frames[base_frame..self.frame_count]) |*frame| {
             try fiber.saved_frames.append(self.allocator, .{
                 .chunk = frame.chunk,
                 .ip = frame.ip,
@@ -9152,6 +9154,12 @@ pub const VM = struct {
                 .ref_array_bindings = frame.ref_array_bindings,
                 .ref_object_bindings = frame.ref_object_bindings,
             });
+            // null out the source's owned data so VM cleanup can't double-free
+            frame.vars = .{};
+            frame.ref_slots = .{};
+            frame.ref_array_bindings = .{};
+            frame.ref_object_bindings = .{};
+            frame.locals = &.{};
         }
         self.frame_count = base_frame;
 
@@ -9175,7 +9183,7 @@ pub const VM = struct {
 
     fn restoreFiberState(self: *VM, fiber: *Fiber, base_frame: usize, base_sp: usize) void {
         // restore frames (move ownership back to VM)
-        for (fiber.saved_frames.items, 0..) |frame, i| {
+        for (fiber.saved_frames.items, 0..) |*frame, i| {
             self.frames[base_frame + i] = .{
                 .chunk = frame.chunk,
                 .ip = frame.ip,
@@ -9186,6 +9194,12 @@ pub const VM = struct {
                 .ref_array_bindings = frame.ref_array_bindings,
                 .ref_object_bindings = frame.ref_object_bindings,
             };
+            // null out source to avoid double-free if cleanupFiberFrames runs later
+            frame.vars = .{};
+            frame.ref_slots = .{};
+            frame.ref_array_bindings = .{};
+            frame.ref_object_bindings = .{};
+            frame.locals = &.{};
         }
         self.frame_count = base_frame + fiber.saved_frames.items.len;
         fiber.saved_frames.clearRetainingCapacity();
