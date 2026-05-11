@@ -535,9 +535,11 @@ pub fn register(vm: *VM, a: Allocator) !void {
     var wr_def = ClassDef{ .name = "WeakReference", .is_final = true };
     try wr_def.methods.put(a, "create", .{ .name = "create", .arity = 1, .is_static = true });
     try wr_def.methods.put(a, "get", .{ .name = "get", .arity = 0 });
+    try wr_def.methods.put(a, "__construct", .{ .name = "__construct", .arity = 0 });
     try vm.classes.put(a, "WeakReference", wr_def);
     try vm.native_fns.put(a, "WeakReference::create", weakRefCreate);
     try vm.native_fns.put(a, "WeakReference::get", weakRefGet);
+    try vm.native_fns.put(a, "WeakReference::__construct", weakRefConstruct);
 
     // add iteration support to existing WeakMap
     if (vm.classes.getPtr("WeakMap")) |wm| {
@@ -622,6 +624,11 @@ fn weakRefCreate(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
 fn weakRefGet(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
     const this = getThis(ctx) orelse return .null;
     return this.get("__target");
+}
+
+fn weakRefConstruct(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    try ctx.vm.setPendingException("Error", "Cannot directly construct WeakReference, use WeakReference::create() instead");
+    return error.RuntimeError;
 }
 
 // =========================================================
@@ -1272,6 +1279,10 @@ fn wmOffsetSet(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     const obj = getThis(ctx) orelse return .null;
     const arr = try ensureData(ctx, obj);
     if (args.len < 2) return .null;
+    if (args[0] != .object) {
+        try ctx.vm.setPendingException("TypeError", "WeakMap key must be an object");
+        return error.RuntimeError;
+    }
     const key = wmObjKey(args[0]) orelse return .null;
     const is_new = arr.get(.{ .int = key }) == .null;
     try arr.set(ctx.allocator, .{ .int = key }, args[1]);
