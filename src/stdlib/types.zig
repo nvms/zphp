@@ -91,6 +91,7 @@ pub const entries = .{
     .{ "user_error", native_trigger_error },
     .{ "class_alias", native_class_alias },
     .{ "assert", native_assert },
+    .{ "assert_options", native_assert_options },
     .{ "spl_autoload_register", native_spl_autoload_register },
     .{ "spl_autoload_unregister", native_spl_autoload_unregister },
     .{ "spl_autoload_functions", native_spl_autoload_functions },
@@ -1322,22 +1323,24 @@ fn native_restore_error_handler(ctx: *NativeContext, _: []const Value) RuntimeEr
 
 fn native_assert(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len == 0) return .{ .bool = true };
+    const active = ctx.vm.ini_settings.get("assert.active") orelse "1";
+    if (std.mem.eql(u8, active, "0")) return .{ .bool = true };
     if (args[0].isTruthy()) return .{ .bool = true };
-    // assert.exception default varies; honor the ini if user explicitly enables.
-    // Many frameworks (Laravel/Symfony) call assert() at runtime expecting no
-    // side effects in production; throwing here causes hard-to-debug 500s.
-    const ae = ctx.vm.ini_settings.get("assert.exception") orelse "0";
+    // a Throwable as the 2nd arg is always thrown on failure, regardless of assert.exception
+    if (args.len >= 2 and args[1] == .object) {
+        ctx.vm.pending_exception = args[1];
+        return error.RuntimeError;
+    }
+    if (ctx.vm.ini_callbacks.get("assert.callback")) |cb| {
+        const file = ctx.vm.file_path;
+        const line: i64 = 0;
+        const expr: []const u8 = "assert(false)";
+        var cb_args = [_]Value{ .{ .string = file }, .{ .int = line }, .{ .string = expr } };
+        _ = ctx.invokeCallable(cb, &cb_args) catch {};
+    }
+    const ae = ctx.vm.ini_settings.get("assert.exception") orelse "1";
     if (std.mem.eql(u8, ae, "1")) {
-        const msg: []const u8 = blk: {
-            if (args.len >= 2) {
-                if (args[1] == .string) break :blk args[1].string;
-                if (args[1] == .object) {
-                    ctx.vm.pending_exception = args[1];
-                    return error.RuntimeError;
-                }
-            }
-            break :blk "assert(false)";
-        };
+        const msg: []const u8 = if (args.len >= 2 and args[1] == .string) args[1].string else "assert(false)";
         try ctx.vm.setPendingException("AssertionError", msg);
         return error.RuntimeError;
     }
@@ -1346,6 +1349,46 @@ fn native_assert(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
 
 fn native_noop_true(_: *NativeContext, _: []const Value) RuntimeError!Value {
     return .{ .bool = true };
+}
+
+fn native_assert_options(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len == 0) return .{ .bool = false };
+    const opt = Value.toInt(args[0]);
+    const key: []const u8 = switch (opt) {
+        1 => "assert.active",
+        2 => "assert.callback",
+        3 => "assert.bail",
+        4 => "assert.warning",
+        5 => "assert.quiet_eval",
+        6 => "assert.exception",
+        else => return .{ .bool = false },
+    };
+
+    // get previous value
+    var prev: Value = .{ .int = 0 };
+    if (opt == 2) {
+        // callback is stored under "assert.callback_val"
+        if (ctx.vm.ini_callbacks.get("assert.callback")) |cb| prev = cb;
+    } else {
+        const s = ctx.vm.ini_settings.get(key) orelse "0";
+        prev = .{ .int = std.fmt.parseInt(i64, s, 10) catch 0 };
+    }
+
+    if (args.len >= 2) {
+        if (opt == 2) {
+            try ctx.vm.ini_callbacks.put(ctx.allocator, "assert.callback", args[1]);
+        } else {
+            var buf: [32]u8 = undefined;
+            const v = Value.toInt(args[1]);
+            const s = std.fmt.bufPrint(&buf, "{d}", .{v}) catch return prev;
+            const owned = try ctx.allocator.dupe(u8, s);
+            try ctx.vm.strings.append(ctx.allocator, owned);
+            const key_owned = try ctx.allocator.dupe(u8, key);
+            try ctx.vm.strings.append(ctx.allocator, key_owned);
+            try ctx.vm.ini_settings.put(ctx.allocator, key_owned, owned);
+        }
+    }
+    return prev;
 }
 
 fn native_noop_null(_: *NativeContext, _: []const Value) RuntimeError!Value {

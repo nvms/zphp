@@ -338,6 +338,7 @@ pub const VM = struct {
     php_constants: std.StringHashMapUnmanaged(Value) = .{},
     user_constants: std.StringHashMapUnmanaged(void) = .{},
     ini_settings: std.StringHashMapUnmanaged([]const u8) = .{},
+    ini_callbacks: std.StringHashMapUnmanaged(Value) = .{},
     shutdown_callbacks: std.ArrayListUnmanaged(Value) = .{},
     strtok_state: ?[]const u8 = null,
     strtok_pos: usize = 0,
@@ -575,6 +576,12 @@ pub const VM = struct {
         try c.put(a, "EXTR_IF_EXISTS", .{ .int = 5 });
         try c.put(a, "EXTR_PREFIX_IF_EXISTS", .{ .int = 6 });
         try c.put(a, "EXTR_REFS", .{ .int = 256 });
+        try c.put(a, "ASSERT_ACTIVE", .{ .int = 1 });
+        try c.put(a, "ASSERT_CALLBACK", .{ .int = 2 });
+        try c.put(a, "ASSERT_BAIL", .{ .int = 3 });
+        try c.put(a, "ASSERT_WARNING", .{ .int = 4 });
+        try c.put(a, "ASSERT_QUIET_EVAL", .{ .int = 5 });
+        try c.put(a, "ASSERT_EXCEPTION", .{ .int = 6 });
         try c.put(a, "SORT_REGULAR", .{ .int = 0 });
         try c.put(a, "SORT_NUMERIC", .{ .int = 1 });
         try c.put(a, "SORT_STRING", .{ .int = 2 });
@@ -974,6 +981,7 @@ pub const VM = struct {
         self.php_constants.deinit(self.allocator);
         self.user_constants.deinit(self.allocator);
         self.ini_settings.deinit(self.allocator);
+        self.ini_callbacks.deinit(self.allocator);
         self.shutdown_callbacks.deinit(self.allocator);
         self.error_handler_stack.deinit(self.allocator);
         self.arrays.deinit(self.allocator);
