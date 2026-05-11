@@ -861,6 +861,19 @@ fn rcGetMethods(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     var seen = std.StringHashMapUnmanaged(void){};
     defer seen.deinit(ctx.allocator);
 
+    // interface methods (declaration order, abstract by definition)
+    if (ctx.vm.interfaces.get(class_name)) |iface| {
+        for (iface.methods.items) |method_name| {
+            if (seen.contains(method_name)) continue;
+            try seen.put(ctx.allocator, method_name, {});
+            const info = ClassDef.MethodInfo{ .name = method_name, .arity = 0, .visibility = .public, .is_abstract = true };
+            if (filter) |f| if (!methodMatchesFilter(info, f)) continue;
+            const obj = try buildMethodObj(ctx, class_name, method_name, info, class_name);
+            try arr.append(ctx.allocator, .{ .object = obj });
+        }
+        return .{ .array = arr };
+    }
+
     var current: ?[]const u8 = class_name;
     var depth: usize = 0;
     while (current) |name| {
