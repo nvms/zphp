@@ -674,6 +674,17 @@ pub const VM = struct {
         try c.put(a, "SIG_BLOCK", .{ .int = 0 });
         try c.put(a, "SIG_UNBLOCK", .{ .int = 1 });
         try c.put(a, "SIG_SETMASK", .{ .int = 2 });
+        try c.put(a, "FTP_ASCII", .{ .int = 1 });
+        try c.put(a, "FTP_TEXT", .{ .int = 1 });
+        try c.put(a, "FTP_BINARY", .{ .int = 2 });
+        try c.put(a, "FTP_IMAGE", .{ .int = 2 });
+        try c.put(a, "FTP_AUTORESUME", .{ .int = -1 });
+        try c.put(a, "FTP_TIMEOUT_SEC", .{ .int = 0 });
+        try c.put(a, "FTP_AUTOSEEK", .{ .int = 1 });
+        try c.put(a, "FTP_USEPASVADDRESS", .{ .int = 2 });
+        try c.put(a, "FTP_FAILED", .{ .int = 0 });
+        try c.put(a, "FTP_FINISHED", .{ .int = 1 });
+        try c.put(a, "FTP_MOREDATA", .{ .int = 2 });
         try c.put(a, "FNM_NOESCAPE", .{ .int = 1 });
         try c.put(a, "FNM_PATHNAME", .{ .int = 2 });
         try c.put(a, "FNM_PERIOD", .{ .int = 4 });
@@ -964,6 +975,7 @@ pub const VM = struct {
         @import("../stdlib/intl.zig").cleanupResources(self.objects);
         @import("../stdlib/gmp.zig").cleanupResources(self.objects);
         @import("../stdlib/gd.zig").cleanupResources(self.objects);
+        @import("../stdlib/ftp.zig").cleanupResources(self.objects);
         // clean up fiber frames before strings/arrays/objects since fiber frames
         // may reference values that get freed by those passes
         for (self.fibers.items) |f| self.cleanupFiberFrames(f);

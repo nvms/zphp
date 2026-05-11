@@ -34,6 +34,7 @@ pub fn register(map: *std.StringHashMapUnmanaged(NativeFn), allocator: std.mem.A
         @import("gd.zig").entries,
         @import("dom.zig").libxml_entries,
         @import("pcntl.zig").entries,
+        @import("ftp.zig").entries,
     };
     inline for (modules) |entries| {
         inline for (entries) |f| try map.put(allocator, f[0], f[1]);
