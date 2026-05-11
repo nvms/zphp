@@ -1002,7 +1002,7 @@ fn stmtErrorInfo(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
     const code = obj.get("__error_code");
     try arr.append(ctx.allocator, if (code == .string) code else .{ .string = "00000" });
     const driver_code = obj.get("__driver_error_code");
-    try arr.append(ctx.allocator, if (driver_code == .int) driver_code else .{ .int = 0 });
+    try arr.append(ctx.allocator, if (driver_code == .int) driver_code else .null);
     const msg = obj.get("__error_message");
     try arr.append(ctx.allocator, if (msg == .string) msg else .null);
     return .{ .array = arr };
