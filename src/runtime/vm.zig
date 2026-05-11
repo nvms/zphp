@@ -7971,6 +7971,16 @@ pub const VM = struct {
         return null;
     }
 
+    pub fn closureThisByName(self: *VM, name: []const u8) Value {
+        if (self.capture_index.get(name)) |cr| {
+            const caps = self.captures.items[cr.start .. cr.start + cr.len];
+            for (caps) |cap| {
+                if (std.mem.eql(u8, cap.var_name, "$this")) return cap.value;
+            }
+        }
+        return .null;
+    }
+
     fn parentResolvingClass(self: *VM) ?[]const u8 {
         // like currentDefiningClass but skips closure scope check and uses
         // called_class as disambiguator fallback for parent:: resolution

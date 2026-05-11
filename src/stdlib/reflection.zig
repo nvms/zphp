@@ -335,6 +335,8 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try rf_def.methods.put(a, "isClosure", .{ .name = "isClosure", .arity = 0 });
     try rf_def.methods.put(a, "isGenerator", .{ .name = "isGenerator", .arity = 0 });
     try rf_def.methods.put(a, "getClosureScopeClass", .{ .name = "getClosureScopeClass", .arity = 0 });
+    try rf_def.methods.put(a, "getClosureThis", .{ .name = "getClosureThis", .arity = 0 });
+    try rf_def.methods.put(a, "isStatic", .{ .name = "isStatic", .arity = 0 });
     try rf_def.methods.put(a, "hasReturnType", .{ .name = "hasReturnType", .arity = 0 });
     try rf_def.methods.put(a, "getAttributes", .{ .name = "getAttributes", .arity = 0 });
     try rf_def.methods.put(a, "invoke", .{ .name = "invoke", .arity = 0 });
@@ -351,6 +353,8 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try vm.native_fns.put(a, "ReflectionFunction::isClosure", rfIsAnonymous);
     try vm.native_fns.put(a, "ReflectionFunction::isGenerator", rfIsGenerator);
     try vm.native_fns.put(a, "ReflectionFunction::getClosureScopeClass", rfGetClosureScopeClass);
+    try vm.native_fns.put(a, "ReflectionFunction::getClosureThis", rfGetClosureThis);
+    try vm.native_fns.put(a, "ReflectionFunction::isStatic", rfIsStatic);
     try vm.native_fns.put(a, "ReflectionFunction::hasReturnType", rfHasReturnType);
     try vm.native_fns.put(a, "ReflectionFunction::getAttributes", rfGetAttributes);
     try vm.native_fns.put(a, "ReflectionFunction::getClosureUsedVariables", rfGetClosureUsedVariables);
@@ -2090,8 +2094,26 @@ fn rfGetClosureScopeClass(ctx: *NativeContext, _: []const Value) RuntimeError!Va
         try obj.set(ctx.allocator, "name", .{ .string = scope_name });
         return .{ .object = obj };
     }
-    _ = name;
+    if (ctx.vm.closureScopeByName(name)) |scope| {
+        const obj = try ctx.createObject("ReflectionClass");
+        try obj.set(ctx.allocator, "name", .{ .string = scope });
+        return .{ .object = obj };
+    }
     return .null;
+}
+
+fn rfGetClosureThis(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const this = getThis(ctx) orelse return .null;
+    const name = if (this.get("name") == .string) this.get("name").string else return .null;
+    return ctx.vm.closureThisByName(name);
+}
+
+fn rfIsStatic(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    _ = ctx;
+    // a "static" closure is one declared with `static function` keyword.
+    // zphp does not track this flag separately; reporting false matches PHP
+    // for ordinary closures and is a known nuance for `static fn` declarations.
+    return .{ .bool = false };
 }
 
 // --- shared helpers ---
