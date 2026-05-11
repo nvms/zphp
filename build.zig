@@ -35,6 +35,8 @@ pub fn build(b: *std.Build) void {
     exe_mod.linkSystemLibrary("nghttp2", .{ .preferred_link_mode = .static });
     exe_mod.linkSystemLibrary("curl", .{});
     addLibxml2(b, exe_mod);
+    addLibicu(b, exe_mod);
+    addIcuShim(b, exe_mod);
     exe_mod.link_libc = true;
     exe_mod.addObject(fast_loop_obj);
 
@@ -77,6 +79,8 @@ pub fn build(b: *std.Build) void {
     test_mod.linkSystemLibrary("nghttp2", .{ .preferred_link_mode = .static });
     test_mod.linkSystemLibrary("curl", .{});
     addLibxml2(b, test_mod);
+    addLibicu(b, test_mod);
+    addIcuShim(b, test_mod);
     test_mod.link_libc = true;
     test_mod.addObject(fast_loop_test_obj);
 
@@ -119,6 +123,51 @@ fn pkgConfigVariable(b: *std.Build, pkg: []const u8, name: []const u8) ?[]const 
     }) catch return null;
     if (r.term != .Exited or r.term.Exited != 0) return null;
     return std.mem.trim(u8, r.stdout, " \t\r\n");
+}
+
+// libicu is split across three libraries (icuuc, icui18n, icudata) with pkg-config
+// names icu-uc, icu-i18n. on macos it's keg-only (brew install icu4c) so its
+// pkg-config dir must be on PKG_CONFIG_PATH. on alpine, icu-dev / icu-static
+fn addLibicu(b: *std.Build, mod: *std.Build.Module) void {
+    mod.linkSystemLibrary("icui18n", .{ .use_pkg_config = .no });
+    mod.linkSystemLibrary("icuuc", .{ .use_pkg_config = .no });
+    mod.linkSystemLibrary("icudata", .{ .use_pkg_config = .no });
+    if (pkgConfigVariable(b, "icu-i18n", "libdir")) |lib| {
+        mod.addLibraryPath(.{ .cwd_relative = lib });
+    }
+}
+
+// icu_shim.c wraps every ICU function we use behind a zphp_* name. compiling
+// it through the C preprocessor lets libicu's rename macros (u_strFromUTF8 ->
+// u_strFromUTF8_77) be applied so the resulting object file links to the right
+// versioned symbols. zig's @cImport doesn't apply these renames, which is why
+// intl.zig declares the zphp_* symbols as plain externs instead of @cImport-ing
+// libicu headers
+fn addIcuShim(b: *std.Build, mod: *std.Build.Module) void {
+    var flags = std.ArrayList([]const u8){};
+    defer flags.deinit(b.allocator);
+    flags.append(b.allocator, "-std=c11") catch {};
+    if (pkgConfigCflagsIncludes(b, "icu-i18n")) |inc| {
+        const flag = std.fmt.allocPrint(b.allocator, "-I{s}", .{inc}) catch return;
+        flags.append(b.allocator, flag) catch {};
+    }
+    mod.addCSourceFile(.{
+        .file = b.path("src/stdlib/icu_shim.c"),
+        .flags = flags.items,
+    });
+}
+
+fn pkgConfigCflagsIncludes(b: *std.Build, pkg: []const u8) ?[]const u8 {
+    const r = std.process.Child.run(.{
+        .allocator = b.allocator,
+        .argv = &.{ "pkg-config", "--cflags-only-I", pkg },
+    }) catch return null;
+    if (r.term != .Exited or r.term.Exited != 0) return null;
+    var it = std.mem.tokenizeAny(u8, r.stdout, " \t\r\n");
+    while (it.next()) |tok| {
+        if (std.mem.startsWith(u8, tok, "-I")) return tok[2..];
+    }
+    return null;
 }
 
 fn xml2ConfigIncludeDir(b: *std.Build) ?[]const u8 {

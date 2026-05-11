@@ -42,11 +42,11 @@ jobs:
 
       - name: install system libs (ubuntu glibc)
         if: runner.os == 'Linux' && !matrix.alpine
-        run: sudo apt-get update && sudo apt-get install -y libpcre2-dev libsqlite3-dev zlib1g-dev libmysqlclient-dev libpq-dev libssl-dev libnghttp2-dev libcurl4-openssl-dev libxml2-dev
+        run: sudo apt-get update && sudo apt-get install -y libpcre2-dev libsqlite3-dev zlib1g-dev libmysqlclient-dev libpq-dev libssl-dev libnghttp2-dev libcurl4-openssl-dev libxml2-dev libicu-dev
 
       - name: install system libs (macos)
         if: runner.os == 'macOS'
-        run: brew install mysql-client libpq openssl@3 nghttp2 curl libxml2
+        run: brew install mysql-client libpq openssl@3 nghttp2 curl libxml2 icu4c
 
       - name: setup alpine (musl)
         if: matrix.alpine
@@ -62,6 +62,7 @@ jobs:
             openssl-dev openssl-libs-static
             nghttp2-dev nghttp2-static curl-dev curl-static
             libxml2-dev libxml2-static
+            icu-dev icu-static icu-libs
 
       - name: install zig (alpine)
         if: matrix.alpine
@@ -77,7 +78,7 @@ jobs:
         if: ${{ !matrix.alpine }}
         run: zig build -Doptimize=ReleaseFast
         env:
-          PKG_CONFIG_PATH: ${{ runner.os == 'macOS' && '/opt/homebrew/opt/mysql-client/lib/pkgconfig:/opt/homebrew/opt/libpq/lib/pkgconfig:/opt/homebrew/opt/curl/lib/pkgconfig:/usr/local/opt/mysql-client/lib/pkgconfig:/usr/local/opt/libpq/lib/pkgconfig' || '' }}
+          PKG_CONFIG_PATH: ${{ runner.os == 'macOS' && '/opt/homebrew/opt/mysql-client/lib/pkgconfig:/opt/homebrew/opt/libpq/lib/pkgconfig:/opt/homebrew/opt/curl/lib/pkgconfig:/opt/homebrew/opt/icu4c/lib/pkgconfig:/usr/local/opt/mysql-client/lib/pkgconfig:/usr/local/opt/libpq/lib/pkgconfig:/usr/local/opt/icu4c/lib/pkgconfig' || '' }}
 
       - name: build (musl)
         if: matrix.alpine

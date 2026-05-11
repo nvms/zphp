@@ -524,6 +524,7 @@ pub const VM = struct {
         try @import("../stdlib/simplexml.zig").register(vm, allocator);
         try @import("../stdlib/xmlreader.zig").register(vm, allocator);
         try @import("../stdlib/xmlwriter.zig").register(vm, allocator);
+        try @import("../stdlib/intl.zig").register(vm, allocator);
         vm.error_reporting_level = 30719;
         vm.ic = try allocator.create(InlineCache);
         vm.ic.?.* = .{};
@@ -907,6 +908,7 @@ pub const VM = struct {
         @import("../stdlib/simplexml.zig").cleanupResources(self.objects);
         @import("../stdlib/xmlreader.zig").cleanupResources(self.objects);
         @import("../stdlib/xmlwriter.zig").cleanupResources(self.objects);
+        @import("../stdlib/intl.zig").cleanupResources(self.objects);
         // clean up fiber frames before strings/arrays/objects since fiber frames
         // may reference values that get freed by those passes
         for (self.fibers.items) |f| self.cleanupFiberFrames(f);
