@@ -215,8 +215,10 @@ fn native_posix_getpgid(_: *NativeContext, args: []const Value) RuntimeError!Val
     return .{ .int = @intCast(r) };
 }
 
+// PHP labels for posix_getrlimit. Index matches RLIMIT_* on Linux/macOS:
+// 0=CPU 1=FSIZE 2=DATA 3=STACK 4=CORE 5=RSS 6=NOFILE 7=NPROC 8=MEMLOCK 9=AS 10=LOCKS
 const RLIMIT_NAMES = [_][]const u8{
-    "cpu", "fsize", "data", "stack", "core", "rss", "nproc", "nofile", "memlock", "as", "locks",
+    "cpu", "filesize", "data", "stack", "core", "maxrss", "openfiles", "maxproc", "memlock", "totalmem", "kqueues",
 };
 fn rlimitFromName(name: []const u8) ?c_int {
     inline for (RLIMIT_NAMES, 0..) |n, idx| {
