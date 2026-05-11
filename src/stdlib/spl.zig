@@ -87,7 +87,16 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try stack_def.methods.put(a, "next", .{ .name = "next", .arity = 0 });
     try stack_def.methods.put(a, "valid", .{ .name = "valid", .arity = 0 });
     try stack_def.methods.put(a, "toArray", .{ .name = "toArray", .arity = 0 });
+    try stack_def.methods.put(a, "offsetGet", .{ .name = "offsetGet", .arity = 1 });
+    try stack_def.methods.put(a, "offsetSet", .{ .name = "offsetSet", .arity = 2 });
+    try stack_def.methods.put(a, "offsetExists", .{ .name = "offsetExists", .arity = 1 });
+    try stack_def.methods.put(a, "offsetUnset", .{ .name = "offsetUnset", .arity = 1 });
     try vm.classes.put(a, "SplStack", stack_def);
+
+    try vm.native_fns.put(a, "SplStack::offsetGet", stackOffsetGet);
+    try vm.native_fns.put(a, "SplStack::offsetSet", stackOffsetSet);
+    try vm.native_fns.put(a, "SplStack::offsetExists", stackOffsetExists);
+    try vm.native_fns.put(a, "SplStack::offsetUnset", stackOffsetUnset);
 
     try vm.native_fns.put(a, "SplStack::__construct", stackConstruct);
     try vm.native_fns.put(a, "SplStack::push", stackPush);
@@ -2027,6 +2036,55 @@ fn dllValid(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
     const arr = getData(obj) orelse return .{ .bool = false };
     const cursor = Value.toInt(obj.get("__cursor"));
     return .{ .bool = cursor >= 0 and cursor < @as(i64, @intCast(arr.entries.items.len)) };
+}
+
+fn stackOffsetGet(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    const obj = getThis(ctx) orelse return .null;
+    const arr = getData(obj) orelse return .null;
+    if (args.len == 0) return .null;
+    const n: i64 = @intCast(arr.entries.items.len);
+    const idx = Value.toInt(args[0]);
+    if (idx < 0 or idx >= n) {
+        try ctx.vm.setPendingException("OutOfRangeException", "Offset invalid or out of range");
+        return error.RuntimeError;
+    }
+    return arr.entries.items[@intCast(n - 1 - idx)].value;
+}
+
+fn stackOffsetSet(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    const obj = getThis(ctx) orelse return .null;
+    const arr = try ensureData(ctx, obj);
+    if (args.len < 2) return .null;
+    if (args[0] == .null) {
+        try arr.append(ctx.allocator, args[1]);
+        return .null;
+    }
+    const n: i64 = @intCast(arr.entries.items.len);
+    const idx = Value.toInt(args[0]);
+    if (idx >= 0 and idx < n) {
+        arr.entries.items[@intCast(n - 1 - idx)].value = args[1];
+    }
+    return .null;
+}
+
+fn stackOffsetExists(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    const obj = getThis(ctx) orelse return .{ .bool = false };
+    const arr = getData(obj) orelse return .{ .bool = false };
+    if (args.len == 0) return .{ .bool = false };
+    const idx = Value.toInt(args[0]);
+    return .{ .bool = idx >= 0 and idx < @as(i64, @intCast(arr.entries.items.len)) };
+}
+
+fn stackOffsetUnset(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    const obj = getThis(ctx) orelse return .null;
+    const arr = getData(obj) orelse return .null;
+    if (args.len == 0) return .null;
+    const n: i64 = @intCast(arr.entries.items.len);
+    const idx = Value.toInt(args[0]);
+    if (idx >= 0 and idx < n) {
+        _ = arr.entries.orderedRemove(@intCast(n - 1 - idx));
+    }
+    return .null;
 }
 
 fn dllOffsetGet(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
