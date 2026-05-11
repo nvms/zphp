@@ -302,6 +302,28 @@ fn serializeValue(ctx: *NativeContext, buf: *std.ArrayListUnmanaged(u8), sctx: *
                 }
             }
 
+            // SplFixedArray: emit fixed-length object with int-keyed entries from __data
+            if (std.mem.eql(u8, obj.class_name, "SplFixedArray")) {
+                const data = obj.get("__data");
+                if (data == .array) {
+                    const arr_v = data.array;
+                    try buf.appendSlice(a, "O:13:\"SplFixedArray\":");
+                    var tmp: [20]u8 = undefined;
+                    const cl = std.fmt.bufPrint(&tmp, "{d}", .{arr_v.entries.items.len}) catch return;
+                    try buf.appendSlice(a, cl);
+                    try buf.appendSlice(a, ":{");
+                    for (arr_v.entries.items, 0..) |entry, i| {
+                        try buf.appendSlice(a, "i:");
+                        const ki = std.fmt.bufPrint(&tmp, "{d}", .{i}) catch return;
+                        try buf.appendSlice(a, ki);
+                        try buf.append(a, ';');
+                        try serializeValue(ctx, buf, sctx, entry.value);
+                    }
+                    try buf.append(a, '}');
+                    return;
+                }
+            }
+
             // PHP 7.4+ __serialize: returns the array used as the object's serialized payload
             if (ctx.vm.hasMethod(obj.class_name, "__serialize")) {
                 const ser_result = try ctx.vm.callMethod(obj, "__serialize", &.{});
@@ -571,6 +593,14 @@ fn unserializeValue(ctx: *NativeContext, uctx: *UnserCtx, s: []const u8, pos: us
                 collected = arr;
             }
 
+            const is_fixed_array = std.mem.eql(u8, class_name, "SplFixedArray");
+            var fixed_data: ?*PhpArray = null;
+            if (is_fixed_array) {
+                const arr = try ctx.allocator.create(PhpArray);
+                arr.* = .{};
+                try ctx.vm.arrays.append(ctx.allocator, arr);
+                fixed_data = arr;
+            }
             for (0..prop_count) |_| {
                 const key_slots_before = uctx.slots.items.len;
                 const key_result = try unserializeValue(ctx, uctx, s, p);
@@ -586,10 +616,17 @@ fn unserializeValue(ctx: *NativeContext, uctx: *UnserCtx, s: []const u8, pos: us
                         else => continue,
                     };
                     try arr.set(ctx.allocator, k, val_result.value);
+                } else if (fixed_data) |arr| {
+                    if (key_result.value == .int) try arr.set(ctx.allocator, .{ .int = key_result.value.int }, val_result.value);
                 } else if (key_result.value == .string) {
                     const stripped = stripVisibilityPrefix(key_result.value.string);
                     try obj.set(ctx.allocator, stripped, val_result.value);
                 }
+            }
+            if (is_fixed_array) {
+                try obj.set(ctx.allocator, "__data", .{ .array = fixed_data.? });
+                try obj.set(ctx.allocator, "__size", .{ .int = @intCast(prop_count) });
+                try obj.set(ctx.allocator, "__cursor", .{ .int = 0 });
             }
             if (p < s.len and s[p] == '}') p += 1;
 

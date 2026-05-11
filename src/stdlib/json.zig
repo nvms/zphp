@@ -328,6 +328,13 @@ fn encodeValue(buf: *std.ArrayListUnmanaged(u8), a: std.mem.Allocator, val: Valu
                     try encodeValue(buf, a, result, depth, max_depth, flags, vm, visited);
                     return;
                 }
+                if (std.mem.eql(u8, obj.class_name, "SplFixedArray")) {
+                    const data = obj.get("__data");
+                    if (data == .array) {
+                        try encodeValue(buf, a, data, depth, max_depth, flags, vm, visited);
+                        return;
+                    }
+                }
             }
 
             // collect public property names in stable order
