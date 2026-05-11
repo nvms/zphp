@@ -486,12 +486,19 @@ fn soapClientGetTypes(ctx: *NativeContext, _: []const Value) RuntimeError!Value 
 }
 fn soapClientSetCookie(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     const o = getThis(ctx) orelse return .null;
-    if (args.len < 2) return .null;
+    if (args.len < 1) return .null;
     const cookies_v = o.get("__cookies");
     if (cookies_v != .array) return .null;
-    if (args[0] == .string) {
-        try cookies_v.array.set(ctx.allocator, .{ .string = args[0].string }, args[1]);
+    if (args[0] != .string) return .null;
+    // PHP stores each cookie as a 3-element array: [value, autodelete, path].
+    // a single arg deletes the cookie - matches PHP's __setCookie(name) semantic
+    if (args.len == 1) {
+        try cookies_v.array.set(ctx.allocator, .{ .string = args[0].string }, .null);
+        return .null;
     }
+    const inner = try ctx.createArray();
+    try inner.set(ctx.allocator, .{ .int = 0 }, args[1]);
+    try cookies_v.array.set(ctx.allocator, .{ .string = args[0].string }, .{ .array = inner });
     return .null;
 }
 fn soapClientGetCookies(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
