@@ -5555,6 +5555,44 @@ pub const VM = struct {
                         };
                     }
 
+                    // drain Iterator-like objects into an array for delegation
+                    if (iterable == .object and self.hasMethod(iterable.object.class_name, "rewind") and self.hasMethod(iterable.object.class_name, "valid") and self.hasMethod(iterable.object.class_name, "current") and self.hasMethod(iterable.object.class_name, "next")) {
+                        const it = iterable.object;
+                        _ = self.callMethod(it, "rewind", &.{}) catch {
+                            if (self.dispatchPendingException(base_frame)) continue;
+                            return error.RuntimeError;
+                        };
+                        const arr = try self.allocator.create(@import("value.zig").PhpArray);
+                        arr.* = .{};
+                        try self.arrays.append(self.allocator, arr);
+                        const has_key = self.hasMethod(it.class_name, "key");
+                        while (true) {
+                            const v = self.callMethod(it, "valid", &.{}) catch {
+                                if (self.dispatchPendingException(base_frame)) continue;
+                                return error.RuntimeError;
+                            };
+                            if (!v.isTruthy()) break;
+                            const cur = self.callMethod(it, "current", &.{}) catch {
+                                if (self.dispatchPendingException(base_frame)) continue;
+                                return error.RuntimeError;
+                            };
+                            if (has_key) {
+                                const k = self.callMethod(it, "key", &.{}) catch {
+                                    if (self.dispatchPendingException(base_frame)) continue;
+                                    return error.RuntimeError;
+                                };
+                                try arr.set(self.allocator, @import("value.zig").Value.toArrayKey(k), cur);
+                            } else {
+                                try arr.append(self.allocator, cur);
+                            }
+                            _ = self.callMethod(it, "next", &.{}) catch {
+                                if (self.dispatchPendingException(base_frame)) continue;
+                                return error.RuntimeError;
+                            };
+                        }
+                        iterable = .{ .array = arr };
+                    }
+
                     if (iterable == .generator) {
                         const inner = iterable.generator;
                         if (inner.state == .created) {
