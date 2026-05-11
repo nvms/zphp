@@ -358,7 +358,6 @@ pub fn register(vm: *VM, a: Allocator) !void {
 
     // SplFixedArray
     var fa_def = ClassDef{ .name = "SplFixedArray" };
-    try fa_def.interfaces.append(a, "Iterator");
     try fa_def.interfaces.append(a, "Countable");
     try fa_def.interfaces.append(a, "ArrayAccess");
     try fa_def.methods.put(a, "__construct", .{ .name = "__construct", .arity = 1 });
@@ -1657,15 +1656,17 @@ fn faFromArray(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     const preserve_keys = if (args.len >= 2) args[1].isTruthy() else true;
     var max_idx: i64 = -1;
     for (src.entries.items) |entry| {
-        if (entry.key != .int) {
-            try ctx.vm.setPendingException("InvalidArgumentException", "array must contain only positive integer keys");
-            return error.RuntimeError;
+        if (preserve_keys) {
+            if (entry.key != .int) {
+                try ctx.vm.setPendingException("InvalidArgumentException", "array must contain only positive integer keys");
+                return error.RuntimeError;
+            }
+            if (entry.key.int < 0) {
+                try ctx.vm.setPendingException("InvalidArgumentException", "array must contain only positive integer keys");
+                return error.RuntimeError;
+            }
+            if (entry.key.int > max_idx) max_idx = entry.key.int;
         }
-        if (entry.key.int < 0) {
-            try ctx.vm.setPendingException("InvalidArgumentException", "array must contain only positive integer keys");
-            return error.RuntimeError;
-        }
-        if (entry.key.int > max_idx) max_idx = entry.key.int;
     }
     const size: usize = if (preserve_keys and max_idx >= 0)
         @intCast(max_idx + 1)
