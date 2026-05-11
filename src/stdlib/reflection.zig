@@ -390,6 +390,21 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try rprop_def.methods.put(a, "getAttributes", .{ .name = "getAttributes", .arity = 0 });
     try rprop_def.methods.put(a, "getDocComment", .{ .name = "getDocComment", .arity = 0 });
     try rprop_def.methods.put(a, "isVirtual", .{ .name = "isVirtual", .arity = 0 });
+    // PHP 8.4 asymmetric visibility methods. zphp doesn't yet model
+    // separate set visibility but the symfony/property-access component
+    // probes for these unconditionally; return false until we implement
+    // `public(set)` / `protected(set)` / `private(set)` modifiers
+    try rprop_def.methods.put(a, "isPrivateSet", .{ .name = "isPrivateSet", .arity = 0 });
+    try rprop_def.methods.put(a, "isProtectedSet", .{ .name = "isProtectedSet", .arity = 0 });
+    try rprop_def.methods.put(a, "isPublicSet", .{ .name = "isPublicSet", .arity = 0 });
+    try rprop_def.methods.put(a, "isFinal", .{ .name = "isFinal", .arity = 0 });
+    try rprop_def.methods.put(a, "isAbstract", .{ .name = "isAbstract", .arity = 0 });
+    try rprop_def.methods.put(a, "hasHooks", .{ .name = "hasHooks", .arity = 0 });
+    try rprop_def.methods.put(a, "getHooks", .{ .name = "getHooks", .arity = 0 });
+    try rprop_def.methods.put(a, "hasHook", .{ .name = "hasHook", .arity = 1 });
+    try rprop_def.methods.put(a, "getHook", .{ .name = "getHook", .arity = 1 });
+    try rprop_def.methods.put(a, "isLazy", .{ .name = "isLazy", .arity = 1 });
+    try rprop_def.methods.put(a, "skipLazyInitialization", .{ .name = "skipLazyInitialization", .arity = 1 });
     try rprop_def.static_props.put(a, "IS_STATIC", .{ .int = 16 });
     try rprop_def.static_props.put(a, "IS_PUBLIC", .{ .int = 1 });
     try rprop_def.static_props.put(a, "IS_PROTECTED", .{ .int = 2 });
@@ -413,6 +428,17 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try vm.native_fns.put(a, "ReflectionProperty::isPublic", rpropIsPublic);
     try vm.native_fns.put(a, "ReflectionProperty::isProtected", rpropIsProtected);
     try vm.native_fns.put(a, "ReflectionProperty::isPrivate", rpropIsPrivate);
+    try vm.native_fns.put(a, "ReflectionProperty::isPrivateSet", reflectionFalse);
+    try vm.native_fns.put(a, "ReflectionProperty::isProtectedSet", reflectionFalse);
+    try vm.native_fns.put(a, "ReflectionProperty::isPublicSet", reflectionFalse);
+    try vm.native_fns.put(a, "ReflectionProperty::isFinal", reflectionFalse);
+    try vm.native_fns.put(a, "ReflectionProperty::isAbstract", reflectionFalse);
+    try vm.native_fns.put(a, "ReflectionProperty::hasHooks", reflectionFalse);
+    try vm.native_fns.put(a, "ReflectionProperty::hasHook", reflectionFalse);
+    try vm.native_fns.put(a, "ReflectionProperty::getHooks", rpropGetHooks);
+    try vm.native_fns.put(a, "ReflectionProperty::getHook", reflectionNoop);
+    try vm.native_fns.put(a, "ReflectionProperty::isLazy", reflectionFalse);
+    try vm.native_fns.put(a, "ReflectionProperty::skipLazyInitialization", reflectionNoop);
     try vm.native_fns.put(a, "ReflectionProperty::getDefaultValue", rpropGetDefaultValue);
     try vm.native_fns.put(a, "ReflectionProperty::hasDefaultValue", rpropHasDefaultValue);
     try vm.native_fns.put(a, "ReflectionProperty::isInitialized", rpropIsInitialized);
@@ -2265,6 +2291,15 @@ fn closureFromCallable(ctx: *NativeContext, args: []const Value) RuntimeError!Va
 
 fn reflectionNoop(_: *NativeContext, _: []const Value) RuntimeError!Value {
     return .null;
+}
+
+fn reflectionFalse(_: *NativeContext, _: []const Value) RuntimeError!Value {
+    return .{ .bool = false };
+}
+
+fn rpropGetHooks(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const arr = try ctx.createArray();
+    return .{ .array = arr };
 }
 
 fn rrefFromArrayElement(_: *NativeContext, _: []const Value) RuntimeError!Value {

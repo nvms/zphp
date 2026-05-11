@@ -4376,7 +4376,19 @@ fn native_strtr(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
                 if (search.len <= best_search.len) continue;
                 if (i + search.len <= str.len and std.mem.eql(u8, str[i .. i + search.len], search)) {
                     best_search = search;
-                    best_repl = if (entry.value == .string) entry.value.string else "";
+                    // PHP coerces non-string replacement values to their string
+                    // form, so int/float/bool entries substitute correctly
+                    best_repl = switch (entry.value) {
+                        .string => |s| s,
+                        .int => |n| try std.fmt.allocPrint(ctx.allocator, "{d}", .{n}),
+                        .float => |f| try std.fmt.allocPrint(ctx.allocator, "{d}", .{f}),
+                        .bool => |b| if (b) "1" else "",
+                        .null => "",
+                        else => "",
+                    };
+                    if (entry.value == .int or entry.value == .float) {
+                        try ctx.strings.append(ctx.allocator, best_repl);
+                    }
                 }
             }
             const matched = best_search.len > 0;

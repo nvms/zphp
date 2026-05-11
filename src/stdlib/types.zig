@@ -343,25 +343,42 @@ fn is_numeric(_: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len == 0) return .{ .bool = false };
     return .{ .bool = switch (args[0]) {
         .int, .float => true,
-        .string => |s| blk: {
-            // trim leading/trailing whitespace (PHP 8 accepts it)
-            var trimmed = s;
-            while (trimmed.len > 0 and (trimmed[0] == ' ' or trimmed[0] == '\t' or trimmed[0] == '\n' or trimmed[0] == '\r')) trimmed = trimmed[1..];
-            while (trimmed.len > 0 and (trimmed[trimmed.len - 1] == ' ' or trimmed[trimmed.len - 1] == '\t' or trimmed[trimmed.len - 1] == '\n' or trimmed[trimmed.len - 1] == '\r')) trimmed = trimmed[0 .. trimmed.len - 1];
-            if (trimmed.len == 0) break :blk false;
-            var start: usize = 0;
-            if (trimmed[0] == '+' or trimmed[0] == '-') start = 1;
-            if (start >= trimmed.len) break :blk false;
-            if (trimmed.len > start + 1 and trimmed[start] == '0') {
-                const next = trimmed[start + 1];
-                if (next == 'x' or next == 'X' or next == 'o' or next == 'O' or next == 'b' or next == 'B')
-                    break :blk false;
-            }
-            for (trimmed) |ch| if (ch == '_') break :blk false;
-            break :blk if (std.fmt.parseFloat(f64, trimmed)) |_| true else |_| false;
-        },
+        .string => |s| isNumericString(s),
         else => false,
     } };
+}
+
+// PHP's is_numeric: optional sign, digits, optional fractional/exponent.
+// Rejects Inf, NaN, hex/octal/binary literals, underscores - even though
+// std.fmt.parseFloat accepts some of those
+fn isNumericString(input: []const u8) bool {
+    var s = input;
+    while (s.len > 0 and (s[0] == ' ' or s[0] == '\t' or s[0] == '\n' or s[0] == '\r' or s[0] == '\x0b' or s[0] == '\x0c')) s = s[1..];
+    while (s.len > 0 and (s[s.len - 1] == ' ' or s[s.len - 1] == '\t' or s[s.len - 1] == '\n' or s[s.len - 1] == '\r' or s[s.len - 1] == '\x0b' or s[s.len - 1] == '\x0c')) s = s[0 .. s.len - 1];
+    if (s.len == 0) return false;
+
+    var i: usize = 0;
+    if (s[0] == '+' or s[0] == '-') i = 1;
+    if (i >= s.len) return false;
+
+    var int_digits: usize = 0;
+    while (i < s.len and s[i] >= '0' and s[i] <= '9') : (i += 1) int_digits += 1;
+
+    var frac_digits: usize = 0;
+    if (i < s.len and s[i] == '.') {
+        i += 1;
+        while (i < s.len and s[i] >= '0' and s[i] <= '9') : (i += 1) frac_digits += 1;
+    }
+    if (int_digits == 0 and frac_digits == 0) return false;
+
+    if (i < s.len and (s[i] == 'e' or s[i] == 'E')) {
+        i += 1;
+        if (i < s.len and (s[i] == '+' or s[i] == '-')) i += 1;
+        var exp_digits: usize = 0;
+        while (i < s.len and s[i] >= '0' and s[i] <= '9') : (i += 1) exp_digits += 1;
+        if (exp_digits == 0) return false;
+    }
+    return i == s.len;
 }
 
 fn native_isset(_: *NativeContext, args: []const Value) RuntimeError!Value {
