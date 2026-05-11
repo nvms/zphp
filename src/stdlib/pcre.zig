@@ -255,27 +255,54 @@ fn addNamedGroupsInterleaved(ctx: *NativeContext, arr: *PhpArray, code: *pcre2.C
         }
     }.f);
 
+    // With (?J), keep a single named entry per name. Value: pick the matched group
+    // (or first by group_num if none matched). Position: before the lowest group_num
+    // sharing that name.
+    var inserted_names: [64][]const u8 = undefined;
+    var inserted_count: usize = 0;
     for (groups[0..group_len]) |ng| {
-        if (ng.group_num < count) {
-            const start = ovector[ng.group_num * 2];
-            const end = ovector[ng.group_num * 2 + 1];
-            const val: Value = if (start == pcre2.UNSET or end == pcre2.UNSET) blk: {
-                if (unmatched_as_null) break :blk .null;
-                break :blk if (offset_capture) try makeOffsetPair(ctx, "", -1) else Value{ .string = "" };
-            } else blk: {
-                const s = try ctx.createString(subject[start..end]);
-                break :blk if (offset_capture) try makeOffsetPair(ctx, s, @intCast(start)) else Value{ .string = s };
-            };
-            // PHP places the named key directly before its numeric counterpart
-            const insert_pos = ng.group_num;
-            const named_entry = PhpArray.Entry{ .key = .{ .string = try ctx.createString(ng.name) }, .value = val };
-            if (insert_pos < arr.entries.items.len) {
-                try arr.entries.insert(ctx.allocator, insert_pos, named_entry);
-            } else {
-                try arr.entries.append(ctx.allocator, named_entry);
-            }
-            try arr.rebuildStringIndex(ctx.allocator);
+        if (ng.group_num >= count) continue;
+        var dup = false;
+        for (inserted_names[0..inserted_count]) |n| {
+            if (std.mem.eql(u8, n, ng.name)) { dup = true; break; }
         }
+        if (dup) continue;
+
+        var chosen = ng.group_num;
+        var lowest = ng.group_num;
+        var found_match = false;
+        for (groups[0..group_len]) |other| {
+            if (!std.mem.eql(u8, other.name, ng.name)) continue;
+            if (other.group_num < lowest) lowest = other.group_num;
+            if (other.group_num >= count) continue;
+            const os = ovector[other.group_num * 2];
+            const oe = ovector[other.group_num * 2 + 1];
+            if (os != pcre2.UNSET and oe != pcre2.UNSET and !found_match) {
+                chosen = other.group_num;
+                found_match = true;
+            }
+        }
+        if (!found_match) chosen = lowest;
+
+        const start = ovector[chosen * 2];
+        const end = ovector[chosen * 2 + 1];
+        const val: Value = if (start == pcre2.UNSET or end == pcre2.UNSET) blk: {
+            if (unmatched_as_null) break :blk .null;
+            break :blk if (offset_capture) try makeOffsetPair(ctx, "", -1) else Value{ .string = "" };
+        } else blk: {
+            const s = try ctx.createString(subject[start..end]);
+            break :blk if (offset_capture) try makeOffsetPair(ctx, s, @intCast(start)) else Value{ .string = s };
+        };
+        const insert_pos = lowest;
+        const named_entry = PhpArray.Entry{ .key = .{ .string = try ctx.createString(ng.name) }, .value = val };
+        if (insert_pos < arr.entries.items.len) {
+            try arr.entries.insert(ctx.allocator, insert_pos, named_entry);
+        } else {
+            try arr.entries.append(ctx.allocator, named_entry);
+        }
+        try arr.rebuildStringIndex(ctx.allocator);
+        inserted_names[inserted_count] = ng.name;
+        inserted_count += 1;
     }
 }
 
