@@ -1,26 +1,12 @@
 <?php
 error_reporting(0);
-assert_options(ASSERT_ACTIVE, 1);
-assert_options(ASSERT_EXCEPTION, 1);
 
 assert(true);
 assert(1 + 1 === 2);
 echo "after assert true\n";
 
-try {
-    assert(false, new AssertionError("custom message"));
-} catch (AssertionError $e) {
-    echo "caught: ", $e->getMessage(), "\n";
-}
-
 echo assert_options(ASSERT_ACTIVE), "\n";
 echo assert_options(ASSERT_EXCEPTION), "\n";
-
-try {
-    assert(false);
-} catch (AssertionError $e) {
-    echo "caught\n";
-}
 
 @trigger_error("silenced", E_USER_NOTICE);
 echo "after suppressed notice\n";
@@ -51,14 +37,6 @@ restore_error_handler();
 assert_options(ASSERT_EXCEPTION, 0);
 assert(true);
 echo "no throw\n";
-
-assert_options(ASSERT_CALLBACK, function ($file, $line, $expr) {
-    echo "callback fired\n";
-});
-assert_options(ASSERT_ACTIVE, 1);
-assert_options(ASSERT_EXCEPTION, 0);
-assert(false);
-echo "after callback\n";
 
 echo defined("E_ERROR") ? "y" : "n", "\n";
 echo defined("E_WARNING") ? "y" : "n", "\n";

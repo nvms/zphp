@@ -1364,13 +1364,15 @@ fn native_assert_options(ctx: *NativeContext, args: []const Value) RuntimeError!
         else => return .{ .bool = false },
     };
 
-    // get previous value
+    // get previous value (defaults match PHP: ACTIVE=1, EXCEPTION=1, others=0)
     var prev: Value = .{ .int = 0 };
     if (opt == 2) {
-        // callback is stored under "assert.callback_val"
         if (ctx.vm.ini_callbacks.get("assert.callback")) |cb| prev = cb;
     } else {
-        const s = ctx.vm.ini_settings.get(key) orelse "0";
+        const default_v: i64 = if (opt == 1 or opt == 6) 1 else 0;
+        var buf: [4]u8 = undefined;
+        const default_s = std.fmt.bufPrint(&buf, "{d}", .{default_v}) catch "0";
+        const s = ctx.vm.ini_settings.get(key) orelse default_s;
         prev = .{ .int = std.fmt.parseInt(i64, s, 10) catch 0 };
     }
 
