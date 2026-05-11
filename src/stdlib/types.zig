@@ -1374,12 +1374,6 @@ fn native_trigger_error(ctx: *NativeContext, args: []const Value) RuntimeError!V
         0;
     const file = ctx.vm.file_path;
 
-    ctx.vm.last_error_type = errno;
-    ctx.vm.last_error_message = ctx.allocator.dupe(u8, message) catch message;
-    ctx.vm.strings.append(ctx.allocator, ctx.vm.last_error_message) catch {};
-    ctx.vm.last_error_file = file;
-    ctx.vm.last_error_line = line;
-
     if (ctx.vm.user_error_handler) |handler| {
         if ((ctx.vm.user_error_handler_mask & errno) != 0) {
             const call_args = &[_]Value{
@@ -1392,6 +1386,12 @@ fn native_trigger_error(ctx: *NativeContext, args: []const Value) RuntimeError!V
             return .{ .bool = true };
         }
     }
+
+    ctx.vm.last_error_type = errno;
+    ctx.vm.last_error_message = ctx.allocator.dupe(u8, message) catch message;
+    ctx.vm.strings.append(ctx.allocator, ctx.vm.last_error_message) catch {};
+    ctx.vm.last_error_file = file;
+    ctx.vm.last_error_line = line;
 
     if (ctx.vm.error_silenced_depth == 0) {
         const label = errnoLabel(errno);
