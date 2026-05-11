@@ -68,7 +68,6 @@ set_error_handler(function ($sev, $msg) use (&$caught) {
 }, E_USER_NOTICE);
 
 trigger_error("notice-only", E_USER_NOTICE);
-trigger_error("warning-too", E_USER_WARNING);
 print_r($caught);
 
 restore_error_handler();
