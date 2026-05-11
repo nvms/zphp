@@ -426,6 +426,7 @@ pub fn register(vm: *VM, a: Allocator) !void {
 
     // SplDoublyLinkedList
     var dll_def = ClassDef{ .name = "SplDoublyLinkedList" };
+    try dll_def.interfaces.append(a, "Iterator");
     try dll_def.interfaces.append(a, "Countable");
     try dll_def.interfaces.append(a, "ArrayAccess");
     try dll_def.methods.put(a, "__construct", .{ .name = "__construct", .arity = 0 });
@@ -1905,6 +1906,10 @@ fn dllUnshift(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     const arr = try ensureData(ctx, obj);
     if (args.len == 0) return .null;
     try arr.entries.insert(ctx.allocator, 0, .{ .key = .{ .int = 0 }, .value = args[0] });
+    for (arr.entries.items, 0..) |*entry, i| {
+        entry.key = .{ .int = @intCast(i) };
+    }
+    arr.next_int_key = @intCast(arr.entries.items.len);
     return .null;
 }
 
