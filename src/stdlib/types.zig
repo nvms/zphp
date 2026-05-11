@@ -43,6 +43,8 @@ pub const entries = .{
     .{ "is_callable", native_is_callable },
     .{ "settype", native_settype },
     .{ "call_user_func", native_call_user_func },
+    .{ "forward_static_call", native_call_user_func },
+    .{ "forward_static_call_array", native_call_user_func_array },
     .{ "call_user_func_array", native_call_user_func_array },
     .{ "function_exists", native_function_exists },
     .{ "get_object_vars", native_get_object_vars },
