@@ -2862,6 +2862,19 @@ pub const VM = struct {
 
                 .throw => {
                     const exception = self.pop();
+                    // if finally was triggered by a propagating exception and that
+                    // exception is still on the stack below this throw, chain it
+                    // as `previous` to match PHP's exception chaining behavior
+                    if (exception == .object and self.sp > 0) {
+                        const below = self.stack[self.sp - 1];
+                        if (below == .object and self.isInstanceOf(below.object.class_name, "Throwable")) {
+                            const prev = exception.object.get("previous");
+                            if (prev == .null and below.object != exception.object) {
+                                try exception.object.set(self.allocator, "previous", below);
+                                _ = self.pop();
+                            }
+                        }
+                    }
                     if (self.handler_count <= self.handler_floor) {
                         self.pending_exception = exception;
                         return error.RuntimeError;
