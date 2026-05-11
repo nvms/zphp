@@ -59,8 +59,13 @@ pub const PhpArray = struct {
 
     pub fn append(self: *PhpArray, allocator: std.mem.Allocator, value: Value) !void {
         const k = if (self.has_int_keys) self.next_int_key else 0;
+        if (self.has_int_keys and k == std.math.maxInt(i64)) {
+            for (self.entries.items) |entry| {
+                if (entry.key == .int and entry.key.int == k) return;
+            }
+        }
         try self.entries.append(allocator, .{ .key = .{ .int = k }, .value = value });
-        self.next_int_key = k + 1;
+        self.next_int_key = if (k == std.math.maxInt(i64)) k else k + 1;
         self.has_int_keys = true;
     }
 
@@ -97,7 +102,8 @@ pub const PhpArray = struct {
         const new_idx = self.entries.items.len;
         try self.entries.append(allocator, .{ .key = key, .value = value });
         if (key == .int) {
-            self.next_int_key = if (self.has_int_keys) @max(self.next_int_key, key.int + 1) else key.int + 1;
+            const next = if (key.int == std.math.maxInt(i64)) key.int else key.int + 1;
+            self.next_int_key = if (self.has_int_keys) @max(self.next_int_key, next) else next;
             self.has_int_keys = true;
         } else if (key == .string) {
             try self.string_index.put(allocator, key.string, new_idx);

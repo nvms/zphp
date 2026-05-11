@@ -199,7 +199,7 @@ fn in_array(_: *NativeContext, args: []const Value) RuntimeError!Value {
 
 fn array_key_exists(_: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len < 2 or args[1] != .array) return .{ .bool = false };
-    const key = Value.toArrayKey(args[0]);
+    const key = PhpArray.normalizeKey(Value.toArrayKey(args[0]));
     const arr = args[1].array;
     for (arr.entries.items) |entry| {
         if (entry.key.eql(key)) return .{ .bool = true };
