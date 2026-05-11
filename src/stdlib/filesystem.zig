@@ -294,7 +294,7 @@ pub fn cleanupHandles(objects: std.ArrayListUnmanaged(*PhpObject)) void {
                         _ = std.posix.system.close(file.handle);
                     }
                 }
-                obj.properties.put(std.heap.page_allocator, "__open", .{ .bool = false }) catch {};
+                obj.set(std.heap.page_allocator, "__open", .{ .bool = false }) catch {};
             }
         }
     }
@@ -1168,7 +1168,8 @@ fn native_fopen(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
         return .{ .object = obj };
     }
 
-    const file = if (std.mem.startsWith(u8, path, "php://temp") or std.mem.startsWith(u8, path, "php://memory")) blk: {
+    const is_memory_stream = std.mem.startsWith(u8, path, "php://temp") or std.mem.startsWith(u8, path, "php://memory");
+    const file = if (is_memory_stream) blk: {
         const tmp = std.fmt.allocPrint(ctx.allocator, "/tmp/zphp_{d}", .{@as(u64, @truncate(@as(u128, @bitCast(std.time.nanoTimestamp()))))}) catch return Value{ .bool = false };
         defer ctx.allocator.free(tmp);
         const f = std.fs.cwd().createFile(tmp, .{ .read = true, .truncate = true }) catch return Value{ .bool = false };
@@ -1183,6 +1184,7 @@ fn native_fopen(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     try obj.set(ctx.allocator, "__open", .{ .bool = true });
     try obj.set(ctx.allocator, "__mode", .{ .string = mode });
     try obj.set(ctx.allocator, "__path", .{ .string = try ctx.createString(path) });
+    if (is_memory_stream) try obj.set(ctx.allocator, "__peek_eof", .{ .bool = true });
     try ctx.vm.objects.append(ctx.allocator, obj);
     return .{ .object = obj };
 }
@@ -1221,7 +1223,7 @@ fn native_fclose(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
         if (ctx.vm.hasMethod(wrapper.class_name, "stream_close")) {
             _ = try ctx.callMethod(wrapper, "stream_close", &.{});
         }
-        obj.properties.put(std.heap.page_allocator, "__open", .{ .bool = false }) catch {};
+        obj.set(ctx.allocator, "__open", .{ .bool = false }) catch {};
         return .{ .bool = true };
     }
     const popen_cmd = obj.get("__popen_cmd");
@@ -1232,7 +1234,7 @@ fn native_fclose(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
             ctx.allocator.free(r.stdout);
             ctx.allocator.free(r.stderr);
         } else |_| {}
-        obj.properties.put(std.heap.page_allocator, "__open", .{ .bool = false }) catch {};
+        obj.set(ctx.allocator, "__open", .{ .bool = false }) catch {};
         obj.properties.put(std.heap.page_allocator, "__popen_cmd", .null) catch {};
         return .{ .bool = true };
     }
@@ -1241,18 +1243,18 @@ fn native_fclose(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
         const buf_v = obj.get("__buffer");
         if (path_v == .string and buf_v == .string) {
             writeZlibFile(ctx.allocator, path_v.string, buf_v.string) catch {
-                obj.properties.put(std.heap.page_allocator, "__open", .{ .bool = false }) catch {};
+                obj.set(ctx.allocator, "__open", .{ .bool = false }) catch {};
                 return .{ .bool = false };
             };
         }
-        obj.properties.put(std.heap.page_allocator, "__open", .{ .bool = false }) catch {};
+        obj.set(ctx.allocator, "__open", .{ .bool = false }) catch {};
         return .{ .bool = true };
     }
     if (getFileHandle(obj)) |file| {
         // never close stdin/stdout/stderr - they're shared with the host process
         if (file.handle > 2) file.close();
     }
-    obj.properties.put(std.heap.page_allocator, "__open", .{ .bool = false }) catch {};
+    obj.set(ctx.allocator, "__open", .{ .bool = false }) catch {};
     return .{ .bool = true };
 }
 
@@ -1313,8 +1315,10 @@ fn native_fread(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     };
     if (n == 0) {
         ctx.allocator.free(buf);
+        try obj.set(ctx.allocator, "__eof", .{ .bool = true });
         return .{ .string = "" };
     }
+    if (n < length) try obj.set(ctx.allocator, "__eof", .{ .bool = true });
     // shrink to actual read size
     if (n < length) {
         const exact = try ctx.allocator.alloc(u8, n);
@@ -1404,12 +1408,14 @@ fn native_fgets(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
 
     var buf = std.ArrayListUnmanaged(u8){};
     var byte: [1]u8 = undefined;
+    var hit_eof = false;
     while (buf.items.len < max_len) {
         const n = file.read(&byte) catch break;
-        if (n == 0) break;
+        if (n == 0) { hit_eof = true; break; }
         try buf.append(ctx.allocator, byte[0]);
         if (byte[0] == '\n') break;
     }
+    if (hit_eof) try obj.set(ctx.allocator, "__eof", .{ .bool = true });
     if (buf.items.len == 0) return .{ .bool = false };
     const result = try buf.toOwnedSlice(ctx.allocator);
     try ctx.strings.append(ctx.allocator, result);
@@ -1418,10 +1424,14 @@ fn native_fgets(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
 
 fn native_fgetc(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len == 0 or args[0] != .object) return .{ .bool = false };
-    const file = getFileHandle(args[0].object) orelse return Value{ .bool = false };
+    const obj = args[0].object;
+    const file = getFileHandle(obj) orelse return Value{ .bool = false };
     var byte: [1]u8 = undefined;
     const n = file.read(&byte) catch return Value{ .bool = false };
-    if (n == 0) return .{ .bool = false };
+    if (n == 0) {
+        try obj.set(ctx.allocator, "__eof", .{ .bool = true });
+        return .{ .bool = false };
+    }
     const result = try ctx.allocator.dupe(u8, byte[0..1]);
     try ctx.strings.append(ctx.allocator, result);
     return .{ .string = result };
@@ -1446,13 +1456,18 @@ fn native_feof(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
         return .{ .bool = getBufferPos(obj) >= buffer.len };
     }
     const file = getFileHandle(obj) orelse return Value{ .bool = true };
-    // peek one byte to check EOF
-    var byte: [1]u8 = undefined;
-    const n = file.read(&byte) catch return Value{ .bool = true };
-    if (n == 0) return .{ .bool = true };
-    // put the byte back by seeking backwards
-    file.seekBy(-1) catch {};
-    return .{ .bool = false };
+    // memory/temp streams use peek-ahead semantics (PHP behavior for those streams)
+    const peek_eof = obj.get("__peek_eof");
+    if (peek_eof == .bool and peek_eof.bool) {
+        var byte: [1]u8 = undefined;
+        const n = file.read(&byte) catch return Value{ .bool = true };
+        if (n == 0) return .{ .bool = true };
+        file.seekBy(-1) catch {};
+        return .{ .bool = false };
+    }
+    // PHP file semantics: feof becomes true only after a read attempt returned 0
+    const eof = obj.get("__eof");
+    return .{ .bool = eof == .bool and eof.bool };
 }
 
 fn native_fseek(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
@@ -1489,6 +1504,7 @@ fn native_fseek(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
         2 => file.seekFromEnd(offset) catch return Value{ .int = -1 },
         else => return .{ .int = -1 },
     }
+    try obj.set(ctx.allocator, "__eof", .{ .bool = false });
     return .{ .int = 0 };
 }
 
@@ -1523,6 +1539,7 @@ fn native_rewind(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     }
     const file = getFileHandle(obj) orelse return Value{ .bool = false };
     file.seekTo(0) catch return Value{ .bool = false };
+    try obj.set(ctx.allocator, "__eof", .{ .bool = false });
     return .{ .bool = true };
 }
 
@@ -1966,7 +1983,8 @@ fn native_fstat(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
 
 fn native_fgetcsv(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len == 0 or args[0] != .object) return .{ .bool = false };
-    const file = getFileHandle(args[0].object) orelse return Value{ .bool = false };
+    const obj = args[0].object;
+    const file = getFileHandle(obj) orelse return Value{ .bool = false };
     const delimiter: u8 = if (args.len >= 3 and args[2] == .string and args[2].string.len > 0) args[2].string[0] else ',';
     const enclosure: u8 = if (args.len >= 4 and args[3] == .string and args[3].string.len > 0) args[3].string[0] else '"';
 
@@ -1977,7 +1995,10 @@ fn native_fgetcsv(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     var got_any = false;
     while (true) {
         const n = file.read(&byte) catch break;
-        if (n == 0) break;
+        if (n == 0) {
+            try obj.set(ctx.allocator, "__eof", .{ .bool = true });
+            break;
+        }
         got_any = true;
         const c = byte[0];
         try line.append(ctx.allocator, c);
@@ -2433,16 +2454,16 @@ fn native_pclose(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
         const buf_v = obj.get("__buffer");
         const stdin_data: []const u8 = if (buf_v == .string) buf_v.string else "";
         const result = runShellCapture(ctx.allocator, cmd_v.string, stdin_data) catch {
-            obj.properties.put(std.heap.page_allocator, "__open", .{ .bool = false }) catch {};
+            obj.set(ctx.allocator, "__open", .{ .bool = false }) catch {};
             return .{ .int = -1 };
         };
         ctx.allocator.free(result.stdout);
         ctx.allocator.free(result.stderr);
-        obj.properties.put(std.heap.page_allocator, "__open", .{ .bool = false }) catch {};
+        obj.set(ctx.allocator, "__open", .{ .bool = false }) catch {};
         return .{ .int = result.exit };
     }
     const exit_v = obj.get("__popen_exit");
-    obj.properties.put(std.heap.page_allocator, "__open", .{ .bool = false }) catch {};
+    obj.set(ctx.allocator, "__open", .{ .bool = false }) catch {};
     if (exit_v == .int) return .{ .int = exit_v.int };
     return .{ .int = 0 };
 }
