@@ -302,11 +302,13 @@ fn emitInterpolationExpr(self: *Compiler, expr: []const u8) (Allocator.Error || 
             if (k == j) break;
             const prop_name = expr[j..k];
             if (k < expr.len and expr[k] == '(') {
-                const paren_end = std.mem.indexOfScalarPos(u8, expr, k, ')') orelse break;
+                const paren_end = findMatchingParen(expr, k) orelse break;
+                const args_str = expr[k + 1 .. paren_end];
+                const arg_count = try emitInterpArgs(self, args_str);
                 const name_idx = try self.addConstant(.{ .string = prop_name });
                 try self.emitOp(.method_call);
                 try self.emitU16(name_idx);
-                try self.emitByte(0);
+                try self.emitByte(arg_count);
                 j = paren_end + 1;
             } else {
                 const name_idx = try self.addConstant(.{ .string = prop_name });
@@ -316,6 +318,117 @@ fn emitInterpolationExpr(self: *Compiler, expr: []const u8) (Allocator.Error || 
             }
         } else break;
     }
+}
+
+fn findMatchingParen(s: []const u8, start: usize) ?usize {
+    var depth: usize = 0;
+    var in_quote: ?u8 = null;
+    var i = start;
+    while (i < s.len) : (i += 1) {
+        const c = s[i];
+        if (in_quote) |q| {
+            if (c == '\\' and i + 1 < s.len) { i += 1; continue; }
+            if (c == q) in_quote = null;
+            continue;
+        }
+        if (c == '\'' or c == '"') { in_quote = c; continue; }
+        if (c == '(') depth += 1
+        else if (c == ')') {
+            depth -= 1;
+            if (depth == 0) return i;
+        }
+    }
+    return null;
+}
+
+fn splitArgs(s: []const u8, buf: *[16][]const u8) usize {
+    var count: usize = 0;
+    var start: usize = 0;
+    var i: usize = 0;
+    var depth: usize = 0;
+    var in_quote: ?u8 = null;
+    while (i < s.len) : (i += 1) {
+        const c = s[i];
+        if (in_quote) |q| {
+            if (c == '\\' and i + 1 < s.len) { i += 1; continue; }
+            if (c == q) in_quote = null;
+            continue;
+        }
+        if (c == '\'' or c == '"') { in_quote = c; continue; }
+        if (c == '(' or c == '[') depth += 1
+        else if (c == ')' or c == ']') depth -= 1
+        else if (c == ',' and depth == 0) {
+            if (count < buf.len) {
+                buf[count] = std.mem.trim(u8, s[start..i], " \t\n");
+                count += 1;
+            }
+            start = i + 1;
+        }
+    }
+    const tail = std.mem.trim(u8, s[start..], " \t\n");
+    if (tail.len > 0 and count < buf.len) {
+        buf[count] = tail;
+        count += 1;
+    }
+    return count;
+}
+
+fn emitInterpArgs(self: *Compiler, args_str: []const u8) (Allocator.Error || error{CompileError})!u8 {
+    const trimmed = std.mem.trim(u8, args_str, " \t\n");
+    if (trimmed.len == 0) return 0;
+    var args_buf: [16][]const u8 = undefined;
+    const n = splitArgs(trimmed, &args_buf);
+    for (args_buf[0..n]) |arg| {
+        try emitInterpArgValue(self, arg);
+    }
+    return @intCast(n);
+}
+
+fn emitInterpArgValue(self: *Compiler, arg: []const u8) (Allocator.Error || error{CompileError})!void {
+    if (arg.len == 0) {
+        const idx = try self.addConstant(.{ .string = "" });
+        try self.emitConstant(idx);
+        return;
+    }
+    if (arg.len >= 2 and (arg[0] == '\'' or arg[0] == '"') and arg[arg.len - 1] == arg[0]) {
+        const inner = arg[1 .. arg.len - 1];
+        const owned = try self.allocator.dupe(u8, inner);
+        try self.string_allocs.append(self.allocator, owned);
+        const idx = try self.addConstant(.{ .string = owned });
+        try self.emitConstant(idx);
+        return;
+    }
+    if (arg[0] == '$') {
+        try emitInterpolationExpr(self, arg);
+        return;
+    }
+    if (std.mem.eql(u8, arg, "true")) {
+        const idx = try self.addConstant(.{ .bool = true });
+        try self.emitConstant(idx);
+        return;
+    }
+    if (std.mem.eql(u8, arg, "false")) {
+        const idx = try self.addConstant(.{ .bool = false });
+        try self.emitConstant(idx);
+        return;
+    }
+    if (std.mem.eql(u8, arg, "null")) {
+        const idx = try self.addConstant(.null);
+        try self.emitConstant(idx);
+        return;
+    }
+    if (std.fmt.parseInt(i64, arg, 10) catch null) |int_val| {
+        const idx = try self.addConstant(.{ .int = int_val });
+        try self.emitConstant(idx);
+        return;
+    }
+    if (std.fmt.parseFloat(f64, arg) catch null) |fv| {
+        const idx = try self.addConstant(.{ .float = fv });
+        try self.emitConstant(idx);
+        return;
+    }
+    const idx = try self.addConstant(.{ .string = arg });
+    try self.emitConstant(idx);
 }
 
 fn findMatchingBracket(s: []const u8, start: usize) ?usize {
