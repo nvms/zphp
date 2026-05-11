@@ -90,9 +90,11 @@ pub const entries = .{
 };
 
 fn array_push(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len < 2 or args[0] != .array) return .{ .int = 0 };
+    if (args.len == 0 or args[0] != .array) return .{ .int = 0 };
     const arr = args[0].array;
-    for (args[1..]) |val| try arr.append(ctx.allocator, val);
+    if (args.len >= 2) {
+        for (args[1..]) |val| try arr.append(ctx.allocator, val);
+    }
     return .{ .int = arr.length() };
 }
 
