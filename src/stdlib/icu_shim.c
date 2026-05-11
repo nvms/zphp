@@ -14,6 +14,7 @@
 #include <stddef.h>
 #include <stdint.h>
 #include <string.h>
+#include <stdlib.h>
 #include <unicode/utypes.h>
 #include <unicode/uloc.h>
 #include <unicode/ustring.h>
@@ -25,6 +26,8 @@
 #include <unicode/umsg.h>
 #include <unicode/uidna.h>
 #include <unicode/ucal.h>
+#include <unicode/ubrk.h>
+#include <unicode/utext.h>
 
 /* ----- utf-16 / utf-8 conversion ----- */
 
@@ -245,4 +248,79 @@ UBool zphp_ucal_getLenient(const UCalendar* cal) {
 }
 void zphp_ucal_setLenient(UCalendar* cal, int32_t lenient) {
     ucal_setAttribute(cal, UCAL_LENIENT, lenient);
+}
+
+/* ----- IntlBreakIterator -----
+ *
+ * PHP's IntlBreakIterator reports UTF-8 byte offsets. ICU's natural input is
+ * UTF-16 (UChar) but utext_openUTF8 lets it work directly on UTF-8 with the
+ * boundary positions reported as byte offsets into the original buffer.
+ *
+ * We allocate one UText alongside each UBreakIterator and own its lifetime
+ */
+
+typedef struct {
+    UBreakIterator* bi;
+    UText* ut;
+    char* text_copy;
+    int32_t text_len;
+} zphp_brk;
+
+zphp_brk* zphp_ubrk_open(UBreakIteratorType type, const char* locale, UErrorCode* err) {
+    zphp_brk* w = (zphp_brk*)calloc(1, sizeof(zphp_brk));
+    if (!w) return NULL;
+    w->bi = ubrk_open(type, locale, NULL, 0, err);
+    if (U_FAILURE(*err)) { free(w); return NULL; }
+    return w;
+}
+
+void zphp_ubrk_close(zphp_brk* w) {
+    if (!w) return;
+    if (w->bi) ubrk_close(w->bi);
+    if (w->ut) utext_close(w->ut);
+    if (w->text_copy) free(w->text_copy);
+    free(w);
+}
+
+void zphp_ubrk_setText(zphp_brk* w, const char* text, int32_t len, UErrorCode* err) {
+    if (w->ut) { utext_close(w->ut); w->ut = NULL; }
+    if (w->text_copy) { free(w->text_copy); w->text_copy = NULL; }
+    if (len > 0) {
+        w->text_copy = (char*)malloc((size_t)len + 1);
+        if (!w->text_copy) { *err = U_MEMORY_ALLOCATION_ERROR; return; }
+        memcpy(w->text_copy, text, (size_t)len);
+        w->text_copy[len] = 0;
+        w->text_len = len;
+    } else {
+        w->text_copy = (char*)malloc(1);
+        w->text_copy[0] = 0;
+        w->text_len = 0;
+    }
+    w->ut = utext_openUTF8(NULL, w->text_copy, w->text_len, err);
+    if (U_FAILURE(*err)) return;
+    ubrk_setUText(w->bi, w->ut, err);
+}
+
+const char* zphp_ubrk_getText(zphp_brk* w, int32_t* len) {
+    *len = w->text_len;
+    return w->text_copy ? w->text_copy : "";
+}
+
+int32_t zphp_ubrk_first(zphp_brk* w) { return ubrk_first(w->bi); }
+int32_t zphp_ubrk_last(zphp_brk* w) { return ubrk_last(w->bi); }
+int32_t zphp_ubrk_next(zphp_brk* w) { return ubrk_next(w->bi); }
+int32_t zphp_ubrk_previous(zphp_brk* w) { return ubrk_previous(w->bi); }
+int32_t zphp_ubrk_current(zphp_brk* w) { return ubrk_current(w->bi); }
+int32_t zphp_ubrk_following(zphp_brk* w, int32_t off) { return ubrk_following(w->bi, off); }
+int32_t zphp_ubrk_preceding(zphp_brk* w, int32_t off) { return ubrk_preceding(w->bi, off); }
+UBool zphp_ubrk_isBoundary(zphp_brk* w, int32_t off) { return ubrk_isBoundary(w->bi, off); }
+int32_t zphp_ubrk_getRuleStatus(zphp_brk* w) { return ubrk_getRuleStatus(w->bi); }
+int32_t zphp_ubrk_getLocaleByType(zphp_brk* w, ULocDataLocaleType ltype, char* buf, int32_t buf_len, UErrorCode* err) {
+    const char* loc = ubrk_getLocaleByType(w->bi, ltype, err);
+    if (!loc) return -1;
+    size_t n = strlen(loc);
+    if ((int32_t)n >= buf_len) return -1;
+    memcpy(buf, loc, n);
+    buf[n] = 0;
+    return (int32_t)n;
 }

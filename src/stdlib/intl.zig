@@ -127,6 +127,22 @@ extern fn zphp_ucal_isWeekend(cal: *const UCalendar, date: f64, err: *UErrorCode
 extern fn zphp_ucal_clone(cal: *const UCalendar, err: *UErrorCode) ?*UCalendar;
 extern fn zphp_ucal_getLenient(cal: *const UCalendar) u8;
 extern fn zphp_ucal_setLenient(cal: *UCalendar, lenient: i32) void;
+
+const ZphpBrk = opaque {};
+extern fn zphp_ubrk_open(brk_type: c_int, locale: [*:0]const u8, err: *UErrorCode) ?*ZphpBrk;
+extern fn zphp_ubrk_close(w: *ZphpBrk) void;
+extern fn zphp_ubrk_setText(w: *ZphpBrk, text: [*]const u8, len: i32, err: *UErrorCode) void;
+extern fn zphp_ubrk_getText(w: *ZphpBrk, len: *i32) [*:0]const u8;
+extern fn zphp_ubrk_first(w: *ZphpBrk) i32;
+extern fn zphp_ubrk_last(w: *ZphpBrk) i32;
+extern fn zphp_ubrk_next(w: *ZphpBrk) i32;
+extern fn zphp_ubrk_previous(w: *ZphpBrk) i32;
+extern fn zphp_ubrk_current(w: *ZphpBrk) i32;
+extern fn zphp_ubrk_following(w: *ZphpBrk, off: i32) i32;
+extern fn zphp_ubrk_preceding(w: *ZphpBrk, off: i32) i32;
+extern fn zphp_ubrk_isBoundary(w: *ZphpBrk, off: i32) u8;
+extern fn zphp_ubrk_getRuleStatus(w: *ZphpBrk) i32;
+extern fn zphp_ubrk_getLocaleByType(w: *ZphpBrk, ltype: c_int, buf: [*]u8, buf_len: i32, err: *UErrorCode) i32;
 extern fn zphp_uidna_openUTS46(options: u32, err: *UErrorCode) ?*UIDNA;
 extern fn zphp_uidna_close(idna: *UIDNA) void;
 extern fn zphp_uidna_nameToASCII(idna: *const UIDNA, name: [*]const UChar, nameLen: i32, dest: [*]UChar, cap: i32, info: *anyopaque, err: *UErrorCode) i32;
@@ -1111,6 +1127,168 @@ fn calEquals(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     return .{ .bool = zphp_ucal_getMillis(a, &s1) == zphp_ucal_getMillis(b, &s2) };
 }
 
+// ---------------- IntlBreakIterator ----------------
+
+fn getBrk(obj: *const PhpObject) ?*ZphpBrk {
+    const v = obj.get("__brk");
+    if (v != .int or v.int == 0) return null;
+    return @ptrFromInt(@as(usize, @intCast(v.int)));
+}
+
+fn openBrk(ctx: *NativeContext, brk_type: c_int, locale: []const u8) !?*ZphpBrk {
+    var status: UErrorCode = U_ZERO_ERROR;
+    const loc = if (locale.len > 0) locale else blk: {
+        const def = zphp_uloc_getDefault();
+        break :blk def[0..cstrLen(def)];
+    };
+    const loc_z = try dupZ(ctx, loc);
+    const w = zphp_ubrk_open(brk_type, loc_z.ptr, &status);
+    if (status > U_ZERO_ERROR) return null;
+    return w;
+}
+
+fn brkMakeInstance(ctx: *NativeContext, brk_type: c_int, locale: []const u8) RuntimeError!Value {
+    const w = (try openBrk(ctx, brk_type, locale)) orelse return .null;
+    const obj = try ctx.createObject("IntlBreakIterator");
+    try obj.set(ctx.allocator, "__brk", .{ .int = @intCast(@intFromPtr(w)) });
+    try obj.set(ctx.allocator, "__type", .{ .int = @intCast(brk_type) });
+    try obj.set(ctx.allocator, "__locale", .{ .string = try dupString(ctx, locale) });
+    return .{ .object = obj };
+}
+
+fn brkCreateWord(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    const locale = if (args.len > 0 and args[0] == .string) args[0].string else "";
+    return brkMakeInstance(ctx, 1, locale);
+}
+
+fn brkCreateChar(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    const locale = if (args.len > 0 and args[0] == .string) args[0].string else "";
+    return brkMakeInstance(ctx, 0, locale);
+}
+
+fn brkCreateLine(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    const locale = if (args.len > 0 and args[0] == .string) args[0].string else "";
+    return brkMakeInstance(ctx, 2, locale);
+}
+
+fn brkCreateSentence(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    const locale = if (args.len > 0 and args[0] == .string) args[0].string else "";
+    return brkMakeInstance(ctx, 3, locale);
+}
+
+fn brkCreateTitle(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    const locale = if (args.len > 0 and args[0] == .string) args[0].string else "";
+    return brkMakeInstance(ctx, 4, locale);
+}
+
+fn brkSetText(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len < 1 or args[0] != .string) return .{ .bool = false };
+    const obj = getThis(ctx) orelse return .{ .bool = false };
+    const w = getBrk(obj) orelse return .{ .bool = false };
+    var status: UErrorCode = U_ZERO_ERROR;
+    const txt = args[0].string;
+    const ptr: [*]const u8 = if (txt.len > 0) txt.ptr else @ptrCast(""[0..]);
+    zphp_ubrk_setText(w, ptr, @intCast(txt.len), &status);
+    if (status > U_ZERO_ERROR) return .{ .bool = false };
+    // also store the text so getText round-trips without losing it
+    try obj.set(ctx.allocator, "__text", .{ .string = try dupString(ctx, txt) });
+    return .{ .bool = true };
+}
+
+fn brkGetText(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const obj = getThis(ctx) orelse return .null;
+    const v = obj.get("__text");
+    if (v == .string) return v;
+    return .{ .string = try dupString(ctx, "") };
+}
+
+fn brkFirst(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const obj = getThis(ctx) orelse return .{ .int = -1 };
+    const w = getBrk(obj) orelse return .{ .int = -1 };
+    return .{ .int = @intCast(zphp_ubrk_first(w)) };
+}
+
+fn brkLast(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const obj = getThis(ctx) orelse return .{ .int = -1 };
+    const w = getBrk(obj) orelse return .{ .int = -1 };
+    return .{ .int = @intCast(zphp_ubrk_last(w)) };
+}
+
+fn brkNext(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    const obj = getThis(ctx) orelse return .{ .int = -1 };
+    const w = getBrk(obj) orelse return .{ .int = -1 };
+    // PHP's next($offset) advances by that many boundaries when given
+    if (args.len > 0 and args[0] == .int) {
+        const n = args[0].int;
+        var last: i32 = zphp_ubrk_current(w);
+        if (n > 0) {
+            var i: i64 = 0;
+            while (i < n) : (i += 1) {
+                last = zphp_ubrk_next(w);
+                if (last == -1) break;
+            }
+        } else if (n < 0) {
+            var i: i64 = 0;
+            while (i < -n) : (i += 1) {
+                last = zphp_ubrk_previous(w);
+                if (last == -1) break;
+            }
+        }
+        return .{ .int = @intCast(last) };
+    }
+    return .{ .int = @intCast(zphp_ubrk_next(w)) };
+}
+
+fn brkPrevious(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const obj = getThis(ctx) orelse return .{ .int = -1 };
+    const w = getBrk(obj) orelse return .{ .int = -1 };
+    return .{ .int = @intCast(zphp_ubrk_previous(w)) };
+}
+
+fn brkCurrent(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const obj = getThis(ctx) orelse return .{ .int = -1 };
+    const w = getBrk(obj) orelse return .{ .int = -1 };
+    return .{ .int = @intCast(zphp_ubrk_current(w)) };
+}
+
+fn brkFollowing(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len < 1 or args[0] != .int) return .{ .int = -1 };
+    const obj = getThis(ctx) orelse return .{ .int = -1 };
+    const w = getBrk(obj) orelse return .{ .int = -1 };
+    return .{ .int = @intCast(zphp_ubrk_following(w, @intCast(args[0].int))) };
+}
+
+fn brkPreceding(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len < 1 or args[0] != .int) return .{ .int = -1 };
+    const obj = getThis(ctx) orelse return .{ .int = -1 };
+    const w = getBrk(obj) orelse return .{ .int = -1 };
+    return .{ .int = @intCast(zphp_ubrk_preceding(w, @intCast(args[0].int))) };
+}
+
+fn brkIsBoundary(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len < 1 or args[0] != .int) return .{ .bool = false };
+    const obj = getThis(ctx) orelse return .{ .bool = false };
+    const w = getBrk(obj) orelse return .{ .bool = false };
+    return .{ .bool = zphp_ubrk_isBoundary(w, @intCast(args[0].int)) != 0 };
+}
+
+fn brkGetRuleStatus(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const obj = getThis(ctx) orelse return .{ .int = 0 };
+    const w = getBrk(obj) orelse return .{ .int = 0 };
+    return .{ .int = @intCast(zphp_ubrk_getRuleStatus(w)) };
+}
+
+fn brkGetLocale(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    const obj = getThis(ctx) orelse return .{ .string = try dupString(ctx, "") };
+    const w = getBrk(obj) orelse return .{ .string = try dupString(ctx, "") };
+    var buf: [128]u8 = undefined;
+    var status: UErrorCode = U_ZERO_ERROR;
+    const ltype: c_int = if (args.len > 0 and args[0] == .int) @intCast(args[0].int) else 0;
+    const n = zphp_ubrk_getLocaleByType(w, ltype, &buf, @intCast(buf.len), &status);
+    if (status > U_ZERO_ERROR or n <= 0) return .{ .string = try dupString(ctx, "") };
+    return .{ .string = try dupString(ctx, buf[0..@intCast(n)]) };
+}
+
 // ---------------- registration ----------------
 
 pub const entries = .{
@@ -1185,7 +1363,75 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try registerDateFormatterClass(vm, a);
     try registerMessageFormatterClass(vm, a);
     try registerIntlCalendarClass(vm, a);
+    try registerBreakIteratorClass(vm, a);
     try registerConstants(vm, a);
+}
+
+fn registerBreakIteratorClass(vm: *VM, a: Allocator) !void {
+    inline for (.{ "IntlBreakIterator", "IntlRuleBasedBreakIterator", "IntlCodePointBreakIterator" }) |cls_name| {
+        var def = ClassDef{ .name = cls_name };
+        if (comptime !std.mem.eql(u8, cls_name, "IntlBreakIterator")) {
+            def.parent = "IntlBreakIterator";
+        }
+        try def.methods.put(a, "createWordInstance", .{ .name = "createWordInstance", .arity = 0, .is_static = true });
+        try def.methods.put(a, "createCharacterInstance", .{ .name = "createCharacterInstance", .arity = 0, .is_static = true });
+        try def.methods.put(a, "createLineInstance", .{ .name = "createLineInstance", .arity = 0, .is_static = true });
+        try def.methods.put(a, "createSentenceInstance", .{ .name = "createSentenceInstance", .arity = 0, .is_static = true });
+        try def.methods.put(a, "createTitleInstance", .{ .name = "createTitleInstance", .arity = 0, .is_static = true });
+        try def.methods.put(a, "setText", .{ .name = "setText", .arity = 1 });
+        try def.methods.put(a, "getText", .{ .name = "getText", .arity = 0 });
+        try def.methods.put(a, "first", .{ .name = "first", .arity = 0 });
+        try def.methods.put(a, "last", .{ .name = "last", .arity = 0 });
+        try def.methods.put(a, "next", .{ .name = "next", .arity = 0 });
+        try def.methods.put(a, "previous", .{ .name = "previous", .arity = 0 });
+        try def.methods.put(a, "current", .{ .name = "current", .arity = 0 });
+        try def.methods.put(a, "following", .{ .name = "following", .arity = 1 });
+        try def.methods.put(a, "preceding", .{ .name = "preceding", .arity = 1 });
+        try def.methods.put(a, "isBoundary", .{ .name = "isBoundary", .arity = 1 });
+        try def.methods.put(a, "getRuleStatus", .{ .name = "getRuleStatus", .arity = 0 });
+        try def.methods.put(a, "getLocale", .{ .name = "getLocale", .arity = 0 });
+
+        try def.constant_order.append(a, "DONE");
+        try def.constant_names.put(a, "DONE", {});
+        try def.static_props.put(a, "DONE", .{ .int = -1 });
+        // rule status tag ranges (PHP exposes these constants on the class)
+        const tag_consts = .{
+            .{ "WORD_NONE", 0 }, .{ "WORD_NONE_LIMIT", 100 },
+            .{ "WORD_NUMBER", 100 }, .{ "WORD_NUMBER_LIMIT", 200 },
+            .{ "WORD_LETTER", 200 }, .{ "WORD_LETTER_LIMIT", 300 },
+            .{ "WORD_KANA", 300 }, .{ "WORD_KANA_LIMIT", 400 },
+            .{ "WORD_IDEO", 400 }, .{ "WORD_IDEO_LIMIT", 500 },
+            .{ "LINE_SOFT", 0 }, .{ "LINE_SOFT_LIMIT", 100 },
+            .{ "LINE_HARD", 100 }, .{ "LINE_HARD_LIMIT", 200 },
+            .{ "SENTENCE_TERM", 0 }, .{ "SENTENCE_TERM_LIMIT", 100 },
+            .{ "SENTENCE_SEP", 100 }, .{ "SENTENCE_SEP_LIMIT", 200 },
+        };
+        inline for (tag_consts) |k| {
+            try def.constant_order.append(a, k[0]);
+            try def.constant_names.put(a, k[0], {});
+            try def.static_props.put(a, k[0], .{ .int = k[1] });
+        }
+
+        try vm.classes.put(a, cls_name, def);
+
+        try vm.native_fns.put(a, cls_name ++ "::createWordInstance", brkCreateWord);
+        try vm.native_fns.put(a, cls_name ++ "::createCharacterInstance", brkCreateChar);
+        try vm.native_fns.put(a, cls_name ++ "::createLineInstance", brkCreateLine);
+        try vm.native_fns.put(a, cls_name ++ "::createSentenceInstance", brkCreateSentence);
+        try vm.native_fns.put(a, cls_name ++ "::createTitleInstance", brkCreateTitle);
+        try vm.native_fns.put(a, cls_name ++ "::setText", brkSetText);
+        try vm.native_fns.put(a, cls_name ++ "::getText", brkGetText);
+        try vm.native_fns.put(a, cls_name ++ "::first", brkFirst);
+        try vm.native_fns.put(a, cls_name ++ "::last", brkLast);
+        try vm.native_fns.put(a, cls_name ++ "::next", brkNext);
+        try vm.native_fns.put(a, cls_name ++ "::previous", brkPrevious);
+        try vm.native_fns.put(a, cls_name ++ "::current", brkCurrent);
+        try vm.native_fns.put(a, cls_name ++ "::following", brkFollowing);
+        try vm.native_fns.put(a, cls_name ++ "::preceding", brkPreceding);
+        try vm.native_fns.put(a, cls_name ++ "::isBoundary", brkIsBoundary);
+        try vm.native_fns.put(a, cls_name ++ "::getRuleStatus", brkGetRuleStatus);
+        try vm.native_fns.put(a, cls_name ++ "::getLocale", brkGetLocale);
+    }
 }
 
 fn registerIntlCalendarClass(vm: *VM, a: Allocator) !void {
@@ -1489,6 +1735,11 @@ pub fn cleanupResources(objects: std.ArrayListUnmanaged(*PhpObject)) void {
             if (getDateFmt(obj)) |f| zphp_udat_close(f);
         } else if (std.mem.eql(u8, obj.class_name, "IntlCalendar") or std.mem.eql(u8, obj.class_name, "IntlGregorianCalendar")) {
             if (getCal(obj)) |c| zphp_ucal_close(c);
+        } else if (std.mem.eql(u8, obj.class_name, "IntlBreakIterator") or
+            std.mem.eql(u8, obj.class_name, "IntlRuleBasedBreakIterator") or
+            std.mem.eql(u8, obj.class_name, "IntlCodePointBreakIterator"))
+        {
+            if (getBrk(obj)) |w| zphp_ubrk_close(w);
         }
     }
 }
