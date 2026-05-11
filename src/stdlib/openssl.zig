@@ -17,7 +17,43 @@ pub const entries = .{
     .{ "openssl_random_pseudo_bytes", opensslRandomPseudoBytes },
     .{ "openssl_digest", opensslDigest },
     .{ "openssl_get_md_methods", opensslGetMdMethods },
+    .{ "openssl_pbkdf2", opensslPbkdf2 },
 };
+
+fn opensslPbkdf2(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len < 4 or args[0] != .string or args[1] != .string) return .{ .bool = false };
+    const password = args[0].string;
+    const salt = args[1].string;
+    const key_length: usize = @intCast(@max(0, Value.toInt(args[2])));
+    const iterations: usize = @intCast(@max(1, Value.toInt(args[3])));
+    const digest_algo = if (args.len >= 5 and args[4] == .string) args[4].string else "sha1";
+
+    var name_buf: [64]u8 = undefined;
+    if (digest_algo.len >= name_buf.len) return .{ .bool = false };
+    @memcpy(name_buf[0..digest_algo.len], digest_algo);
+    name_buf[digest_algo.len] = 0;
+
+    const md = c.EVP_MD_fetch(null, &name_buf, null) orelse return .{ .bool = false };
+    defer c.EVP_MD_free(md);
+
+    const out = try ctx.allocator.alloc(u8, key_length);
+    const rc = c.PKCS5_PBKDF2_HMAC(
+        password.ptr,
+        @intCast(password.len),
+        salt.ptr,
+        @intCast(salt.len),
+        @intCast(iterations),
+        md,
+        @intCast(key_length),
+        out.ptr,
+    );
+    if (rc != 1) {
+        ctx.allocator.free(out);
+        return .{ .bool = false };
+    }
+    try ctx.vm.strings.append(ctx.allocator, out);
+    return .{ .string = out };
+}
 
 fn opensslDigest(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len < 2 or args[0] != .string or args[1] != .string) return .{ .bool = false };
