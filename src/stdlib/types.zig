@@ -544,6 +544,7 @@ fn class_exists(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len == 0 or args[0] != .string) return .{ .bool = false };
     const name = args[0].string;
     if (std.ascii.eqlIgnoreCase(name, "stdClass") or std.ascii.eqlIgnoreCase(name, "Attribute")) return .{ .bool = true };
+    if (std.ascii.eqlIgnoreCase(name, "Closure") or std.ascii.eqlIgnoreCase(name, "Generator") or std.ascii.eqlIgnoreCase(name, "Fiber")) return .{ .bool = true };
     if (ctx.vm.interfaces.contains(name)) return .{ .bool = false };
     if (ctx.vm.traits.contains(name)) return .{ .bool = false };
     if (classExistsCaseInsensitive(ctx, name)) return .{ .bool = true };
