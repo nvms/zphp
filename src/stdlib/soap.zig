@@ -106,19 +106,23 @@ pub fn register(vm: *VM, a: Allocator) !void {
     }
 }
 
+fn getThis(ctx: *NativeContext) ?*PhpObject {
+    if (ctx.vm.frame_count == 0) return null;
+    const v = ctx.vm.currentFrame().vars.get("$this") orelse return null;
+    if (v != .object) return null;
+    return v.object;
+}
+
 fn getOpt(opts: ?*PhpArray, key: []const u8) Value {
     if (opts == null) return .null;
     return opts.?.get(.{ .string = key });
 }
 
 fn soapClientConstruct(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len < 1) return .null;
-    const this = args[0];
-    if (this != .object) return .null;
-    const obj = this.object;
+    const obj = getThis(ctx) orelse return .null;
 
-    const wsdl = if (args.len > 1) args[1] else .null;
-    const opts: ?*PhpArray = if (args.len > 2 and args[2] == .array) args[2].array else null;
+    const wsdl = if (args.len > 0) args[0] else .null;
+    const opts: ?*PhpArray = if (args.len > 1 and args[1] == .array) args[1].array else null;
 
     try obj.set(ctx.allocator, "__wsdl", wsdl);
     try obj.set(ctx.allocator, "__options", if (opts != null) Value{ .array = opts.? } else .null);
@@ -396,11 +400,10 @@ fn parseSoapResponse(ctx: *NativeContext, xml: []const u8) RuntimeError!Value {
 }
 
 fn soapClientCall(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len < 3 or args[0] != .object) return .null;
-    const obj = args[0].object;
-    if (args[1] != .string or args[2] != .array) return .null;
-    const method = args[1].string;
-    const args_arr = args[2].array;
+    const obj = getThis(ctx) orelse return .null;
+    if (args.len < 2 or args[0] != .string or args[1] != .array) return .null;
+    const method = args[0].string;
+    const args_arr = args[1].array;
 
     const loc_v = obj.get("__location");
     const uri_v = obj.get("__uri");
@@ -442,37 +445,37 @@ fn soapClientCall(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
 }
 
 fn soapClientMagicCall(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    // signature: __call($name, $arguments)
-    if (args.len < 3) return .null;
-    const new_args = [_]Value{ args[0], args[1], args[2], .null, .null };
-    return try soapClientCall(ctx, &new_args);
+    // signature: __call($name, $arguments) - delegate to __soapCall
+    return try soapClientCall(ctx, args);
 }
 
-fn soapClientGetLastRequest(_: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len < 1 or args[0] != .object) return .null;
-    return args[0].object.get("__last_request");
+fn soapClientGetLastRequest(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const o = getThis(ctx) orelse return .null;
+    return o.get("__last_request");
 }
-fn soapClientGetLastResponse(_: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len < 1 or args[0] != .object) return .null;
-    return args[0].object.get("__last_response");
+fn soapClientGetLastResponse(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const o = getThis(ctx) orelse return .null;
+    return o.get("__last_response");
 }
-fn soapClientGetLastRequestHeaders(_: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len < 1 or args[0] != .object) return .null;
-    return args[0].object.get("__last_request_headers");
+fn soapClientGetLastRequestHeaders(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const o = getThis(ctx) orelse return .null;
+    return o.get("__last_request_headers");
 }
-fn soapClientGetLastResponseHeaders(_: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len < 1 or args[0] != .object) return .null;
-    return args[0].object.get("__last_response_headers");
+fn soapClientGetLastResponseHeaders(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const o = getThis(ctx) orelse return .null;
+    return o.get("__last_response_headers");
 }
 fn soapClientSetLocation(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len < 2 or args[0] != .object) return .null;
-    const prev = args[0].object.get("__location");
-    try args[0].object.set(ctx.allocator, "__location", args[1]);
+    const o = getThis(ctx) orelse return .null;
+    if (args.len < 1) return .null;
+    const prev = o.get("__location");
+    try o.set(ctx.allocator, "__location", args[0]);
     return prev;
 }
 fn soapClientSetSoapHeaders(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len < 2 or args[0] != .object) return .{ .bool = false };
-    try args[0].object.set(ctx.allocator, "__headers", args[1]);
+    const o = getThis(ctx) orelse return .{ .bool = false };
+    if (args.len < 1) return .{ .bool = false };
+    try o.set(ctx.allocator, "__headers", args[0]);
     return .{ .bool = true };
 }
 fn soapClientGetFunctions(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
@@ -482,24 +485,24 @@ fn soapClientGetTypes(ctx: *NativeContext, _: []const Value) RuntimeError!Value 
     return .{ .array = try ctx.createArray() };
 }
 fn soapClientSetCookie(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len < 3 or args[0] != .object) return .null;
-    const cookies_v = args[0].object.get("__cookies");
+    const o = getThis(ctx) orelse return .null;
+    if (args.len < 2) return .null;
+    const cookies_v = o.get("__cookies");
     if (cookies_v != .array) return .null;
-    if (args[1] == .string) {
-        try cookies_v.array.set(ctx.allocator, .{ .string = args[1].string }, args[2]);
+    if (args[0] == .string) {
+        try cookies_v.array.set(ctx.allocator, .{ .string = args[0].string }, args[1]);
     }
     return .null;
 }
-fn soapClientGetCookies(_: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len < 1 or args[0] != .object) return .null;
-    return args[0].object.get("__cookies");
+fn soapClientGetCookies(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const o = getThis(ctx) orelse return .null;
+    return o.get("__cookies");
 }
 
 // SoapServer stubs - functional outline. real-world server use is rare from PHP scripts
 fn soapServerConstruct(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len < 1 or args[0] != .object) return .null;
-    const obj = args[0].object;
-    const wsdl = if (args.len > 1) args[1] else .null;
+    const obj = getThis(ctx) orelse return .null;
+    const wsdl = if (args.len > 0) args[0] else .null;
     try obj.set(ctx.allocator, "__wsdl", wsdl);
     try obj.set(ctx.allocator, "__functions", .{ .array = try ctx.createArray() });
     try obj.set(ctx.allocator, "__class", .null);
@@ -507,27 +510,29 @@ fn soapServerConstruct(ctx: *NativeContext, args: []const Value) RuntimeError!Va
     return .null;
 }
 fn soapServerAddFunction(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len < 2 or args[0] != .object) return .{ .bool = false };
-    const obj = args[0].object;
+    const obj = getThis(ctx) orelse return .{ .bool = false };
+    if (args.len < 1) return .{ .bool = false };
     const fns_v = obj.get("__functions");
     if (fns_v != .array) return .{ .bool = false };
-    if (args[1] == .string) {
-        try fns_v.array.set(ctx.allocator, .{ .int = fns_v.array.next_int_key }, args[1]);
-    } else if (args[1] == .array) {
-        for (args[1].array.entries.items) |e| {
+    if (args[0] == .string) {
+        try fns_v.array.set(ctx.allocator, .{ .int = fns_v.array.next_int_key }, args[0]);
+    } else if (args[0] == .array) {
+        for (args[0].array.entries.items) |e| {
             try fns_v.array.set(ctx.allocator, .{ .int = fns_v.array.next_int_key }, e.value);
         }
     }
     return .{ .bool = true };
 }
 fn soapServerSetObject(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len < 2 or args[0] != .object) return .{ .bool = false };
-    try args[0].object.set(ctx.allocator, "__object", args[1]);
+    const obj = getThis(ctx) orelse return .{ .bool = false };
+    if (args.len < 1) return .{ .bool = false };
+    try obj.set(ctx.allocator, "__object", args[0]);
     return .{ .bool = true };
 }
 fn soapServerSetClass(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len < 2 or args[0] != .object) return .{ .bool = false };
-    try args[0].object.set(ctx.allocator, "__class", args[1]);
+    const obj = getThis(ctx) orelse return .{ .bool = false };
+    if (args.len < 1) return .{ .bool = false };
+    try obj.set(ctx.allocator, "__class", args[0]);
     return .{ .bool = true };
 }
 fn soapServerHandle(_: *NativeContext, _: []const Value) RuntimeError!Value {
@@ -540,61 +545,56 @@ fn soapServerFault(_: *NativeContext, _: []const Value) RuntimeError!Value {
 fn soapServerAddSoapHeader(_: *NativeContext, _: []const Value) RuntimeError!Value {
     return .{ .bool = true };
 }
-fn soapServerGetFunctions(_: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len < 1 or args[0] != .object) return .null;
-    return args[0].object.get("__functions");
+fn soapServerGetFunctions(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const obj = getThis(ctx) orelse return .null;
+    return obj.get("__functions");
 }
 fn soapServerSetPersistence(_: *NativeContext, _: []const Value) RuntimeError!Value {
     return .null;
 }
 
 fn soapHeaderConstruct(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len < 1 or args[0] != .object) return .null;
-    const obj = args[0].object;
-    if (args.len > 1) try obj.set(ctx.allocator, "namespace", args[1]);
-    if (args.len > 2) try obj.set(ctx.allocator, "name", args[2]);
-    if (args.len > 3) try obj.set(ctx.allocator, "data", args[3]);
-    if (args.len > 4) try obj.set(ctx.allocator, "mustUnderstand", args[4]);
-    if (args.len > 5) try obj.set(ctx.allocator, "actor", args[5]);
+    const obj = getThis(ctx) orelse return .null;
+    if (args.len > 0) try obj.set(ctx.allocator, "namespace", args[0]);
+    if (args.len > 1) try obj.set(ctx.allocator, "name", args[1]);
+    if (args.len > 2) try obj.set(ctx.allocator, "data", args[2]);
+    if (args.len > 3) try obj.set(ctx.allocator, "mustUnderstand", args[3]);
+    if (args.len > 4) try obj.set(ctx.allocator, "actor", args[4]);
     return .null;
 }
 
 fn soapVarConstruct(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len < 1 or args[0] != .object) return .null;
-    const obj = args[0].object;
-    if (args.len > 1) try obj.set(ctx.allocator, "enc_value", args[1]);
-    if (args.len > 2) try obj.set(ctx.allocator, "enc_type", args[2]);
-    if (args.len > 3) try obj.set(ctx.allocator, "enc_stype", args[3]);
-    if (args.len > 4) try obj.set(ctx.allocator, "enc_ns", args[4]);
-    if (args.len > 5) try obj.set(ctx.allocator, "enc_name", args[5]);
+    const obj = getThis(ctx) orelse return .null;
+    if (args.len > 0) try obj.set(ctx.allocator, "enc_value", args[0]);
+    if (args.len > 1) try obj.set(ctx.allocator, "enc_type", args[1]);
+    if (args.len > 2) try obj.set(ctx.allocator, "enc_stype", args[2]);
+    if (args.len > 3) try obj.set(ctx.allocator, "enc_ns", args[3]);
+    if (args.len > 4) try obj.set(ctx.allocator, "enc_name", args[4]);
     return .null;
 }
 
 fn soapParamConstruct(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len < 1 or args[0] != .object) return .null;
-    const obj = args[0].object;
-    if (args.len > 1) try obj.set(ctx.allocator, "param_data", args[1]);
-    if (args.len > 2) try obj.set(ctx.allocator, "param_name", args[2]);
+    const obj = getThis(ctx) orelse return .null;
+    if (args.len > 0) try obj.set(ctx.allocator, "param_data", args[0]);
+    if (args.len > 1) try obj.set(ctx.allocator, "param_name", args[1]);
     return .null;
 }
 
 fn soapFaultConstruct(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len < 1 or args[0] != .object) return .null;
-    const obj = args[0].object;
-    if (args.len > 1) try obj.set(ctx.allocator, "faultcode", args[1]);
-    if (args.len > 2) {
-        try obj.set(ctx.allocator, "faultstring", args[2]);
-        try obj.set(ctx.allocator, "message", args[2]); // Exception's message
+    const obj = getThis(ctx) orelse return .null;
+    if (args.len > 0) try obj.set(ctx.allocator, "faultcode", args[0]);
+    if (args.len > 1) {
+        try obj.set(ctx.allocator, "faultstring", args[1]);
+        try obj.set(ctx.allocator, "message", args[1]); // Exception's message
     }
-    if (args.len > 3) try obj.set(ctx.allocator, "faultactor", args[3]);
-    if (args.len > 4) try obj.set(ctx.allocator, "detail", args[4]);
-    if (args.len > 5) try obj.set(ctx.allocator, "faultname", args[5]);
+    if (args.len > 2) try obj.set(ctx.allocator, "faultactor", args[2]);
+    if (args.len > 3) try obj.set(ctx.allocator, "detail", args[3]);
+    if (args.len > 4) try obj.set(ctx.allocator, "faultname", args[4]);
     return .null;
 }
 
-fn soapFaultToString(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len < 1 or args[0] != .object) return .{ .string = "" };
-    const obj = args[0].object;
+fn soapFaultToString(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const obj = getThis(ctx) orelse return .{ .string = "" };
     const code = obj.get("faultcode");
     const str = obj.get("faultstring");
     const code_s = if (code == .string) code.string else "Server";

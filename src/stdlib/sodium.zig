@@ -749,8 +749,14 @@ fn native_kdf_derive(ctx: *NativeContext, args: []const Value) RuntimeError!Valu
     const subkey_id: u64 = @intCast(args[1].int);
     const context = args[2].string;
     const key = args[3].string;
-    if (key.len != c.crypto_kdf_KEYBYTES) return .{ .bool = false };
-    if (context.len < c.crypto_kdf_CONTEXTBYTES) return .{ .bool = false };
+    if (key.len != c.crypto_kdf_KEYBYTES) {
+        try ctx.vm.setPendingException("SodiumException", "sodium_crypto_kdf_derive_from_key(): Argument #4 ($key) must be SODIUM_CRYPTO_KDF_KEYBYTES bytes long");
+        return .{ .bool = false };
+    }
+    if (context.len != c.crypto_kdf_CONTEXTBYTES) {
+        try ctx.vm.setPendingException("SodiumException", "sodium_crypto_kdf_derive_from_key(): Argument #3 ($context) must be SODIUM_CRYPTO_KDF_CONTEXTBYTES bytes long");
+        return .{ .bool = false };
+    }
     var ctx_buf: [c.crypto_kdf_CONTEXTBYTES]u8 = undefined;
     @memcpy(&ctx_buf, context[0..c.crypto_kdf_CONTEXTBYTES]);
     const out = try ctx.allocator.alloc(u8, out_len);
