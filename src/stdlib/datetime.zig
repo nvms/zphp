@@ -386,18 +386,54 @@ fn dtConstruct(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
             var hour: i64 = 0;
             var min: i64 = 0;
             var sec: i64 = 0;
+            var pos: usize = 10;
             if (s.len >= 19 and (s[10] == ' ' or s[10] == 'T') and s[13] == ':' and s[16] == ':') {
                 hour = std.fmt.parseInt(i64, s[11..13], 10) catch 0;
                 min = std.fmt.parseInt(i64, s[14..16], 10) catch 0;
                 sec = std.fmt.parseInt(i64, s[17..19], 10) catch 0;
+                pos = 19;
             } else if (s.len >= 16 and (s[10] == ' ' or s[10] == 'T') and s[13] == ':') {
                 hour = std.fmt.parseInt(i64, s[11..13], 10) catch 0;
                 min = std.fmt.parseInt(i64, s[14..16], 10) catch 0;
+                pos = 16;
             }
-            // when constructing with a datetime string and a timezone,
-            // the string is interpreted as local time in that timezone
+            // skip fractional seconds
+            if (pos < s.len and s[pos] == '.') {
+                pos += 1;
+                while (pos < s.len and s[pos] >= '0' and s[pos] <= '9') pos += 1;
+            }
+            while (pos < s.len and s[pos] == ' ') pos += 1;
+            // try trailing timezone
+            var explicit_offset: ?i64 = null;
+            var explicit_name: ?[]const u8 = null;
+            if (pos < s.len) {
+                const rest = s[pos..];
+                if (rest.len >= 1 and (rest[0] == 'Z' or rest[0] == 'z')) {
+                    explicit_offset = 0;
+                    explicit_name = "+00:00";
+                } else if (parseTimezoneOffset(rest)) |off| {
+                    explicit_offset = off;
+                    const abs_off: i64 = if (off < 0) -off else off;
+                    const oh: i64 = @divTrunc(abs_off, 3600);
+                    const om: i64 = @mod(@divTrunc(abs_off, 60), 60);
+                    var nm_buf: [8]u8 = undefined;
+                    nm_buf[0] = if (off < 0) '-' else '+';
+                    nm_buf[1] = @intCast(@divTrunc(oh, 10) + '0');
+                    nm_buf[2] = @intCast(@mod(oh, 10) + '0');
+                    nm_buf[3] = ':';
+                    nm_buf[4] = @intCast(@divTrunc(om, 10) + '0');
+                    nm_buf[5] = @intCast(@mod(om, 10) + '0');
+                    const nm = nm_buf[0..6];
+                    const owned = try ctx.allocator.dupe(u8, nm);
+                    try ctx.vm.strings.append(ctx.allocator, owned);
+                    explicit_name = owned;
+                }
+            }
             ts = dateToTimestamp(year, month, day, hour, min, sec);
-            if (lookupTimezone(tz_name)) |tz| {
+            if (explicit_offset) |off| {
+                ts -= off;
+                try obj.set(ctx.allocator, "__timezone", .{ .string = explicit_name.? });
+            } else if (lookupTimezone(tz_name)) |tz| {
                 ts -= @as(i64, tzOffsetAt(tz, ts));
             }
         } else {
