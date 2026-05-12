@@ -625,7 +625,9 @@ fn stmtFetch(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
         const class_name: []const u8 = if (fc_v == .string) fc_v.string else "stdClass";
         const inst = try fetchRowAsClass(ctx, stmt, class_name);
         const ctor_args_v = obj.get("__fetch_class_args");
-        if (ctor_args_v == .array) try invokeCtorWithArgs(ctx, inst, class_name, ctor_args_v.array);
+        if (!std.mem.eql(u8, class_name, "stdClass")) {
+            try invokeCtorWithArgs(ctx, inst, class_name, if (ctor_args_v == .array) ctor_args_v.array else null);
+        }
         const next_rc = sqlite.sqlite3_step(stmt);
         try obj.set(ctx.allocator, "__has_row", .{ .bool = next_rc == sqlite.ROW });
         return inst;
@@ -742,15 +744,21 @@ fn stmtFetchAll(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
         var class_name: []const u8 = "stdClass";
         if (args.len >= 2 and args[1] == .string) class_name = args[1].string;
         const ctor_args_arr: ?*PhpArray = if (args.len >= 3 and args[2] == .array) args[2].array else null;
+        // PHP calls __construct after populating properties unless FETCH_PROPS_LATE flag
+        const is_stdclass = std.mem.eql(u8, class_name, "stdClass");
         if (start_with_row) {
             const inst = try fetchRowAsClass(ctx, stmt, class_name);
-            if (ctor_args_arr) |ca| try invokeCtorWithArgs(ctx, inst, class_name, ca);
+            if (!is_stdclass) {
+                if (ctor_args_arr) |ca| try invokeCtorWithArgs(ctx, inst, class_name, ca) else try invokeCtorWithArgs(ctx, inst, class_name, null);
+            }
             try result.append(ctx.allocator, inst);
         }
         var rc = sqlite.sqlite3_step(stmt);
         while (rc == sqlite.ROW) {
             const inst = try fetchRowAsClass(ctx, stmt, class_name);
-            if (ctor_args_arr) |ca| try invokeCtorWithArgs(ctx, inst, class_name, ca);
+            if (!is_stdclass) {
+                if (ctor_args_arr) |ca| try invokeCtorWithArgs(ctx, inst, class_name, ca) else try invokeCtorWithArgs(ctx, inst, class_name, null);
+            }
             try result.append(ctx.allocator, inst);
             rc = sqlite.sqlite3_step(stmt);
         }
@@ -931,16 +939,18 @@ fn stmtSetFetchMode(ctx: *NativeContext, args: []const Value) RuntimeError!Value
     return .{ .bool = true };
 }
 
-fn invokeCtorWithArgs(ctx: *NativeContext, inst_val: Value, class_name: []const u8, ctor_args: *PhpArray) !void {
+fn invokeCtorWithArgs(ctx: *NativeContext, inst_val: Value, class_name: []const u8, ctor_args: ?*PhpArray) !void {
     if (inst_val != .object) return;
     if (!ctx.vm.hasMethod(class_name, "__construct")) return;
     const obj = inst_val.object;
     var args_buf: [16]Value = undefined;
     var ai: usize = 0;
-    for (ctor_args.entries.items) |e| {
-        if (ai >= args_buf.len) break;
-        args_buf[ai] = e.value;
-        ai += 1;
+    if (ctor_args) |arr| {
+        for (arr.entries.items) |e| {
+            if (ai >= args_buf.len) break;
+            args_buf[ai] = e.value;
+            ai += 1;
+        }
     }
     _ = try ctx.vm.callMethod(obj, "__construct", args_buf[0..ai]);
 }
