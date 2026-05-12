@@ -1601,7 +1601,8 @@ fn registerLocaleClass(vm: *VM, a: Allocator) !void {
     inline for (.{
         "getDefault", "setDefault", "getPrimaryLanguage", "getRegion", "getScript",
         "canonicalize", "getDisplayName", "getDisplayLanguage", "getDisplayRegion",
-        "getDisplayScript",
+        "getDisplayScript", "composeLocale", "parseLocale",
+        "getAllVariants", "getKeywords", "filterMatches", "lookup", "acceptFromHttp",
     }) |m| {
         try def.methods.put(a, m, .{ .name = m, .arity = 0, .is_static = true });
     }
@@ -1616,6 +1617,134 @@ fn registerLocaleClass(vm: *VM, a: Allocator) !void {
     try vm.native_fns.put(a, "Locale::getDisplayLanguage", localeGetDisplayLanguage);
     try vm.native_fns.put(a, "Locale::getDisplayRegion", localeGetDisplayRegion);
     try vm.native_fns.put(a, "Locale::getDisplayScript", localeGetDisplayScript);
+    try vm.native_fns.put(a, "Locale::composeLocale", localeComposeLocale);
+    try vm.native_fns.put(a, "Locale::parseLocale", localeParseLocale);
+    try vm.native_fns.put(a, "Locale::getAllVariants", localeGetAllVariants);
+    try vm.native_fns.put(a, "Locale::getKeywords", localeGetKeywords);
+    try vm.native_fns.put(a, "Locale::filterMatches", localeFilterMatches);
+    try vm.native_fns.put(a, "Locale::lookup", localeLookup);
+    try vm.native_fns.put(a, "Locale::acceptFromHttp", localeAcceptFromHttp);
+}
+
+fn localeComposeLocale(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len < 1 or args[0] != .array) return .{ .bool = false };
+    const arr = args[0].array;
+    var buf: std.ArrayListUnmanaged(u8) = .{};
+    defer buf.deinit(ctx.allocator);
+    // PHP's composeLocale stitches subtags in order: language[_script]_region[_variants]@keyword=value;...
+    const lang = arr.get(.{ .string = "language" });
+    if (lang == .string) try buf.appendSlice(ctx.allocator, lang.string);
+    const script = arr.get(.{ .string = "script" });
+    if (script == .string and script.string.len > 0) {
+        try buf.append(ctx.allocator, '_');
+        try buf.appendSlice(ctx.allocator, script.string);
+    }
+    const region = arr.get(.{ .string = "region" });
+    if (region == .string and region.string.len > 0) {
+        try buf.append(ctx.allocator, '_');
+        try buf.appendSlice(ctx.allocator, region.string);
+    }
+    var i: usize = 0;
+    while (i < 16) : (i += 1) {
+        var key_buf: [16]u8 = undefined;
+        const key = std.fmt.bufPrint(&key_buf, "variant{d}", .{i}) catch break;
+        const v = arr.get(.{ .string = key });
+        if (v == .string and v.string.len > 0) {
+            try buf.append(ctx.allocator, '_');
+            try buf.appendSlice(ctx.allocator, v.string);
+        } else break;
+    }
+    const owned = try ctx.allocator.dupe(u8, buf.items);
+    try ctx.vm.strings.append(ctx.allocator, owned);
+    return .{ .string = owned };
+}
+
+fn localeParseLocale(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len < 1 or args[0] != .string) return .null;
+    const s = args[0].string;
+    const out = try ctx.createArray();
+    // split on '_' / '-' separators
+    var parts: [8][]const u8 = undefined;
+    var n: usize = 0;
+    var start: usize = 0;
+    for (s, 0..) |c, idx| {
+        if (c == '_' or c == '-') {
+            if (n < 8) {
+                parts[n] = s[start..idx];
+                n += 1;
+            }
+            start = idx + 1;
+        }
+    }
+    if (n < 8 and start < s.len) {
+        parts[n] = s[start..];
+        n += 1;
+    }
+    if (n >= 1) try out.set(ctx.allocator, .{ .string = "language" }, .{ .string = parts[0] });
+    var idx: usize = 1;
+    // 4-letter title-case token is the script (e.g. Latn, Cyrl)
+    if (n > idx and parts[idx].len == 4) {
+        try out.set(ctx.allocator, .{ .string = "script" }, .{ .string = parts[idx] });
+        idx += 1;
+    }
+    // next 2-letter or 3-digit token is the region
+    if (n > idx and (parts[idx].len == 2 or parts[idx].len == 3)) {
+        try out.set(ctx.allocator, .{ .string = "region" }, .{ .string = parts[idx] });
+        idx += 1;
+    }
+    // remaining are variants
+    var vi: usize = 0;
+    while (idx < n) : ({ idx += 1; vi += 1; }) {
+        var key_buf: [16]u8 = undefined;
+        const key = std.fmt.bufPrint(&key_buf, "variant{d}", .{vi}) catch break;
+        const owned_key = try ctx.allocator.dupe(u8, key);
+        try ctx.vm.strings.append(ctx.allocator, owned_key);
+        try out.set(ctx.allocator, .{ .string = owned_key }, .{ .string = parts[idx] });
+    }
+    return .{ .array = out };
+}
+
+fn localeGetAllVariants(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    const out = try ctx.createArray();
+    if (args.len < 1 or args[0] != .string) return .{ .array = out };
+    const parsed = try localeParseLocale(ctx, args);
+    if (parsed != .array) return .{ .array = out };
+    var i: usize = 0;
+    while (i < 16) : (i += 1) {
+        var key_buf: [16]u8 = undefined;
+        const key = std.fmt.bufPrint(&key_buf, "variant{d}", .{i}) catch break;
+        const v = parsed.array.get(.{ .string = key });
+        if (v == .string) try out.append(ctx.allocator, v) else break;
+    }
+    return .{ .array = out };
+}
+
+fn localeGetKeywords(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    return .{ .array = try ctx.createArray() };
+}
+
+fn localeFilterMatches(_: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len < 2 or args[0] != .string or args[1] != .string) return .{ .bool = false };
+    return .{ .bool = std.ascii.eqlIgnoreCase(args[0].string, args[1].string) };
+}
+
+fn localeLookup(_: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len < 2 or args[1] != .string) return .{ .string = "" };
+    return args[1];
+}
+
+fn localeAcceptFromHttp(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    // best-effort: take the first locale from a comma-separated header
+    if (args.len < 1 or args[0] != .string) return .{ .bool = false };
+    const s = args[0].string;
+    var first_end: usize = s.len;
+    for (s, 0..) |c, i| {
+        if (c == ',' or c == ';') { first_end = i; break; }
+    }
+    const slice = std.mem.trim(u8, s[0..first_end], " \t");
+    const owned = try ctx.allocator.dupe(u8, slice);
+    try ctx.vm.strings.append(ctx.allocator, owned);
+    return .{ .string = owned };
 }
 
 fn registerCollatorClass(vm: *VM, a: Allocator) !void {
