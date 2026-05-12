@@ -729,6 +729,14 @@ fn class_exists(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
 
 fn method_exists(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len < 2 or args[1] != .string) return .{ .bool = false };
+    // closures (stored as unique name strings) report themselves as the
+    // 'Closure' class. they always have __invoke + the public Closure API
+    if (args[0] == .string and std.mem.startsWith(u8, args[0].string, "__closure_")) {
+        const m = args[1].string;
+        const closure_methods = [_][]const u8{ "__invoke", "bindTo", "bind", "call", "fromCallable", "getClosureScopeClass", "getClosureThis", "getClosureCalledClass", "getClosureUsedVariables" };
+        for (closure_methods) |cm| if (std.mem.eql(u8, cm, m)) return .{ .bool = true };
+        return .{ .bool = false };
+    }
     var current: ?[]const u8 = if (args[0] == .object)
         args[0].object.class_name
     else if (args[0] == .generator)
@@ -963,6 +971,12 @@ fn native_function_exists(ctx: *NativeContext, args: []const Value) RuntimeError
 }
 
 fn native_get_object_vars(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    // closures are stored as name strings and report as 'object'/'Closure'
+    // but have no user-visible properties - return empty array per PHP
+    if (args.len > 0 and args[0] == .string and std.mem.startsWith(u8, args[0].string, "__closure_")) {
+        const empty = try ctx.createArray();
+        return .{ .array = empty };
+    }
     if (args.len == 0 or args[0] != .object) return Value{ .bool = false };
     const obj = args[0].object;
     var arr = try ctx.createArray();
