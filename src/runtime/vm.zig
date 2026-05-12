@@ -5843,6 +5843,8 @@ pub const VM = struct {
                     gen.implicit_key += 1;
                     gen.ip = self.currentFrame().ip;
                     gen.vars = self.currentFrame().vars;
+                    gen.ref_slots = self.currentFrame().ref_slots;
+                    self.currentFrame().ref_slots = .{};
                     self.saveFrameLocalsToGenerator(gen);
                     try self.saveGeneratorStack(gen);
                     self.saveGeneratorHandlers(gen);
@@ -5863,6 +5865,8 @@ pub const VM = struct {
                     if (key == .int and key.int >= gen.implicit_key) gen.implicit_key = key.int + 1;
                     gen.ip = self.currentFrame().ip;
                     gen.vars = self.currentFrame().vars;
+                    gen.ref_slots = self.currentFrame().ref_slots;
+                    self.currentFrame().ref_slots = .{};
                     self.saveFrameLocalsToGenerator(gen);
                     try self.saveGeneratorStack(gen);
                     self.saveGeneratorHandlers(gen);
@@ -5940,6 +5944,8 @@ pub const VM = struct {
                             // save ip past the yield_from opcode so we resume here
                             outer_gen.ip = self.currentFrame().ip;
                             outer_gen.vars = self.currentFrame().vars;
+                            outer_gen.ref_slots = self.currentFrame().ref_slots;
+                            self.currentFrame().ref_slots = .{};
                             self.saveFrameLocalsToGenerator(outer_gen);
                             try self.saveGeneratorStack(outer_gen);
                             self.saveGeneratorHandlers(outer_gen);
@@ -5961,6 +5967,8 @@ pub const VM = struct {
                             outer_gen.current_value = entry.value;
                             outer_gen.ip = self.currentFrame().ip;
                             outer_gen.vars = self.currentFrame().vars;
+                            outer_gen.ref_slots = self.currentFrame().ref_slots;
+                            self.currentFrame().ref_slots = .{};
                             self.saveFrameLocalsToGenerator(outer_gen);
                             try self.saveGeneratorStack(outer_gen);
                             self.saveGeneratorHandlers(outer_gen);
@@ -5989,6 +5997,8 @@ pub const VM = struct {
                     gen.current_key = .null;
                     gen.state = .completed;
                     gen.vars = self.currentFrame().vars;
+                    gen.ref_slots = self.currentFrame().ref_slots;
+                    self.currentFrame().ref_slots = .{};
                     self.saveFrameLocalsToGenerator(gen);
                     self.frame_count -= 1;
                     return;
@@ -6278,7 +6288,9 @@ pub const VM = struct {
             .locals = gen_locals,
             .func = gen.func,
             .generator = gen,
+            .ref_slots = gen.ref_slots,
         };
+        gen.ref_slots = .{};
         self.frame_count += 1;
         if (self.frame_count > self.frame_high_water) self.frame_high_water = self.frame_count;
 

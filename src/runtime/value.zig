@@ -199,6 +199,7 @@ pub const Generator = struct {
     vars: std.StringHashMapUnmanaged(Value) = .{},
     locals: std.ArrayListUnmanaged(Value) = .{},
     stack: std.ArrayListUnmanaged(Value) = .{},
+    ref_slots: std.StringHashMapUnmanaged(*Value) = .{},
     base_sp: usize = 0,
     current_value: Value = .null,
     current_key: Value = .null,
@@ -226,6 +227,7 @@ pub const Generator = struct {
         self.vars.deinit(allocator);
         self.locals.deinit(allocator);
         self.stack.deinit(allocator);
+        self.ref_slots.deinit(allocator);
     }
 };
 
