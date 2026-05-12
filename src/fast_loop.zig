@@ -36,6 +36,15 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
 
             dispatch: switch (byte) {
             .get_local => {
+                // when a by-ref param binding exists, the local's authoritative
+                // value lives in a ref_slot cell (not locals[slot]). bail so
+                // runLoop can resolve the cell - common after calling a function
+                // with `&$var` from inside a locals_only closure or fiber body
+                if (frame.ref_slots.count() > 0) {
+                    frame.ip = ip - 1;
+                    self.sp = sp;
+                    return;
+                }
                 const slot = (@as(u16, code[ip]) << 8) | code[ip + 1];
                 ip += 2;
                 self.stack[sp] = locals[slot];

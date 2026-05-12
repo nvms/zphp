@@ -247,6 +247,8 @@ pub const Fiber = struct {
         ip: usize,
         vars: std.StringHashMapUnmanaged(Value),
         locals: []Value = &.{},
+        func: ?*const ObjFunction = null,
+        called_class: ?[]const u8 = null,
         generator: ?*Generator = null,
         ref_slots: std.StringHashMapUnmanaged(*Value),
         ref_array_bindings: std.ArrayListUnmanaged(ArrayRefBinding) = .{},

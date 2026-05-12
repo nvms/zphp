@@ -1,7 +1,7 @@
 <?php
 // covers: fiber+generator interactions, exception across suspends,
-//   nested fibers, generator with by-ref param, fiber-throw semantics.
-//   (fiber + by-ref function param is a known limitation - see CLAUDE.md)
+//   nested fibers, generator with by-ref param, fiber-throw semantics,
+//   fiber + by-ref param across suspend
 
 echo "=== generator with by-ref param mutates caller across yields ===\n";
 function progressLog(array &$log): Generator {
@@ -14,6 +14,21 @@ function progressLog(array &$log): Generator {
 $entries = [];
 foreach (progressLog($entries) as $step) echo "  step: $step\n";
 print_r($entries);
+
+echo "=== fiber + by-ref param survives suspend ===\n";
+function mutate(array &$arr): void {
+    $arr[] = 'before';
+    Fiber::suspend();
+    $arr[] = 'after';
+}
+$f = new Fiber(function () {
+    $data = [];
+    mutate($data);
+    return $data;
+});
+$f->start();
+$f->resume();
+print_r($f->getReturn());
 
 echo "=== fiber + generator: generator runs inside fiber body ===\n";
 function genN(int $n): Generator {
