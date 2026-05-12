@@ -466,6 +466,23 @@ fn nodeInNs(n: *c.xmlNode, ns: []const u8) bool {
     return ns.len == 0;
 }
 
+fn sxmlIsset(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len < 1 or args[0] != .string) return .{ .bool = false };
+    const obj = getThis(ctx) orelse return .{ .bool = false };
+    const name = args[0].string;
+    const node = getNodePtr(obj) orelse return .{ .bool = false };
+    const ns_v = obj.get("__ns");
+    const ns_filter: ?[]const u8 = if (ns_v == .string) ns_v.string else null;
+    var ch = node.children;
+    while (ch != null) : (ch = ch.*.next) {
+        if (ch.*.type != c.XML_ELEMENT_NODE) continue;
+        if (!nameMatches(ch, name)) continue;
+        if (ns_filter) |ns| if (!nodeInNs(ch, ns)) continue;
+        return .{ .bool = true };
+    }
+    return .{ .bool = false };
+}
+
 fn sxmlGet(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len < 1 or args[0] != .string) return .null;
     const obj = getThis(ctx) orelse return .null;
@@ -540,6 +557,21 @@ fn sxmlOffsetExists(ctx: *NativeContext, args: []const Value) RuntimeError!Value
         const z = try dupZ(ctx, args[0].string);
         return .{ .bool = c.xmlHasProp(node, @ptrCast(z.ptr)) != null };
     }
+    if (args[0] == .int) {
+        // numeric offset: counts same-named siblings of $this
+        const idx = args[0].int;
+        if (idx < 0 or node.name == null) return .{ .bool = false };
+        const self_name = node.name[0..cstrLen(node.name)];
+        var n: ?*c.xmlNode = if (node.parent != null) node.parent.*.children else node;
+        var found: i64 = 0;
+        while (n != null) : (n = n.?.next) {
+            const cn = n.?;
+            if (cn.type == c.XML_ELEMENT_NODE and cn.name != null and std.mem.eql(u8, cn.name[0..cstrLen(cn.name)], self_name)) {
+                if (found == idx) return .{ .bool = true };
+                found += 1;
+            }
+        }
+    }
     return .{ .bool = false };
 }
 
@@ -598,15 +630,30 @@ fn sxmlGetIterator(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
             i += 1;
         }
     } else {
-        // sibling iteration: walk same-named siblings starting from $this
+        // sibling iteration: walk same-named siblings starting from $this,
+        // filtering to the same namespace as the starting node (PHP behavior)
         if (node.name == null) return .null;
         const self_name = node.name[0..cstrLen(node.name)];
+        const self_ns: ?[]const u8 = if (node.ns != null and node.ns.*.href != null)
+            node.ns.*.href[0..cstrLen(node.ns.*.href)]
+        else
+            null;
         var ch: ?*c.xmlNode = node;
         while (ch != null) : (ch = ch.?.next) {
             const cn = ch.?;
             if (cn.type != c.XML_ELEMENT_NODE) continue;
             if (cn.name == null) continue;
             if (!std.mem.eql(u8, cn.name[0..cstrLen(cn.name)], self_name)) continue;
+            // namespace filter: include only siblings in the same namespace
+            const cn_ns: ?[]const u8 = if (cn.ns != null and cn.ns.*.href != null)
+                cn.ns.*.href[0..cstrLen(cn.ns.*.href)]
+            else
+                null;
+            const ns_match = if (self_ns) |sns|
+                (cn_ns != null and std.mem.eql(u8, cn_ns.?, sns))
+            else
+                cn_ns == null;
+            if (!ns_match) continue;
             const wrapped_obj = try buildWrapper(ctx, doc, cn);
             try arr.set(ctx.allocator, .{ .int = @intCast(i) }, .{ .object = wrapped_obj });
             i += 1;
@@ -643,6 +690,7 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try def.methods.put(a, "getDocNamespaces", .{ .name = "getDocNamespaces", .arity = 0 });
     try def.methods.put(a, "__toString", .{ .name = "__toString", .arity = 0 });
     try def.methods.put(a, "__get", .{ .name = "__get", .arity = 1 });
+    try def.methods.put(a, "__isset", .{ .name = "__isset", .arity = 1 });
     try def.methods.put(a, "getIterator", .{ .name = "getIterator", .arity = 0 });
     try def.methods.put(a, "offsetGet", .{ .name = "offsetGet", .arity = 1 });
     try def.methods.put(a, "offsetSet", .{ .name = "offsetSet", .arity = 2 });
@@ -665,6 +713,7 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try vm.native_fns.put(a, "SimpleXMLElement::getDocNamespaces", sxmlGetDocNamespaces);
     try vm.native_fns.put(a, "SimpleXMLElement::__toString", sxmlToString);
     try vm.native_fns.put(a, "SimpleXMLElement::__get", sxmlGet);
+    try vm.native_fns.put(a, "SimpleXMLElement::__isset", sxmlIsset);
     try vm.native_fns.put(a, "SimpleXMLElement::getIterator", sxmlGetIterator);
     try vm.native_fns.put(a, "SimpleXMLElement::offsetGet", sxmlOffsetGet);
     try vm.native_fns.put(a, "SimpleXMLElement::offsetSet", sxmlOffsetSet);
