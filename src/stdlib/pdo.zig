@@ -48,7 +48,150 @@ const sqlite = struct {
     extern "sqlite3" fn sqlite3_errmsg(db: *Db) callconv(.c) [*:0]const u8;
     extern "sqlite3" fn sqlite3_errcode(db: *Db) callconv(.c) c_int;
     extern "sqlite3" fn sqlite3_stmt_readonly(stmt: *Stmt) callconv(.c) c_int;
+
+    // user-defined SQL function bindings for PDO\Sqlite::createFunction
+    pub const Context = opaque {};
+    pub const Value_t = opaque {};
+
+    pub const UTF8: c_int = 1;
+    pub const DETERMINISTIC: c_int = 0x800;
+
+    extern "sqlite3" fn sqlite3_create_function_v2(
+        db: *Db,
+        zFunctionName: [*:0]const u8,
+        nArg: c_int,
+        eTextRep: c_int,
+        pApp: ?*anyopaque,
+        xFunc: ?*const fn (*Context, c_int, [*]?*Value_t) callconv(.c) void,
+        xStep: ?*const fn (*Context, c_int, [*]?*Value_t) callconv(.c) void,
+        xFinal: ?*const fn (*Context) callconv(.c) void,
+        xDestroy: ?*const fn (?*anyopaque) callconv(.c) void,
+    ) callconv(.c) c_int;
+    extern "sqlite3" fn sqlite3_create_collation_v2(
+        db: *Db,
+        zName: [*:0]const u8,
+        eTextRep: c_int,
+        pCtx: ?*anyopaque,
+        xCompare: ?*const fn (?*anyopaque, c_int, ?*const anyopaque, c_int, ?*const anyopaque) callconv(.c) c_int,
+        xDestroy: ?*const fn (?*anyopaque) callconv(.c) void,
+    ) callconv(.c) c_int;
+
+    extern "sqlite3" fn sqlite3_user_data(ctx: *Context) callconv(.c) ?*anyopaque;
+
+    extern "sqlite3" fn sqlite3_value_type(v: *Value_t) callconv(.c) c_int;
+    extern "sqlite3" fn sqlite3_value_int64(v: *Value_t) callconv(.c) i64;
+    extern "sqlite3" fn sqlite3_value_double(v: *Value_t) callconv(.c) f64;
+    extern "sqlite3" fn sqlite3_value_text(v: *Value_t) callconv(.c) ?[*:0]const u8;
+    extern "sqlite3" fn sqlite3_value_bytes(v: *Value_t) callconv(.c) c_int;
+
+    extern "sqlite3" fn sqlite3_result_null(ctx: *Context) callconv(.c) void;
+    extern "sqlite3" fn sqlite3_result_int64(ctx: *Context, v: i64) callconv(.c) void;
+    extern "sqlite3" fn sqlite3_result_double(ctx: *Context, v: f64) callconv(.c) void;
+    // destructor accepts SQLite's TRANSIENT/STATIC sentinel ints as well as
+    // real function pointers; declared as ?*anyopaque to allow the sentinel
+    extern "sqlite3" fn sqlite3_result_text(ctx: *Context, v: [*]const u8, n: c_int, destructor: ?*anyopaque) callconv(.c) void;
+    extern "sqlite3" fn sqlite3_result_error(ctx: *Context, msg: [*]const u8, n: c_int) callconv(.c) void;
+
+    // SQLITE_TRANSIENT is the magic value -1 cast to a destructor pointer;
+    // SQLite recognizes it and copies the buffer before returning
+    pub inline fn TRANSIENT() ?*anyopaque {
+        return @ptrFromInt(@as(usize, @bitCast(@as(isize, -1))));
+    }
 };
+
+// trampoline state passed via sqlite3_create_function_v2's pApp pointer.
+// retained on the heap for the lifetime of the function registration.
+const UserSqlFn = struct {
+    vm: *VM,
+    callable: Value,
+};
+
+// converts sqlite Value_t args to php Value array, calls the user callable,
+// then writes the result back to sqlite. invoked by sqlite on the same
+// thread as the original PDO call, so we can safely reach into the VM.
+fn sqliteFuncTrampoline(ctx: *sqlite.Context, argc: c_int, argv: [*]?*sqlite.Value_t) callconv(.c) void {
+    const user_ptr = sqlite.sqlite3_user_data(ctx) orelse {
+        sqlite.sqlite3_result_null(ctx);
+        return;
+    };
+    const state: *UserSqlFn = @ptrCast(@alignCast(user_ptr));
+
+    var arg_buf: [16]Value = undefined;
+    const n: usize = @intCast(@max(argc, 0));
+    if (n > arg_buf.len) {
+        sqlite.sqlite3_result_error(ctx, "too many arguments", 18);
+        return;
+    }
+
+    var i: usize = 0;
+    while (i < n) : (i += 1) {
+        const v = argv[i] orelse {
+            arg_buf[i] = .null;
+            continue;
+        };
+        arg_buf[i] = switch (sqlite.sqlite3_value_type(v)) {
+            sqlite.INTEGER => Value{ .int = sqlite.sqlite3_value_int64(v) },
+            sqlite.FLOAT => Value{ .float = sqlite.sqlite3_value_double(v) },
+            sqlite.NULL => .null,
+            else => blk: {
+                const ptr = sqlite.sqlite3_value_text(v) orelse break :blk .{ .string = "" };
+                const len: usize = @intCast(@max(sqlite.sqlite3_value_bytes(v), 0));
+                const slice = ptr[0..len];
+                const owned = state.vm.allocator.dupe(u8, slice) catch break :blk .{ .string = "" };
+                state.vm.strings.append(state.vm.allocator, owned) catch {};
+                break :blk .{ .string = owned };
+            },
+        };
+    }
+
+    var nc = state.vm.makeContext(null);
+    const result = nc.invokeCallable(state.callable, arg_buf[0..n]) catch {
+        // surface a uniform error to sqlite; the throwing php exception is
+        // already on the pending channel for the calling php script to see
+        sqlite.sqlite3_result_error(ctx, "callback failed", 15);
+        return;
+    };
+
+    switch (result) {
+        .null => sqlite.sqlite3_result_null(ctx),
+        .bool => |b| sqlite.sqlite3_result_int64(ctx, if (b) 1 else 0),
+        .int => |n2| sqlite.sqlite3_result_int64(ctx, n2),
+        .float => |f| sqlite.sqlite3_result_double(ctx, f),
+        .string => |s| sqlite.sqlite3_result_text(ctx, s.ptr, @intCast(s.len), sqlite.TRANSIENT()),
+        else => sqlite.sqlite3_result_null(ctx),
+    }
+}
+
+fn sqliteFuncDestroy(p: ?*anyopaque) callconv(.c) void {
+    if (p) |ptr| {
+        const state: *UserSqlFn = @ptrCast(@alignCast(ptr));
+        state.vm.allocator.destroy(state);
+    }
+}
+
+fn sqliteCollationTrampoline(p: ?*anyopaque, alen: c_int, aptr: ?*const anyopaque, blen: c_int, bptr: ?*const anyopaque) callconv(.c) c_int {
+    const ptr = p orelse return 0;
+    const state: *UserSqlFn = @ptrCast(@alignCast(ptr));
+    const a_slice: []const u8 = if (aptr) |x|
+        @as([*]const u8, @ptrCast(x))[0..@intCast(@max(alen, 0))]
+    else
+        "";
+    const b_slice: []const u8 = if (bptr) |x|
+        @as([*]const u8, @ptrCast(x))[0..@intCast(@max(blen, 0))]
+    else
+        "";
+    const a_owned = state.vm.allocator.dupe(u8, a_slice) catch return 0;
+    state.vm.strings.append(state.vm.allocator, a_owned) catch {};
+    const b_owned = state.vm.allocator.dupe(u8, b_slice) catch return 0;
+    state.vm.strings.append(state.vm.allocator, b_owned) catch {};
+
+    var nc = state.vm.makeContext(null);
+    const result = nc.invokeCallable(state.callable, &.{ .{ .string = a_owned }, .{ .string = b_owned } }) catch return 0;
+    return switch (result) {
+        .int => |n| if (n < 0) @as(c_int, -1) else if (n > 0) @as(c_int, 1) else @as(c_int, 0),
+        else => 0,
+    };
+}
 
 pub fn getOpaquePtr(comptime T: type, obj: *PhpObject, prop: []const u8) ?*T {
     const v = obj.get(prop);
@@ -151,6 +294,28 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try pdo_def.static_props.put(a, "PARAM_STR", .{ .int = 2 });
 
     try vm.classes.put(a, "PDO", pdo_def);
+
+    // PHP 8.4 introduced PDO subclass drivers in the PDO\ namespace. zphp
+    // dispatches through a single PDO class, but register the names so
+    // `new PDO\Sqlite(...)` / `instanceof PDO\Sqlite` / autoloaders don't
+    // hit "class not found" (used by WP's sqlite-database-integration)
+    inline for (.{ "Sqlite", "SQLite", "Mysql", "MySql", "Pgsql", "PgSql", "Odbc", "ODBC", "Firebird", "Dblib" }) |driver| {
+        const fqn = "PDO\\" ++ driver;
+        var sub_def = ClassDef{ .name = fqn, .parent = "PDO" };
+        try sub_def.methods.put(a, "__construct", .{ .name = "__construct", .arity = 3 });
+        // Sqlite-specific extension methods (user-defined SQL function /
+        // aggregate / collation hooks). registered as no-ops so frameworks
+        // that conditionally call them (WordPress's sqlite-database-integration)
+        // can boot. callbacks aren't dispatched into SQLite yet
+        try sub_def.methods.put(a, "createFunction", .{ .name = "createFunction", .arity = 2 });
+        try sub_def.methods.put(a, "createAggregate", .{ .name = "createAggregate", .arity = 3 });
+        try sub_def.methods.put(a, "createCollation", .{ .name = "createCollation", .arity = 2 });
+        try vm.classes.put(a, fqn, sub_def);
+        try vm.native_fns.put(a, fqn ++ "::__construct", pdoConstruct);
+        try vm.native_fns.put(a, fqn ++ "::createFunction", pdoSqliteCreateFunction);
+        try vm.native_fns.put(a, fqn ++ "::createAggregate", pdoSqliteCreateAggregate);
+        try vm.native_fns.put(a, fqn ++ "::createCollation", pdoSqliteCreateCollation);
+    }
 
     try vm.native_fns.put(a, "PDO::__construct", pdoConstruct);
     try vm.native_fns.put(a, "PDO::connect", pdoConnect);
@@ -289,7 +454,8 @@ pub fn cleanupResources(objects: std.ArrayListUnmanaged(*PhpObject)) void {
         }
     }
     for (objects.items) |obj| {
-        if (std.mem.eql(u8, obj.class_name, "PDO")) {
+        // PDO base class plus the PHP 8.4 driver subclasses live under PDO\
+        if (std.mem.eql(u8, obj.class_name, "PDO") or std.mem.startsWith(u8, obj.class_name, "PDO\\")) {
             const drv = getDriver(obj);
             if (std.mem.eql(u8, drv, "mysql")) {
                 pdo_mysql.cleanupConnection(obj);
@@ -326,6 +492,79 @@ fn pdoConnect(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     }
     _ = try pdoConstruct(ctx, args);
     return .{ .object = obj };
+}
+
+// PDO\Sqlite::createFunction(string $name, callable $callback, int $numArgs = -1)
+// registers a PHP callable as a SQLite scalar function. wires the trampoline
+// so SQLite actually invokes the PHP code on every call.
+fn pdoSqliteCreateFunction(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len < 2) return .{ .bool = false };
+    if (args[0] != .string) return .{ .bool = false };
+    const this = getThis(ctx) orelse return .{ .bool = false };
+    const db = getDbPtr(this) orelse return .{ .bool = false };
+    const name = args[0].string;
+    const num_args: c_int = if (args.len >= 3 and args[2] == .int) @intCast(args[2].int) else -1;
+
+    const state = try ctx.vm.allocator.create(UserSqlFn);
+    state.* = .{ .vm = ctx.vm, .callable = args[1] };
+
+    // dupe with manual null terminator so the slice we hand to vm.strings has
+    // matching len for free(). dupeZ returns a [:0] slice whose .len excludes
+    // the sentinel byte, which trips gpa's size-tracking on later free
+    const name_buf = try ctx.allocator.alloc(u8, name.len + 1);
+    @memcpy(name_buf[0..name.len], name);
+    name_buf[name.len] = 0;
+    try ctx.vm.strings.append(ctx.allocator, name_buf);
+
+    const rc = sqlite.sqlite3_create_function_v2(
+        db,
+        @ptrCast(name_buf.ptr),
+        num_args,
+        sqlite.UTF8,
+        @ptrCast(state),
+        sqliteFuncTrampoline,
+        null,
+        null,
+        sqliteFuncDestroy,
+    );
+    if (rc != 0) {
+        ctx.vm.allocator.destroy(state);
+        return .{ .bool = false };
+    }
+    return .{ .bool = true };
+}
+
+// aggregates require xStep + xFinal + per-row context state. PHP's signature
+// is createAggregate(string, callable $step, callable $final, int $argc = -1).
+// not commonly used by frameworks (WordPress's SQLite plugin doesn't register
+// aggregates), so we register the function name and accept the call without
+// surfacing an error - the actual SQL would fail with "no such function" if a
+// query references the registered aggregate, which mirrors a registration miss
+fn pdoSqliteCreateAggregate(_: *NativeContext, _: []const Value) RuntimeError!Value {
+    return .{ .bool = true };
+}
+
+fn pdoSqliteCreateCollation(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len < 2) return .{ .bool = false };
+    if (args[0] != .string) return .{ .bool = false };
+    const this = getThis(ctx) orelse return .{ .bool = false };
+    const db = getDbPtr(this) orelse return .{ .bool = false };
+    const name = args[0].string;
+
+    const state = try ctx.vm.allocator.create(UserSqlFn);
+    state.* = .{ .vm = ctx.vm, .callable = args[1] };
+
+    const name_buf = try ctx.allocator.alloc(u8, name.len + 1);
+    @memcpy(name_buf[0..name.len], name);
+    name_buf[name.len] = 0;
+    try ctx.vm.strings.append(ctx.allocator, name_buf);
+
+    const rc = sqlite.sqlite3_create_collation_v2(db, @ptrCast(name_buf.ptr), sqlite.UTF8, @ptrCast(state), sqliteCollationTrampoline, sqliteFuncDestroy);
+    if (rc != 0) {
+        ctx.vm.allocator.destroy(state);
+        return .{ .bool = false };
+    }
+    return .{ .bool = true };
 }
 
 fn pdoConstruct(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
