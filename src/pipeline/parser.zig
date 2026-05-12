@@ -2217,6 +2217,12 @@ const Parser = struct {
 
     fn parseVariableVariable(self: *Parser) Error!u32 {
         const dollar_tok = self.advance(); // $
+        if (self.peek() == .l_brace) {
+            _ = self.advance(); // {
+            const inner = try self.parseExpression();
+            _ = try self.expect(.r_brace);
+            return self.addNode(.{ .tag = .variable_variable, .main_token = dollar_tok, .data = .{ .lhs = inner } });
+        }
         const inner = try self.parsePrimaryExpr();
         return self.addNode(.{ .tag = .variable_variable, .main_token = dollar_tok, .data = .{ .lhs = inner } });
     }
