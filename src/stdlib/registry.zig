@@ -37,6 +37,7 @@ pub fn register(map: *std.StringHashMapUnmanaged(NativeFn), allocator: std.mem.A
         @import("ftp.zig").entries,
         @import("sodium.zig").entries,
         @import("ldap.zig").entries,
+        @import("mysqli.zig").entries,
     };
     @setEvalBranchQuota(10000);
     inline for (modules) |entries| {

@@ -554,6 +554,7 @@ pub const VM = struct {
         try @import("../stdlib/gmp.zig").register(vm, allocator);
         try @import("../stdlib/gd.zig").register(vm, allocator);
         try @import("../stdlib/soap.zig").register(vm, allocator);
+        try @import("../stdlib/mysqli.zig").register(vm, allocator);
         vm.error_reporting_level = 30719;
         vm.ic = try allocator.create(InlineCache);
         vm.ic.?.* = .{};
@@ -699,6 +700,21 @@ pub const VM = struct {
         try c.put(a, "FTP_AUTOSEEK", .{ .int = 1 });
         try c.put(a, "FTP_USEPASVADDRESS", .{ .int = 2 });
         try c.put(a, "FTP_FAILED", .{ .int = 0 });
+        try c.put(a, "MYSQLI_REPORT_OFF", .{ .int = 0 });
+        try c.put(a, "MYSQLI_REPORT_ERROR", .{ .int = 1 });
+        try c.put(a, "MYSQLI_REPORT_STRICT", .{ .int = 2 });
+        try c.put(a, "MYSQLI_REPORT_INDEX", .{ .int = 4 });
+        try c.put(a, "MYSQLI_REPORT_DATA_TRUNCATION", .{ .int = 8 });
+        try c.put(a, "MYSQLI_REPORT_ALL", .{ .int = 255 });
+        try c.put(a, "MYSQLI_ASSOC", .{ .int = 1 });
+        try c.put(a, "MYSQLI_NUM", .{ .int = 2 });
+        try c.put(a, "MYSQLI_BOTH", .{ .int = 3 });
+        try c.put(a, "MYSQLI_STORE_RESULT", .{ .int = 0 });
+        try c.put(a, "MYSQLI_USE_RESULT", .{ .int = 1 });
+        try c.put(a, "MYSQLI_CLIENT_FOUND_ROWS", .{ .int = 2 });
+        try c.put(a, "MYSQLI_CLIENT_COMPRESS", .{ .int = 32 });
+        try c.put(a, "MYSQLI_CLIENT_SSL", .{ .int = 2048 });
+        try c.put(a, "MYSQLI_OPT_CONNECT_TIMEOUT", .{ .int = 0 });
         try c.put(a, "FTP_FINISHED", .{ .int = 1 });
         try c.put(a, "FTP_MOREDATA", .{ .int = 2 });
         try c.put(a, "SODIUM_LIBRARY_MAJOR_VERSION", .{ .int = 26 });
@@ -1130,6 +1146,7 @@ pub const VM = struct {
         @import("../stdlib/gd.zig").cleanupResources(self.objects);
         @import("../stdlib/ftp.zig").cleanupResources(self.objects);
         @import("../stdlib/ldap.zig").cleanupResources(self.objects);
+        @import("../stdlib/mysqli.zig").cleanupConnections(self.objects);
         // clean up fiber frames before strings/arrays/objects since fiber frames
         // may reference values that get freed by those passes
         for (self.fibers.items) |f| self.cleanupFiberFrames(f);
