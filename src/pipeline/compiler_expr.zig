@@ -969,18 +969,43 @@ pub fn compileNullsafeMethodCall(self: *Compiler, node: Ast.Node) Error!void {
 }
 
 pub fn compileStaticCall(self: *Compiler, node: Ast.Node) Error!void {
-    const class_node = self.ast.nodes[node.data.lhs];
+    // unwrap (grouped_expr) wrapping so (new X())::foo() is dispatched as a
+    // dynamic static call against the inner new-expression
+    var class_lhs_idx = node.data.lhs;
+    var class_node = self.ast.nodes[class_lhs_idx];
+    while (class_node.tag == .grouped_expr) {
+        class_lhs_idx = class_node.data.lhs;
+        class_node = self.ast.nodes[class_lhs_idx];
+    }
     const method_name = self.ast.tokenSlice(node.main_token);
     const args = self.ast.extraSlice(node.data.rhs);
 
     if (class_node.tag == .variable) {
-        try self.compileNode(node.data.lhs);
+        try self.compileNode(class_lhs_idx);
         const method_idx = try self.addConstant(.{ .string = method_name });
         for (args) |arg| try self.compileNode(arg);
         try self.emitOp(.static_call_dynamic);
         try self.emitU16(method_idx);
         try self.emitByte(@intCast(args.len));
         return;
+    }
+
+    // Class::method when the class side is an expression that produces an
+    // object (e.g. (new X())::foo()): evaluate the object, derive its class,
+    // then emit static_call_dynamic
+    switch (class_node.tag) {
+        .new_expr, .method_call, .nullsafe_method_call, .call,
+        .property_access, .nullsafe_property_access, .array_access => {
+            try self.compileNode(class_lhs_idx);
+            try self.emitOp(.get_obj_class);
+            const method_idx = try self.addConstant(.{ .string = method_name });
+            for (args) |arg| try self.compileNode(arg);
+            try self.emitOp(.static_call_dynamic);
+            try self.emitU16(method_idx);
+            try self.emitByte(@intCast(args.len));
+            return;
+        },
+        else => {},
     }
 
     const class_name = try resolveNodeClassName(self, class_node);
