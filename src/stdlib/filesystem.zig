@@ -1601,7 +1601,14 @@ fn stream_get_meta_data(ctx: *NativeContext, args: []const Value) RuntimeError!V
             stream_type = "tcp_socket/ssl";
         } else if (std.mem.eql(u8, scheme, "php")) {
             wrapper_type = "PHP";
-            stream_type = "STDIO";
+            const rest = uri[colon + 3 ..];
+            if (std.mem.startsWith(u8, rest, "memory") or std.mem.startsWith(u8, rest, "temp")) {
+                stream_type = "MEMORY";
+            } else if (std.mem.startsWith(u8, rest, "stdin") or std.mem.startsWith(u8, rest, "stdout") or std.mem.startsWith(u8, rest, "stderr") or std.mem.startsWith(u8, rest, "input") or std.mem.startsWith(u8, rest, "output")) {
+                stream_type = "STDIO";
+            } else {
+                stream_type = "STDIO";
+            }
         } else if (std.mem.eql(u8, scheme, "data")) {
             wrapper_type = "RFC2397";
             stream_type = "RFC2397";
