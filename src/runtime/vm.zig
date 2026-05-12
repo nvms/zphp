@@ -966,15 +966,9 @@ pub const VM = struct {
         try c.put(a, "DATE_RFC1123", .{ .string = "D, d M Y H:i:s O" });
         try c.put(a, "DATE_RFC7231", .{ .string = "D, d M Y H:i:s \\G\\M\\T" });
         try c.put(a, "DATE_RSS", .{ .string = "D, d M Y H:i:s O" });
-        try c.put(a, "SIGTERM", .{ .int = 15 });
-        try c.put(a, "SIGINT", .{ .int = 2 });
-        try c.put(a, "SIGKILL", .{ .int = 9 });
-        try c.put(a, "SIGHUP", .{ .int = 1 });
-        try c.put(a, "SIGQUIT", .{ .int = 3 });
-        try c.put(a, "SIGUSR1", .{ .int = 30 });
-        try c.put(a, "SIGUSR2", .{ .int = 31 });
-        try c.put(a, "SIGCHLD", .{ .int = 20 });
-        try c.put(a, "SIGSTOP", .{ .int = 17 });
+        // signal numbers are registered above via std.posix.SIG.*; do not
+        // re-register them here with hardcoded macOS values or they clobber
+        // the platform-correct numbers on Linux (SIGUSR1=10 vs macOS=30)
         try c.put(a, "AF_INET", .{ .int = 2 });
         try c.put(a, "AF_INET6", .{ .int = if (@import("builtin").os.tag == .macos) @as(i64, 30) else 10 });
         try c.put(a, "AF_UNIX", .{ .int = 1 });
