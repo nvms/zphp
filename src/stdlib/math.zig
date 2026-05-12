@@ -181,8 +181,13 @@ fn native_lcg_value(_: *NativeContext, _: []const Value) RuntimeError!Value {
     return .{ .float = std.crypto.random.float(f64) };
 }
 
-fn native_srand_noop(_: *NativeContext, _: []const Value) RuntimeError!Value {
-    // we use crypto.random which is not seedable; accept the call as a no-op
+fn native_srand_noop(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    const seed: u64 = if (args.len >= 1) blk: {
+        const v = Value.toInt(args[0]);
+        break :blk @bitCast(v);
+    } else @intCast(std.time.timestamp());
+    ctx.vm.rng_state = std.Random.DefaultPrng.init(seed);
+    ctx.vm.rng_seeded = true;
     return .null;
 }
 
@@ -190,12 +195,15 @@ fn native_getrandmax(_: *NativeContext, _: []const Value) RuntimeError!Value {
     return .{ .int = 2147483647 };
 }
 
-fn native_rand(_: *NativeContext, args: []const Value) RuntimeError!Value {
+fn native_rand(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     const lo: i64 = if (args.len >= 1) Value.toInt(args[0]) else 0;
     const hi: i64 = if (args.len >= 2) Value.toInt(args[1]) else 2147483647;
     if (lo >= hi) return .{ .int = lo };
     const range: u64 = @intCast(hi - lo + 1);
-    const r = std.crypto.random.intRangeAtMost(u64, 0, range - 1);
+    const r = if (ctx.vm.rng_seeded)
+        ctx.vm.rng_state.random().intRangeAtMost(u64, 0, range - 1)
+    else
+        std.crypto.random.intRangeAtMost(u64, 0, range - 1);
     return .{ .int = lo + @as(i64, @intCast(r)) };
 }
 
