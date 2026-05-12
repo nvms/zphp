@@ -258,6 +258,30 @@ fn exceptionGetTrace(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
     return .{ .array = arr };
 }
 
-fn exceptionGetTraceAsString(_: *NativeContext, _: []const Value) RuntimeError!Value {
-    return .{ .string = "" };
+fn exceptionGetTraceAsString(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const this_val = ctx.vm.currentFrame().vars.get("$this") orelse return .{ .string = "" };
+    if (this_val != .object) return .{ .string = "" };
+    const t = this_val.object.get("__trace");
+    var buf: std.ArrayListUnmanaged(u8) = .{};
+    defer buf.deinit(ctx.allocator);
+    if (t == .array) {
+        for (t.array.entries.items, 0..) |entry, i| {
+            if (entry.value != .array) continue;
+            const e = entry.value.array;
+            const fn_v = e.get(.{ .string = "function" });
+            const line_v = e.get(.{ .string = "line" });
+            const file_v = e.get(.{ .string = "file" });
+            const fn_s = if (fn_v == .string) fn_v.string else "?";
+            const file_s = if (file_v == .string) file_v.string else "";
+            const line_n: i64 = if (line_v == .int) line_v.int else 0;
+            try buf.writer(ctx.allocator).print("#{d} {s}({d}): {s}()\n", .{ i, file_s, line_n, fn_s });
+        }
+        const n = t.array.entries.items.len;
+        try buf.writer(ctx.allocator).print("#{d} {{main}}", .{n});
+    } else {
+        try buf.appendSlice(ctx.allocator, "#0 {main}");
+    }
+    const owned = try ctx.allocator.dupe(u8, buf.items);
+    try ctx.vm.strings.append(ctx.allocator, owned);
+    return .{ .string = owned };
 }
