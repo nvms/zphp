@@ -8705,14 +8705,26 @@ pub const VM = struct {
     }
 
     fn cloneArray(self: *VM, src: *PhpArray) RuntimeError!*PhpArray {
+        var visited: std.AutoHashMapUnmanaged(*PhpArray, *PhpArray) = .{};
+        defer visited.deinit(self.allocator);
+        return try self.cloneArrayInner(src, &visited);
+    }
+
+    fn cloneArrayInner(
+        self: *VM,
+        src: *PhpArray,
+        visited: *std.AutoHashMapUnmanaged(*PhpArray, *PhpArray),
+    ) RuntimeError!*PhpArray {
+        if (visited.get(src)) |existing| return existing;
         const copy = self.allocator.create(PhpArray) catch return error.RuntimeError;
         copy.* = .{ .next_int_key = src.next_int_key, .has_int_keys = src.has_int_keys, .cursor = src.cursor };
+        visited.put(self.allocator, src, copy) catch return error.RuntimeError;
         copy.entries.ensureTotalCapacity(self.allocator, src.entries.items.len) catch return error.RuntimeError;
         for (src.entries.items, 0..) |entry, i| {
             copy.entries.appendAssumeCapacity(.{
                 .key = entry.key,
                 .value = if (entry.value == .array)
-                    Value{ .array = try self.cloneArray(entry.value.array) }
+                    Value{ .array = try self.cloneArrayInner(entry.value.array, visited) }
                 else
                     entry.value,
             });
