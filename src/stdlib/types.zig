@@ -1178,12 +1178,13 @@ fn native_is_a(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
         return .{ .bool = std.mem.eql(u8, target, "Generator") or std.mem.eql(u8, target, "Iterator") or std.mem.eql(u8, target, "Traversable") };
     }
     if (args[0] == .fiber) return .{ .bool = std.mem.eql(u8, target, "Fiber") };
-    const class_name = if (args[0] == .object)
-        args[0].object.class_name
-    else if (args[0] == .string)
-        args[0].string
-    else
-        return Value{ .bool = false };
+    if (args[0] == .string) {
+        // string arg requires explicit allow_string=true (3rd arg)
+        const allow_string = args.len >= 3 and args[2].isTruthy();
+        if (!allow_string) return .{ .bool = false };
+        return .{ .bool = ctx.vm.isInstanceOf(args[0].string, target) };
+    }
+    const class_name = if (args[0] == .object) args[0].object.class_name else return .{ .bool = false };
     return .{ .bool = ctx.vm.isInstanceOf(class_name, target) };
 }
 
