@@ -533,6 +533,99 @@ fn getAllInfo(ctx: *NativeContext, handle: *c.CURL) RuntimeError!Value {
         }
     }
 
+    var redirect_url_ptr: [*c]u8 = null;
+    if (c.curl_easy_getinfo(handle, c.CURLINFO_REDIRECT_URL, &redirect_url_ptr) == c.CURLE_OK) {
+        if (redirect_url_ptr != null) {
+            const s = try ctx.createString(std.mem.span(redirect_url_ptr));
+            try arr.set(ctx.allocator, .{ .string = "redirect_url" }, .{ .string = s });
+        } else {
+            try arr.set(ctx.allocator, .{ .string = "redirect_url" }, .{ .string = "" });
+        }
+    }
+
+    var local_ip_ptr: [*c]u8 = null;
+    if (c.curl_easy_getinfo(handle, c.CURLINFO_LOCAL_IP, &local_ip_ptr) == c.CURLE_OK) {
+        if (local_ip_ptr != null) {
+            const s = try ctx.createString(std.mem.span(local_ip_ptr));
+            try arr.set(ctx.allocator, .{ .string = "local_ip" }, .{ .string = s });
+        }
+    }
+
+    var local_port: c_long = 0;
+    if (c.curl_easy_getinfo(handle, c.CURLINFO_LOCAL_PORT, &local_port) == c.CURLE_OK)
+        try arr.set(ctx.allocator, .{ .string = "local_port" }, .{ .int = @intCast(local_port) });
+
+    var filetime: c_long = 0;
+    if (c.curl_easy_getinfo(handle, c.CURLINFO_FILETIME, &filetime) == c.CURLE_OK)
+        try arr.set(ctx.allocator, .{ .string = "filetime" }, .{ .int = @intCast(filetime) });
+
+    var http_version: c_long = 0;
+    if (c.curl_easy_getinfo(handle, c.CURLINFO_HTTP_VERSION, &http_version) == c.CURLE_OK)
+        try arr.set(ctx.allocator, .{ .string = "http_version" }, .{ .int = @intCast(http_version) });
+
+    var protocol: c_long = 0;
+    if (c.curl_easy_getinfo(handle, c.CURLINFO_PROTOCOL, &protocol) == c.CURLE_OK)
+        try arr.set(ctx.allocator, .{ .string = "protocol" }, .{ .int = @intCast(protocol) });
+
+    var num_connects: c_long = 0;
+    if (c.curl_easy_getinfo(handle, c.CURLINFO_NUM_CONNECTS, &num_connects) == c.CURLE_OK)
+        try arr.set(ctx.allocator, .{ .string = "num_connects" }, .{ .int = @intCast(num_connects) });
+
+    var os_errno: c_long = 0;
+    if (c.curl_easy_getinfo(handle, c.CURLINFO_OS_ERRNO, &os_errno) == c.CURLE_OK)
+        try arr.set(ctx.allocator, .{ .string = "os_errno" }, .{ .int = @intCast(os_errno) });
+
+    var size_upload: f64 = 0;
+    if (c.curl_easy_getinfo(handle, c.CURLINFO_SIZE_UPLOAD_T, &size_upload) == c.CURLE_OK)
+        try arr.set(ctx.allocator, .{ .string = "size_upload" }, .{ .float = size_upload });
+
+    var size_download: f64 = 0;
+    if (c.curl_easy_getinfo(handle, c.CURLINFO_SIZE_DOWNLOAD_T, &size_download) == c.CURLE_OK)
+        try arr.set(ctx.allocator, .{ .string = "size_download" }, .{ .float = size_download });
+
+    var speed_download: f64 = 0;
+    if (c.curl_easy_getinfo(handle, c.CURLINFO_SPEED_DOWNLOAD_T, &speed_download) == c.CURLE_OK)
+        try arr.set(ctx.allocator, .{ .string = "speed_download" }, .{ .float = speed_download });
+
+    var speed_upload: f64 = 0;
+    if (c.curl_easy_getinfo(handle, c.CURLINFO_SPEED_UPLOAD_T, &speed_upload) == c.CURLE_OK)
+        try arr.set(ctx.allocator, .{ .string = "speed_upload" }, .{ .float = speed_upload });
+
+    var download_cl: f64 = 0;
+    if (c.curl_easy_getinfo(handle, c.CURLINFO_CONTENT_LENGTH_DOWNLOAD_T, &download_cl) == c.CURLE_OK)
+        try arr.set(ctx.allocator, .{ .string = "download_content_length" }, .{ .float = download_cl });
+
+    var upload_cl: f64 = 0;
+    if (c.curl_easy_getinfo(handle, c.CURLINFO_CONTENT_LENGTH_UPLOAD_T, &upload_cl) == c.CURLE_OK)
+        try arr.set(ctx.allocator, .{ .string = "upload_content_length" }, .{ .float = upload_cl });
+
+    var appconnect_time: f64 = 0;
+    if (c.curl_easy_getinfo(handle, c.CURLINFO_APPCONNECT_TIME, &appconnect_time) == c.CURLE_OK)
+        try arr.set(ctx.allocator, .{ .string = "appconnect_time" }, .{ .float = appconnect_time });
+
+    // _us variants (microsecond integer versions, present since libcurl 7.61.0)
+    var ttot_us: c_long = 0;
+    if (c.curl_easy_getinfo(handle, c.CURLINFO_TOTAL_TIME_T, &ttot_us) == c.CURLE_OK)
+        try arr.set(ctx.allocator, .{ .string = "total_time_us" }, .{ .int = @intCast(ttot_us) });
+    var nl_us: c_long = 0;
+    if (c.curl_easy_getinfo(handle, c.CURLINFO_NAMELOOKUP_TIME_T, &nl_us) == c.CURLE_OK)
+        try arr.set(ctx.allocator, .{ .string = "namelookup_time_us" }, .{ .int = @intCast(nl_us) });
+    var conn_us: c_long = 0;
+    if (c.curl_easy_getinfo(handle, c.CURLINFO_CONNECT_TIME_T, &conn_us) == c.CURLE_OK)
+        try arr.set(ctx.allocator, .{ .string = "connect_time_us" }, .{ .int = @intCast(conn_us) });
+    var pre_us: c_long = 0;
+    if (c.curl_easy_getinfo(handle, c.CURLINFO_PRETRANSFER_TIME_T, &pre_us) == c.CURLE_OK)
+        try arr.set(ctx.allocator, .{ .string = "pretransfer_time_us" }, .{ .int = @intCast(pre_us) });
+    var start_us: c_long = 0;
+    if (c.curl_easy_getinfo(handle, c.CURLINFO_STARTTRANSFER_TIME_T, &start_us) == c.CURLE_OK)
+        try arr.set(ctx.allocator, .{ .string = "starttransfer_time_us" }, .{ .int = @intCast(start_us) });
+    var redirect_us: c_long = 0;
+    if (c.curl_easy_getinfo(handle, c.CURLINFO_REDIRECT_TIME_T, &redirect_us) == c.CURLE_OK)
+        try arr.set(ctx.allocator, .{ .string = "redirect_time_us" }, .{ .int = @intCast(redirect_us) });
+    var appc_us: c_long = 0;
+    if (c.curl_easy_getinfo(handle, c.CURLINFO_APPCONNECT_TIME_T, &appc_us) == c.CURLE_OK)
+        try arr.set(ctx.allocator, .{ .string = "appconnect_time_us" }, .{ .int = @intCast(appc_us) });
+
     return .{ .array = arr };
 }
 
