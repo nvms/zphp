@@ -2471,8 +2471,58 @@ fn rpropGetName(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
     return this.get("name");
 }
 
-fn rpropGetType(_: *NativeContext, _: []const Value) RuntimeError!Value {
+fn rpropGetType(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const this = getThis(ctx) orelse return .null;
+    const dc_v = this.get("_declaring_class");
+    if (dc_v != .string) return .null;
+    const class_name = dc_v.string;
+    const prop_name_v = this.get("name");
+    if (prop_name_v != .string) return .null;
+    const prop_name = prop_name_v.string;
+
+    // promoted properties carry their type on the ctor param; look up via
+    // type_info on "Class::__construct" and match by param name
+    const ctor_name = try std.fmt.allocPrint(ctx.allocator, "{s}::__construct", .{class_name});
+    defer ctx.allocator.free(ctor_name);
+    if (@import("../runtime/vm.zig").g_type_info.get(ctor_name)) |ti| {
+        if (ctx.vm.functions.get(ctor_name)) |func| {
+            for (func.params, 0..) |pname, i| {
+                const base = if (pname.len > 0 and pname[0] == '$') pname[1..] else pname;
+                if (std.mem.eql(u8, base, prop_name)) {
+                    if (i < ti.param_types.len and ti.param_types[i].len > 0) {
+                        return try makeReflectionType(ctx, ti.param_types[i]);
+                    }
+                    break;
+                }
+            }
+        }
+    }
     return .null;
+}
+
+fn makeReflectionType(ctx: *NativeContext, type_str: []const u8) RuntimeError!Value {
+    var name = type_str;
+    var allows_null = false;
+    if (name.len > 0 and name[0] == '?') {
+        allows_null = true;
+        name = name[1..];
+    }
+    // union/intersection types not modeled as ReflectionUnionType yet - return
+    // the first segment so the most common case (single named type) works
+    if (std.mem.indexOfAny(u8, name, "|&")) |sep| name = name[0..sep];
+    const obj = try ctx.createObject("ReflectionNamedType");
+    const dup = try ctx.allocator.dupe(u8, name);
+    try ctx.strings.append(ctx.allocator, dup);
+    try obj.set(ctx.allocator, "type_name", .{ .string = dup });
+    try obj.set(ctx.allocator, "nullable", .{ .bool = allows_null or std.mem.eql(u8, name, "mixed") or std.mem.eql(u8, name, "null") });
+    try obj.set(ctx.allocator, "is_builtin", .{ .bool = isBuiltinTypeName(name) });
+    return .{ .object = obj };
+}
+
+fn isBuiltinTypeName(name: []const u8) bool {
+    const builtins = [_][]const u8{ "int", "float", "string", "bool", "array", "object", "callable", "iterable", "void", "mixed", "never", "null", "false", "true", "self", "static", "parent" };
+    for (builtins) |b| if (std.mem.eql(u8, b, name)) return true;
+    return false;
 }
 
 fn rpropIsPublic(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
@@ -2694,7 +2744,19 @@ fn rmGetAttributes(ctx: *NativeContext, args: []const Value) RuntimeError!Value 
     return buildAttributeArrayWithFlags(ctx, attrs, filter, 4, flags);
 }
 
-fn rpIsPromoted(_: *NativeContext, _: []const Value) RuntimeError!Value {
+fn rpIsPromoted(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const this = getThis(ctx) orelse return .{ .bool = false };
+    // promoted iff declaring method is __construct AND the class has a matching property
+    const method_v = this.get("_method_name");
+    if (method_v != .string or !std.mem.eql(u8, method_v.string, "__construct")) return .{ .bool = false };
+    const class_v = this.get("_declaring_class");
+    if (class_v != .string) return .{ .bool = false };
+    const name_v = this.get("name");
+    if (name_v != .string) return .{ .bool = false };
+    const cls = ctx.vm.classes.getPtr(class_v.string) orelse return .{ .bool = false };
+    for (cls.properties.items) |prop| {
+        if (std.mem.eql(u8, prop.name, name_v.string)) return .{ .bool = true };
+    }
     return .{ .bool = false };
 }
 

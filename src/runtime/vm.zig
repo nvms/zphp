@@ -18,11 +18,11 @@ pub const RuntimeError = error{ RuntimeError, OutOfMemory };
 
 extern fn zphp_fast_loop(vm_ptr: *anyopaque) callconv(.c) u8;
 
-const TypeInfo = struct {
+pub const TypeInfo = struct {
     param_types: []const []const u8 = &.{},
     return_type: []const u8 = "",
 };
-var g_type_info: std.StringHashMapUnmanaged(TypeInfo) = .{};
+pub var g_type_info: std.StringHashMapUnmanaged(TypeInfo) = .{};
 var g_type_info_allocator: ?Allocator = null;
 
 pub fn getTypeInfo(key: []const u8) ?TypeInfo {

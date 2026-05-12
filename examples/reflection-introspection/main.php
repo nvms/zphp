@@ -80,15 +80,22 @@ foreach ($rb->getProperties() as $p) {
     echo "  $vis$ro \$" . $p->getName() . "$default\n";
 }
 
-echo "\n=== Rectangle property count ===\n";
+echo "\n=== Rectangle promoted properties (type preserved) ===\n";
 $rr = new ReflectionClass(Rectangle::class);
-echo "props found: " . count($rr->getProperties()) . "\n";
+foreach ($rr->getProperties() as $p) {
+    $t = $p->getType();
+    $tname = $t instanceof ReflectionNamedType ? $t->getName() : 'no-type';
+    $vis = $p->isPublic() ? 'public' : ($p->isProtected() ? 'protected' : 'private');
+    $ro = $p->isReadOnly() ? ' readonly' : '';
+    echo "  $vis$ro $tname \$" . $p->getName() . "\n";
+}
 
 echo "\n=== constructor inspection ===\n";
 $ctor = $rr->getConstructor();
 echo "params: " . $ctor->getNumberOfParameters() . " (required: " . $ctor->getNumberOfRequiredParameters() . ")\n";
 foreach ($ctor->getParameters() as $p) {
-    echo "  \$" . $p->getName();
+    $promo = $p->isPromoted() ? ' [promoted]' : '';
+    echo "  \$" . $p->getName() . $promo;
     if ($p->isDefaultValueAvailable()) {
         echo " = " . var_export($p->getDefaultValue(), true);
     }
