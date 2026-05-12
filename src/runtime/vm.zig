@@ -213,6 +213,7 @@ pub const AttributeDef = struct {
 pub const ClassDef = struct {
     name: []const u8,
     methods: std.StringHashMapUnmanaged(MethodInfo) = .{},
+    method_order: std.ArrayListUnmanaged([]const u8) = .{},
     properties: std.ArrayListUnmanaged(PropertyDef) = .{},
     static_props: std.StringHashMapUnmanaged(Value) = .{},
     parent: ?[]const u8 = null,
@@ -245,6 +246,12 @@ pub const ClassDef = struct {
         visibility: Visibility = .public,
     };
 
+    pub fn addMethod(self: *ClassDef, allocator: Allocator, info: MethodInfo) !void {
+        const existed = self.methods.contains(info.name);
+        try self.methods.put(allocator, info.name, info);
+        if (!existed) try self.method_order.append(allocator, info.name);
+    }
+
     pub const PropertyDef = struct {
         name: []const u8,
         default: Value,
@@ -264,6 +271,7 @@ pub const ClassDef = struct {
 
     fn deinit(self: *ClassDef, allocator: Allocator) void {
         self.methods.deinit(allocator);
+        self.method_order.deinit(allocator);
         self.properties.deinit(allocator);
         self.static_props.deinit(allocator);
         self.interfaces.deinit(allocator);
@@ -6529,7 +6537,7 @@ pub const VM = struct {
 
         for (0..method_count) |_| {
             const mi = self.readMethodInfo();
-            try def.methods.put(self.allocator, mi[0], mi[1]);
+            try def.addMethod(self.allocator, mi[1]);
         }
 
         const prop_count = self.readU16();
@@ -6902,7 +6910,7 @@ pub const VM = struct {
         const method_count = self.readU16();
         for (0..method_count) |_| {
             const mi = self.readMethodInfo();
-            try def.methods.put(self.allocator, mi[0], mi[1]);
+            try def.addMethod(self.allocator, mi[1]);
         }
 
         const iface_count = self.readByte();
@@ -7148,7 +7156,7 @@ pub const VM = struct {
                         try self.strings.append(self.allocator, alias_method);
                         if (!self.functions.contains(alias_method)) {
                             try self.functions.put(self.allocator, alias_method, tm.func);
-                            try def.methods.put(self.allocator, rule.alias, .{ .name = rule.alias, .arity = tm.func.arity, .visibility = if (rule.visibility != 0) rule_vis else .public });
+                            try def.addMethod(self.allocator, .{ .name = rule.alias, .arity = tm.func.arity, .visibility = if (rule.visibility != 0) rule_vis else .public });
                         }
                     }
                 }
@@ -7170,7 +7178,7 @@ pub const VM = struct {
             try self.strings.append(self.allocator, class_method);
             if (!self.functions.contains(class_method)) {
                 try self.functions.put(self.allocator, class_method, tm.func);
-                try def.methods.put(self.allocator, tm.name, .{
+                try def.addMethod(self.allocator, .{
                     .name = tm.name,
                     .arity = tm.func.arity,
                     .visibility = vis_override orelse .public,

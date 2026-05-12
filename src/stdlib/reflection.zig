@@ -970,17 +970,27 @@ fn rcGetMethods(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     var depth: usize = 0;
     while (current) |name| {
         const cls = ctx.vm.classes.get(name) orelse break;
-        var it = cls.methods.iterator();
-        while (it.next()) |entry| {
-            const method_name = entry.key_ptr.*;
-            const info = entry.value_ptr.*;
-            // private methods of ancestor classes are not visible here
-            if (depth > 0 and info.visibility == .private) continue;
-            if (!seen.contains(method_name)) {
+        // iterate in declaration order when available; fall back to hash iteration
+        if (cls.method_order.items.len > 0) {
+            for (cls.method_order.items) |method_name| {
+                const info = cls.methods.get(method_name) orelse continue;
+                if (depth > 0 and info.visibility == .private) continue;
+                if (seen.contains(method_name)) continue;
                 try seen.put(ctx.allocator, method_name, {});
-                if (filter) |f| {
-                    if (!methodMatchesFilter(info, f)) continue;
-                }
+                if (filter) |f| if (!methodMatchesFilter(info, f)) continue;
+                const declaring = findDeclaringClass(ctx.vm, class_name, method_name);
+                const obj = try buildMethodObj(ctx, class_name, method_name, info, declaring);
+                try arr.append(ctx.allocator, .{ .object = obj });
+            }
+        } else {
+            var it = cls.methods.iterator();
+            while (it.next()) |entry| {
+                const method_name = entry.key_ptr.*;
+                const info = entry.value_ptr.*;
+                if (depth > 0 and info.visibility == .private) continue;
+                if (seen.contains(method_name)) continue;
+                try seen.put(ctx.allocator, method_name, {});
+                if (filter) |f| if (!methodMatchesFilter(info, f)) continue;
                 const declaring = findDeclaringClass(ctx.vm, class_name, method_name);
                 const obj = try buildMethodObj(ctx, class_name, method_name, info, declaring);
                 try arr.append(ctx.allocator, .{ .object = obj });
