@@ -516,6 +516,7 @@ fn nfSetAttribute(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     switch (args[1]) {
         .int => |i| zphp_unum_setAttribute(f, @intCast(args[0].int), @intCast(i)),
         .float => |fl| zphp_unum_setDoubleAttribute(f, @intCast(args[0].int), fl),
+        .bool => |b| zphp_unum_setAttribute(f, @intCast(args[0].int), if (b) 1 else 0),
         else => return .{ .bool = false },
     }
     return .{ .bool = true };
