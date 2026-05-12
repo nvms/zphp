@@ -197,7 +197,11 @@ const RefSource = union(enum) {
         var_name: []const u8,
         is_local: bool,
         slot: u16,
-        props: [4]?[]const u8,
+        // chains deeper than this length silently skip the writeback. real
+        // code (linked lists, trees, AST walkers) easily exceeds 4 so the
+        // bound is set high enough to cover practical cases without making
+        // the RefSource union enormous
+        props: [16]?[]const u8,
     },
     prop_array_elem: struct {
         var_name: []const u8,
@@ -7975,7 +7979,11 @@ pub const VM = struct {
         const call_pos = ip - 4;
         const code = chunk.code.items;
 
-        const max_scan = ac * 16;
+        // bytes to walk backwards from the call site. each PHP arg can
+        // compile to ~3 instructions of ~3 bytes per level of access chain;
+        // a 16-deep chain ~= 16*3*3 = 144 bytes per arg. give plenty of
+        // headroom so deep ->a->b->c->... chains find their root op
+        const max_scan = ac * 96;
         const region_start = if (call_pos > max_scan) call_pos - max_scan else 0;
 
         var instrs: [128]usize = undefined;
@@ -8193,7 +8201,7 @@ pub const VM = struct {
                         }
                     }
                     if (var_name) |vn| {
-                        var props: [4]?[]const u8 = .{ null, null, null, null };
+                        var props: [16]?[]const u8 = @splat(null);
                         var valid = true;
                         var prop_count: usize = 0;
                         const is_dynamic = code[last_ip] == @intFromEnum(OpCode.get_prop_dynamic);
@@ -8203,7 +8211,7 @@ pub const VM = struct {
                             if (code[pip] == @intFromEnum(OpCode.get_prop)) {
                                 const pci = (@as(u16, code[pip + 1]) << 8) | code[pip + 2];
                                 if (pci < chunk.constants.items.len and chunk.constants.items[pci] == .string) {
-                                    if (prop_count < 4) {
+                                    if (prop_count < props.len) {
                                         props[prop_count] = chunk.constants.items[pci].string;
                                         prop_count += 1;
                                     }
@@ -8246,7 +8254,7 @@ pub const VM = struct {
                                 }
                             }
                             if (dyn_name) |dn| {
-                                if (prop_count < 4) {
+                                if (prop_count < props.len) {
                                     props[prop_count] = dn;
                                     prop_count += 1;
                                 }
@@ -8254,7 +8262,7 @@ pub const VM = struct {
                         } else if (valid) {
                             const pci = (@as(u16, code[last_ip + 1]) << 8) | code[last_ip + 2];
                             if (pci < chunk.constants.items.len and chunk.constants.items[pci] == .string) {
-                                if (prop_count < 4) {
+                                if (prop_count < props.len) {
                                     props[prop_count] = chunk.constants.items[pci].string;
                                     prop_count += 1;
                                 }
