@@ -40,11 +40,14 @@ foreach ($specs as $s) {
 }
 
 echo "\n=== parse via createFromFormat ===\n";
+// the leading '!' resets unspecified parts to the epoch instead of the
+// current wall clock, which would make sequential PHP and zphp runs disagree
+// on the seconds component
 $formats = [
-    ['Y-m-d',    '2026-05-11'],
-    ['d/m/Y',    '11/05/2026'],
-    ['Y-m-d H:i', '2026-05-11 09:30'],
-    ['U',        '1717070400'],
+    ['!Y-m-d',    '2026-05-11'],
+    ['!d/m/Y',    '11/05/2026'],
+    ['!Y-m-d H:i', '2026-05-11 09:30'],
+    ['U',         '1717070400'],
     ['Y-m-d\TH:i:sP', '2026-05-11T14:30:00+02:00'],
 ];
 foreach ($formats as [$f, $s]) {
