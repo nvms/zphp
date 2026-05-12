@@ -615,13 +615,26 @@ fn createTypeObj(ctx: *NativeContext, type_name: []const u8, nullable: bool, sel
         }
     }
     if (std.mem.indexOfScalar(u8, clean, '|') != null) {
-        const obj = try ctx.createObject("ReflectionUnionType");
-        try obj.set(ctx.allocator, "type_str", .{ .string = clean });
-        // detect null member for nullable
+        // detect "T|null" / "null|T" - PHP normalizes to nullable named type
+        var has_null = false;
+        var non_null_count: usize = 0;
+        var only_non_null: []const u8 = "";
         var it = std.mem.splitScalar(u8, clean, '|');
         while (it.next()) |part| {
-            if (std.mem.eql(u8, part, "null")) is_nullable = true;
+            const trimmed = std.mem.trim(u8, part, " ");
+            if (std.ascii.eqlIgnoreCase(trimmed, "null")) {
+                has_null = true;
+            } else {
+                non_null_count += 1;
+                only_non_null = trimmed;
+            }
         }
+        if (has_null and non_null_count == 1) {
+            return createNamedTypeObj(ctx, only_non_null, true);
+        }
+        const obj = try ctx.createObject("ReflectionUnionType");
+        try obj.set(ctx.allocator, "type_str", .{ .string = clean });
+        if (has_null) is_nullable = true;
         try obj.set(ctx.allocator, "nullable", .{ .bool = is_nullable });
         try obj.set(ctx.allocator, "_self_class", .{ .string = self_class orelse "" });
         return obj;
@@ -2562,6 +2575,26 @@ fn makeReflectionType(ctx: *NativeContext, type_str: []const u8) RuntimeError!Va
     if (name.len > 0 and name[0] == '?') {
         allows_null = true;
         name = name[1..];
+    }
+    // normalize "T|null" / "null|T" to nullable named type when only one non-null part remains
+    if (std.mem.indexOfScalar(u8, name, '|')) |_| {
+        var has_null = false;
+        var non_null_count: usize = 0;
+        var only_non_null: []const u8 = "";
+        var it = std.mem.splitScalar(u8, name, '|');
+        while (it.next()) |part| {
+            const trimmed = std.mem.trim(u8, part, " ");
+            if (std.ascii.eqlIgnoreCase(trimmed, "null")) {
+                has_null = true;
+            } else {
+                non_null_count += 1;
+                only_non_null = trimmed;
+            }
+        }
+        if (has_null and non_null_count == 1) {
+            name = only_non_null;
+            allows_null = true;
+        }
     }
     // union/intersection types not modeled as ReflectionUnionType yet - return
     // the first segment so the most common case (single named type) works
