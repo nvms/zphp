@@ -395,6 +395,18 @@ fn strlen(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len == 0) return .{ .int = 0 };
     return switch (args[0]) {
         .string => |s| .{ .int = @intCast(s.len) },
+        .int => |i| blk: {
+            var buf: [32]u8 = undefined;
+            const s = std.fmt.bufPrint(&buf, "{d}", .{i}) catch break :blk .{ .int = 0 };
+            break :blk .{ .int = @intCast(s.len) };
+        },
+        .float => |f| blk: {
+            var buf: [64]u8 = undefined;
+            const s = std.fmt.bufPrint(&buf, "{d}", .{f}) catch break :blk .{ .int = 0 };
+            break :blk .{ .int = @intCast(s.len) };
+        },
+        .bool => |b| .{ .int = if (b) 1 else 0 },
+        .null => .{ .int = 0 },
         .object => |obj| blk: {
             if (ctx.vm.hasMethod(obj.class_name, "__toString")) {
                 const result = try ctx.vm.callMethod(obj, "__toString", &.{});

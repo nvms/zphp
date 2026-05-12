@@ -3433,12 +3433,13 @@ fn native_stripos(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len < 2) return .{ .bool = false };
     const haystack = if (args[0] == .string) args[0].string else return Value{ .bool = false };
     const needle = if (args[1] == .string) args[1].string else return Value{ .bool = false };
-    if (needle.len == 0) return .{ .bool = false };
     const hlen: i64 = @intCast(haystack.len);
     const raw_off: i64 = if (args.len >= 3) Value.toInt(args[2]) else 0;
     const off_i: i64 = if (raw_off < 0) @max(0, hlen + raw_off) else raw_off;
     if (off_i > hlen) return .{ .bool = false };
     const offset: usize = @intCast(off_i);
+    // PHP 8+: stripos/strpos with empty needle returns the offset (0 default)
+    if (needle.len == 0) return .{ .int = @intCast(offset) };
     const h_lower = try toLowerBuf(ctx.allocator, haystack[offset..]);
     defer ctx.allocator.free(h_lower);
     const n_lower = try toLowerBuf(ctx.allocator, needle);
