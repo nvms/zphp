@@ -413,6 +413,11 @@ pub const VM = struct {
     run_base_frame: usize = 0,
     allocator: Allocator,
     global_slot_names: []const []const u8 = &.{},
+    // the slot_names of the top script frame (frame[0]). global_slot_names
+    // is temporarily overridden during require/include to point at the inner
+    // file's slot_names; writebacks to frame[0]'s locals must use the top
+    // script's layout, not the most-recently-required file's
+    top_slot_names: []const []const u8 = &.{},
     global_vars_dirty: bool = false,
     method_cache_class: []const u8 = "",
     method_cache_method: []const u8 = "",
@@ -1395,6 +1400,7 @@ pub const VM = struct {
             }
         }
         self.global_slot_names = result.slot_names;
+        self.top_slot_names = result.slot_names;
         self.source = result.source;
         self.file_path = result.file_path;
         self.frames[0] = .{ .chunk = &result.chunk, .ip = 0, .vars = vars, .locals = locals };
@@ -6613,11 +6619,12 @@ pub const VM = struct {
         const dollar_name = std.fmt.allocPrint(self.allocator, "${s}", .{key}) catch return;
         try self.strings.append(self.allocator, dollar_name);
 
-        // top frame: vars + locals (slot lookup via global_slot_names)
+        // top frame: vars + locals (slot lookup via top_slot_names — must
+        // not use global_slot_names because it's overridden inside require)
         if (self.frame_count > 0) {
             const top = &self.frames[0];
             try top.vars.put(self.allocator, dollar_name, val);
-            for (self.global_slot_names, 0..) |sn, i| {
+            for (self.top_slot_names, 0..) |sn, i| {
                 if (std.mem.eql(u8, sn, dollar_name)) {
                     if (i < top.locals.len) top.locals[i] = val;
                     break;
@@ -6646,7 +6653,7 @@ pub const VM = struct {
         if (!self.global_vars_dirty) return;
         self.global_vars_dirty = false;
         const frame = &self.frames[0];
-        for (self.global_slot_names, 0..) |name, i| {
+        for (self.top_slot_names, 0..) |name, i| {
             if (name.len > 0 and i < frame.locals.len) {
                 try frame.vars.put(self.allocator, name, frame.locals[i]);
             }
@@ -6661,7 +6668,7 @@ pub const VM = struct {
             if (entry.frame_depth == self.frame_count) {
                 const val = try self.copyValue(self.currentFrame().vars.get(entry.var_name) orelse .null);
                 try self.frames[0].vars.put(self.allocator, entry.var_name, val);
-                for (self.global_slot_names, 0..) |sn, si| {
+                for (self.top_slot_names, 0..) |sn, si| {
                     if (std.mem.eql(u8, sn, entry.var_name)) {
                         if (si < self.frames[0].locals.len) self.frames[0].locals[si] = val;
                         break;
