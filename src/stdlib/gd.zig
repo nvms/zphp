@@ -59,6 +59,15 @@ fn argInt(args: []const Value, idx: usize) ?i64 {
     };
 }
 
+fn argFloat(args: []const Value, idx: usize) ?f64 {
+    if (args.len <= idx) return null;
+    return switch (args[idx]) {
+        .float => |f| f,
+        .int => |i| @floatFromInt(i),
+        else => null,
+    };
+}
+
 fn argImg(args: []const Value, idx: usize) ?*c.gdImageStruct {
     if (args.len <= idx) return null;
     if (args[idx] != .object) return null;
@@ -162,11 +171,12 @@ fn writeImageTo(ctx: *NativeContext, im: *c.gdImageStruct, args: []const Value, 
     };
     if (buf == null) return .{ .bool = false };
     defer c.gdFree(buf);
-    // when filename is null, PHP writes to stdout; we return true and write
-    const slice: [*]const u8 = @ptrCast(buf);
-    // stdout is a function-like macro on macOS, a global on linux. cast away
-    // the difference by calling through libc fileno+write directly
-    _ = c.write(1, slice, @intCast(size));
+    // when filename is null, PHP writes to the script's output channel - which
+    // goes through ob_start buffers, not directly to stdout. append to vm.output
+    // so output handlers + ob capture work correctly
+    const slice_ptr: [*]const u8 = @ptrCast(buf);
+    const usize_sz: usize = @intCast(size);
+    try ctx.vm.output.appendSlice(ctx.allocator, slice_ptr[0..usize_sz]);
     return .{ .bool = true };
 }
 
@@ -210,6 +220,51 @@ fn imgColorAt(_: *NativeContext, args: []const Value) RuntimeError!Value {
     const x = argInt(args, 1) orelse return .{ .bool = false };
     const y = argInt(args, 2) orelse return .{ .bool = false };
     return .{ .int = @intCast(c.gdImageGetPixel(im, @intCast(x), @intCast(y))) };
+}
+
+fn imgRotate(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    const im = argImg(args, 0) orelse return .{ .bool = false };
+    const angle = argFloat(args, 1) orelse return .{ .bool = false };
+    const bg_color = argInt(args, 2) orelse 0;
+    const out = c.gdImageRotateInterpolated(im, @floatCast(angle), @intCast(bg_color));
+    return wrapImg(ctx, out);
+}
+
+fn imgColorTransparent(_: *NativeContext, args: []const Value) RuntimeError!Value {
+    const im = argImg(args, 0) orelse return .{ .int = -1 };
+    if (args.len >= 2 and args[1] == .int) {
+        c.gdImageColorTransparent(im, @intCast(args[1].int));
+    }
+    return .{ .int = @intCast(im.*.transparent) };
+}
+
+fn imgColorsForIndex(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    const im = argImg(args, 0) orelse return .{ .bool = false };
+    const idx = argInt(args, 1) orelse return .{ .bool = false };
+    var r: c_int = 0;
+    var g: c_int = 0;
+    var b: c_int = 0;
+    var alpha: c_int = 0;
+    if (im.*.trueColor != 0) {
+        const ci: c_int = @intCast(idx);
+        r = (ci >> 16) & 0xff;
+        g = (ci >> 8) & 0xff;
+        b = ci & 0xff;
+        alpha = (ci >> 24) & 0x7f;
+    } else {
+        const ci: usize = @intCast(idx);
+        if (ci >= im.*.colorsTotal) return .{ .bool = false };
+        r = im.*.red[ci];
+        g = im.*.green[ci];
+        b = im.*.blue[ci];
+        alpha = im.*.alpha[ci];
+    }
+    const arr = try ctx.createArray();
+    try arr.set(ctx.allocator, .{ .string = "red" }, .{ .int = r });
+    try arr.set(ctx.allocator, .{ .string = "green" }, .{ .int = g });
+    try arr.set(ctx.allocator, .{ .string = "blue" }, .{ .int = b });
+    try arr.set(ctx.allocator, .{ .string = "alpha" }, .{ .int = alpha });
+    return .{ .array = arr };
 }
 
 // ---------------- drawing ----------------
@@ -491,6 +546,9 @@ pub const entries = .{
     .{ "imagecolorallocate", imgColorAllocate },
     .{ "imagecolorallocatealpha", imgColorAllocateAlpha },
     .{ "imagecolorat", imgColorAt },
+    .{ "imagecolorsforindex", imgColorsForIndex },
+    .{ "imagecolortransparent", imgColorTransparent },
+    .{ "imagerotate", imgRotate },
     .{ "imagesetpixel", imgSetPixel },
     .{ "imageline", imgLine },
     .{ "imagerectangle", imgRectangle },
