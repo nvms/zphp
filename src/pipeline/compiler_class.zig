@@ -1146,11 +1146,14 @@ pub fn compileClassDecl(self: *Compiler, node: Ast.Node) Error!void {
         if (member.tag == .trait_use) {
             for (self.ast.extraSlice(member.data.lhs)) |tn| {
                 const tn_node = self.ast.nodes[tn];
+                const is_absolute = tn_node.tag == .qualified_name and tn_node.data.rhs == 1;
                 const raw_name = if (tn_node.tag == .qualified_name) blk: {
                     const parts = self.ast.extraSlice(tn_node.data.lhs);
                     break :blk try self.buildQualifiedString(parts);
                 } else self.ast.tokenSlice(tn_node.main_token);
-                try all_traits.append(self.allocator, self.resolveClassName(raw_name));
+                // FQN (had leading backslash): skip use-alias + namespace prefix
+                const resolved = if (is_absolute) raw_name else self.resolveClassName(raw_name);
+                try all_traits.append(self.allocator, resolved);
             }
         }
     }
@@ -1553,11 +1556,14 @@ pub fn compileAnonymousClass(self: *Compiler, node: Ast.Node) Error!void {
         if (member.tag == .trait_use) {
             for (self.ast.extraSlice(member.data.lhs)) |tn| {
                 const tn_node = self.ast.nodes[tn];
+                const is_absolute = tn_node.tag == .qualified_name and tn_node.data.rhs == 1;
                 const raw_name = if (tn_node.tag == .qualified_name) blk: {
                     const parts = self.ast.extraSlice(tn_node.data.lhs);
                     break :blk try self.buildQualifiedString(parts);
                 } else self.ast.tokenSlice(tn_node.main_token);
-                try all_traits.append(self.allocator, self.resolveClassName(raw_name));
+                // FQN (had leading backslash): skip use-alias + namespace prefix
+                const resolved = if (is_absolute) raw_name else self.resolveClassName(raw_name);
+                try all_traits.append(self.allocator, resolved);
             }
         }
     }

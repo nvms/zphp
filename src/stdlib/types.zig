@@ -1930,12 +1930,13 @@ fn native_class_parents(ctx: *NativeContext, args: []const Value) RuntimeError!V
 
 fn native_class_uses(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len == 0) return .{ .bool = false };
-    const class_name = if (args[0] == .object)
+    const raw = if (args[0] == .object)
         args[0].object.class_name
     else if (args[0] == .string)
         args[0].string
     else
         return Value{ .bool = false };
+    const class_name = if (raw.len > 0 and raw[0] == '\\') raw[1..] else raw;
 
     const cls = ctx.vm.classes.get(class_name) orelse {
         try ctx.vm.tryAutoload(class_name);
