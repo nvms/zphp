@@ -274,8 +274,13 @@ fn readPharEntry(a: Allocator, archive_path: []const u8, internal_path: []const 
 // parses "data://[mediatype][;base64],<data>" into the decoded byte payload.
 // returns null on malformed input (no comma, bad base64)
 fn parseDataUri(a: Allocator, path: []const u8) !?[]u8 {
-    if (!std.mem.startsWith(u8, path, "data://")) return null;
-    const rest = path[7..];
+    // PHP accepts both "data:" (RFC 2397) and the "data://" stream-wrapper form
+    const rest: []const u8 = if (std.mem.startsWith(u8, path, "data://"))
+        path[7..]
+    else if (std.mem.startsWith(u8, path, "data:"))
+        path[5..]
+    else
+        return null;
     const comma = std.mem.indexOfScalar(u8, rest, ',') orelse return null;
     const meta = rest[0..comma];
     const data = rest[comma + 1 ..];
@@ -398,7 +403,7 @@ fn native_file_get_contents(ctx: *NativeContext, args: []const Value) RuntimeErr
     if (std.mem.eql(u8, path, "php://stdout") or std.mem.eql(u8, path, "php://output") or std.mem.eql(u8, path, "php://stderr")) {
         return .{ .string = "" };
     }
-    if (std.mem.startsWith(u8, path, "data://")) {
+    if (std.mem.startsWith(u8, path, "data:")) {
         const payload = (parseDataUri(ctx.allocator, path) catch return Value{ .bool = false }) orelse return Value{ .bool = false };
         try ctx.strings.append(ctx.allocator, payload);
         return .{ .string = payload };
@@ -1125,7 +1130,7 @@ fn native_fopen(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
         try ctx.vm.objects.append(ctx.allocator, obj);
         return .{ .object = obj };
     }
-    if (std.mem.startsWith(u8, path, "data://")) {
+    if (std.mem.startsWith(u8, path, "data:")) {
         const payload = (parseDataUri(ctx.allocator, path) catch return Value{ .bool = false }) orelse return Value{ .bool = false };
         try ctx.strings.append(ctx.allocator, payload);
         const obj = try ctx.allocator.create(PhpObject);
