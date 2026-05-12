@@ -1132,12 +1132,13 @@ fn native_get_parent_class(ctx: *NativeContext, args: []const Value) RuntimeErro
         if (cls.parent) |p| return Value{ .string = p };
         return Value{ .bool = false };
     }
-    const class_name = if (args[0] == .object)
+    const raw = if (args[0] == .object)
         args[0].object.class_name
     else if (args[0] == .string)
         args[0].string
     else
         return Value{ .bool = false };
+    const class_name = if (raw.len > 0 and raw[0] == '\\') raw[1..] else raw;
     const cls = ctx.vm.classes.get(class_name) orelse {
         try ctx.vm.setPendingException("TypeError", "get_parent_class(): Argument #1 ($object_or_class) must be an object or a valid class name");
         return error.RuntimeError;
@@ -1859,12 +1860,13 @@ fn native_enum_exists(ctx: *NativeContext, args: []const Value) RuntimeError!Val
 
 fn native_class_implements(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len == 0) return .{ .bool = false };
-    const class_name = if (args[0] == .object)
+    const raw = if (args[0] == .object)
         args[0].object.class_name
     else if (args[0] == .string)
         args[0].string
     else
         return Value{ .bool = false };
+    const class_name = if (raw.len > 0 and raw[0] == '\\') raw[1..] else raw;
 
     const cls = ctx.vm.classes.get(class_name) orelse return Value{ .bool = false };
 
@@ -1898,17 +1900,19 @@ fn native_class_implements(ctx: *NativeContext, args: []const Value) RuntimeErro
 
 fn native_class_parents(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len == 0) return .{ .bool = false };
-    const class_name = if (args[0] == .object)
+    const raw = if (args[0] == .object)
         args[0].object.class_name
     else if (args[0] == .string)
         args[0].string
     else
         return Value{ .bool = false };
+    const class_name = if (raw.len > 0 and raw[0] == '\\') raw[1..] else raw;
 
     const cls = ctx.vm.classes.get(class_name) orelse {
         try ctx.vm.tryAutoload(class_name);
         if (ctx.vm.classes.get(class_name) == null) return Value{ .bool = false };
-        return native_class_parents(ctx, args);
+        const normalized = [_]Value{ .{ .string = class_name } };
+        return native_class_parents(ctx, &normalized);
     };
 
     var result = try ctx.createArray();

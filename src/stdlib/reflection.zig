@@ -1699,6 +1699,8 @@ fn rmConstruct(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     } else {
         return throwReflection(ctx, "ReflectionMethod::__construct() expects a class name or object");
     }
+    // accept FQN with leading backslash
+    if (class_name.len > 0 and class_name[0] == '\\') class_name = class_name[1..];
 
     if (!ctx.vm.hasMethod(class_name, method_name)) {
         // class might not be loaded yet - try autoloading
