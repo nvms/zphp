@@ -284,9 +284,9 @@ fn encodeValue(buf: *std.ArrayListUnmanaged(u8), a: std.mem.Allocator, val: Valu
                     }
                     switch (entry.key) {
                         .string => |s| {
-                            try buf.append(a, '"');
-                            try buf.appendSlice(a, s);
-                            try buf.append(a, '"');
+                            // route through encodeValue so the key gets the
+                            // same escaping (\n, \t, unicode etc) as values
+                            try encodeValue(buf, a, .{ .string = s }, depth, max_depth, flags, vm, visited);
                         },
                         .int => |ki| {
                             try buf.append(a, '"');
@@ -384,9 +384,7 @@ fn encodeValue(buf: *std.ArrayListUnmanaged(u8), a: std.mem.Allocator, val: Valu
                     try buf.append(a, '\n');
                     try appendIndent(buf, a, depth + 1);
                 }
-                try buf.append(a, '"');
-                try buf.appendSlice(a, prop.name);
-                try buf.append(a, '"');
+                try encodeValue(buf, a, .{ .string = prop.name }, depth, max_depth, flags, vm, visited);
                 try buf.append(a, ':');
                 if (pretty) try buf.append(a, ' ');
                 try encodeValue(buf, a, prop.value, depth + 1, max_depth, flags, vm, visited);
