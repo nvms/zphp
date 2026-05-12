@@ -91,6 +91,15 @@ pub const NativeContext = struct {
                         break;
                     }
                 }
+                // if the caller's param itself is a reference (e.g. function
+                // wrap(&$r) { parse_str(..., $r); }) propagate the write
+                // through the ref binding so the outer scope's variable
+                // updates too. without this, native by-ref writes stop at
+                // the first wrapping function
+                if (caller.ref_slots.get(var_name)) |cell| {
+                    cell.* = value;
+                    vm.propagateCellWrite(cell, value) catch {};
+                }
             },
             .array_elem => |ae| {
                 const arr_val = vm.resolveCallerVar(ae.var_name, ae.is_local, ae.slot);
