@@ -632,7 +632,8 @@ fn native_request_parse_body(ctx: *NativeContext, _: []const Value) RuntimeError
 
 fn native_trait_exists(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len == 0 or args[0] != .string) return .{ .bool = false };
-    const name = args[0].string;
+    const raw = args[0].string;
+    const name = if (raw.len > 0 and raw[0] == '\\') raw[1..] else raw;
     return .{ .bool = ctx.vm.traits.contains(name) };
 }
 

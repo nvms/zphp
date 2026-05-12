@@ -689,7 +689,8 @@ fn classExistsCaseInsensitive(ctx: *NativeContext, name: []const u8) bool {
 
 fn class_exists(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len == 0 or args[0] != .string) return .{ .bool = false };
-    const name = args[0].string;
+    const raw = args[0].string;
+    const name = if (raw.len > 0 and raw[0] == '\\') raw[1..] else raw;
     if (std.ascii.eqlIgnoreCase(name, "stdClass") or std.ascii.eqlIgnoreCase(name, "Attribute")) return .{ .bool = true };
     if (std.ascii.eqlIgnoreCase(name, "Closure") or std.ascii.eqlIgnoreCase(name, "Generator") or std.ascii.eqlIgnoreCase(name, "Fiber")) return .{ .bool = true };
     if (ctx.vm.interfaces.contains(name)) return .{ .bool = false };
@@ -1147,18 +1148,19 @@ fn native_get_parent_class(ctx: *NativeContext, args: []const Value) RuntimeErro
 
 fn native_is_a(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len < 2 or args[1] != .string) return .{ .bool = false };
+    const raw_target = args[1].string;
+    const target = if (raw_target.len > 0 and raw_target[0] == '\\') raw_target[1..] else raw_target;
     if (args[0] == .generator) {
-        const t = args[1].string;
-        return .{ .bool = std.mem.eql(u8, t, "Generator") or std.mem.eql(u8, t, "Iterator") or std.mem.eql(u8, t, "Traversable") };
+        return .{ .bool = std.mem.eql(u8, target, "Generator") or std.mem.eql(u8, target, "Iterator") or std.mem.eql(u8, target, "Traversable") };
     }
-    if (args[0] == .fiber) return .{ .bool = std.mem.eql(u8, args[1].string, "Fiber") };
+    if (args[0] == .fiber) return .{ .bool = std.mem.eql(u8, target, "Fiber") };
     const class_name = if (args[0] == .object)
         args[0].object.class_name
     else if (args[0] == .string)
         args[0].string
     else
         return Value{ .bool = false };
-    return .{ .bool = ctx.vm.isInstanceOf(class_name, args[1].string) };
+    return .{ .bool = ctx.vm.isInstanceOf(class_name, target) };
 }
 
 fn native_is_subclass_of(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
@@ -1828,7 +1830,8 @@ fn native_func_get_arg(ctx: *NativeContext, args: []const Value) RuntimeError!Va
 
 fn native_interface_exists(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len == 0 or args[0] != .string) return .{ .bool = false };
-    const name = args[0].string;
+    const raw = args[0].string;
+    const name = if (raw.len > 0 and raw[0] == '\\') raw[1..] else raw;
     if (ctx.vm.interfaces.contains(name)) return .{ .bool = true };
     const autoload = if (args.len > 1 and args[1] == .bool) args[1].bool else true;
     if (autoload) {

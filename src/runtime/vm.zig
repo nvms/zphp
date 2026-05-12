@@ -8167,7 +8167,10 @@ pub const VM = struct {
         }
     }
 
-    pub fn isInstanceOf(self: *VM, obj_class: []const u8, target_class: []const u8) bool {
+    pub fn isInstanceOf(self: *VM, raw_obj_class: []const u8, raw_target: []const u8) bool {
+        // PHP normalizes leading-backslash equivalence for class names
+        const obj_class = if (raw_obj_class.len > 0 and raw_obj_class[0] == '\\') raw_obj_class[1..] else raw_obj_class;
+        const target_class = if (raw_target.len > 0 and raw_target[0] == '\\') raw_target[1..] else raw_target;
         if (std.mem.eql(u8, target_class, "Stringable") and self.hasMethod(obj_class, "__toString")) return true;
         var current = obj_class;
         while (true) {

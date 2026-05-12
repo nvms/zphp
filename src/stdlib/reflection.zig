@@ -72,6 +72,8 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try rc_def.methods.put(a, "isUninitializedLazyObject", .{ .name = "isUninitializedLazyObject", .arity = 1 });
     try rc_def.methods.put(a, "markLazyObjectAsInitialized", .{ .name = "markLazyObjectAsInitialized", .arity = 1 });
     try rc_def.methods.put(a, "getShortName", .{ .name = "getShortName", .arity = 0 });
+    try rc_def.methods.put(a, "getNamespaceName", .{ .name = "getNamespaceName", .arity = 0 });
+    try rc_def.methods.put(a, "inNamespace", .{ .name = "inNamespace", .arity = 0 });
     try rc_def.methods.put(a, "isTrait", .{ .name = "isTrait", .arity = 0 });
     try rc_def.methods.put(a, "getTraitNames", .{ .name = "getTraitNames", .arity = 0 });
     try rc_def.methods.put(a, "isEnum", .{ .name = "isEnum", .arity = 0 });
@@ -120,6 +122,8 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try vm.native_fns.put(a, "ReflectionClass::isUninitializedLazyObject", rcIsUninitializedLazyObject);
     try vm.native_fns.put(a, "ReflectionClass::markLazyObjectAsInitialized", rcMarkLazyObjectAsInitialized);
     try vm.native_fns.put(a, "ReflectionClass::getShortName", rcGetShortName);
+    try vm.native_fns.put(a, "ReflectionClass::getNamespaceName", rcGetNamespaceName);
+    try vm.native_fns.put(a, "ReflectionClass::inNamespace", rcInNamespace);
     try vm.native_fns.put(a, "ReflectionClass::isTrait", rcIsTrait);
     try vm.native_fns.put(a, "ReflectionClass::getTraitNames", rcGetTraitNames);
     try vm.native_fns.put(a, "ReflectionClass::isEnum", rcIsEnum);
@@ -722,12 +726,15 @@ fn hasInterfaceMethod(vm: *VM, iface_name: []const u8, method_name: []const u8) 
 
 fn rcConstruct(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len < 1) return throwReflection(ctx, "ReflectionClass::__construct() expects a class name");
-    const class_name = if (args[0] == .string)
+    const raw_class_name = if (args[0] == .string)
         args[0].string
     else if (args[0] == .object)
         args[0].object.class_name
     else
         return throwReflection(ctx, "ReflectionClass::__construct() expects a class name or object");
+    // PHP accepts leading-backslash on FQN class strings; normalize so the
+    // class registry lookup succeeds either way
+    const class_name = if (raw_class_name.len > 0 and raw_class_name[0] == '\\') raw_class_name[1..] else raw_class_name;
     const this = getThis(ctx) orelse return .null;
 
     _ = resolveClassName(ctx.vm, class_name) catch {
@@ -1351,6 +1358,21 @@ fn rcGetShortName(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
         return .{ .string = name[pos + 1 ..] };
     }
     return .{ .string = name };
+}
+
+fn rcGetNamespaceName(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const this = getThis(ctx) orelse return .{ .string = "" };
+    const name = if (this.get("name") == .string) this.get("name").string else return .{ .string = "" };
+    if (std.mem.lastIndexOfScalar(u8, name, '\\')) |pos| {
+        return .{ .string = name[0..pos] };
+    }
+    return .{ .string = "" };
+}
+
+fn rcInNamespace(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const this = getThis(ctx) orelse return .{ .bool = false };
+    const name = if (this.get("name") == .string) this.get("name").string else return .{ .bool = false };
+    return .{ .bool = std.mem.indexOfScalar(u8, name, '\\') != null };
 }
 
 fn rcIsTrait(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
