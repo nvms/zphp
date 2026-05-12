@@ -8770,9 +8770,32 @@ pub const VM = struct {
     }
 
     fn cloneArray(self: *VM, src: *PhpArray) RuntimeError!*PhpArray {
+        // shallow fast path: when the source has no nested arrays we can
+        // copy without any cycle tracking. covers the overwhelming majority
+        // of php arrays. cloneArrayDeep only runs when at least one entry
+        // is an array, where cycles become possible.
+        var has_nested = false;
+        for (src.entries.items) |entry| {
+            if (entry.value == .array) { has_nested = true; break; }
+        }
+        if (!has_nested) return try self.cloneArrayFlat(src);
         var visited: std.AutoHashMapUnmanaged(*PhpArray, *PhpArray) = .{};
         defer visited.deinit(self.allocator);
         return try self.cloneArrayInner(src, &visited);
+    }
+
+    fn cloneArrayFlat(self: *VM, src: *PhpArray) RuntimeError!*PhpArray {
+        const copy = self.allocator.create(PhpArray) catch return error.RuntimeError;
+        copy.* = .{ .next_int_key = src.next_int_key, .has_int_keys = src.has_int_keys, .cursor = src.cursor };
+        copy.entries.ensureTotalCapacity(self.allocator, src.entries.items.len) catch return error.RuntimeError;
+        for (src.entries.items, 0..) |entry, i| {
+            copy.entries.appendAssumeCapacity(entry);
+            if (entry.key == .string) {
+                copy.string_index.put(self.allocator, entry.key.string, i) catch return error.RuntimeError;
+            }
+        }
+        self.arrays.append(self.allocator, copy) catch return error.RuntimeError;
+        return copy;
     }
 
     fn cloneArrayInner(
