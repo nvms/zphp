@@ -149,6 +149,23 @@ jobs:
       - run: ./tests/symfony/setup
       - run: ./tests/symfony/run
 
+  wordpress:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.15.1
+      - name: install system libs
+        run: sudo apt-get update && sudo apt-get install -y libpcre2-dev libsqlite3-dev zlib1g-dev libmysqlclient-dev libpq-dev libssl-dev libnghttp2-dev libcurl4-openssl-dev libxml2-dev libicu-dev libgmp-dev libgd-dev libsodium-dev libldap2-dev unzip
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.5'
+          extensions: mbstring, xml, sqlite3, curl, tokenizer, gd, intl, zip
+      - run: zig build
+      - run: ./tests/wordpress/setup
+      - run: ./tests/wordpress/run
+
   compile:
     runs-on: ubuntu-latest
     steps:

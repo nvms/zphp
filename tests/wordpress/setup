@@ -1,0 +1,76 @@
+#!/bin/bash
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+APP_DIR="$SCRIPT_DIR/app"
+
+if ! command -v php &>/dev/null; then
+    echo "php not found in PATH"
+    exit 1
+fi
+
+# fetch the latest WordPress release if not already present
+if [ ! -f "$APP_DIR/wp-load.php" ]; then
+    echo "downloading WordPress..."
+    mkdir -p "$APP_DIR"
+    cd "$APP_DIR"
+    if command -v curl &>/dev/null; then
+        curl -sSL https://wordpress.org/latest.tar.gz -o /tmp/wp.tar.gz
+    elif command -v wget &>/dev/null; then
+        wget -q https://wordpress.org/latest.tar.gz -O /tmp/wp.tar.gz
+    else
+        echo "need curl or wget to download wordpress"
+        exit 1
+    fi
+    tar -xzf /tmp/wp.tar.gz --strip-components=1
+    rm /tmp/wp.tar.gz
+fi
+
+# install the SQLite drop-in plugin so we can run without a mysql server
+DROPIN_DIR="$APP_DIR/wp-content"
+if [ ! -d "$DROPIN_DIR/plugins/sqlite-database-integration" ]; then
+    echo "downloading sqlite-database-integration plugin..."
+    if command -v curl &>/dev/null; then
+        curl -sSL https://downloads.wordpress.org/plugin/sqlite-database-integration.zip -o /tmp/sqlite-db.zip
+    else
+        wget -q https://downloads.wordpress.org/plugin/sqlite-database-integration.zip -O /tmp/sqlite-db.zip
+    fi
+    mkdir -p "$DROPIN_DIR/plugins"
+    cd "$DROPIN_DIR/plugins"
+    unzip -q /tmp/sqlite-db.zip
+    rm /tmp/sqlite-db.zip
+    mkdir -p "$DROPIN_DIR/database"
+    cp sqlite-database-integration/db.copy "$DROPIN_DIR/db.php" 2>/dev/null || true
+fi
+
+# write a wp-config.php tuned for the SQLite harness if not present
+if [ ! -f "$APP_DIR/wp-config.php" ]; then
+    cat > "$APP_DIR/wp-config.php" <<'EOF'
+<?php
+define('DB_NAME', 'wordpress');
+define('DB_USER', 'wordpress');
+define('DB_PASSWORD', 'wordpress');
+define('DB_HOST', 'localhost');
+define('DB_CHARSET', 'utf8');
+define('DB_COLLATE', '');
+define('AUTH_KEY',         'zphp-test-key-1');
+define('SECURE_AUTH_KEY',  'zphp-test-key-2');
+define('LOGGED_IN_KEY',    'zphp-test-key-3');
+define('NONCE_KEY',        'zphp-test-key-4');
+define('AUTH_SALT',        'zphp-test-salt-1');
+define('SECURE_AUTH_SALT', 'zphp-test-salt-2');
+define('LOGGED_IN_SALT',   'zphp-test-salt-3');
+define('NONCE_SALT',       'zphp-test-salt-4');
+$table_prefix = 'wp_';
+define('WP_DEBUG', false);
+define('WP_DEBUG_DISPLAY', false);
+define('WP_DEBUG_LOG', false);
+define('FS_METHOD', 'direct');
+if ( ! defined( 'ABSPATH' ) ) {
+    define( 'ABSPATH', __DIR__ . '/' );
+}
+require_once ABSPATH . 'wp-settings.php';
+EOF
+fi
+
+echo "setup complete"

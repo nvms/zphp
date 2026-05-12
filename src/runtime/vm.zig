@@ -3407,6 +3407,51 @@ pub const VM = struct {
                                     self.push(.{ .bool = false });
                                     continue;
                                 };
+                                // merge top-level variable assignments from the
+                                // included file back into the caller's scope.
+                                // PHP semantics: vars defined at the top level
+                                // of an included script become locals/globals
+                                // in the requiring scope. without this, files
+                                // that rely on `$x = ...; require 'helper.php';`
+                                // patterns (WordPress, legacy frameworks) fail
+                                // to pick up state set by the include
+                                const include_frame_idx = self.frame_count - 1;
+                                const include_frame = &self.frames[include_frame_idx];
+                                const include_slot_names = r.slot_names;
+                                // 1) merge slot-backed locals
+                                for (include_slot_names, 0..) |name, si| {
+                                    if (name.len == 0) continue;
+                                    if (si >= include_frame.locals.len) continue;
+                                    const v = include_frame.locals[si];
+                                    if (v == .null) continue;
+                                    // find a matching slot in the caller
+                                    var caller_slot: ?usize = null;
+                                    for (caller_sn, 0..) |csn, ci| {
+                                        if (std.mem.eql(u8, csn, name)) { caller_slot = ci; break; }
+                                    }
+                                    if (caller_slot) |cs| {
+                                        if (cs < caller.locals.len) caller.locals[cs] = v;
+                                    } else {
+                                        try caller.vars.put(self.allocator, name, v);
+                                    }
+                                }
+                                // 2) merge dynamically-stored vars
+                                var iter_vars = include_frame.vars.iterator();
+                                while (iter_vars.next()) |entry| {
+                                    const name = entry.key_ptr.*;
+                                    if (name.len == 0) continue;
+                                    // skip framework-internal keys (start with __)
+                                    if (name.len >= 3 and name[0] == '$' and name[1] == '_' and name[2] == '_') continue;
+                                    var caller_slot: ?usize = null;
+                                    for (caller_sn, 0..) |csn, ci| {
+                                        if (std.mem.eql(u8, csn, name)) { caller_slot = ci; break; }
+                                    }
+                                    if (caller_slot) |cs| {
+                                        if (cs < caller.locals.len) caller.locals[cs] = entry.value_ptr.*;
+                                    } else {
+                                        try caller.vars.put(self.allocator, name, entry.value_ptr.*);
+                                    }
+                                }
                                 while (self.frame_count > return_frame) {
                                     self.frame_count -= 1;
                                     self.deinitFrameSlot(self.frame_count);

@@ -1,0 +1,65 @@
+#!/bin/bash
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+ZPHP="${ZPHP:-$SCRIPT_DIR/../../zig-out/bin/zphp}"
+APP_DIR="$SCRIPT_DIR/app"
+
+if ! command -v php &>/dev/null; then
+    echo "php not found in PATH"
+    exit 1
+fi
+
+if [ ! -f "$ZPHP" ]; then
+    echo "zphp not found at $ZPHP (build with: make build)"
+    exit 1
+fi
+
+if [ ! -f "$APP_DIR/wp-load.php" ]; then
+    echo "run 'tests/wordpress/setup' first"
+    exit 1
+fi
+
+passed=0
+failed=0
+errors=""
+
+for f in "$SCRIPT_DIR"/harness/test-*.php; do
+    name="$(basename "$f" .php)"
+    php_out="$(php -d error_reporting=E_ALL\&~E_DEPRECATED\&~E_WARNING "$f" 2>&1)" || true
+    TIMEOUT_CMD=""
+    if command -v timeout &>/dev/null; then
+        TIMEOUT_CMD="timeout 120"
+    elif command -v gtimeout &>/dev/null; then
+        TIMEOUT_CMD="gtimeout 120"
+    fi
+    zphp_out="$($TIMEOUT_CMD "$ZPHP" run "$f" 2>&1)" && zphp_exit=0 || zphp_exit=$?
+
+    if [ "$php_out" = "$zphp_out" ]; then
+        passed=$((passed + 1))
+        echo "  pass  $name"
+    else
+        failed=$((failed + 1))
+        if [ $zphp_exit -eq 124 ]; then
+            echo "  FAIL  $name (timeout)"
+        elif [ $zphp_exit -ne 0 ]; then
+            echo "  FAIL  $name (exit $zphp_exit)"
+        else
+            echo "  FAIL  $name"
+        fi
+        errors="$errors
+
+--- $name ---
+expected (php):
+$php_out
+got (zphp):
+$zphp_out"
+    fi
+done
+
+echo
+echo "$passed passed, $failed failed"
+if [ $failed -gt 0 ]; then
+    echo "$errors"
+    exit 1
+fi
