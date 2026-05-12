@@ -77,6 +77,12 @@ pub const entries = .{
     .{ "fstat", native_fstat },
     .{ "stream_get_contents", stream_get_contents },
     .{ "stream_copy_to_stream", stream_copy_to_stream },
+    .{ "stream_filter_register", native_stream_filter_register },
+    .{ "stream_filter_append", native_stream_filter_append },
+    .{ "stream_filter_prepend", native_stream_filter_append },
+    .{ "stream_filter_remove", native_noop_true },
+    .{ "stream_get_filters", native_stream_get_filters },
+    .{ "stream_get_transports", native_stream_get_transports },
     .{ "touch", native_touch },
     .{ "chmod", native_chmod },
     .{ "stat", native_stat },
@@ -1931,6 +1937,37 @@ fn stream_wrapper_restore(ctx: *NativeContext, args: []const Value) RuntimeError
     if (!ctx.vm.stream_wrappers_unregistered.contains(protocol)) return .{ .bool = true };
     _ = ctx.vm.stream_wrappers_unregistered.remove(protocol);
     return .{ .bool = true };
+}
+
+fn native_noop_true(_: *NativeContext, _: []const Value) RuntimeError!Value {
+    return .{ .bool = true };
+}
+
+fn native_stream_filter_register(_: *NativeContext, _: []const Value) RuntimeError!Value {
+    // accept the registration silently; user-defined filters aren't dispatched
+    // through our stream layer, but returning true lets feature-detection
+    // codepaths in libraries proceed
+    return .{ .bool = true };
+}
+
+fn native_stream_filter_append(_: *NativeContext, _: []const Value) RuntimeError!Value {
+    // return a stub resource-like value so the caller can later pass it to
+    // stream_filter_remove without erroring
+    return .{ .int = 1 };
+}
+
+fn native_stream_get_filters(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const arr = try ctx.createArray();
+    const names = [_][]const u8{ "string.rot13", "string.toupper", "string.tolower", "convert.base64-encode", "convert.base64-decode", "zlib.deflate", "zlib.inflate" };
+    for (names) |n| try arr.append(ctx.allocator, .{ .string = n });
+    return .{ .array = arr };
+}
+
+fn native_stream_get_transports(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const arr = try ctx.createArray();
+    const names = [_][]const u8{ "tcp", "udp", "unix", "udg", "ssl", "tls", "tlsv1.2", "tlsv1.3" };
+    for (names) |n| try arr.append(ctx.allocator, .{ .string = n });
+    return .{ .array = arr };
 }
 
 fn stream_copy_to_stream(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
