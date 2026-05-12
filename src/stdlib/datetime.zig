@@ -99,6 +99,7 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try dt_def.methods.put(a, "getTimezone", .{ .name = "getTimezone", .arity = 0 });
     try dt_def.methods.put(a, "setTimezone", .{ .name = "setTimezone", .arity = 1 });
     try dt_def.methods.put(a, "createFromImmutable", .{ .name = "createFromImmutable", .arity = 1, .is_static = true });
+    try dt_def.methods.put(a, "createFromInterface", .{ .name = "createFromInterface", .arity = 1, .is_static = true });
     inline for (DT_FORMAT_CONSTS) |c| {
         try dt_def.static_props.put(a, c[0], .{ .string = c[1] });
     }
@@ -140,6 +141,7 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try dti_def.methods.put(a, "setTimezone", .{ .name = "setTimezone", .arity = 1 });
     try dti_def.methods.put(a, "createFromFormat", .{ .name = "createFromFormat", .arity = 2, .is_static = true });
     try dti_def.methods.put(a, "createFromMutable", .{ .name = "createFromMutable", .arity = 1, .is_static = true });
+    try dti_def.methods.put(a, "createFromInterface", .{ .name = "createFromInterface", .arity = 1, .is_static = true });
     inline for (DT_FORMAT_CONSTS) |c| {
         try dti_def.static_props.put(a, c[0], .{ .string = c[1] });
     }
@@ -163,6 +165,8 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try vm.native_fns.put(a, "DateTimeImmutable::setTimestamp", dtiSetTimestamp);
     try vm.native_fns.put(a, "DateTimeImmutable::createFromMutable", dtiCreateFromMutable);
     try vm.native_fns.put(a, "DateTime::createFromImmutable", dtCreateFromImmutable);
+    try vm.native_fns.put(a, "DateTime::createFromInterface", dtCreateFromInterface);
+    try vm.native_fns.put(a, "DateTimeImmutable::createFromInterface", dtiCreateFromInterface);
 
     // DateTimeZone class
     var dtz_def = ClassDef{ .name = "DateTimeZone" };
@@ -1005,6 +1009,17 @@ fn dtiCreateFromMutable(ctx: *NativeContext, args: []const Value) RuntimeError!V
     try obj.set(ctx.allocator, "timestamp", src.get("timestamp"));
     if (src.get("__timezone") == .string) try obj.set(ctx.allocator, "__timezone", src.get("__timezone"));
     return .{ .object = obj };
+}
+
+// createFromInterface accepts either DateTime or DateTimeImmutable and produces
+// the corresponding target type (called as DateTime::createFromInterface or
+// DateTimeImmutable::createFromInterface)
+fn dtCreateFromInterface(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    return dtCreateFromImmutable(ctx, args);
+}
+
+fn dtiCreateFromInterface(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    return dtiCreateFromMutable(ctx, args);
 }
 
 fn native_date_create_from_format(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
