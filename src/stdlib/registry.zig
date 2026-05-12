@@ -38,6 +38,7 @@ pub fn register(map: *std.StringHashMapUnmanaged(NativeFn), allocator: std.mem.A
         @import("sodium.zig").entries,
         @import("ldap.zig").entries,
     };
+    @setEvalBranchQuota(10000);
     inline for (modules) |entries| {
         inline for (entries) |f| try map.put(allocator, f[0], f[1]);
     }

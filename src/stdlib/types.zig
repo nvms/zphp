@@ -77,6 +77,15 @@ pub const entries = .{
     .{ "opcache_is_script_cached", native_noop_false },
     .{ "opcache_reset", native_noop_true },
     .{ "ignore_user_abort", native_noop_zero },
+    .{ "strftime", native_strftime },
+    .{ "gmstrftime", native_gmstrftime },
+    .{ "getmxrr", native_getmxrr },
+    .{ "header_register_callback", native_noop_true },
+    .{ "spl_autoload_call", native_spl_autoload_call },
+    .{ "spl_classes", native_spl_classes },
+    .{ "iconv_mime_decode", native_iconv_mime_decode },
+    .{ "iconv_mime_decode_headers", native_iconv_mime_decode_headers },
+    .{ "iconv_mime_encode", native_iconv_mime_encode },
     .{ "gc_status", native_gc_status },
     .{ "gc_mem_caches", native_noop_zero },
     .{ "highlight_string", native_highlight_string },
@@ -1653,6 +1662,99 @@ fn native_highlight_string(_: *NativeContext, args: []const Value) RuntimeError!
 
 fn native_highlight_file(_: *NativeContext, _: []const Value) RuntimeError!Value {
     return .{ .bool = true };
+}
+
+fn native_strftime(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    // strftime is deprecated since 8.1; we delegate to date() with a best-effort
+    // format remap for the most common specifiers
+    if (args.len == 0 or args[0] != .string) return .{ .bool = false };
+    const fmt = args[0].string;
+    const ts: Value = if (args.len >= 2) args[1] else try ctx.vm.callByName("time", &.{});
+    var buf: std.ArrayListUnmanaged(u8) = .{};
+    defer buf.deinit(ctx.allocator);
+    var i: usize = 0;
+    while (i < fmt.len) : (i += 1) {
+        if (fmt[i] != '%' or i + 1 >= fmt.len) {
+            try buf.append(ctx.allocator, fmt[i]);
+            continue;
+        }
+        i += 1;
+        const mapped: []const u8 = switch (fmt[i]) {
+            'Y' => "Y", 'y' => "y", 'm' => "m", 'd' => "d", 'H' => "H", 'M' => "i",
+            'S' => "s", 'p' => "A", 'P' => "a", 'A' => "l", 'a' => "D", 'B' => "F",
+            'b', 'h' => "M", 'e' => "j", 'j' => "z", 'n' => "\n", 't' => "\t",
+            's' => "U", 'u' => "N", 'w' => "w", 'z' => "O", 'Z' => "T",
+            '%' => "%%",
+            else => continue,
+        };
+        const r = try ctx.vm.callByName("date", &.{ .{ .string = mapped }, ts });
+        if (r == .string) try buf.appendSlice(ctx.allocator, r.string);
+    }
+    const owned = try ctx.allocator.dupe(u8, buf.items);
+    try ctx.vm.strings.append(ctx.allocator, owned);
+    return .{ .string = owned };
+}
+
+fn native_gmstrftime(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    return native_strftime(ctx, args);
+}
+
+fn native_getmxrr(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    // empty MX array, return false (no records found) - matches PHP behavior
+    // when MX query fails. tools that branch on this still work.
+    _ = ctx;
+    return .{ .bool = false };
+}
+
+fn native_spl_autoload_call(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len < 1 or args[0] != .string) return .null;
+    const name = args[0].string;
+    var i: usize = 0;
+    while (i < ctx.vm.autoload_callbacks.items.len) : (i += 1) {
+        const cb = ctx.vm.autoload_callbacks.items[i];
+        _ = ctx.invokeCallable(cb, &.{.{ .string = name }}) catch {};
+        if (ctx.vm.classes.contains(name)) break;
+    }
+    return .null;
+}
+
+fn native_spl_classes(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const arr = try ctx.createArray();
+    const names = [_][]const u8{
+        "AppendIterator", "ArrayIterator", "ArrayObject", "BadFunctionCallException",
+        "BadMethodCallException", "CachingIterator", "CallbackFilterIterator",
+        "DirectoryIterator", "DomainException", "EmptyIterator", "FilesystemIterator",
+        "FilterIterator", "GlobIterator", "InfiniteIterator", "InvalidArgumentException",
+        "IteratorIterator", "LengthException", "LimitIterator", "LogicException",
+        "MultipleIterator", "NoRewindIterator", "OuterIterator", "OutOfBoundsException",
+        "OutOfRangeException", "OverflowException", "ParentIterator", "RangeException",
+        "RecursiveArrayIterator", "RecursiveCallbackFilterIterator",
+        "RecursiveDirectoryIterator", "RecursiveFilterIterator", "RecursiveIterator",
+        "RecursiveIteratorIterator", "RecursiveRegexIterator", "RecursiveTreeIterator",
+        "RegexIterator", "RuntimeException", "SeekableIterator", "SplDoublyLinkedList",
+        "SplFileInfo", "SplFileObject", "SplFixedArray", "SplHeap", "SplMinHeap",
+        "SplMaxHeap", "SplObjectStorage", "SplPriorityQueue", "SplQueue", "SplStack",
+        "SplTempFileObject", "UnderflowException", "UnexpectedValueException",
+    };
+    for (names) |n| try arr.set(ctx.allocator, .{ .string = n }, .{ .string = n });
+    return .{ .array = arr };
+}
+
+fn native_iconv_mime_decode(_: *NativeContext, args: []const Value) RuntimeError!Value {
+    // best-effort: return the input as-is, ignoring mime encoding
+    if (args.len == 0 or args[0] != .string) return .{ .string = "" };
+    return args[0];
+}
+
+fn native_iconv_mime_decode_headers(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len == 0 or args[0] != .string) return .{ .array = try ctx.createArray() };
+    return .{ .array = try ctx.createArray() };
+}
+
+fn native_iconv_mime_encode(_: *NativeContext, args: []const Value) RuntimeError!Value {
+    // best-effort: emit "Header: value" unencoded
+    if (args.len < 2 or args[0] != .string or args[1] != .string) return .{ .bool = false };
+    return args[1];
 }
 
 fn native_get_include_path(_: *NativeContext, _: []const Value) RuntimeError!Value {

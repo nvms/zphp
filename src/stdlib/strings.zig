@@ -44,6 +44,7 @@ pub const entries = .{
     .{ "sprintf", native_sprintf },
     .{ "printf", native_printf },
     .{ "fprintf", native_fprintf },
+    .{ "vfprintf", native_vfprintf },
     .{ "addslashes", native_addslashes },
     .{ "stripslashes", native_stripslashes },
     .{ "htmlspecialchars", native_htmlspecialchars },
@@ -73,6 +74,7 @@ pub const entries = .{
     .{ "mb_chr", native_mb_chr },
     .{ "mb_ord", native_mb_ord },
     .{ "mb_stripos", native_mb_stripos },
+    .{ "mb_strripos", native_mb_strripos },
     .{ "mb_strstr", native_mb_strstr },
     .{ "mb_stristr", native_mb_stristr },
     .{ "mb_strcut", native_mb_strcut },
@@ -1196,6 +1198,18 @@ fn native_fprintf(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     const result = try sprintfImpl(ctx, fmt_str, args[2..]);
     const written = try ctx.vm.callByName("fwrite", &.{ args[0], .{ .string = result } });
     return written;
+}
+
+fn native_vfprintf(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len < 3) return .{ .int = 0 };
+    const fmt_str = if (args[1] == .string) args[1].string else return Value{ .int = 0 };
+    if (args[2] != .array) return .{ .int = 0 };
+    const arr = args[2].array;
+    var vals = try ctx.allocator.alloc(Value, arr.entries.items.len);
+    defer ctx.allocator.free(vals);
+    for (arr.entries.items, 0..) |entry, i| vals[i] = entry.value;
+    const result = try sprintfImpl(ctx, fmt_str, vals);
+    return try ctx.vm.callByName("fwrite", &.{ args[0], .{ .string = result } });
 }
 
 fn sprintfImpl(ctx: *NativeContext, fmt_str: []const u8, args: []const Value) ![]const u8 {
@@ -2952,6 +2966,22 @@ fn native_mb_stripos(_: *NativeContext, args: []const Value) RuntimeError!Value 
         if (matchAtCi(haystack, i, needle)) return .{ .int = byteToCharPos(haystack, i) };
         i += utf8CharLen(haystack[i]);
     }
+    return .{ .bool = false };
+}
+
+fn native_mb_strripos(_: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len < 2 or args[0] != .string or args[1] != .string) return .{ .bool = false };
+    const haystack = args[0].string;
+    const needle = args[1].string;
+    if (needle.len == 0) return .{ .bool = false };
+    // walk to the end recording the last case-insensitive match position
+    var last: ?usize = null;
+    var i: usize = 0;
+    while (i < haystack.len) {
+        if (matchAtCi(haystack, i, needle)) last = i;
+        i += utf8CharLen(haystack[i]);
+    }
+    if (last) |bi| return .{ .int = byteToCharPos(haystack, bi) };
     return .{ .bool = false };
 }
 
