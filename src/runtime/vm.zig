@@ -2581,6 +2581,32 @@ pub const VM = struct {
                         }
                     }
                 },
+                .unset_prop_dynamic => {
+                    const name_val = self.pop();
+                    const obj_val = self.pop();
+                    if (obj_val == .object and name_val == .string) {
+                        const obj = obj_val.object;
+                        const prop_name = name_val.string;
+                        const vr = self.findPropertyVisibility(obj.class_name, prop_name);
+                        if (vr.is_readonly and obj.get(prop_name) != .null) {
+                            const msg = try std.fmt.allocPrint(self.allocator, "Cannot unset readonly property {s}::${s}", .{ obj.class_name, prop_name });
+                            try self.strings.append(self.allocator, msg);
+                            if (try self.throwBuiltinException("Error", msg)) continue;
+                            return error.RuntimeError;
+                        }
+                        if (self.hasMethod(obj.class_name, "__unset")) {
+                            _ = self.callMethod(obj, "__unset", &.{.{ .string = prop_name }}) catch {};
+                        } else {
+                            try obj.markUnset(self.allocator, prop_name);
+                            if (obj.slots) |s| {
+                                if (obj.getSlotIndex(prop_name)) |idx| {
+                                    s[idx] = .null;
+                                }
+                            }
+                            _ = obj.properties.orderedRemove(prop_name);
+                        }
+                    }
+                },
                 .unset_array_elem => {
                     const key = self.pop();
                     const arr_val = self.pop();

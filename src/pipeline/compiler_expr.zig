@@ -694,12 +694,20 @@ fn compileUnset(self: *Compiler, args: []const u32) Error!void {
             try self.emitU16(idx);
         } else if (arg.tag == .property_access) {
             try self.compileNode(arg.data.lhs);
-            const prop_node = self.ast.nodes[arg.data.rhs];
-            var prop_name = self.ast.tokenSlice(prop_node.main_token);
-            if (prop_name.len > 0 and prop_name[0] == '$') prop_name = prop_name[1..];
-            const prop_idx = try self.addConstant(.{ .string = prop_name });
-            try self.emitOp(.unset_prop);
-            try self.emitU16(prop_idx);
+            if (self.isDynamicProp(arg)) {
+                if (arg.main_token == 0) {
+                    try self.compileNode(arg.data.rhs);
+                } else {
+                    const prop_node = self.ast.nodes[arg.data.rhs];
+                    const var_name = self.ast.tokenSlice(prop_node.main_token);
+                    try self.emitGetVar(var_name);
+                }
+                try self.emitOp(.unset_prop_dynamic);
+            } else {
+                const prop_idx = try self.addConstant(.{ .string = self.propName(arg) });
+                try self.emitOp(.unset_prop);
+                try self.emitU16(prop_idx);
+            }
         } else if (arg.tag == .array_access) {
             try self.compileNode(arg.data.lhs);
             try self.compileNode(arg.data.rhs);
