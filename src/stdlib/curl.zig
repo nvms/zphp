@@ -23,6 +23,7 @@ pub const entries = .{
     .{ "curl_getinfo", curlGetinfo },
     .{ "curl_reset", curlReset },
     .{ "curl_version", curlVersion },
+    .{ "curl_strerror", curlStrerror },
 };
 
 var global_init_done: bool = false;
@@ -557,15 +558,37 @@ fn curlReset(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     return .null;
 }
 
+fn curlStrerror(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len < 1 or args[0] != .int) return .null;
+    const code: c_uint = @intCast(args[0].int);
+    const msg = c.curl_easy_strerror(code);
+    if (msg == null) return .null;
+    const span = std.mem.span(msg);
+    const owned = try ctx.allocator.dupe(u8, span);
+    try ctx.strings.append(ctx.allocator, owned);
+    return .{ .string = owned };
+}
+
 fn curlVersion(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
     const info = c.curl_version_info(c.CURLVERSION_NOW) orelse return .{ .bool = false };
     const arr = try ctx.createArray();
+
+    // PHP emits in this exact order. include every key it does so
+    // is_array+key checks line up
+    try arr.set(ctx.allocator, .{ .string = "version_number" }, .{ .int = @intCast(info.*.version_num) });
+    try arr.set(ctx.allocator, .{ .string = "age" }, .{ .int = @intCast(info.*.age) });
+    try arr.set(ctx.allocator, .{ .string = "features" }, .{ .int = @intCast(info.*.features) });
+
+    // feature_list - empty array unless we wanted to translate bitmask names
+    const fl = try ctx.createArray();
+    try arr.set(ctx.allocator, .{ .string = "feature_list" }, .{ .array = fl });
+
+    try arr.set(ctx.allocator, .{ .string = "ssl_version_number" }, .{ .int = 0 });
 
     if (info.*.version) |ver| {
         const s = try ctx.createString(std.mem.span(ver));
         try arr.set(ctx.allocator, .{ .string = "version" }, .{ .string = s });
     }
-    try arr.set(ctx.allocator, .{ .string = "version_number" }, .{ .int = @intCast(info.*.version_num) });
     if (info.*.host) |host| {
         const s = try ctx.createString(std.mem.span(host));
         try arr.set(ctx.allocator, .{ .string = "host" }, .{ .string = s });
@@ -578,6 +601,25 @@ fn curlVersion(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
         const s = try ctx.createString(std.mem.span(zlib));
         try arr.set(ctx.allocator, .{ .string = "libz_version" }, .{ .string = s });
     }
+
+    // protocols list - populate from null-terminated list of strings
+    const protocols_arr = try ctx.createArray();
+    if (info.*.protocols) |protos| {
+        var i: usize = 0;
+        while (protos[i] != null) : (i += 1) {
+            const s = try ctx.createString(std.mem.span(protos[i]));
+            try protocols_arr.set(ctx.allocator, .{ .int = @intCast(i) }, .{ .string = s });
+        }
+    }
+    try arr.set(ctx.allocator, .{ .string = "protocols" }, .{ .array = protocols_arr });
+
+    try arr.set(ctx.allocator, .{ .string = "ares" }, .{ .string = "" });
+    try arr.set(ctx.allocator, .{ .string = "ares_num" }, .{ .int = 0 });
+    try arr.set(ctx.allocator, .{ .string = "libidn" }, .{ .string = "" });
+    try arr.set(ctx.allocator, .{ .string = "iconv_ver_num" }, .{ .int = 0 });
+    try arr.set(ctx.allocator, .{ .string = "libssh_version" }, .{ .string = "" });
+    try arr.set(ctx.allocator, .{ .string = "brotli_ver_num" }, .{ .int = 0 });
+    try arr.set(ctx.allocator, .{ .string = "brotli_version" }, .{ .string = "" });
 
     return .{ .array = arr };
 }
