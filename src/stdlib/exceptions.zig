@@ -153,7 +153,44 @@ fn exceptionConstruct(ctx: *NativeContext, args: []const Value) RuntimeError!Val
             try obj.set(ctx.allocator, "line", .{ .int = @as(i64, @intCast(loc.line)) });
         }
     }
+    try buildAndAttachTrace(ctx, obj);
     return .null;
+}
+
+fn buildAndAttachTrace(ctx: *NativeContext, obj: *@import("../runtime/value.zig").PhpObject) RuntimeError!void {
+    const PhpArray = @import("../runtime/value.zig").PhpArray;
+    const arr = try ctx.vm.allocator.create(PhpArray);
+    arr.* = .{};
+    try ctx.vm.arrays.append(ctx.vm.allocator, arr);
+    if (ctx.vm.frame_count >= 2) {
+        var i: usize = ctx.vm.frame_count - 2;
+        while (true) : (i -= 1) {
+            const frame = ctx.vm.frames[i];
+            if (frame.func) |f| {
+                if (f.name.len > 0 and !std.mem.endsWith(u8, f.name, "::__construct")) {
+                    const entry = try ctx.vm.allocator.create(PhpArray);
+                    entry.* = .{};
+                    try ctx.vm.arrays.append(ctx.vm.allocator, entry);
+                    try entry.set(ctx.vm.allocator, .{ .string = "function" }, .{ .string = f.name });
+                    if (i > 0) {
+                        const caller = ctx.vm.frames[i - 1];
+                        const ip = if (caller.ip > 0) caller.ip - 1 else 0;
+                        if (caller.chunk.getSourceLocation(ip, ctx.vm.source)) |loc| {
+                            try entry.set(ctx.vm.allocator, .{ .string = "line" }, .{ .int = @as(i64, @intCast(loc.line)) });
+                            try entry.set(ctx.vm.allocator, .{ .string = "file" }, .{ .string = ctx.vm.file_path });
+                        }
+                    }
+                    const args_arr = try ctx.vm.allocator.create(PhpArray);
+                    args_arr.* = .{};
+                    try ctx.vm.arrays.append(ctx.vm.allocator, args_arr);
+                    try entry.set(ctx.vm.allocator, .{ .string = "args" }, .{ .array = args_arr });
+                    try arr.append(ctx.vm.allocator, .{ .array = entry });
+                }
+            }
+            if (i == 0) break;
+        }
+    }
+    try obj.set(ctx.vm.allocator, "__trace", .{ .array = arr });
 }
 
 fn exceptionGetMessage(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
@@ -205,6 +242,16 @@ fn exceptionGetLine(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
 
 fn exceptionGetTrace(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
     const PhpArray = @import("../runtime/value.zig").PhpArray;
+    const this_val = ctx.vm.currentFrame().vars.get("$this") orelse {
+        const arr = try ctx.vm.allocator.create(PhpArray);
+        arr.* = .{};
+        try ctx.vm.arrays.append(ctx.vm.allocator, arr);
+        return .{ .array = arr };
+    };
+    if (this_val == .object) {
+        const t = this_val.object.get("__trace");
+        if (t == .array) return t;
+    }
     const arr = try ctx.vm.allocator.create(PhpArray);
     arr.* = .{};
     try ctx.vm.arrays.append(ctx.vm.allocator, arr);
