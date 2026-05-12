@@ -418,20 +418,31 @@ fn dtConstruct(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
                     explicit_name = "+00:00";
                 } else if (parseTimezoneOffset(rest)) |off| {
                     explicit_offset = off;
-                    const abs_off: i64 = if (off < 0) -off else off;
-                    const oh: i64 = @divTrunc(abs_off, 3600);
-                    const om: i64 = @mod(@divTrunc(abs_off, 60), 60);
-                    var nm_buf: [8]u8 = undefined;
-                    nm_buf[0] = if (off < 0) '-' else '+';
-                    nm_buf[1] = @intCast(@divTrunc(oh, 10) + '0');
-                    nm_buf[2] = @intCast(@mod(oh, 10) + '0');
-                    nm_buf[3] = ':';
-                    nm_buf[4] = @intCast(@divTrunc(om, 10) + '0');
-                    nm_buf[5] = @intCast(@mod(om, 10) + '0');
-                    const nm = nm_buf[0..6];
-                    const owned = try ctx.allocator.dupe(u8, nm);
-                    try ctx.vm.strings.append(ctx.allocator, owned);
-                    explicit_name = owned;
+                    // when the suffix is a named zone (not numeric +HH:MM),
+                    // preserve the name so format('T'/'e') can report the
+                    // abbreviation correctly instead of just an offset
+                    const trimmed = std.mem.trim(u8, rest, " \t");
+                    const is_numeric = trimmed.len > 0 and (trimmed[0] == '+' or trimmed[0] == '-');
+                    if (!is_numeric) {
+                        const owned = try ctx.allocator.dupe(u8, trimmed);
+                        try ctx.vm.strings.append(ctx.allocator, owned);
+                        explicit_name = owned;
+                    } else {
+                        const abs_off: i64 = if (off < 0) -off else off;
+                        const oh: i64 = @divTrunc(abs_off, 3600);
+                        const om: i64 = @mod(@divTrunc(abs_off, 60), 60);
+                        var nm_buf: [8]u8 = undefined;
+                        nm_buf[0] = if (off < 0) '-' else '+';
+                        nm_buf[1] = @intCast(@divTrunc(oh, 10) + '0');
+                        nm_buf[2] = @intCast(@mod(oh, 10) + '0');
+                        nm_buf[3] = ':';
+                        nm_buf[4] = @intCast(@divTrunc(om, 10) + '0');
+                        nm_buf[5] = @intCast(@mod(om, 10) + '0');
+                        const nm = nm_buf[0..6];
+                        const owned = try ctx.allocator.dupe(u8, nm);
+                        try ctx.vm.strings.append(ctx.allocator, owned);
+                        explicit_name = owned;
+                    }
                 }
             }
             ts = dateToTimestamp(year, month, day, hour, min, sec);
