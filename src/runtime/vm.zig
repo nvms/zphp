@@ -337,6 +337,10 @@ pub const VM = struct {
     arrays: std.ArrayListUnmanaged(*PhpArray) = .{},
     objects: std.ArrayListUnmanaged(*PhpObject) = .{},
     next_object_id: u32 = 0,
+    // pointer to the $GLOBALS PhpArray for the current run, used so writes
+    // to $GLOBALS[key] = val also propagate to the top frame's variable
+    // table (matching PHP's superglobal semantics)
+    globals_array: ?*PhpArray = null,
     rng_seeded: bool = false,
     rng_state: std.Random.DefaultPrng = std.Random.DefaultPrng.init(0),
     obj_id_base: usize = 0,
@@ -1375,6 +1379,10 @@ pub const VM = struct {
             globals_arr.* = .{};
             try self.arrays.append(self.allocator, globals_arr);
             try vars.put(self.allocator, "$GLOBALS", .{ .array = globals_arr });
+            self.globals_array = globals_arr;
+        } else {
+            const gv = vars.get("$GLOBALS").?;
+            if (gv == .array) self.globals_array = gv.array;
         }
         var locals: []Value = &.{};
         if (result.local_count > 0) {
@@ -1458,6 +1466,14 @@ pub const VM = struct {
                 .get_var => {
                     const idx = self.readU16();
                     const name = self.currentChunk().constants.items[idx].string;
+                    // $GLOBALS is a true superglobal: always resolve to the
+                    // single shared array on the VM, regardless of frame scope
+                    if (std.mem.eql(u8, name, "$GLOBALS")) {
+                        if (self.globals_array) |ga| {
+                            self.push(.{ .array = ga });
+                            continue;
+                        }
+                    }
                     if (self.currentFrame().ref_slots.get(name)) |cell| {
                         self.push(cell.*);
                     } else if (self.currentFrame().vars.get(name)) |val| {
@@ -2164,6 +2180,29 @@ pub const VM = struct {
                     const arr_val = self.pop();
                     if (arr_val == .array) {
                         try arr_val.array.set(self.allocator, Value.toArrayKey(key), val);
+                        // mirror writes to $GLOBALS into the script's top frame
+                        // so `$GLOBALS['x'] = ...` is visible as `$x` everywhere.
+                        // PHP implements $GLOBALS as a live view over the global
+                        // variable table; this approximates that bidirectionality
+                        if (self.globals_array) |ga| {
+                            if (arr_val.array == ga and key == .string and self.frame_count > 0) {
+                                const top = &self.frames[0];
+                                const dollar_name = std.fmt.allocPrint(self.allocator, "${s}", .{key.string}) catch null;
+                                if (dollar_name) |dn| {
+                                    try self.strings.append(self.allocator, dn);
+                                    var slot_found: ?usize = null;
+                                    for (self.global_slot_names, 0..) |sn, i| {
+                                        if (std.mem.eql(u8, sn, dn)) { slot_found = i; break; }
+                                    }
+                                    // write to both vars and locals: get_global
+                                    // reads from vars, get_local reads from locals
+                                    try top.vars.put(self.allocator, dn, val);
+                                    if (slot_found) |si| {
+                                        if (si < top.locals.len) top.locals[si] = val;
+                                    }
+                                }
+                            }
+                        }
                     } else if (arr_val == .object and self.hasMethod(arr_val.object.class_name, "offsetSet")) {
                         _ = self.callMethod(arr_val.object, "offsetSet", &.{ key, val }) catch {
                             if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
@@ -2268,6 +2307,26 @@ pub const VM = struct {
 
                     if (cur == .array) {
                         try cur.array.set(self.allocator, Value.toArrayKey(key), val);
+                        // bidirectional mirror for $GLOBALS[$name] = ...
+                        if (self.globals_array) |ga| {
+                            if (cur.array == ga and key == .string and self.frame_count > 0) {
+                                const top = &self.frames[0];
+                                const dollar_name = std.fmt.allocPrint(self.allocator, "${s}", .{key.string}) catch null;
+                                if (dollar_name) |dn| {
+                                    try self.strings.append(self.allocator, dn);
+                                    var slot_found: ?usize = null;
+                                    for (self.global_slot_names, 0..) |sn, i| {
+                                        if (std.mem.eql(u8, sn, dn)) { slot_found = i; break; }
+                                    }
+                                    // write to both vars and locals: get_global
+                                    // reads from vars, get_local reads from locals
+                                    try top.vars.put(self.allocator, dn, val);
+                                    if (slot_found) |si| {
+                                        if (si < top.locals.len) top.locals[si] = val;
+                                    }
+                                }
+                            }
+                        }
                         self.push(val);
                         continue;
                     }
@@ -2287,6 +2346,17 @@ pub const VM = struct {
                 .ensure_array_local => {
                     const slot = self.readU16();
                     const frame = self.currentFrame();
+                    // $GLOBALS resolves to the VM-wide superglobal array
+                    const ea_slot_name = if (frame.func) |func|
+                        (if (slot < func.slot_names.len) func.slot_names[slot] else "")
+                    else
+                        (if (slot < self.global_slot_names.len) self.global_slot_names[slot] else "");
+                    if (std.mem.eql(u8, ea_slot_name, "$GLOBALS")) {
+                        if (self.globals_array) |ga| {
+                            self.push(.{ .array = ga });
+                            continue;
+                        }
+                    }
                     var cur: Value = .null;
                     if (frame.func) |func| {
                         var from_ref = false;
@@ -2331,6 +2401,13 @@ pub const VM = struct {
                 .ensure_array_var => {
                     const idx = self.readU16();
                     const name = self.currentChunk().constants.items[idx].string;
+                    // $GLOBALS resolves to the VM-wide superglobal array
+                    if (std.mem.eql(u8, name, "$GLOBALS")) {
+                        if (self.globals_array) |ga| {
+                            self.push(.{ .array = ga });
+                            continue;
+                        }
+                    }
                     const frame = self.currentFrame();
                     var cur: Value = .null;
                     var from_request = false;
@@ -2787,6 +2864,14 @@ pub const VM = struct {
                                 self.push(cell.*);
                                 continue;
                             }
+                            // $GLOBALS is a superglobal — always resolve to
+                            // the shared VM-level array
+                            if (std.mem.eql(u8, func.slot_names[slot], "$GLOBALS")) {
+                                if (self.globals_array) |ga| {
+                                    self.push(.{ .array = ga });
+                                    continue;
+                                }
+                            }
                         }
                         if (slot < frame.locals.len) {
                             self.push(frame.locals[slot]);
@@ -2794,6 +2879,13 @@ pub const VM = struct {
                             self.push(.null);
                         }
                     } else {
+                        // top-frame: check $GLOBALS by slot name
+                        if (slot < self.global_slot_names.len and std.mem.eql(u8, self.global_slot_names[slot], "$GLOBALS")) {
+                            if (self.globals_array) |ga| {
+                                self.push(.{ .array = ga });
+                                continue;
+                            }
+                        }
                         self.push(self.getLocalGlobal(slot, frame));
                     }
                 },

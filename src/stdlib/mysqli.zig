@@ -209,6 +209,8 @@ fn mysqliRealConnect(ctx: *NativeContext, args: []const Value) RuntimeError!Valu
 fn mysqliClose(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     const link = linkObj(ctx, args, 0) orelse return .{ .bool = false };
     if (getConn(link)) |c| {
+        // mysql_close is safe to call on a handle returned by mysql_init even
+        // when never connected — releases the allocated handle either way
         mysql.mysql_close(c);
         try link.set(ctx.allocator, "__conn", .{ .int = 0 });
         try link.set(ctx.allocator, "__connected", .{ .bool = false });
@@ -219,6 +221,7 @@ fn mysqliClose(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
 fn mysqliQuery(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     const link = linkObj(ctx, args, 0) orelse return .{ .bool = false };
     const conn = getConn(link) orelse return .{ .bool = false };
+    if (!isConnected(link)) return .{ .bool = false };
     // determine which arg holds the SQL
     const sql_arg: Value = if (args.len > 0 and args[0] == .object) (if (args.len > 1) args[1] else .null) else if (args.len > 0) args[0] else .null;
     if (sql_arg != .string) return .{ .bool = false };
@@ -326,6 +329,7 @@ fn mysqliNumRows(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
 fn mysqliAffectedRows(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     const link = linkObj(ctx, args, 0) orelse return .{ .int = 0 };
     const c = getConn(link) orelse return .{ .int = 0 };
+    if (!isConnected(link)) return .{ .int = 0 };
     const raw = mysql.mysql_affected_rows(c);
     return .{ .int = if (raw == std.math.maxInt(u64)) -1 else @intCast(raw) };
 }
@@ -333,6 +337,7 @@ fn mysqliAffectedRows(ctx: *NativeContext, args: []const Value) RuntimeError!Val
 fn mysqliInsertId(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     const link = linkObj(ctx, args, 0) orelse return .{ .int = 0 };
     const c = getConn(link) orelse return .{ .int = 0 };
+    if (!isConnected(link)) return .{ .int = 0 };
     return .{ .int = @intCast(mysql.mysql_insert_id(c)) };
 }
 
@@ -359,10 +364,8 @@ fn mysqliRealEscapeString(ctx: *NativeContext, args: []const Value) RuntimeError
     const link = linkObj(ctx, args, 0) orelse return .{ .string = "" };
     const str_arg: Value = if (args.len > 0 and args[0] == .object) (if (args.len > 1) args[1] else .null) else if (args.len > 0) args[0] else .null;
     if (str_arg != .string) return .{ .string = "" };
-    const conn = getConn(link) orelse {
-        // no live connection: fall back to plain backslash quoting
-        return try fallbackEscape(ctx, str_arg.string);
-    };
+    const conn = getConn(link) orelse return try fallbackEscape(ctx, str_arg.string);
+    if (!isConnected(link)) return try fallbackEscape(ctx, str_arg.string);
     const src = str_arg.string;
     const buf = try ctx.allocator.alloc(u8, src.len * 2 + 1);
     const written = mysql.mysql_real_escape_string(conn, buf.ptr, src.ptr, @intCast(src.len));
@@ -399,6 +402,7 @@ fn fallbackEscape(ctx: *NativeContext, src: []const u8) !Value {
 fn mysqliSelectDb(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     const link = linkObj(ctx, args, 0) orelse return .{ .bool = false };
     const conn = getConn(link) orelse return .{ .bool = false };
+    if (!isConnected(link)) return .{ .bool = false };
     const db_arg: Value = if (args.len > 0 and args[0] == .object) (if (args.len > 1) args[1] else .null) else if (args.len > 0) args[0] else .null;
     if (db_arg != .string) return .{ .bool = false };
     const db_z = try dupZ(ctx, db_arg.string);
@@ -413,6 +417,7 @@ fn mysqliSelectDb(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
 fn mysqliSetCharset(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     const link = linkObj(ctx, args, 0) orelse return .{ .bool = false };
     const conn = getConn(link) orelse return .{ .bool = false };
+    if (!isConnected(link)) return .{ .bool = false };
     const cs_arg: Value = if (args.len > 0 and args[0] == .object) (if (args.len > 1) args[1] else .null) else if (args.len > 0) args[0] else .null;
     if (cs_arg != .string) return .{ .bool = false };
     const cs_z = try dupZ(ctx, cs_arg.string);
@@ -425,6 +430,7 @@ fn mysqliSetCharset(ctx: *NativeContext, args: []const Value) RuntimeError!Value
 fn mysqliCharacterSetName(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     const link = linkObj(ctx, args, 0) orelse return .{ .string = "" };
     const conn = getConn(link) orelse return .{ .string = "" };
+    if (!isConnected(link)) return .{ .string = "" };
     const name = std.mem.span(mysql.mysql_character_set_name(conn));
     const owned = try ctx.allocator.dupe(u8, name);
     try ctx.vm.strings.append(ctx.allocator, owned);
@@ -442,9 +448,15 @@ fn mysqliGetClientVersion(_: *NativeContext, _: []const Value) RuntimeError!Valu
     return .{ .int = @intCast(mysql.mysql_get_client_version()) };
 }
 
+fn isConnected(link: *PhpObject) bool {
+    const v = link.get("__connected");
+    return v == .bool and v.bool;
+}
+
 fn mysqliGetServerInfo(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     const link = linkObj(ctx, args, 0) orelse return .{ .string = "" };
     const conn = getConn(link) orelse return .{ .string = "" };
+    if (!isConnected(link)) return .{ .string = "" };
     const info = std.mem.span(mysql.mysql_get_server_info(conn));
     const owned = try ctx.allocator.dupe(u8, info);
     try ctx.vm.strings.append(ctx.allocator, owned);
@@ -454,12 +466,14 @@ fn mysqliGetServerInfo(ctx: *NativeContext, args: []const Value) RuntimeError!Va
 fn mysqliGetServerVersion(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     const link = linkObj(ctx, args, 0) orelse return .{ .int = 0 };
     const conn = getConn(link) orelse return .{ .int = 0 };
+    if (!isConnected(link)) return .{ .int = 0 };
     return .{ .int = @intCast(mysql.mysql_get_server_version(conn)) };
 }
 
 fn mysqliGetHostInfo(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     const link = linkObj(ctx, args, 0) orelse return .{ .string = "" };
     const conn = getConn(link) orelse return .{ .string = "" };
+    if (!isConnected(link)) return .{ .string = "" };
     const info = std.mem.span(mysql.mysql_get_host_info(conn));
     const owned = try ctx.allocator.dupe(u8, info);
     try ctx.vm.strings.append(ctx.allocator, owned);
@@ -469,18 +483,21 @@ fn mysqliGetHostInfo(ctx: *NativeContext, args: []const Value) RuntimeError!Valu
 fn mysqliThreadId(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     const link = linkObj(ctx, args, 0) orelse return .{ .int = 0 };
     const conn = getConn(link) orelse return .{ .int = 0 };
+    if (!isConnected(link)) return .{ .int = 0 };
     return .{ .int = @intCast(mysql.mysql_thread_id(conn)) };
 }
 
 fn mysqliPing(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     const link = linkObj(ctx, args, 0) orelse return .{ .bool = false };
     const conn = getConn(link) orelse return .{ .bool = false };
+    if (!isConnected(link)) return .{ .bool = false };
     return .{ .bool = mysql.mysql_ping(conn) == 0 };
 }
 
 fn mysqliAutocommit(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     const link = linkObj(ctx, args, 0) orelse return .{ .bool = false };
     const conn = getConn(link) orelse return .{ .bool = false };
+    if (!isConnected(link)) return .{ .bool = false };
     const mode_arg: Value = if (args.len > 0 and args[0] == .object) (if (args.len > 1) args[1] else .{ .bool = true }) else if (args.len > 0) args[0] else .{ .bool = true };
     const mode: u8 = if (mode_arg.isTruthy()) 1 else 0;
     return .{ .bool = mysql.mysql_autocommit(conn, mode) == 0 };
@@ -489,12 +506,14 @@ fn mysqliAutocommit(ctx: *NativeContext, args: []const Value) RuntimeError!Value
 fn mysqliCommit(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     const link = linkObj(ctx, args, 0) orelse return .{ .bool = false };
     const conn = getConn(link) orelse return .{ .bool = false };
+    if (!isConnected(link)) return .{ .bool = false };
     return .{ .bool = mysql.mysql_commit(conn) == 0 };
 }
 
 fn mysqliRollback(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     const link = linkObj(ctx, args, 0) orelse return .{ .bool = false };
     const conn = getConn(link) orelse return .{ .bool = false };
+    if (!isConnected(link)) return .{ .bool = false };
     return .{ .bool = mysql.mysql_rollback(conn) == 0 };
 }
 

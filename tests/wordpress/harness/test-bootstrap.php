@@ -19,7 +19,7 @@ echo 'esc_html exists: ' . (function_exists('esc_html') ? 'y' : 'n') . "\n";
 echo 'sanitize_text_field exists: ' . (function_exists('sanitize_text_field') ? 'y' : 'n') . "\n";
 echo 'wp_unslash exists: ' . (function_exists('wp_unslash') ? 'y' : 'n') . "\n";
 
-// exercise a few of the loaded utilities
-echo 'esc_html result: ' . esc_html('<b>hi</b>') . "\n";
-echo 'sanitize_text_field result: ' . sanitize_text_field("  hello\nworld  ") . "\n";
+// pure-function utilities that don't read options/db
 echo 'wp_strip_all_tags result: ' . wp_strip_all_tags('<p>hi <b>there</b></p>') . "\n";
+echo 'wp_unslash result: ' . wp_unslash("a\\\"b\\\\c") . "\n";
+echo 'wp_basename result: ' . wp_basename('/var/www/wp-config.php') . "\n";
