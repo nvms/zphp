@@ -720,6 +720,24 @@ const Parser = struct {
 
     fn parseConstDecl(self: *Parser) Error!u32 {
         _ = self.advance(); // const
+        // PHP 8.3 typed class constants: `const string NAME = "hi";`. accept
+        // and discard the type annotation since constants are dynamic anyway.
+        // detect by lookahead: if current is a type-like token and next is an
+        // identifier followed by `=`, the current token is the type
+        // detect `?T NAME = ...` or `T NAME = ...` (PHP 8.3 typed const) by
+        // looking past an optional `?` and a type token to see whether a const
+        // name + `=` follows
+        const at0 = self.peek();
+        if (at0 == .question or (self.isTypeName() and at0 != .identifier) or
+            (at0 == .identifier and (self.peekAt(1) == .identifier or isSemiReserved(self.peekAt(1))) and self.peekAt(2) == .equal))
+        {
+            const probe: u32 = if (at0 == .question) 2 else 1;
+            const next_tag = self.peekAt(probe);
+            const after_tag = self.peekAt(probe + 1);
+            if ((next_tag == .identifier or isSemiReserved(next_tag)) and after_tag == .equal) {
+                self.skipTypeHint();
+            }
+        }
         const name_tok = try self.expectFunctionName();
         _ = try self.expect(.equal);
         const value = try self.parseExpression();
