@@ -9184,11 +9184,13 @@ pub const VM = struct {
             try self.bindRefParams(ac, func, &new_vars, &callee_refs, &callee_array_bindings, &callee_object_bindings);
 
             if (func.is_generator) {
-                callee_refs.deinit(self.allocator);
+                // by-ref params: ref_slots on the generator so subsequent
+                // function calls inside the body see the cells; array/object
+                // bindings aren't represented on Generator yet
                 callee_array_bindings.deinit(self.allocator);
                 callee_object_bindings.deinit(self.allocator);
                 const gen = try self.allocator.create(Generator);
-                gen.* = .{ .func = func, .vars = new_vars };
+                gen.* = .{ .func = func, .vars = new_vars, .ref_slots = callee_refs };
                 try self.generators.append(self.allocator, gen);
                 self.push(.{ .generator = gen });
             } else {
