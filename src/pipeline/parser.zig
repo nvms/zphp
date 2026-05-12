@@ -74,6 +74,7 @@ const Parser = struct {
     attr_ranges: std.ArrayListUnmanaged(AttrRange) = .{},
     allocator: Allocator,
     found_yield: bool = false,
+    pending_top_stmts: std.ArrayListUnmanaged(u32) = .{},
 
     // ======================================================================
     // root
@@ -86,7 +87,12 @@ const Parser = struct {
         var stmts = std.ArrayListUnmanaged(u32){};
         defer stmts.deinit(self.allocator);
 
-        while (self.peek() != .eof) {
+        while (self.peek() != .eof or self.pending_top_stmts.items.len > 0) {
+            if (self.pending_top_stmts.items.len > 0) {
+                const drained = self.pending_top_stmts.orderedRemove(0);
+                try stmts.append(self.allocator, drained);
+                continue;
+            }
             const node = self.parseTopLevel() catch |err| switch (err) {
                 error.ParseError => {
                     self.synchronize();
@@ -96,6 +102,7 @@ const Parser = struct {
             };
             try stmts.append(self.allocator, node);
         }
+        self.pending_top_stmts.deinit(self.allocator);
 
         const extra = try self.addExtraList(stmts.items);
         self.nodes.items[0].data.lhs = extra;
@@ -324,16 +331,45 @@ const Parser = struct {
         var parts = std.ArrayListUnmanaged(u32){};
         defer parts.deinit(self.allocator);
 
-        // namespace App\Models\User;
-        try parts.append(self.allocator, self.pos);
-        _ = try self.expect(.identifier);
-        while (self.peek() == .backslash) {
-            _ = self.advance();
+        // namespace App\Models\User;  or  namespace App\Models { ... }
+        // or unnamed:  namespace { ... }
+        if (self.peek() == .identifier) {
             try parts.append(self.allocator, self.pos);
-            _ = try self.expect(.identifier);
+            _ = self.advance();
+            while (self.peek() == .backslash) {
+                _ = self.advance();
+                try parts.append(self.allocator, self.pos);
+                _ = try self.expect(.identifier);
+            }
         }
-        _ = try self.expect(.semicolon);
 
+        if (self.peek() == .l_brace) {
+            _ = self.advance(); // {
+            const extra = try self.addExtraList(parts.items);
+            // queue the namespace_decl as the next statement; remember to emit
+            // a closing reset when we hit `}`
+            const ns_node = try self.addNode(.{ .tag = .namespace_decl, .main_token = tok, .data = .{ .lhs = extra } });
+            try self.pending_top_stmts.append(self.allocator, ns_node);
+            // body statements: drain pending then loop
+            while (self.peek() != .r_brace and self.peek() != .eof) {
+                const node = self.parseStatement() catch |err| switch (err) {
+                    error.ParseError => { self.synchronize(); continue; },
+                    error.OutOfMemory => return error.OutOfMemory,
+                };
+                try self.pending_top_stmts.append(self.allocator, node);
+            }
+            _ = try self.expect(.r_brace);
+            // emit a reset namespace_decl (to global namespace) so subsequent
+            // top-level code parses outside this namespace
+            const empty_extra = try self.addExtraList(&.{});
+            const reset_node = try self.addNode(.{ .tag = .namespace_decl, .main_token = tok, .data = .{ .lhs = empty_extra } });
+            try self.pending_top_stmts.append(self.allocator, reset_node);
+            // return the first pending entry; the rest get drained from caller
+            const first = self.pending_top_stmts.orderedRemove(0);
+            return first;
+        }
+
+        _ = try self.expect(.semicolon);
         const extra = try self.addExtraList(parts.items);
         return self.addNode(.{ .tag = .namespace_decl, .main_token = tok, .data = .{ .lhs = extra } });
     }
