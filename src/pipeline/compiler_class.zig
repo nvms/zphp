@@ -674,11 +674,12 @@ pub fn compileClosure(self: *Compiler, node: Ast.Node) Error!void {
         break :blk d;
     } else &[_]Value{};
 
-    // rhs = extra -> {body (bit 31 = generator), use_count, use_vars...}
+    // rhs = extra -> {body (bit 31 = generator, bit 30 = static), use_count, use_vars...}
     // use_count 0xFFFFFFFF = arrow fn (implicit capture)
     const raw_body = self.ast.extra_data[node.data.rhs];
-    const body_node = raw_body & 0x7FFFFFFF;
+    const body_node = raw_body & 0x3FFFFFFF;
     const gen = (raw_body & (1 << 31)) != 0;
+    const is_static_closure = (raw_body & (1 << 30)) != 0;
     const raw_use_count = self.ast.extra_data[node.data.rhs + 1];
     const is_arrow = raw_use_count == 0xFFFFFFFF;
     const use_count: u32 = if (is_arrow) 0 else raw_use_count;
@@ -785,6 +786,7 @@ pub fn compileClosure(self: *Compiler, node: Ast.Node) Error!void {
         .is_arrow = is_arrow,
         .is_generator = gen,
         .is_variadic = is_variadic,
+        .is_static = is_static_closure,
         .locals_only = closure_lo,
         .ref_params = ref_params,
         .local_count = local_count,

@@ -332,6 +332,7 @@ pub const ObjFunction = struct {
     is_variadic: bool = false,
     is_generator: bool = false,
     is_arrow: bool = false,
+    is_static: bool = false,
     locals_only: bool = false,
     params: []const []const u8,
     defaults: []const Value = &.{},

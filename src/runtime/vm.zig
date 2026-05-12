@@ -7180,6 +7180,11 @@ pub const VM = struct {
     pub fn cloneClosureWithThis(self: *VM, closure_name: []const u8, new_this: Value, scope_action: ClosureScope) !Value {
         const func = self.functions.get(closure_name) orelse return .null;
 
+        // static closures cannot be bound to a non-null $this. PHP emits a
+        // warning and returns null in that case; match the null return so
+        // callers see the same observable behavior
+        if (func.is_static and new_this != .null) return .null;
+
         const id = self.closure_instance_count;
         self.closure_instance_count += 1;
         const new_name = try std.fmt.allocPrint(self.allocator, "__closure_bound_{d}", .{id});

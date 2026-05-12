@@ -1767,7 +1767,8 @@ const Parser = struct {
     }
 
     fn parseClosureExpr(self: *Parser) Error!u32 {
-        if (self.peek() == .kw_static) _ = self.advance();
+        var is_static = false;
+        if (self.peek() == .kw_static) { is_static = true; _ = self.advance(); }
         const fn_tok = self.advance(); // function
         _ = try self.expect(.l_paren);
 
@@ -1824,7 +1825,7 @@ const Parser = struct {
         // rhs = extra -> {body (bit 31 = generator), use_count, use_vars...}
         var rhs_data = std.ArrayListUnmanaged(u32){};
         defer rhs_data.deinit(self.allocator);
-        try rhs_data.append(self.allocator, body | (if (is_gen) @as(u32, 1) << 31 else 0));
+        try rhs_data.append(self.allocator, body | (if (is_gen) @as(u32, 1) << 31 else 0) | (if (is_static) @as(u32, 1) << 30 else 0));
         try rhs_data.append(self.allocator, @intCast(use_vars.items.len));
         try rhs_data.appendSlice(self.allocator, use_vars.items);
         const rhs_extra = try self.addExtra(rhs_data.items);
