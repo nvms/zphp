@@ -3809,7 +3809,8 @@ pub const VM = struct {
                     }
 
                     const obj = try self.allocator.create(PhpObject);
-                    obj.* = .{ .class_name = class_name };
+                    self.next_object_id += 1;
+                    obj.* = .{ .class_name = class_name, .id = self.next_object_id };
                     try self.objects.append(self.allocator, obj);
 
                     // set property defaults from class and parent chain
@@ -4008,7 +4009,8 @@ pub const VM = struct {
                     }
 
                     const obj = try self.allocator.create(PhpObject);
-                    obj.* = .{ .class_name = class_name };
+                    self.next_object_id += 1;
+                    obj.* = .{ .class_name = class_name, .id = self.next_object_id };
                     try self.objects.append(self.allocator, obj);
                     try self.initObjectProperties(obj, class_name);
 
@@ -6919,7 +6921,8 @@ pub const VM = struct {
         var vj: usize = 0;
         for (0..case_count) |ci| {
             const case_obj = try self.allocator.create(PhpObject);
-            case_obj.* = .{ .class_name = enum_name };
+            self.next_object_id += 1;
+            case_obj.* = .{ .class_name = enum_name, .id = self.next_object_id };
             try self.objects.append(self.allocator, case_obj);
             try case_obj.set(self.allocator, "name", .{ .string = case_names[ci] });
             if (case_has_value[ci] == 1) {
