@@ -248,7 +248,11 @@ pub fn compileForeach(self: *Compiler, node: Ast.Node) Error!void {
         if (val_by_ref) ref_key_name = key_name;
     } else {
         if (val_by_ref) {
-            const synth_name = "__foreach_key";
+            // unique per loop depth so nested by-ref foreach loops don't
+            // clobber each other's iteration key (and thus write back to
+            // the wrong index in the outer loop's array)
+            const synth_name = try std.fmt.allocPrint(self.allocator, "__foreach_key_{d}", .{self.loop_depth});
+            try self.string_allocs.append(self.allocator, synth_name);
             try self.emitSetVar(synth_name);
             try self.emitOp(.pop);
             ref_key_name = synth_name;
