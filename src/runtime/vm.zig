@@ -5578,7 +5578,7 @@ pub const VM = struct {
                     const method_name = self.currentChunk().constants.items[method_idx].string;
                     const ac: usize = arg_count;
                     const class_val = self.stack[self.sp - ac - 1];
-                    const class_name = if (class_val == .string)
+                    const raw_class_name = if (class_val == .string)
                         class_val.string
                     else if (class_val == .object)
                         class_val.object.class_name
@@ -5589,6 +5589,8 @@ pub const VM = struct {
                         if (try self.throwBuiltinException("Error", msg)) continue;
                         return error.RuntimeError;
                     };
+                    // accept FQN with leading backslash
+                    const class_name = if (raw_class_name.len > 0 and raw_class_name[0] == '\\') raw_class_name[1..] else raw_class_name;
                     if (!self.classes.contains(class_name)) {
                         try self.tryAutoload(class_name);
                     }
@@ -6051,12 +6053,20 @@ pub const VM = struct {
     fn resolveStaticClassName(self: *VM, name: []const u8) []const u8 {
         if (name.len > 0 and name[0] == '$') {
             const local_val = self.getLocalByName(name);
-            if (local_val == .string) return local_val.string;
+            if (local_val == .string) {
+                const s = local_val.string;
+                return if (s.len > 0 and s[0] == '\\') s[1..] else s;
+            }
             if (self.currentFrame().vars.get(name)) |val| {
-                if (val == .string) return val.string;
+                if (val == .string) {
+                    const s = val.string;
+                    return if (s.len > 0 and s[0] == '\\') s[1..] else s;
+                }
             }
             return name;
         }
+        // direct FQN with leading backslash
+        if (name.len > 0 and name[0] == '\\') return name[1..];
         if (std.mem.eql(u8, name, "static")) {
             const f = self.currentFrame();
             // called_class takes priority - set by explicit static calls like Base::get()
