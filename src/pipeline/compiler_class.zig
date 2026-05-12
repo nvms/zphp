@@ -2234,6 +2234,7 @@ fn compileClassMethodBody(self: *Compiler, class_name: []const u8, member: Ast.N
         .required_params = required,
         .is_variadic = is_variadic,
         .is_generator = method_gen,
+        .is_static = member.tag == .static_class_method,
         .locals_only = method_lo,
         .params = param_names[0..param_nodes.len],
         .defaults = defaults_owned,

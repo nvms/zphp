@@ -454,15 +454,16 @@ fn buildBacktrace(ctx: *NativeContext, ignore_args: bool, limit: usize) RuntimeE
 
         const frame = &vm.frames[i];
         if (frame.func) |func| {
+            const type_str: []const u8 = if (func.is_static) "::" else "->";
             if (std.mem.indexOf(u8, func.name, "::")) |sep| {
                 try entry.set(alloc, .{ .string = "class" }, .{ .string = func.name[0..sep] });
                 try entry.set(alloc, .{ .string = "function" }, .{ .string = func.name[sep + 2 ..] });
-                try entry.set(alloc, .{ .string = "type" }, .{ .string = "->" });
+                try entry.set(alloc, .{ .string = "type" }, .{ .string = type_str });
             } else {
                 try entry.set(alloc, .{ .string = "function" }, .{ .string = func.name });
                 if (frame.called_class) |cls| {
                     try entry.set(alloc, .{ .string = "class" }, .{ .string = cls });
-                    try entry.set(alloc, .{ .string = "type" }, .{ .string = "->" });
+                    try entry.set(alloc, .{ .string = "type" }, .{ .string = type_str });
                 }
             }
         }
