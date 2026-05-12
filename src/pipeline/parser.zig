@@ -1133,16 +1133,18 @@ const Parser = struct {
         while (self.peek() != .r_brace and self.peek() != .eof) {
             var is_static = false;
             var is_abstract = false;
+            var is_final = false;
             var is_readonly = false;
             var visibility: u32 = 0;
             var set_visibility: u32 = 0;
             var has_set_vis = false;
             while (self.peek() == .kw_public or self.peek() == .kw_protected or
                 self.peek() == .kw_private or self.peek() == .kw_static or
-                self.peek() == .kw_abstract or self.peek() == .kw_readonly)
+                self.peek() == .kw_abstract or self.peek() == .kw_final or self.peek() == .kw_readonly)
             {
                 if (self.peek() == .kw_static) { is_static = true; _ = self.advance(); continue; }
                 if (self.peek() == .kw_abstract) { is_abstract = true; _ = self.advance(); continue; }
+                if (self.peek() == .kw_final) { is_final = true; _ = self.advance(); continue; }
                 if (self.peek() == .kw_readonly) { is_readonly = true; _ = self.advance(); continue; }
                 const vis_val: u32 = if (self.peek() == .kw_protected) 1 else if (self.peek() == .kw_private) 2 else 0;
                 _ = self.advance();
@@ -1180,7 +1182,8 @@ const Parser = struct {
                 try members.append(self.allocator, prop);
             } else if (self.peek() == .kw_const) {
                 const cd = try self.parseConstDecl();
-                self.nodes.items[cd].data.rhs = visibility;
+                // bits 0-1: visibility, bit 4: final
+                self.nodes.items[cd].data.rhs = visibility | (if (is_final) @as(u32, 1) << 4 else 0);
                 try members.append(self.allocator, cd);
             } else if (self.isTypeName() or self.peek() == .question or self.peek() == .l_paren) {
                 self.skipTypeHint();
@@ -1340,7 +1343,8 @@ const Parser = struct {
                 try members.append(self.allocator, prop);
             } else if (self.peek() == .kw_const) {
                 const cd = try self.parseConstDecl();
-                self.nodes.items[cd].data.rhs = visibility;
+                // bits 0-1: visibility, bit 4: final
+                self.nodes.items[cd].data.rhs = visibility | (if (is_final) @as(u32, 1) << 4 else 0);
                 try members.append(self.allocator, cd);
             } else if (self.isTypeName() or self.peek() == .question or self.peek() == .l_paren) {
                 self.skipTypeHint();

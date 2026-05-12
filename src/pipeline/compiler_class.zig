@@ -1117,7 +1117,7 @@ pub fn compileClassDecl(self: *Compiler, node: Ast.Node) Error!void {
             const cname_idx = try self.addConstant(.{ .string = cname });
             try self.emitU16(cname_idx);
             try self.emitByte(1); // always has a value
-            try self.emitByte(@intCast(member.data.rhs & 3));
+            try self.emitByte(@intCast(member.data.rhs & 0x13)); // bits 0-1 visibility, bit 4 final
             try self.emitByte(1); // 1 = constant
         }
     }
@@ -1529,7 +1529,7 @@ pub fn compileAnonymousClass(self: *Compiler, node: Ast.Node) Error!void {
             const cname_idx = try self.addConstant(.{ .string = cname });
             try self.emitU16(cname_idx);
             try self.emitByte(1);
-            try self.emitByte(0);
+            try self.emitByte(@intCast(member.data.rhs & 0x13)); // bits 0-1 visibility, bit 4 final
             try self.emitByte(1); // 1 = constant
         }
     }

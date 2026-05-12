@@ -234,6 +234,7 @@ pub const ClassDef = struct {
     constant_names: std.StringHashMapUnmanaged(void) = .{},
     constant_order: std.ArrayListUnmanaged([]const u8) = .{},
     const_visibility: std.StringHashMapUnmanaged(Visibility) = .{},
+    const_final: std.StringHashMapUnmanaged(void) = .{},
     constant_attributes: std.StringHashMapUnmanaged([]const AttributeDef) = .{},
 
     pub const Visibility = enum(u8) { public = 0, protected = 1, private = 2 };
@@ -273,6 +274,7 @@ pub const ClassDef = struct {
     fn deinit(self: *ClassDef, allocator: Allocator) void {
         self.methods.deinit(allocator);
         self.method_order.deinit(allocator);
+        self.const_final.deinit(allocator);
         self.properties.deinit(allocator);
         self.static_props.deinit(allocator);
         self.interfaces.deinit(allocator);
@@ -6627,6 +6629,9 @@ pub const VM = struct {
                     try def.constant_order.append(self.allocator, sprop_names[pi]);
                 }
                 try def.constant_names.put(self.allocator, sprop_names[pi], {});
+                if ((sprop_visibility[pi] & 0x10) != 0) {
+                    try def.const_final.put(self.allocator, sprop_names[pi], {});
+                }
             }
         }
 

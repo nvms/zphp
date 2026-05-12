@@ -1582,20 +1582,35 @@ fn rccGetAttributes(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
     return .{ .array = try ctx.createArray() };
 }
 
-fn rccIsPublic(_: *NativeContext, _: []const Value) RuntimeError!Value {
-    return .{ .bool = true };
+fn rccVisibility(ctx: *NativeContext) ?@import("../runtime/vm.zig").ClassDef.Visibility {
+    const this = getThis(ctx) orelse return null;
+    const class_name = if (this.get("class") == .string) this.get("class").string else return null;
+    const const_name = if (this.get("name") == .string) this.get("name").string else return null;
+    const cls = ctx.vm.classes.get(class_name) orelse return null;
+    return cls.const_visibility.get(const_name);
 }
 
-fn rccIsProtected(_: *NativeContext, _: []const Value) RuntimeError!Value {
-    return .{ .bool = false };
+fn rccIsPublic(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const v = rccVisibility(ctx) orelse return .{ .bool = true };
+    return .{ .bool = v == .public };
 }
 
-fn rccIsPrivate(_: *NativeContext, _: []const Value) RuntimeError!Value {
-    return .{ .bool = false };
+fn rccIsProtected(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const v = rccVisibility(ctx) orelse return .{ .bool = false };
+    return .{ .bool = v == .protected };
 }
 
-fn rccIsFinal(_: *NativeContext, _: []const Value) RuntimeError!Value {
-    return .{ .bool = false };
+fn rccIsPrivate(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const v = rccVisibility(ctx) orelse return .{ .bool = false };
+    return .{ .bool = v == .private };
+}
+
+fn rccIsFinal(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const this = getThis(ctx) orelse return .{ .bool = false };
+    const class_name = if (this.get("class") == .string) this.get("class").string else return .{ .bool = false };
+    const const_name = if (this.get("name") == .string) this.get("name").string else return .{ .bool = false };
+    const cls = ctx.vm.classes.get(class_name) orelse return .{ .bool = false };
+    return .{ .bool = cls.const_final.contains(const_name) };
 }
 
 fn rccIsEnumCase(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
