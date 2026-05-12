@@ -2403,14 +2403,18 @@ pub const VM = struct {
                         }
                         self.push(.{ .int = -1 }); // sentinel: -1 means generator iteration
                     } else if (iterable == .object) {
-                        // IteratorAggregate: replace iterable with getIterator() result
-                        if (self.hasMethod(iterable.object.class_name, "getIterator")) {
+                        // IteratorAggregate: replace iterable with getIterator() result.
+                        // PHP allows getIterator to return another IteratorAggregate;
+                        // unwrap up to a fixed depth to avoid infinite cycles.
+                        var unwrap_steps: u8 = 0;
+                        while (iterable == .object and self.hasMethod(iterable.object.class_name, "getIterator") and !self.isInstanceOf(iterable.object.class_name, "Iterator") and unwrap_steps < 8) {
                             const inner = self.callMethod(iterable.object, "getIterator", &.{}) catch {
                                 if (self.dispatchPendingException(base_frame)) continue;
                                 return error.RuntimeError;
                             };
                             self.stack[self.sp - 1] = inner;
                             iterable = inner;
+                            unwrap_steps += 1;
                         }
                         // getIterator may have returned a generator; iterate it directly
                         if (iterable == .generator) {
