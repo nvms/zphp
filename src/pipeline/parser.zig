@@ -943,8 +943,12 @@ const Parser = struct {
     fn parseNewExpr(self: *Parser) Error!u32 {
         const new_tok = self.advance(); // new
 
-        // anonymous class: new class (...) { ... }
+        // anonymous class: new class (...) { ... }, or new readonly|abstract|final class ...
         if (self.peek() == .kw_class) {
+            return self.parseAnonymousClass(new_tok);
+        }
+        if ((self.peek() == .kw_readonly or self.peek() == .kw_abstract or self.peek() == .kw_final) and self.peekAt(1) == .kw_class) {
+            _ = self.advance(); // readonly/abstract/final modifier
             return self.parseAnonymousClass(new_tok);
         }
 
