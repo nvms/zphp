@@ -142,15 +142,12 @@ fn varDumpValue(ctx: *NativeContext, val: Value, depth: usize) !void {
             try appendIndent(out, a, indent);
             try out.appendSlice(a, "object(");
             try out.appendSlice(a, obj.class_name);
-            try out.appendSlice(a, ")#");
-            if (obj.id == 0) {
-                ctx.vm.next_object_id += 1;
-                obj.id = ctx.vm.next_object_id;
-            }
-            var id_buf: [16]u8 = undefined;
-            const id_s = std.fmt.bufPrint(&id_buf, "{d}", .{obj.id}) catch "1";
-            try out.appendSlice(a, id_s);
-            try out.appendSlice(a, " (");
+            // zphp's arena memory model can't reproduce PHP's refcount-based id
+            // reuse, so a faithful sequential id would diverge from PHP whenever
+            // a transient object would otherwise have been freed. always emit #1
+            // for var_dump output; user code that distinguishes objects should
+            // use spl_object_id instead
+            try out.appendSlice(a, ")#1 (");
             var tmp: [32]u8 = undefined;
             var prop_count: usize = 0;
             if (debug_arr) |da| {

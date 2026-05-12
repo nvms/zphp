@@ -2406,16 +2406,24 @@ pub const VM = struct {
                         // IteratorAggregate: replace iterable with getIterator() result.
                         // PHP allows getIterator to return another IteratorAggregate;
                         // unwrap up to a fixed depth to avoid infinite cycles.
+                        var unwrap_dispatched = false;
+                        var unwrap_failed = false;
                         var unwrap_steps: u8 = 0;
-                        while (iterable == .object and self.hasMethod(iterable.object.class_name, "getIterator") and !self.isInstanceOf(iterable.object.class_name, "Iterator") and unwrap_steps < 8) {
+                        unwrap: while (iterable == .object and self.hasMethod(iterable.object.class_name, "getIterator") and !self.isInstanceOf(iterable.object.class_name, "Iterator") and unwrap_steps < 8) {
                             const inner = self.callMethod(iterable.object, "getIterator", &.{}) catch {
-                                if (self.dispatchPendingException(base_frame)) continue;
-                                return error.RuntimeError;
+                                if (self.dispatchPendingException(base_frame)) {
+                                    unwrap_dispatched = true;
+                                } else {
+                                    unwrap_failed = true;
+                                }
+                                break :unwrap;
                             };
                             self.stack[self.sp - 1] = inner;
                             iterable = inner;
                             unwrap_steps += 1;
                         }
+                        if (unwrap_dispatched) continue;
+                        if (unwrap_failed) return error.RuntimeError;
                         // getIterator may have returned a generator; iterate it directly
                         if (iterable == .generator) {
                             self.resumeGenerator(iterable.generator, .null) catch {
@@ -3813,8 +3821,7 @@ pub const VM = struct {
                     }
 
                     const obj = try self.allocator.create(PhpObject);
-                    self.next_object_id += 1;
-                    obj.* = .{ .class_name = class_name, .id = self.next_object_id };
+                    obj.* = .{ .class_name = class_name };
                     try self.objects.append(self.allocator, obj);
 
                     // set property defaults from class and parent chain
@@ -4013,8 +4020,7 @@ pub const VM = struct {
                     }
 
                     const obj = try self.allocator.create(PhpObject);
-                    self.next_object_id += 1;
-                    obj.* = .{ .class_name = class_name, .id = self.next_object_id };
+                    obj.* = .{ .class_name = class_name };
                     try self.objects.append(self.allocator, obj);
                     try self.initObjectProperties(obj, class_name);
 
@@ -6925,8 +6931,7 @@ pub const VM = struct {
         var vj: usize = 0;
         for (0..case_count) |ci| {
             const case_obj = try self.allocator.create(PhpObject);
-            self.next_object_id += 1;
-            case_obj.* = .{ .class_name = enum_name, .id = self.next_object_id };
+            case_obj.* = .{ .class_name = enum_name };
             try self.objects.append(self.allocator, case_obj);
             try case_obj.set(self.allocator, "name", .{ .string = case_names[ci] });
             if (case_has_value[ci] == 1) {
