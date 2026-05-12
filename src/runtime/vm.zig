@@ -4951,7 +4951,7 @@ pub const VM = struct {
                             const rest_arr = try self.allocator.create(PhpArray);
                             rest_arr.* = .{};
                             try self.arrays.append(self.allocator, rest_arr);
-                            for (fixed..ac) |i| try rest_arr.append(self.allocator, self.stack[self.sp - ac + i]);
+                            if (ac > fixed) for (fixed..ac) |i| try rest_arr.append(self.allocator, self.stack[self.sp - ac + i]);
                             try new_vars.put(self.allocator, func.params[fixed], .{ .array = rest_arr });
                         } else {
                             for (0..@min(ac, func.arity)) |i| {
@@ -5127,7 +5127,7 @@ pub const VM = struct {
                             const rest_arr = try self.allocator.create(PhpArray);
                             rest_arr.* = .{};
                             try self.arrays.append(self.allocator, rest_arr);
-                            for (fixed..ac) |i| try rest_arr.append(self.allocator, self.stack[self.sp - ac + i]);
+                            if (ac > fixed) for (fixed..ac) |i| try rest_arr.append(self.allocator, self.stack[self.sp - ac + i]);
                             try new_vars.put(self.allocator, func.params[fixed], .{ .array = rest_arr });
                         } else {
                             for (0..@min(ac, func.arity)) |i| {
@@ -5263,7 +5263,7 @@ pub const VM = struct {
                             const rest_arr = try self.allocator.create(PhpArray);
                             rest_arr.* = .{};
                             try self.arrays.append(self.allocator, rest_arr);
-                            for (fixed..ac) |ai| try rest_arr.append(self.allocator, self.stack[self.sp - ac + ai]);
+                            if (ac > fixed) for (fixed..ac) |ai| try rest_arr.append(self.allocator, self.stack[self.sp - ac + ai]);
                             try new_vars.put(self.allocator, func.params[fixed], .{ .array = rest_arr });
                         } else {
                             for (0..@min(ac, func.arity)) |ai| {
@@ -5418,7 +5418,7 @@ pub const VM = struct {
                             const rest_arr = try self.allocator.create(PhpArray);
                             rest_arr.* = .{};
                             try self.arrays.append(self.allocator, rest_arr);
-                            for (fixed..ac) |ai| try rest_arr.append(self.allocator, self.stack[self.sp - ac + ai]);
+                            if (ac > fixed) for (fixed..ac) |ai| try rest_arr.append(self.allocator, self.stack[self.sp - ac + ai]);
                             try new_vars.put(self.allocator, func.params[fixed], .{ .array = rest_arr });
                         } else {
                             for (0..@min(ac, func.arity)) |ai| {
@@ -5560,8 +5560,10 @@ pub const VM = struct {
                                     }
                                     const rest_arr = try self.allocator.create(PhpArray);
                                     rest_arr.* = .{};
-                                    for (fixed..ac) |i| {
-                                        try rest_arr.append(self.allocator, self.stack[self.sp - ac + i]);
+                                    if (ac > fixed) {
+                                        for (fixed..ac) |i| {
+                                            try rest_arr.append(self.allocator, self.stack[self.sp - ac + i]);
+                                        }
                                     }
                                     try self.arrays.append(self.allocator, rest_arr);
                                     try new_vars.put(self.allocator, func.params[fixed], .{ .array = rest_arr });
