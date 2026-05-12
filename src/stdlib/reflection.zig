@@ -350,6 +350,7 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try rf_def.methods.put(a, "isGenerator", .{ .name = "isGenerator", .arity = 0 });
     try rf_def.methods.put(a, "isVariadic", .{ .name = "isVariadic", .arity = 0 });
     try rf_def.methods.put(a, "returnsReference", .{ .name = "returnsReference", .arity = 0 });
+    try rf_def.methods.put(a, "getStaticVariables", .{ .name = "getStaticVariables", .arity = 0 });
     try rf_def.methods.put(a, "getClosureScopeClass", .{ .name = "getClosureScopeClass", .arity = 0 });
     try rf_def.methods.put(a, "getClosureThis", .{ .name = "getClosureThis", .arity = 0 });
     try rf_def.methods.put(a, "isStatic", .{ .name = "isStatic", .arity = 0 });
@@ -376,6 +377,7 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try vm.native_fns.put(a, "ReflectionFunction::hasReturnType", rfHasReturnType);
     try vm.native_fns.put(a, "ReflectionFunction::getAttributes", rfGetAttributes);
     try vm.native_fns.put(a, "ReflectionFunction::getClosureUsedVariables", rfGetClosureUsedVariables);
+    try vm.native_fns.put(a, "ReflectionFunction::getStaticVariables", rfGetClosureUsedVariables);
     try vm.native_fns.put(a, "ReflectionFunction::getClosureCalledClass", rfGetClosureCalledClass);
     try vm.native_fns.put(a, "ReflectionFunction::invoke", rfInvoke);
     try vm.native_fns.put(a, "ReflectionFunction::invokeArgs", rfInvokeArgs);
