@@ -2090,7 +2090,8 @@ fn rfConstruct(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     const this = getThis(ctx) orelse return .null;
 
     if (args[0] == .string) {
-        const func_name = args[0].string;
+        const raw_name = args[0].string;
+        const func_name = if (raw_name.len > 0 and raw_name[0] == '\\') raw_name[1..] else raw_name;
         if (ctx.vm.functions.get(func_name) == null and ctx.vm.native_fns.get(func_name) == null)
             return throwReflection(ctx, "Function does not exist");
         try this.set(ctx.allocator, "name", .{ .string = func_name });
@@ -2385,8 +2386,18 @@ fn closureFromCallable(ctx: *NativeContext, args: []const Value) RuntimeError!Va
     // if already a closure, return as-is
     if (callable == .string and std.mem.startsWith(u8, callable.string, "__closure_")) return callable;
     if (callable == .string) {
-        if (ctx.vm.functions.contains(callable.string) or ctx.vm.native_fns.contains(callable.string))
+        const raw = callable.string;
+        const name = if (raw.len > 0 and raw[0] == '\\') raw[1..] else raw;
+        if (ctx.vm.functions.contains(name) or ctx.vm.native_fns.contains(name)) {
+            // when input had a leading backslash, return the normalized form
+            // so subsequent invocations find the function
+            if (name.len != raw.len) {
+                const owned = try ctx.allocator.dupe(u8, name);
+                try ctx.strings.append(ctx.allocator, owned);
+                return .{ .string = owned };
+            }
             return callable;
+        }
         try ctx.vm.setPendingException("TypeError", "Failed to create closure from callable: function does not exist");
         return error.RuntimeError;
     }

@@ -805,6 +805,12 @@ fn native_is_callable(ctx: *NativeContext, args: []const Value) RuntimeError!Val
         const name = if (raw.len > 0 and raw[0] == '\\') raw[1..] else raw;
         if (ctx.vm.native_fns.contains(name)) return .{ .bool = true };
         if (ctx.vm.functions.contains(name)) return .{ .bool = true };
+        // Class::method string form
+        if (std.mem.indexOf(u8, name, "::")) |sep| {
+            const class_part = name[0..sep];
+            const method_part = name[sep + 2 ..];
+            if (ctx.vm.hasMethod(class_part, method_part)) return .{ .bool = true };
+        }
         return .{ .bool = false };
     }
     if (val == .object) {
@@ -817,12 +823,13 @@ fn native_is_callable(ctx: *NativeContext, args: []const Value) RuntimeError!Val
         const method_val = arr.entries.items[1].value;
         if (method_val != .string) return .{ .bool = false };
         const method = method_val.string;
-        const class_name = if (target == .object)
+        const raw_class = if (target == .object)
             target.object.class_name
         else if (target == .string)
             target.string
         else
             return .{ .bool = false };
+        const class_name = if (raw_class.len > 0 and raw_class[0] == '\\') raw_class[1..] else raw_class;
         if (ctx.vm.classes.get(class_name)) |cdef| {
             if (cdef.methods.get(method)) |mi| {
                 if (mi.visibility != .public) return .{ .bool = false };
