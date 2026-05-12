@@ -116,6 +116,22 @@ fn varDumpValue(ctx: *NativeContext, val: Value, depth: usize) !void {
             try visited_ptrs.append(a, obj_ptr);
             defer _ = visited_ptrs.pop();
 
+            // PHP enum cases dump as `enum(ClassName::CaseName)\n`
+            if (ctx.vm.classes.get(obj.class_name)) |cls_def| {
+                if (cls_def.is_enum) {
+                    const name_v = obj.get("name");
+                    if (name_v == .string) {
+                        try appendIndent(out, a, indent);
+                        try out.appendSlice(a, "enum(");
+                        try out.appendSlice(a, obj.class_name);
+                        try out.appendSlice(a, "::");
+                        try out.appendSlice(a, name_v.string);
+                        try out.appendSlice(a, ")\n");
+                        return;
+                    }
+                }
+            }
+
             // honor __debugInfo if defined
             var debug_arr: ?*@import("../runtime/value.zig").PhpArray = null;
             if (ctx.vm.hasMethod(obj.class_name, "__debugInfo")) {
