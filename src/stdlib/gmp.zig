@@ -194,6 +194,38 @@ fn unOpCall(ctx: *NativeContext, args: []const Value, op: Unop) RuntimeError!Val
     return .{ .object = obj };
 }
 
+fn gmpBinomial(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len < 2) return .null;
+    const an = (try coerceArgToMpz(ctx, args[0])) orelse return .null;
+    defer zphp_mpz_destroy(an);
+    const ak = (try coerceArgToMpz(ctx, args[1])) orelse return .null;
+    defer zphp_mpz_destroy(ak);
+    const n = zphp_mpz_get_si(an);
+    const k_raw = zphp_mpz_get_si(ak);
+    const obj = try createGmpObj(ctx);
+    const result = getMpz(obj).?;
+    if (k_raw < 0 or n < 0 or k_raw > n) {
+        _ = zphp_mpz_set_si(result, 0);
+        return .{ .object = obj };
+    }
+    // use C(n,k) = C(n,n-k) and pick the smaller k for efficiency
+    var k = k_raw;
+    if (k > n - k) k = n - k;
+    _ = zphp_mpz_set_si(result, 1);
+    const cur = zphp_mpz_create() orelse return error.OutOfMemory;
+    defer zphp_mpz_destroy(cur);
+    const divisor = zphp_mpz_create() orelse return error.OutOfMemory;
+    defer zphp_mpz_destroy(divisor);
+    var i: i64 = 0;
+    while (i < k) : (i += 1) {
+        _ = zphp_mpz_set_si(cur, n - i);
+        zphp_mpz_mul(result, result, cur);
+        _ = zphp_mpz_set_si(divisor, i + 1);
+        zphp_mpz_tdiv_q(result, result, divisor);
+    }
+    return .{ .object = obj };
+}
+
 fn gmpFact(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len < 1) return .null;
     const a = (try coerceArgToMpz(ctx, args[0])) orelse return .null;
@@ -399,6 +431,7 @@ pub const entries = .{
     .{ "gmp_gcd", gmpGcd },
     .{ "gmp_lcm", gmpLcm },
     .{ "gmp_fact", gmpFact },
+    .{ "gmp_binomial", gmpBinomial },
     .{ "gmp_invert", gmpInvert },
     .{ "gmp_prob_prime", gmpProbPrime },
     .{ "gmp_nextprime", gmpNextprime },
