@@ -2180,27 +2180,9 @@ pub const VM = struct {
                     const arr_val = self.pop();
                     if (arr_val == .array) {
                         try arr_val.array.set(self.allocator, Value.toArrayKey(key), val);
-                        // mirror writes to $GLOBALS into the script's top frame
-                        // so `$GLOBALS['x'] = ...` is visible as `$x` everywhere.
-                        // PHP implements $GLOBALS as a live view over the global
-                        // variable table; this approximates that bidirectionality
                         if (self.globals_array) |ga| {
-                            if (arr_val.array == ga and key == .string and self.frame_count > 0) {
-                                const top = &self.frames[0];
-                                const dollar_name = std.fmt.allocPrint(self.allocator, "${s}", .{key.string}) catch null;
-                                if (dollar_name) |dn| {
-                                    try self.strings.append(self.allocator, dn);
-                                    var slot_found: ?usize = null;
-                                    for (self.global_slot_names, 0..) |sn, i| {
-                                        if (std.mem.eql(u8, sn, dn)) { slot_found = i; break; }
-                                    }
-                                    // write to both vars and locals: get_global
-                                    // reads from vars, get_local reads from locals
-                                    try top.vars.put(self.allocator, dn, val);
-                                    if (slot_found) |si| {
-                                        if (si < top.locals.len) top.locals[si] = val;
-                                    }
-                                }
+                            if (arr_val.array == ga and key == .string) {
+                                try self.mirrorGlobalsWrite(key.string, val);
                             }
                         }
                     } else if (arr_val == .object and self.hasMethod(arr_val.object.class_name, "offsetSet")) {
@@ -2307,24 +2289,9 @@ pub const VM = struct {
 
                     if (cur == .array) {
                         try cur.array.set(self.allocator, Value.toArrayKey(key), val);
-                        // bidirectional mirror for $GLOBALS[$name] = ...
                         if (self.globals_array) |ga| {
-                            if (cur.array == ga and key == .string and self.frame_count > 0) {
-                                const top = &self.frames[0];
-                                const dollar_name = std.fmt.allocPrint(self.allocator, "${s}", .{key.string}) catch null;
-                                if (dollar_name) |dn| {
-                                    try self.strings.append(self.allocator, dn);
-                                    var slot_found: ?usize = null;
-                                    for (self.global_slot_names, 0..) |sn, i| {
-                                        if (std.mem.eql(u8, sn, dn)) { slot_found = i; break; }
-                                    }
-                                    // write to both vars and locals: get_global
-                                    // reads from vars, get_local reads from locals
-                                    try top.vars.put(self.allocator, dn, val);
-                                    if (slot_found) |si| {
-                                        if (si < top.locals.len) top.locals[si] = val;
-                                    }
-                                }
+                            if (cur.array == ga and key == .string) {
+                                try self.mirrorGlobalsWrite(key.string, val);
                             }
                         }
                         self.push(val);
@@ -4360,8 +4327,10 @@ pub const VM = struct {
                         const obj = obj_val.object;
                         const prop_name = prop_name_val.string;
                         const has_prop = obj.properties.contains(prop_name) or (obj.slots != null and obj.getSlotIndex(prop_name) != null);
-                        if (!has_prop and self.hasMethod(obj.class_name, "__set")) {
+                        if (!has_prop and self.hasMethod(obj.class_name, "__set") and !obj.magic_set_active.contains(prop_name)) {
+                            try obj.magic_set_active.put(self.allocator, prop_name, {});
                             _ = self.callMethod(obj, "__set", &.{ .{ .string = prop_name }, new_val }) catch {};
+                            _ = obj.magic_set_active.remove(prop_name);
                         } else {
                             try obj.set(self.allocator, prop_name, new_val);
                         }
@@ -4403,13 +4372,17 @@ pub const VM = struct {
                         }
 
                         const has_prop = obj.properties.contains(prop_name) or (obj.slots != null and obj.getSlotIndex(prop_name) != null);
-                        if (!has_prop and self.hasMethod(obj.class_name, "__set")) {
+                        if (!has_prop and self.hasMethod(obj.class_name, "__set") and !obj.magic_set_active.contains(prop_name)) {
+                            try obj.magic_set_active.put(self.allocator, prop_name, {});
                             _ = self.callMethod(obj, "__set", &.{ .{ .string = prop_name }, val }) catch {};
+                            _ = obj.magic_set_active.remove(prop_name);
                         } else {
                             const vr = self.findPropertyVisibility(obj.class_name, prop_name);
                             if (!self.checkVisibility(vr.defining_class, vr.visibility)) {
-                                if (self.hasMethod(obj.class_name, "__set")) {
+                                if (self.hasMethod(obj.class_name, "__set") and !obj.magic_set_active.contains(prop_name)) {
+                                    try obj.magic_set_active.put(self.allocator, prop_name, {});
                                     _ = self.callMethod(obj, "__set", &.{ .{ .string = prop_name }, val }) catch {};
+                                    _ = obj.magic_set_active.remove(prop_name);
                                     self.push(val);
                                     continue;
                                 }
@@ -4421,8 +4394,10 @@ pub const VM = struct {
                                 return error.RuntimeError;
                             }
                             if (vr.set_visibility != vr.visibility and !self.checkVisibility(vr.defining_class, vr.set_visibility)) {
-                                if (self.hasMethod(obj.class_name, "__set")) {
+                                if (self.hasMethod(obj.class_name, "__set") and !obj.magic_set_active.contains(prop_name)) {
+                                    try obj.magic_set_active.put(self.allocator, prop_name, {});
                                     _ = self.callMethod(obj, "__set", &.{ .{ .string = prop_name }, val }) catch {};
+                                    _ = obj.magic_set_active.remove(prop_name);
                                     self.push(val);
                                     continue;
                                 }
@@ -6628,6 +6603,43 @@ pub const VM = struct {
             }
         }
         self.global_vars_dirty = true;
+    }
+
+    // propagate a write to $GLOBALS[$key] into every frame that has `global $key`
+    // declared (including the top frame). PHP models $GLOBALS as a live view of
+    // the global table, so a write must be visible to every active `global`
+    // binding, not just the top-level script frame.
+    fn mirrorGlobalsWrite(self: *VM, key: []const u8, val: Value) !void {
+        const dollar_name = std.fmt.allocPrint(self.allocator, "${s}", .{key}) catch return;
+        try self.strings.append(self.allocator, dollar_name);
+
+        // top frame: vars + locals (slot lookup via global_slot_names)
+        if (self.frame_count > 0) {
+            const top = &self.frames[0];
+            try top.vars.put(self.allocator, dollar_name, val);
+            for (self.global_slot_names, 0..) |sn, i| {
+                if (std.mem.eql(u8, sn, dollar_name)) {
+                    if (i < top.locals.len) top.locals[i] = val;
+                    break;
+                }
+            }
+        }
+
+        // any function frame with an active `global $key` declaration
+        for (self.global_vars.items) |entry| {
+            if (!std.mem.eql(u8, entry.var_name, dollar_name)) continue;
+            if (entry.frame_depth == 0 or entry.frame_depth > self.frame_count) continue;
+            const frame = &self.frames[entry.frame_depth - 1];
+            try frame.vars.put(self.allocator, dollar_name, val);
+            if (frame.func) |func| {
+                for (func.slot_names, 0..) |sn, i| {
+                    if (std.mem.eql(u8, sn, dollar_name)) {
+                        if (i < frame.locals.len) frame.locals[i] = val;
+                        break;
+                    }
+                }
+            }
+        }
     }
 
     fn syncGlobalLocalsToVars(self: *VM) !void {
