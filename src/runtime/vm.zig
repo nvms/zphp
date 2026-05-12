@@ -60,7 +60,8 @@ pub const NativeContext = struct {
 
     pub fn createObject(self: *NativeContext, class_name: []const u8) !*PhpObject {
         const obj = try self.allocator.create(PhpObject);
-        obj.* = .{ .class_name = class_name };
+        self.vm.next_object_id += 1;
+        obj.* = .{ .class_name = class_name, .id = self.vm.next_object_id };
         try self.vm.objects.append(self.allocator, obj);
         try self.vm.initObjectProperties(obj, class_name);
         return obj;
@@ -333,6 +334,7 @@ pub const VM = struct {
     strings: std.ArrayListUnmanaged([]const u8) = .{},
     arrays: std.ArrayListUnmanaged(*PhpArray) = .{},
     objects: std.ArrayListUnmanaged(*PhpObject) = .{},
+    next_object_id: u32 = 0,
     obj_id_base: usize = 0,
     generators: std.ArrayListUnmanaged(*Generator) = .{},
     fibers: std.ArrayListUnmanaged(*Fiber) = .{},

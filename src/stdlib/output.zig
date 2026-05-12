@@ -126,7 +126,15 @@ fn varDumpValue(ctx: *NativeContext, val: Value, depth: usize) !void {
             try appendIndent(out, a, indent);
             try out.appendSlice(a, "object(");
             try out.appendSlice(a, obj.class_name);
-            try out.appendSlice(a, ")#1 (");
+            try out.appendSlice(a, ")#");
+            if (obj.id == 0) {
+                ctx.vm.next_object_id += 1;
+                obj.id = ctx.vm.next_object_id;
+            }
+            var id_buf: [16]u8 = undefined;
+            const id_s = std.fmt.bufPrint(&id_buf, "{d}", .{obj.id}) catch "1";
+            try out.appendSlice(a, id_s);
+            try out.appendSlice(a, " (");
             var tmp: [32]u8 = undefined;
             var prop_count: usize = 0;
             if (debug_arr) |da| {
