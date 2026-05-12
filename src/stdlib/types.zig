@@ -1073,6 +1073,13 @@ fn isInClassHierarchy(vm: *@import("../runtime/vm.zig").VM, candidate: []const u
 
 fn native_get_class_methods(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len == 0) return Value{ .bool = false };
+    // closures (stored as name strings) report the standard Closure API
+    if (args[0] == .string and std.mem.startsWith(u8, args[0].string, "__closure_")) {
+        var arr = try ctx.createArray();
+        const methods = [_][]const u8{ "bind", "bindTo", "call", "fromCallable", "__invoke" };
+        for (methods) |m| try arr.append(ctx.allocator, .{ .string = m });
+        return .{ .array = arr };
+    }
     const class_name = if (args[0] == .object)
         args[0].object.class_name
     else if (args[0] == .generator)
@@ -1178,6 +1185,10 @@ fn native_get_parent_class(ctx: *NativeContext, args: []const Value) RuntimeErro
         if (cls.parent) |p| return Value{ .string = p };
         return Value{ .bool = false };
     }
+    // closures (string-form) report as Closure with no parent
+    if (args[0] == .string and std.mem.startsWith(u8, args[0].string, "__closure_")) {
+        return Value{ .bool = false };
+    }
     const raw = if (args[0] == .object)
         args[0].object.class_name
     else if (args[0] == .string)
@@ -1201,6 +1212,10 @@ fn native_is_a(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
         return .{ .bool = std.mem.eql(u8, target, "Generator") or std.mem.eql(u8, target, "Iterator") or std.mem.eql(u8, target, "Traversable") };
     }
     if (args[0] == .fiber) return .{ .bool = std.mem.eql(u8, target, "Fiber") };
+    // closures stored as unique name strings present as object/Closure
+    if (args[0] == .string and std.mem.startsWith(u8, args[0].string, "__closure_")) {
+        return .{ .bool = std.mem.eql(u8, target, "Closure") };
+    }
     if (args[0] == .string) {
         // string arg requires explicit allow_string=true (3rd arg)
         const allow_string = args.len >= 3 and args[2].isTruthy();
