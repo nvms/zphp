@@ -1226,6 +1226,11 @@ fn native_spl_object_id(ctx: *NativeContext, args: []const Value) RuntimeError!V
     }
     if (args[0] == .generator) return .{ .int = @intCast(@intFromPtr(args[0].generator)) };
     if (args[0] == .fiber) return .{ .int = @intCast(@intFromPtr(args[0].fiber)) };
+    // closures stored as unique name strings - mirror spl_object_hash by
+    // using the string's pointer as the id
+    if (args[0] == .string and std.mem.startsWith(u8, args[0].string, "__closure_")) {
+        return .{ .int = @intCast(@intFromPtr(args[0].string.ptr)) };
+    }
     return Value{ .int = 0 };
 }
 
