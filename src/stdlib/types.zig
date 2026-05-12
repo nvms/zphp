@@ -1401,14 +1401,20 @@ fn native_ini_set(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
 fn native_extension_loaded(_: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len == 0 or args[0] != .string) return .{ .bool = false };
     const name = args[0].string;
-    if (std.mem.eql(u8, name, "json")) return .{ .bool = true };
-    if (std.mem.eql(u8, name, "pcre")) return .{ .bool = true };
-    if (std.mem.eql(u8, name, "pdo")) return .{ .bool = true };
-    if (std.mem.eql(u8, name, "pdo_sqlite")) return .{ .bool = true };
-    if (std.mem.eql(u8, name, "pdo_mysql")) return .{ .bool = true };
-    if (std.mem.eql(u8, name, "pdo_pgsql")) return .{ .bool = true };
-    if (std.mem.eql(u8, name, "session")) return .{ .bool = true };
-    if (std.mem.eql(u8, name, "mbstring")) return .{ .bool = true };
+    const supported = [_][]const u8{
+        "core",     "standard", "spl",        "json",       "pcre",
+        "pdo",      "pdo_sqlite", "pdo_mysql", "pdo_pgsql",
+        "session",  "mbstring", "ctype",      "filter",     "hash",
+        "iconv",    "tokenizer", "reflection", "date",      "datetime",
+        "openssl",  "curl",     "sodium",     "ldap",       "ftp",
+        "gd",       "gmp",      "bcmath",     "libxml",     "dom",
+        "simplexml", "xml",     "xmlreader",  "xmlwriter",  "intl",
+        "fileinfo", "phar",     "soap",       "zlib",       "posix",
+        "pcntl",    "random",
+    };
+    for (supported) |s| {
+        if (std.ascii.eqlIgnoreCase(name, s)) return .{ .bool = true };
+    }
     return .{ .bool = false };
 }
 
