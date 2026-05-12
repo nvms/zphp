@@ -1205,9 +1205,15 @@ fn native_is_subclass_of(ctx: *NativeContext, args: []const Value) RuntimeError!
     return .{ .bool = ctx.vm.isInstanceOf(class_name, args[1].string) };
 }
 
-fn native_spl_object_id(_: *NativeContext, args: []const Value) RuntimeError!Value {
+fn native_spl_object_id(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len == 0) return Value{ .int = 0 };
-    if (args[0] == .object) return .{ .int = @intCast(@intFromPtr(args[0].object)) };
+    if (args[0] == .object) {
+        if (args[0].object.id == 0) {
+            ctx.vm.next_object_id += 1;
+            args[0].object.id = ctx.vm.next_object_id;
+        }
+        return .{ .int = @intCast(args[0].object.id) };
+    }
     if (args[0] == .generator) return .{ .int = @intCast(@intFromPtr(args[0].generator)) };
     if (args[0] == .fiber) return .{ .int = @intCast(@intFromPtr(args[0].fiber)) };
     return Value{ .int = 0 };
@@ -2596,13 +2602,21 @@ fn isResourceObject(name: []const u8) bool {
 
 fn native_spl_object_hash(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len == 0) return .{ .bool = false };
-    const ptr: usize = switch (args[0]) {
-        .object => |o| @intFromPtr(o),
-        .generator => |g| @intFromPtr(g),
-        .fiber => |f| @intFromPtr(f),
+    var id: u64 = 0;
+    switch (args[0]) {
+        .object => |o| {
+            if (o.id == 0) {
+                ctx.vm.next_object_id += 1;
+                o.id = ctx.vm.next_object_id;
+            }
+            id = o.id;
+        },
+        .generator => |g| id = @intCast(@intFromPtr(g)),
+        .fiber => |f| id = @intCast(@intFromPtr(f)),
         else => return .{ .bool = false },
-    };
-    const hash = std.fmt.allocPrint(ctx.allocator, "{x:0>32}", .{ptr}) catch return .{ .bool = false };
+    }
+    // PHP format: 16 hex chars of id, then 16 zeros
+    const hash = std.fmt.allocPrint(ctx.allocator, "{x:0>16}0000000000000000", .{id}) catch return .{ .bool = false };
     ctx.vm.strings.append(ctx.allocator, hash) catch {};
     return .{ .string = hash };
 }
