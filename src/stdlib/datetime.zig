@@ -3046,13 +3046,22 @@ fn parseRelativeDuration(input: []const u8) RelDuration {
         const unit = input[unit_start..i];
         if (unit.len == 0) continue;
 
-        if (matchUnit(unit, "year")) out.y += value
-        else if (matchUnit(unit, "month")) out.m += value
-        else if (matchUnit(unit, "week")) out.d += value * 7
-        else if (matchUnit(unit, "day")) out.d += value
-        else if (matchUnit(unit, "hour")) out.h += value
-        else if (matchUnit(unit, "minute") or matchUnit(unit, "min")) out.mi += value
-        else if (matchUnit(unit, "second") or matchUnit(unit, "sec")) out.s += value;
+        // check for trailing " ago" which inverts the value
+        var save_i = i;
+        while (save_i < input.len and (input[save_i] == ' ' or input[save_i] == '\t')) : (save_i += 1) {}
+        var v = value;
+        if (save_i + 3 <= input.len and eqlLower(input[save_i .. save_i + 3], "ago")) {
+            v = -v;
+            i = save_i + 3;
+        }
+
+        if (matchUnit(unit, "year")) out.y += v
+        else if (matchUnit(unit, "month")) out.m += v
+        else if (matchUnit(unit, "week")) out.d += v * 7
+        else if (matchUnit(unit, "day")) out.d += v
+        else if (matchUnit(unit, "hour")) out.h += v
+        else if (matchUnit(unit, "minute") or matchUnit(unit, "min")) out.mi += v
+        else if (matchUnit(unit, "second") or matchUnit(unit, "sec")) out.s += v;
     }
     return out;
 }
