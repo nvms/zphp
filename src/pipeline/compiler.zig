@@ -532,6 +532,23 @@ pub const Compiler = struct {
             return;
         }
 
+        // bare identifier (no $) - PHP constant resolution:
+        //   1. if `use const X\Y as Z` aliases this name, use that FQN
+        //   2. if in a namespace block, prefer `<namespace>\<name>` (runtime
+        //      falls back to global by stripping the namespace prefix)
+        if (name.len > 0 and name[0] != '$') {
+            if (self.use_const_aliases.get(name)) |fqn| {
+                try self.emitGetVar(fqn);
+                return;
+            }
+            if (self.namespace.len > 0) {
+                const ns_name = try std.fmt.allocPrint(self.allocator, "{s}\\{s}", .{ self.namespace, name });
+                try self.string_allocs.append(self.allocator, ns_name);
+                try self.emitGetVar(ns_name);
+                return;
+            }
+        }
+
         try self.emitGetVar(name);
     }
 

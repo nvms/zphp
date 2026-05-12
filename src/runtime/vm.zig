@@ -1454,6 +1454,15 @@ pub const VM = struct {
                         self.push(val);
                     } else if (self.php_constants.get(name)) |val| {
                         self.push(val);
+                    } else if (std.mem.lastIndexOfScalar(u8, name, '\\')) |sep| blk: {
+                        // PHP fallback: bare constants in a namespace try
+                        // <ns>\<name> first, then fall back to the global <name>
+                        const bare = name[sep + 1 ..];
+                        if (self.php_constants.get(bare)) |val| {
+                            self.push(val);
+                            break :blk;
+                        }
+                        self.push(.null);
                     } else if (name.len > 2 and name[0] == '$' and name[1] == '_') {
                         self.push(self.request_vars.get(name) orelse .null);
                     } else if (self.request_vars.get(name)) |rv| {

@@ -144,6 +144,11 @@ fn native_defined(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len == 0 or args[0] != .string) return .{ .bool = false };
     const name = args[0].string;
     if (ctx.vm.php_constants.contains(name)) return .{ .bool = true };
+    // PHP treats leading-backslash and no-leading-backslash equivalently
+    // for fully qualified constant lookups: defined('\M\PI') == defined('M\PI')
+    if (name.len > 0 and name[0] == '\\') {
+        if (ctx.vm.php_constants.contains(name[1..])) return .{ .bool = true };
+    }
     if (std.mem.indexOf(u8, name, "::")) |sep| {
         const class_name = name[0..sep];
         const prop_name = name[sep + 2 ..];
