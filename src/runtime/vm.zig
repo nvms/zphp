@@ -7525,7 +7525,12 @@ pub const VM = struct {
         self.frames[idx].ref_slots.deinit(self.allocator);
         self.frames[idx].ref_array_bindings.deinit(self.allocator);
         self.frames[idx].ref_object_bindings.deinit(self.allocator);
-        self.frames[idx].vars.deinit(self.allocator);
+        // when the frame belongs to a generator, its vars hashmap is owned by
+        // the Generator and will be freed during freeHeapItems. freeing it
+        // here too causes a double-free during VM cleanup
+        if (self.frames[idx].generator == null) {
+            self.frames[idx].vars.deinit(self.allocator);
+        }
         if (self.frames[idx].locals.len > 0) {
             self.freeLocals(self.frames[idx].locals);
             self.frames[idx].locals = &.{};
