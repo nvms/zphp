@@ -2443,7 +2443,8 @@ fn rpConstruct(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len < 2) return throwReflection(ctx, "ReflectionProperty::__construct() expects class and property name");
     const this = getThis(ctx) orelse return .null;
 
-    const class_name = if (args[0] == .string) args[0].string else if (args[0] == .object) args[0].object.class_name else return throwReflection(ctx, "ReflectionProperty::__construct() expects a class name");
+    const raw_class = if (args[0] == .string) args[0].string else if (args[0] == .object) args[0].object.class_name else return throwReflection(ctx, "ReflectionProperty::__construct() expects a class name");
+    const class_name = if (raw_class.len > 0 and raw_class[0] == '\\') raw_class[1..] else raw_class;
     const prop_name = if (args[1] == .string) args[1].string else return throwReflection(ctx, "ReflectionProperty::__construct() expects a property name");
 
     try this.set(ctx.allocator, "name", .{ .string = prop_name });
@@ -2955,12 +2956,13 @@ fn raIsRepeated(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
 
 fn reConstruct(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len < 1) return throwReflection(ctx, "ReflectionEnum::__construct() expects an enum name");
-    const class_name = if (args[0] == .string)
+    const raw = if (args[0] == .string)
         args[0].string
     else if (args[0] == .object)
         args[0].object.class_name
     else
         return throwReflection(ctx, "ReflectionEnum::__construct() expects an enum name or object");
+    const class_name = if (raw.len > 0 and raw[0] == '\\') raw[1..] else raw;
     const this = getThis(ctx) orelse return .null;
 
     const cls = ctx.vm.classes.get(class_name) orelse {

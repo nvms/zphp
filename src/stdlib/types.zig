@@ -773,7 +773,8 @@ fn property_exists(ctx: *NativeContext, args: []const Value) RuntimeError!Value 
         return .{ .bool = obj.properties.contains(prop_name) };
     }
     if (args[0] == .string) {
-        const class_name = args[0].string;
+        const raw = args[0].string;
+        const class_name = if (raw.len > 0 and raw[0] == '\\') raw[1..] else raw;
         var is_own = true;
         var current: ?[]const u8 = class_name;
         while (current) |name| {
@@ -1101,7 +1102,8 @@ fn isInClassChain(vm: *@import("../runtime/vm.zig").VM, a: []const u8, b: []cons
 
 fn native_get_class_vars(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len == 0 or args[0] != .string) return Value{ .bool = false };
-    const class_name = args[0].string;
+    const raw = args[0].string;
+    const class_name = if (raw.len > 0 and raw[0] == '\\') raw[1..] else raw;
     const cls = ctx.vm.classes.get(class_name) orelse return Value{ .bool = false };
     const caller = ctx.vm.currentDefiningClass();
     var arr = try ctx.createArray();
