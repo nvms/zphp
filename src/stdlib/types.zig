@@ -2716,6 +2716,16 @@ fn native_spl_object_hash(ctx: *NativeContext, args: []const Value) RuntimeError
         },
         .generator => |g| id = @intCast(@intFromPtr(g)),
         .fiber => |f| id = @intCast(@intFromPtr(f)),
+        // closures are represented as unique name strings ("__closure_N_M"
+        // or "__closure_bound_N"). use the string's pointer as the id so
+        // every distinct closure instance gets a distinct hash
+        .string => |s| {
+            if (std.mem.startsWith(u8, s, "__closure_")) {
+                id = @intCast(@intFromPtr(s.ptr));
+            } else {
+                return .{ .bool = false };
+            }
+        },
         else => return .{ .bool = false },
     }
     // PHP format: 16 hex chars of id, then 16 zeros
