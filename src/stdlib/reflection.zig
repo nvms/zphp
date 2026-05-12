@@ -675,6 +675,7 @@ fn findDeclaringClass(vm: *VM, class_name: []const u8, method_name: []const u8) 
 const PropertyDefResult = struct {
     prop: ClassDef.PropertyDef,
     declaring_class: []const u8,
+    is_static: bool = false,
 };
 
 fn findPropertyDef(vm: *VM, class_name: []const u8, prop_name: []const u8) ?PropertyDefResult {
@@ -684,12 +685,20 @@ fn findPropertyDef(vm: *VM, class_name: []const u8, prop_name: []const u8) ?Prop
         for (cls.properties.items) |prop| {
             if (std.mem.eql(u8, prop.name, prop_name)) return .{ .prop = prop, .declaring_class = name };
         }
+        if (cls.static_props.get(prop_name)) |v| {
+            const synth: ClassDef.PropertyDef = .{ .name = prop_name, .default = v, .has_default = true };
+            return .{ .prop = synth, .declaring_class = name, .is_static = true };
+        }
         current = cls.parent;
     }
     return null;
 }
 
 fn buildPropertyObj(ctx: *NativeContext, class_name: []const u8, prop: ClassDef.PropertyDef, declaring_class: []const u8) !*PhpObject {
+    return try buildPropertyObjStatic(ctx, class_name, prop, declaring_class, false);
+}
+
+fn buildPropertyObjStatic(ctx: *NativeContext, class_name: []const u8, prop: ClassDef.PropertyDef, declaring_class: []const u8, is_static: bool) !*PhpObject {
     const obj = try ctx.createObject("ReflectionProperty");
     try obj.set(ctx.allocator, "name", .{ .string = prop.name });
     try obj.set(ctx.allocator, "class", .{ .string = class_name });
@@ -698,6 +707,7 @@ fn buildPropertyObj(ctx: *NativeContext, class_name: []const u8, prop: ClassDef.
     try obj.set(ctx.allocator, "_default_value", prop.default);
     try obj.set(ctx.allocator, "_declaring_class", .{ .string = declaring_class });
     try obj.set(ctx.allocator, "_is_readonly", .{ .bool = prop.is_readonly });
+    try obj.set(ctx.allocator, "_is_static", .{ .bool = is_static });
     return obj;
 }
 
@@ -1287,7 +1297,7 @@ fn rcGetProperty(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     const class_name = if (this.get("name") == .string) this.get("name").string else return .null;
 
     if (findPropertyDef(ctx.vm, class_name, prop_name)) |result| {
-        const obj = try buildPropertyObj(ctx, class_name, result.prop, result.declaring_class);
+        const obj = try buildPropertyObjStatic(ctx, class_name, result.prop, result.declaring_class, result.is_static);
         return .{ .object = obj };
     }
     const msg = std.fmt.allocPrint(ctx.allocator, "Property {s}::${s} does not exist", .{ class_name, prop_name }) catch return error.OutOfMemory;
@@ -2621,8 +2631,10 @@ fn rpropIsReadOnly(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
     return .{ .bool = v == .bool and v.bool };
 }
 
-fn rpropIsStatic(_: *NativeContext, _: []const Value) RuntimeError!Value {
-    return .{ .bool = false };
+fn rpropIsStatic(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const this = getThis(ctx) orelse return .{ .bool = false };
+    const v = this.get("_is_static");
+    return .{ .bool = v == .bool and v.bool };
 }
 
 fn rpropIsPromoted(_: *NativeContext, _: []const Value) RuntimeError!Value {
