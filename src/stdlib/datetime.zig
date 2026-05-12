@@ -53,6 +53,7 @@ pub const entries = .{
     .{ "gmdate", native_gmdate },
     .{ "date_default_timezone_set", native_tz_set },
     .{ "date_default_timezone_get", native_tz_get },
+    .{ "timezone_identifiers_list", dtzListIdentifiers },
     .{ "timezone_name_get", native_timezone_name_get },
     .{ "timezone_offset_get", native_timezone_offset_get },
     .{ "timezone_open", native_timezone_open },
