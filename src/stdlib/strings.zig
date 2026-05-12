@@ -1322,7 +1322,7 @@ fn sprintfImpl(ctx: *NativeContext, fmt_str: []const u8, args: []const Value) ![
                     const s = std.fmt.bufPrint(&num_buf, "{d}", .{v}) catch "0";
                     try tmp_buf.appendSlice(ctx.allocator, s);
                 },
-                'f' => {
+                'f', 'F' => {
                     var v = Value.toFloat(arg);
                     // php's %f drops the negative-zero sign
                     if (v == 0 and std.math.signbit(v)) v = 0;
