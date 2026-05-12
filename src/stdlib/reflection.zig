@@ -179,6 +179,9 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try rm_def.methods.put(a, "invokeArgs", .{ .name = "invokeArgs", .arity = 2 });
     try rm_def.methods.put(a, "isAbstract", .{ .name = "isAbstract", .arity = 0 });
     try rm_def.methods.put(a, "isFinal", .{ .name = "isFinal", .arity = 0 });
+    try rm_def.methods.put(a, "isVariadic", .{ .name = "isVariadic", .arity = 0 });
+    try rm_def.methods.put(a, "isGenerator", .{ .name = "isGenerator", .arity = 0 });
+    try rm_def.methods.put(a, "returnsReference", .{ .name = "returnsReference", .arity = 0 });
     try rm_def.methods.put(a, "getModifiers", .{ .name = "getModifiers", .arity = 0 });
     try rm_def.methods.put(a, "getAttributes", .{ .name = "getAttributes", .arity = 0 });
     try rm_def.methods.put(a, "getClosure", .{ .name = "getClosure", .arity = 1 });
@@ -203,6 +206,9 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try vm.native_fns.put(a, "ReflectionMethod::invokeArgs", rmInvokeArgs);
     try vm.native_fns.put(a, "ReflectionMethod::isAbstract", rmIsAbstract);
     try vm.native_fns.put(a, "ReflectionMethod::isFinal", rmIsFinal);
+    try vm.native_fns.put(a, "ReflectionMethod::isVariadic", rmIsVariadic);
+    try vm.native_fns.put(a, "ReflectionMethod::isGenerator", rmIsGenerator);
+    try vm.native_fns.put(a, "ReflectionMethod::returnsReference", reflectionFalse);
     try vm.native_fns.put(a, "ReflectionMethod::getModifiers", rmGetModifiers);
     try vm.native_fns.put(a, "ReflectionMethod::getAttributes", rmGetAttributes);
     try vm.native_fns.put(a, "ReflectionMethod::getClosure", rmGetClosure);
@@ -342,6 +348,8 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try rf_def.methods.put(a, "isAnonymous", .{ .name = "isAnonymous", .arity = 0 });
     try rf_def.methods.put(a, "isClosure", .{ .name = "isClosure", .arity = 0 });
     try rf_def.methods.put(a, "isGenerator", .{ .name = "isGenerator", .arity = 0 });
+    try rf_def.methods.put(a, "isVariadic", .{ .name = "isVariadic", .arity = 0 });
+    try rf_def.methods.put(a, "returnsReference", .{ .name = "returnsReference", .arity = 0 });
     try rf_def.methods.put(a, "getClosureScopeClass", .{ .name = "getClosureScopeClass", .arity = 0 });
     try rf_def.methods.put(a, "getClosureThis", .{ .name = "getClosureThis", .arity = 0 });
     try rf_def.methods.put(a, "isStatic", .{ .name = "isStatic", .arity = 0 });
@@ -360,6 +368,8 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try vm.native_fns.put(a, "ReflectionFunction::isAnonymous", rfIsAnonymous);
     try vm.native_fns.put(a, "ReflectionFunction::isClosure", rfIsAnonymous);
     try vm.native_fns.put(a, "ReflectionFunction::isGenerator", rfIsGenerator);
+    try vm.native_fns.put(a, "ReflectionFunction::isVariadic", rfIsVariadic);
+    try vm.native_fns.put(a, "ReflectionFunction::returnsReference", reflectionFalse);
     try vm.native_fns.put(a, "ReflectionFunction::getClosureScopeClass", rfGetClosureScopeClass);
     try vm.native_fns.put(a, "ReflectionFunction::getClosureThis", rfGetClosureThis);
     try vm.native_fns.put(a, "ReflectionFunction::isStatic", rfIsStatic);
@@ -2260,6 +2270,13 @@ fn rfIsGenerator(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
     return .{ .bool = func.is_generator };
 }
 
+fn rfIsVariadic(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const this = getThis(ctx) orelse return .{ .bool = false };
+    const func_name = if (this.get("name") == .string) this.get("name").string else return .{ .bool = false };
+    const func = ctx.vm.functions.get(func_name) orelse return .{ .bool = false };
+    return .{ .bool = func.is_variadic };
+}
+
 fn rfGetClosureUsedVariables(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
     const this = getThis(ctx) orelse return .{ .array = try ctx.createArray() };
     const fn_name = if (this.get("name") == .string) this.get("name").string else return .{ .array = try ctx.createArray() };
@@ -2815,6 +2832,29 @@ fn rmIsFinal(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
     const cls = ctx.vm.classes.get(declaring) orelse return .{ .bool = false };
     const m = cls.methods.get(method_name) orelse return .{ .bool = false };
     return .{ .bool = m.is_final };
+}
+
+fn rmFullName(ctx: *NativeContext) ?[]const u8 {
+    const this = getThis(ctx) orelse return null;
+    const method_name = if (this.get("name") == .string) this.get("name").string else return null;
+    const declaring = if (this.get("_declaring_class") == .string) this.get("_declaring_class").string else return null;
+    var buf: [256]u8 = undefined;
+    const key = std.fmt.bufPrint(&buf, "{s}::{s}", .{ declaring, method_name }) catch return null;
+    const owned = ctx.allocator.dupe(u8, key) catch return null;
+    ctx.vm.strings.append(ctx.allocator, owned) catch {};
+    return owned;
+}
+
+fn rmIsVariadic(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const key = rmFullName(ctx) orelse return .{ .bool = false };
+    const func = ctx.vm.functions.get(key) orelse return .{ .bool = false };
+    return .{ .bool = func.is_variadic };
+}
+
+fn rmIsGenerator(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const key = rmFullName(ctx) orelse return .{ .bool = false };
+    const func = ctx.vm.functions.get(key) orelse return .{ .bool = false };
+    return .{ .bool = func.is_generator };
 }
 
 fn rmGetModifiers(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
