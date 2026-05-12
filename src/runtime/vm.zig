@@ -2956,11 +2956,27 @@ pub const VM = struct {
 
                 .cast_int => {
                     const v = self.pop();
-                    self.push(.{ .int = Value.toInt(v) });
+                    if (v == .object and self.hasMethod(v.object.class_name, "__toString")) {
+                        const s = self.objectToString(v.object) catch {
+                            if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
+                            return error.RuntimeError;
+                        };
+                        self.push(.{ .int = Value.toInt(.{ .string = s }) });
+                    } else {
+                        self.push(.{ .int = Value.toInt(v) });
+                    }
                 },
                 .cast_float => {
                     const v = self.pop();
-                    self.push(.{ .float = Value.toFloat(v) });
+                    if (v == .object and self.hasMethod(v.object.class_name, "__toString")) {
+                        const s = self.objectToString(v.object) catch {
+                            if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
+                            return error.RuntimeError;
+                        };
+                        self.push(.{ .float = Value.toFloat(.{ .string = s }) });
+                    } else {
+                        self.push(.{ .float = Value.toFloat(v) });
+                    }
                 },
                 .cast_string => {
                     const v = self.pop();
