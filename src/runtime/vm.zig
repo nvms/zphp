@@ -386,6 +386,12 @@ pub const VM = struct {
     file_path: []const u8 = "",
     autoload_callbacks: std.ArrayListUnmanaged(Value) = .{},
     autoload_depth: u8 = 0,
+    // when a required script does an early `return X` at top level, the
+    // return op pops its frame before the require handler runs the merge.
+    // require sets this to the about-to-be-popped frame depth before
+    // runUntilFrame; popFrame skips deinit and leaves the slot intact so
+    // the require handler can read the include frame's locals/vars
+    require_merge_depth: usize = 0,
     magic_get_guard: std.ArrayListUnmanaged(struct { obj_ptr: usize, prop_name: []const u8 }) = .{},
     magic_call_guard: std.ArrayListUnmanaged(struct { obj_ptr: usize, method_name: []const u8 }) = .{},
     prop_hook_guard: std.ArrayListUnmanaged(struct { obj_ptr: usize, prop_name: []const u8 }) = .{},
@@ -3455,7 +3461,10 @@ pub const VM = struct {
                                 self.frames[self.frame_count].entry_sp = self.sp;
                                 self.frame_count += 1;
         if (self.frame_count > self.frame_high_water) self.frame_high_water = self.frame_count;
+                                const saved_merge_depth = self.require_merge_depth;
+                                self.require_merge_depth = self.frame_count;
                                 self.runUntilFrame(return_frame) catch {
+                                    self.require_merge_depth = saved_merge_depth;
                                     while (self.frame_count > return_frame) {
                                         self.frame_count -= 1;
                                         self.deinitFrameSlot(self.frame_count);
@@ -3497,7 +3506,11 @@ pub const VM = struct {
                                 // that rely on `$x = ...; require 'helper.php';`
                                 // patterns (WordPress, legacy frameworks) fail
                                 // to pick up state set by the include
-                                const include_frame_idx = self.frame_count - 1;
+                                // the include frame lives at return_frame (its slot
+                                // when pushed). popFrame leaves it intact when popping
+                                // back to require_merge_depth, so we can read its
+                                // vars/locals here even after an explicit `return`
+                                const include_frame_idx = return_frame;
                                 const include_frame = &self.frames[include_frame_idx];
                                 const include_slot_names = r.slot_names;
                                 // 1) merge slot-backed locals
@@ -3538,6 +3551,10 @@ pub const VM = struct {
                                     self.frame_count -= 1;
                                     self.deinitFrameSlot(self.frame_count);
                                 }
+                                // popFrame at require_merge_depth left this slot
+                                // intact for the merge above; deinit it now
+                                self.deinitFrameSlot(return_frame);
+                                self.require_merge_depth = saved_merge_depth;
                                 self.global_slot_names = saved_slot_names;
                                 if (self.sp <= sp_before) self.push(.{ .bool = true });
                             } else {
@@ -7802,6 +7819,13 @@ pub const VM = struct {
             self.exception_handlers[self.handler_count - 1].frame_count > self.frame_count)
         {
             self.handler_count -= 1;
+        }
+        // if this pop returns to the require-merge depth, leave the slot
+        // intact so the require handler can read its vars/locals before
+        // doing its own deinit. otherwise PHP's "include leaks top-level
+        // vars even after explicit return" semantics is silently dropped
+        if (self.require_merge_depth != 0 and self.frame_count + 1 == self.require_merge_depth) {
+            return;
         }
         self.deinitFrameSlot(self.frame_count);
     }
