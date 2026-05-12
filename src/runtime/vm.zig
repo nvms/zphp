@@ -9110,7 +9110,9 @@ pub const VM = struct {
             self.frames[self.frame_count - 1].called_class = class_name;
     }
 
-    fn callNamedFunction(self: *VM, name: []const u8, arg_count: u8) RuntimeError!void {
+    fn callNamedFunction(self: *VM, raw_name: []const u8, arg_count: u8) RuntimeError!void {
+        // PHP normalizes leading-backslash on function callable strings
+        const name = if (raw_name.len > 0 and raw_name[0] == '\\') raw_name[1..] else raw_name;
         if (self.native_fns.get(name)) |native| {
             var args: [64]Value = undefined;
             const ac: usize = arg_count;
@@ -9324,7 +9326,10 @@ pub const VM = struct {
         self.shutdown_callbacks.clearRetainingCapacity();
     }
 
-    pub fn callByName(self: *VM, name: []const u8, args: []const Value) RuntimeError!Value {
+    pub fn callByName(self: *VM, raw_name: []const u8, args: []const Value) RuntimeError!Value {
+        // PHP normalizes leading-backslash on function callable strings:
+        // call_user_func('\App\f') and call_user_func('App\f') are equivalent
+        const name = if (raw_name.len > 0 and raw_name[0] == '\\') raw_name[1..] else raw_name;
         if (self.native_fns.get(name)) |native| {
             var ctx = self.makeContext(null);
             return native(&ctx, args);
@@ -9431,7 +9436,8 @@ pub const VM = struct {
         return self.pop();
     }
 
-    pub fn callByNameRef(self: *VM, name: []const u8, args: []Value) RuntimeError!Value {
+    pub fn callByNameRef(self: *VM, raw_name: []const u8, args: []Value) RuntimeError!Value {
+        const name = if (raw_name.len > 0 and raw_name[0] == '\\') raw_name[1..] else raw_name;
         if (self.functions.get(name)) |func| {
             if (func.ref_params.len == 0) {
                 return self.callByName(name, args);

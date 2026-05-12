@@ -799,7 +799,8 @@ fn native_is_callable(ctx: *NativeContext, args: []const Value) RuntimeError!Val
     if (args.len == 0) return .{ .bool = false };
     const val = args[0];
     if (val == .string) {
-        const name = val.string;
+        const raw = val.string;
+        const name = if (raw.len > 0 and raw[0] == '\\') raw[1..] else raw;
         if (ctx.vm.native_fns.contains(name)) return .{ .bool = true };
         if (ctx.vm.functions.contains(name)) return .{ .bool = true };
         return .{ .bool = false };
@@ -922,7 +923,8 @@ fn native_call_user_func_array(ctx: *NativeContext, args: []const Value) Runtime
 
 fn native_function_exists(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len == 0 or args[0] != .string) return .{ .bool = false };
-    const name = args[0].string;
+    const raw = args[0].string;
+    const name = if (raw.len > 0 and raw[0] == '\\') raw[1..] else raw;
     if (ctx.vm.native_fns.contains(name)) return .{ .bool = true };
     if (ctx.vm.functions.contains(name)) return .{ .bool = true };
     return .{ .bool = false };
