@@ -194,6 +194,25 @@ fn unOpCall(ctx: *NativeContext, args: []const Value, op: Unop) RuntimeError!Val
     return .{ .object = obj };
 }
 
+fn gmpFact(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len < 1) return .null;
+    const a = (try coerceArgToMpz(ctx, args[0])) orelse return .null;
+    defer zphp_mpz_destroy(a);
+    const n = zphp_mpz_get_si(a);
+    const obj = try createGmpObj(ctx);
+    const result = getMpz(obj).?;
+    _ = zphp_mpz_set_si(result, 1);
+    if (n <= 1) return .{ .object = obj };
+    const cur = zphp_mpz_create() orelse return error.OutOfMemory;
+    defer zphp_mpz_destroy(cur);
+    var i: i64 = 2;
+    while (i <= n) : (i += 1) {
+        _ = zphp_mpz_set_si(cur, i);
+        zphp_mpz_mul(result, result, cur);
+    }
+    return .{ .object = obj };
+}
+
 fn gmpAdd(ctx: *NativeContext, args: []const Value) RuntimeError!Value { return binOpCall(ctx, args, zphp_mpz_add); }
 fn gmpSub(ctx: *NativeContext, args: []const Value) RuntimeError!Value { return binOpCall(ctx, args, zphp_mpz_sub); }
 fn gmpMul(ctx: *NativeContext, args: []const Value) RuntimeError!Value { return binOpCall(ctx, args, zphp_mpz_mul); }
@@ -379,6 +398,7 @@ pub const entries = .{
     .{ "gmp_com", gmpCom },
     .{ "gmp_gcd", gmpGcd },
     .{ "gmp_lcm", gmpLcm },
+    .{ "gmp_fact", gmpFact },
     .{ "gmp_invert", gmpInvert },
     .{ "gmp_prob_prime", gmpProbPrime },
     .{ "gmp_nextprime", gmpNextprime },
