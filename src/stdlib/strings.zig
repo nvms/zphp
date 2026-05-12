@@ -2545,14 +2545,125 @@ fn native_mb_detect_encoding(_: *NativeContext, args: []const Value) RuntimeErro
     return .{ .string = "UTF-8" };
 }
 
-fn native_mb_convert_encoding(_: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len < 2 or args[0] != .string) return .{ .bool = false };
+fn encodingMatches(name: []const u8, options: anytype) bool {
+    var buf: [32]u8 = undefined;
+    const n = @min(name.len, buf.len);
+    for (0..n) |i| buf[i] = std.ascii.toLower(name[i]);
+    const lower = buf[0..n];
+    inline for (options) |opt| {
+        if (std.mem.eql(u8, lower, opt)) return true;
+    }
+    return false;
+}
+
+fn isUtf8Encoding(name: []const u8) bool {
+    return encodingMatches(name, .{ "utf-8", "utf8" });
+}
+
+fn isLatin1Encoding(name: []const u8) bool {
+    return encodingMatches(name, .{ "iso-8859-1", "iso8859-1", "latin1" });
+}
+
+fn isAsciiEncoding(name: []const u8) bool {
+    return encodingMatches(name, .{ "ascii", "us-ascii" });
+}
+
+fn convertUtf8ToLatin1(allocator: std.mem.Allocator, input: []const u8) ![]u8 {
+    var out = std.ArrayListUnmanaged(u8){};
+    errdefer out.deinit(allocator);
+    var i: usize = 0;
+    while (i < input.len) {
+        const b = input[i];
+        if (b < 0x80) {
+            try out.append(allocator, b);
+            i += 1;
+        } else if ((b & 0xe0) == 0xc0 and i + 1 < input.len) {
+            const b2 = input[i + 1];
+            const cp: u21 = (@as(u21, b & 0x1f) << 6) | @as(u21, b2 & 0x3f);
+            try out.append(allocator, if (cp < 0x100) @intCast(cp) else '?');
+            i += 2;
+        } else {
+            try out.append(allocator, '?');
+            i += utf8CharLen(b);
+        }
+    }
+    return try out.toOwnedSlice(allocator);
+}
+
+fn convertLatin1ToUtf8(allocator: std.mem.Allocator, input: []const u8) ![]u8 {
+    var out = std.ArrayListUnmanaged(u8){};
+    errdefer out.deinit(allocator);
+    for (input) |b| {
+        if (b < 0x80) {
+            try out.append(allocator, b);
+        } else {
+            try out.append(allocator, 0xc0 | (b >> 6));
+            try out.append(allocator, 0x80 | (b & 0x3f));
+        }
+    }
+    return try out.toOwnedSlice(allocator);
+}
+
+fn native_mb_convert_encoding(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len < 2 or args[0] != .string or args[1] != .string) return .{ .bool = false };
+    const input = args[0].string;
+    const to = args[1].string;
+    const from: []const u8 = if (args.len >= 3 and args[2] == .string) args[2].string else "UTF-8";
+
+    if ((isUtf8Encoding(from) and isUtf8Encoding(to)) or
+        (isLatin1Encoding(from) and isLatin1Encoding(to)) or
+        (isAsciiEncoding(from) and isAsciiEncoding(to)))
+    {
+        return args[0];
+    }
+    if (isUtf8Encoding(from) and isLatin1Encoding(to)) {
+        const out = convertUtf8ToLatin1(ctx.allocator, input) catch return .{ .bool = false };
+        try ctx.strings.append(ctx.allocator, out);
+        return .{ .string = out };
+    }
+    if (isLatin1Encoding(from) and isUtf8Encoding(to)) {
+        const out = convertLatin1ToUtf8(ctx.allocator, input) catch return .{ .bool = false };
+        try ctx.strings.append(ctx.allocator, out);
+        return .{ .string = out };
+    }
+    if (isAsciiEncoding(from) and (isUtf8Encoding(to) or isLatin1Encoding(to))) {
+        return args[0]; // ascii is a subset of both
+    }
+    if ((isUtf8Encoding(from) or isLatin1Encoding(from)) and isAsciiEncoding(to)) {
+        // strip non-ascii bytes
+        var out = std.ArrayListUnmanaged(u8){};
+        errdefer out.deinit(ctx.allocator);
+        var i: usize = 0;
+        while (i < input.len) {
+            const b = input[i];
+            if (b < 0x80) {
+                try out.append(ctx.allocator, b);
+                i += 1;
+            } else if (isUtf8Encoding(from)) {
+                try out.append(ctx.allocator, '?');
+                i += utf8CharLen(b);
+            } else {
+                try out.append(ctx.allocator, '?');
+                i += 1;
+            }
+        }
+        const owned = try out.toOwnedSlice(ctx.allocator);
+        try ctx.strings.append(ctx.allocator, owned);
+        return .{ .string = owned };
+    }
+    // unknown encoding pair - pass through
     return args[0];
 }
 
-fn native_iconv(_: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len < 3 or args[2] != .string) return .{ .bool = false };
-    return args[2];
+fn native_iconv(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len < 3 or args[0] != .string or args[1] != .string or args[2] != .string) return .{ .bool = false };
+    const from = args[0].string;
+    const to_raw = args[1].string;
+    // iconv supports "//IGNORE" / "//TRANSLIT" suffixes; strip them
+    var to = to_raw;
+    if (std.mem.indexOf(u8, to_raw, "//")) |sep| to = to_raw[0..sep];
+    const args2 = [_]Value{ args[2], .{ .string = to }, .{ .string = from } };
+    return try native_mb_convert_encoding(ctx, &args2);
 }
 
 fn native_mb_strpos(_: *NativeContext, args: []const Value) RuntimeError!Value {

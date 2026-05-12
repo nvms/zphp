@@ -678,37 +678,47 @@ fn stmtFetchAll(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
             first = false;
             // first column is the group/unique key
             const key_v = try columnToValue(ctx, stmt, 0);
-            // rest of columns form the value row
-            var inner = try ctx.createArray();
-            const col_count = sqlite.sqlite3_column_count(stmt);
-            var i: c_int = 1;
-            while (i < col_count) : (i += 1) {
-                const v = try columnToValue(ctx, stmt, i);
-                if (row_mode == 3 or row_mode == 4) try inner.append(ctx.allocator, v);
-                if (row_mode == 2 or row_mode == 4) {
-                    if (sqlite.sqlite3_column_name(stmt, i)) |np| {
-                        const name = try ctx.createString(std.mem.span(np));
-                        try inner.set(ctx.allocator, .{ .string = name }, v);
-                    }
-                }
-            }
             const ak: PhpArray.Key = switch (key_v) {
                 .string => |s| .{ .string = s },
                 .int => |n| .{ .int = n },
                 else => .{ .int = Value.toInt(key_v) },
             };
+
+            // for FETCH_COLUMN the per-row value is the next column scalar;
+            // for FETCH_NUM/ASSOC/BOTH the per-row value is a row array
+            var row_value: Value = .null;
+            if (row_mode == 7) {
+                const col_count_c = sqlite.sqlite3_column_count(stmt);
+                row_value = if (col_count_c > 1) try columnToValue(ctx, stmt, 1) else .null;
+            } else {
+                var inner = try ctx.createArray();
+                const col_count = sqlite.sqlite3_column_count(stmt);
+                var i: c_int = 1;
+                while (i < col_count) : (i += 1) {
+                    const v = try columnToValue(ctx, stmt, i);
+                    if (row_mode == 3 or row_mode == 4) try inner.append(ctx.allocator, v);
+                    if (row_mode == 2 or row_mode == 4) {
+                        if (sqlite.sqlite3_column_name(stmt, i)) |np| {
+                            const name = try ctx.createString(std.mem.span(np));
+                            try inner.set(ctx.allocator, .{ .string = name }, v);
+                        }
+                    }
+                }
+                row_value = .{ .array = inner };
+            }
+
             if (is_unique) {
-                try result.set(ctx.allocator, ak, .{ .array = inner });
+                try result.set(ctx.allocator, ak, row_value);
             } else {
                 // group: collect rows under the key
                 const existing = result.get(ak);
                 if (existing == .array) {
-                    try existing.array.append(ctx.allocator, .{ .array = inner });
+                    try existing.array.append(ctx.allocator, row_value);
                 } else {
                     const group = try ctx.allocator.create(PhpArray);
                     group.* = .{};
                     try ctx.vm.arrays.append(ctx.allocator, group);
-                    try group.append(ctx.allocator, .{ .array = inner });
+                    try group.append(ctx.allocator, row_value);
                     try result.set(ctx.allocator, ak, .{ .array = group });
                 }
             }
