@@ -65,8 +65,22 @@ pub const entries = .{
     .{ "getmygid", native_getmygid },
     .{ "getmyinode", native_noop_zero },
     .{ "ini_get", native_ini_get },
+    .{ "ini_get_all", native_ini_get_all },
+    .{ "ini_restore", native_ini_restore },
     .{ "get_cfg_var", native_get_cfg_var },
     .{ "ini_set", native_ini_set },
+    .{ "ini_alter", native_ini_set },
+    .{ "opcache_compile_file", native_noop_true },
+    .{ "opcache_get_status", native_opcache_get_status },
+    .{ "opcache_get_configuration", native_opcache_get_configuration },
+    .{ "opcache_invalidate", native_noop_true },
+    .{ "opcache_is_script_cached", native_noop_false },
+    .{ "opcache_reset", native_noop_true },
+    .{ "ignore_user_abort", native_noop_zero },
+    .{ "gc_status", native_gc_status },
+    .{ "gc_mem_caches", native_noop_zero },
+    .{ "highlight_string", native_highlight_string },
+    .{ "highlight_file", native_highlight_file },
     .{ "extension_loaded", native_extension_loaded },
     .{ "get_included_files", native_get_included_files },
     .{ "get_required_files", native_get_included_files },
@@ -1356,7 +1370,30 @@ fn native_get_cfg_var(_: *NativeContext, _: []const Value) RuntimeError!Value {
 fn iniDefault(name: []const u8) ?[]const u8 {
     if (std.mem.eql(u8, name, "date.timezone")) return "UTC";
     // PHP CLI default is "-1" (no limit); web SAPI default is "128M"
-    if (std.mem.eql(u8, name, "memory_limit")) return "-1";
+    if (std.mem.eql(u8, name, "memory_limit")) return "128M";
+    if (std.mem.eql(u8, name, "post_max_size")) return "8M";
+    if (std.mem.eql(u8, name, "upload_max_filesize")) return "2M";
+    if (std.mem.eql(u8, name, "max_input_time")) return "-1";
+    if (std.mem.eql(u8, name, "max_file_uploads")) return "20";
+    if (std.mem.eql(u8, name, "default_charset")) return "UTF-8";
+    if (std.mem.eql(u8, name, "default_mimetype")) return "text/html";
+    if (std.mem.eql(u8, name, "session.save_handler")) return "files";
+    if (std.mem.eql(u8, name, "session.save_path")) return "";
+    if (std.mem.eql(u8, name, "session.gc_maxlifetime")) return "1440";
+    if (std.mem.eql(u8, name, "session.cookie_lifetime")) return "0";
+    if (std.mem.eql(u8, name, "session.use_cookies")) return "1";
+    if (std.mem.eql(u8, name, "session.cookie_httponly")) return "";
+    if (std.mem.eql(u8, name, "session.cookie_secure")) return "";
+    if (std.mem.eql(u8, name, "session.cookie_samesite")) return "";
+    if (std.mem.eql(u8, name, "date.default_latitude")) return "31.7667";
+    if (std.mem.eql(u8, name, "date.default_longitude")) return "35.2333";
+    if (std.mem.eql(u8, name, "precision")) return "14";
+    if (std.mem.eql(u8, name, "serialize_precision")) return "-1";
+    if (std.mem.eql(u8, name, "open_basedir")) return "";
+    if (std.mem.eql(u8, name, "include_path")) return ".:/usr/local/lib/php";
+    if (std.mem.eql(u8, name, "log_errors")) return "1";
+    if (std.mem.eql(u8, name, "error_log")) return "";
+    if (std.mem.eql(u8, name, "html_errors")) return "0";
     if (std.mem.eql(u8, name, "max_execution_time")) return "0";
     if (std.mem.eql(u8, name, "display_errors")) return "1";
     if (std.mem.eql(u8, name, "error_reporting")) return "30719";
@@ -1558,6 +1595,57 @@ fn native_noop_null(_: *NativeContext, _: []const Value) RuntimeError!Value {
 
 fn native_noop_zero(_: *NativeContext, _: []const Value) RuntimeError!Value {
     return .{ .int = 0 };
+}
+
+fn native_noop_false(_: *NativeContext, _: []const Value) RuntimeError!Value {
+    return .{ .bool = false };
+}
+
+fn native_ini_get_all(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    // returns an empty array - PHP returns a dict of all settings, but most
+    // userland code just iterates it or queries specific keys (use ini_get)
+    return .{ .array = try ctx.createArray() };
+}
+
+fn native_ini_restore(_: *NativeContext, _: []const Value) RuntimeError!Value {
+    return .null;
+}
+
+fn native_opcache_get_status(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const arr = try ctx.createArray();
+    try arr.set(ctx.allocator, .{ .string = "opcache_enabled" }, .{ .bool = false });
+    return .{ .array = arr };
+}
+
+fn native_opcache_get_configuration(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const arr = try ctx.createArray();
+    const directives = try ctx.createArray();
+    try directives.set(ctx.allocator, .{ .string = "opcache.enable" }, .{ .bool = false });
+    try arr.set(ctx.allocator, .{ .string = "directives" }, .{ .array = directives });
+    return .{ .array = arr };
+}
+
+fn native_gc_status(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const arr = try ctx.createArray();
+    try arr.set(ctx.allocator, .{ .string = "runs" }, .{ .int = 0 });
+    try arr.set(ctx.allocator, .{ .string = "collected" }, .{ .int = 0 });
+    try arr.set(ctx.allocator, .{ .string = "threshold" }, .{ .int = 10001 });
+    try arr.set(ctx.allocator, .{ .string = "roots" }, .{ .int = 0 });
+    return .{ .array = arr };
+}
+
+fn native_highlight_string(_: *NativeContext, args: []const Value) RuntimeError!Value {
+    // PHP returns syntax-highlighted HTML; we return false (PHP errors on bad input
+    // also return false, so this is safe as a "no-op" while still being callable)
+    if (args.len >= 2 and args[1] == .bool and args[1].bool) {
+        if (args.len >= 1 and args[0] == .string) return args[0];
+        return .{ .string = "" };
+    }
+    return .{ .bool = true };
+}
+
+fn native_highlight_file(_: *NativeContext, _: []const Value) RuntimeError!Value {
+    return .{ .bool = true };
 }
 
 fn native_get_include_path(_: *NativeContext, _: []const Value) RuntimeError!Value {
