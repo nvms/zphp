@@ -2112,16 +2112,60 @@ fn tryParseNextLast(input: []const u8, base: i64) ?i64 {
         return target_monday + comps.hour * 3600 + comps.min * 60 + comps.sec;
     }
 
-    // next/last <weekday>
+    // next/last <weekday> [time-of-day]
     if (parseWeekdayName(s)) |target_dow| {
-        if (direction > 0) {
-            return resolveNextWeekday(base, target_dow);
-        } else {
-            return resolveLastWeekday(base, target_dow);
+        const wname_len = weekdayNameLen(s) orelse s.len;
+        var rest = s[wname_len..];
+        while (rest.len > 0 and rest[0] == ' ') rest = rest[1..];
+        const ts = if (direction > 0) resolveNextWeekday(base, target_dow) else resolveLastWeekday(base, target_dow);
+        if (rest.len == 0) return ts;
+        if (parseTimeOfDay(rest)) |tod| {
+            return baseMidnight(ts) + tod.hour * 3600 + tod.min * 60 + tod.sec;
         }
+        return ts;
     }
 
     return null;
+}
+
+const TimeOfDay = struct { hour: i64, min: i64, sec: i64 };
+
+fn parseTimeOfDay(input: []const u8) ?TimeOfDay {
+    var s = input;
+    while (s.len > 0 and s[0] == ' ') s = s[1..];
+    if (s.len == 0) return null;
+    var i: usize = 0;
+    while (i < s.len and s[i] >= '0' and s[i] <= '9') i += 1;
+    if (i == 0) return null;
+    const hour = std.fmt.parseInt(i64, s[0..i], 10) catch return null;
+    var min: i64 = 0;
+    var sec: i64 = 0;
+    s = s[i..];
+    if (s.len > 0 and s[0] == ':') {
+        s = s[1..];
+        i = 0;
+        while (i < s.len and s[i] >= '0' and s[i] <= '9') i += 1;
+        if (i == 0) return null;
+        min = std.fmt.parseInt(i64, s[0..i], 10) catch return null;
+        s = s[i..];
+        if (s.len > 0 and s[0] == ':') {
+            s = s[1..];
+            i = 0;
+            while (i < s.len and s[i] >= '0' and s[i] <= '9') i += 1;
+            if (i == 0) return null;
+            sec = std.fmt.parseInt(i64, s[0..i], 10) catch return null;
+            s = s[i..];
+        }
+    }
+    while (s.len > 0 and s[0] == ' ') s = s[1..];
+    var h = hour;
+    if (s.len >= 2 and eqlLower(s[0..2], "am")) {
+        if (h == 12) h = 0;
+    } else if (s.len >= 2 and eqlLower(s[0..2], "pm")) {
+        if (h < 12) h += 12;
+    }
+    if (h < 0 or h > 23 or min < 0 or min > 59 or sec < 0 or sec > 59) return null;
+    return .{ .hour = h, .min = min, .sec = sec };
 }
 
 fn parseNumericRelative(input: []const u8, base: i64) Value {
