@@ -250,7 +250,9 @@ fn stmtIterNext(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
 fn stmtIterValid(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
     const obj = getThis(ctx) orelse return .{ .bool = false };
     const cur = obj.get("__iter_current");
-    return .{ .bool = cur == .array };
+    // FETCH_CLASS / FETCH_OBJ produce objects; FETCH_ASSOC etc produce arrays.
+    // either type is a valid row - only null/false means no more rows
+    return .{ .bool = cur == .array or cur == .object };
 }
 
 fn stmtFetchObject(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
@@ -615,6 +617,18 @@ fn stmtFetch(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
         const next_rc = sqlite.sqlite3_step(stmt);
         try obj.set(ctx.allocator, "__has_row", .{ .bool = next_rc == sqlite.ROW });
         return row;
+    }
+
+    if (mode == 8) {
+        // FETCH_CLASS: hydrate into the previously-configured fetch class
+        const fc_v = obj.get("__fetch_class");
+        const class_name: []const u8 = if (fc_v == .string) fc_v.string else "stdClass";
+        const inst = try fetchRowAsClass(ctx, stmt, class_name);
+        const ctor_args_v = obj.get("__fetch_class_args");
+        if (ctor_args_v == .array) try invokeCtorWithArgs(ctx, inst, class_name, ctor_args_v.array);
+        const next_rc = sqlite.sqlite3_step(stmt);
+        try obj.set(ctx.allocator, "__has_row", .{ .bool = next_rc == sqlite.ROW });
+        return inst;
     }
 
     if (mode == 9) {
