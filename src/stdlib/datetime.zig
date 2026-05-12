@@ -1194,16 +1194,27 @@ fn createFromFormatImpl(ctx: *NativeContext, args: []const Value, default_class:
         break :blk default_class;
     };
 
-    const ts = parseDateTimeFormat(format, datetime, std.time.timestamp()) orelse return .{ .bool = false };
+    const res = parseDateTimeFormat(format, datetime, std.time.timestamp()) orelse return .{ .bool = false };
     const obj = try ctx.createObject(class_name);
-    try obj.set(ctx.allocator, "timestamp", .{ .int = ts });
+    try obj.set(ctx.allocator, "timestamp", .{ .int = res.ts });
+    if (res.tz_offset_seconds) |off| {
+        const sign: u8 = if (off < 0) '-' else '+';
+        const abs: u32 = @intCast(if (off < 0) -off else off);
+        const hh = abs / 3600;
+        const mm = (abs % 3600) / 60;
+        const tz_name = try std.fmt.allocPrint(ctx.allocator, "{c}{d:0>2}:{d:0>2}", .{ sign, hh, mm });
+        try ctx.strings.append(ctx.allocator, tz_name);
+        try obj.set(ctx.allocator, "__timezone", .{ .string = tz_name });
+    }
     return .{ .object = obj };
 }
+
+const ParsedDateTime = struct { ts: i64, tz_offset_seconds: ?i32 };
 
 // PHP createFromFormat parser. Supports the common specifiers: Y y m n M F d j D l
 // H G h g i s U a A e T P O Z, plus literal escape (\X) and reset markers (! and |).
 // Returns null on parse failure (caller maps to PHP `false`).
-fn parseDateTimeFormat(format: []const u8, datetime: []const u8, now: i64) ?i64 {
+fn parseDateTimeFormat(format: []const u8, datetime: []const u8, now: i64) ?ParsedDateTime {
     const ncomps = baseComponents(now);
     var year: i64 = ncomps.year;
     var month: i64 = ncomps.month;
@@ -1213,6 +1224,7 @@ fn parseDateTimeFormat(format: []const u8, datetime: []const u8, now: i64) ?i64 
     var sec: i64 = ncomps.sec;
     var u_ts: ?i64 = null;
     var tz_offset: i64 = 0;
+    var tz_parsed: bool = false;
     var is_pm: ?bool = null;
     var hour_is_12: bool = false;
 
@@ -1391,6 +1403,7 @@ fn parseDateTimeFormat(format: []const u8, datetime: []const u8, now: i64) ?i64 
                     di += 2;
                 }
                 tz_offset = sign * (hh * 3600 + mm * 60);
+                tz_parsed = true;
             },
             'Z' => {
                 const start = di;
@@ -1398,6 +1411,7 @@ fn parseDateTimeFormat(format: []const u8, datetime: []const u8, now: i64) ?i64 
                 while (di < datetime.len and datetime[di] >= '0' and datetime[di] <= '9') : (di += 1) {}
                 if (di == start or (di == start + 1 and !isDigit(datetime[start]))) return null;
                 tz_offset = std.fmt.parseInt(i64, datetime[start..di], 10) catch return null;
+                tz_parsed = true;
             },
             ' ' => {
                 while (di < datetime.len and datetime[di] == ' ') di += 1;
@@ -1409,7 +1423,9 @@ fn parseDateTimeFormat(format: []const u8, datetime: []const u8, now: i64) ?i64 
         }
     }
 
-    if (u_ts) |ts| return ts - tz_offset;
+    const parsed_off: ?i32 = if (tz_parsed) @intCast(tz_offset) else null;
+
+    if (u_ts) |ts| return .{ .ts = ts - tz_offset, .tz_offset_seconds = parsed_off };
 
     if (hour_is_12) {
         if (is_pm) |pm| {
@@ -1418,7 +1434,16 @@ fn parseDateTimeFormat(format: []const u8, datetime: []const u8, now: i64) ?i64 
         }
     }
 
-    return dateToTimestamp(year, month, day, hour, min, sec) - tz_offset;
+    // PHP zeroes unset time components when ANY time component is parsed.
+    // Without this, an "Y-m-d H:i" format would leave seconds at current time.
+    const any_time_parsed = parsed_hour or parsed_min or parsed_sec;
+    if (any_time_parsed) {
+        if (!parsed_hour) hour = 0;
+        if (!parsed_min) min = 0;
+        if (!parsed_sec) sec = 0;
+    }
+
+    return .{ .ts = dateToTimestamp(year, month, day, hour, min, sec) - tz_offset, .tz_offset_seconds = parsed_off };
 }
 
 fn isDigit(c: u8) bool { return c >= '0' and c <= '9'; }
