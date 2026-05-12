@@ -370,6 +370,11 @@ pub const VM = struct {
     statics: std.StringHashMapUnmanaged(Value) = .{},
     statics_cells: std.StringHashMapUnmanaged(*Value) = .{},
     pending_call_name: ?[]const u8 = null,
+    // args slice for invocations driven from native code (callByName-style).
+    // executeFunction consumes this to seed fga_buf so func_get_args inside
+    // the called function sees the real args, not stale data from whatever
+    // last used this frame slot
+    pending_invoke_args: ?[]const Value = null,
     static_vars: std.ArrayListUnmanaged(StaticEntry) = .{},
     global_vars: std.ArrayListUnmanaged(StaticEntry) = .{},
     file_loader: ?*const FileLoader = null,
@@ -7784,6 +7789,7 @@ pub const VM = struct {
         self.frames[self.frame_count] = .{ .chunk = &func.chunk, .ip = 0, .vars = .{}, .locals = locals, .func = func, .call_name = self.pending_call_name };
         self.frames[self.frame_count].entry_sp = self.sp;
         self.consumePendingArgCount();
+        self.saveFrameArgsSlice(args);
         self.pending_call_name = null;
         self.frame_count += 1;
         if (self.frame_count > self.frame_high_water) self.frame_high_water = self.frame_count;
@@ -7816,6 +7822,7 @@ pub const VM = struct {
         try self.writebackGlobals();
         try self.writebackRefs();
         self.frame_count -= 1;
+        self.restoreFrameArgsSp();
         // prune exception handlers that belonged to the popped frame
         while (self.handler_count > self.handler_floor and
             self.exception_handlers[self.handler_count - 1].frame_count > self.frame_count)
@@ -9197,6 +9204,7 @@ pub const VM = struct {
         self.frames[self.frame_count] = .{ .chunk = &func.chunk, .ip = 0, .vars = vars, .locals = try self.allocLocals(func, &vars), .func = func, .call_name = self.pending_call_name };
         self.frames[self.frame_count].entry_sp = self.sp;
         self.consumePendingArgCount();
+        if (self.pending_invoke_args) |pia| self.saveFrameArgsSlice(pia);
         self.pending_call_name = null;
         self.frame_count += 1;
         if (self.frame_count > self.frame_high_water) self.frame_high_water = self.frame_count;
@@ -9222,6 +9230,7 @@ pub const VM = struct {
         self.frames[self.frame_count] = .{ .chunk = &func.chunk, .ip = 0, .vars = vars, .locals = try self.allocLocals(func, &vars), .func = func, .ref_slots = ref_slots, .call_name = self.pending_call_name };
         self.frames[self.frame_count].entry_sp = self.sp;
         self.consumePendingArgCount();
+        if (self.pending_invoke_args) |pia| self.saveFrameArgsSlice(pia);
         self.pending_call_name = null;
         self.frame_count += 1;
         if (self.frame_count > self.frame_high_water) self.frame_high_water = self.frame_count;
@@ -9649,6 +9658,9 @@ pub const VM = struct {
             if (args.len < func.required_params) return error.RuntimeError;
             if (self.ic) |ic| ic.pending_arg_count = @intCast(@min(args.len, 255));
             self.pending_call_name = name;
+            const saved_pia_outer = self.pending_invoke_args;
+            self.pending_invoke_args = args;
+            defer self.pending_invoke_args = saved_pia_outer;
             if (func.locals_only) {
                 if (self.captures.items.len == 0)
                     return self.executeFunctionLocalsOnly(func, args);
@@ -9729,6 +9741,7 @@ pub const VM = struct {
         self.frames[self.frame_count] = .{ .chunk = &func.chunk, .ip = 0, .vars = .{}, .locals = locals, .func = func, .called_class = self.closureScopeByName(name) orelse self.currentFrame().called_class };
         self.frames[self.frame_count].entry_sp = self.sp;
         self.consumePendingArgCount();
+        self.saveFrameArgsSlice(args);
         self.frame_count += 1;
         if (self.frame_count > self.frame_high_water) self.frame_high_water = self.frame_count;
         self.fastLoop() catch |err| {
@@ -9978,11 +9991,35 @@ pub const VM = struct {
             return;
         }
         const sp = ic.fga_sp;
-        if (sp + ac > 256) return;
+        if (sp + ac > ic.fga_buf.len) return;
         ic.fga_offsets[self.frame_count] = sp;
         for (0..ac) |i| {
             ic.fga_buf[sp + i] = self.stack[self.sp - ac + i];
         }
+        ic.fga_sp = @intCast(sp + ac);
+    }
+
+    // saveFrameArgs equivalent for callers that have args in a slice (not on
+    // the value stack). without this, native-driven invocations (e.g. PDO
+    // sqliteCreateFunction callbacks, sort comparators) leave fga_buf with
+    // stale entries from whatever last touched that frame slot, and
+    // func_get_args returns the previous call's args
+    pub fn saveFrameArgsSlice(self: *VM, args: []const Value) void {
+        const ic = self.ic orelse return;
+        if (self.frame_count >= 2048) return;
+        const ac: usize = args.len;
+        if (ac == 0) {
+            ic.fga_offsets[self.frame_count] = ic.fga_sp;
+            return;
+        }
+        const sp = ic.fga_sp;
+        if (sp + ac > ic.fga_buf.len) {
+            // signal "no saved args" by leaving offsets stale; getFrameArgs
+            // will read whatever's there but at least we shouldn't crash
+            return;
+        }
+        ic.fga_offsets[self.frame_count] = sp;
+        for (0..ac) |i| ic.fga_buf[sp + i] = args[i];
         ic.fga_sp = @intCast(sp + ac);
     }
 
@@ -9998,7 +10035,7 @@ pub const VM = struct {
         if (ac_raw == 0xFF) return null;
         const ac: usize = ac_raw;
         const offset: usize = ic.fga_offsets[fc];
-        if (offset + ac > 256) return null;
+        if (offset + ac > ic.fga_buf.len) return null;
         return ic.fga_buf[offset..offset + ac];
     }
 

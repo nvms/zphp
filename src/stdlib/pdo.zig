@@ -258,6 +258,10 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try pdo_def.methods.put(a, "quote", .{ .name = "quote", .arity = 1 });
     try pdo_def.methods.put(a, "inTransaction", .{ .name = "inTransaction", .arity = 0 });
     try pdo_def.methods.put(a, "getAvailableDrivers", .{ .name = "getAvailableDrivers", .arity = 0, .is_static = true });
+    // legacy aliases (PHP exposes these directly on PDO when the driver is sqlite)
+    try pdo_def.methods.put(a, "sqliteCreateFunction", .{ .name = "sqliteCreateFunction", .arity = 2 });
+    try pdo_def.methods.put(a, "sqliteCreateAggregate", .{ .name = "sqliteCreateAggregate", .arity = 3 });
+    try pdo_def.methods.put(a, "sqliteCreateCollation", .{ .name = "sqliteCreateCollation", .arity = 2 });
 
     // PDO constants as static properties
     try pdo_def.static_props.put(a, "FETCH_BOTH", .{ .int = 4 });
@@ -324,6 +328,9 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try vm.native_fns.put(a, "PDO::quote", pdoQuote);
     try vm.native_fns.put(a, "PDO::inTransaction", pdoInTransaction);
     try vm.native_fns.put(a, "PDO::getAvailableDrivers", pdoGetAvailableDrivers);
+    try vm.native_fns.put(a, "PDO::sqliteCreateFunction", pdoSqliteCreateFunction);
+    try vm.native_fns.put(a, "PDO::sqliteCreateAggregate", pdoSqliteCreateAggregate);
+    try vm.native_fns.put(a, "PDO::sqliteCreateCollation", pdoSqliteCreateCollation);
     try vm.native_fns.put(a, "PDO::errorCode", pdoErrorCode);
     try vm.native_fns.put(a, "PDO::prepare", pdoPrepare);
     try vm.native_fns.put(a, "PDO::lastInsertId", pdoLastInsertId);
