@@ -1412,7 +1412,26 @@ const Parser = struct {
             } else if (self.peek() == .kw_const) {
                 try methods.append(self.allocator, try self.parseConstDecl());
             } else {
-                _ = self.advance();
+                // PHP 8.4 interface property hooks: `public T $name { get; }` or
+                // `public T $name { get; set; }`. we accept the syntax for parse
+                // compatibility but don't store the contract since hooks are
+                // already validated at the class level.
+                if (self.isTypeName() or self.peek() == .question) self.skipTypeHint();
+                if (self.peek() == .variable) {
+                    _ = self.advance();
+                    if (self.peek() == .l_brace) {
+                        var depth: u32 = 1;
+                        _ = self.advance();
+                        while (depth > 0 and self.peek() != .eof) : (_ = self.advance()) {
+                            if (self.peek() == .l_brace) depth += 1
+                            else if (self.peek() == .r_brace) depth -= 1;
+                        }
+                    } else if (self.peek() == .semicolon) {
+                        _ = self.advance();
+                    }
+                } else {
+                    _ = self.advance();
+                }
             }
         }
         _ = try self.expect(.r_brace);
