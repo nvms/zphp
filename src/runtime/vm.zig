@@ -6056,6 +6056,17 @@ pub const VM = struct {
             }
             if (self.currentDefiningClass()) |dc| return dc;
         } else if (std.mem.eql(u8, name, "self")) {
+            // self:: from inside a trait static method needs to know WHICH
+            // using-class we were invoked through. called_class on the active
+            // frame carries that (set when X::method() is dispatched).
+            // currentDefiningClass falls back to chunk identity which is
+            // ambiguous when multiple classes share the same trait chunk
+            if (self.currentFrame().called_class) |cc| {
+                if (self.currentDefiningClass()) |dc| {
+                    if (self.traits.contains(dc)) return cc;
+                }
+                return cc;
+            }
             if (self.currentDefiningClass()) |dc| return dc;
         } else if (std.mem.eql(u8, name, "parent")) {
             if (self.parentResolvingClass()) |dc| {

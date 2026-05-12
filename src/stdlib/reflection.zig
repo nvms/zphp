@@ -384,6 +384,8 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try rprop_def.methods.put(a, "getDeclaringClass", .{ .name = "getDeclaringClass", .arity = 0 });
     try rprop_def.methods.put(a, "isDefault", .{ .name = "isDefault", .arity = 0 });
     try rprop_def.methods.put(a, "isReadOnly", .{ .name = "isReadOnly", .arity = 0 });
+    // PHP 8.4 added the lowercase 'isReadonly' alias
+    try rprop_def.methods.put(a, "isReadonly", .{ .name = "isReadonly", .arity = 0 });
     try rprop_def.methods.put(a, "setValue", .{ .name = "setValue", .arity = 2 });
     try rprop_def.methods.put(a, "isStatic", .{ .name = "isStatic", .arity = 0 });
     try rprop_def.methods.put(a, "isPromoted", .{ .name = "isPromoted", .arity = 0 });
@@ -447,6 +449,7 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try vm.native_fns.put(a, "ReflectionProperty::getDeclaringClass", rpropGetDeclaringClass);
     try vm.native_fns.put(a, "ReflectionProperty::isDefault", rpropIsDefault);
     try vm.native_fns.put(a, "ReflectionProperty::isReadOnly", rpropIsReadOnly);
+    try vm.native_fns.put(a, "ReflectionProperty::isReadonly", rpropIsReadOnly);
     try vm.native_fns.put(a, "ReflectionProperty::isStatic", rpropIsStatic);
     try vm.native_fns.put(a, "ReflectionProperty::isPromoted", rpropIsPromoted);
     try vm.native_fns.put(a, "ReflectionProperty::hasType", rpropHasType);
