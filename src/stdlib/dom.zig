@@ -522,6 +522,38 @@ fn domGenericGet(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     return try readProperty(ctx, obj, prop);
 }
 
+fn domGenericSet(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len < 2 or args[0] != .string) return .null;
+    const obj = getThis(ctx) orelse return .null;
+    const node = getNodePtr(obj) orelse return .null;
+    const prop = args[0].string;
+    const val = args[1];
+
+    if (std.mem.eql(u8, prop, "nodeValue") or std.mem.eql(u8, prop, "textContent")) {
+        const s = if (val == .string) val.string else "";
+        const s_z = try dupZ(ctx, s);
+        // wipe existing content and set fresh
+        c.xmlNodeSetContent(node, @ptrCast(s_z.ptr));
+        return .null;
+    }
+    if (std.mem.eql(u8, prop, "data") and (node.type == c.XML_TEXT_NODE or node.type == c.XML_CDATA_SECTION_NODE or node.type == c.XML_COMMENT_NODE)) {
+        const s = if (val == .string) val.string else "";
+        const s_z = try dupZ(ctx, s);
+        c.xmlNodeSetContent(node, @ptrCast(s_z.ptr));
+        return .null;
+    }
+    if (std.mem.eql(u8, prop, "value") and node.type == c.XML_ATTRIBUTE_NODE) {
+        const s = if (val == .string) val.string else "";
+        const s_z = try dupZ(ctx, s);
+        c.xmlNodeSetContent(node, @ptrCast(s_z.ptr));
+        return .null;
+    }
+    // unrecognized property: fall back to stashing in PhpObject (matches the
+    // legacy dynamic-property behavior so tests aren't surprised)
+    try obj.set(ctx.allocator, prop, val);
+    return .null;
+}
+
 fn readProperty(ctx: *NativeContext, obj: *PhpObject, prop: []const u8) RuntimeError!Value {
     // namespace pseudo-nodes are stored as standalone PhpObjects with their
     // prefix+href captured as properties (not via __node, since the underlying
@@ -1402,6 +1434,7 @@ fn registerNodeClass(vm: *VM, a: Allocator) !void {
     try def.methods.put(a, "getNodePath", .{ .name = "getNodePath", .arity = 0 });
     try def.methods.put(a, "getLineNo", .{ .name = "getLineNo", .arity = 0 });
     try def.methods.put(a, "__get", .{ .name = "__get", .arity = 1 });
+    try def.methods.put(a, "__set", .{ .name = "__set", .arity = 2 });
     try vm.classes.put(a, "DOMNode", def);
     try registerNodeNativeFns(vm, a, "DOMNode");
 }
@@ -1424,6 +1457,7 @@ fn registerNodeNativeFns(vm: *VM, a: Allocator, comptime class_name: []const u8)
         .{ "getNodePath", domNodeGetNodePath },
         .{ "getLineNo", domNodeGetLineNo },
         .{ "__get", domGenericGet },
+        .{ "__set", domGenericSet },
     };
     inline for (pairs) |p| {
         try vm.native_fns.put(a, class_name ++ "::" ++ p[0], p[1]);
@@ -1458,6 +1492,7 @@ fn registerElementClass(vm: *VM, a: Allocator) !void {
     try def.methods.put(a, "getNodePath", .{ .name = "getNodePath", .arity = 0 });
     try def.methods.put(a, "getLineNo", .{ .name = "getLineNo", .arity = 0 });
     try def.methods.put(a, "__get", .{ .name = "__get", .arity = 1 });
+    try def.methods.put(a, "__set", .{ .name = "__set", .arity = 2 });
     try vm.classes.put(a, "DOMElement", def);
 
     try vm.native_fns.put(a, "DOMElement::getAttribute", domElementGetAttribute);
@@ -1486,6 +1521,7 @@ fn registerCharacterDataClasses(vm: *VM, a: Allocator) !void {
         try def.methods.put(a, "hasChildNodes", .{ .name = "hasChildNodes", .arity = 0 });
         try def.methods.put(a, "isSameNode", .{ .name = "isSameNode", .arity = 1 });
         try def.methods.put(a, "__get", .{ .name = "__get", .arity = 1 });
+        try def.methods.put(a, "__set", .{ .name = "__set", .arity = 2 });
         try vm.classes.put(a, name, def);
 
         try vm.native_fns.put(a, name ++ "::appendData", domCdAppendData);
@@ -1501,6 +1537,7 @@ fn registerAttrClass(vm: *VM, a: Allocator) !void {
     try def.methods.put(a, "cloneNode", .{ .name = "cloneNode", .arity = 0 });
     try def.methods.put(a, "isSameNode", .{ .name = "isSameNode", .arity = 1 });
     try def.methods.put(a, "__get", .{ .name = "__get", .arity = 1 });
+    try def.methods.put(a, "__set", .{ .name = "__set", .arity = 2 });
     try vm.classes.put(a, "DOMAttr", def);
     try registerNodeNativeFns(vm, a, "DOMAttr");
 }
