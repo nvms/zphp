@@ -40,6 +40,9 @@ pub const entries = .{
     .{ "sinh", native_sinh },
     .{ "cosh", native_cosh },
     .{ "tanh", native_tanh },
+    .{ "asinh", native_asinh },
+    .{ "acosh", native_acosh },
+    .{ "atanh", native_atanh },
     .{ "deg2rad", native_deg2rad },
     .{ "rad2deg", native_rad2deg },
     .{ "hypot", native_hypot },
@@ -428,6 +431,26 @@ fn native_tanh(_: *NativeContext, args: []const Value) RuntimeError!Value {
     const ex = @exp(x);
     const enx = @exp(-x);
     return .{ .float = (ex - enx) / (ex + enx) };
+}
+
+fn native_asinh(_: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len == 0) return .{ .float = 0.0 };
+    const x = Value.toFloat(args[0]);
+    return .{ .float = @log(x + @sqrt(x * x + 1.0)) };
+}
+
+fn native_acosh(_: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len == 0) return .{ .float = 0.0 };
+    const x = Value.toFloat(args[0]);
+    if (x < 1.0) return .{ .float = std.math.nan(f64) };
+    return .{ .float = @log(x + @sqrt(x * x - 1.0)) };
+}
+
+fn native_atanh(_: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len == 0) return .{ .float = 0.0 };
+    const x = Value.toFloat(args[0]);
+    if (x <= -1.0 or x >= 1.0) return .{ .float = if (x == 1.0) std.math.inf(f64) else if (x == -1.0) -std.math.inf(f64) else std.math.nan(f64) };
+    return .{ .float = 0.5 * @log((1.0 + x) / (1.0 - x)) };
 }
 
 fn native_deg2rad(_: *NativeContext, args: []const Value) RuntimeError!Value {
