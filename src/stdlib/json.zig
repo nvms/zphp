@@ -131,6 +131,10 @@ fn encodeValue(buf: *std.ArrayListUnmanaged(u8), a: std.mem.Allocator, val: Valu
             }
         },
         .string => |s| {
+            if (std.mem.startsWith(u8, s, "__closure_")) {
+                try buf.appendSlice(a, "{}");
+                return;
+            }
             if ((flags & JSON_NUMERIC_CHECK) != 0 and s.len > 0) {
                 if (std.fmt.parseInt(i64, s, 10)) |int_val| {
                     var tmp: [32]u8 = undefined;
