@@ -618,7 +618,10 @@ fn native_dirname(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
 
 fn native_pathinfo(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len == 0 or args[0] != .string) return .null;
-    const path = args[0].string;
+    // PHP strips trailing slashes from the input before splitting (so
+    // pathinfo("/a/b/") yields dirname=/a, basename=b, matching basename())
+    var path = args[0].string;
+    while (path.len > 1 and path[path.len - 1] == '/') path = path[0 .. path.len - 1];
 
     const dir: []const u8 = if (std.mem.lastIndexOf(u8, path, "/")) |pos|
         (if (pos == 0) "/" else try ctx.createString(path[0..pos]))
