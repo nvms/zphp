@@ -602,12 +602,16 @@ fn openDateFmt(ctx: *NativeContext, locale: []const u8, date_style: i32, time_st
     return f;
 }
 
+fn defaultTzName(ctx: *NativeContext) []const u8 {
+    return ctx.vm.default_tz_name;
+}
+
 fn dfConstruct(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len < 3 or args[0] != .string) return .null;
     const obj = getThis(ctx) orelse return .null;
     const date_style: i32 = if (args[1] == .int) @intCast(args[1].int) else 0;
     const time_style: i32 = if (args[2] == .int) @intCast(args[2].int) else 0;
-    const tz_opt: ?[]const u8 = if (args.len > 3 and args[3] == .string and args[3].string.len > 0) args[3].string else null;
+    const tz_opt: ?[]const u8 = if (args.len > 3 and args[3] == .string and args[3].string.len > 0) args[3].string else defaultTzName(ctx);
     // skip args[4] (calendar) for now
     const pat_opt: ?[]const u8 = if (args.len > 5 and args[5] == .string and args[5].string.len > 0) args[5].string else null;
 
@@ -621,7 +625,7 @@ fn dfCreateStatic(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     const obj = try ctx.createObject("IntlDateFormatter");
     const date_style: i32 = if (args[1] == .int) @intCast(args[1].int) else 0;
     const time_style: i32 = if (args[2] == .int) @intCast(args[2].int) else 0;
-    const tz_opt: ?[]const u8 = if (args.len > 3 and args[3] == .string and args[3].string.len > 0) args[3].string else null;
+    const tz_opt: ?[]const u8 = if (args.len > 3 and args[3] == .string and args[3].string.len > 0) args[3].string else defaultTzName(ctx);
     const pat_opt: ?[]const u8 = if (args.len > 5 and args[5] == .string and args[5].string.len > 0) args[5].string else null;
     const f = (try openDateFmt(ctx, args[0].string, date_style, time_style, tz_opt, pat_opt)) orelse return .null;
     try obj.set(ctx.allocator, "__dfmt", .{ .int = @intCast(@intFromPtr(f)) });
