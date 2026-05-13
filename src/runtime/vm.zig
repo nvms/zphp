@@ -1494,12 +1494,25 @@ pub const VM = struct {
 
     fn runUntilFrame(self: *VM, base_frame: usize) RuntimeError!void {
         if (self.frame_count <= base_frame) return;
-        self.runLoop(base_frame) catch {
+        self.runLoop(base_frame) catch |err| {
             if (self.pending_exception != null) {
                 if (self.dispatchPendingException(self.run_base_frame)) {
                     self.exception_dispatched = true;
                     return;
                 }
+            }
+            // surface the Zig error in error_msg so callers (e.g. require's
+            // catch block) don't replace it with a generic "Failed opening"
+            // message. captures the current function name and IP so the user
+            // gets a real diagnostic instead of a bare RuntimeError
+            if (self.error_msg == null and self.pending_exception == null) {
+                const cur_frame = if (self.frame_count > 0) &self.frames[self.frame_count - 1] else null;
+                const ip: usize = if (cur_frame) |f| f.ip else 0;
+                const func_name: []const u8 = if (cur_frame) |f|
+                    if (f.func) |fn_def| fn_def.name else "<top>"
+                else
+                    "<no frame>";
+                self.setErrorMsg("Fatal error: internal {s} in {s} at ip {d}", .{ @errorName(err), func_name, ip });
             }
             return error.RuntimeError;
         };
