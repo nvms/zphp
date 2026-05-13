@@ -2,8 +2,14 @@
 # serve-mode WP harness: boots both zphp serve and php's built-in server against
 # the same WP install, curls a set of endpoints, and diffs status code and body
 # (after stripping nonces/timestamps). a pass means PHP and zphp agree on what
-# WordPress generated for that request
-set -euo pipefail
+# WordPress generated for that request.
+#
+# KNOWN: zphp's interpreter currently runs the WP SQLite translator ~100x slower
+# than php-cli (24s vs 0.25s to load wp-settings.php). serve-mode requests can
+# exceed the curl timeout below; if every test FAILs with zphp=000 it almost
+# certainly means the worker is still translating the first query rather than
+# crashed. fix is a perf pass on the interpreter, not on this script.
+set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ZPHP="${ZPHP:-$SCRIPT_DIR/../../zig-out/bin/zphp}"
@@ -73,8 +79,11 @@ normalize() {
 
 check_status() {
     local name="$1" path="$2"
-    local zc=$(curl -s -o /dev/null -w '%{http_code}' "http://localhost:$ZPHP_PORT$path" 2>&1 || echo "ERR")
-    local pc=$(curl -s -o /dev/null -w '%{http_code}' "http://localhost:$PHP_PORT$path" 2>&1 || echo "ERR")
+    # zphp's interpreter is currently ~100x slower than PHP on the SQLite
+    # translator that backs the wpdb drop-in, so first-request load (which
+    # boots WP) takes ~30s on a cold cache. allow generous timeouts here
+    local zc=$(curl -s -m 90 -o /dev/null -w '%{http_code}' "http://localhost:$ZPHP_PORT$path" 2>&1 || echo "ERR")
+    local pc=$(curl -s -m 30 -o /dev/null -w '%{http_code}' "http://localhost:$PHP_PORT$path" 2>&1 || echo "ERR")
     if [ "$zc" = "$pc" ]; then
         passed=$((passed + 1))
         echo "  pass  $name (status=$zc)"
@@ -87,7 +96,7 @@ check_status() {
 
 check_body_contains() {
     local name="$1" path="$2" needle="$3"
-    local zb=$(curl -s "http://localhost:$ZPHP_PORT$path" 2>&1)
+    local zb=$(curl -s -m 90 "http://localhost:$ZPHP_PORT$path" 2>&1)
     if echo "$zb" | grep -qF "$needle"; then
         passed=$((passed + 1))
         echo "  pass  $name (contains '$needle')"
