@@ -62,6 +62,7 @@ pub const entries = .{
     .{ "iconv", native_iconv },
     .{ "iconv_strlen", native_mb_strlen },
     .{ "iconv_strpos", native_mb_strpos },
+    .{ "iconv_strrpos", native_mb_strrpos },
     .{ "iconv_substr", native_mb_substr },
     .{ "mb_strpos", native_mb_strpos },
     .{ "mb_strrpos", native_mb_strrpos },
@@ -2686,9 +2687,43 @@ fn native_iconv(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len < 3 or args[0] != .string or args[1] != .string or args[2] != .string) return .{ .bool = false };
     const from = args[0].string;
     const to_raw = args[1].string;
-    // iconv supports "//IGNORE" / "//TRANSLIT" suffixes; strip them
+    // iconv supports "//IGNORE" and "//TRANSLIT" suffixes after the target
+    // encoding. IGNORE drops un-convertible chars instead of substituting
+    // with '?'; TRANSLIT does a best-effort replacement (currently mapped
+    // to IGNORE since the full transliteration tables aren't shipped here)
     var to = to_raw;
-    if (std.mem.indexOf(u8, to_raw, "//")) |sep| to = to_raw[0..sep];
+    var ignore = false;
+    var translit = false;
+    if (std.mem.indexOf(u8, to_raw, "//")) |sep| {
+        to = to_raw[0..sep];
+        const suffix = to_raw[sep + 2 ..];
+        if (std.mem.indexOf(u8, suffix, "IGNORE") != null) ignore = true;
+        if (std.mem.indexOf(u8, suffix, "TRANSLIT") != null) translit = true;
+    }
+
+    // fast path for IGNORE/TRANSLIT when going to ASCII: drop non-ASCII bytes
+    // directly so callers don't get the '?' substitutions
+    if ((ignore or translit) and isAsciiEncoding(to) and (isUtf8Encoding(from) or isLatin1Encoding(from))) {
+        const input = args[2].string;
+        var out = std.ArrayListUnmanaged(u8){};
+        errdefer out.deinit(ctx.allocator);
+        var i: usize = 0;
+        while (i < input.len) {
+            const b = input[i];
+            if (b < 0x80) {
+                try out.append(ctx.allocator, b);
+                i += 1;
+            } else if (isUtf8Encoding(from)) {
+                i += utf8CharLen(b);
+            } else {
+                i += 1;
+            }
+        }
+        const owned = try out.toOwnedSlice(ctx.allocator);
+        try ctx.strings.append(ctx.allocator, owned);
+        return .{ .string = owned };
+    }
+
     const args2 = [_]Value{ args[2], .{ .string = to }, .{ .string = from } };
     return try native_mb_convert_encoding(ctx, &args2);
 }
