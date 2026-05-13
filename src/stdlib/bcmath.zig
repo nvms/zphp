@@ -824,6 +824,193 @@ fn bcScale(_: *NativeContext, args: []const Value) RuntimeError!Value {
     return .{ .int = @intCast(prev) };
 }
 
+// ---------------- ceil / floor / round (PHP 8.4) ----------------
+
+const NumParts = struct { neg: bool, int_part: []const u8, frac_part: []const u8 };
+
+fn splitNumber(s: []const u8) NumParts {
+    var i: usize = 0;
+    var neg = false;
+    if (i < s.len and (s[i] == '+' or s[i] == '-')) {
+        neg = s[i] == '-';
+        i += 1;
+    }
+    const int_start = i;
+    while (i < s.len and s[i] >= '0' and s[i] <= '9') i += 1;
+    const int_part = if (i > int_start) s[int_start..i] else "0";
+    var frac: []const u8 = "";
+    if (i < s.len and s[i] == '.') {
+        i += 1;
+        const frac_start = i;
+        while (i < s.len and s[i] >= '0' and s[i] <= '9') i += 1;
+        frac = s[frac_start..i];
+    }
+    return .{ .neg = neg, .int_part = int_part, .frac_part = frac };
+}
+
+fn fracNonZero(frac: []const u8) bool {
+    for (frac) |c| if (c != '0') return true;
+    return false;
+}
+
+fn incrementDigits(allocator: Allocator, digits: []const u8) ![]u8 {
+    // returns digits + 1, may grow by one (e.g. "999" -> "1000")
+    var buf = try allocator.alloc(u8, digits.len + 1);
+    @memcpy(buf[1..], digits);
+    buf[0] = '0';
+    var i: usize = buf.len;
+    var carry: u8 = 1;
+    while (i > 0 and carry > 0) : (i -= 1) {
+        const v = (buf[i - 1] - '0') + carry;
+        buf[i - 1] = '0' + (v % 10);
+        carry = v / 10;
+    }
+    if (buf[0] == '0') {
+        const out = try allocator.alloc(u8, buf.len - 1);
+        @memcpy(out, buf[1..]);
+        allocator.free(buf);
+        return out;
+    }
+    return buf;
+}
+
+fn signedResult(allocator: Allocator, neg: bool, digits: []const u8) ![]u8 {
+    // strip leading zeros from the integer portion, but keep at least one and
+    // never eat the zero before a decimal point (so "0.50" stays as-is)
+    var start: usize = 0;
+    const dot = std.mem.indexOfScalar(u8, digits, '.') orelse digits.len;
+    while (start + 1 < dot and digits[start] == '0') start += 1;
+    const body = digits[start..];
+    const is_zero = blk: {
+        for (body) |c| if (c != '0' and c != '.') break :blk false;
+        break :blk true;
+    };
+    if (neg and !is_zero) {
+        const out = try allocator.alloc(u8, body.len + 1);
+        out[0] = '-';
+        @memcpy(out[1..], body);
+        return out;
+    }
+    return try allocator.dupe(u8, body);
+}
+
+fn bcCeil(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    const s = argToString(args, 0) orelse return .null;
+    const p = splitNumber(s);
+    const has_frac = fracNonZero(p.frac_part);
+    var result: []u8 = undefined;
+    if (!has_frac) {
+        result = try signedResult(ctx.allocator, p.neg, p.int_part);
+    } else if (p.neg) {
+        // negative number rounding toward +inf: drop the fraction
+        result = try signedResult(ctx.allocator, true, p.int_part);
+    } else {
+        const inc = try incrementDigits(ctx.allocator, p.int_part);
+        defer ctx.allocator.free(inc);
+        result = try signedResult(ctx.allocator, false, inc);
+    }
+    defer ctx.allocator.free(result);
+    return try returnStr(ctx, result);
+}
+
+fn bcFloor(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    const s = argToString(args, 0) orelse return .null;
+    const p = splitNumber(s);
+    const has_frac = fracNonZero(p.frac_part);
+    var result: []u8 = undefined;
+    if (!has_frac) {
+        result = try signedResult(ctx.allocator, p.neg, p.int_part);
+    } else if (!p.neg) {
+        result = try signedResult(ctx.allocator, false, p.int_part);
+    } else {
+        const inc = try incrementDigits(ctx.allocator, p.int_part);
+        defer ctx.allocator.free(inc);
+        result = try signedResult(ctx.allocator, true, inc);
+    }
+    defer ctx.allocator.free(result);
+    return try returnStr(ctx, result);
+}
+
+fn bcRound(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    const s = argToString(args, 0) orelse return .null;
+    const precision: i64 = if (args.len > 1 and args[1] == .int) args[1].int else 0;
+    const p = splitNumber(s);
+
+    // build combined digit stream (int_part ++ frac_part) and remember the
+    // decimal position. the result keeps `precision` digits after the point.
+    // half-away-from-zero rounding: inspect the digit immediately past the cut
+    var combined_buf: std.ArrayListUnmanaged(u8) = .{};
+    defer combined_buf.deinit(ctx.allocator);
+    try combined_buf.appendSlice(ctx.allocator, p.int_part);
+    try combined_buf.appendSlice(ctx.allocator, p.frac_part);
+
+    const dec_pos: i64 = @intCast(p.int_part.len);
+    const want_len: i64 = dec_pos + precision;
+
+    var result_buf: std.ArrayListUnmanaged(u8) = .{};
+    defer result_buf.deinit(ctx.allocator);
+
+    if (want_len <= 0) {
+        // result is "0" with precision decimal places, plus possibly a carry
+        // from the leading digit of combined
+        var rounded_zero = true;
+        if (combined_buf.items.len > 0) {
+            const cut_idx: i64 = want_len;
+            // first kept digit is at position want_len-1; round digit is at want_len
+            // if want_len <= 0, we look at combined_buf[0] essentially
+            if (cut_idx < @as(i64, @intCast(combined_buf.items.len))) {
+                const idx: usize = if (cut_idx < 0) 0 else @intCast(cut_idx);
+                if (idx < combined_buf.items.len and combined_buf.items[idx] >= '5') {
+                    rounded_zero = false;
+                }
+            }
+        }
+        if (rounded_zero or want_len < 0) {
+            try result_buf.append(ctx.allocator, '0');
+            if (precision > 0) {
+                try result_buf.append(ctx.allocator, '.');
+                for (0..@intCast(precision)) |_| try result_buf.append(ctx.allocator, '0');
+            }
+        } else {
+            // 0.5 rounded with precision=0 -> 1
+            try result_buf.append(ctx.allocator, '1');
+            if (precision > 0) {
+                try result_buf.append(ctx.allocator, '.');
+                for (0..@intCast(precision)) |_| try result_buf.append(ctx.allocator, '0');
+            }
+        }
+    } else {
+        const cut_u: usize = @intCast(want_len);
+        var kept = try ctx.allocator.alloc(u8, cut_u);
+        defer ctx.allocator.free(kept);
+        for (0..cut_u) |i| kept[i] = if (i < combined_buf.items.len) combined_buf.items[i] else '0';
+        var round_up = false;
+        if (cut_u < combined_buf.items.len and combined_buf.items[cut_u] >= '5') round_up = true;
+        if (round_up) {
+            const inc = try incrementDigits(ctx.allocator, kept);
+            defer ctx.allocator.free(inc);
+            const new_int_len = @as(i64, @intCast(inc.len)) - precision;
+            const ni: usize = @intCast(@max(@as(i64, 1), new_int_len));
+            try result_buf.appendSlice(ctx.allocator, inc[0..ni]);
+            if (precision > 0) {
+                try result_buf.append(ctx.allocator, '.');
+                try result_buf.appendSlice(ctx.allocator, inc[ni..]);
+            }
+        } else {
+            const int_keep_len: usize = @intCast(dec_pos);
+            try result_buf.appendSlice(ctx.allocator, kept[0..int_keep_len]);
+            if (precision > 0) {
+                try result_buf.append(ctx.allocator, '.');
+                try result_buf.appendSlice(ctx.allocator, kept[int_keep_len..]);
+            }
+        }
+    }
+
+    const out = try signedResult(ctx.allocator, p.neg, result_buf.items);
+    defer ctx.allocator.free(out);
+    return try returnStr(ctx, out);
+}
+
 // ---------------- registration ----------------
 
 pub const entries = .{
@@ -837,4 +1024,7 @@ pub const entries = .{
     .{ "bcsqrt", bcSqrt },
     .{ "bccomp", bcComp },
     .{ "bcscale", bcScale },
+    .{ "bcceil", bcCeil },
+    .{ "bcfloor", bcFloor },
+    .{ "bcround", bcRound },
 };
