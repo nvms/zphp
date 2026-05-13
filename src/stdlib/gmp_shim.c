@@ -85,6 +85,8 @@ int zphp_mpz_testbit(const zphp_mpz* a, unsigned long bit) { return mpz_tstbit(a
 void zphp_mpz_setbit(zphp_mpz* a, unsigned long bit) { mpz_setbit(a->v, bit); }
 void zphp_mpz_clrbit(zphp_mpz* a, unsigned long bit) { mpz_clrbit(a->v, bit); }
 unsigned long zphp_mpz_popcount(const zphp_mpz* a) { return mpz_popcount(a->v); }
+unsigned long zphp_mpz_scan0(const zphp_mpz* a, unsigned long start) { return mpz_scan0(a->v, start); }
+unsigned long zphp_mpz_scan1(const zphp_mpz* a, unsigned long start) { return mpz_scan1(a->v, start); }
 int zphp_mpz_legendre(const zphp_mpz* a, const zphp_mpz* p) { return mpz_legendre(a->v, p->v); }
 int zphp_mpz_jacobi(const zphp_mpz* a, const zphp_mpz* b) { return mpz_jacobi(a->v, b->v); }
 int zphp_mpz_perfect_square_p(const zphp_mpz* a) { return mpz_perfect_square_p(a->v); }

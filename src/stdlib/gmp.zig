@@ -51,6 +51,8 @@ extern fn zphp_mpz_testbit(a: *const ZphpMpz, bit: c_ulong) c_int;
 extern fn zphp_mpz_setbit(a: *ZphpMpz, bit: c_ulong) void;
 extern fn zphp_mpz_clrbit(a: *ZphpMpz, bit: c_ulong) void;
 extern fn zphp_mpz_popcount(a: *const ZphpMpz) c_ulong;
+extern fn zphp_mpz_scan0(a: *const ZphpMpz, start: c_ulong) c_ulong;
+extern fn zphp_mpz_scan1(a: *const ZphpMpz, start: c_ulong) c_ulong;
 extern fn zphp_mpz_legendre(a: *const ZphpMpz, p: *const ZphpMpz) c_int;
 extern fn zphp_mpz_jacobi(a: *const ZphpMpz, b: *const ZphpMpz) c_int;
 extern fn zphp_mpz_perfect_square_p(a: *const ZphpMpz) c_int;
@@ -141,9 +143,18 @@ fn gmpInit(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len < 1) return .{ .bool = false };
     const obj = try createGmpObj(ctx);
     const dst = getMpz(obj).?;
+
+    // explicit base via second arg (PHP signature: gmp_init($num, $base = 0))
+    // 0 = autodetect from prefix, 2..62 = explicit base
+    if (args[0] == .string and args.len >= 2 and args[1] == .int) {
+        const base: c_int = @intCast(args[1].int);
+        const z = try dupZ(ctx, args[0].string);
+        if (zphp_mpz_set_str(dst, z.ptr, base) != 0) return .{ .bool = false };
+        return .{ .object = obj };
+    }
+
     const src = (try coerceArgToMpz(ctx, args[0])) orelse return .{ .bool = false };
     defer zphp_mpz_destroy(src);
-    // copy src into dst via add with zero
     const zero = zphp_mpz_create() orelse return error.OutOfMemory;
     defer zphp_mpz_destroy(zero);
     zphp_mpz_add(dst, src, zero);
@@ -357,6 +368,25 @@ fn gmpPopcount(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     return .{ .int = @intCast(zphp_mpz_popcount(a)) };
 }
 
+fn gmpScan0(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len < 2 or args[1] != .int) return .{ .int = -1 };
+    const a = (try coerceArgToMpz(ctx, args[0])) orelse return .{ .int = -1 };
+    defer zphp_mpz_destroy(a);
+    const r = zphp_mpz_scan0(a, @intCast(@max(args[1].int, 0)));
+    // GMP returns ULONG_MAX when no zero bit is found; map to -1 like PHP
+    if (r == std.math.maxInt(c_ulong)) return .{ .int = -1 };
+    return .{ .int = @intCast(r) };
+}
+
+fn gmpScan1(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len < 2 or args[1] != .int) return .{ .int = -1 };
+    const a = (try coerceArgToMpz(ctx, args[0])) orelse return .{ .int = -1 };
+    defer zphp_mpz_destroy(a);
+    const r = zphp_mpz_scan1(a, @intCast(@max(args[1].int, 0)));
+    if (r == std.math.maxInt(c_ulong)) return .{ .int = -1 };
+    return .{ .int = @intCast(r) };
+}
+
 fn gmpHamdist(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len < 2) return .{ .int = 0 };
     const a = (try coerceArgToMpz(ctx, args[0])) orelse return .{ .int = 0 };
@@ -439,6 +469,8 @@ pub const entries = .{
     .{ "gmp_clrbit", gmpClrbit },
     .{ "gmp_testbit", gmpTestbit },
     .{ "gmp_popcount", gmpPopcount },
+    .{ "gmp_scan0", gmpScan0 },
+    .{ "gmp_scan1", gmpScan1 },
     .{ "gmp_hamdist", gmpHamdist },
     .{ "gmp_legendre", gmpLegendre },
     .{ "gmp_jacobi", gmpJacobi },
