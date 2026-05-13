@@ -273,6 +273,7 @@ const HashAlgo = enum {
     sha3_512,
     crc32,
     crc32b,
+    crc32c,
     xxh32,
     xxh64,
     xxh3,
@@ -297,11 +298,14 @@ const HashAlgo = enum {
         if (std.mem.eql(u8, name, "sha3-384")) return .sha3_384;
         if (std.mem.eql(u8, name, "sha3-512")) return .sha3_512;
         if (std.mem.eql(u8, name, "crc32")) return .crc32;
+        if (std.mem.eql(u8, name, "crc32c")) return .crc32c;
         if (std.mem.eql(u8, name, "crc32b")) return .crc32b;
         if (std.mem.eql(u8, name, "xxh32")) return .xxh32;
         if (std.mem.eql(u8, name, "xxh64")) return .xxh64;
         if (std.mem.eql(u8, name, "xxh3")) return .xxh3;
-        if (std.mem.eql(u8, name, "xxh128")) return .xxh128;
+        // xxh128 isn't implemented; reject so callers get the same "unsupported
+        // algorithm" path PHP gives for an unknown name rather than a silently
+        // wrong digest (the previous code returned the first 16 bytes of sha256)
         if (std.mem.eql(u8, name, "adler32")) return .adler32;
         if (std.mem.eql(u8, name, "fnv132")) return .fnv132;
         if (std.mem.eql(u8, name, "fnv1a32")) return .fnv1a32;
@@ -318,7 +322,7 @@ const HashAlgo = enum {
             .sha256, .sha3_256, .sha512_256 => 32,
             .sha384, .sha3_384 => 48,
             .sha512, .sha3_512 => 64,
-            .crc32, .crc32b, .xxh32, .adler32, .fnv132, .fnv1a32 => 4,
+            .crc32, .crc32b, .crc32c, .xxh32, .adler32, .fnv132, .fnv1a32 => 4,
             .xxh64, .xxh3, .fnv164, .fnv1a64 => 8,
             .xxh128 => 16,
         };
@@ -349,6 +353,13 @@ fn computeHash(algo: HashAlgo, data: []const u8, out: []u8) void {
         },
         .crc32b => {
             const c = std.hash.crc.Crc32IsoHdlc.hash(data);
+            out[0] = @intCast((c >> 24) & 0xff);
+            out[1] = @intCast((c >> 16) & 0xff);
+            out[2] = @intCast((c >> 8) & 0xff);
+            out[3] = @intCast(c & 0xff);
+        },
+        .crc32c => {
+            const c = std.hash.crc.Crc32Iscsi.hash(data);
             out[0] = @intCast((c >> 24) & 0xff);
             out[1] = @intCast((c >> 16) & 0xff);
             out[2] = @intCast((c >> 8) & 0xff);
@@ -439,7 +450,7 @@ fn computeHmac(algo: HashAlgo, data: []const u8, key: []const u8, out: []u8) voi
         .sha512 => std.crypto.auth.hmac.sha2.HmacSha512.create(out[0..64], data, key),
         // hmac is only defined for proper cryptographic hashes; for unsupported
         // hmac variants we fall back to plain hashing of the data
-        .sha224, .sha512_224, .sha512_256, .sha3_224, .sha3_256, .sha3_384, .sha3_512, .crc32, .crc32b, .xxh32, .xxh64, .xxh3, .xxh128, .adler32, .fnv132, .fnv1a32, .fnv164, .fnv1a64 => computeHash(algo, data, out),
+        .sha224, .sha512_224, .sha512_256, .sha3_224, .sha3_256, .sha3_384, .sha3_512, .crc32, .crc32b, .crc32c, .xxh32, .xxh64, .xxh3, .xxh128, .adler32, .fnv132, .fnv1a32, .fnv164, .fnv1a64 => computeHash(algo, data, out),
     }
 }
 
@@ -541,7 +552,7 @@ fn native_hash_hkdf(ctx: *NativeContext, args: []const Value) RuntimeError!Value
 
 fn native_hash_algos(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
     var arr = try ctx.createArray();
-    const algos = [_][]const u8{ "md5", "sha1", "sha224", "sha256", "sha384", "sha512", "sha3-224", "sha3-256", "sha3-384", "sha3-512", "crc32", "crc32b", "xxh32", "xxh64", "xxh3", "xxh128", "adler32", "fnv132", "fnv1a32", "fnv164", "fnv1a64" };
+    const algos = [_][]const u8{ "md5", "sha1", "sha224", "sha256", "sha384", "sha512", "sha3-224", "sha3-256", "sha3-384", "sha3-512", "crc32", "crc32b", "crc32c", "xxh32", "xxh64", "xxh3", "adler32", "fnv132", "fnv1a32", "fnv164", "fnv1a64" };
     for (algos) |name| {
         try arr.append(ctx.allocator, .{ .string = name });
     }
