@@ -632,6 +632,113 @@ fn bcPow(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     return try returnStr(ctx, out);
 }
 
+// modular exponentiation: base^exp mod mod. arbitrary precision via the same
+// BcNum primitives bcpow uses, but exp is also a BcNum so it can be larger
+// than i64. PHP truncates fractional bits of all three args.
+fn bcPowmod(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    const sa = argToString(args, 0) orelse return .null;
+    const sb = argToString(args, 1) orelse return .null;
+    const sm = argToString(args, 2) orelse return .null;
+    const scale = resolveScale(args, 3);
+
+    // truncate fractional parts (PHP semantics for bcpowmod)
+    var base = try parseBc(ctx.allocator, sa);
+    base.scale = 0;
+    if (base.digits.items.len > 0) {
+        // keep integer part only
+        const int_digits = base.digits.items.len;
+        _ = int_digits;
+    }
+    defer base.deinit(ctx.allocator);
+    var exp = try parseBc(ctx.allocator, sb);
+    defer exp.deinit(ctx.allocator);
+    var mod = try parseBc(ctx.allocator, sm);
+    defer mod.deinit(ctx.allocator);
+
+    if (mod.isZero()) {
+        try ctx.vm.setPendingException("DivisionByZeroError", "Modulo by zero");
+        return .null;
+    }
+    if (exp.sign < 0) {
+        try ctx.vm.setPendingException("ValueError", "bcpowmod(): Argument #2 ($exponent) must be greater than or equal to 0");
+        return .null;
+    }
+
+    // result = 1
+    var result = try parseBc(ctx.allocator, "1");
+    errdefer result.deinit(ctx.allocator);
+
+    // base = base mod mod (so subsequent multiplies stay bounded)
+    {
+        var q = (try bcDivInternal(ctx.allocator, base, mod, 0)) orelse return .null;
+        defer q.deinit(ctx.allocator);
+        var qm = try bcMulInternal(ctx.allocator, q, mod);
+        defer qm.deinit(ctx.allocator);
+        const new_base = try bcSubInternal(ctx.allocator, base, qm);
+        base.deinit(ctx.allocator);
+        base = new_base;
+    }
+
+    // square-and-multiply with bcnum-sized exponent
+    var two = try parseBc(ctx.allocator, "2");
+    defer two.deinit(ctx.allocator);
+
+    while (!exp.isZero()) {
+        // exp odd? -> last digit % 2 == 1 (digits are decimal; check the
+        // ones place). BcNum digits are stored with integer/fractional split
+        // so the ones-place digit is at index integer_count - 1
+        const odd = blk: {
+            // a BcNum that's all zeros isn't reached (loop exits). check ones digit
+            // by computing exp mod 2
+            var q2 = (try bcDivInternal(ctx.allocator, exp, two, 0)) orelse return .null;
+            defer q2.deinit(ctx.allocator);
+            var qm2 = try bcMulInternal(ctx.allocator, q2, two);
+            defer qm2.deinit(ctx.allocator);
+            var rem = try bcSubInternal(ctx.allocator, exp, qm2);
+            defer rem.deinit(ctx.allocator);
+            break :blk !rem.isZero();
+        };
+
+        if (odd) {
+            var rb = try bcMulInternal(ctx.allocator, result, base);
+            defer rb.deinit(ctx.allocator);
+            var q = (try bcDivInternal(ctx.allocator, rb, mod, 0)) orelse return .null;
+            defer q.deinit(ctx.allocator);
+            var qm = try bcMulInternal(ctx.allocator, q, mod);
+            defer qm.deinit(ctx.allocator);
+            const new_r = try bcSubInternal(ctx.allocator, rb, qm);
+            result.deinit(ctx.allocator);
+            result = new_r;
+        }
+
+        // exp = exp / 2
+        {
+            const new_exp = (try bcDivInternal(ctx.allocator, exp, two, 0)) orelse return .null;
+            exp.deinit(ctx.allocator);
+            exp = new_exp;
+        }
+        if (exp.isZero()) break;
+
+        // base = (base * base) mod mod
+        {
+            var bb = try bcMulInternal(ctx.allocator, base, base);
+            defer bb.deinit(ctx.allocator);
+            var q = (try bcDivInternal(ctx.allocator, bb, mod, 0)) orelse return .null;
+            defer q.deinit(ctx.allocator);
+            var qm = try bcMulInternal(ctx.allocator, q, mod);
+            defer qm.deinit(ctx.allocator);
+            const new_base = try bcSubInternal(ctx.allocator, bb, qm);
+            base.deinit(ctx.allocator);
+            base = new_base;
+        }
+    }
+
+    const out = try formatBc(ctx.allocator, result, scale);
+    defer ctx.allocator.free(out);
+    result.deinit(ctx.allocator);
+    return try returnStr(ctx, out);
+}
+
 fn bcSqrt(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     const sa = argToString(args, 0) orelse return .null;
     const scale = resolveScale(args, 1);
@@ -726,6 +833,7 @@ pub const entries = .{
     .{ "bcdiv", bcDiv },
     .{ "bcmod", bcMod },
     .{ "bcpow", bcPow },
+    .{ "bcpowmod", bcPowmod },
     .{ "bcsqrt", bcSqrt },
     .{ "bccomp", bcComp },
     .{ "bcscale", bcScale },
