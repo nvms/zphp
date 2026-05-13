@@ -22,6 +22,7 @@ pub const entries = .{
     .{ "str_starts_with", str_starts_with },
     .{ "str_ends_with", str_ends_with },
     .{ "str_repeat", str_repeat },
+    .{ "str_shuffle", str_shuffle },
     .{ "ucfirst", ucfirst },
     .{ "lcfirst", lcfirst },
     .{ "str_pad", str_pad },
@@ -417,6 +418,25 @@ fn str_ends_with(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     const haystack = try coerceToString(ctx, args[0]);
     const needle = try coerceToString(ctx, args[1]);
     return .{ .bool = std.mem.endsWith(u8, haystack, needle) };
+}
+
+fn str_shuffle(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len == 0) return .{ .string = "" };
+    const s = try coerceToString(ctx, args[0]);
+    if (s.len <= 1) return .{ .string = s };
+    const buf = try ctx.allocator.alloc(u8, s.len);
+    @memcpy(buf, s);
+    // Fisher-Yates with the default PRNG
+    var prng = std.Random.DefaultPrng.init(@bitCast(std.time.timestamp()));
+    var i: usize = buf.len - 1;
+    while (i > 0) : (i -= 1) {
+        const j = prng.random().intRangeAtMost(usize, 0, i);
+        const tmp = buf[i];
+        buf[i] = buf[j];
+        buf[j] = tmp;
+    }
+    try ctx.strings.append(ctx.allocator, buf);
+    return .{ .string = buf };
 }
 
 fn str_repeat(ctx: *NativeContext, args: []const Value) RuntimeError!Value {

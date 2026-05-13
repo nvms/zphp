@@ -37,23 +37,52 @@ pub fn register(vm: *VM, a: Allocator) !void {
     // and the wrapper Randomizer just ignores the engine and uses crypto rand
     var mt = ClassDef{ .name = "Random\\Engine\\Mt19937" };
     try mt.methods.put(a, "__construct", .{ .name = "__construct", .arity = 2 });
+    try mt.methods.put(a, "generate", .{ .name = "generate", .arity = 0 });
     try vm.classes.put(a, "Random\\Engine\\Mt19937", mt);
     try vm.native_fns.put(a, "Random\\Engine\\Mt19937::__construct", engineConstruct);
+    try vm.native_fns.put(a, "Random\\Engine\\Mt19937::generate", engineGenerate);
 
     var pcg = ClassDef{ .name = "Random\\Engine\\PcgOneseq128XslRr64" };
     try pcg.methods.put(a, "__construct", .{ .name = "__construct", .arity = 1 });
+    try pcg.methods.put(a, "generate", .{ .name = "generate", .arity = 0 });
     try vm.classes.put(a, "Random\\Engine\\PcgOneseq128XslRr64", pcg);
     try vm.native_fns.put(a, "Random\\Engine\\PcgOneseq128XslRr64::__construct", engineConstruct);
+    try vm.native_fns.put(a, "Random\\Engine\\PcgOneseq128XslRr64::generate", engineGenerate);
 
     var xosh = ClassDef{ .name = "Random\\Engine\\Xoshiro256StarStar" };
     try xosh.methods.put(a, "__construct", .{ .name = "__construct", .arity = 1 });
+    try xosh.methods.put(a, "generate", .{ .name = "generate", .arity = 0 });
     try vm.classes.put(a, "Random\\Engine\\Xoshiro256StarStar", xosh);
     try vm.native_fns.put(a, "Random\\Engine\\Xoshiro256StarStar::__construct", engineConstruct);
+    try vm.native_fns.put(a, "Random\\Engine\\Xoshiro256StarStar::generate", engineGenerate);
 
     var secure = ClassDef{ .name = "Random\\Engine\\Secure" };
     try secure.methods.put(a, "__construct", .{ .name = "__construct", .arity = 0 });
+    try secure.methods.put(a, "generate", .{ .name = "generate", .arity = 0 });
     try vm.classes.put(a, "Random\\Engine\\Secure", secure);
     try vm.native_fns.put(a, "Random\\Engine\\Secure::__construct", noopConstruct);
+    try vm.native_fns.put(a, "Random\\Engine\\Secure::generate", engineGenerateSecure);
+}
+
+// Random\Engine\*::generate(): string. returns 8 raw bytes from the engine's
+// PRNG (PHP's contract; the Randomizer wrapper consumes this raw output)
+fn engineGenerate(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const this = getThis(ctx) orelse return .null;
+    var prng = loadPrngFromEngine(this) orelse return .null;
+    var bytes: [8]u8 = undefined;
+    prng.random().bytes(&bytes);
+    try savePrngToEngine(ctx, this, &prng);
+    const owned = try ctx.allocator.dupe(u8, &bytes);
+    try ctx.vm.strings.append(ctx.allocator, owned);
+    return .{ .string = owned };
+}
+
+fn engineGenerateSecure(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    var bytes: [8]u8 = undefined;
+    std.crypto.random.bytes(&bytes);
+    const owned = try ctx.allocator.dupe(u8, &bytes);
+    try ctx.vm.strings.append(ctx.allocator, owned);
+    return .{ .string = owned };
 }
 
 fn noopConstruct(_: *NativeContext, _: []const Value) RuntimeError!Value {
