@@ -1315,7 +1315,118 @@ pub const entries = .{
     .{ "transliterator_create", transCreateStatic },
     .{ "msgfmt_create", mfCreate },
     .{ "msgfmt_format_message", mfFormatMessage },
+    .{ "grapheme_strlen", graphemeStrlen },
+    .{ "grapheme_substr", graphemeSubstr },
+    .{ "grapheme_strpos", graphemeStrpos },
+    .{ "grapheme_stripos", graphemeStripos },
 };
+
+// count grapheme clusters in a UTF-8 string. uses ICU's character-level
+// BreakIterator and counts boundary crossings
+fn graphemeStrlen(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len == 0 or args[0] != .string) return .{ .bool = false };
+    const s = args[0].string;
+    const w = (try openBrk(ctx, 0, "")) orelse return .{ .bool = false };
+    defer zphp_ubrk_close(w);
+    var status: UErrorCode = U_ZERO_ERROR;
+    zphp_ubrk_setText(w, s.ptr, @intCast(s.len), &status);
+    if (status > U_ZERO_ERROR) return .{ .bool = false };
+    var count: i64 = 0;
+    _ = zphp_ubrk_first(w);
+    while (zphp_ubrk_next(w) != -1) count += 1;
+    return .{ .int = count };
+}
+
+// grapheme-aware substring. start and length are in grapheme units.
+fn graphemeSubstr(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len < 2 or args[0] != .string) return .{ .bool = false };
+    const s = args[0].string;
+    const start: i64 = Value.toInt(args[1]);
+    const length_arg: ?i64 = if (args.len >= 3 and args[2] != .null) Value.toInt(args[2]) else null;
+
+    const w = (try openBrk(ctx, 0, "")) orelse return .{ .bool = false };
+    defer zphp_ubrk_close(w);
+    var status: UErrorCode = U_ZERO_ERROR;
+    zphp_ubrk_setText(w, s.ptr, @intCast(s.len), &status);
+    if (status > U_ZERO_ERROR) return .{ .bool = false };
+
+    // collect grapheme byte offsets
+    var offsets = std.ArrayListUnmanaged(i32){};
+    defer offsets.deinit(ctx.allocator);
+    var pos = zphp_ubrk_first(w);
+    while (pos != -1) : (pos = zphp_ubrk_next(w)) {
+        try offsets.append(ctx.allocator, pos);
+    }
+    const n: i64 = @intCast(offsets.items.len -| 1);
+    var s_idx: i64 = start;
+    if (s_idx < 0) s_idx = @max(0, n + s_idx);
+    if (s_idx > n) return .{ .bool = false };
+    const start_byte: usize = @intCast(offsets.items[@intCast(s_idx)]);
+
+    var end_byte: usize = s.len;
+    if (length_arg) |lv| {
+        const l = lv;
+        if (l < 0) {
+            const end_idx = @max(0, n + l);
+            end_byte = @intCast(offsets.items[@intCast(end_idx)]);
+        } else {
+            const end_idx = @min(n, s_idx + l);
+            end_byte = @intCast(offsets.items[@intCast(end_idx)]);
+        }
+        if (end_byte < start_byte) end_byte = start_byte;
+    }
+
+    return .{ .string = try dupString(ctx, s[start_byte..end_byte]) };
+}
+
+fn graphemeStrposImpl(ctx: *NativeContext, args: []const Value, case_insensitive: bool) !Value {
+    if (args.len < 2 or args[0] != .string or args[1] != .string) return Value{ .bool = false };
+    const haystack = args[0].string;
+    const needle = args[1].string;
+    if (needle.len == 0) return .{ .bool = false };
+
+    var h_search = haystack;
+    var n_search = needle;
+    var h_buf: ?[]u8 = null;
+    var n_buf: ?[]u8 = null;
+    defer if (h_buf) |b| ctx.allocator.free(b);
+    defer if (n_buf) |b| ctx.allocator.free(b);
+    if (case_insensitive) {
+        const hb = try ctx.allocator.alloc(u8, haystack.len);
+        for (haystack, 0..) |c, i| hb[i] = std.ascii.toLower(c);
+        h_buf = hb;
+        h_search = hb;
+        const nb = try ctx.allocator.alloc(u8, needle.len);
+        for (needle, 0..) |c, i| nb[i] = std.ascii.toLower(c);
+        n_buf = nb;
+        n_search = nb;
+    }
+
+    const byte_pos = std.mem.indexOf(u8, h_search, n_search) orelse return Value{ .bool = false };
+
+    // convert byte offset to grapheme offset using BreakIterator on the
+    // ORIGINAL haystack so multi-byte sequences map correctly
+    const w = (try openBrk(ctx, 0, "")) orelse return Value{ .bool = false };
+    defer zphp_ubrk_close(w);
+    var status: UErrorCode = U_ZERO_ERROR;
+    zphp_ubrk_setText(w, haystack.ptr, @intCast(haystack.len), &status);
+    if (status > U_ZERO_ERROR) return .{ .bool = false };
+    var g_idx: i64 = 0;
+    var pos = zphp_ubrk_first(w);
+    while (pos != -1) : (pos = zphp_ubrk_next(w)) {
+        if (pos == @as(i32, @intCast(byte_pos))) return .{ .int = g_idx };
+        g_idx += 1;
+    }
+    return .{ .int = g_idx };
+}
+
+fn graphemeStrpos(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    return graphemeStrposImpl(ctx, args, false);
+}
+
+fn graphemeStripos(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    return graphemeStrposImpl(ctx, args, true);
+}
 
 // procedural shim: accepts a Transliterator instance or an ID string
 fn transliteratorTransliterate(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
