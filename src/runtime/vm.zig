@@ -582,6 +582,20 @@ pub const VM = struct {
         vm.default_tz_name = "UTC";
         try @import("../stdlib/registry.zig").register(&vm.native_fns, allocator);
         try initConstants(&vm.php_constants, allocator);
+        try registerStdlibClasses(vm, allocator);
+        vm.error_reporting_level = 30719;
+        vm.ic = try allocator.create(InlineCache);
+        vm.ic.?.* = .{};
+        const locals_buf = try allocator.alloc(Value, 8192);
+        vm.ic.?.locals_buf = locals_buf.ptr;
+        vm.ic.?.locals_cap = 8192;
+    }
+
+    // stdlib class/interface/trait registration. callable both at VM init time
+    // and after a serve-mode reset (which clears the class table to drop the
+    // user's request-scoped class definitions). idempotent for each stdlib
+    // module since the maps overwrite on duplicate keys
+    fn registerStdlibClasses(vm: *VM, allocator: Allocator) RuntimeError!void {
         try @import("../stdlib/exceptions.zig").register(vm, allocator);
         try @import("../stdlib/datetime.zig").register(vm, allocator);
         try @import("../stdlib/spl.zig").register(vm, allocator);
@@ -603,12 +617,6 @@ pub const VM = struct {
         try @import("../stdlib/gd.zig").register(vm, allocator);
         try @import("../stdlib/soap.zig").register(vm, allocator);
         try @import("../stdlib/mysqli.zig").register(vm, allocator);
-        vm.error_reporting_level = 30719;
-        vm.ic = try allocator.create(InlineCache);
-        vm.ic.?.* = .{};
-        const locals_buf = try allocator.alloc(Value, 8192);
-        vm.ic.?.locals_buf = locals_buf.ptr;
-        vm.ic.?.locals_cap = 8192;
     }
 
     fn initConstants(c: *std.StringHashMapUnmanaged(Value), a: Allocator) !void {
@@ -1406,6 +1414,10 @@ pub const VM = struct {
             self.functions.clearRetainingCapacity();
             self.php_constants.clearRetainingCapacity();
             initConstants(&self.php_constants, self.allocator) catch {};
+            // freeClassState above cleared the class table. re-seed it with
+            // the stdlib classes so PDO, DateTime, SPL types etc. are visible
+            // to the next request
+            registerStdlibClasses(self, self.allocator) catch {};
             self.autoload_callbacks.clearRetainingCapacity();
             self.closure_instance_count = 0;
         } else {
