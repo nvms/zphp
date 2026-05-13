@@ -440,7 +440,13 @@ fn strlen(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
                 const result = try ctx.vm.callMethod(obj, "__toString", &.{});
                 if (result == .string) break :blk .{ .int = @intCast(result.string.len) };
             }
-            break :blk .{ .int = 0 };
+            // object without __toString: PHP throws TypeError
+            try ctx.vm.setPendingException("TypeError", "strlen(): Argument #1 ($string) must be of type string, object given");
+            break :blk error.RuntimeError;
+        },
+        .array => blk: {
+            try ctx.vm.setPendingException("TypeError", "strlen(): Argument #1 ($string) must be of type string, array given");
+            break :blk error.RuntimeError;
         },
         else => .{ .int = 0 },
     };
