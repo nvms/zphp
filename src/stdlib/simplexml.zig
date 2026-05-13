@@ -111,6 +111,141 @@ fn nameMatches(n: *c.xmlNode, name: []const u8) bool {
     return std.mem.eql(u8, n.name[0..cstrLen(n.name)], name);
 }
 
+// json_encode integration: walk a SimpleXMLElement's underlying xml tree and
+// return a Value matching what PHP's json_encode produces for SimpleXMLElement.
+// rules: a leaf element with only text returns the text as a string; an element
+// with children returns an associative array keyed by child name (siblings with
+// the same name group into a numerically-keyed array); attributes are exposed
+// under "@attributes"
+pub fn elementToJsonValue(ctx: *NativeContext, obj: *PhpObject) RuntimeError!Value {
+    const node = getNodePtr(obj) orelse return .null;
+    if (obj.get("__is_attr") == .bool and obj.get("__is_attr").bool) {
+        const an = obj.get("__attr_name");
+        if (an != .string) return .null;
+        const name_z = try dupZ(ctx, an.string);
+        const v = c.xmlGetProp(node, name_z.ptr);
+        if (v == null) return .{ .string = "" };
+        defer c.xmlFree.?(v);
+        return .{ .string = try dupString(ctx, v[0..cstrLen(v)]) };
+    }
+    return try nodeToJsonValue(ctx, node);
+}
+
+fn nodeToJsonValue(ctx: *NativeContext, node: *c.xmlNode) RuntimeError!Value {
+    var has_attr = false;
+    var attr_iter: ?*c.xmlAttr = @ptrCast(node.properties);
+    while (attr_iter) |_| : (attr_iter = @ptrCast(attr_iter.?.next)) {
+        has_attr = true;
+        break;
+    }
+
+    var has_elem_child = false;
+    var ch: ?*c.xmlNode = @ptrCast(node.children);
+    while (ch) |cn| : (ch = @ptrCast(cn.next)) {
+        if (cn.type == c.XML_ELEMENT_NODE) { has_elem_child = true; break; }
+    }
+
+    // PHP's json_encode on SimpleXMLElement mirrors the iterator: if the
+    // element has direct text content, that text is the value (attributes and
+    // children are ignored). this matches `(string)$elem` semantics
+    var has_text = false;
+    ch = @ptrCast(node.children);
+    while (ch) |cn| : (ch = @ptrCast(cn.next)) {
+        if (cn.type == c.XML_TEXT_NODE or cn.type == c.XML_CDATA_SECTION_NODE) {
+            const txt = c.xmlNodeGetContent(cn);
+            if (txt != null) {
+                defer c.xmlFree.?(txt);
+                if (cstrLen(txt) > 0) { has_text = true; break; }
+            }
+        }
+    }
+
+    if (has_text) {
+        // direct text children only; xmlNodeGetContent would recurse into
+        // child elements which PHP does not include here
+        var buf: std.ArrayListUnmanaged(u8) = .{};
+        defer buf.deinit(ctx.allocator);
+        var tch: ?*c.xmlNode = @ptrCast(node.children);
+        while (tch) |cn| : (tch = @ptrCast(cn.next)) {
+            if (cn.type == c.XML_TEXT_NODE or cn.type == c.XML_CDATA_SECTION_NODE) {
+                const txt = c.xmlNodeGetContent(cn);
+                if (txt != null) {
+                    defer c.xmlFree.?(txt);
+                    try buf.appendSlice(ctx.allocator, txt[0..cstrLen(txt)]);
+                }
+            }
+        }
+        return .{ .string = try dupString(ctx, buf.items) };
+    }
+
+    if (!has_attr and !has_elem_child) {
+        // empty element: PHP returns an empty object, not an empty list. give
+        // back a stdClass so json_encode renders `{}`
+        const obj = try ctx.allocator.create(PhpObject);
+        obj.* = .{ .class_name = "stdClass" };
+        try ctx.vm.objects.append(ctx.allocator, obj);
+        return .{ .object = obj };
+    }
+
+    const result = try ctx.allocator.create(PhpArray);
+    result.* = .{};
+    try ctx.vm.arrays.append(ctx.allocator, result);
+
+    if (has_attr) {
+        const attrs = try ctx.allocator.create(PhpArray);
+        attrs.* = .{};
+        try ctx.vm.arrays.append(ctx.allocator, attrs);
+        attr_iter = @ptrCast(node.properties);
+        while (attr_iter) |a| : (attr_iter = @ptrCast(a.next)) {
+            if (a.name == null) continue;
+            const aname = try dupString(ctx, a.name[0..cstrLen(a.name)]);
+            const an_z = try ctx.allocator.allocSentinel(u8, aname.len, 0);
+            @memcpy(an_z[0..aname.len], aname);
+            defer ctx.allocator.free(an_z);
+            const v = c.xmlGetProp(node, an_z.ptr);
+            if (v == null) {
+                try attrs.set(ctx.allocator, .{ .string = aname }, .{ .string = "" });
+            } else {
+                defer c.xmlFree.?(v);
+                const vs = try dupString(ctx, v[0..cstrLen(v)]);
+                try attrs.set(ctx.allocator, .{ .string = aname }, .{ .string = vs });
+            }
+        }
+        try result.set(ctx.allocator, .{ .string = "@attributes" }, .{ .array = attrs });
+    }
+
+    // walk children, grouping by element name
+    ch = @ptrCast(node.children);
+    while (ch) |cn| : (ch = @ptrCast(cn.next)) {
+        if (cn.type != c.XML_ELEMENT_NODE) continue;
+        if (cn.name == null) continue;
+        const cname = try dupString(ctx, cn.name[0..cstrLen(cn.name)]);
+        const child_val = try nodeToJsonValue(ctx, cn);
+        const existing = result.get(.{ .string = cname });
+        if (existing == .null) {
+            try result.set(ctx.allocator, .{ .string = cname }, child_val);
+        } else if (existing == .array and isSequentialList(existing.array)) {
+            try existing.array.append(ctx.allocator, child_val);
+        } else {
+            // promote single value into a 2-element list
+            const list = try ctx.allocator.create(PhpArray);
+            list.* = .{};
+            try ctx.vm.arrays.append(ctx.allocator, list);
+            try list.append(ctx.allocator, existing);
+            try list.append(ctx.allocator, child_val);
+            try result.set(ctx.allocator, .{ .string = cname }, .{ .array = list });
+        }
+    }
+    return .{ .array = result };
+}
+
+fn isSequentialList(arr: *const PhpArray) bool {
+    for (arr.entries.items, 0..) |e, i| {
+        if (e.key != .int or e.key.int != @as(i64, @intCast(i))) return false;
+    }
+    return true;
+}
+
 // ---------------- top-level functions ----------------
 
 fn sxmlLoadString(ctx: *NativeContext, args: []const Value) RuntimeError!Value {

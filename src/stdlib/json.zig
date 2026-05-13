@@ -324,6 +324,25 @@ fn encodeValue(buf: *std.ArrayListUnmanaged(u8), a: std.mem.Allocator, val: Valu
                         return;
                     }
                 }
+                if (std.mem.eql(u8, obj.class_name, "SimpleXMLElement")) {
+                    // hand off to the simplexml helper that walks the underlying
+                    // libxml tree; json_encode on a SimpleXMLElement folds
+                    // attributes under "@attributes" and groups same-named
+                    // children into arrays
+                    if (vm) |vv| {
+                        var nctx: vm_mod.NativeContext = .{
+                            .vm = vv,
+                            .allocator = a,
+                            .arrays = &vv.arrays,
+                            .strings = &vv.strings,
+                        };
+                        const built = @import("simplexml.zig").elementToJsonValue(&nctx, obj) catch null;
+                        if (built) |bv| {
+                            try encodeValue(buf, a, bv, depth, max_depth, flags, vm, visited);
+                            return;
+                        }
+                    }
+                }
                 if (v.isInstanceOf(obj.class_name, "JsonSerializable")) {
                     const result = v.callMethod(obj, "jsonSerialize", &.{}) catch {
                         try buf.appendSlice(a, "{}");
