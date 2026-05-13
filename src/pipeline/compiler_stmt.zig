@@ -266,7 +266,8 @@ pub fn compileForeach(self: *Compiler, node: Ast.Node) Error!void {
     // continue lands here, before iter_advance (same pattern as for loop update)
     try self.patchContinues(&prev_continues);
 
-    // by-ref writeback: $arr[$key] = $val
+    // by-ref writeback: $arr[$key] = $val. emitted at end-of-iteration so the
+    // current iteration's mutation reaches the source array
     if (ref_val_name) |vn| {
         if (ref_key_name) |kn| {
             try self.compileNode(iter_n);
@@ -281,9 +282,36 @@ pub fn compileForeach(self: *Compiler, node: Ast.Node) Error!void {
     try self.emitLoop(loop_top);
 
     self.patchJump(exit_jump);
-    try self.emitOp(.iter_end);
 
-    try self.patchBreaks(&prev_breaks);
+    // for by-ref loops, route break jumps through a writeback block so the
+    // current iteration's mutation reaches the source. normal exit (iter_check
+    // false) lands at iter_end below and skips this; only patched break jumps
+    // arrive here
+    if (ref_val_name != null and ref_key_name != null) {
+        const after_writeback_jump = try self.emitJump(.jump);
+        const break_writeback_target = self.chunk.offset();
+        if (ref_val_name) |vn| {
+            if (ref_key_name) |kn| {
+                try self.compileNode(iter_n);
+                try self.emitGetVar(kn);
+                try self.emitGetVar(vn);
+                try self.emitOp(.array_set);
+                try self.emitOp(.pop);
+            }
+        }
+        const skip_iter_end_jump = try self.emitJump(.jump);
+        self.patchJump(after_writeback_jump);
+        try self.emitOp(.iter_end);
+        const after_iter_end = self.chunk.offset();
+        self.patchJumpTo(skip_iter_end_jump, after_iter_end);
+
+        // patch break jumps to the writeback target (they'll fall into
+        // writeback then skip iter_end since iter_check never ran for them)
+        try self.patchBreaksTo(&prev_breaks, break_writeback_target);
+    } else {
+        try self.emitOp(.iter_end);
+        try self.patchBreaks(&prev_breaks);
+    }
     self.break_jumps = prev_breaks;
     self.continue_jumps = prev_continues;
     self.use_continue_jumps = prev_use_cj;

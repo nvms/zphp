@@ -928,6 +928,17 @@ pub const Compiler = struct {
         self.break_jumps.deinit(self.allocator);
     }
 
+    pub fn patchBreaksTo(self: *Compiler, prev_breaks: *std.ArrayListUnmanaged(LoopJump), target: usize) Error!void {
+        for (self.break_jumps.items) |bj| {
+            if (bj.depth < self.loop_depth) {
+                try prev_breaks.append(self.allocator, bj);
+            } else {
+                self.patchJumpTo(bj.offset, target);
+            }
+        }
+        self.break_jumps.deinit(self.allocator);
+    }
+
     pub fn patchContinues(self: *Compiler, prev_continues: *std.ArrayListUnmanaged(LoopJump)) Error!void {
         for (self.continue_jumps.items) |cj| {
             if (cj.depth < self.loop_depth) {
