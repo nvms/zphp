@@ -574,6 +574,46 @@ fn bcMod(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     return try returnStr(ctx, out);
 }
 
+fn bcDivmod(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    const sa = argToString(args, 0) orelse return .null;
+    const sb = argToString(args, 1) orelse return .null;
+    const scale = resolveScale(args, 2);
+    var a = try parseBc(ctx.allocator, sa);
+    defer a.deinit(ctx.allocator);
+    var b = try parseBc(ctx.allocator, sb);
+    defer b.deinit(ctx.allocator);
+    if (b.isZero()) {
+        try ctx.vm.setPendingException("DivisionByZeroError", "Division by zero");
+        return .null;
+    }
+    var q_opt = try bcDivInternal(ctx.allocator, a, b, 0);
+    if (q_opt == null) return .null;
+    const q = q_opt.?;
+    defer @constCast(&q).deinit(ctx.allocator);
+    var qb = try bcMulInternal(ctx.allocator, q, b);
+    defer qb.deinit(ctx.allocator);
+    var r = try bcSubInternal(ctx.allocator, a, qb);
+    defer r.deinit(ctx.allocator);
+    _ = &q_opt;
+
+    const q_str = try formatBc(ctx.allocator, q, 0);
+    defer ctx.allocator.free(q_str);
+    const r_str = try formatBc(ctx.allocator, r, scale);
+    defer ctx.allocator.free(r_str);
+
+    const q_owned = try ctx.allocator.dupe(u8, q_str);
+    try ctx.vm.strings.append(ctx.allocator, q_owned);
+    const r_owned = try ctx.allocator.dupe(u8, r_str);
+    try ctx.vm.strings.append(ctx.allocator, r_owned);
+
+    const arr = try ctx.allocator.create(@import("../runtime/value.zig").PhpArray);
+    arr.* = .{};
+    try ctx.vm.arrays.append(ctx.allocator, arr);
+    try arr.append(ctx.allocator, .{ .string = q_owned });
+    try arr.append(ctx.allocator, .{ .string = r_owned });
+    return .{ .array = arr };
+}
+
 fn bcPow(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     const sa = argToString(args, 0) orelse return .null;
     const sb = argToString(args, 1) orelse return .null;
@@ -1019,6 +1059,7 @@ pub const entries = .{
     .{ "bcmul", bcMul },
     .{ "bcdiv", bcDiv },
     .{ "bcmod", bcMod },
+    .{ "bcdivmod", bcDivmod },
     .{ "bcpow", bcPow },
     .{ "bcpowmod", bcPowmod },
     .{ "bcsqrt", bcSqrt },
