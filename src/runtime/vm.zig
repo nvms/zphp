@@ -361,6 +361,7 @@ pub const VM = struct {
     globals_array: ?*PhpArray = null,
     rng_seeded: bool = false,
     rng_state: std.Random.DefaultPrng = std.Random.DefaultPrng.init(0),
+    mt19937: @import("../stdlib/mt19937.zig").Mt19937 = .{},
     obj_id_base: usize = 0,
     generators: std.ArrayListUnmanaged(*Generator) = .{},
     fibers: std.ArrayListUnmanaged(*Fiber) = .{},

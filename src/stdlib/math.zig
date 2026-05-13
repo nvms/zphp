@@ -182,11 +182,11 @@ fn native_lcg_value(_: *NativeContext, _: []const Value) RuntimeError!Value {
 }
 
 fn native_srand_noop(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    const seed: u64 = if (args.len >= 1) blk: {
+    const seed: u32 = if (args.len >= 1) blk: {
         const v = Value.toInt(args[0]);
-        break :blk @bitCast(v);
-    } else @intCast(std.time.timestamp());
-    ctx.vm.rng_state = std.Random.DefaultPrng.init(seed);
+        break :blk @as(u32, @truncate(@as(u64, @bitCast(v))));
+    } else @truncate(@as(u64, @intCast(std.time.timestamp())));
+    ctx.vm.mt19937.seed(seed);
     ctx.vm.rng_seeded = true;
     return .null;
 }
@@ -196,15 +196,19 @@ fn native_getrandmax(_: *NativeContext, _: []const Value) RuntimeError!Value {
 }
 
 fn native_rand(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (!ctx.vm.rng_seeded) {
+        var entropy: [4]u8 = undefined;
+        std.crypto.random.bytes(&entropy);
+        const sd: u32 = std.mem.readInt(u32, &entropy, .little);
+        ctx.vm.mt19937.seed(sd);
+        ctx.vm.rng_seeded = true;
+    }
     const lo: i64 = if (args.len >= 1) Value.toInt(args[0]) else 0;
     const hi: i64 = if (args.len >= 2) Value.toInt(args[1]) else 2147483647;
+    // mt_rand() with no args returns a 31-bit value
+    if (args.len < 2) return .{ .int = ctx.vm.mt19937.next31() };
     if (lo >= hi) return .{ .int = lo };
-    const range: u64 = @intCast(hi - lo + 1);
-    const r = if (ctx.vm.rng_seeded)
-        ctx.vm.rng_state.random().intRangeAtMost(u64, 0, range - 1)
-    else
-        std.crypto.random.intRangeAtMost(u64, 0, range - 1);
-    return .{ .int = lo + @as(i64, @intCast(r)) };
+    return .{ .int = ctx.vm.mt19937.nextRange(lo, hi) };
 }
 
 fn native_pow(_: *NativeContext, args: []const Value) RuntimeError!Value {
