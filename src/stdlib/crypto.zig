@@ -63,6 +63,30 @@ fn native_password_hash(ctx: *NativeContext, args: []const Value) RuntimeError!V
     if (args.len == 0 or args[0] != .string) return Value{ .bool = false };
     const password = args[0].string;
 
+    // dispatch on the algo arg: bcrypt (default), argon2i, or argon2id.
+    // argon2 family is routed to sodium_crypto_pwhash_str which produces the
+    // PHP-compatible $argon2id$... encoding. without this, PASSWORD_ARGON2*
+    // silently fell back to bcrypt
+    const algo: []const u8 = if (args.len >= 2 and args[1] == .string) args[1].string else "2y";
+    if (std.mem.eql(u8, algo, "argon2i") or std.mem.eql(u8, algo, "argon2id")) {
+        // default-ish "interactive" cost; PHP's default is memory_cost=65536, time_cost=4
+        var ops: i64 = 4;
+        var mem_kb: i64 = 65536;
+        if (args.len >= 3 and args[2] == .array) {
+            const opts = args[2].array;
+            const t = opts.get(.{ .string = "time_cost" });
+            if (t == .int) ops = t.int;
+            const m = opts.get(.{ .string = "memory_cost" });
+            if (m == .int) mem_kb = m.int;
+        }
+        const r = ctx.vm.callByName("sodium_crypto_pwhash_str", &.{
+            .{ .string = password },
+            .{ .int = ops },
+            .{ .int = mem_kb * 1024 },
+        }) catch return Value{ .bool = false };
+        return r;
+    }
+
     // PHP 7.4+ default cost is 12, was 10 in older versions
     var rounds_log: u6 = 12;
     if (args.len >= 3 and args[2] == .array) {
@@ -93,6 +117,15 @@ fn native_password_verify(ctx: *NativeContext, args: []const Value) RuntimeError
     if (args.len < 2 or args[0] != .string or args[1] != .string) return Value{ .bool = false };
     const password = args[0].string;
     const hash = args[1].string;
+
+    // argon2 family: delegate to libsodium
+    if (std.mem.startsWith(u8, hash, "$argon2")) {
+        const r = ctx.vm.callByName("sodium_crypto_pwhash_str_verify", &.{
+            .{ .string = hash },
+            .{ .string = password },
+        }) catch return Value{ .bool = false };
+        return r;
+    }
 
     // std.crypto.pwhash.bcrypt only knows the $2b$ variant; PHP-generated and
     // legacy hashes use $2y$ and $2a$. Normalize before verification.
