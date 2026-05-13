@@ -4604,7 +4604,9 @@ pub const VM = struct {
                             };
                             self.push(if (gen.state == .completed) .null else gen.current_value);
                         } else {
-                            self.setErrorMsg("Fatal error: Uncaught Error: Call to undefined method Generator::{s}()", .{method_name});
+                            const msg = try std.fmt.allocPrint(self.allocator, "Call to undefined method Generator::{s}()", .{method_name});
+                            try self.strings.append(self.allocator, msg);
+                            if (try self.throwBuiltinException("Error", msg)) continue;
                             return error.RuntimeError;
                         }
                         continue;
@@ -4715,7 +4717,9 @@ pub const VM = struct {
                             };
                             self.push(result);
                         } else {
-                            self.setErrorMsg("Fatal error: Uncaught Error: Call to undefined method Fiber::{s}()", .{method_name});
+                            const msg = try std.fmt.allocPrint(self.allocator, "Call to undefined method Fiber::{s}()", .{method_name});
+                            try self.strings.append(self.allocator, msg);
+                            if (try self.throwBuiltinException("Error", msg)) continue;
                             return error.RuntimeError;
                         }
                         continue;
@@ -4758,7 +4762,9 @@ pub const VM = struct {
                             continue;
                         } else {
                             self.sp -= ac + 1;
-                            self.setErrorMsg("Fatal error: Uncaught Error: Call to undefined method Closure::{s}()", .{method_name});
+                            const msg = try std.fmt.allocPrint(self.allocator, "Call to undefined method Closure::{s}()", .{method_name});
+                            try self.strings.append(self.allocator, msg);
+                            if (try self.throwBuiltinException("Error", msg)) continue;
                             return error.RuntimeError;
                         }
                     }
@@ -5734,7 +5740,9 @@ pub const VM = struct {
                             try self.callStaticFunction(cs_name, 2, effective_called);
                             continue;
                         }
-                        self.setErrorMsg("Fatal error: Uncaught Error: Call to undefined method {s}::{s}()", .{ class_name, method_name });
+                        const msg = try std.fmt.allocPrint(self.allocator, "Call to undefined method {s}::{s}()", .{ class_name, method_name });
+                        try self.strings.append(self.allocator, msg);
+                        if (try self.throwBuiltinException("Error", msg)) continue;
                         return error.RuntimeError;
                     };
                     // resolve named args to positional order
@@ -5807,7 +5815,9 @@ pub const VM = struct {
         if (self.frame_count > self.frame_high_water) self.frame_high_water = self.frame_count;
                                 }
                             } else {
-                                self.setErrorMsg("Fatal error: Uncaught Error: Call to undefined method {s}::{s}()", .{ class_name, method_name });
+                                const msg = try std.fmt.allocPrint(self.allocator, "Call to undefined method {s}::{s}()", .{ class_name, method_name });
+                                try self.strings.append(self.allocator, msg);
+                                if (try self.throwBuiltinException("Error", msg)) continue;
                                 return error.RuntimeError;
                             }
                         } else {
