@@ -1335,6 +1335,45 @@ fn pqConstruct(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
     return .null;
 }
 
+// SplPriorityQueue stores pairs as a binary max-heap. element at index i has
+// parent (i-1)/2 and children 2i+1, 2i+2. matching PHP's heap means we get the
+// same extraction order for equal-priority items as PHP does
+fn pqEntryPriority(entry: PhpArray.Entry) Value {
+    if (entry.value != .array) return .null;
+    return entry.value.array.get(.{ .int = 1 });
+}
+
+fn pqSiftUp(arr: *PhpArray, start: usize) void {
+    var i = start;
+    while (i > 0) {
+        const parent = (i - 1) / 2;
+        const a = pqEntryPriority(arr.entries.items[i]);
+        const b = pqEntryPriority(arr.entries.items[parent]);
+        if (Value.compare(a, b) <= 0) break;
+        const tmp = arr.entries.items[i];
+        arr.entries.items[i] = arr.entries.items[parent];
+        arr.entries.items[parent] = tmp;
+        i = parent;
+    }
+}
+
+fn pqSiftDown(arr: *PhpArray, start: usize) void {
+    var i = start;
+    const n = arr.entries.items.len;
+    while (true) {
+        const l = 2 * i + 1;
+        const r = 2 * i + 2;
+        var best = i;
+        if (l < n and Value.compare(pqEntryPriority(arr.entries.items[l]), pqEntryPriority(arr.entries.items[best])) > 0) best = l;
+        if (r < n and Value.compare(pqEntryPriority(arr.entries.items[r]), pqEntryPriority(arr.entries.items[best])) > 0) best = r;
+        if (best == i) break;
+        const tmp = arr.entries.items[i];
+        arr.entries.items[i] = arr.entries.items[best];
+        arr.entries.items[best] = tmp;
+        i = best;
+    }
+}
+
 fn pqInsert(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     const obj = getThis(ctx) orelse return .null;
     const arr = try ensureData(ctx, obj);
@@ -1345,15 +1384,9 @@ fn pqInsert(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     try pair.set(ctx.allocator, .{ .int = 0 }, args[0]);
     try pair.set(ctx.allocator, .{ .int = 1 }, args[1]);
 
-    var pos: usize = 0;
-    for (arr.entries.items) |entry| {
-        if (entry.value != .array) break;
-        const ep = entry.value.array.get(.{ .int = 1 });
-        // ties: insert after equal-priority items so earlier-inserted extracts first
-        if (Value.compare(args[1], ep) > 0) break;
-        pos += 1;
-    }
-    try arr.entries.insert(ctx.allocator, pos, .{ .key = .{ .int = @intCast(arr.entries.items.len) }, .value = .{ .array = pair } });
+    const new_idx = arr.entries.items.len;
+    try arr.entries.append(ctx.allocator, .{ .key = .{ .int = @intCast(new_idx) }, .value = .{ .array = pair } });
+    pqSiftUp(arr, new_idx);
     return .null;
 }
 
@@ -1363,10 +1396,14 @@ fn pqExtractValue(ctx: *NativeContext, obj: *PhpObject) RuntimeError!Value {
         try ctx.vm.setPendingException("RuntimeException", "Can't peek at an empty datastructure");
         return error.RuntimeError;
     }
-    const entry = arr.entries.items[0].value;
-    std.mem.copyForwards(PhpArray.Entry, arr.entries.items[0 .. arr.entries.items.len - 1], arr.entries.items[1..arr.entries.items.len]);
+    const top = arr.entries.items[0].value;
+    const last = arr.entries.items[arr.entries.items.len - 1];
     arr.entries.items.len -= 1;
-    return pqFormatEntry(ctx, obj, entry);
+    if (arr.entries.items.len > 0) {
+        arr.entries.items[0] = last;
+        pqSiftDown(arr, 0);
+    }
+    return pqFormatEntry(ctx, obj, top);
 }
 
 fn pqFormatEntry(ctx: *NativeContext, obj: *PhpObject, entry: Value) Value {
