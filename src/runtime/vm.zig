@@ -4318,9 +4318,13 @@ pub const VM = struct {
 
                         if (obj.lazy_initializer != .null) try self.triggerLazyInit(obj);
 
-                        // property hooks: dispatch to get hook if present (and not recursing)
+                        // property hooks: dispatch to get hook if present (and not recursing).
+                        // route exceptions through the local try/catch handler
                         if (self.hasPropHook(obj.class_name, prop_name, .get) and !self.inPropHook(obj, prop_name)) {
-                            const hook_result = try self.callPropHook(obj, prop_name, .get, .null);
+                            const hook_result = self.callPropHook(obj, prop_name, .get, .null) catch {
+                                if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
+                                return error.RuntimeError;
+                            };
                             if (hook_result) |hv| {
                                 self.push(hv);
                                 continue;
@@ -4448,9 +4452,14 @@ pub const VM = struct {
 
                         if (obj.lazy_initializer != .null) try self.triggerLazyInit(obj);
 
-                        // property hooks: dispatch to set hook if present (and not recursing)
+                        // property hooks: dispatch to set hook if present (and not recursing).
+                        // an exception thrown inside the hook must dispatch back into the
+                        // caller's try/catch instead of bubbling out of runLoop
                         if (self.hasPropHook(obj.class_name, prop_name, .set) and !self.inPropHook(obj, prop_name)) {
-                            const hook_result = try self.callPropHook(obj, prop_name, .set, val);
+                            const hook_result = self.callPropHook(obj, prop_name, .set, val) catch {
+                                if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
+                                return error.RuntimeError;
+                            };
                             if (hook_result != null) {
                                 self.push(val);
                                 continue;
