@@ -2457,16 +2457,35 @@ fn native_filter_var(_ctx: *NativeContext, args: []const Value) RuntimeError!Val
             return .{ .bool = false };
         },
         257 => { // FILTER_VALIDATE_INT
+            const allow_octal = (eff_flags & 1) != 0; // FILTER_FLAG_ALLOW_OCTAL
+            const allow_hex = (eff_flags & 2) != 0; // FILTER_FLAG_ALLOW_HEX
             const n: i64 = blk: {
                 if (value == .int) break :blk value.int;
                 if (value == .bool) return fail_default;
                 if (value == .float) return fail_default;
                 const s = if (value == .string) value.string else return fail_default;
                 const trimmed = std.mem.trim(u8, s, " \t\n\r");
-                if (trimmed.len > 1 and trimmed[0] == '0' and trimmed[1] != 'x' and trimmed[1] != 'X') return fail_default;
-                if (trimmed.len > 0 and (trimmed[0] == '+' or trimmed[0] == '-' or std.ascii.isDigit(trimmed[0]))) {} else return fail_default;
-                const parsed = std.fmt.parseInt(i64, trimmed, 10) catch return fail_default;
-                break :blk parsed;
+                if (trimmed.len == 0) return fail_default;
+                // optional sign
+                var rest = trimmed;
+                var sign: i64 = 1;
+                if (rest[0] == '+') { rest = rest[1..]; } else if (rest[0] == '-') { sign = -1; rest = rest[1..]; }
+                if (rest.len == 0) return fail_default;
+                // hex with ALLOW_HEX
+                if (allow_hex and rest.len > 2 and rest[0] == '0' and (rest[1] == 'x' or rest[1] == 'X')) {
+                    const v = std.fmt.parseInt(i64, rest[2..], 16) catch return fail_default;
+                    break :blk sign * v;
+                }
+                // octal with ALLOW_OCTAL ("0" prefix)
+                if (allow_octal and rest.len > 1 and rest[0] == '0' and std.ascii.isDigit(rest[1])) {
+                    const v = std.fmt.parseInt(i64, rest[1..], 8) catch return fail_default;
+                    break :blk sign * v;
+                }
+                // default: decimal, reject leading-zero ints (except plain "0")
+                if (rest.len > 1 and rest[0] == '0') return fail_default;
+                if (!std.ascii.isDigit(rest[0])) return fail_default;
+                const parsed = std.fmt.parseInt(i64, rest, 10) catch return fail_default;
+                break :blk sign * parsed;
             };
             if (opts_arr) |opts| {
                 const min_v = opts.get(.{ .string = "min_range" });
