@@ -77,6 +77,8 @@ pub const entries = .{
     .{ "mb_strripos", native_mb_strripos },
     .{ "mb_strstr", native_mb_strstr },
     .{ "mb_stristr", native_mb_stristr },
+    .{ "mb_strrchr", native_mb_strrchr },
+    .{ "mb_strimwidth", native_mb_strimwidth },
     .{ "mb_strcut", native_mb_strcut },
     .{ "mb_str_pad", native_mb_str_pad },
     .{ "str_getcsv", native_str_getcsv },
@@ -2430,11 +2432,27 @@ fn utfTitleCase(ctx: *NativeContext, s: []const u8) ![]u8 {
     return out;
 }
 
-fn native_mb_check_encoding(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    _ = ctx;
+fn native_mb_check_encoding(_: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len == 0) return .{ .bool = true };
     if (args[0] != .string) return .{ .bool = false };
     const s = args[0].string;
+    // encoding arg defaults to mb_internal_encoding (UTF-8)
+    var is_ascii = false;
+    if (args.len >= 2 and args[1] == .string) {
+        const enc = args[1].string;
+        // case-insensitive ASCII check
+        if (enc.len >= 5) {
+            var lo: [16]u8 = undefined;
+            const cap = @min(enc.len, lo.len);
+            for (enc[0..cap], 0..) |c, i| lo[i] = std.ascii.toLower(c);
+            const l = lo[0..cap];
+            if (std.mem.eql(u8, l, "ascii") or std.mem.eql(u8, l, "us-ascii") or std.mem.eql(u8, l, "7bit")) is_ascii = true;
+        }
+    }
+    if (is_ascii) {
+        for (s) |b| if (b >= 0x80) return .{ .bool = false };
+        return .{ .bool = true };
+    }
     var i: usize = 0;
     while (i < s.len) {
         const byte = s[i];
@@ -3007,6 +3025,136 @@ fn native_mb_stristr(ctx: *NativeContext, args: []const Value) RuntimeError!Valu
         }
     }
     return .{ .bool = false };
+}
+
+// last-occurrence variant of mb_strstr. PHP: mb_strrchr(haystack, needle, before=false)
+// returns the slice starting at the LAST occurrence of needle (or the part
+// before it when $before_needle=true). only the first character of $needle
+// is used in PHP. case-sensitive
+fn native_mb_strrchr(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len < 2 or args[0] != .string or args[1] != .string) return .{ .bool = false };
+    const haystack = args[0].string;
+    const needle = args[1].string;
+    if (needle.len == 0) return .{ .bool = false };
+    const nch_len = utf8CharLen(needle[0]);
+    if (nch_len > needle.len) return .{ .bool = false };
+    const before: bool = if (args.len >= 3) Value.isTruthy(args[2]) else false;
+    var last: ?usize = null;
+    var i: usize = 0;
+    while (i < haystack.len) {
+        const cl = utf8CharLen(haystack[i]);
+        if (cl == nch_len and i + cl <= haystack.len and std.mem.eql(u8, haystack[i..i + cl], needle[0..nch_len])) {
+            last = i;
+        }
+        i += cl;
+    }
+    if (last) |pos| {
+        const slice = if (before) haystack[0..pos] else haystack[pos..];
+        return .{ .string = try ctx.createString(slice) };
+    }
+    return .{ .bool = false };
+}
+
+// trim string to a maximum display width and optionally append a marker.
+// PHP weighs CJK / full-width chars as 2 and everything else as 1; we use a
+// simplified East Asian Wide range that covers CJK ideographs, hangul, and
+// the basic emoji range - close enough for the common case
+fn eastAsianWidth(cp: u32) u8 {
+    if (cp < 0x1100) return 1;
+    if ((cp >= 0x1100 and cp <= 0x115F) // Hangul Jamo
+        or (cp >= 0x2E80 and cp <= 0x303E) // CJK Radicals, Kangxi
+        or (cp >= 0x3041 and cp <= 0x33FF) // Hiragana, Katakana, CJK
+        or (cp >= 0x3400 and cp <= 0x4DBF) // CJK Ext A
+        or (cp >= 0x4E00 and cp <= 0x9FFF) // CJK Unified
+        or (cp >= 0xA000 and cp <= 0xA4CF) // Yi
+        or (cp >= 0xAC00 and cp <= 0xD7A3) // Hangul Syllables
+        or (cp >= 0xF900 and cp <= 0xFAFF) // CJK Compat Ideographs
+        or (cp >= 0xFE30 and cp <= 0xFE4F) // CJK Compat Forms
+        or (cp >= 0xFF00 and cp <= 0xFF60) // Fullwidth ASCII
+        or (cp >= 0xFFE0 and cp <= 0xFFE6) // Fullwidth signs
+        or (cp >= 0x1F300 and cp <= 0x1FAFF) // Emoji / Symbols
+        or (cp >= 0x20000 and cp <= 0x2FFFD) // CJK Ext B-F
+        or (cp >= 0x30000 and cp <= 0x3FFFD)) return 2; // CJK Ext G+
+    return 1;
+}
+
+fn decodeUtf8(s: []const u8, i: usize) struct { cp: u32, len: usize } {
+    if (i >= s.len) return .{ .cp = 0, .len = 0 };
+    const b0 = s[i];
+    if (b0 < 0x80) return .{ .cp = b0, .len = 1 };
+    if (b0 < 0xC0) return .{ .cp = b0, .len = 1 }; // invalid lead - treat as 1
+    if (b0 < 0xE0) {
+        if (i + 1 >= s.len) return .{ .cp = b0, .len = 1 };
+        return .{ .cp = (@as(u32, b0 & 0x1F) << 6) | (s[i + 1] & 0x3F), .len = 2 };
+    }
+    if (b0 < 0xF0) {
+        if (i + 2 >= s.len) return .{ .cp = b0, .len = 1 };
+        return .{ .cp = (@as(u32, b0 & 0x0F) << 12) | (@as(u32, s[i + 1] & 0x3F) << 6) | (s[i + 2] & 0x3F), .len = 3 };
+    }
+    if (i + 3 >= s.len) return .{ .cp = b0, .len = 1 };
+    return .{ .cp = (@as(u32, b0 & 0x07) << 18) | (@as(u32, s[i + 1] & 0x3F) << 12) | (@as(u32, s[i + 2] & 0x3F) << 6) | (s[i + 3] & 0x3F), .len = 4 };
+}
+
+fn native_mb_strimwidth(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len < 3 or args[0] != .string) return .{ .bool = false };
+    const s = args[0].string;
+    const start: i64 = Value.toInt(args[1]);
+    const max_width: i64 = Value.toInt(args[2]);
+    if (max_width <= 0) return .{ .string = try ctx.createString("") };
+    const marker = if (args.len >= 4 and args[3] == .string) args[3].string else "";
+
+    // marker width
+    var marker_w: i64 = 0;
+    {
+        var mi: usize = 0;
+        while (mi < marker.len) {
+            const d = decodeUtf8(marker, mi);
+            marker_w += eastAsianWidth(d.cp);
+            mi += d.len;
+        }
+    }
+
+    // skip 'start' chars (chars, not bytes; matches PHP byte-positional? actually
+    // PHP mb_strimwidth's start is in chars under the given encoding)
+    var bi: usize = 0;
+    {
+        var skipped: i64 = 0;
+        while (skipped < start and bi < s.len) {
+            const d = decodeUtf8(s, bi);
+            bi += d.len;
+            skipped += 1;
+        }
+    }
+
+    var out = std.ArrayListUnmanaged(u8){};
+    const target = max_width - marker_w;
+    // first try to fit without the marker
+    var probe = bi;
+    var probe_w: i64 = 0;
+    while (probe < s.len) {
+        const d = decodeUtf8(s, probe);
+        probe_w += eastAsianWidth(d.cp);
+        if (probe_w > max_width) break;
+        probe += d.len;
+    }
+    if (probe == s.len) {
+        try out.appendSlice(ctx.allocator, s[bi..]);
+    } else {
+        var ti = bi;
+        var tw: i64 = 0;
+        while (ti < s.len) {
+            const d = decodeUtf8(s, ti);
+            const next_w = tw + eastAsianWidth(d.cp);
+            if (next_w > target) break;
+            try out.appendSlice(ctx.allocator, s[ti..ti + d.len]);
+            tw = next_w;
+            ti += d.len;
+        }
+        try out.appendSlice(ctx.allocator, marker);
+    }
+    const owned = try out.toOwnedSlice(ctx.allocator);
+    try ctx.strings.append(ctx.allocator, owned);
+    return .{ .string = owned };
 }
 
 fn native_mb_strcut(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
