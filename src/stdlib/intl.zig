@@ -188,7 +188,7 @@ fn utf8ToU16(ctx: *NativeContext, s: []const u8) ![]u16 {
     var actual: i32 = 0;
     var status: UErrorCode = U_ZERO_ERROR;
     _ = zphp_u_strFromUTF8(buf.ptr, cap, &actual, s.ptr, @intCast(s.len), &status);
-    if (status > U_ZERO_ERROR) return error.RuntimeError;
+    if (intlRecord(ctx.vm, status)) return error.RuntimeError;
     buf = try ctx.allocator.realloc(buf, @intCast(actual));
     return buf;
 }
@@ -201,7 +201,7 @@ fn u16ToUtf8(ctx: *NativeContext, s: []const u16) ![]const u8 {
     var actual: i32 = 0;
     var status: UErrorCode = U_ZERO_ERROR;
     _ = zphp_u_strToUTF8(buf.ptr, cap, &actual, s.ptr, @intCast(s.len), &status);
-    if (status > U_ZERO_ERROR) return error.RuntimeError;
+    if (intlRecord(ctx.vm, status)) return error.RuntimeError;
     buf = try ctx.allocator.realloc(buf, @intCast(actual));
     try ctx.strings.append(ctx.allocator, buf);
     return buf;
@@ -239,7 +239,7 @@ fn normalizerNormalize(ctx: *NativeContext, args: []const Value) RuntimeError!Va
     defer ctx.allocator.free(buf);
     var status: UErrorCode = U_ZERO_ERROR;
     const actual = zphp_unorm2_normalize(norm, u16src.ptr, @intCast(u16src.len), buf.ptr, cap, &status);
-    if (status > U_ZERO_ERROR) return .{ .bool = false };
+    if (intlRecord(ctx.vm, status)) return .{ .bool = false };
 
     const out = try u16ToUtf8(ctx, buf[0..@intCast(actual)]);
     return .{ .string = out };
@@ -253,7 +253,7 @@ fn normalizerIsNormalized(ctx: *NativeContext, args: []const Value) RuntimeError
     defer ctx.allocator.free(u16src);
     var status: UErrorCode = U_ZERO_ERROR;
     const ok = zphp_unorm2_isNormalized(norm, u16src.ptr, @intCast(u16src.len), &status);
-    if (status > U_ZERO_ERROR) return .{ .bool = false };
+    if (intlRecord(ctx.vm, status)) return .{ .bool = false };
     return .{ .bool = ok != 0 };
 }
 
@@ -338,7 +338,7 @@ fn openCollatorFor(ctx: *NativeContext, locale: []const u8) !?*UCollator {
     const loc_z = try dupZ(ctx, locale);
     var status: UErrorCode = U_ZERO_ERROR;
     const c = zphp_ucol_open(loc_z.ptr, &status);
-    if (status > U_ZERO_ERROR) return null;
+    if (intlRecord(ctx.vm, status)) return null;
     return c;
 }
 
@@ -433,7 +433,7 @@ fn openNumFmt(ctx: *NativeContext, locale: []const u8, style: i32) !?*UNumberFor
     const loc_z = try dupZ(ctx, locale);
     var status: UErrorCode = U_ZERO_ERROR;
     const f = zphp_unum_open(style, null, 0, loc_z.ptr, null, &status);
-    if (status > U_ZERO_ERROR) return null;
+    if (intlRecord(ctx.vm, status)) return null;
     return f;
 }
 
@@ -469,7 +469,7 @@ fn nfFormat(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
         .float => |fl| n = zphp_unum_formatDouble(f, fl, &buf, @intCast(buf.len), null, &status),
         else => return .{ .bool = false },
     }
-    if (status > U_ZERO_ERROR) return .{ .bool = false };
+    if (intlRecord(ctx.vm, status)) return .{ .bool = false };
     const out = try u16ToUtf8(ctx, buf[0..@intCast(n)]);
     return .{ .string = out };
 }
@@ -488,7 +488,7 @@ fn nfFormatCurrency(ctx: *NativeContext, args: []const Value) RuntimeError!Value
     var buf: [128]UChar = undefined;
     var status: UErrorCode = U_ZERO_ERROR;
     const n = zphp_unum_formatDoubleCurrency(f, amount, ccy_u16.ptr, &buf, @intCast(buf.len), null, &status);
-    if (status > U_ZERO_ERROR) return .{ .bool = false };
+    if (intlRecord(ctx.vm, status)) return .{ .bool = false };
     const out = try u16ToUtf8(ctx, buf[0..@intCast(n)]);
     return .{ .string = out };
 }
@@ -502,7 +502,7 @@ fn nfParse(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     var pos: i32 = 0;
     var status: UErrorCode = U_ZERO_ERROR;
     const result = zphp_unum_parseDouble(f, u16src.ptr, @intCast(u16src.len), &pos, &status);
-    if (status > U_ZERO_ERROR) return .{ .bool = false };
+    if (intlRecord(ctx.vm, status)) return .{ .bool = false };
     if (@trunc(result) == result and result < 1e15 and result > -1e15) {
         return .{ .int = @intFromFloat(result) };
     }
@@ -567,7 +567,7 @@ fn transTransliterate(ctx: *NativeContext, args: []const Value) RuntimeError!Val
     var limit: i32 = text_len;
     var status: UErrorCode = U_ZERO_ERROR;
     zphp_utrans_transUChars(t, buf.ptr, &text_len, cap, 0, &limit, &status);
-    if (status > U_ZERO_ERROR) return .{ .bool = false };
+    if (intlRecord(ctx.vm, status)) return .{ .bool = false };
     const out = try u16ToUtf8(ctx, buf[0..@intCast(text_len)]);
     return .{ .string = out };
 }
@@ -599,7 +599,7 @@ fn openDateFmt(ctx: *NativeContext, locale: []const u8, date_style: i32, time_st
 
     var status: UErrorCode = U_ZERO_ERROR;
     const f = zphp_udat_open(t_style, d_style, loc_z.ptr, tz_ptr, tz_len, pat_ptr, pat_len, &status);
-    if (status > U_ZERO_ERROR) return null;
+    if (intlRecord(ctx.vm, status)) return null;
     return f;
 }
 
@@ -652,7 +652,7 @@ fn dfFormat(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     var buf: [256]UChar = undefined;
     var status: UErrorCode = U_ZERO_ERROR;
     const n = zphp_udat_format(f, millis, &buf, @intCast(buf.len), null, &status);
-    if (status > U_ZERO_ERROR) return .{ .bool = false };
+    if (intlRecord(ctx.vm, status)) return .{ .bool = false };
     const out = try u16ToUtf8(ctx, buf[0..@intCast(n)]);
     return .{ .string = out };
 }
@@ -666,7 +666,7 @@ fn dfParse(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     var pos: i32 = 0;
     var status: UErrorCode = U_ZERO_ERROR;
     const millis = zphp_udat_parse(f, u16src.ptr, @intCast(u16src.len), &pos, &status);
-    if (status > U_ZERO_ERROR) return .{ .bool = false };
+    if (intlRecord(ctx.vm, status)) return .{ .bool = false };
     return .{ .int = @intFromFloat(millis / 1000.0) };
 }
 
@@ -676,7 +676,7 @@ fn dfGetPattern(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
     var buf: [256]UChar = undefined;
     var status: UErrorCode = U_ZERO_ERROR;
     const n = zphp_udat_toPattern(f, 0, &buf, @intCast(buf.len), &status);
-    if (status > U_ZERO_ERROR) return .{ .bool = false };
+    if (intlRecord(ctx.vm, status)) return .{ .bool = false };
     const out = try u16ToUtf8(ctx, buf[0..@intCast(n)]);
     return .{ .string = out };
 }
@@ -698,7 +698,7 @@ fn idnConvert(ctx: *NativeContext, args: []const Value, to_ascii: bool) RuntimeE
     var status: UErrorCode = U_ZERO_ERROR;
     const idna = zphp_uidna_openUTS46(0, &status) orelse return .{ .bool = false };
     defer zphp_uidna_close(idna);
-    if (status > U_ZERO_ERROR) return .{ .bool = false };
+    if (intlRecord(ctx.vm, status)) return .{ .bool = false };
 
     const info_size = zphp_uidna_info_size();
     const info_buf = try ctx.allocator.alloc(u8, info_size);
@@ -872,7 +872,7 @@ fn openCalendar(ctx: *NativeContext, tz_opt: ?[]const u8, locale: []const u8, ca
     const tz_ptr: ?[*]const UChar = if (tz_u16) |b| b.ptr else null;
     const tz_len: i32 = if (tz_u16) |b| @intCast(b.len) else 0;
     const cal = zphp_ucal_open(tz_ptr, tz_len, loc_z.ptr, cal_type, &status);
-    if (status > U_ZERO_ERROR) return null;
+    if (intlRecord(ctx.vm, status)) return null;
     return cal;
 }
 
@@ -939,7 +939,7 @@ fn calGet(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     const cal = getCal(obj) orelse return .{ .bool = false };
     var status: UErrorCode = U_ZERO_ERROR;
     const r = zphp_ucal_get(cal, @intCast(args[0].int), &status);
-    if (status > U_ZERO_ERROR) return .{ .bool = false };
+    if (intlRecord(ctx.vm, status)) return .{ .bool = false };
     return .{ .int = @intCast(r) };
 }
 
@@ -979,7 +979,7 @@ fn calGetTime(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
     const cal = getCal(obj) orelse return .{ .bool = false };
     var status: UErrorCode = U_ZERO_ERROR;
     const millis = zphp_ucal_getMillis(cal, &status);
-    if (status > U_ZERO_ERROR) return .{ .bool = false };
+    if (intlRecord(ctx.vm, status)) return .{ .bool = false };
     return .{ .float = millis };
 }
 
@@ -1155,7 +1155,7 @@ fn openBrk(ctx: *NativeContext, brk_type: c_int, locale: []const u8) !?*ZphpBrk 
     };
     const loc_z = try dupZ(ctx, loc);
     const w = zphp_ubrk_open(brk_type, loc_z.ptr, &status);
-    if (status > U_ZERO_ERROR) return null;
+    if (intlRecord(ctx.vm, status)) return null;
     return w;
 }
 
@@ -1201,7 +1201,7 @@ fn brkSetText(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     const txt = args[0].string;
     const ptr: [*]const u8 = if (txt.len > 0) txt.ptr else @ptrCast(""[0..]);
     zphp_ubrk_setText(w, ptr, @intCast(txt.len), &status);
-    if (status > U_ZERO_ERROR) return .{ .bool = false };
+    if (intlRecord(ctx.vm, status)) return .{ .bool = false };
     // also store the text so getText round-trips without losing it
     try obj.set(ctx.allocator, "__text", .{ .string = try dupString(ctx, txt) });
     return .{ .bool = true };
@@ -1303,12 +1303,69 @@ fn brkGetLocale(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
 
 // ---------------- registration ----------------
 
-fn intlGetErrorMessage(_: *NativeContext, _: []const Value) RuntimeError!Value {
-    return .{ .string = "U_ZERO_ERROR" };
+const NativeFn = *const fn (*NativeContext, []const Value) RuntimeError!Value;
+
+// every intl op resets vm.last_intl_error_code on entry so a successful call
+// surfaces "U_ZERO_ERROR" through intl_get_error_*. failures record the failing
+// UErrorCode via intlRecord. the four error-query natives (get_error_code,
+// get_error_message, is_failure, error_name) do NOT reset
+fn intlWrap(comptime inner: NativeFn) NativeFn {
+    return struct {
+        fn wrapped(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+            ctx.vm.last_intl_error_code = 0;
+            return inner(ctx, args);
+        }
+    }.wrapped;
 }
 
-fn intlGetErrorCode(_: *NativeContext, _: []const Value) RuntimeError!Value {
-    return .{ .int = 0 };
+pub fn intlRecord(vm: *@import("../runtime/vm.zig").VM, status: UErrorCode) bool {
+    vm.last_intl_error_code = @intCast(status);
+    return status > U_ZERO_ERROR;
+}
+
+fn errorNameForCode(code: i32) []const u8 {
+    return switch (code) {
+        0 => "U_ZERO_ERROR",
+        1 => "U_ILLEGAL_ARGUMENT_ERROR",
+        2 => "U_MISSING_RESOURCE_ERROR",
+        3 => "U_INVALID_FORMAT_ERROR",
+        4 => "U_FILE_ACCESS_ERROR",
+        5 => "U_INTERNAL_PROGRAM_ERROR",
+        6 => "U_MESSAGE_PARSE_ERROR",
+        7 => "U_MEMORY_ALLOCATION_ERROR",
+        8 => "U_INDEX_OUTOFBOUNDS_ERROR",
+        9 => "U_PARSE_ERROR",
+        10 => "U_INVALID_CHAR_FOUND",
+        11 => "U_TRUNCATED_CHAR_FOUND",
+        12 => "U_ILLEGAL_CHAR_FOUND",
+        13 => "U_INVALID_TABLE_FORMAT",
+        14 => "U_INVALID_TABLE_FILE",
+        15 => "U_BUFFER_OVERFLOW_ERROR",
+        16 => "U_UNSUPPORTED_ERROR",
+        17 => "U_RESOURCE_TYPE_MISMATCH",
+        18 => "U_ILLEGAL_ESCAPE_SEQUENCE",
+        19 => "U_UNSUPPORTED_ESCAPE_SEQUENCE",
+        20 => "U_NO_SPACE_AVAILABLE",
+        21 => "U_CE_NOT_FOUND_ERROR",
+        22 => "U_PRIMARY_TOO_LONG_ERROR",
+        23 => "U_STATE_TOO_OLD_ERROR",
+        24 => "U_TOO_MANY_ALIASES_ERROR",
+        25 => "U_ENUM_OUT_OF_SYNC_ERROR",
+        26 => "U_INVARIANT_CONVERSION_ERROR",
+        27 => "U_INVALID_STATE_ERROR",
+        28 => "U_COLLATOR_VERSION_MISMATCH",
+        29 => "U_USELESS_COLLATOR_ERROR",
+        30 => "U_NO_WRITE_PERMISSION",
+        else => "U_ERROR",
+    };
+}
+
+fn intlGetErrorMessage(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    return .{ .string = errorNameForCode(ctx.vm.last_intl_error_code) };
+}
+
+fn intlGetErrorCode(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    return .{ .int = ctx.vm.last_intl_error_code };
 }
 
 fn intlIsFailure(_: *NativeContext, args: []const Value) RuntimeError!Value {
@@ -1319,8 +1376,8 @@ fn intlIsFailure(_: *NativeContext, args: []const Value) RuntimeError!Value {
 
 fn intlErrorName(_: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len < 1) return .{ .string = "U_ZERO_ERROR" };
-    const c = Value.toInt(args[0]);
-    return .{ .string = if (c == 0) "U_ZERO_ERROR" else "U_UNKNOWN_ERROR" };
+    const c: i32 = @intCast(Value.toInt(args[0]));
+    return .{ .string = errorNameForCode(c) };
 }
 
 pub const entries = .{
@@ -1328,28 +1385,28 @@ pub const entries = .{
     .{ "intl_get_error_code", intlGetErrorCode },
     .{ "intl_is_failure", intlIsFailure },
     .{ "intl_error_name", intlErrorName },
-    .{ "locale_get_default", localeGetDefault },
-    .{ "locale_set_default", localeSetDefault },
-    .{ "locale_get_primary_language", localeGetPrimaryLanguage },
-    .{ "locale_get_region", localeGetRegion },
-    .{ "locale_get_script", localeGetScript },
-    .{ "locale_canonicalize", localeCanonicalize },
-    .{ "locale_get_display_name", localeGetDisplayName },
-    .{ "locale_get_display_language", localeGetDisplayLanguage },
-    .{ "locale_get_display_region", localeGetDisplayRegion },
-    .{ "locale_get_display_script", localeGetDisplayScript },
-    .{ "normalizer_normalize", normalizerNormalize },
-    .{ "normalizer_is_normalized", normalizerIsNormalized },
-    .{ "idn_to_ascii", idnToAscii },
-    .{ "idn_to_utf8", idnToUtf8 },
-    .{ "transliterator_transliterate", transliteratorTransliterate },
-    .{ "transliterator_create", transCreateStatic },
-    .{ "msgfmt_create", mfCreate },
-    .{ "msgfmt_format_message", mfFormatMessage },
-    .{ "grapheme_strlen", graphemeStrlen },
-    .{ "grapheme_substr", graphemeSubstr },
-    .{ "grapheme_strpos", graphemeStrpos },
-    .{ "grapheme_stripos", graphemeStripos },
+    .{ "locale_get_default", intlWrap(localeGetDefault) },
+    .{ "locale_set_default", intlWrap(localeSetDefault) },
+    .{ "locale_get_primary_language", intlWrap(localeGetPrimaryLanguage) },
+    .{ "locale_get_region", intlWrap(localeGetRegion) },
+    .{ "locale_get_script", intlWrap(localeGetScript) },
+    .{ "locale_canonicalize", intlWrap(localeCanonicalize) },
+    .{ "locale_get_display_name", intlWrap(localeGetDisplayName) },
+    .{ "locale_get_display_language", intlWrap(localeGetDisplayLanguage) },
+    .{ "locale_get_display_region", intlWrap(localeGetDisplayRegion) },
+    .{ "locale_get_display_script", intlWrap(localeGetDisplayScript) },
+    .{ "normalizer_normalize", intlWrap(normalizerNormalize) },
+    .{ "normalizer_is_normalized", intlWrap(normalizerIsNormalized) },
+    .{ "idn_to_ascii", intlWrap(idnToAscii) },
+    .{ "idn_to_utf8", intlWrap(idnToUtf8) },
+    .{ "transliterator_transliterate", intlWrap(transliteratorTransliterate) },
+    .{ "transliterator_create", intlWrap(transCreateStatic) },
+    .{ "msgfmt_create", intlWrap(mfCreate) },
+    .{ "msgfmt_format_message", intlWrap(mfFormatMessage) },
+    .{ "grapheme_strlen", intlWrap(graphemeStrlen) },
+    .{ "grapheme_substr", intlWrap(graphemeSubstr) },
+    .{ "grapheme_strpos", intlWrap(graphemeStrpos) },
+    .{ "grapheme_stripos", intlWrap(graphemeStripos) },
 };
 
 // count grapheme clusters in a UTF-8 string. uses ICU's character-level
@@ -1361,7 +1418,7 @@ fn graphemeStrlen(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     defer zphp_ubrk_close(w);
     var status: UErrorCode = U_ZERO_ERROR;
     zphp_ubrk_setText(w, s.ptr, @intCast(s.len), &status);
-    if (status > U_ZERO_ERROR) return .{ .bool = false };
+    if (intlRecord(ctx.vm, status)) return .{ .bool = false };
     var count: i64 = 0;
     _ = zphp_ubrk_first(w);
     while (zphp_ubrk_next(w) != -1) count += 1;
@@ -1379,7 +1436,7 @@ fn graphemeSubstr(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     defer zphp_ubrk_close(w);
     var status: UErrorCode = U_ZERO_ERROR;
     zphp_ubrk_setText(w, s.ptr, @intCast(s.len), &status);
-    if (status > U_ZERO_ERROR) return .{ .bool = false };
+    if (intlRecord(ctx.vm, status)) return .{ .bool = false };
 
     // collect grapheme byte offsets
     var offsets = std.ArrayListUnmanaged(i32){};
@@ -1441,7 +1498,7 @@ fn graphemeStrposImpl(ctx: *NativeContext, args: []const Value, case_insensitive
     defer zphp_ubrk_close(w);
     var status: UErrorCode = U_ZERO_ERROR;
     zphp_ubrk_setText(w, haystack.ptr, @intCast(haystack.len), &status);
-    if (status > U_ZERO_ERROR) return .{ .bool = false };
+    if (intlRecord(ctx.vm, status)) return .{ .bool = false };
     var g_idx: i64 = 0;
     var pos = zphp_ubrk_first(w);
     while (pos != -1) : (pos = zphp_ubrk_next(w)) {
@@ -1496,7 +1553,7 @@ fn transliteratorTransliterate(ctx: *NativeContext, args: []const Value) Runtime
     var limit: i32 = text_len;
     var status: UErrorCode = U_ZERO_ERROR;
     zphp_utrans_transUChars(t, buf.ptr, &text_len, cap, 0, &limit, &status);
-    if (status > U_ZERO_ERROR) return .{ .bool = false };
+    if (intlRecord(ctx.vm, status)) return .{ .bool = false };
     const out = try u16ToUtf8(ctx, buf[0..@intCast(text_len)]);
     return .{ .string = out };
 }
@@ -1561,23 +1618,23 @@ fn registerBreakIteratorClass(vm: *VM, a: Allocator) !void {
 
         try vm.classes.put(a, cls_name, def);
 
-        try vm.native_fns.put(a, cls_name ++ "::createWordInstance", brkCreateWord);
-        try vm.native_fns.put(a, cls_name ++ "::createCharacterInstance", brkCreateChar);
-        try vm.native_fns.put(a, cls_name ++ "::createLineInstance", brkCreateLine);
-        try vm.native_fns.put(a, cls_name ++ "::createSentenceInstance", brkCreateSentence);
-        try vm.native_fns.put(a, cls_name ++ "::createTitleInstance", brkCreateTitle);
-        try vm.native_fns.put(a, cls_name ++ "::setText", brkSetText);
-        try vm.native_fns.put(a, cls_name ++ "::getText", brkGetText);
-        try vm.native_fns.put(a, cls_name ++ "::first", brkFirst);
-        try vm.native_fns.put(a, cls_name ++ "::last", brkLast);
-        try vm.native_fns.put(a, cls_name ++ "::next", brkNext);
-        try vm.native_fns.put(a, cls_name ++ "::previous", brkPrevious);
-        try vm.native_fns.put(a, cls_name ++ "::current", brkCurrent);
-        try vm.native_fns.put(a, cls_name ++ "::following", brkFollowing);
-        try vm.native_fns.put(a, cls_name ++ "::preceding", brkPreceding);
-        try vm.native_fns.put(a, cls_name ++ "::isBoundary", brkIsBoundary);
-        try vm.native_fns.put(a, cls_name ++ "::getRuleStatus", brkGetRuleStatus);
-        try vm.native_fns.put(a, cls_name ++ "::getLocale", brkGetLocale);
+        try vm.native_fns.put(a, cls_name ++ "::createWordInstance", intlWrap(brkCreateWord));
+        try vm.native_fns.put(a, cls_name ++ "::createCharacterInstance", intlWrap(brkCreateChar));
+        try vm.native_fns.put(a, cls_name ++ "::createLineInstance", intlWrap(brkCreateLine));
+        try vm.native_fns.put(a, cls_name ++ "::createSentenceInstance", intlWrap(brkCreateSentence));
+        try vm.native_fns.put(a, cls_name ++ "::createTitleInstance", intlWrap(brkCreateTitle));
+        try vm.native_fns.put(a, cls_name ++ "::setText", intlWrap(brkSetText));
+        try vm.native_fns.put(a, cls_name ++ "::getText", intlWrap(brkGetText));
+        try vm.native_fns.put(a, cls_name ++ "::first", intlWrap(brkFirst));
+        try vm.native_fns.put(a, cls_name ++ "::last", intlWrap(brkLast));
+        try vm.native_fns.put(a, cls_name ++ "::next", intlWrap(brkNext));
+        try vm.native_fns.put(a, cls_name ++ "::previous", intlWrap(brkPrevious));
+        try vm.native_fns.put(a, cls_name ++ "::current", intlWrap(brkCurrent));
+        try vm.native_fns.put(a, cls_name ++ "::following", intlWrap(brkFollowing));
+        try vm.native_fns.put(a, cls_name ++ "::preceding", intlWrap(brkPreceding));
+        try vm.native_fns.put(a, cls_name ++ "::isBoundary", intlWrap(brkIsBoundary));
+        try vm.native_fns.put(a, cls_name ++ "::getRuleStatus", intlWrap(brkGetRuleStatus));
+        try vm.native_fns.put(a, cls_name ++ "::getLocale", intlWrap(brkGetLocale));
     }
 }
 
@@ -1640,28 +1697,28 @@ fn registerIntlCalendarClass(vm: *VM, a: Allocator) !void {
 
         try vm.classes.put(a, cls_name, def);
 
-        try vm.native_fns.put(a, cls_name ++ "::__construct", calConstruct);
-        try vm.native_fns.put(a, cls_name ++ "::createInstance", calCreateInstance);
-        try vm.native_fns.put(a, cls_name ++ "::get", calGet);
-        try vm.native_fns.put(a, cls_name ++ "::set", calSet);
-        try vm.native_fns.put(a, cls_name ++ "::add", calAdd);
-        try vm.native_fns.put(a, cls_name ++ "::roll", calRoll);
-        try vm.native_fns.put(a, cls_name ++ "::getTime", calGetTime);
-        try vm.native_fns.put(a, cls_name ++ "::setTime", calSetTime);
-        try vm.native_fns.put(a, cls_name ++ "::inDaylightTime", calInDaylightTime);
-        try vm.native_fns.put(a, cls_name ++ "::isSet", calIsSet);
-        try vm.native_fns.put(a, cls_name ++ "::clear", calClear);
-        try vm.native_fns.put(a, cls_name ++ "::setTimeZone", calSetTimeZone);
-        try vm.native_fns.put(a, cls_name ++ "::getFirstDayOfWeek", calGetFirstDayOfWeek);
-        try vm.native_fns.put(a, cls_name ++ "::setFirstDayOfWeek", calSetFirstDayOfWeek);
-        try vm.native_fns.put(a, cls_name ++ "::isWeekend", calIsWeekend);
-        try vm.native_fns.put(a, cls_name ++ "::getType", calGetType);
-        try vm.native_fns.put(a, cls_name ++ "::getLocale", calGetLocale);
-        try vm.native_fns.put(a, cls_name ++ "::getActualMaximum", calGetActualMaximum);
-        try vm.native_fns.put(a, cls_name ++ "::getActualMinimum", calGetActualMinimum);
-        try vm.native_fns.put(a, cls_name ++ "::isLenient", calIsLenient);
-        try vm.native_fns.put(a, cls_name ++ "::setLenient", calSetLenient);
-        try vm.native_fns.put(a, cls_name ++ "::equals", calEquals);
+        try vm.native_fns.put(a, cls_name ++ "::__construct", intlWrap(calConstruct));
+        try vm.native_fns.put(a, cls_name ++ "::createInstance", intlWrap(calCreateInstance));
+        try vm.native_fns.put(a, cls_name ++ "::get", intlWrap(calGet));
+        try vm.native_fns.put(a, cls_name ++ "::set", intlWrap(calSet));
+        try vm.native_fns.put(a, cls_name ++ "::add", intlWrap(calAdd));
+        try vm.native_fns.put(a, cls_name ++ "::roll", intlWrap(calRoll));
+        try vm.native_fns.put(a, cls_name ++ "::getTime", intlWrap(calGetTime));
+        try vm.native_fns.put(a, cls_name ++ "::setTime", intlWrap(calSetTime));
+        try vm.native_fns.put(a, cls_name ++ "::inDaylightTime", intlWrap(calInDaylightTime));
+        try vm.native_fns.put(a, cls_name ++ "::isSet", intlWrap(calIsSet));
+        try vm.native_fns.put(a, cls_name ++ "::clear", intlWrap(calClear));
+        try vm.native_fns.put(a, cls_name ++ "::setTimeZone", intlWrap(calSetTimeZone));
+        try vm.native_fns.put(a, cls_name ++ "::getFirstDayOfWeek", intlWrap(calGetFirstDayOfWeek));
+        try vm.native_fns.put(a, cls_name ++ "::setFirstDayOfWeek", intlWrap(calSetFirstDayOfWeek));
+        try vm.native_fns.put(a, cls_name ++ "::isWeekend", intlWrap(calIsWeekend));
+        try vm.native_fns.put(a, cls_name ++ "::getType", intlWrap(calGetType));
+        try vm.native_fns.put(a, cls_name ++ "::getLocale", intlWrap(calGetLocale));
+        try vm.native_fns.put(a, cls_name ++ "::getActualMaximum", intlWrap(calGetActualMaximum));
+        try vm.native_fns.put(a, cls_name ++ "::getActualMinimum", intlWrap(calGetActualMinimum));
+        try vm.native_fns.put(a, cls_name ++ "::isLenient", intlWrap(calIsLenient));
+        try vm.native_fns.put(a, cls_name ++ "::setLenient", intlWrap(calSetLenient));
+        try vm.native_fns.put(a, cls_name ++ "::equals", intlWrap(calEquals));
     }
 }
 
@@ -1675,13 +1732,13 @@ fn registerMessageFormatterClass(vm: *VM, a: Allocator) !void {
     try def.methods.put(a, "setPattern", .{ .name = "setPattern", .arity = 1 });
     try def.methods.put(a, "getLocale", .{ .name = "getLocale", .arity = 0 });
     try vm.classes.put(a, "MessageFormatter", def);
-    try vm.native_fns.put(a, "MessageFormatter::__construct", mfConstruct);
-    try vm.native_fns.put(a, "MessageFormatter::create", mfCreate);
-    try vm.native_fns.put(a, "MessageFormatter::format", mfFormat);
-    try vm.native_fns.put(a, "MessageFormatter::formatMessage", mfFormatMessage);
-    try vm.native_fns.put(a, "MessageFormatter::getPattern", mfGetPattern);
-    try vm.native_fns.put(a, "MessageFormatter::setPattern", mfSetPattern);
-    try vm.native_fns.put(a, "MessageFormatter::getLocale", mfGetLocale);
+    try vm.native_fns.put(a, "MessageFormatter::__construct", intlWrap(mfConstruct));
+    try vm.native_fns.put(a, "MessageFormatter::create", intlWrap(mfCreate));
+    try vm.native_fns.put(a, "MessageFormatter::format", intlWrap(mfFormat));
+    try vm.native_fns.put(a, "MessageFormatter::formatMessage", intlWrap(mfFormatMessage));
+    try vm.native_fns.put(a, "MessageFormatter::getPattern", intlWrap(mfGetPattern));
+    try vm.native_fns.put(a, "MessageFormatter::setPattern", intlWrap(mfSetPattern));
+    try vm.native_fns.put(a, "MessageFormatter::getLocale", intlWrap(mfGetLocale));
 }
 
 fn registerDateFormatterClass(vm: *VM, a: Allocator) !void {
@@ -1706,12 +1763,12 @@ fn registerDateFormatterClass(vm: *VM, a: Allocator) !void {
     }
 
     try vm.classes.put(a, "IntlDateFormatter", def);
-    try vm.native_fns.put(a, "IntlDateFormatter::__construct", dfConstruct);
-    try vm.native_fns.put(a, "IntlDateFormatter::create", dfCreateStatic);
-    try vm.native_fns.put(a, "IntlDateFormatter::format", dfFormat);
-    try vm.native_fns.put(a, "IntlDateFormatter::parse", dfParse);
-    try vm.native_fns.put(a, "IntlDateFormatter::getPattern", dfGetPattern);
-    try vm.native_fns.put(a, "IntlDateFormatter::setPattern", dfSetPattern);
+    try vm.native_fns.put(a, "IntlDateFormatter::__construct", intlWrap(dfConstruct));
+    try vm.native_fns.put(a, "IntlDateFormatter::create", intlWrap(dfCreateStatic));
+    try vm.native_fns.put(a, "IntlDateFormatter::format", intlWrap(dfFormat));
+    try vm.native_fns.put(a, "IntlDateFormatter::parse", intlWrap(dfParse));
+    try vm.native_fns.put(a, "IntlDateFormatter::getPattern", intlWrap(dfGetPattern));
+    try vm.native_fns.put(a, "IntlDateFormatter::setPattern", intlWrap(dfSetPattern));
 }
 
 fn registerNormalizerClass(vm: *VM, a: Allocator) !void {
@@ -1734,8 +1791,8 @@ fn registerNormalizerClass(vm: *VM, a: Allocator) !void {
     }
 
     try vm.classes.put(a, "Normalizer", def);
-    try vm.native_fns.put(a, "Normalizer::normalize", normalizerNormalize);
-    try vm.native_fns.put(a, "Normalizer::isNormalized", normalizerIsNormalized);
+    try vm.native_fns.put(a, "Normalizer::normalize", intlWrap(normalizerNormalize));
+    try vm.native_fns.put(a, "Normalizer::isNormalized", intlWrap(normalizerIsNormalized));
 }
 
 fn registerLocaleClass(vm: *VM, a: Allocator) !void {
@@ -1749,23 +1806,23 @@ fn registerLocaleClass(vm: *VM, a: Allocator) !void {
         try def.methods.put(a, m, .{ .name = m, .arity = 0, .is_static = true });
     }
     try vm.classes.put(a, "Locale", def);
-    try vm.native_fns.put(a, "Locale::getDefault", localeGetDefault);
-    try vm.native_fns.put(a, "Locale::setDefault", localeSetDefault);
-    try vm.native_fns.put(a, "Locale::getPrimaryLanguage", localeGetPrimaryLanguage);
-    try vm.native_fns.put(a, "Locale::getRegion", localeGetRegion);
-    try vm.native_fns.put(a, "Locale::getScript", localeGetScript);
-    try vm.native_fns.put(a, "Locale::canonicalize", localeCanonicalize);
-    try vm.native_fns.put(a, "Locale::getDisplayName", localeGetDisplayName);
-    try vm.native_fns.put(a, "Locale::getDisplayLanguage", localeGetDisplayLanguage);
-    try vm.native_fns.put(a, "Locale::getDisplayRegion", localeGetDisplayRegion);
-    try vm.native_fns.put(a, "Locale::getDisplayScript", localeGetDisplayScript);
-    try vm.native_fns.put(a, "Locale::composeLocale", localeComposeLocale);
-    try vm.native_fns.put(a, "Locale::parseLocale", localeParseLocale);
-    try vm.native_fns.put(a, "Locale::getAllVariants", localeGetAllVariants);
-    try vm.native_fns.put(a, "Locale::getKeywords", localeGetKeywords);
-    try vm.native_fns.put(a, "Locale::filterMatches", localeFilterMatches);
-    try vm.native_fns.put(a, "Locale::lookup", localeLookup);
-    try vm.native_fns.put(a, "Locale::acceptFromHttp", localeAcceptFromHttp);
+    try vm.native_fns.put(a, "Locale::getDefault", intlWrap(localeGetDefault));
+    try vm.native_fns.put(a, "Locale::setDefault", intlWrap(localeSetDefault));
+    try vm.native_fns.put(a, "Locale::getPrimaryLanguage", intlWrap(localeGetPrimaryLanguage));
+    try vm.native_fns.put(a, "Locale::getRegion", intlWrap(localeGetRegion));
+    try vm.native_fns.put(a, "Locale::getScript", intlWrap(localeGetScript));
+    try vm.native_fns.put(a, "Locale::canonicalize", intlWrap(localeCanonicalize));
+    try vm.native_fns.put(a, "Locale::getDisplayName", intlWrap(localeGetDisplayName));
+    try vm.native_fns.put(a, "Locale::getDisplayLanguage", intlWrap(localeGetDisplayLanguage));
+    try vm.native_fns.put(a, "Locale::getDisplayRegion", intlWrap(localeGetDisplayRegion));
+    try vm.native_fns.put(a, "Locale::getDisplayScript", intlWrap(localeGetDisplayScript));
+    try vm.native_fns.put(a, "Locale::composeLocale", intlWrap(localeComposeLocale));
+    try vm.native_fns.put(a, "Locale::parseLocale", intlWrap(localeParseLocale));
+    try vm.native_fns.put(a, "Locale::getAllVariants", intlWrap(localeGetAllVariants));
+    try vm.native_fns.put(a, "Locale::getKeywords", intlWrap(localeGetKeywords));
+    try vm.native_fns.put(a, "Locale::filterMatches", intlWrap(localeFilterMatches));
+    try vm.native_fns.put(a, "Locale::lookup", intlWrap(localeLookup));
+    try vm.native_fns.put(a, "Locale::acceptFromHttp", intlWrap(localeAcceptFromHttp));
 }
 
 fn localeComposeLocale(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
@@ -1913,13 +1970,13 @@ fn registerCollatorClass(vm: *VM, a: Allocator) !void {
     }
 
     try vm.classes.put(a, "Collator", def);
-    try vm.native_fns.put(a, "Collator::__construct", collConstruct);
-    try vm.native_fns.put(a, "Collator::create", collCreateStatic);
-    try vm.native_fns.put(a, "Collator::compare", collCompare);
-    try vm.native_fns.put(a, "Collator::setStrength", collSetStrength);
-    try vm.native_fns.put(a, "Collator::getStrength", collGetStrength);
-    try vm.native_fns.put(a, "Collator::getLocale", collGetLocale);
-    try vm.native_fns.put(a, "Collator::sort", collSort);
+    try vm.native_fns.put(a, "Collator::__construct", intlWrap(collConstruct));
+    try vm.native_fns.put(a, "Collator::create", intlWrap(collCreateStatic));
+    try vm.native_fns.put(a, "Collator::compare", intlWrap(collCompare));
+    try vm.native_fns.put(a, "Collator::setStrength", intlWrap(collSetStrength));
+    try vm.native_fns.put(a, "Collator::getStrength", intlWrap(collGetStrength));
+    try vm.native_fns.put(a, "Collator::getLocale", intlWrap(collGetLocale));
+    try vm.native_fns.put(a, "Collator::sort", intlWrap(collSort));
 }
 
 fn registerNumberFormatterClass(vm: *VM, a: Allocator) !void {
@@ -1960,13 +2017,13 @@ fn registerNumberFormatterClass(vm: *VM, a: Allocator) !void {
     }
 
     try vm.classes.put(a, "NumberFormatter", def);
-    try vm.native_fns.put(a, "NumberFormatter::__construct", nfConstruct);
-    try vm.native_fns.put(a, "NumberFormatter::create", nfCreateStatic);
-    try vm.native_fns.put(a, "NumberFormatter::format", nfFormat);
-    try vm.native_fns.put(a, "NumberFormatter::formatCurrency", nfFormatCurrency);
-    try vm.native_fns.put(a, "NumberFormatter::parse", nfParse);
-    try vm.native_fns.put(a, "NumberFormatter::setAttribute", nfSetAttribute);
-    try vm.native_fns.put(a, "NumberFormatter::getAttribute", nfGetAttribute);
+    try vm.native_fns.put(a, "NumberFormatter::__construct", intlWrap(nfConstruct));
+    try vm.native_fns.put(a, "NumberFormatter::create", intlWrap(nfCreateStatic));
+    try vm.native_fns.put(a, "NumberFormatter::format", intlWrap(nfFormat));
+    try vm.native_fns.put(a, "NumberFormatter::formatCurrency", intlWrap(nfFormatCurrency));
+    try vm.native_fns.put(a, "NumberFormatter::parse", intlWrap(nfParse));
+    try vm.native_fns.put(a, "NumberFormatter::setAttribute", intlWrap(nfSetAttribute));
+    try vm.native_fns.put(a, "NumberFormatter::getAttribute", intlWrap(nfGetAttribute));
 }
 
 fn registerTransliteratorClass(vm: *VM, a: Allocator) !void {
@@ -1980,8 +2037,8 @@ fn registerTransliteratorClass(vm: *VM, a: Allocator) !void {
     try def.constant_names.put(a, "REVERSE", {});
     try def.static_props.put(a, "REVERSE", .{ .int = 1 });
     try vm.classes.put(a, "Transliterator", def);
-    try vm.native_fns.put(a, "Transliterator::create", transCreateStatic);
-    try vm.native_fns.put(a, "Transliterator::transliterate", transTransliterate);
+    try vm.native_fns.put(a, "Transliterator::create", intlWrap(transCreateStatic));
+    try vm.native_fns.put(a, "Transliterator::transliterate", intlWrap(transTransliterate));
 }
 
 fn registerConstants(vm: *VM, a: Allocator) !void {

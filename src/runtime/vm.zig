@@ -443,6 +443,10 @@ pub const VM = struct {
     allocator: Allocator,
     global_slot_names: []const []const u8 = &.{},
     script_strict_types: bool = false,
+    // most recent ICU UErrorCode from any intl native call. reset to 0 on entry
+    // to each intl call (except intl_get_error_*/intl_is_failure/intl_error_name)
+    // and bumped to the failing status when an op fails
+    last_intl_error_code: i32 = 0,
     // the slot_names of the top script frame (frame[0]). global_slot_names
     // is temporarily overridden during require/include to point at the inner
     // file's slot_names; writebacks to frame[0]'s locals must use the top
@@ -2150,10 +2154,7 @@ pub const VM = struct {
                     const arr_val = self.peek();
                     if (arr_val == .array) {
                         if (key == .array or key == .object) {
-                            const tn: []const u8 = if (key == .object) key.object.class_name else "array";
-                            const msg = std.fmt.allocPrint(self.allocator, "Cannot access offset of type {s} on array", .{tn}) catch return error.RuntimeError;
-                            try self.strings.append(self.allocator, msg);
-                            if (try self.throwBuiltinException("TypeError", msg)) continue;
+                            if (try self.throwOffsetKeyType(key, .access)) continue;
                             return error.RuntimeError;
                         }
                         try arr_val.array.set(self.allocator, Value.toArrayKey(key), val);
@@ -2168,6 +2169,10 @@ pub const VM = struct {
                     const key = self.pop();
                     const arr_val = self.pop();
                     if (arr_val == .array) {
+                        if (key == .array or key == .object) {
+                            if (try self.throwOffsetKeyType(key, .access)) continue;
+                            return error.RuntimeError;
+                        }
                         self.push(arr_val.array.get(Value.toArrayKey(key)));
                     } else if (arr_val == .object and self.hasMethod(arr_val.object.class_name, "offsetGet")) {
                         const result = self.callMethod(arr_val.object, "offsetGet", &.{key}) catch {
@@ -2197,6 +2202,10 @@ pub const VM = struct {
                     const key = self.pop();
                     const arr_val = self.pop();
                     if (arr_val == .array) {
+                        if (key == .array or key == .object) {
+                            if (try self.throwOffsetKeyType(key, .access)) continue;
+                            return error.RuntimeError;
+                        }
                         const arr_key = Value.toArrayKey(key);
                         const existing = arr_val.array.get(arr_key);
                         if (existing != .null) {
@@ -2233,6 +2242,10 @@ pub const VM = struct {
                     const key = self.pop();
                     const arr_val = self.pop();
                     if (arr_val == .array) {
+                        if (key == .array or key == .object) {
+                            if (try self.throwOffsetKeyType(key, .access)) continue;
+                            return error.RuntimeError;
+                        }
                         try arr_val.array.set(self.allocator, Value.toArrayKey(key), val);
                         if (self.globals_array) |ga| {
                             if (arr_val.array == ga and key == .string) {
@@ -2321,6 +2334,10 @@ pub const VM = struct {
                     }
 
                     if (cur == .null or (cur == .bool and !cur.bool)) {
+                        if (key == .array or key == .object) {
+                            if (try self.throwOffsetKeyType(key, .access)) continue;
+                            return error.RuntimeError;
+                        }
                         const new_arr = try self.allocator.create(PhpArray);
                         new_arr.* = .{};
                         try self.arrays.append(self.allocator, new_arr);
@@ -2342,6 +2359,10 @@ pub const VM = struct {
                     }
 
                     if (cur == .array) {
+                        if (key == .array or key == .object) {
+                            if (try self.throwOffsetKeyType(key, .access)) continue;
+                            return error.RuntimeError;
+                        }
                         try cur.array.set(self.allocator, Value.toArrayKey(key), val);
                         if (self.globals_array) |ga| {
                             if (cur.array == ga and key == .string) {
@@ -2746,6 +2767,10 @@ pub const VM = struct {
                     const key = self.pop();
                     const arr_val = self.pop();
                     if (arr_val == .array) {
+                        if (key == .array or key == .object) {
+                            if (try self.throwOffsetKeyType(key, .unset)) continue;
+                            return error.RuntimeError;
+                        }
                         arr_val.array.remove(Value.toArrayKey(key));
                     } else if (arr_val == .object) {
                         if (self.hasMethod(arr_val.object.class_name, "offsetUnset")) {
@@ -3028,6 +3053,10 @@ pub const VM = struct {
                 .isset_index => {
                     const key = self.pop();
                     const arr_val = self.pop();
+                    if ((arr_val == .array or (arr_val == .object and (std.mem.eql(u8, arr_val.object.class_name, "ArrayObject") or std.mem.eql(u8, arr_val.object.class_name, "ArrayIterator")))) and (key == .array or key == .object)) {
+                        if (try self.throwOffsetKeyType(key, .isset_or_empty)) continue;
+                        return error.RuntimeError;
+                    }
                     if (arr_val == .object and (std.mem.eql(u8, arr_val.object.class_name, "ArrayObject") or std.mem.eql(u8, arr_val.object.class_name, "ArrayIterator"))) {
                         // SPL ArrayObject/ArrayIterator: isset() is null-aware (PHP's spl_array_has_dimension semantics)
                         const data = arr_val.object.get("__data");
@@ -6461,6 +6490,19 @@ pub const VM = struct {
         self.pending_exception = .{ .object = obj };
     }
 
+    pub const OffsetOp = enum { access, isset_or_empty, unset };
+
+    pub fn throwOffsetKeyType(self: *VM, key: Value, op: OffsetOp) RuntimeError!bool {
+        const tn: []const u8 = if (key == .object) key.object.class_name else "array";
+        const msg = switch (op) {
+            .access => std.fmt.allocPrint(self.allocator, "Cannot access offset of type {s} on array", .{tn}),
+            .isset_or_empty => std.fmt.allocPrint(self.allocator, "Cannot access offset of type {s} in isset or empty", .{tn}),
+            .unset => std.fmt.allocPrint(self.allocator, "Cannot unset offset of type {s} on array", .{tn}),
+        } catch return error.RuntimeError;
+        try self.strings.append(self.allocator, msg);
+        return self.throwBuiltinException("TypeError", msg);
+    }
+
     pub fn throwBuiltinException(self: *VM, class_name: []const u8, message: []const u8) !bool {
         const obj = try self.allocator.create(PhpObject);
         obj.* = .{ .class_name = class_name };
@@ -9368,17 +9410,25 @@ pub const VM = struct {
         };
     }
 
-    fn tryWeakCoerce(val: Value, type_str: []const u8) ?Value {
-        // only handle simple top-level scalar types here; unions and intersections
-        // would need a priority pass (PHP picks the type requiring least
-        // coercion) which we don't model
+    fn tryWeakCoerce(self: *VM, val: Value, type_str: []const u8) RuntimeError!?Value {
         var t = type_str;
         if (t.len > 0 and t[0] == '?') t = t[1..];
-        // bail on anything that isn't a bare scalar type
-        for (t) |c| if (c == '|' or c == '&' or c == '(' or c == ')') return null;
+        // bail on intersection types
+        for (t) |c| if (c == '&' or c == '(' or c == ')') return null;
+        // unions: try each member in PHP's priority order, returning the first
+        // that coerces successfully without lossy conversion. PHP's rule is to
+        // pick the type the value already matches; failing that, scalar values
+        // prefer int > float > string > bool (and the converse for non-scalars)
+        if (std.mem.indexOfScalar(u8, t, '|') != null) {
+            return try self.tryWeakCoerceUnion(val, t);
+        }
+        return try self.tryWeakCoerceSingle(val, t);
+    }
+
+    fn tryWeakCoerceSingle(self: *VM, val: Value, t: []const u8) RuntimeError!?Value {
         if (std.mem.eql(u8, t, "int") or std.mem.eql(u8, t, "integer")) {
             return switch (val) {
-                .bool => |b| .{ .int = if (b) @as(i64, 1) else 0 },
+                .bool => |b| Value{ .int = if (b) @as(i64, 1) else 0 },
                 .float => |f| if (std.math.isFinite(f)) Value{ .int = @as(i64, @intFromFloat(f)) } else null,
                 .string => |s| if (Value.isNumericString(s)) Value{ .int = Value.toInt(val) } else null,
                 else => null,
@@ -9386,20 +9436,64 @@ pub const VM = struct {
         }
         if (std.mem.eql(u8, t, "float") or std.mem.eql(u8, t, "double")) {
             return switch (val) {
-                .int => |i| .{ .float = @floatFromInt(i) },
-                .bool => |b| .{ .float = if (b) @as(f64, 1) else 0 },
+                .int => |i| Value{ .float = @floatFromInt(i) },
+                .bool => |b| Value{ .float = if (b) @as(f64, 1) else 0 },
                 .string => |s| if (Value.isNumericString(s)) Value{ .float = Value.toFloat(val) } else null,
                 else => null,
             };
         }
         if (std.mem.eql(u8, t, "bool") or std.mem.eql(u8, t, "boolean")) {
             return switch (val) {
-                .int => |i| .{ .bool = i != 0 },
-                .float => |f| .{ .bool = f != 0 },
-                .string => |s| .{ .bool = !(s.len == 0 or (s.len == 1 and s[0] == '0')) },
-                .null => .{ .bool = false },
+                .int => |i| Value{ .bool = i != 0 },
+                .float => |f| Value{ .bool = f != 0 },
+                .string => |s| Value{ .bool = !(s.len == 0 or (s.len == 1 and s[0] == '0')) },
+                .null => Value{ .bool = false },
                 else => null,
             };
+        }
+        if (std.mem.eql(u8, t, "string")) {
+            return switch (val) {
+                .int, .float, .bool => try self.coerceToStringValue(val),
+                else => null,
+            };
+        }
+        return null;
+    }
+
+    fn coerceToStringValue(self: *VM, val: Value) RuntimeError!Value {
+        var buf: std.ArrayListUnmanaged(u8) = .{};
+        errdefer buf.deinit(self.allocator);
+        try val.format(&buf, self.allocator);
+        const s = try buf.toOwnedSlice(self.allocator);
+        try self.strings.append(self.allocator, s);
+        return Value{ .string = s };
+    }
+
+    // PHP weak-mode union resolution. for a value V against `int|float|string|bool`,
+    // PHP checks types in this order: int, float, string, bool. the first type
+    // V already matches wins; otherwise the first coercible match wins. when
+    // multiple coercions could succeed (e.g. "5" against int|float), int wins
+    // since it appears first in the priority order
+    fn tryWeakCoerceUnion(self: *VM, val: Value, t: []const u8) RuntimeError!?Value {
+        const priority = [_][]const u8{ "int", "float", "string", "bool" };
+
+        // first pass: exact match (no coercion)
+        var iter = std.mem.tokenizeScalar(u8, t, '|');
+        while (iter.next()) |member| {
+            const m = std.mem.trim(u8, member, " \t");
+            if (self.checkSingleType(val, m)) return val;
+        }
+
+        // second pass: scalar coercion in priority order, but only for types
+        // listed in the union
+        for (priority) |p| {
+            var iter2 = std.mem.tokenizeScalar(u8, t, '|');
+            while (iter2.next()) |member| {
+                const m = std.mem.trim(u8, member, " \t");
+                const canonical: []const u8 = if (std.mem.eql(u8, m, "integer")) "int" else if (std.mem.eql(u8, m, "double")) "float" else if (std.mem.eql(u8, m, "boolean")) "bool" else m;
+                if (!std.mem.eql(u8, canonical, p)) continue;
+                if (try self.tryWeakCoerceSingle(val, canonical)) |coerced| return coerced;
+            }
         }
         return null;
     }
@@ -9510,7 +9604,7 @@ pub const VM = struct {
                     break :blk self.script_strict_types;
                 };
                 if (!caller_strict) {
-                    if (tryWeakCoerce(val, type_str)) |coerced| {
+                    if (try self.tryWeakCoerce(val, type_str)) |coerced| {
                         self.stack[self.sp - ac + i] = coerced;
                         continue;
                     }
