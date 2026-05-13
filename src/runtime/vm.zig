@@ -6519,6 +6519,12 @@ pub const VM = struct {
         if (gen.delegate) |*del| {
             switch (del.*) {
                 .gen => |inner| {
+                    // throw() on the outer generator forwards into the inner
+                    // delegate so try/catch around `yield from` works PHP-style
+                    if (gen.pending_throw) |ex| {
+                        gen.pending_throw = null;
+                        inner.pending_throw = ex;
+                    }
                     try self.resumeGenerator(inner, sent_value);
                     if (inner.state == .suspended) {
                         gen.current_value = inner.current_value;
