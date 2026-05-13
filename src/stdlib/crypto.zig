@@ -1,4 +1,6 @@
 const std = @import("std");
+
+extern fn zphp_xxh3_128(data: ?[*]const u8, len: usize, out: [*]u8) void;
 const Value = @import("../runtime/value.zig").Value;
 const NativeContext = @import("../runtime/vm.zig").NativeContext;
 const RuntimeError = error{ RuntimeError, OutOfMemory };
@@ -303,12 +305,6 @@ const HashAlgo = enum {
         if (std.mem.eql(u8, name, "xxh32")) return .xxh32;
         if (std.mem.eql(u8, name, "xxh64")) return .xxh64;
         if (std.mem.eql(u8, name, "xxh3")) return .xxh3;
-        // xxh128: zphp returns the first 16 bytes of sha256 since the real
-        // XXH3-128 algorithm isn't implemented. Symfony uses xxh128 only as a
-        // stable internal cache-key generator (translation catalogue filenames,
-        // var-dumper request ids); for that use case a substitute is fine. it
-        // does NOT match PHP's xxh128 byte-for-byte, so code comparing zphp's
-        // output against an externally-computed xxh128 will see a mismatch
         if (std.mem.eql(u8, name, "xxh128")) return .xxh128;
         if (std.mem.eql(u8, name, "adler32")) return .adler32;
         if (std.mem.eql(u8, name, "fnv132")) return .fnv132;
@@ -387,10 +383,9 @@ fn computeHash(algo: HashAlgo, data: []const u8, out: []u8) void {
             while (i < 8) : (i += 1) out[i] = @intCast((c >> @intCast((7 - i) * 8)) & 0xff);
         },
         .xxh128 => {
-            // use first 128 bits of sha256 as xxh128 substitute
-            var full: [32]u8 = undefined;
-            std.crypto.hash.sha2.Sha256.hash(data, &full, .{});
-            @memcpy(out[0..16], full[0..16]);
+            // real XXH3-128 via the vendored xxhash header. matches PHP's
+            // hash('xxh128', ...) output byte-for-byte
+            zphp_xxh3_128(if (data.len == 0) null else data.ptr, data.len, out[0..16].ptr);
         },
         .adler32 => {
             // Adler-32 mod 65521. PHP output bytes are big-endian

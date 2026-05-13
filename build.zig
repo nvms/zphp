@@ -41,6 +41,7 @@ pub fn build(b: *std.Build) void {
     addLibgd(b, exe_mod);
     addLibsodium(b, exe_mod);
     addLibldap(b, exe_mod);
+    addXxhashShim(b, exe_mod);
     exe_mod.link_libc = true;
     exe_mod.addObject(fast_loop_obj);
 
@@ -89,6 +90,7 @@ pub fn build(b: *std.Build) void {
     addLibgd(b, test_mod);
     addLibsodium(b, test_mod);
     addLibldap(b, test_mod);
+    addXxhashShim(b, test_mod);
     test_mod.link_libc = true;
     test_mod.addObject(fast_loop_test_obj);
 
@@ -151,6 +153,15 @@ fn addLibicu(b: *std.Build, mod: *std.Build.Module) void {
 // versioned symbols. zig's @cImport doesn't apply these renames, which is why
 // intl.zig declares the zphp_* symbols as plain externs instead of @cImport-ing
 // libicu headers
+// vendored xxhash (single-header); compiled inline so xxh128 doesn't add a
+// system library dependency on every CI runner
+fn addXxhashShim(b: *std.Build, mod: *std.Build.Module) void {
+    mod.addCSourceFile(.{
+        .file = b.path("src/stdlib/xxhash_shim.c"),
+        .flags = &.{"-std=c11"},
+    });
+}
+
 fn addIcuShim(b: *std.Build, mod: *std.Build.Module) void {
     var flags = std.ArrayList([]const u8){};
     defer flags.deinit(b.allocator);
