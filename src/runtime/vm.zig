@@ -4765,7 +4765,9 @@ pub const VM = struct {
 
                     if (obj_val != .object) {
                         self.sp -= ac + 1;
-                        self.setErrorMsg("Fatal error: Uncaught Error: Call to a member function {s}() on {s}", .{ method_name, valueTypeName(obj_val) });
+                        const msg = try std.fmt.allocPrint(self.allocator, "Call to a member function {s}() on {s}", .{ method_name, valueTypeName(obj_val) });
+                        try self.strings.append(self.allocator, msg);
+                        if (try self.throwBuiltinException("Error", msg)) continue;
                         return error.RuntimeError;
                     }
                     const obj = obj_val.object;
@@ -5076,7 +5078,9 @@ pub const VM = struct {
                     const obj_val = self.stack[self.sp - ac - 1];
                     if (obj_val != .object) {
                         self.sp -= ac + 1;
-                        self.setErrorMsg("Fatal error: Uncaught Error: Call to a member function {s}() on {s}", .{ method_name, valueTypeName(obj_val) });
+                        const msg = try std.fmt.allocPrint(self.allocator, "Call to a member function {s}() on {s}", .{ method_name, valueTypeName(obj_val) });
+                        try self.strings.append(self.allocator, msg);
+                        if (try self.throwBuiltinException("Error", msg)) continue;
                         return error.RuntimeError;
                     }
                     const obj = obj_val.object;
@@ -5192,7 +5196,9 @@ pub const VM = struct {
                     const method_name = method_name_val.string;
                     if (obj_val != .object) {
                         self.sp -= ac + 2;
-                        self.setErrorMsg("Fatal error: Uncaught Error: Call to a member function {s}() on {s}", .{ method_name, valueTypeName(obj_val) });
+                        const msg = try std.fmt.allocPrint(self.allocator, "Call to a member function {s}() on {s}", .{ method_name, valueTypeName(obj_val) });
+                        try self.strings.append(self.allocator, msg);
+                        if (try self.throwBuiltinException("Error", msg)) continue;
                         return error.RuntimeError;
                     }
                     const obj = obj_val.object;
@@ -5329,7 +5335,9 @@ pub const VM = struct {
                         return error.RuntimeError;
                     }
                     if (obj_val != .object) {
-                        self.setErrorMsg("Fatal error: Uncaught Error: Call to a member function {s}() on {s}", .{ method_name_val.string, valueTypeName(obj_val) });
+                        const msg = try std.fmt.allocPrint(self.allocator, "Call to a member function {s}() on {s}", .{ method_name_val.string, valueTypeName(obj_val) });
+                        try self.strings.append(self.allocator, msg);
+                        if (try self.throwBuiltinException("Error", msg)) continue;
                         return error.RuntimeError;
                     }
                     const method_name = method_name_val.string;
