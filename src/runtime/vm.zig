@@ -9295,7 +9295,9 @@ pub const VM = struct {
         return switch (val) {
             .int => "int",
             .float => "float",
-            .bool => "bool",
+            // PHP's error messages spell out 'true'/'false' for bool values,
+            // not 'bool'. matters for "Call to a member function X() on false"
+            .bool => |b| if (b) "true" else "false",
             .string => "string",
             .array => "array",
             .object => |obj| obj.class_name,
