@@ -2149,6 +2149,13 @@ pub const VM = struct {
                     const key = self.pop();
                     const arr_val = self.peek();
                     if (arr_val == .array) {
+                        if (key == .array or key == .object) {
+                            const tn: []const u8 = if (key == .object) key.object.class_name else "array";
+                            const msg = std.fmt.allocPrint(self.allocator, "Cannot access offset of type {s} on array", .{tn}) catch return error.RuntimeError;
+                            try self.strings.append(self.allocator, msg);
+                            if (try self.throwBuiltinException("TypeError", msg)) continue;
+                            return error.RuntimeError;
+                        }
                         try arr_val.array.set(self.allocator, Value.toArrayKey(key), val);
                     } else if (arr_val == .object and self.hasMethod(arr_val.object.class_name, "offsetSet")) {
                         _ = self.callMethod(arr_val.object, "offsetSet", &.{ key, val }) catch {
