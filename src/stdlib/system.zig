@@ -297,7 +297,22 @@ fn native_usleep(_: *NativeContext, args: []const Value) RuntimeError!Value {
 }
 
 fn native_getenv(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len == 0 or args[0] != .string) return .{ .bool = false };
+    // no-arg form returns all environment vars as an associative array
+    if (args.len == 0) {
+        const arr = try ctx.createArray();
+        var em = std.process.getEnvMap(ctx.allocator) catch return .{ .array = arr };
+        defer em.deinit();
+        var it = em.iterator();
+        while (it.next()) |e| {
+            const k = try ctx.allocator.dupe(u8, e.key_ptr.*);
+            const v = try ctx.allocator.dupe(u8, e.value_ptr.*);
+            try ctx.strings.append(ctx.allocator, k);
+            try ctx.strings.append(ctx.allocator, v);
+            try arr.set(ctx.allocator, .{ .string = k }, .{ .string = v });
+        }
+        return .{ .array = arr };
+    }
+    if (args[0] != .string) return .{ .bool = false };
     const val = std.process.getEnvVarOwned(ctx.allocator, args[0].string) catch return Value{ .bool = false };
     try ctx.strings.append(ctx.allocator, val);
     return .{ .string = val };

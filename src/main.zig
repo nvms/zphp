@@ -232,11 +232,17 @@ fn initArgv(vm: *VM, a: std.mem.Allocator, script_path: []const u8, script_args:
     try vm.request_vars.put(a, "$argv", .{ .array = argv_arr });
     try vm.request_vars.put(a, "$argc", .{ .int = @intCast(1 + script_args.len) });
 
-    // also update $_SERVER['argv'] and $_SERVER['argc']
+    // also update $_SERVER['argv'] and $_SERVER['argc'], plus the script-
+    // path keys that CLI PHP populates for the running file
     if (vm.request_vars.get("$_SERVER")) |sv| {
         if (sv == .array) {
             try sv.array.set(a, .{ .string = "argv" }, .{ .array = argv_arr });
             try sv.array.set(a, .{ .string = "argc" }, .{ .int = @intCast(1 + script_args.len) });
+            const dup_path = try a.dupe(u8, script_path);
+            try vm.strings.append(a, dup_path);
+            try sv.array.set(a, .{ .string = "SCRIPT_FILENAME" }, .{ .string = dup_path });
+            try sv.array.set(a, .{ .string = "SCRIPT_NAME" }, .{ .string = dup_path });
+            try sv.array.set(a, .{ .string = "PHP_SELF" }, .{ .string = dup_path });
         }
     }
 }
