@@ -1553,10 +1553,17 @@ fn native_register_shutdown_function(ctx: *NativeContext, args: []const Value) R
 }
 
 fn native_memory_get_usage(_: *NativeContext, _: []const Value) RuntimeError!Value {
-    // zphp uses an arena/request allocator and doesn't track byte-accurate
-    // process RSS; report a small non-zero stub so callers that gate on >0
-    // (the common pattern) keep working
-    return .{ .int = 1024 };
+    // pull current process RSS via getrusage. PHP distinguishes "current" from
+    // "peak" usage; zphp's arena doesn't track byte-accurate current bytes per
+    // call, so we report the OS-level resident-set peak. matches the common
+    // "did memory grow?" check and stays monotonic, while giving a value that's
+    // proportional to actual usage (unlike the previous 1024-byte stub)
+    var usage: std.c.rusage = undefined;
+    if (std.c.getrusage(std.c.rusage.SELF, &usage) != 0) return .{ .int = 0 };
+    // ru_maxrss is bytes on macOS, kilobytes on Linux/BSD
+    const builtin = @import("builtin");
+    const mult: i64 = if (builtin.target.os.tag == .macos or builtin.target.os.tag == .ios) 1 else 1024;
+    return .{ .int = @as(i64, @intCast(usage.maxrss)) * mult };
 }
 
 fn native_set_error_handler(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
