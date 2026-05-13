@@ -6997,6 +6997,21 @@ pub const VM = struct {
         // composer's autoloader uses `include` (not require_once), so a class
         // file can be re-executed multiple times during a single autoload chain.
         // each re-execution rebuilds slot_layout and the class def. the LAST
+        // a non-abstract class cannot declare any abstract methods directly.
+        // PHP fatals here: 'Class X declares abstract method Y() and must
+        // therefore be declared abstract'
+        if (!def.is_abstract) {
+            var di = def.methods.iterator();
+            while (di.next()) |e| {
+                if (e.value_ptr.is_abstract) {
+                    const msg = try std.fmt.allocPrint(self.allocator, "Class {s} declares abstract method {s}() and must therefore be declared abstract", .{ class_name, e.key_ptr.* });
+                    try self.strings.append(self.allocator, msg);
+                    self.error_msg = msg;
+                    return error.RuntimeError;
+                }
+            }
+        }
+
         // unless this class is itself abstract, every abstract method inherited
         // from the parent chain (and required by any implemented interface)
         // must be implemented by a non-abstract method
