@@ -2502,6 +2502,11 @@ pub const VM = struct {
                         const old_int = if (old == .int) old.int else if (old == .float) @as(i64, @intFromFloat(old.float)) else 0;
                         const new_val: Value = if (op == .array_elem_inc) .{ .int = old_int + 1 } else .{ .int = old_int - 1 };
                         try aei_arr.array.set(self.allocator, ak, new_val);
+                        if (self.globals_array) |ga| {
+                            if (aei_arr.array == ga and ak == .string) {
+                                try self.mirrorGlobalsWrite(ak.string, new_val);
+                            }
+                        }
                         self.push(old);
                     } else {
                         self.push(.null);
@@ -6812,6 +6817,13 @@ pub const VM = struct {
                     }
                 }
                 try frame.vars.put(self.allocator, name, val);
+                // $GLOBALS is a live view of top-frame variables. mirror writes
+                // back so $GLOBALS[$key] picks up the new value
+                if (self.globals_array) |ga| {
+                    if (name.len > 1 and name[0] == '$') {
+                        try ga.set(self.allocator, .{ .string = name[1..] }, val);
+                    }
+                }
             }
         }
         self.global_vars_dirty = true;
