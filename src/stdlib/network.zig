@@ -7,6 +7,7 @@ const RuntimeError = error{ RuntimeError, OutOfMemory };
 
 pub const entries = .{
     .{ "gethostbyname", native_gethostbyname },
+    .{ "gethostbynamel", native_gethostbynamel },
     .{ "gethostbyaddr", native_gethostbyaddr },
     .{ "gethostname", native_gethostname },
     .{ "inet_pton", native_inet_pton },
@@ -104,6 +105,33 @@ fn native_gethostbyname(ctx: *NativeContext, args: []const Value) RuntimeError!V
         }
     }
     return args[0];
+}
+
+// gethostbynamel: like gethostbyname but returns all resolved IPv4 addresses
+// as a numerically-indexed array, or false on failure
+fn native_gethostbynamel(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len == 0 or args[0] != .string) return .{ .bool = false };
+    const host = args[0].string;
+    var list = std.net.getAddressList(ctx.allocator, host, 0) catch return .{ .bool = false };
+    defer list.deinit();
+    if (list.addrs.len == 0) return .{ .bool = false };
+    const arr = try ctx.createArray();
+    var seen = std.StringHashMapUnmanaged(void){};
+    defer seen.deinit(ctx.allocator);
+    for (list.addrs) |addr| {
+        if (addr.any.family != std.posix.AF.INET) continue;
+        var buf: [32]u8 = undefined;
+        const written = std.fmt.bufPrint(&buf, "{f}", .{addr}) catch continue;
+        const colon = std.mem.lastIndexOfScalar(u8, written, ':') orelse written.len;
+        const ip_str = written[0..colon];
+        // dedup - the same IP can come back multiple times for different ports
+        if (seen.contains(ip_str)) continue;
+        const owned = try createString(ctx, ip_str);
+        try seen.put(ctx.allocator, owned, {});
+        try arr.append(ctx.allocator, .{ .string = owned });
+    }
+    if (arr.entries.items.len == 0) return .{ .bool = false };
+    return .{ .array = arr };
 }
 
 fn native_gethostbyaddr(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
