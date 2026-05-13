@@ -538,7 +538,7 @@ pub const Value = union(enum) {
         return toFloat(a) == toFloat(b);
     }
 
-    fn isNumericString(s: []const u8) bool {
+    pub fn isNumericString(s: []const u8) bool {
         var i: usize = 0;
         while (i < s.len and (s[i] == ' ' or s[i] == '\t' or s[i] == '\n' or s[i] == '\r')) i += 1;
         if (i >= s.len) return false;

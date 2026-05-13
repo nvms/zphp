@@ -341,4 +341,5 @@ pub const ObjFunction = struct {
     chunk: Chunk = .{},
     local_count: u16 = 0,
     slot_names: []const []const u8 = &.{},
+    strict_types: bool = false,
 };

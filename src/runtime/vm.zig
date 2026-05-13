@@ -442,6 +442,7 @@ pub const VM = struct {
     run_base_frame: usize = 0,
     allocator: Allocator,
     global_slot_names: []const []const u8 = &.{},
+    script_strict_types: bool = false,
     // the slot_names of the top script frame (frame[0]). global_slot_names
     // is temporarily overridden during require/include to point at the inner
     // file's slot_names; writebacks to frame[0]'s locals must use the top
@@ -1436,6 +1437,7 @@ pub const VM = struct {
         self.top_slot_names = result.slot_names;
         self.source = result.source;
         self.file_path = result.file_path;
+        self.script_strict_types = result.strict_types;
         self.frames[0] = .{ .chunk = &result.chunk, .ip = 0, .vars = vars, .locals = locals };
         self.frame_count = 1;
         self.obj_id_base = self.objects.items.len;
@@ -3479,6 +3481,8 @@ pub const VM = struct {
                                 }
                                 const saved_slot_names = self.global_slot_names;
                                 self.global_slot_names = r.slot_names;
+                                const saved_strict = self.script_strict_types;
+                                self.script_strict_types = r.strict_types;
                                 self.frames[self.frame_count] = .{
                                     .chunk = &r.chunk,
                                     .ip = 0,
@@ -3497,6 +3501,7 @@ pub const VM = struct {
                                         self.deinitFrameSlot(self.frame_count);
                                     }
                                     self.global_slot_names = saved_slot_names;
+                                self.script_strict_types = saved_strict;
 
                                     if (self.pending_exception) |exc| {
                                         if (self.handler_count > self.handler_floor) {
@@ -3583,6 +3588,7 @@ pub const VM = struct {
                                 self.deinitFrameSlot(return_frame);
                                 self.require_merge_depth = saved_merge_depth;
                                 self.global_slot_names = saved_slot_names;
+                                self.script_strict_types = saved_strict;
                                 if (self.sp <= sp_before) self.push(.{ .bool = true });
                             } else {
                                 if (is_require) {
@@ -9343,6 +9349,42 @@ pub const VM = struct {
         };
     }
 
+    fn tryWeakCoerce(val: Value, type_str: []const u8) ?Value {
+        // only handle simple top-level scalar types here; unions and intersections
+        // would need a priority pass (PHP picks the type requiring least
+        // coercion) which we don't model
+        var t = type_str;
+        if (t.len > 0 and t[0] == '?') t = t[1..];
+        // bail on anything that isn't a bare scalar type
+        for (t) |c| if (c == '|' or c == '&' or c == '(' or c == ')') return null;
+        if (std.mem.eql(u8, t, "int") or std.mem.eql(u8, t, "integer")) {
+            return switch (val) {
+                .bool => |b| .{ .int = if (b) @as(i64, 1) else 0 },
+                .float => |f| if (std.math.isFinite(f)) Value{ .int = @as(i64, @intFromFloat(f)) } else null,
+                .string => |s| if (Value.isNumericString(s)) Value{ .int = Value.toInt(val) } else null,
+                else => null,
+            };
+        }
+        if (std.mem.eql(u8, t, "float") or std.mem.eql(u8, t, "double")) {
+            return switch (val) {
+                .int => |i| .{ .float = @floatFromInt(i) },
+                .bool => |b| .{ .float = if (b) @as(f64, 1) else 0 },
+                .string => |s| if (Value.isNumericString(s)) Value{ .float = Value.toFloat(val) } else null,
+                else => null,
+            };
+        }
+        if (std.mem.eql(u8, t, "bool") or std.mem.eql(u8, t, "boolean")) {
+            return switch (val) {
+                .int => |i| .{ .bool = i != 0 },
+                .float => |f| .{ .bool = f != 0 },
+                .string => |s| .{ .bool = !(s.len == 0 or (s.len == 1 and s[0] == '0')) },
+                .null => .{ .bool = false },
+                else => null,
+            };
+        }
+        return null;
+    }
+
     noinline fn checkSingleType(self: *VM, val: Value, type_name: []const u8) bool {
         if (std.mem.eql(u8, type_name, "mixed")) return true;
         if (std.mem.eql(u8, type_name, "void")) return val == .null;
@@ -9435,6 +9477,25 @@ pub const VM = struct {
             if (type_str.len == 0) continue;
             const val = self.stack[self.sp - ac + i];
             if (!self.checkTypeMatch(val, type_str)) {
+                // weak-mode coercion: PHP's default is non-strict, so a numeric
+                // string passes int/float, scalars convert into each other,
+                // etc. only fall through to the TypeError path if coercion
+                // cannot produce a matching value. caller's file determines the
+                // mode - a strict_types=1 file calling a non-strict function
+                // still gets strict argument checking
+                const caller_strict = blk: {
+                    if (self.frame_count >= 2) {
+                        const caller = &self.frames[self.frame_count - 2];
+                        if (caller.func) |cf| break :blk cf.strict_types;
+                    }
+                    break :blk self.script_strict_types;
+                };
+                if (!caller_strict) {
+                    if (tryWeakCoerce(val, type_str)) |coerced| {
+                        self.stack[self.sp - ac + i] = coerced;
+                        continue;
+                    }
+                }
                 self.sp -= ac;
                 const param_name = if (func) |f| (if (i < f.params.len) f.params[i] else "") else "";
                 const msg = if (param_name.len > 0)

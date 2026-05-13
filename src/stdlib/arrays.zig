@@ -1503,6 +1503,10 @@ fn native_extract(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
                 break;
             }
         }
+        // a previous by-ref pass may have installed a ref-cell for this name;
+        // reading goes through ref_slots first, so update it or extract appears
+        // to silently no-op
+        if (frame.ref_slots.get(var_name)) |cell| cell.* = entry.value;
         count_val += 1;
     }
     return .{ .int = count_val };

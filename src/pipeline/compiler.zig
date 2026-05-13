@@ -42,6 +42,7 @@ pub const CompileResult = struct {
     new_defaults: std.ArrayListUnmanaged(*bytecode.NewDefault) = .{},
     source: []const u8 = "",
     file_path: []const u8 = "",
+    strict_types: bool = false,
 
     pub fn deinit(self: *CompileResult) void {
         self.chunk.deinit(self.allocator);
@@ -140,7 +141,31 @@ pub fn compileWithPath(ast: *const Ast, allocator: Allocator, file_path: []const
     const local_count = c.next_slot;
     c.local_slots.deinit(allocator);
     global_closure_counter = c.closure_count;
-    return .{ .chunk = c.chunk, .functions = c.functions, .string_allocs = c.string_allocs, .allocator = allocator, .local_count = local_count, .slot_names = slot_names, .type_hints = c.type_hints, .function_attrs = c.function_attrs, .new_defaults = c.new_defaults, .source = ast.source, .file_path = file_path };
+    const strict = detectStrictTypes(ast.source);
+    for (c.functions.items) |*f| f.strict_types = strict;
+    return .{ .chunk = c.chunk, .functions = c.functions, .string_allocs = c.string_allocs, .allocator = allocator, .local_count = local_count, .slot_names = slot_names, .type_hints = c.type_hints, .function_attrs = c.function_attrs, .new_defaults = c.new_defaults, .source = ast.source, .file_path = file_path, .strict_types = strict };
+}
+
+fn detectStrictTypes(src: []const u8) bool {
+    // declare(strict_types=1) appears at file scope, before any namespace.
+    // tolerate whitespace around tokens. we just need a yes/no answer; we
+    // don't bother re-parsing the directive
+    var i: usize = 0;
+    while (i < src.len) {
+        const idx = std.mem.indexOfScalarPos(u8, src, i, 'd') orelse return false;
+        if (idx + 7 <= src.len and std.mem.eql(u8, src[idx .. idx + 7], "declare")) {
+            var j = idx + 7;
+            while (j < src.len and (src[j] == ' ' or src[j] == '\t')) j += 1;
+            if (j < src.len and src[j] == '(') {
+                const end = std.mem.indexOfScalarPos(u8, src, j, ')') orelse return false;
+                const inner = src[j + 1 .. end];
+                if (std.mem.indexOf(u8, inner, "strict_types") != null and std.mem.indexOf(u8, inner, "1") != null) return true;
+                return false;
+            }
+        }
+        i = idx + 1;
+    }
+    return false;
 }
 
 pub const Compiler = struct {
