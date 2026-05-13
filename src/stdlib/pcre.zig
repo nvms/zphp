@@ -31,6 +31,7 @@ const pcre2 = struct {
     const UTF: u32 = 0x00080000;
     const UCP: u32 = 0x00020000;
     const ANCHORED: u32 = 0x80000000;
+    const UNGREEDY: u32 = 0x00040000;
 
     const SUBSTITUTE_GLOBAL: u32 = 0x00000100;
     const SUBSTITUTE_OVERFLOW_LENGTH: u32 = 0x00001000;
@@ -149,6 +150,7 @@ fn parsePattern(raw: []const u8) ?PatternInfo {
             'x' => flags |= pcre2.EXTENDED,
             'u' => flags |= pcre2.UTF | pcre2.UCP,
             'A' => flags |= pcre2.ANCHORED,
+            'U' => flags |= pcre2.UNGREEDY,
             'e' => return null,
             else => {},
         }
