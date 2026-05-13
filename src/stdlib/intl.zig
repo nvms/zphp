@@ -640,6 +640,13 @@ fn dfFormat(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     const millis: f64 = switch (args[0]) {
         .int => |i| @as(f64, @floatFromInt(i)) * 1000.0,
         .float => |fl| fl * 1000.0,
+        .object => |o| blk: {
+            // DateTime, DateTimeImmutable: pull the unix timestamp
+            const ts_v = o.get("timestamp");
+            if (ts_v == .int) break :blk @as(f64, @floatFromInt(ts_v.int)) * 1000.0;
+            if (ts_v == .float) break :blk ts_v.float * 1000.0;
+            return .{ .bool = false };
+        },
         else => return .{ .bool = false },
     };
     var buf: [256]UChar = undefined;
@@ -1296,7 +1303,31 @@ fn brkGetLocale(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
 
 // ---------------- registration ----------------
 
+fn intlGetErrorMessage(_: *NativeContext, _: []const Value) RuntimeError!Value {
+    return .{ .string = "U_ZERO_ERROR" };
+}
+
+fn intlGetErrorCode(_: *NativeContext, _: []const Value) RuntimeError!Value {
+    return .{ .int = 0 };
+}
+
+fn intlIsFailure(_: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len < 1) return .{ .bool = false };
+    const c = Value.toInt(args[0]);
+    return .{ .bool = c > 0 };
+}
+
+fn intlErrorName(_: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len < 1) return .{ .string = "U_ZERO_ERROR" };
+    const c = Value.toInt(args[0]);
+    return .{ .string = if (c == 0) "U_ZERO_ERROR" else "U_UNKNOWN_ERROR" };
+}
+
 pub const entries = .{
+    .{ "intl_get_error_message", intlGetErrorMessage },
+    .{ "intl_get_error_code", intlGetErrorCode },
+    .{ "intl_is_failure", intlIsFailure },
+    .{ "intl_error_name", intlErrorName },
     .{ "locale_get_default", localeGetDefault },
     .{ "locale_set_default", localeSetDefault },
     .{ "locale_get_primary_language", localeGetPrimaryLanguage },
