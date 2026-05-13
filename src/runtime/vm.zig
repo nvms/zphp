@@ -388,6 +388,10 @@ pub const VM = struct {
     trait_constants: std.StringHashMapUnmanaged([]const TraitStaticProp) = .{},
     statics: std.StringHashMapUnmanaged(Value) = .{},
     statics_cells: std.StringHashMapUnmanaged(*Value) = .{},
+    // shared heap cell per global variable name. allocated on first `global $x`
+    // declaration so every function frame referencing the same global gets a
+    // pointer to the same value. lets writes propagate live to recursive calls
+    globals_cells: std.StringHashMapUnmanaged(*Value) = .{},
     pending_call_name: ?[]const u8 = null,
     // args slice for invocations driven from native code (callByName-style).
     // executeFunction consumes this to seed fga_buf so func_get_args inside
@@ -1326,6 +1330,9 @@ pub const VM = struct {
         var sc_iter = self.statics_cells.iterator();
         while (sc_iter.next()) |entry| self.allocator.destroy(entry.value_ptr.*);
         self.statics_cells.deinit(self.allocator);
+        var gc_iter = self.globals_cells.iterator();
+        while (gc_iter.next()) |entry| self.allocator.destroy(entry.value_ptr.*);
+        self.globals_cells.deinit(self.allocator);
         self.static_vars.deinit(self.allocator);
         self.global_vars.deinit(self.allocator);
         self.loaded_files.deinit(self.allocator);
@@ -1385,6 +1392,9 @@ pub const VM = struct {
         var sc_it = self.statics_cells.iterator();
         while (sc_it.next()) |entry| self.allocator.destroy(entry.value_ptr.*);
         self.statics_cells.clearRetainingCapacity();
+        var gc_it = self.globals_cells.iterator();
+        while (gc_it.next()) |entry| self.allocator.destroy(entry.value_ptr.*);
+        self.globals_cells.clearRetainingCapacity();
         self.static_vars.clearRetainingCapacity();
         self.global_vars.clearRetainingCapacity();
         self.loaded_files.clearRetainingCapacity();
@@ -3425,16 +3435,41 @@ pub const VM = struct {
                     if (self.global_vars_dirty) try self.syncGlobalLocalsToVars();
                     const name_idx = self.readU16();
                     const name = self.currentChunk().constants.items[name_idx].string;
-                    const raw_val = if (self.frame_count > 1) blk: {
-                        if (self.frames[0].ref_slots.get(name)) |cell| break :blk cell.*;
-                        break :blk self.frames[0].vars.get(name) orelse
-                            self.php_constants.get(name) orelse .null;
-                    } else blk: {
-                        if (self.currentFrame().ref_slots.get(name)) |cell| break :blk cell.*;
-                        break :blk self.currentFrame().vars.get(name) orelse .null;
-                    };
-                    const global_val = try self.copyValue(raw_val);
-                    try self.currentFrame().vars.put(self.allocator, name, global_val);
+                    // resolve or allocate the shared cell. picks up the current
+                    // value from the top-frame's view (locals + ref_slots + vars
+                    // + constants) so this is the first read after a value was
+                    // set there
+                    var cell = self.globals_cells.get(name);
+                    if (cell == null) {
+                        const initial: Value = blk: {
+                            if (self.frames[0].ref_slots.get(name)) |c| break :blk c.*;
+                            for (self.top_slot_names, 0..) |sn, i| {
+                                if (std.mem.eql(u8, sn, name) and i < self.frames[0].locals.len) {
+                                    const v = self.frames[0].locals[i];
+                                    if (v != .null) break :blk v;
+                                }
+                            }
+                            if (self.frames[0].vars.get(name)) |v| break :blk v;
+                            if (self.php_constants.get(name)) |v| break :blk v;
+                            break :blk .null;
+                        };
+                        const c = try self.allocator.create(Value);
+                        c.* = initial;
+                        const owned = try self.allocator.dupe(u8, name);
+                        try self.strings.append(self.allocator, owned);
+                        try self.globals_cells.put(self.allocator, owned, c);
+                        cell = c;
+                    }
+                    // bind the local name to the cell so set_var/get_var on this
+                    // frame routes through ref_slots and stays in sync across
+                    // recursive calls. also point the top frame at the cell so
+                    // top-level reads of $name pick up writes done by function
+                    // frames sharing the cell
+                    try self.currentFrame().ref_slots.put(self.allocator, name, cell.?);
+                    try self.currentFrame().vars.put(self.allocator, name, cell.?.*);
+                    if (self.frame_count > 1) {
+                        try self.frames[0].ref_slots.put(self.allocator, name, cell.?);
+                    }
                     if (self.frame_count > 1) {
                         try self.global_vars.append(self.allocator, .{
                             .var_name = name,
@@ -6832,6 +6867,11 @@ pub const VM = struct {
                         try ga.set(self.allocator, .{ .string = name[1..] }, val);
                     }
                 }
+                // keep the shared global-cell (used by `global $name` inside
+                // functions) in sync with the top-frame write
+                if (self.globals_cells.get(name)) |cell| {
+                    cell.* = val;
+                }
             }
         }
         self.global_vars_dirty = true;
@@ -6856,6 +6896,12 @@ pub const VM = struct {
                     break;
                 }
             }
+        }
+
+        // shared global cell - so `global $key` inside any function picks
+        // up writes done through $GLOBALS at the top level
+        if (self.globals_cells.get(dollar_name)) |cell| {
+            cell.* = val;
         }
 
         // any function frame with an active `global $key` declaration

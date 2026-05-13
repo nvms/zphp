@@ -1,0 +1,126 @@
+#!/bin/bash
+# serve-mode WP harness: boots both zphp serve and php's built-in server against
+# the same WP install, curls a set of endpoints, and diffs status code and body
+# (after stripping nonces/timestamps). a pass means PHP and zphp agree on what
+# WordPress generated for that request
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+ZPHP="${ZPHP:-$SCRIPT_DIR/../../zig-out/bin/zphp}"
+APP_DIR="$SCRIPT_DIR/app"
+ZPHP_PORT=19880
+PHP_PORT=19881
+
+if ! command -v php &>/dev/null; then echo "php not in PATH"; exit 1; fi
+if [ ! -x "$ZPHP" ]; then echo "zphp not built"; exit 1; fi
+if [ ! -f "$SCRIPT_DIR/serve_seed.sqlite" ]; then
+    echo "no seed db - run tests/wordpress/serve_setup first"; exit 1;
+fi
+
+# restore the seed DB so both servers start from the same state
+DB="$APP_DIR/wp-content/database/.ht.sqlite"
+cp "$SCRIPT_DIR/serve_seed.sqlite" "$DB"
+
+# router for php -S so it dispatches like Apache mod_rewrite (existing files
+# served directly, everything else falls through to index.php)
+ROUTER="$APP_DIR/_serve_router.php"
+cat > "$ROUTER" <<'EOF'
+<?php
+$path = parse_url($_SERVER['REQUEST_URI'], PHP_URL_PATH);
+$full = __DIR__ . $path;
+if ($path !== '/' && is_file($full)) return false;
+$_SERVER['SCRIPT_NAME'] = '/index.php';
+$_SERVER['SCRIPT_FILENAME'] = __DIR__ . '/index.php';
+require __DIR__ . '/index.php';
+EOF
+
+cleanup() {
+    [ -n "${ZPHP_PID:-}" ] && kill "$ZPHP_PID" 2>/dev/null || true
+    [ -n "${PHP_PID:-}" ] && kill "$PHP_PID" 2>/dev/null || true
+    rm -f "$ROUTER"
+    wait 2>/dev/null || true
+}
+trap cleanup EXIT
+
+# start servers
+"$ZPHP" serve "$APP_DIR/index.php" --port "$ZPHP_PORT" --workers 2 >/tmp/zphp_serve.log 2>&1 &
+ZPHP_PID=$!
+php -S "localhost:$PHP_PORT" -t "$APP_DIR" "$ROUTER" >/tmp/php_serve.log 2>&1 &
+PHP_PID=$!
+
+# wait for both
+for i in $(seq 1 50); do
+    z=$(curl -s -o /dev/null -w '%{http_code}' "http://localhost:$ZPHP_PORT/" 2>/dev/null || echo 0)
+    p=$(curl -s -o /dev/null -w '%{http_code}' "http://localhost:$PHP_PORT/" 2>/dev/null || echo 0)
+    if [ "$z" != "0" ] && [ "$p" != "0" ]; then break; fi
+    sleep 0.1
+done
+
+passed=0
+failed=0
+failures=""
+
+# normalize output: strip nonces, query strings with timestamps, generated ids
+normalize() {
+    sed -E \
+        -e 's/nonce="[^"]*"/nonce="X"/g' \
+        -e 's/ver=[0-9.a-f]+/ver=X/g' \
+        -e 's/_wpnonce=[0-9a-f]+/_wpnonce=X/g' \
+        -e 's/[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:.+\-]+/DATE/g' \
+        -e 's/Generator" content="WordPress [0-9.]+"/Generator" content="WordPress X"/g' \
+        -e 's/wp-admin\/css\/[a-z-]+\.css\?ver=X/wp-admin\/css\/X.css?ver=X/g'
+}
+
+check_status() {
+    local name="$1" path="$2"
+    local zc=$(curl -s -o /dev/null -w '%{http_code}' "http://localhost:$ZPHP_PORT$path" 2>&1 || echo "ERR")
+    local pc=$(curl -s -o /dev/null -w '%{http_code}' "http://localhost:$PHP_PORT$path" 2>&1 || echo "ERR")
+    if [ "$zc" = "$pc" ]; then
+        passed=$((passed + 1))
+        echo "  pass  $name (status=$zc)"
+    else
+        failed=$((failed + 1))
+        echo "  FAIL  $name (zphp=$zc php=$pc)"
+        failures="$failures\n$name: zphp=$zc php=$pc"
+    fi
+}
+
+check_body_contains() {
+    local name="$1" path="$2" needle="$3"
+    local zb=$(curl -s "http://localhost:$ZPHP_PORT$path" 2>&1)
+    if echo "$zb" | grep -qF "$needle"; then
+        passed=$((passed + 1))
+        echo "  pass  $name (contains '$needle')"
+    else
+        failed=$((failed + 1))
+        echo "  FAIL  $name (missing '$needle')"
+        failures="$failures\n$name body did not contain '$needle'"
+    fi
+}
+
+echo
+echo "=== status-code parity ==="
+check_status "front-page"   "/"
+check_status "login-form"   "/wp-login.php"
+check_status "admin-redir"  "/wp-admin/"
+check_status "missing-page" "/this-page-does-not-exist-42"
+check_status "rest-root"    "/wp-json/"
+check_status "rest-posts"   "/wp-json/wp/v2/posts"
+
+echo
+echo "=== body markers (zphp only) ==="
+check_body_contains "front-has-wp"      "/"                "WordPress"
+check_body_contains "front-has-post"    "/"                "Hello zphp"
+check_body_contains "login-has-form"    "/wp-login.php"    "user_login"
+check_body_contains "rest-has-posts"    "/wp-json/wp/v2/posts"  "Hello zphp"
+
+echo
+echo "$passed passed, $failed failed"
+if [ $failed -gt 0 ]; then
+    echo -e "$failures"
+    echo "--- zphp serve log (last 30 lines) ---"
+    tail -30 /tmp/zphp_serve.log 2>&1 || true
+    echo "--- php serve log (last 30 lines) ---"
+    tail -30 /tmp/php_serve.log 2>&1 || true
+    exit 1
+fi

@@ -809,6 +809,13 @@ const Parser = struct {
 
         const end_tag: Tag = if (is_alt) .kw_endswitch else .r_brace;
         while (self.peek() != .kw_case and self.peek() != .kw_default and self.peek() != end_tag and self.peek() != .eof) {
+            // case body can contain bare ?>HTML<?php fragments terminated by a
+            // case/default/`}`. swallow lone PHP tag tokens here so parseStatement
+            // isn't called on a r_brace or kw_case after the tag consumes
+            if (self.peek() == .open_tag or self.peek() == .close_tag) {
+                _ = self.advance();
+                continue;
+            }
             const stmt = self.parseStatement() catch |err| switch (err) {
                 error.ParseError => { self.synchronize(); continue; },
                 error.OutOfMemory => return error.OutOfMemory,
@@ -830,6 +837,10 @@ const Parser = struct {
 
         const end_tag: Tag = if (is_alt) .kw_endswitch else .r_brace;
         while (self.peek() != .kw_case and self.peek() != .kw_default and self.peek() != end_tag and self.peek() != .eof) {
+            if (self.peek() == .open_tag or self.peek() == .close_tag) {
+                _ = self.advance();
+                continue;
+            }
             const stmt = self.parseStatement() catch |err| switch (err) {
                 error.ParseError => { self.synchronize(); continue; },
                 error.OutOfMemory => return error.OutOfMemory,

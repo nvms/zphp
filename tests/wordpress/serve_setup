@@ -1,0 +1,52 @@
+#!/bin/bash
+# install WordPress core (admin user, options, sample post) so the serve harness
+# has a known fixture to query. idempotent - re-running just re-seeds the same
+# DB which lets us snapshot/restore for write-path tests
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+APP_DIR="$SCRIPT_DIR/app"
+
+if [ ! -f "$APP_DIR/wp-load.php" ]; then
+    echo "run 'tests/wordpress/setup' first"
+    exit 1
+fi
+
+INSTALL_SCRIPT="$(mktemp -t zphp_wp_install.XXXXXX).php"
+trap "rm -f $INSTALL_SCRIPT" EXIT
+
+cat > "$INSTALL_SCRIPT" <<EOF
+<?php
+define('WP_INSTALLING', true);
+define('ABSPATH', '$APP_DIR/');
+\$_SERVER['HTTP_HOST'] = 'localhost';
+\$_SERVER['SERVER_NAME'] = 'localhost';
+\$_SERVER['REQUEST_URI'] = '/wp-admin/install.php';
+\$_SERVER['SCRIPT_NAME'] = '/wp-admin/install.php';
+\$_SERVER['DOCUMENT_ROOT'] = '$APP_DIR';
+require '$APP_DIR/wp-load.php';
+require '$APP_DIR/wp-admin/includes/upgrade.php';
+if ( is_blog_installed() ) {
+    echo "WordPress already installed.\n";
+    return;
+}
+\$result = wp_install('zphp test', 'admin', 'admin@example.com', false, '', 'admin-password', 'en_US');
+echo "installed: user_id=" . \$result['user_id'] . "\n";
+\$post_id = wp_insert_post([
+    'post_title' => 'Hello zphp',
+    'post_content' => 'This is a sample post for the serve harness.',
+    'post_status' => 'publish',
+    'post_author' => \$result['user_id'],
+]);
+echo "sample post: \$post_id\n";
+update_option('permalink_structure', '/%year%/%monthnum%/%postname%/');
+echo "permalinks set\n";
+EOF
+
+php -d display_errors=1 "$INSTALL_SCRIPT"
+
+DB="$APP_DIR/wp-content/database/.ht.sqlite"
+if [ -f "$DB" ]; then
+    cp "$DB" "$SCRIPT_DIR/serve_seed.sqlite"
+    echo "snapshot saved to $SCRIPT_DIR/serve_seed.sqlite"
+fi
