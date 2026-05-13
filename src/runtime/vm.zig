@@ -4509,9 +4509,15 @@ pub const VM = struct {
                                     self.push(val);
                                     continue;
                                 }
-                                const msg = try std.fmt.allocPrint(self.allocator, "Cannot modify {s}(set) property {s}::${s} from global scope", .{
-                                    @tagName(vr.set_visibility), vr.defining_class, prop_name,
-                                });
+                                const scope_name = self.currentDefiningClass();
+                                const msg = if (scope_name) |sn|
+                                    try std.fmt.allocPrint(self.allocator, "Cannot modify {s}(set) property {s}::${s} from scope {s}", .{
+                                        @tagName(vr.set_visibility), vr.defining_class, prop_name, sn,
+                                    })
+                                else
+                                    try std.fmt.allocPrint(self.allocator, "Cannot modify {s}(set) property {s}::${s} from global scope", .{
+                                        @tagName(vr.set_visibility), vr.defining_class, prop_name,
+                                    });
                                 try self.strings.append(self.allocator, msg);
                                 if (try self.throwBuiltinException("Error", msg)) continue;
                                 return error.RuntimeError;
