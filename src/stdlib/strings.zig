@@ -3846,28 +3846,108 @@ fn native_str_rot13(ctx: *NativeContext, args: []const Value) RuntimeError!Value
     return .{ .string = buf };
 }
 
+// PHP's default Unicode-whitespace set for mb_trim family. matches what PHP
+// docs list as "characters with the White_Space property", restricted to the
+// ones PHP actually uses
+const DEFAULT_MB_TRIM_CPS = [_]u21{
+    0x0009, 0x000A, 0x000B, 0x000C, 0x000D, 0x0020,
+    0x0085, 0x00A0, 0x1680,
+    0x2000, 0x2001, 0x2002, 0x2003, 0x2004, 0x2005, 0x2006, 0x2007, 0x2008, 0x2009, 0x200A,
+    0x2028, 0x2029, 0x202F, 0x205F,
+    0x3000, 0xFEFF,
+};
+
+fn decodeUtf8At(s: []const u8, pos: usize) struct { cp: u21, len: u3 } {
+    if (pos >= s.len) return .{ .cp = 0, .len = 0 };
+    const len = std.unicode.utf8ByteSequenceLength(s[pos]) catch return .{ .cp = s[pos], .len = 1 };
+    if (pos + len > s.len) return .{ .cp = s[pos], .len = 1 };
+    const cp = std.unicode.utf8Decode(s[pos .. pos + len]) catch return .{ .cp = s[pos], .len = 1 };
+    return .{ .cp = cp, .len = len };
+}
+
+// previous-codepoint length walking backwards from `pos`. returns 0 if none.
+fn prevUtf8Len(s: []const u8, pos: usize) u3 {
+    if (pos == 0) return 0;
+    var i: usize = pos;
+    var back: u3 = 0;
+    while (i > 0 and back < 4) {
+        i -= 1;
+        back += 1;
+        const b = s[i];
+        // continuation byte is 10xxxxxx; stop at a non-continuation
+        if ((b & 0xC0) != 0x80) return back;
+    }
+    return back;
+}
+
+fn buildMbTrimSet(allocator: std.mem.Allocator, arg: ?[]const u8) ![]u21 {
+    if (arg) |a| {
+        var list: std.ArrayListUnmanaged(u21) = .{};
+        var i: usize = 0;
+        while (i < a.len) {
+            const d = decodeUtf8At(a, i);
+            try list.append(allocator, d.cp);
+            i += if (d.len == 0) 1 else d.len;
+        }
+        return list.toOwnedSlice(allocator);
+    }
+    const out = try allocator.alloc(u21, DEFAULT_MB_TRIM_CPS.len);
+    @memcpy(out, &DEFAULT_MB_TRIM_CPS);
+    return out;
+}
+
+fn cpInSet(set: []const u21, cp: u21) bool {
+    for (set) |x| if (x == cp) return true;
+    return false;
+}
+
+fn mbTrimImpl(ctx: *NativeContext, s: []const u8, set: []const u21, left: bool, right: bool) ![]const u8 {
+    var start: usize = 0;
+    if (left) {
+        while (start < s.len) {
+            const d = decodeUtf8At(s, start);
+            if (d.len == 0 or !cpInSet(set, d.cp)) break;
+            start += d.len;
+        }
+    }
+    var end: usize = s.len;
+    if (right) {
+        while (end > start) {
+            const pl = prevUtf8Len(s, end);
+            if (pl == 0) break;
+            const d = decodeUtf8At(s, end - pl);
+            if (d.len == 0 or !cpInSet(set, d.cp)) break;
+            end -= pl;
+        }
+    }
+    return try ctx.createString(s[start..end]);
+}
+
 fn native_mb_trim(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len == 0) return .{ .string = "" };
     const s = if (args[0] == .string) args[0].string else return Value{ .string = "" };
-    const chars = if (args.len >= 2 and args[1] == .string) args[1].string else " \t\n\r\x0b\x00";
-    const trimmed = std.mem.trim(u8, s, chars);
-    return .{ .string = try ctx.createString(trimmed) };
+    const arg_chars: ?[]const u8 = if (args.len >= 2 and args[1] == .string) args[1].string else null;
+    const set = try buildMbTrimSet(ctx.allocator, arg_chars);
+    defer ctx.allocator.free(set);
+    return .{ .string = try mbTrimImpl(ctx, s, set, true, true) };
 }
 
 fn native_mb_ltrim(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len == 0) return .{ .string = "" };
     const s = if (args[0] == .string) args[0].string else return Value{ .string = "" };
-    const chars = if (args.len >= 2 and args[1] == .string) args[1].string else " \t\n\r\x0b\x00";
-    const trimmed = std.mem.trimLeft(u8, s, chars);
-    return .{ .string = try ctx.createString(trimmed) };
+    const arg_chars: ?[]const u8 = if (args.len >= 2 and args[1] == .string) args[1].string else null;
+    const set = try buildMbTrimSet(ctx.allocator, arg_chars);
+    defer ctx.allocator.free(set);
+    return .{ .string = try mbTrimImpl(ctx, s, set, true, false) };
 }
 
 fn native_mb_rtrim(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len == 0) return .{ .string = "" };
     const s = if (args[0] == .string) args[0].string else return Value{ .string = "" };
-    const chars = if (args.len >= 2 and args[1] == .string) args[1].string else " \t\n\r\x0b\x00";
-    const trimmed = std.mem.trimRight(u8, s, chars);
-    return .{ .string = try ctx.createString(trimmed) };
+    const arg_chars: ?[]const u8 = if (args.len >= 2 and args[1] == .string) args[1].string else null;
+    const set = try buildMbTrimSet(ctx.allocator, arg_chars);
+    defer ctx.allocator.free(set);
+    return .{ .string = try mbTrimImpl(ctx, s, set, false, true) };
 }
 
 fn native_quotemeta(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
