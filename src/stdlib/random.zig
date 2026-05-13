@@ -7,6 +7,10 @@ const VM = vm_mod.VM;
 const NativeContext = vm_mod.NativeContext;
 const ClassDef = vm_mod.ClassDef;
 
+const Mt19937 = @import("mt19937.zig").Mt19937;
+const Xoshiro256ss = @import("xoshiro256ss.zig").Xoshiro256ss;
+const PcgOneseq128 = @import("pcg_oneseq_128.zig").PcgOneseq128;
+
 const Allocator = std.mem.Allocator;
 const RuntimeError = error{ RuntimeError, OutOfMemory };
 
@@ -33,56 +37,33 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try vm.native_fns.put(a, "Random\\Randomizer::shuffleBytes", rzShuffleBytes);
     try vm.native_fns.put(a, "Random\\Randomizer::pickArrayKeys", rzPickArrayKeys);
 
-    // Engine namespace placeholders so `new Random\Engine\Mt19937(42)` parses
-    // and the wrapper Randomizer just ignores the engine and uses crypto rand
     var mt = ClassDef{ .name = "Random\\Engine\\Mt19937" };
     try mt.methods.put(a, "__construct", .{ .name = "__construct", .arity = 2 });
     try mt.methods.put(a, "generate", .{ .name = "generate", .arity = 0 });
     try vm.classes.put(a, "Random\\Engine\\Mt19937", mt);
-    try vm.native_fns.put(a, "Random\\Engine\\Mt19937::__construct", engineConstruct);
-    try vm.native_fns.put(a, "Random\\Engine\\Mt19937::generate", engineGenerate);
+    try vm.native_fns.put(a, "Random\\Engine\\Mt19937::__construct", mtConstruct);
+    try vm.native_fns.put(a, "Random\\Engine\\Mt19937::generate", mtGenerate);
 
     var pcg = ClassDef{ .name = "Random\\Engine\\PcgOneseq128XslRr64" };
     try pcg.methods.put(a, "__construct", .{ .name = "__construct", .arity = 1 });
     try pcg.methods.put(a, "generate", .{ .name = "generate", .arity = 0 });
     try vm.classes.put(a, "Random\\Engine\\PcgOneseq128XslRr64", pcg);
-    try vm.native_fns.put(a, "Random\\Engine\\PcgOneseq128XslRr64::__construct", engineConstruct);
-    try vm.native_fns.put(a, "Random\\Engine\\PcgOneseq128XslRr64::generate", engineGenerate);
+    try vm.native_fns.put(a, "Random\\Engine\\PcgOneseq128XslRr64::__construct", pcgConstruct);
+    try vm.native_fns.put(a, "Random\\Engine\\PcgOneseq128XslRr64::generate", pcgGenerate);
 
     var xosh = ClassDef{ .name = "Random\\Engine\\Xoshiro256StarStar" };
     try xosh.methods.put(a, "__construct", .{ .name = "__construct", .arity = 1 });
     try xosh.methods.put(a, "generate", .{ .name = "generate", .arity = 0 });
     try vm.classes.put(a, "Random\\Engine\\Xoshiro256StarStar", xosh);
-    try vm.native_fns.put(a, "Random\\Engine\\Xoshiro256StarStar::__construct", engineConstruct);
-    try vm.native_fns.put(a, "Random\\Engine\\Xoshiro256StarStar::generate", engineGenerate);
+    try vm.native_fns.put(a, "Random\\Engine\\Xoshiro256StarStar::__construct", xoshConstruct);
+    try vm.native_fns.put(a, "Random\\Engine\\Xoshiro256StarStar::generate", xoshGenerate);
 
     var secure = ClassDef{ .name = "Random\\Engine\\Secure" };
     try secure.methods.put(a, "__construct", .{ .name = "__construct", .arity = 0 });
     try secure.methods.put(a, "generate", .{ .name = "generate", .arity = 0 });
     try vm.classes.put(a, "Random\\Engine\\Secure", secure);
     try vm.native_fns.put(a, "Random\\Engine\\Secure::__construct", noopConstruct);
-    try vm.native_fns.put(a, "Random\\Engine\\Secure::generate", engineGenerateSecure);
-}
-
-// Random\Engine\*::generate(): string. returns 8 raw bytes from the engine's
-// PRNG (PHP's contract; the Randomizer wrapper consumes this raw output)
-fn engineGenerate(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const this = getThis(ctx) orelse return .null;
-    var prng = loadPrngFromEngine(this) orelse return .null;
-    var bytes: [8]u8 = undefined;
-    prng.random().bytes(&bytes);
-    try savePrngToEngine(ctx, this, &prng);
-    const owned = try ctx.allocator.dupe(u8, &bytes);
-    try ctx.vm.strings.append(ctx.allocator, owned);
-    return .{ .string = owned };
-}
-
-fn engineGenerateSecure(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    var bytes: [8]u8 = undefined;
-    std.crypto.random.bytes(&bytes);
-    const owned = try ctx.allocator.dupe(u8, &bytes);
-    try ctx.vm.strings.append(ctx.allocator, owned);
-    return .{ .string = owned };
+    try vm.native_fns.put(a, "Random\\Engine\\Secure::generate", secureGenerate);
 }
 
 fn noopConstruct(_: *NativeContext, _: []const Value) RuntimeError!Value {
@@ -95,47 +76,189 @@ fn getThis(ctx: *NativeContext) ?*PhpObject {
     return v.object;
 }
 
-// engine __construct: seed an Xoshiro256 PRNG and store its raw state on $this.
-// every supported engine class shares this implementation; exact algorithm
-// differs from PHP's Mt19937/PCG but reproducibility per-seed is preserved
-fn engineConstruct(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    const this = getThis(ctx) orelse return .null;
-    const seed: u64 = if (args.len >= 1) @bitCast(Value.toInt(args[0])) else @intCast(std.time.timestamp());
-    var prng = std.Random.DefaultPrng.init(seed);
-    const bytes = std.mem.asBytes(&prng);
+fn freshU64FromCrypto() u64 {
+    var b: [8]u8 = undefined;
+    std.crypto.random.bytes(&b);
+    return std.mem.readInt(u64, &b, .little);
+}
+
+fn storeState(ctx: *NativeContext, obj: *PhpObject, bytes: []const u8) !void {
     const owned = try ctx.allocator.dupe(u8, bytes);
     try ctx.vm.strings.append(ctx.allocator, owned);
-    try this.set(ctx.allocator, "_state", .{ .string = owned });
+    try obj.set(ctx.allocator, "_state", .{ .string = owned });
+}
+
+fn loadState(obj: *PhpObject, comptime T: type) ?T {
+    const v = obj.get("_state");
+    if (v != .string) return null;
+    if (v.string.len != @sizeOf(T)) return null;
+    var out: T = undefined;
+    @memcpy(std.mem.asBytes(&out), v.string);
+    return out;
+}
+
+// ---- Mt19937 ----
+
+fn mtConstruct(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    const this = getThis(ctx) orelse return .null;
+    const seed_int: u32 = if (args.len >= 1 and args[0] != .null)
+        @as(u32, @truncate(@as(u64, @bitCast(Value.toInt(args[0])))))
+    else
+        @truncate(freshU64FromCrypto());
+    // arg 1 is the MT_RAND_* mode; only MT_RAND_MT19937 (= 0) is supported
+    if (args.len >= 2 and args[1] == .int and args[1].int != 0 and args[1].int != 1) {
+        try ctx.vm.setPendingException("ValueError", "Mt19937::__construct(): Argument #2 ($mode) must be a valid mode");
+        return error.RuntimeError;
+    }
+    var m = Mt19937{};
+    m.seed(seed_int);
+    try storeState(ctx, this, std.mem.asBytes(&m));
     return .null;
 }
 
-fn engineIsSecure(obj: *PhpObject) bool {
-    return std.mem.endsWith(u8, obj.class_name, "Secure");
-}
-
-fn loadPrngFromEngine(engine: *PhpObject) ?std.Random.DefaultPrng {
-    const v = engine.get("_state");
-    if (v != .string) return null;
-    if (v.string.len != @sizeOf(std.Random.DefaultPrng)) return null;
-    var prng: std.Random.DefaultPrng = undefined;
-    @memcpy(std.mem.asBytes(&prng), v.string);
-    return prng;
-}
-
-fn savePrngToEngine(ctx: *NativeContext, engine: *PhpObject, prng: *const std.Random.DefaultPrng) !void {
-    const bytes = std.mem.asBytes(prng);
-    const owned = try ctx.allocator.dupe(u8, bytes);
+fn mtGenerate(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const this = getThis(ctx) orelse return .null;
+    var m = loadState(this, Mt19937) orelse return .null;
+    const v = m.nextU32();
+    try storeState(ctx, this, std.mem.asBytes(&m));
+    var bytes: [4]u8 = undefined;
+    std.mem.writeInt(u32, &bytes, v, .little);
+    const owned = try ctx.allocator.dupe(u8, &bytes);
     try ctx.vm.strings.append(ctx.allocator, owned);
-    try engine.set(ctx.allocator, "_state", .{ .string = owned });
+    return .{ .string = owned };
 }
 
-// returns the engine object referenced by the Randomizer ($this->_engine), or
-// null when the engine is Secure / unset (callers should fall back to crypto)
-fn randEngine(ctx: *NativeContext) ?*PhpObject {
+// ---- PCG OneSeq 128 XSL RR 64 ----
+
+fn pcgConstruct(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    const this = getThis(ctx) orelse return .null;
+    var p = PcgOneseq128{};
+    if (args.len >= 1 and args[0] != .null) {
+        if (args[0] == .string) {
+            if (args[0].string.len != 16) {
+                try ctx.vm.setPendingException("ValueError", "Random\\Engine\\PcgOneseq128XslRr64::__construct(): Argument #1 ($seed) must be a 16 byte (128 bit) string");
+                return error.RuntimeError;
+            }
+            _ = p.seedBytes(args[0].string);
+        } else {
+            p.seedInt(@bitCast(Value.toInt(args[0])));
+        }
+    } else {
+        p.seedInt(freshU64FromCrypto());
+    }
+    try storeState(ctx, this, std.mem.asBytes(&p));
+    return .null;
+}
+
+fn pcgGenerate(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const this = getThis(ctx) orelse return .null;
+    var p = loadState(this, PcgOneseq128) orelse return .null;
+    const v = p.next();
+    try storeState(ctx, this, std.mem.asBytes(&p));
+    var bytes: [8]u8 = undefined;
+    std.mem.writeInt(u64, &bytes, v, .little);
+    const owned = try ctx.allocator.dupe(u8, &bytes);
+    try ctx.vm.strings.append(ctx.allocator, owned);
+    return .{ .string = owned };
+}
+
+// ---- Xoshiro256** ----
+
+fn xoshConstruct(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    const this = getThis(ctx) orelse return .null;
+    var x = Xoshiro256ss{};
+    if (args.len >= 1 and args[0] != .null) {
+        if (args[0] == .string) {
+            if (args[0].string.len != 32) {
+                try ctx.vm.setPendingException("ValueError", "Random\\Engine\\Xoshiro256StarStar::__construct(): Argument #1 ($seed) must be a 32 byte (256 bit) string");
+                return error.RuntimeError;
+            }
+            _ = x.seedBytes(args[0].string);
+        } else {
+            x.seedInt(@bitCast(Value.toInt(args[0])));
+        }
+    } else {
+        x.seedInt(freshU64FromCrypto());
+    }
+    try storeState(ctx, this, std.mem.asBytes(&x));
+    return .null;
+}
+
+fn xoshGenerate(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const this = getThis(ctx) orelse return .null;
+    var x = loadState(this, Xoshiro256ss) orelse return .null;
+    const v = x.next();
+    try storeState(ctx, this, std.mem.asBytes(&x));
+    var bytes: [8]u8 = undefined;
+    std.mem.writeInt(u64, &bytes, v, .little);
+    const owned = try ctx.allocator.dupe(u8, &bytes);
+    try ctx.vm.strings.append(ctx.allocator, owned);
+    return .{ .string = owned };
+}
+
+fn secureGenerate(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    var bytes: [8]u8 = undefined;
+    std.crypto.random.bytes(&bytes);
+    const owned = try ctx.allocator.dupe(u8, &bytes);
+    try ctx.vm.strings.append(ctx.allocator, owned);
+    return .{ .string = owned };
+}
+
+// ---- Randomizer dispatch ----
+
+// returns the next u32 from whatever engine the Randomizer was constructed with
+fn engineNextU32(ctx: *NativeContext, eng: *PhpObject) u32 {
+    if (std.mem.endsWith(u8, eng.class_name, "Mt19937")) {
+        var m = loadState(eng, Mt19937) orelse return @as(u32, @truncate(freshU64FromCrypto()));
+        const v = m.nextU32();
+        storeState(ctx, eng, std.mem.asBytes(&m)) catch {};
+        return v;
+    }
+    if (std.mem.endsWith(u8, eng.class_name, "Xoshiro256StarStar")) {
+        var x = loadState(eng, Xoshiro256ss) orelse return @as(u32, @truncate(freshU64FromCrypto()));
+        const v = x.next();
+        storeState(ctx, eng, std.mem.asBytes(&x)) catch {};
+        return @as(u32, @truncate(v));
+    }
+    if (std.mem.endsWith(u8, eng.class_name, "PcgOneseq128XslRr64")) {
+        var p = loadState(eng, PcgOneseq128) orelse return @as(u32, @truncate(freshU64FromCrypto()));
+        const v = p.next();
+        storeState(ctx, eng, std.mem.asBytes(&p)) catch {};
+        return @as(u32, @truncate(v));
+    }
+    // Secure or unknown: csprng
+    return @as(u32, @truncate(freshU64FromCrypto()));
+}
+
+fn engineNextU64(ctx: *NativeContext, eng: *PhpObject) u64 {
+    if (std.mem.endsWith(u8, eng.class_name, "Mt19937")) {
+        // Mt19937 produces 32-bit blocks; PHP consumes two for a u64 with hi
+        // word first (matches php_random_algo_mt19937 in php-src)
+        var m = loadState(eng, Mt19937) orelse return freshU64FromCrypto();
+        const hi: u64 = @as(u64, m.nextU32()) << 32;
+        const lo: u64 = @as(u64, m.nextU32());
+        storeState(ctx, eng, std.mem.asBytes(&m)) catch {};
+        return hi | lo;
+    }
+    if (std.mem.endsWith(u8, eng.class_name, "Xoshiro256StarStar")) {
+        var x = loadState(eng, Xoshiro256ss) orelse return freshU64FromCrypto();
+        const v = x.next();
+        storeState(ctx, eng, std.mem.asBytes(&x)) catch {};
+        return v;
+    }
+    if (std.mem.endsWith(u8, eng.class_name, "PcgOneseq128XslRr64")) {
+        var p = loadState(eng, PcgOneseq128) orelse return freshU64FromCrypto();
+        const v = p.next();
+        storeState(ctx, eng, std.mem.asBytes(&p)) catch {};
+        return v;
+    }
+    return freshU64FromCrypto();
+}
+
+fn engine(ctx: *NativeContext) ?*PhpObject {
     const this = getThis(ctx) orelse return null;
     const v = this.get("_engine");
     if (v != .object) return null;
-    if (engineIsSecure(v.object)) return null;
     return v.object;
 }
 
@@ -147,48 +270,83 @@ fn rzConstruct(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     return .null;
 }
 
-fn rzGetBytes(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len < 1 or args[0] != .int or args[0].int < 1) return .{ .bool = false };
-    const n: usize = @intCast(args[0].int);
-    const buf = try ctx.allocator.alloc(u8, n);
-    if (randEngine(ctx)) |eng| {
-        if (loadPrngFromEngine(eng)) |loaded| {
-            var prng = loaded;
-            prng.random().bytes(buf);
-            try savePrngToEngine(ctx, eng, &prng);
-        } else std.crypto.random.bytes(buf);
-    } else std.crypto.random.bytes(buf);
-    try ctx.vm.strings.append(ctx.allocator, buf);
-    return .{ .string = buf };
+// PHP's range32 with rejection sampling, using whatever engine is attached
+fn rangeU32(ctx: *NativeContext, eng_opt: ?*PhpObject, umax: u32) u32 {
+    if (umax == 0xffffffff) {
+        return if (eng_opt) |e| engineNextU32(ctx, e) else @as(u32, @truncate(freshU64FromCrypto()));
+    }
+    const span: u64 = @as(u64, umax) + 1;
+    // power-of-two: simple mask
+    if ((span & (span - 1)) == 0) {
+        const r = if (eng_opt) |e| engineNextU32(ctx, e) else @as(u32, @truncate(freshU64FromCrypto()));
+        return @as(u32, @intCast(@as(u64, r) & (span - 1)));
+    }
+    const limit: u32 = @intCast(0xffffffff - (0xffffffff % span) - 1);
+    while (true) {
+        const r = if (eng_opt) |e| engineNextU32(ctx, e) else @as(u32, @truncate(freshU64FromCrypto()));
+        if (r <= limit) return @as(u32, @intCast(@as(u64, r) % span));
+    }
+}
+
+fn rangeU64(ctx: *NativeContext, eng_opt: ?*PhpObject, umax: u64) u64 {
+    if (umax == 0xffffffffffffffff) {
+        return if (eng_opt) |e| engineNextU64(ctx, e) else freshU64FromCrypto();
+    }
+    const span: u128 = @as(u128, umax) + 1;
+    if ((span & (span - 1)) == 0) {
+        const r = if (eng_opt) |e| engineNextU64(ctx, e) else freshU64FromCrypto();
+        return @intCast(@as(u128, r) & (span - 1));
+    }
+    const limit_big: u128 = 0x10000000000000000;
+    const bound: u64 = @intCast(limit_big - (limit_big % span) - 1);
+    while (true) {
+        const r = if (eng_opt) |e| engineNextU64(ctx, e) else freshU64FromCrypto();
+        if (r <= bound) return @intCast(@as(u128, r) % span);
+    }
 }
 
 fn rzGetInt(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len < 2 or args[0] != .int or args[1] != .int) return .{ .int = 0 };
     const lo = args[0].int;
     const hi = args[1].int;
-    if (hi < lo) return .{ .int = lo };
-    const span: u64 = @intCast(hi - lo + 1);
-    var r: u64 = 0;
-    if (randEngine(ctx)) |eng| {
-        if (loadPrngFromEngine(eng)) |loaded| {
-            var prng = loaded;
-            r = prng.random().uintLessThan(u64, span);
-            savePrngToEngine(ctx, eng, &prng) catch {};
-        } else r = std.crypto.random.uintLessThan(u64, span);
-    } else r = std.crypto.random.uintLessThan(u64, span);
+    if (hi < lo) {
+        try ctx.vm.setPendingException("ValueError", "Random\\Randomizer::getInt(): Argument #2 ($max) must be greater than or equal to argument #1 ($min)");
+        return error.RuntimeError;
+    }
+    if (hi == lo) return .{ .int = lo };
+    const eng_opt = engine(ctx);
+    const range: u64 = @intCast(hi - lo);
+    if (range <= 0xffffffff) {
+        const r: u32 = rangeU32(ctx, eng_opt, @intCast(range));
+        return .{ .int = lo + @as(i64, r) };
+    }
+    const r: u64 = rangeU64(ctx, eng_opt, range);
     return .{ .int = lo + @as(i64, @intCast(r)) };
 }
 
-fn rzNextInt(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    if (randEngine(ctx)) |eng| {
-        if (loadPrngFromEngine(eng)) |loaded| {
-            var prng = loaded;
-            const v: i63 = @bitCast(@as(u63, @truncate(prng.random().int(u64))));
-            savePrngToEngine(ctx, eng, &prng) catch {};
-            return .{ .int = v };
-        }
+fn rzGetBytes(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len < 1 or args[0] != .int or args[0].int < 1) return .{ .bool = false };
+    const n: usize = @intCast(args[0].int);
+    const buf = try ctx.allocator.alloc(u8, n);
+    const eng_opt = engine(ctx);
+    var written: usize = 0;
+    while (written < n) {
+        const v = if (eng_opt) |e| engineNextU64(ctx, e) else freshU64FromCrypto();
+        var chunk: [8]u8 = undefined;
+        std.mem.writeInt(u64, &chunk, v, .little);
+        const take: usize = @min(8, n - written);
+        @memcpy(buf[written .. written + take], chunk[0..take]);
+        written += take;
     }
-    return .{ .int = std.crypto.random.int(i63) };
+    try ctx.vm.strings.append(ctx.allocator, buf);
+    return .{ .string = buf };
+}
+
+fn rzNextInt(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const eng_opt = engine(ctx);
+    const v = if (eng_opt) |e| engineNextU64(ctx, e) else freshU64FromCrypto();
+    // PHP's nextInt returns a non-negative 63-bit integer
+    return .{ .int = @as(i64, @intCast(v >> 1)) };
 }
 
 fn rzGetFloat(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
@@ -197,40 +355,25 @@ fn rzGetFloat(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len >= 2 and args[0] != .null) lo = Value.toFloat(args[0]);
     if (args.len >= 2 and args[1] != .null) hi = Value.toFloat(args[1]);
     if (hi <= lo) return .{ .float = lo };
-    var r: f64 = 0;
-    if (randEngine(ctx)) |eng| {
-        if (loadPrngFromEngine(eng)) |loaded| {
-            var prng = loaded;
-            r = prng.random().float(f64);
-            savePrngToEngine(ctx, eng, &prng) catch {};
-        } else r = std.crypto.random.float(f64);
-    } else r = std.crypto.random.float(f64);
+    const eng_opt = engine(ctx);
+    const v = if (eng_opt) |e| engineNextU64(ctx, e) else freshU64FromCrypto();
+    // 53-bit precision, mapped into [0, 1)
+    const denom: f64 = @as(f64, @floatFromInt(@as(u64, 1) << 53));
+    const r = @as(f64, @floatFromInt(v >> 11)) / denom;
     return .{ .float = lo + r * (hi - lo) };
 }
 
 fn rzNextFloat(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    if (randEngine(ctx)) |eng| {
-        if (loadPrngFromEngine(eng)) |loaded| {
-            var prng = loaded;
-            const r = prng.random().float(f64);
-            savePrngToEngine(ctx, eng, &prng) catch {};
-            return .{ .float = r };
-        }
-    }
-    return .{ .float = std.crypto.random.float(f64) };
+    const eng_opt = engine(ctx);
+    const v = if (eng_opt) |e| engineNextU64(ctx, e) else freshU64FromCrypto();
+    const denom: f64 = @as(f64, @floatFromInt(@as(u64, 1) << 53));
+    return .{ .float = @as(f64, @floatFromInt(v >> 11)) / denom };
 }
 
-// roll a uniform integer in [0, n) using either the engine's PRNG or crypto
 fn rollN(ctx: *NativeContext, n: usize) usize {
-    if (randEngine(ctx)) |eng| {
-        if (loadPrngFromEngine(eng)) |loaded| {
-            var prng = loaded;
-            const r = prng.random().uintLessThan(usize, n);
-            savePrngToEngine(ctx, eng, &prng) catch {};
-            return r;
-        }
-    }
-    return std.crypto.random.uintLessThan(usize, n);
+    if (n == 0) return 0;
+    const eng_opt = engine(ctx);
+    return @intCast(rangeU64(ctx, eng_opt, @as(u64, @intCast(n - 1))));
 }
 
 fn rzShuffleArray(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
