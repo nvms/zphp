@@ -2082,6 +2082,12 @@ pub const VM = struct {
                             if (try self.throwBuiltinException("TypeError", "Array callback must have exactly two elements")) continue;
                             return error.RuntimeError;
                         }
+                    } else if (name_val == .object and self.hasMethod(name_val.object.class_name, "__invoke")) {
+                        var args_buf: [32]Value = undefined;
+                        const ac = arr.entries.items.len;
+                        for (0..ac) |i| args_buf[i] = arr.entries.items[i].value;
+                        const result = try self.callMethod(name_val.object, "__invoke", args_buf[0..ac]);
+                        self.push(result);
                     } else {
                         var buf2: [256]u8 = undefined;
                         const msg = std.fmt.bufPrint(&buf2, "Value of type {s} is not callable", .{valueTypeName(name_val)}) catch "Value is not callable";
