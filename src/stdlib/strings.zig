@@ -378,7 +378,7 @@ fn rtrim(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
 
 fn strtolower(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len == 0) return .{ .string = "" };
-    const s = if (args[0] == .string) args[0].string else return Value{ .string = "" };
+    const s = try coerceToString(ctx, args[0]);
     const buf = try ctx.allocator.alloc(u8, s.len);
     for (s, 0..) |c, i| buf[i] = std.ascii.toLower(c);
     try ctx.strings.append(ctx.allocator, buf);
@@ -387,31 +387,32 @@ fn strtolower(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
 
 fn strtoupper(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len == 0) return .{ .string = "" };
-    const s = if (args[0] == .string) args[0].string else return Value{ .string = "" };
+    const s = try coerceToString(ctx, args[0]);
     const buf = try ctx.allocator.alloc(u8, s.len);
     for (s, 0..) |c, i| buf[i] = std.ascii.toUpper(c);
     try ctx.strings.append(ctx.allocator, buf);
     return .{ .string = buf };
 }
 
-fn str_contains(_: *NativeContext, args: []const Value) RuntimeError!Value {
+fn str_contains(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len < 2) return .{ .bool = false };
-    const haystack = if (args[0] == .string) args[0].string else return Value{ .bool = false };
-    const needle = if (args[1] == .string) args[1].string else return Value{ .bool = false };
+    const haystack = try coerceToString(ctx, args[0]);
+    const needle = try coerceToString(ctx, args[1]);
+    if (needle.len == 0) return .{ .bool = true };
     return .{ .bool = std.mem.indexOf(u8, haystack, needle) != null };
 }
 
-fn str_starts_with(_: *NativeContext, args: []const Value) RuntimeError!Value {
+fn str_starts_with(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len < 2) return .{ .bool = false };
-    const haystack = if (args[0] == .string) args[0].string else return Value{ .bool = false };
-    const needle = if (args[1] == .string) args[1].string else return Value{ .bool = false };
+    const haystack = try coerceToString(ctx, args[0]);
+    const needle = try coerceToString(ctx, args[1]);
     return .{ .bool = std.mem.startsWith(u8, haystack, needle) };
 }
 
-fn str_ends_with(_: *NativeContext, args: []const Value) RuntimeError!Value {
+fn str_ends_with(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len < 2) return .{ .bool = false };
-    const haystack = if (args[0] == .string) args[0].string else return Value{ .bool = false };
-    const needle = if (args[1] == .string) args[1].string else return Value{ .bool = false };
+    const haystack = try coerceToString(ctx, args[0]);
+    const needle = try coerceToString(ctx, args[1]);
     return .{ .bool = std.mem.endsWith(u8, haystack, needle) };
 }
 
