@@ -6143,6 +6143,27 @@ pub const VM = struct {
                     }
                 },
 
+                .get_static_prop_dyn_name => {
+                    const class_idx = self.readU16();
+                    const class_name = self.currentChunk().constants.items[class_idx].string;
+                    const name_val = self.pop();
+                    const prop_name: []const u8 = if (name_val == .string) name_val.string else "";
+                    if (prop_name.len == 0) {
+                        self.push(.null);
+                    } else if (self.getStaticProp(class_name, prop_name)) |val| {
+                        self.push(val);
+                    } else {
+                        if (!self.classes.contains(class_name) and !self.interfaces.contains(class_name)) {
+                            try self.tryAutoload(class_name);
+                        }
+                        if (self.getStaticProp(class_name, prop_name)) |val| {
+                            self.push(val);
+                        } else {
+                            self.push(.null);
+                        }
+                    }
+                },
+
                 .get_static_prop_dynamic => {
                     const prop_idx = self.readU16();
                     const prop_name = self.currentChunk().constants.items[prop_idx].string;

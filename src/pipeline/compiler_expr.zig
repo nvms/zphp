@@ -1052,6 +1052,17 @@ pub fn compileDynamicStaticCall(self: *Compiler, node: Ast.Node) Error!void {
 pub fn compileStaticPropAccess(self: *Compiler, node: Ast.Node) Error!void {
     const class_node = self.ast.nodes[node.data.lhs];
 
+    // Class::{expr} - dynamic constant/property name. parser sets main_token=0
+    // and stores the name expression in node.data.rhs
+    if (node.main_token == 0 and node.data.rhs != 0) {
+        const class_name = try resolveNodeClassName(self, class_node);
+        const class_idx = try self.addConstant(.{ .string = class_name });
+        try self.compileNode(node.data.rhs);
+        try self.emitOp(.get_static_prop_dyn_name);
+        try self.emitU16(class_idx);
+        return;
+    }
+
     if (node.main_token != 0 and self.ast.tokens[node.main_token].tag == .kw_class and
         class_node.tag != .identifier and class_node.tag != .qualified_name)
     {
