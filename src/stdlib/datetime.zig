@@ -1223,16 +1223,34 @@ fn createFromFormatImpl(ctx: *NativeContext, args: []const Value, default_class:
 
     const res = parseDateTimeFormat(format, datetime, std.time.timestamp()) orelse return .{ .bool = false };
     const obj = try ctx.createObject(class_name);
-    try obj.set(ctx.allocator, "timestamp", .{ .int = res.ts });
+
+    // optional 3rd arg: DateTimeZone. PHP applies it as the default zone when
+    // the format string didn't already specify one. without this, an explicit
+    // tz arg to createFromFormat was ignored and DST/regional offsets were
+    // wrong (everything treated as UTC)
+    var final_ts = res.ts;
+    var tz_name_opt: ?[]const u8 = null;
     if (res.tz_offset_seconds) |off| {
         const sign: u8 = if (off < 0) '-' else '+';
         const abs: u32 = @intCast(if (off < 0) -off else off);
         const hh = abs / 3600;
         const mm = (abs % 3600) / 60;
-        const tz_name = try std.fmt.allocPrint(ctx.allocator, "{c}{d:0>2}:{d:0>2}", .{ sign, hh, mm });
-        try ctx.strings.append(ctx.allocator, tz_name);
-        try obj.set(ctx.allocator, "__timezone", .{ .string = tz_name });
+        const n = try std.fmt.allocPrint(ctx.allocator, "{c}{d:0>2}:{d:0>2}", .{ sign, hh, mm });
+        try ctx.strings.append(ctx.allocator, n);
+        tz_name_opt = n;
+    } else if (args.len >= 3 and args[2] == .object and std.mem.eql(u8, args[2].object.class_name, "DateTimeZone")) {
+        const nv = args[2].object.get("timezone");
+        if (nv == .string) {
+            tz_name_opt = nv.string;
+            // adjust timestamp: parseDateTimeFormat returned a UTC-interpreted
+            // ts but the user meant the wall clock in the explicit zone.
+            // subtract the zone's offset at that moment to get the real UTC ts
+            const off: i64 = if (lookupTimezone(nv.string)) |tz| tzOffsetAt(tz, res.ts) else 0;
+            final_ts = res.ts - off;
+        }
     }
+    try obj.set(ctx.allocator, "timestamp", .{ .int = final_ts });
+    if (tz_name_opt) |n| try obj.set(ctx.allocator, "__timezone", .{ .string = n });
     return .{ .object = obj };
 }
 
