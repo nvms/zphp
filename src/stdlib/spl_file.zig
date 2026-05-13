@@ -397,12 +397,17 @@ fn sfoSeek(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len < 1) return .null;
     const target = Value.toInt(args[0]);
     _ = try sfoRewind(ctx, &.{});
-    // populate line 0 first (rewind no longer pre-reads); then next() to advance
-    try ensureCurrent(ctx, obj);
-    while (objGetInt(obj, "__sfo_line") < target) {
-        const cur = obj.get("__sfo_current");
-        if (cur == .bool and !cur.bool) break;
-        _ = try sfoNext(ctx, &.{});
+    // rewind leaves the file handle at byte 0 and __sfo_line at 0 / current
+    // unread. for target > 0 advance by reading target lines so the file
+    // handle ends at the start of line `target`. for target == 0 no read is
+    // needed - the next fgets will return line 0
+    if (target > 0) {
+        try ensureCurrent(ctx, obj);
+        while (objGetInt(obj, "__sfo_line") < target) {
+            const cur = obj.get("__sfo_current");
+            if (cur == .bool and !cur.bool) break;
+            _ = try sfoNext(ctx, &.{});
+        }
     }
     return .null;
 }
