@@ -630,6 +630,35 @@ pub const Compiler = struct {
             for (slots, 0..) |slot, i| {
                 if (slot == 0) continue;
                 const slot_node = self.ast.nodes[slot];
+                // keyed slot: list('k' => $var) - data.lhs is the target,
+                // data.rhs is the key expression
+                if (slot_node.tag == .array_element) {
+                    const inner_target = self.ast.nodes[slot_node.data.lhs];
+                    if (inner_target.tag == .ref_target) {
+                        try self.compileDestructureRefSlot(inner_target, .{ .key_node = slot_node.data.rhs });
+                        continue;
+                    }
+                    try self.emitOp(.dup);
+                    try self.compileNode(slot_node.data.rhs);
+                    try self.emitOp(.array_get);
+                    if (inner_target.tag == .list_destructure or inner_target.tag == .array_literal) {
+                        try self.compileDestructure(inner_target);
+                        try self.emitOp(.pop);
+                    } else if (inner_target.tag == .property_access) {
+                        try self.compileNode(inner_target.data.lhs);
+                        try self.emitOp(.swap);
+                        const prop_name = self.propName(inner_target);
+                        const prop_idx = try self.addConstant(.{ .string = prop_name });
+                        try self.emitOp(.set_prop);
+                        try self.emitU16(prop_idx);
+                        try self.emitOp(.pop);
+                    } else {
+                        const name = self.ast.tokenSlice(inner_target.main_token);
+                        try self.emitSetVar(name);
+                        try self.emitOp(.pop);
+                    }
+                    continue;
+                }
                 if (slot_node.tag == .ref_target) {
                     try self.compileDestructureRefSlot(slot_node, .{ .index = @intCast(i) });
                     continue;

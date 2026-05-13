@@ -6150,6 +6150,10 @@ pub const VM = struct {
                     const prop_name: []const u8 = if (name_val == .string) name_val.string else "";
                     if (prop_name.len == 0) {
                         self.push(.null);
+                    } else if (std.mem.eql(u8, prop_name, "class")) {
+                        // Class::{'class'} resolves to the class name string,
+                        // matching the static `Class::class` form
+                        self.push(.{ .string = class_name });
                     } else if (self.getStaticProp(class_name, prop_name)) |val| {
                         self.push(val);
                     } else {

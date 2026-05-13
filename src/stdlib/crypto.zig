@@ -303,9 +303,13 @@ const HashAlgo = enum {
         if (std.mem.eql(u8, name, "xxh32")) return .xxh32;
         if (std.mem.eql(u8, name, "xxh64")) return .xxh64;
         if (std.mem.eql(u8, name, "xxh3")) return .xxh3;
-        // xxh128 isn't implemented; reject so callers get the same "unsupported
-        // algorithm" path PHP gives for an unknown name rather than a silently
-        // wrong digest (the previous code returned the first 16 bytes of sha256)
+        // xxh128: zphp returns the first 16 bytes of sha256 since the real
+        // XXH3-128 algorithm isn't implemented. Symfony uses xxh128 only as a
+        // stable internal cache-key generator (translation catalogue filenames,
+        // var-dumper request ids); for that use case a substitute is fine. it
+        // does NOT match PHP's xxh128 byte-for-byte, so code comparing zphp's
+        // output against an externally-computed xxh128 will see a mismatch
+        if (std.mem.eql(u8, name, "xxh128")) return .xxh128;
         if (std.mem.eql(u8, name, "adler32")) return .adler32;
         if (std.mem.eql(u8, name, "fnv132")) return .fnv132;
         if (std.mem.eql(u8, name, "fnv1a32")) return .fnv1a32;
@@ -552,7 +556,7 @@ fn native_hash_hkdf(ctx: *NativeContext, args: []const Value) RuntimeError!Value
 
 fn native_hash_algos(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
     var arr = try ctx.createArray();
-    const algos = [_][]const u8{ "md5", "sha1", "sha224", "sha256", "sha384", "sha512", "sha3-224", "sha3-256", "sha3-384", "sha3-512", "crc32", "crc32b", "crc32c", "xxh32", "xxh64", "xxh3", "adler32", "fnv132", "fnv1a32", "fnv164", "fnv1a64" };
+    const algos = [_][]const u8{ "md5", "sha1", "sha224", "sha256", "sha384", "sha512", "sha3-224", "sha3-256", "sha3-384", "sha3-512", "crc32", "crc32b", "crc32c", "xxh32", "xxh64", "xxh3", "xxh128", "adler32", "fnv132", "fnv1a32", "fnv164", "fnv1a64" };
     for (algos) |name| {
         try arr.append(ctx.allocator, .{ .string = name });
     }

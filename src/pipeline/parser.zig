@@ -2373,11 +2373,31 @@ const Parser = struct {
                     is_ref = true;
                 }
                 const inner = if (self.peek() == .kw_list) try self.parseListDestructure() else try self.parseExpression();
-                const target_node = if (is_ref)
-                    try self.addNode(.{ .tag = .ref_target, .main_token = ref_amp_tok, .data = .{ .lhs = inner } })
-                else
-                    inner;
-                try targets.append(self.allocator, target_node);
+                // list('key' => $var) form: the parsed expression was actually
+                // the key. wrap the real target in an array_element node so the
+                // compiler can look up by key
+                if (self.peek() == .fat_arrow) {
+                    _ = self.advance();
+                    var ref2_tok: u32 = 0;
+                    var is_ref2 = false;
+                    if (self.peek() == .amp) {
+                        ref2_tok = self.advance();
+                        is_ref2 = true;
+                    }
+                    const target_inner = if (self.peek() == .kw_list) try self.parseListDestructure() else try self.parseExpression();
+                    const real_target = if (is_ref2)
+                        try self.addNode(.{ .tag = .ref_target, .main_token = ref2_tok, .data = .{ .lhs = target_inner } })
+                    else
+                        target_inner;
+                    const elem = try self.addNode(.{ .tag = .array_element, .main_token = 0, .data = .{ .lhs = real_target, .rhs = inner } });
+                    try targets.append(self.allocator, elem);
+                } else {
+                    const target_node = if (is_ref)
+                        try self.addNode(.{ .tag = .ref_target, .main_token = ref_amp_tok, .data = .{ .lhs = inner } })
+                    else
+                        inner;
+                    try targets.append(self.allocator, target_node);
+                }
             }
             if (self.peek() == .comma) {
                 _ = self.advance();
