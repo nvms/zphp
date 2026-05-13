@@ -272,7 +272,9 @@ fn sxmlChildren(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     const obj = getThis(ctx) orelse return .null;
     const node = getNodePtr(obj) orelse return .null;
     const doc = getDocPtr(obj) orelse return .null;
-    const wrapper = try buildWrapper(ctx, doc, node);
+    // ->children() must yield the node's CHILDREN, not iterate same-named
+    // siblings of the node itself - that's the default sibling-mode wrapper
+    const wrapper = try buildWrapperMode(ctx, doc, node, .children);
     // optional namespace filter. PHP: children(string $ns = null, bool $isPrefix = false)
     if (args.len >= 1 and args[0] == .string and args[0].string.len > 0) {
         const ns_or_prefix = args[0].string;
