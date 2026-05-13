@@ -91,6 +91,8 @@ pub const entries = .{
     .{ "highlight_string", native_highlight_string },
     .{ "highlight_file", native_highlight_file },
     .{ "extension_loaded", native_extension_loaded },
+    .{ "get_loaded_extensions", native_get_loaded_extensions },
+    .{ "get_extension_funcs", native_get_extension_funcs },
     .{ "get_included_files", native_get_included_files },
     .{ "get_required_files", native_get_included_files },
     .{ "memory_get_usage", native_memory_get_usage },
@@ -1491,22 +1493,46 @@ fn native_ini_set(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     return .{ .string = previous };
 }
 
+const SUPPORTED_EXTENSIONS = [_][]const u8{
+    "Core",       "standard",   "spl",        "json",       "pcre",
+    "PDO",        "pdo_sqlite", "pdo_mysql",  "pdo_pgsql",
+    "session",    "mbstring",   "ctype",      "filter",     "hash",
+    "iconv",      "tokenizer",  "Reflection", "date",
+    "openssl",    "curl",       "sodium",     "ldap",       "ftp",
+    "gd",         "gmp",        "bcmath",     "libxml",     "dom",
+    "SimpleXML",  "xml",        "xmlreader",  "xmlwriter",  "intl",
+    "fileinfo",   "Phar",       "soap",       "zlib",       "posix",
+    "pcntl",      "random",
+};
+
 fn native_extension_loaded(_: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len == 0 or args[0] != .string) return .{ .bool = false };
     const name = args[0].string;
-    const supported = [_][]const u8{
-        "core",     "standard", "spl",        "json",       "pcre",
-        "pdo",      "pdo_sqlite", "pdo_mysql", "pdo_pgsql",
-        "session",  "mbstring", "ctype",      "filter",     "hash",
-        "iconv",    "tokenizer", "reflection", "date",      "datetime",
-        "openssl",  "curl",     "sodium",     "ldap",       "ftp",
-        "gd",       "gmp",      "bcmath",     "libxml",     "dom",
-        "simplexml", "xml",     "xmlreader",  "xmlwriter",  "intl",
-        "fileinfo", "phar",     "soap",       "zlib",       "posix",
-        "pcntl",    "random",
-    };
-    for (supported) |s| {
+    for (SUPPORTED_EXTENSIONS) |s| {
         if (std.ascii.eqlIgnoreCase(name, s)) return .{ .bool = true };
+    }
+    // also accept the historic "datetime" alias for "date"
+    if (std.ascii.eqlIgnoreCase(name, "datetime")) return .{ .bool = true };
+    return .{ .bool = false };
+}
+
+fn native_get_loaded_extensions(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const arr = try ctx.createArray();
+    for (SUPPORTED_EXTENSIONS) |s| try arr.append(ctx.allocator, .{ .string = s });
+    return .{ .array = arr };
+}
+
+fn native_get_extension_funcs(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len == 0 or args[0] != .string) return .{ .bool = false };
+    const name = args[0].string;
+    // not granular about which fn belongs to which extension - PHP code that
+    // calls this typically just checks for non-false. return false for unknown
+    // extensions and an empty array for known ones to mirror "exists but no
+    // functions enumerable" behavior
+    for (SUPPORTED_EXTENSIONS) |s| {
+        if (std.ascii.eqlIgnoreCase(name, s)) {
+            return .{ .array = try ctx.createArray() };
+        }
     }
     return .{ .bool = false };
 }
