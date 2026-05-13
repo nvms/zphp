@@ -6961,6 +6961,18 @@ pub const VM = struct {
                     self.error_msg = msg;
                     return error.RuntimeError;
                 }
+                if (parent_cls.is_readonly and !def.is_readonly) {
+                    const msg = try std.fmt.allocPrint(self.allocator, "Non-readonly class {s} cannot extend readonly class {s}", .{ class_name, parent_name });
+                    try self.strings.append(self.allocator, msg);
+                    self.error_msg = msg;
+                    return error.RuntimeError;
+                }
+                if (def.is_readonly and !parent_cls.is_readonly) {
+                    const msg = try std.fmt.allocPrint(self.allocator, "Readonly class {s} cannot extend non-readonly class {s}", .{ class_name, parent_name });
+                    try self.strings.append(self.allocator, msg);
+                    self.error_msg = msg;
+                    return error.RuntimeError;
+                }
                 // reject overrides of final methods
                 var pcls_iter = parent_cls.methods.iterator();
                 while (pcls_iter.next()) |pe| {
