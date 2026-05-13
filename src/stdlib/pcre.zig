@@ -4,6 +4,22 @@ const PhpArray = @import("../runtime/value.zig").PhpArray;
 const NativeContext = @import("../runtime/vm.zig").NativeContext;
 const RuntimeError = error{ RuntimeError, OutOfMemory };
 
+// coerce to string with __toString support. preg functions previously
+// bailed on Stringable objects (passing a Symfony Path-like wrapper or a
+// custom regex builder to preg_match returned false silently)
+fn coerceStrArg(ctx: *NativeContext, v: Value) ?[]const u8 {
+    return switch (v) {
+        .string => |s| s,
+        .object => |o| blk: {
+            if (!ctx.vm.hasMethod(o.class_name, "__toString")) break :blk null;
+            const r = ctx.vm.callMethod(o, "__toString", &.{}) catch break :blk null;
+            if (r == .string) break :blk r.string;
+            break :blk null;
+        },
+        else => null,
+    };
+}
+
 const pcre2 = struct {
     const Code = opaque {};
     const MatchData = opaque {};
@@ -154,13 +170,15 @@ fn compilePattern(pattern: []const u8, flags: u32) ?*pcre2.Code {
 }
 
 fn preg_match(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len < 2 or args[0] != .string or args[1] != .string) return .{ .bool = false };
+    if (args.len < 2) return .{ .bool = false };
+    const pat_str = coerceStrArg(ctx, args[0]) orelse return .{ .bool = false };
+    const subj_str = coerceStrArg(ctx, args[1]) orelse return .{ .bool = false };
     setPregError(0);
-    const info = parsePattern(args[0].string) orelse {
+    const info = parsePattern(pat_str) orelse {
         setPregError(1);
         return Value{ .bool = false };
     };
-    const subject = args[1].string;
+    const subject = subj_str;
 
     const code = compilePattern(info.pattern, info.flags) orelse {
         setPregError(1);

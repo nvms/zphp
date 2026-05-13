@@ -138,9 +138,9 @@ pub const entries = .{
     .{ "strpbrk", native_strpbrk },
 };
 
-fn substr(_: *NativeContext, args: []const Value) RuntimeError!Value {
+fn substr(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len < 2) return .{ .string = "" };
-    const s = if (args[0] == .string) args[0].string else return Value{ .string = "" };
+    const s = try coerceToString(ctx, args[0]);
     const slen: i64 = @intCast(s.len);
     var start = Value.toInt(args[1]);
     if (start < 0) start = @max(0, slen + start);
@@ -160,8 +160,8 @@ fn substr(_: *NativeContext, args: []const Value) RuntimeError!Value {
 
 fn strpos(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len < 2) return .{ .bool = false };
-    const haystack = if (args[0] == .string) args[0].string else return Value{ .bool = false };
-    const needle = if (args[1] == .string) args[1].string else return Value{ .bool = false };
+    const haystack = try coerceToString(ctx, args[0]);
+    const needle = try coerceToString(ctx, args[1]);
     const hlen: i64 = @intCast(haystack.len);
     const raw_off: i64 = if (args.len >= 3) Value.toInt(args[2]) else 0;
     if (raw_off > hlen or raw_off < -hlen) {
@@ -221,7 +221,7 @@ fn str_replace(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
         return .{ .array = out };
     }
 
-    const subject = if (args[2] == .string) args[2].string else return args[2];
+    const subject = if (args[2] == .object) try coerceToString(ctx, args[2]) else if (args[2] == .string) args[2].string else return args[2];
     const replaced = try strReplaceOnSingle(ctx, args[0], args[1], subject, &total_count);
     if (args.len >= 4) ctx.setCallerVar(3, args.len, .{ .int = total_count });
     return .{ .string = replaced };
@@ -253,8 +253,8 @@ fn strReplaceOnSingle(ctx: *NativeContext, search: Value, replace: Value, subjec
 
 fn explode(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len < 2) return .null;
-    const delim = if (args[0] == .string) args[0].string else return Value.null;
-    const s = if (args[1] == .string) args[1].string else return Value.null;
+    const delim = try coerceToString(ctx, args[0]);
+    const s = try coerceToString(ctx, args[1]);
     if (delim.len == 0) {
         try ctx.vm.setPendingException("ValueError", "explode(): Argument #1 ($separator) must not be empty");
         return error.RuntimeError;
@@ -418,7 +418,7 @@ fn str_ends_with(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
 
 fn str_repeat(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len < 2) return .{ .string = "" };
-    const s = if (args[0] == .string) args[0].string else return Value{ .string = "" };
+    const s = try coerceToString(ctx, args[0]);
     const raw_times = Value.toInt(args[1]);
     if (raw_times < 0) {
         try ctx.vm.setPendingException("ValueError", "str_repeat(): Argument #2 ($times) must be greater than or equal to 0");
@@ -437,7 +437,7 @@ fn str_repeat(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
 
 fn ucfirst(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len == 0) return .{ .string = "" };
-    const s = if (args[0] == .string) args[0].string else return Value{ .string = "" };
+    const s = try coerceToString(ctx, args[0]);
     if (s.len == 0) return .{ .string = "" };
     const buf = try ctx.allocator.alloc(u8, s.len);
     @memcpy(buf, s);
@@ -448,7 +448,7 @@ fn ucfirst(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
 
 fn lcfirst(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len == 0) return .{ .string = "" };
-    const s = if (args[0] == .string) args[0].string else return Value{ .string = "" };
+    const s = try coerceToString(ctx, args[0]);
     if (s.len == 0) return .{ .string = "" };
     const buf = try ctx.allocator.alloc(u8, s.len);
     @memcpy(buf, s);
@@ -459,10 +459,10 @@ fn lcfirst(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
 
 fn str_pad(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len < 2) return if (args.len > 0) args[0] else Value{ .string = "" };
-    const s = if (args[0] == .string) args[0].string else return Value{ .string = "" };
+    const s = try coerceToString(ctx, args[0]);
     const target_len: usize = @intCast(@max(0, Value.toInt(args[1])));
-    if (s.len >= target_len) return args[0];
-    const pad_str = if (args.len >= 3 and args[2] == .string) args[2].string else " ";
+    if (s.len >= target_len) return .{ .string = s };
+    const pad_str = if (args.len >= 3 and args[2] != .null) try coerceToString(ctx, args[2]) else " ";
     if (pad_str.len == 0) {
         try ctx.vm.setPendingException("ValueError", "str_pad(): Argument #3 ($pad_string) must not be empty");
         return error.RuntimeError;
@@ -827,7 +827,7 @@ fn native_str_word_count(ctx: *NativeContext, args: []const Value) RuntimeError!
 
 fn native_nl2br(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len == 0) return .{ .string = "" };
-    const s = if (args[0] == .string) args[0].string else return Value{ .string = "" };
+    const s = try coerceToString(ctx, args[0]);
     const use_xhtml = if (args.len >= 2) args[1].isTruthy() else true;
     const br = if (use_xhtml) "<br />" else "<br>";
     var buf = std.ArrayListUnmanaged(u8){};
@@ -854,7 +854,7 @@ fn native_nl2br(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
 
 fn native_wordwrap(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len == 0) return .{ .string = "" };
-    const s = if (args[0] == .string) args[0].string else return Value{ .string = "" };
+    const s = try coerceToString(ctx, args[0]);
     const width: usize = if (args.len >= 2) @intCast(@max(1, Value.toInt(args[1]))) else 75;
     const brk = if (args.len >= 3 and args[2] == .string) args[2].string else "\n";
     const cut = args.len >= 4 and args[3].isTruthy();
@@ -1705,7 +1705,7 @@ fn stripTrailingZeros(buf: *std.ArrayListUnmanaged(u8)) void {
 
 fn native_addslashes(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len == 0) return .{ .string = "" };
-    const s = if (args[0] == .string) args[0].string else return Value{ .string = "" };
+    const s = try coerceToString(ctx, args[0]);
     var buf = std.ArrayListUnmanaged(u8){};
     for (s) |c| {
         if (c == 0) {
@@ -1970,13 +1970,7 @@ fn native_htmlentities(ctx: *NativeContext, args: []const Value) RuntimeError!Va
 fn native_htmlspecialchars(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len == 0) return .{ .string = "" };
     if (args[0] == .null) return .{ .string = "" };
-    const s = if (args[0] == .string) args[0].string else blk: {
-        var buf = std.ArrayListUnmanaged(u8){};
-        try args[0].format(&buf, ctx.allocator);
-        const converted = try buf.toOwnedSlice(ctx.allocator);
-        try ctx.strings.append(ctx.allocator, converted);
-        break :blk converted;
-    };
+    const s = try coerceToString(ctx, args[0]);
     const flags: i64 = if (args.len >= 2) Value.toInt(args[1]) else 3;
     const escape_double = (flags & 2) != 0;
     const escape_single = (flags & 1) != 0;
@@ -3446,7 +3440,7 @@ fn mbCharLen(byte: u8) usize {
 
 fn native_strrev(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len == 0) return .{ .string = "" };
-    const s = if (args[0] == .string) args[0].string else return Value{ .string = "" };
+    const s = try coerceToString(ctx, args[0]);
     if (s.len == 0) return .{ .string = "" };
     const buf = try ctx.allocator.alloc(u8, s.len);
     for (s, 0..) |c, i| buf[s.len - 1 - i] = c;
@@ -3462,8 +3456,8 @@ fn toLowerBuf(allocator: std.mem.Allocator, s: []const u8) ![]u8 {
 
 fn native_stripos(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len < 2) return .{ .bool = false };
-    const haystack = if (args[0] == .string) args[0].string else return Value{ .bool = false };
-    const needle = if (args[1] == .string) args[1].string else return Value{ .bool = false };
+    const haystack = try coerceToString(ctx, args[0]);
+    const needle = try coerceToString(ctx, args[1]);
     const hlen: i64 = @intCast(haystack.len);
     const raw_off: i64 = if (args.len >= 3) Value.toInt(args[2]) else 0;
     const off_i: i64 = if (raw_off < 0) @max(0, hlen + raw_off) else raw_off;
@@ -3481,10 +3475,10 @@ fn native_stripos(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     return .{ .bool = false };
 }
 
-fn native_strrpos(_: *NativeContext, args: []const Value) RuntimeError!Value {
+fn native_strrpos(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len < 2) return .{ .bool = false };
-    const haystack = if (args[0] == .string) args[0].string else return Value{ .bool = false };
-    const needle = if (args[1] == .string) args[1].string else return Value{ .bool = false };
+    const haystack = try coerceToString(ctx, args[0]);
+    const needle = try coerceToString(ctx, args[1]);
     if (needle.len == 0) return .{ .int = @intCast(haystack.len) };
     if (haystack.len == 0) return .{ .bool = false };
     return strrposImpl(haystack, needle, args);
@@ -3597,7 +3591,7 @@ fn strIreplaceOnSingle(ctx: *NativeContext, search: Value, replace: Value, subje
 
 fn native_ucwords(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len == 0) return .{ .string = "" };
-    const s = if (args[0] == .string) args[0].string else return Value{ .string = "" };
+    const s = try coerceToString(ctx, args[0]);
     if (s.len == 0) return .{ .string = "" };
     const delimiters = if (args.len >= 2 and args[1] == .string) args[1].string else " \t\r\n\x0b";
     const buf = try ctx.allocator.alloc(u8, s.len);
