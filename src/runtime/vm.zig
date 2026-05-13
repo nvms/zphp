@@ -2670,6 +2670,14 @@ pub const VM = struct {
                     _ = self.pop();
                     _ = self.pop();
                 },
+                .iter_end_close => {
+                    const iterable = self.stack[self.sp - 2];
+                    if (iterable == .generator and iterable.generator.state == .suspended) {
+                        try self.closeGenerator(iterable.generator, base_frame);
+                    }
+                    _ = self.pop();
+                    _ = self.pop();
+                },
 
                 .silence_begin => {
                     self.error_silenced_depth += 1;
@@ -6511,6 +6519,36 @@ pub const VM = struct {
         } catch return error.RuntimeError;
         try self.strings.append(self.allocator, msg);
         return self.throwBuiltinException("TypeError", msg);
+    }
+
+    // close a suspended generator: inject a synthetic exception so any open
+    // try/finally blocks run during the unwind. swallow the marker if it
+    // propagates out (matches PHP's close-on-foreach-break semantics). a
+    // different exception raised by finally still propagates to the caller
+    pub fn closeGenerator(self: *VM, gen: *Generator, base_frame: usize) RuntimeError!void {
+        if (gen.state != .suspended) return;
+        const obj = try self.allocator.create(PhpObject);
+        obj.* = .{ .class_name = "Exception" };
+        try obj.set(self.allocator, "message", .{ .string = "Generator closed" });
+        try obj.set(self.allocator, "code", .{ .int = 0 });
+        try self.objects.append(self.allocator, obj);
+        const marker_ptr = @intFromPtr(obj);
+
+        gen.pending_throw = .{ .object = obj };
+        self.resumeGenerator(gen, .null) catch |err| {
+            // RuntimeError is expected when the marker (or another exception)
+            // exits the generator with no handler. handle the bookkeeping below
+            if (err != error.RuntimeError) return err;
+        };
+        if (self.pending_exception) |ex| {
+            if (ex == .object and @intFromPtr(ex.object) == marker_ptr) {
+                self.pending_exception = null;
+            } else {
+                // finally raised something other than our marker - dispatch into
+                // the caller's handler chain
+                _ = self.dispatchPendingException(base_frame);
+            }
+        }
     }
 
     pub fn throwBuiltinException(self: *VM, class_name: []const u8, message: []const u8) !bool {

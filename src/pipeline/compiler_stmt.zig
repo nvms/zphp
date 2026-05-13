@@ -1,6 +1,7 @@
 const std = @import("std");
 const Compiler = @import("compiler.zig").Compiler;
 const Ast = @import("ast.zig").Ast;
+const bytecode = @import("bytecode.zig");
 const Token = @import("token.zig").Token;
 const Value = @import("../runtime/value.zig").Value;
 const Allocator = std.mem.Allocator;
@@ -214,10 +215,21 @@ pub fn compileForeach(self: *Compiler, node: Ast.Node) Error!void {
     self.break_jumps = .{};
     self.continue_jumps = .{};
     self.use_continue_jumps = true;
-    if (self.loop_depth < 32) self.loop_is_foreach[self.loop_depth] = true;
+    // generators only need close-on-exit when the foreach owns the only
+    // reference (anonymous iterable like gen() or new Foo()). when the
+    // iterable is a variable, the caller may still hold it after the loop -
+    // closing here would run finally too early and invalidate the generator
+    const iter_node_tag = self.ast.nodes[iter_n].tag;
+    const close_on_exit = switch (iter_node_tag) {
+        .variable, .variable_variable, .property_access, .nullsafe_property_access, .static_prop_access, .array_access => false,
+        else => true,
+    };
+    if (self.loop_depth < 32) {
+        self.loop_is_foreach[self.loop_depth] = true;
+        self.loop_foreach_close[self.loop_depth] = close_on_exit;
+    }
     self.loop_depth += 1;
     self.foreach_depth += 1;
-
     try self.compileNode(iter_n);
     try self.emitOp(.iter_begin);
 
@@ -287,6 +299,7 @@ pub fn compileForeach(self: *Compiler, node: Ast.Node) Error!void {
     // current iteration's mutation reaches the source. normal exit (iter_check
     // false) lands at iter_end below and skips this; only patched break jumps
     // arrive here
+    const end_op: bytecode.OpCode = if (close_on_exit) .iter_end_close else .iter_end;
     if (ref_val_name != null and ref_key_name != null) {
         const after_writeback_jump = try self.emitJump(.jump);
         const break_writeback_target = self.chunk.offset();
@@ -301,7 +314,7 @@ pub fn compileForeach(self: *Compiler, node: Ast.Node) Error!void {
         }
         const skip_iter_end_jump = try self.emitJump(.jump);
         self.patchJump(after_writeback_jump);
-        try self.emitOp(.iter_end);
+        try self.emitOp(end_op);
         const after_iter_end = self.chunk.offset();
         self.patchJumpTo(skip_iter_end_jump, after_iter_end);
 
@@ -309,7 +322,7 @@ pub fn compileForeach(self: *Compiler, node: Ast.Node) Error!void {
         // writeback then skip iter_end since iter_check never ran for them)
         try self.patchBreaksTo(&prev_breaks, break_writeback_target);
     } else {
-        try self.emitOp(.iter_end);
+        try self.emitOp(end_op);
         try self.patchBreaks(&prev_breaks);
     }
     self.break_jumps = prev_breaks;

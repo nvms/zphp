@@ -124,7 +124,8 @@ pub const OpCode = enum(u8) {
     iter_begin, // push index 0 (array already on stack)
     iter_check, // u16: exit offset. peek array+index, push key+value or jump
     iter_advance, // pop index, push index+1
-    iter_end, // pop index, pop array
+    iter_end, // pop index, pop iterable
+    iter_end_close, // pop index, pop iterable; if iterable is a suspended generator, close it (runs finally)
 
     silence_begin, // increment vm.error_silenced_depth
     silence_end, // decrement vm.error_silenced_depth

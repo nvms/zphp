@@ -187,6 +187,10 @@ pub const Compiler = struct {
     loop_depth: u32 = 0,
     foreach_depth: u32 = 0,
     loop_is_foreach: [32]bool = [_]bool{false} ** 32,
+    // per-foreach: true when the iterable is anonymous (e.g. `gen()`) and
+    // therefore should be closed when the loop exits. `break` uses this to
+    // pick iter_end_close vs iter_end
+    loop_foreach_close: [32]bool = [_]bool{false} ** 32,
     closure_count: u32 = 0,
     is_generator: bool = false,
     namespace: []const u8 = "",
@@ -256,7 +260,15 @@ pub const Compiler = struct {
                     }
                     try self.emitOp(.generator_return);
                 } else {
-                    for (0..self.foreach_depth) |_| try self.emitOp(.iter_end);
+                    // close suspended generators in active foreach scopes; the
+                    // function is returning so the iterables go out of scope
+                    var fei: usize = self.loop_depth;
+                    while (fei > 0) {
+                        fei -= 1;
+                        if (fei < 32 and self.loop_is_foreach[fei]) {
+                            try self.emitOp(if (self.loop_foreach_close[fei]) .iter_end_close else .iter_end);
+                        }
+                    }
                     if (node.data.lhs != 0) {
                         try self.compileNode(node.data.lhs);
                     }
@@ -296,7 +308,7 @@ pub const Compiler = struct {
                 self.finally_depth = saved_fd;
                 for (target_depth..self.loop_depth) |d| {
                     if (d < 32 and self.loop_is_foreach[d]) {
-                        try self.emitOp(.iter_end);
+                        try self.emitOp(if (self.loop_foreach_close[d]) .iter_end_close else .iter_end);
                     }
                 }
                 const j = try self.emitJump(.jump);
@@ -325,7 +337,7 @@ pub const Compiler = struct {
                         const skip_target = self.loop_depth -| (level - 1);
                         for (skip_target..self.loop_depth) |d| {
                             if (d < 32 and self.loop_is_foreach[d]) {
-                                try self.emitOp(.iter_end);
+                                try self.emitOp(if (self.loop_foreach_close[d]) .iter_end_close else .iter_end);
                             }
                         }
                         const j = try self.emitJump(.jump);
