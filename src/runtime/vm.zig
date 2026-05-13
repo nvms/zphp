@@ -4508,24 +4508,19 @@ pub const VM = struct {
                                 return error.RuntimeError;
                             }
                             if (vr.is_readonly) {
-                                // a readonly property can be initialized once from within
-                                // its declaring class's scope. PHP additionally treats the
-                                // same property name redeclared in a subclass as a fresh
-                                // slot (separate readonly init permitted from the subclass).
-                                // since zphp shares one slot per name, we instead allow any
-                                // write that originates from inside the object's hierarchy
-                                // and let external writes fail per PHP semantics
+                                // PHP readonly: the property can be initialized exactly
+                                // once, from within the declaring class's scope. a child
+                                // class's methods cannot write the parent's readonly
+                                // property (the child must redeclare it to get its own
+                                // init slot - which zphp doesn't model separately, so
+                                // we enforce the declaring-class rule strictly)
                                 const existing = obj.get(prop_name);
                                 if (existing != .null) {
-                                    const scope_in_hierarchy = blk: {
-                                        const scope = self.currentFrame().called_class orelse self.currentDefiningClass();
-                                        if (scope) |s| {
-                                            if (self.isInstanceOf(obj.class_name, s)) break :blk true;
-                                            if (self.isInstanceOf(s, obj.class_name)) break :blk true;
-                                        }
-                                        break :blk false;
+                                    const scope_is_decl = blk: {
+                                        const scope = self.currentDefiningClass() orelse break :blk false;
+                                        break :blk std.mem.eql(u8, scope, vr.defining_class);
                                     };
-                                    if (!scope_in_hierarchy) {
+                                    if (!scope_is_decl) {
                                         const msg = try std.fmt.allocPrint(self.allocator, "Cannot modify readonly property {s}::${s}", .{
                                             vr.defining_class, prop_name,
                                         });
