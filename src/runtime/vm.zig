@@ -330,9 +330,14 @@ pub const InterfaceDef = struct {
     name: []const u8,
     methods: std.ArrayListUnmanaged([]const u8) = .{},
     parent: ?[]const u8 = null,
+    // PHP allows `interface C extends A, B` - all extended interfaces. the
+    // single `parent` field is kept for code that walks one parent at a time;
+    // new code should iterate `parents` so multi-extension is honored
+    parents: std.ArrayListUnmanaged([]const u8) = .{},
 
     fn deinit(self: *InterfaceDef, allocator: Allocator) void {
         self.methods.deinit(allocator);
+        self.parents.deinit(allocator);
     }
 };
 
@@ -3688,6 +3693,7 @@ pub const VM = struct {
                     for (0..parent_count) |pi| {
                         const pidx = self.readU16();
                         parent_names[pi] = self.currentChunk().constants.items[pidx].string;
+                        try idef.parents.append(self.allocator, parent_names[pi]);
                     }
                     if (parent_count > 0) {
                         idef.parent = parent_names[0];
@@ -8649,26 +8655,32 @@ pub const VM = struct {
     }
 
     fn implementsInterface(self: *VM, iface_name: []const u8, target: []const u8) bool {
-        var current: ?[]const u8 = iface_name;
-        while (current) |name| {
-            if (std.mem.eql(u8, name, target)) return true;
-            if (self.interfaces.get(name)) |idef| {
-                current = idef.parent;
-            } else {
-                if (!self.classes.contains(name)) {
-                    self.tryAutoload(name) catch {};
-                }
-                if (self.interfaces.get(name)) |idef| {
-                    current = idef.parent;
-                } else {
-                    // also check the ClassDef's interfaces list as fallback
-                    if (self.classes.get(name)) |cls| {
-                        for (cls.interfaces.items) |parent_iface| {
-                            if (self.implementsInterface(parent_iface, target)) return true;
-                        }
-                    }
-                    break;
-                }
+        if (std.mem.eql(u8, iface_name, target)) return true;
+        if (self.interfaces.get(iface_name)) |idef| {
+            // walk every extended interface (PHP allows multi-extension)
+            for (idef.parents.items) |p| {
+                if (self.implementsInterface(p, target)) return true;
+            }
+            // legacy single-parent field for older code paths that haven't been
+            // converted to push into 'parents' yet
+            if (idef.parent) |p| {
+                var seen_in_parents = false;
+                for (idef.parents.items) |pp| if (std.mem.eql(u8, pp, p)) { seen_in_parents = true; break; };
+                if (!seen_in_parents and self.implementsInterface(p, target)) return true;
+            }
+            return false;
+        }
+        // not registered as an interface - try autoload then fall back to
+        // walking a class's implemented-interface list (for class-as-iface refs)
+        if (!self.classes.contains(iface_name)) {
+            self.tryAutoload(iface_name) catch {};
+        }
+        if (self.interfaces.get(iface_name)) |idef| {
+            for (idef.parents.items) |p| if (self.implementsInterface(p, target)) return true;
+            if (idef.parent) |p| if (self.implementsInterface(p, target)) return true;
+        } else if (self.classes.get(iface_name)) |cls| {
+            for (cls.interfaces.items) |parent_iface| {
+                if (self.implementsInterface(parent_iface, target)) return true;
             }
         }
         return false;
