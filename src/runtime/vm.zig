@@ -4478,6 +4478,14 @@ pub const VM = struct {
                                 self.push(val);
                                 continue;
                             }
+                        } else if (self.hasPropHook(obj.class_name, prop_name, .get) and !self.inPropHook(obj, prop_name)) {
+                            // get hook exists but no set hook: PHP makes the
+                            // property read-only (the hook owns reads and there's
+                            // no way to express writes)
+                            const msg = std.fmt.allocPrint(self.allocator, "Property {s}::${s} is read-only", .{ obj.class_name, prop_name }) catch return error.RuntimeError;
+                            try self.strings.append(self.allocator, msg);
+                            if (try self.throwBuiltinException("Error", msg)) continue;
+                            return error.RuntimeError;
                         }
 
                         // IC: slot-indexed fast path
