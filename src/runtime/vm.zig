@@ -6747,7 +6747,16 @@ pub const VM = struct {
     }
 
     fn objectToString(self: *VM, obj: *PhpObject) RuntimeError![]const u8 {
-        const method_name = self.resolveMethod(obj.class_name, "__toString") catch return "Object";
+        const method_name = self.resolveMethod(obj.class_name, "__toString") catch {
+            // PHP: 'Object of class X could not be converted to string'.
+            // throw a catchable Error so user code wrapping the access in
+            // try/catch can recover; non-catching code falls through to a
+            // runtime error like any other uncaught exception
+            const msg = try std.fmt.allocPrint(self.allocator, "Object of class {s} could not be converted to string", .{obj.class_name});
+            try self.strings.append(self.allocator, msg);
+            try self.setPendingException("Error", msg);
+            return error.RuntimeError;
+        };
         if (self.functions.get(method_name)) |func| {
             var new_vars: std.StringHashMapUnmanaged(Value) = .{};
             try new_vars.put(self.allocator, "$this", .{ .object = obj });
