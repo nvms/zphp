@@ -5229,8 +5229,9 @@ pub const VM = struct {
                     // check visibility
                     const mvr = self.findMethodVisibility(obj.class_name, method_name);
                     if (!self.checkVisibility(mvr.defining_class, mvr.visibility)) {
-                        const msg = try std.fmt.allocPrint(self.allocator, "Call to {s} method {s}::{s}()", .{
-                            @tagName(mvr.visibility), mvr.defining_class, method_name,
+                        const suffix = self.visScopeSuffix();
+                        const msg = try std.fmt.allocPrint(self.allocator, "Call to {s} method {s}::{s}(){s}", .{
+                            @tagName(mvr.visibility), mvr.defining_class, method_name, suffix,
                         });
                         try self.strings.append(self.allocator, msg);
                         self.sp -= ac + 1;
@@ -5476,7 +5477,8 @@ pub const VM = struct {
                     const mvr = self.findMethodVisibility(obj.class_name, method_name);
                     if (!self.checkVisibility(mvr.defining_class, mvr.visibility)) {
                         self.sp -= ac + 1;
-                        const msg = std.fmt.allocPrint(self.allocator, "Call to {s} method {s}::{s}()", .{ @tagName(mvr.visibility), mvr.defining_class, method_name }) catch null;
+                        const suffix = self.visScopeSuffix();
+                        const msg = std.fmt.allocPrint(self.allocator, "Call to {s} method {s}::{s}(){s}", .{ @tagName(mvr.visibility), mvr.defining_class, method_name, suffix }) catch null;
                         self.error_msg = msg;
                         return error.RuntimeError;
                     }
@@ -9318,6 +9320,20 @@ pub const VM = struct {
         try self.strings.append(self.allocator, msg);
         _ = try self.throwBuiltinException("Error", msg);
         return false;
+    }
+
+    fn visScopeSuffix(self: *VM) []const u8 {
+        // PHP's "from global scope" / "from 'X' context" suffix for visibility errors
+        const caller = if (self.frame_count > 0)
+            self.frames[self.frame_count - 1].called_class orelse self.currentDefiningClass()
+        else
+            null;
+        if (caller) |c| {
+            const s = std.fmt.allocPrint(self.allocator, " from '{s}' context", .{c}) catch return " from global scope";
+            self.strings.append(self.allocator, s) catch {};
+            return s;
+        }
+        return " from global scope";
     }
 
     fn checkVisibility(self: *VM, target_class: []const u8, vis: ClassDef.Visibility) bool {
