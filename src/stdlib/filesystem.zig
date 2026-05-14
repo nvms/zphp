@@ -152,6 +152,18 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try def.methods.put(a, "__toString", .{ .name = "__toString", .arity = 0 });
     try vm.classes.put(a, "FileHandle", def);
 
+    // finfo as an OO wrapper around finfo_* functions
+    var finfo_def = ClassDef{ .name = "finfo" };
+    try finfo_def.methods.put(a, "__construct", .{ .name = "__construct", .arity = 2 });
+    try finfo_def.methods.put(a, "file", .{ .name = "file", .arity = 3 });
+    try finfo_def.methods.put(a, "buffer", .{ .name = "buffer", .arity = 3 });
+    try finfo_def.methods.put(a, "set_flags", .{ .name = "set_flags", .arity = 1 });
+    try vm.classes.put(a, "finfo", finfo_def);
+    try vm.native_fns.put(a, "finfo::__construct", finfoConstruct);
+    try vm.native_fns.put(a, "finfo::file", finfoFile);
+    try vm.native_fns.put(a, "finfo::buffer", finfoBuffer);
+    try vm.native_fns.put(a, "finfo::set_flags", finfoNoop);
+
     inline for (.{ .{ "STDIN", 0, "r" }, .{ "STDOUT", 1, "w" }, .{ "STDERR", 2, "w" } }) |spec| {
         const obj = try a.create(PhpObject);
         obj.* = .{ .class_name = "FileHandle" };
@@ -3088,5 +3100,24 @@ fn native_finfo_buffer(ctx: *NativeContext, args: []const Value) RuntimeError!Va
 }
 
 fn native_finfo_close(_: *NativeContext, _: []const Value) RuntimeError!Value {
+    return .{ .bool = true };
+}
+
+fn finfoConstruct(_: *NativeContext, _: []const Value) RuntimeError!Value {
+    return .null;
+}
+
+fn finfoFile(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len < 1 or args[0] != .string) return .{ .bool = false };
+    return native_mime_content_type(ctx, args[0..1]);
+}
+
+fn finfoBuffer(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len < 1 or args[0] != .string) return .{ .bool = false };
+    if (detectMimeFromBytes(args[0].string)) |m| return .{ .string = try ctx.createString(m) };
+    return .{ .string = "application/octet-stream" };
+}
+
+fn finfoNoop(_: *NativeContext, _: []const Value) RuntimeError!Value {
     return .{ .bool = true };
 }
