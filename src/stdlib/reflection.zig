@@ -664,11 +664,10 @@ fn createTypeObj(ctx: *NativeContext, type_name: []const u8, nullable: bool, sel
         clean = clean[1..];
         is_nullable = true;
     }
-    // resolve self/static to declaring class
+    // PHP resolves 'self' / 'parent' at the class definition site but keeps
+    // 'static' literal so reflection callers see the late-binding type
     if (self_class) |sc| {
-        if (std.mem.eql(u8, clean, "self") or std.mem.eql(u8, clean, "static")) {
-            clean = sc;
-        }
+        if (std.mem.eql(u8, clean, "self")) clean = sc;
     }
     if (std.mem.indexOfScalar(u8, clean, '|') != null) {
         // detect "T|null" / "null|T" - PHP normalizes to nullable named type
@@ -686,12 +685,9 @@ fn createTypeObj(ctx: *NativeContext, type_name: []const u8, nullable: bool, sel
             }
         }
         if (has_null and non_null_count == 1) {
-            // resolve self/static when the union collapses to ?Named
             var resolved = only_non_null;
             if (self_class) |sc| {
-                if (std.mem.eql(u8, resolved, "self") or std.mem.eql(u8, resolved, "static")) {
-                    resolved = sc;
-                }
+                if (std.mem.eql(u8, resolved, "self")) resolved = sc;
             }
             return createNamedTypeObj(ctx, resolved, true);
         }
@@ -2264,9 +2260,8 @@ fn rutGetTypes(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
     while (it.next()) |part| {
         if (part.len == 0) continue;
         const obj = try createNamedTypeObj(ctx, part, false);
-        // resolve self/static
         if (self_class) |sc| {
-            if (std.mem.eql(u8, part, "self") or std.mem.eql(u8, part, "static")) {
+            if (std.mem.eql(u8, part, "self")) {
                 try obj.set(ctx.allocator, "type_name", .{ .string = sc });
             }
         }
