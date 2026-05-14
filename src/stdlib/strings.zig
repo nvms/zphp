@@ -1044,13 +1044,23 @@ fn roundFloatToDecimals(num: f64, decimals: usize, int_buf: []u8, frac_buf: []u8
 
     var src_buf: [256]u8 = undefined;
     var src: []const u8 = undefined;
-    if (decimals > 16) {
+    // prefer the shortest round-trip representation - PHP rounds against
+    // dtoa's shortest form so cases like number_format(123456789.12345, 4)
+    // see a literal "5" at the rounding boundary and round up to .1235.
+    // when the shortest form doesn't expose enough fractional digits (because
+    // the integer part dominates the 15-17 sig-digit budget), fall back to
+    // snprintf %.f with extra precision so we don't truncate to .6700 etc.
+    const short_src = std.fmt.bufPrint(&src_buf, "{d}", .{abs_val}) catch "0";
+    const short_dot = std.mem.indexOfScalar(u8, short_src, '.');
+    const short_frac_len: usize = if (short_dot) |d| short_src.len - d - 1 else 0;
+    const short_has_exp = std.mem.indexOfAny(u8, short_src, "eE") != null;
+    if (short_has_exp or short_frac_len < decimals + 1) {
         var fmt_buf: [16]u8 = undefined;
         const fmt_str = std.fmt.bufPrintZ(&fmt_buf, "%.{d}f", .{decimals + 5}) catch unreachable;
         const n = snprintf(&src_buf, src_buf.len, fmt_str.ptr, abs_val);
-        src = if (n > 0 and @as(usize, @intCast(n)) < src_buf.len) src_buf[0..@intCast(n)] else std.fmt.bufPrint(&src_buf, "{d}", .{abs_val}) catch "0";
+        src = if (n > 0 and @as(usize, @intCast(n)) < src_buf.len) src_buf[0..@intCast(n)] else short_src;
     } else {
-        src = std.fmt.bufPrint(&src_buf, "{d}", .{abs_val}) catch "0";
+        src = short_src;
     }
 
     // expand scientific form (e.g. "1e-5", "1.5e10") to plain decimal
