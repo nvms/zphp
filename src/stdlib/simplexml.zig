@@ -383,10 +383,14 @@ fn sxmlCount(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
         return .{ .int = count };
     }
     if (obj.get("__iter_children") == .bool and obj.get("__iter_children").bool) {
+        const ns_v = obj.get("__ns");
+        const ns_filter: ?[]const u8 = if (ns_v == .string) ns_v.string else null;
         var count: i64 = 0;
         var child = node.children;
         while (child != null) : (child = child.*.next) {
-            if (child.*.type == c.XML_ELEMENT_NODE) count += 1;
+            if (child.*.type != c.XML_ELEMENT_NODE) continue;
+            if (ns_filter) |ns| if (!nodeInNs(child, ns)) continue;
+            count += 1;
         }
         return .{ .int = count };
     }
@@ -410,13 +414,46 @@ fn sxmlChildren(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     // ->children() must yield the node's CHILDREN, not iterate same-named
     // siblings of the node itself - that's the default sibling-mode wrapper
     const wrapper = try buildWrapperMode(ctx, doc, node, .children);
-    // optional namespace filter. PHP: children(string $ns = null, bool $isPrefix = false)
-    if (args.len >= 1 and args[0] == .string and args[0].string.len > 0) {
+    // PHP: children(string $ns = null, bool $isPrefix = false). The default
+    // (no arg or empty string with isPrefix=false) yields children in the
+    // null/empty namespace, not all children. Set __ns to mark which ns to
+    // filter on; iteration / count / __get all honor it
+    var resolved_ns: []const u8 = "";
+    if (args.len >= 1 and args[0] == .string) {
         const ns_or_prefix = args[0].string;
         const is_prefix = args.len >= 2 and args[1] == .bool and args[1].bool;
-        var resolved_ns: []const u8 = ns_or_prefix;
+        resolved_ns = ns_or_prefix;
         if (is_prefix) {
-            // resolve prefix to URI via the document's namespace map
+            const prefix_z = try dupZ(ctx, ns_or_prefix);
+            const ns = c.xmlSearchNs(doc, node, @ptrCast(prefix_z.ptr));
+            if (ns != null and ns.*.href != null) {
+                const href = ns.*.href;
+                resolved_ns = href[0..cstrLen(href)];
+            }
+        }
+    }
+    const owned = try ctx.allocator.dupe(u8, resolved_ns);
+    try ctx.strings.append(ctx.allocator, owned);
+    try wrapper.set(ctx.allocator, "__ns", .{ .string = owned });
+    return .{ .object = wrapper };
+}
+
+fn sxmlAttributes(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    const obj = getThis(ctx) orelse return .null;
+    const node = getNodePtr(obj) orelse return .null;
+    const doc = getDocPtr(obj) orelse return .null;
+    const wrapper = try ctx.createObject("SimpleXMLElement");
+    try wrapper.set(ctx.allocator, "__node", .{ .int = @intCast(@intFromPtr(node)) });
+    try wrapper.set(ctx.allocator, "__doc", .{ .int = @intCast(@intFromPtr(doc)) });
+    try wrapper.set(ctx.allocator, "__is_attr", .{ .bool = false });
+    try wrapper.set(ctx.allocator, "__attr_view", .{ .bool = true });
+    // optional namespace filter mirrors children()
+    var resolved_ns: []const u8 = "";
+    if (args.len >= 1 and args[0] == .string) {
+        const ns_or_prefix = args[0].string;
+        const is_prefix = args.len >= 2 and args[1] == .bool and args[1].bool;
+        resolved_ns = ns_or_prefix;
+        if (is_prefix) {
             const prefix_z = try dupZ(ctx, ns_or_prefix);
             const ns = c.xmlSearchNs(doc, node, @ptrCast(prefix_z.ptr));
             if (ns != null and ns.*.href != null) {
@@ -428,21 +465,6 @@ fn sxmlChildren(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
         try ctx.strings.append(ctx.allocator, owned);
         try wrapper.set(ctx.allocator, "__ns", .{ .string = owned });
     }
-    return .{ .object = wrapper };
-}
-
-fn sxmlAttributes(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    _ = args;
-    const obj = getThis(ctx) orelse return .null;
-    const node = getNodePtr(obj) orelse return .null;
-    const doc = getDocPtr(obj) orelse return .null;
-    // return a SimpleXMLElement-like wrapper exposing attributes via offsetGet/iteration.
-    // store as a special wrapper with __attr_view = true
-    const wrapper = try ctx.createObject("SimpleXMLElement");
-    try wrapper.set(ctx.allocator, "__node", .{ .int = @intCast(@intFromPtr(node)) });
-    try wrapper.set(ctx.allocator, "__doc", .{ .int = @intCast(@intFromPtr(doc)) });
-    try wrapper.set(ctx.allocator, "__is_attr", .{ .bool = false });
-    try wrapper.set(ctx.allocator, "__attr_view", .{ .bool = true });
     return .{ .object = wrapper };
 }
 
@@ -571,7 +593,11 @@ fn sxmlToString(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
         const an = obj.get("__attr_name");
         if (an != .string) return .{ .string = try dupString(ctx, "") };
         const an_z = try dupZ(ctx, an.string);
-        const v = c.xmlGetProp(owner, @ptrCast(an_z.ptr));
+        const ns_v = obj.get("__attr_ns");
+        const v: [*c]u8 = if (ns_v == .string and ns_v.string.len > 0) blk: {
+            const ns_z = try dupZ(ctx, ns_v.string);
+            break :blk c.xmlGetNsProp(owner, @ptrCast(an_z.ptr), @ptrCast(ns_z.ptr));
+        } else c.xmlGetProp(owner, @ptrCast(an_z.ptr));
         if (v == null) return .{ .string = try dupString(ctx, "") };
         defer c.xmlFree.?(v);
         return .{ .string = try dupString(ctx, v[0..cstrLen(v)]) };
@@ -627,9 +653,20 @@ fn sxmlGet(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     const node = getNodePtr(obj) orelse return .null;
     const doc = getDocPtr(obj) orelse return .null;
 
-    // honor namespace filter set by children($ns)
+    // honor namespace filter set by children($ns) / attributes($ns)
     const ns_v = obj.get("__ns");
     const ns_filter: ?[]const u8 = if (ns_v == .string) ns_v.string else null;
+
+    // when the wrapper is an attribute view, $wrap->name returns an attribute
+    // wrapper instead of looking for a child element
+    if (obj.get("__attr_view") == .bool and obj.get("__attr_view").bool) {
+        const wrap = try buildAttrWrapper(ctx, doc, node, name);
+        if (ns_filter) |ns| {
+            const owned = try dupString(ctx, ns);
+            try wrap.set(ctx.allocator, "__attr_ns", .{ .string = owned });
+        }
+        return .{ .object = wrap };
+    }
 
     var ch = node.children;
     while (ch != null) : (ch = ch.*.next) {
@@ -713,12 +750,81 @@ fn sxmlOffsetExists(ctx: *NativeContext, args: []const Value) RuntimeError!Value
 }
 
 fn sxmlOffsetSet(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len < 2 or args[0] != .string or args[1] != .string) return .null;
+    if (args.len < 2) return .null;
     const obj = getThis(ctx) orelse return .null;
     const node = getNodePtr(obj) orelse return .null;
+    // numeric offset: replace text content of the Nth same-named sibling
+    if (args[0] == .int) {
+        const idx = args[0].int;
+        if (idx < 0 or node.name == null) return .null;
+        const self_name = node.name[0..cstrLen(node.name)];
+        var n: ?*c.xmlNode = if (node.parent != null) node.parent.*.children else node;
+        var found: i64 = 0;
+        while (n != null) : (n = n.?.next) {
+            const cn = n.?;
+            if (cn.type == c.XML_ELEMENT_NODE and cn.name != null and std.mem.eql(u8, cn.name[0..cstrLen(cn.name)], self_name)) {
+                if (found == idx) {
+                    if (args[1] == .string) try setNodeText(ctx, cn, args[1].string);
+                    return .null;
+                }
+                found += 1;
+            }
+        }
+        return .null;
+    }
+    if (args[0] != .string or args[1] != .string) return .null;
     const name_z = try dupZ(ctx, args[0].string);
     const val_z = try dupZ(ctx, args[1].string);
     _ = c.xmlSetProp(node, @ptrCast(name_z.ptr), @ptrCast(val_z.ptr));
+    return .null;
+}
+
+// replaces the text content of an element node with the supplied string.
+// removes all existing text/element children first so the post-state is a
+// single text node, matching PHP's `$elem->child = 'value'` semantics
+fn setNodeText(ctx: *NativeContext, n: *c.xmlNode, text: []const u8) !void {
+    var ch = n.children;
+    while (ch != null) {
+        const nxt = ch.*.next;
+        c.xmlUnlinkNode(ch);
+        c.xmlFreeNode(ch);
+        ch = nxt;
+    }
+    const tz = try dupZ(ctx, text);
+    const txt_node = c.xmlNewText(@ptrCast(tz.ptr));
+    if (txt_node != null) _ = c.xmlAddChild(n, txt_node);
+}
+
+fn sxmlSet(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len < 2 or args[0] != .string) return .null;
+    const obj = getThis(ctx) orelse return .null;
+    const node = getNodePtr(obj) orelse return .null;
+    const new_text: []const u8 = switch (args[1]) {
+        .string => |s| s,
+        .int => |i| blk: {
+            var buf: [32]u8 = undefined;
+            const s = std.fmt.bufPrint(&buf, "{d}", .{i}) catch break :blk "";
+            break :blk try dupString(ctx, s);
+        },
+        .float => |f| blk: {
+            var buf: [64]u8 = undefined;
+            const s = std.fmt.bufPrint(&buf, "{d}", .{f}) catch break :blk "";
+            break :blk try dupString(ctx, s);
+        },
+        .bool => |b| if (b) "1" else "",
+        else => return .null,
+    };
+    // find existing child with this element name; if not found, create one
+    var ch = node.children;
+    while (ch != null) : (ch = ch.*.next) {
+        if (ch.*.type == c.XML_ELEMENT_NODE and nameMatches(ch, args[0].string)) {
+            try setNodeText(ctx, ch, new_text);
+            return .null;
+        }
+    }
+    const name_z = try dupZ(ctx, args[0].string);
+    const val_z = try dupZ(ctx, new_text);
+    _ = c.xmlNewTextChild(node, null, @ptrCast(name_z.ptr), @ptrCast(val_z.ptr));
     return .null;
 }
 
@@ -742,12 +848,30 @@ fn sxmlGetIterator(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
     // are unique per element (so dedup in a PhpArray is harmless and the
     // existing iter contract is what userland expects)
     if (obj.get("__attr_view") == .bool and obj.get("__attr_view").bool) {
+        const ns_v = obj.get("__ns");
+        const ns_filter: ?[]const u8 = if (ns_v == .string) ns_v.string else null;
         const arr = try ctx.createArray();
         var attr = node.properties;
         while (attr != null) : (attr = attr.*.next) {
             if (attr.*.name == null) continue;
+            if (ns_filter) |ns| {
+                const has_ns = attr.*.ns != null and attr.*.ns.*.href != null;
+                if (ns.len == 0 and has_ns) continue;
+                if (ns.len > 0) {
+                    if (!has_ns) continue;
+                    const href = attr.*.ns.*.href;
+                    if (!std.mem.eql(u8, href[0..cstrLen(href)], ns)) continue;
+                }
+            }
             const an = attr.*.name[0..cstrLen(attr.*.name)];
             const wrapped_obj = try buildAttrWrapper(ctx, doc, node, an);
+            // remember which namespace the attr was sourced from so __toString
+            // can resolve via xmlGetNsProp instead of xmlGetProp
+            if (attr.*.ns != null and attr.*.ns.*.href != null) {
+                const href = attr.*.ns.*.href;
+                const owned = try dupString(ctx, href[0..cstrLen(href)]);
+                try wrapped_obj.set(ctx.allocator, "__attr_ns", .{ .string = owned });
+            }
             const key = try dupString(ctx, an);
             try arr.set(ctx.allocator, .{ .string = key }, .{ .object = wrapped_obj });
         }
@@ -801,6 +925,7 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try def.methods.put(a, "getDocNamespaces", .{ .name = "getDocNamespaces", .arity = 0 });
     try def.methods.put(a, "__toString", .{ .name = "__toString", .arity = 0 });
     try def.methods.put(a, "__get", .{ .name = "__get", .arity = 1 });
+    try def.methods.put(a, "__set", .{ .name = "__set", .arity = 2 });
     try def.methods.put(a, "__isset", .{ .name = "__isset", .arity = 1 });
     try def.methods.put(a, "getIterator", .{ .name = "getIterator", .arity = 0 });
     try def.methods.put(a, "offsetGet", .{ .name = "offsetGet", .arity = 1 });
@@ -824,6 +949,7 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try vm.native_fns.put(a, "SimpleXMLElement::getDocNamespaces", sxmlGetDocNamespaces);
     try vm.native_fns.put(a, "SimpleXMLElement::__toString", sxmlToString);
     try vm.native_fns.put(a, "SimpleXMLElement::__get", sxmlGet);
+    try vm.native_fns.put(a, "SimpleXMLElement::__set", sxmlSet);
     try vm.native_fns.put(a, "SimpleXMLElement::__isset", sxmlIsset);
     try vm.native_fns.put(a, "SimpleXMLElement::getIterator", sxmlGetIterator);
     try vm.native_fns.put(a, "SimpleXMLElement::offsetGet", sxmlOffsetGet);
