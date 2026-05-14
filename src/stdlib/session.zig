@@ -27,7 +27,24 @@ pub const entries = .{
     .{ "session_get_cookie_params", native_session_get_cookie_params },
     .{ "session_encode", native_session_encode },
     .{ "session_decode", native_session_decode },
+    .{ "session_set_save_handler", native_session_set_save_handler },
 };
+
+// SessionHandlerInterface implementations: we accept the registration but
+// don't actually delegate session storage through them (the built-in file
+// backend continues to serve $_SESSION). this lets apps that follow the
+// "register a custom handler before starting" pattern run end-to-end without
+// hitting an undefined-function fatal
+fn native_session_set_save_handler(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    // legacy 6-callable form: session_set_save_handler(open, close, read, write, destroy, gc, ...)
+    if (args.len >= 6 and args[0] != .object) return .{ .bool = true };
+    // OO form: session_set_save_handler($handler [, $register_shutdown = true])
+    if (args.len >= 1 and args[0] == .object) {
+        try setSessionVar(ctx, "__session_handler", args[0]);
+        return .{ .bool = true };
+    }
+    return .{ .bool = false };
+}
 
 const default_session_dir = "/tmp";
 const default_name = "PHPSESSID";

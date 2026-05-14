@@ -69,6 +69,26 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try stringable.methods.append(a, "__toString");
     try vm.interfaces.put(a, "Stringable", stringable);
 
+    // SessionHandlerInterface / SessionIdInterface / SessionUpdateTimestampHandlerInterface
+    // PHP session module exposes these so userland save handlers can implement them
+    var sess = vm_mod.InterfaceDef{ .name = "SessionHandlerInterface" };
+    try sess.methods.append(a, "open");
+    try sess.methods.append(a, "close");
+    try sess.methods.append(a, "read");
+    try sess.methods.append(a, "write");
+    try sess.methods.append(a, "destroy");
+    try sess.methods.append(a, "gc");
+    try vm.interfaces.put(a, "SessionHandlerInterface", sess);
+
+    var sess_id = vm_mod.InterfaceDef{ .name = "SessionIdInterface" };
+    try sess_id.methods.append(a, "create_sid");
+    try vm.interfaces.put(a, "SessionIdInterface", sess_id);
+
+    var sess_ts = vm_mod.InterfaceDef{ .name = "SessionUpdateTimestampHandlerInterface" };
+    try sess_ts.methods.append(a, "validateId");
+    try sess_ts.methods.append(a, "updateTimestamp");
+    try vm.interfaces.put(a, "SessionUpdateTimestampHandlerInterface", sess_ts);
+
     // Serializable - deprecated marker interface still present for code that
     // checks for it. PHP 8 implemented as a soft-marker that types implementing
     // it via __serialize / __unserialize still satisfy
