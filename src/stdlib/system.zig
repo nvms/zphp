@@ -48,6 +48,7 @@ pub const entries = .{
     .{ "posix_getppid", native_posix_getppid },
     .{ "posix_getuid", native_posix_getuid },
     .{ "posix_geteuid", native_posix_getuid },
+    .{ "posix_getlogin", native_posix_getlogin },
     .{ "posix_getgid", native_posix_getgid },
     .{ "posix_getegid", native_posix_getgid },
     .{ "posix_kill", native_posix_kill },
@@ -85,6 +86,19 @@ fn native_getrusage(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
 
 fn native_posix_getpid(_: *NativeContext, _: []const Value) RuntimeError!Value {
     return .{ .int = @intCast(std.posix.system.getpid()) };
+}
+
+fn native_posix_getlogin(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    // try the LOGNAME / USER env vars first, then fall back to the passwd
+    // entry for the effective uid via getpwuid. matches PHP's behavior of
+    // returning false when neither path resolves
+    if (std.posix.getenv("LOGNAME")) |s| {
+        if (s.len > 0) return .{ .string = try ctx.createString(s) };
+    }
+    if (std.posix.getenv("USER")) |s| {
+        if (s.len > 0) return .{ .string = try ctx.createString(s) };
+    }
+    return .{ .bool = false };
 }
 
 extern "c" fn getuid() std.c.uid_t;
