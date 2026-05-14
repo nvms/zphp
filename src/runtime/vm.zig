@@ -3222,6 +3222,15 @@ pub const VM = struct {
                 },
                 .clone_obj => {
                     const val = self.pop();
+                    // PHP rejects cloning of generators and fibers with Error
+                    if (val == .generator) {
+                        if (try self.throwBuiltinException("Error", "Trying to clone an uncloneable object of class Generator")) continue;
+                        return error.RuntimeError;
+                    }
+                    if (val == .fiber) {
+                        if (try self.throwBuiltinException("Error", "Trying to clone an uncloneable object of class Fiber")) continue;
+                        return error.RuntimeError;
+                    }
                     if (val == .object) {
                         const src = val.object;
                         const copy = try self.allocator.create(PhpObject);

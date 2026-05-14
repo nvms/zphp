@@ -134,6 +134,14 @@ fn native_serialize(ctx: *NativeContext, args: []const Value) RuntimeError!Value
             return error.RuntimeError;
         }
     }
+    if (args[0] == .generator) {
+        try ctx.vm.setPendingException("Exception", "Serialization of 'Generator' is not allowed");
+        return error.RuntimeError;
+    }
+    if (args[0] == .fiber) {
+        try ctx.vm.setPendingException("Exception", "Serialization of 'Fiber' is not allowed");
+        return error.RuntimeError;
+    }
     return try serializeToString(ctx, args[0]);
 }
 
