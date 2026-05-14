@@ -3519,6 +3519,18 @@ fn raGetArguments(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
     return .{ .array = try ctx.createArray() };
 }
 
+fn targetName(t: i64) []const u8 {
+    return switch (t) {
+        1 => "class",
+        2 => "function",
+        4 => "method",
+        8 => "property",
+        16 => "class constant",
+        32 => "parameter",
+        else => "this declaration",
+    };
+}
+
 fn isAttributeClass(vm: *VM, class_name: []const u8) bool {
     if (std.mem.eql(u8, class_name, "Attribute")) return true;
     const cls = vm.classes.get(class_name) orelse return false;
@@ -3569,7 +3581,17 @@ fn raNewInstance(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
         const target = target_val.int;
         const flags = getAttributeFlags(ctx.vm, attr_name);
         if (flags != 127 and (flags & target) == 0) {
-            const msg = std.fmt.allocPrint(ctx.allocator, "Attribute \"{s}\" cannot target this declaration", .{attr_name}) catch return error.OutOfMemory;
+            const used = targetName(target);
+            var allowed_buf: std.ArrayListUnmanaged(u8) = .{};
+            defer allowed_buf.deinit(ctx.allocator);
+            const bits = [_]i64{ 1, 2, 4, 8, 16, 32 };
+            for (bits) |b| {
+                if ((flags & b) != 0) {
+                    if (allowed_buf.items.len > 0) try allowed_buf.appendSlice(ctx.allocator, ", ");
+                    try allowed_buf.appendSlice(ctx.allocator, targetName(b));
+                }
+            }
+            const msg = std.fmt.allocPrint(ctx.allocator, "Attribute \"{s}\" cannot target {s} (allowed targets: {s})", .{ attr_name, used, allowed_buf.items }) catch return error.OutOfMemory;
             try ctx.strings.append(ctx.allocator, msg);
             _ = ctx.vm.throwBuiltinException("Error", msg) catch {};
             return error.RuntimeError;
