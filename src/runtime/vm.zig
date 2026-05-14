@@ -1751,6 +1751,7 @@ pub const VM = struct {
                 .divide => {
                     const b = self.pop();
                     const a = self.pop();
+                    if (try self.checkArithOperands(a, b, "/")) continue;
                     const bv = Value.toFloat(b);
                     if (bv == 0.0) {
                         if (try self.throwBuiltinException("DivisionByZeroError", "Division by zero")) continue;
@@ -1761,6 +1762,7 @@ pub const VM = struct {
                 .modulo => {
                     const b = self.pop();
                     const a = self.pop();
+                    if (try self.checkArithOperands(a, b, "%")) continue;
                     const bi = Value.toInt(b);
                     if (bi == 0) {
                         if (try self.throwBuiltinException("DivisionByZeroError", "Modulo by zero")) continue;
@@ -1771,10 +1773,18 @@ pub const VM = struct {
                 .power => {
                     const b = self.pop();
                     const a = self.pop();
+                    if (try self.checkArithOperands(a, b, "**")) continue;
                     self.push(Value.power(a, b));
                 },
                 .negate => {
                     const v = self.pop();
+                    if (!isArithOperand(v)) {
+                        const tn = arithTypeName(v);
+                        const msg = try std.fmt.allocPrint(self.allocator, "Cannot negate {s}", .{tn});
+                        try self.strings.append(self.allocator, msg);
+                        if (try self.throwBuiltinException("TypeError", msg)) continue;
+                        return error.RuntimeError;
+                    }
                     self.push(v.negate());
                 },
                 .concat => {
@@ -1814,17 +1824,35 @@ pub const VM = struct {
                 .bit_and => {
                     const b = self.pop();
                     const a = self.pop();
-                    self.push(.{ .int = Value.toInt(a) & Value.toInt(b) });
+                    if (a == .string and b == .string) {
+                        const result = try self.bitwiseStrings(a.string, b.string, .and_op);
+                        self.push(.{ .string = result });
+                    } else {
+                        if (try self.checkArithOperands(a, b, "&")) continue;
+                        self.push(.{ .int = Value.toInt(a) & Value.toInt(b) });
+                    }
                 },
                 .bit_or => {
                     const b = self.pop();
                     const a = self.pop();
-                    self.push(.{ .int = Value.toInt(a) | Value.toInt(b) });
+                    if (a == .string and b == .string) {
+                        const result = try self.bitwiseStrings(a.string, b.string, .or_op);
+                        self.push(.{ .string = result });
+                    } else {
+                        if (try self.checkArithOperands(a, b, "|")) continue;
+                        self.push(.{ .int = Value.toInt(a) | Value.toInt(b) });
+                    }
                 },
                 .bit_xor => {
                     const b = self.pop();
                     const a = self.pop();
-                    self.push(.{ .int = Value.toInt(a) ^ Value.toInt(b) });
+                    if (a == .string and b == .string) {
+                        const result = try self.bitwiseStrings(a.string, b.string, .xor_op);
+                        self.push(.{ .string = result });
+                    } else {
+                        if (try self.checkArithOperands(a, b, "^")) continue;
+                        self.push(.{ .int = Value.toInt(a) ^ Value.toInt(b) });
+                    }
                 },
                 .bit_not => {
                     const v = self.pop();
@@ -6829,6 +6857,27 @@ pub const VM = struct {
         try self.strings.append(self.allocator, msg);
         if (try self.throwBuiltinException("TypeError", msg)) return true;
         return error.RuntimeError;
+    }
+
+    fn bitwiseStrings(self: *VM, a: []const u8, b: []const u8, comptime op: enum { and_op, or_op, xor_op }) ![]const u8 {
+        // PHP byte-wise op on two strings: AND truncates to shorter length,
+        // OR and XOR pad shorter side with NUL bytes
+        const len = switch (op) {
+            .and_op => @min(a.len, b.len),
+            .or_op, .xor_op => @max(a.len, b.len),
+        };
+        const out = try self.allocator.alloc(u8, len);
+        try self.strings.append(self.allocator, out);
+        for (0..len) |i| {
+            const ca: u8 = if (i < a.len) a[i] else 0;
+            const cb: u8 = if (i < b.len) b[i] else 0;
+            out[i] = switch (op) {
+                .and_op => ca & cb,
+                .or_op => ca | cb,
+                .xor_op => ca ^ cb,
+            };
+        }
+        return out;
     }
 
     fn isArithOperand(v: Value) bool {
