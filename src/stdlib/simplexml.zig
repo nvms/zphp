@@ -848,6 +848,83 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try vm.native_fns.put(a, "SimpleXMLChildrenIter::current", sxiCurrent);
     try vm.native_fns.put(a, "SimpleXMLChildrenIter::key", sxiKey);
     try vm.native_fns.put(a, "SimpleXMLChildrenIter::next", sxiNext);
+
+    // SimpleXMLIterator extends SimpleXMLElement and adds hasChildren /
+    // getChildren on top of the regular iteration methods. it's used with
+    // RecursiveIteratorIterator so just expose the class with parent = SXE
+    var sxi_def = ClassDef{ .name = "SimpleXMLIterator", .parent = "SimpleXMLElement" };
+    try sxi_def.interfaces.append(a, "RecursiveIterator");
+    try sxi_def.methods.put(a, "hasChildren", .{ .name = "hasChildren", .arity = 0 });
+    try sxi_def.methods.put(a, "getChildren", .{ .name = "getChildren", .arity = 0 });
+    try sxi_def.methods.put(a, "rewind", .{ .name = "rewind", .arity = 0 });
+    try sxi_def.methods.put(a, "valid", .{ .name = "valid", .arity = 0 });
+    try sxi_def.methods.put(a, "current", .{ .name = "current", .arity = 0 });
+    try sxi_def.methods.put(a, "key", .{ .name = "key", .arity = 0 });
+    try sxi_def.methods.put(a, "next", .{ .name = "next", .arity = 0 });
+    try vm.classes.put(a, "SimpleXMLIterator", sxi_def);
+    try vm.native_fns.put(a, "SimpleXMLIterator::hasChildren", sxmlIterHasChildren);
+    try vm.native_fns.put(a, "SimpleXMLIterator::getChildren", sxmlIterGetChildren);
+    // share the same node-walker the SimpleXMLChildrenIter helper uses; the
+    // SimpleXMLIterator's $this object stores its own cursor under __cursor
+    try vm.native_fns.put(a, "SimpleXMLIterator::rewind", sxmlIterRewind);
+    try vm.native_fns.put(a, "SimpleXMLIterator::valid", sxiValid);
+    try vm.native_fns.put(a, "SimpleXMLIterator::current", sxmlIterCurrent);
+    try vm.native_fns.put(a, "SimpleXMLIterator::key", sxiKey);
+    try vm.native_fns.put(a, "SimpleXMLIterator::next", sxiNext);
+}
+
+fn sxmlIterRewind(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    // SimpleXMLIterator iterates the children of $this. seed __mode and start
+    const obj = getThis(ctx) orelse return .null;
+    try obj.set(ctx.allocator, "__mode", .{ .string = "children" });
+    try obj.set(ctx.allocator, "__same_name", .{ .string = "" });
+    return sxiRewind(ctx, &.{});
+}
+
+fn sxmlIterCurrent(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    // wrap the child node as another SimpleXMLIterator so the foreach value
+    // also implements RecursiveIterator (needed by RecursiveIteratorIterator)
+    const obj = getThis(ctx) orelse return .null;
+    const cur = obj.get("__cursor");
+    if (cur != .int or cur.int == 0) return .null;
+    const node: *c.xmlNode = @ptrFromInt(@as(usize, @intCast(cur.int)));
+    const doc: *c.xmlDoc = @ptrFromInt(@as(usize, @intCast(obj.get("__doc").int)));
+    const wrapper = try ctx.createObject("SimpleXMLIterator");
+    try wrapper.set(ctx.allocator, "__node", .{ .int = @intCast(@intFromPtr(node)) });
+    try wrapper.set(ctx.allocator, "__doc", .{ .int = @intCast(@intFromPtr(doc)) });
+    try wrapper.set(ctx.allocator, "__is_attr", .{ .bool = false });
+    try wrapper.set(ctx.allocator, "__iter_children", .{ .bool = true });
+    return .{ .object = wrapper };
+}
+
+// hasChildren / getChildren operate on the CURRENT iteration position (cursor)
+// not the wrapper's own __node. zphp's RecursiveIteratorIterator calls these
+// on the iterator itself between valid() and current(), expecting them to
+// describe the element about to be yielded
+fn sxmlIterHasChildren(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const obj = getThis(ctx) orelse return .{ .bool = false };
+    const cur = obj.get("__cursor");
+    if (cur != .int or cur.int == 0) return .{ .bool = false };
+    const node: *c.xmlNode = @ptrFromInt(@as(usize, @intCast(cur.int)));
+    var ch = node.children;
+    while (ch != null) : (ch = ch.*.next) {
+        if (ch.*.type == c.XML_ELEMENT_NODE) return .{ .bool = true };
+    }
+    return .{ .bool = false };
+}
+
+fn sxmlIterGetChildren(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const obj = getThis(ctx) orelse return .null;
+    const cur = obj.get("__cursor");
+    if (cur != .int or cur.int == 0) return .null;
+    const node: *c.xmlNode = @ptrFromInt(@as(usize, @intCast(cur.int)));
+    const doc = getDocPtr(obj) orelse return .null;
+    const wrapper = try ctx.createObject("SimpleXMLIterator");
+    try wrapper.set(ctx.allocator, "__node", .{ .int = @intCast(@intFromPtr(node)) });
+    try wrapper.set(ctx.allocator, "__doc", .{ .int = @intCast(@intFromPtr(doc)) });
+    try wrapper.set(ctx.allocator, "__is_attr", .{ .bool = false });
+    try wrapper.set(ctx.allocator, "__iter_children", .{ .bool = true });
+    return .{ .object = wrapper };
 }
 
 // these walk xml node siblings via the underlying libxml node pointers stored
