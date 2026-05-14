@@ -37,28 +37,99 @@ fn native_crypt(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     const password = args[0].string;
     const salt: []const u8 = if (args.len >= 2 and args[1] == .string) args[1].string else "";
 
-    // bcrypt salt: $2y$NN$22-char-salt or $2a$/$2b$
-    if (salt.len >= 7 and salt[0] == '$' and salt[1] == '2' and (salt[2] == 'y' or salt[2] == 'a' or salt[2] == 'b') and salt[3] == '$') {
+    // bcrypt salt: $2y$NN$22-char-salt[31-char-hash]. crypt() must be
+    // deterministic on the input salt - strHash generates its own random
+    // salt, so we decode the supplied salt bytes and feed bcrypt() directly
+    if (salt.len >= 29 and salt[0] == '$' and salt[1] == '2' and (salt[2] == 'y' or salt[2] == 'a' or salt[2] == 'b') and salt[3] == '$' and salt[6] == '$') {
         var rounds_log: u6 = 10;
-        if (salt.len >= 6 and salt[6] == '$') {
-            const cost = std.fmt.parseInt(u8, salt[4..6], 10) catch 10;
-            if (cost >= 4 and cost <= 31) rounds_log = @intCast(cost);
-        }
-        var buf: [60]u8 = undefined;
-        const hash = std.crypto.pwhash.bcrypt.strHash(password, .{
-            .params = .{ .rounds_log = rounds_log, .silently_truncate_password = true },
-            .encoding = .crypt,
-        }, &buf) catch return Value{ .bool = false };
-        const out = try ctx.createString(hash);
-        // preserve the variant prefix from the salt ($2y$ vs $2a$ vs $2b$)
-        if (out.len >= 4 and out[0] == '$' and out[1] == '2' and out[3] == '$') {
-            @as([*]u8, @ptrCast(@constCast(out.ptr)))[2] = salt[2];
-        }
-        return .{ .string = out };
+        const cost = std.fmt.parseInt(u8, salt[4..6], 10) catch 10;
+        if (cost >= 4 and cost <= 31) rounds_log = @intCast(cost);
+
+        var salt_bytes: [16]u8 = undefined;
+        if (!bcryptB64Decode(&salt_bytes, salt[7..29])) return .{ .string = "*0" };
+
+        // PHP canonicalizes the salt encoding by re-encoding the 16 decoded
+        // bytes, which forces the trailing unused bits in the last base64
+        // character to 0 ($..uv -> $..uu). preserve that behavior so verify
+        // round-trips
+        var salt_b64_buf: [22]u8 = undefined;
+        bcryptB64Encode(&salt_b64_buf, &salt_bytes);
+
+        const hash = std.crypto.pwhash.bcrypt.bcrypt(password, salt_bytes, .{
+            .rounds_log = rounds_log,
+            .silently_truncate_password = true,
+        });
+
+        var hash_b64_buf: [31]u8 = undefined;
+        bcryptB64Encode(&hash_b64_buf, &hash);
+
+        var out_buf: [60]u8 = undefined;
+        const out = std.fmt.bufPrint(&out_buf, "$2{c}${d}{d}${s}{s}", .{
+            salt[2],
+            rounds_log / 10,
+            rounds_log % 10,
+            salt_b64_buf,
+            hash_b64_buf,
+        }) catch return .{ .string = "*0" };
+        return .{ .string = try ctx.createString(out) };
     }
 
     // PHP returns a special "*0" or "*1" failure indicator on bad salt
     return .{ .string = "*0" };
+}
+
+const bcrypt_alphabet = "./ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+
+fn bcryptB64DecodeChar(c: u8) ?u6 {
+    for (bcrypt_alphabet, 0..) |a, i| if (a == c) return @intCast(i);
+    return null;
+}
+
+fn bcryptB64Decode(out: []u8, b64: []const u8) bool {
+    // bcrypt's variant of base64: 22 chars → 16 bytes (drops the trailing 2 bits)
+    var ob: usize = 0;
+    var i: usize = 0;
+    while (i + 4 <= b64.len and ob < out.len) {
+        const c0 = bcryptB64DecodeChar(b64[i + 0]) orelse return false;
+        const c1 = bcryptB64DecodeChar(b64[i + 1]) orelse return false;
+        const c2 = bcryptB64DecodeChar(b64[i + 2]) orelse return false;
+        const c3 = bcryptB64DecodeChar(b64[i + 3]) orelse return false;
+        out[ob + 0] = (@as(u8, c0) << 2) | (@as(u8, c1) >> 4);
+        if (ob + 1 < out.len) out[ob + 1] = ((@as(u8, c1) & 0x0f) << 4) | (@as(u8, c2) >> 2);
+        if (ob + 2 < out.len) out[ob + 2] = ((@as(u8, c2) & 0x03) << 6) | @as(u8, c3);
+        ob += 3;
+        i += 4;
+    }
+    // handle the trailing partial group (b64 len 22 -> i=20, 2 chars left -> 1 byte)
+    if (i + 2 <= b64.len and ob < out.len) {
+        const c0 = bcryptB64DecodeChar(b64[i + 0]) orelse return false;
+        const c1 = bcryptB64DecodeChar(b64[i + 1]) orelse return false;
+        out[ob] = (@as(u8, c0) << 2) | (@as(u8, c1) >> 4);
+    }
+    return true;
+}
+
+fn bcryptB64Encode(out: []u8, data: []const u8) void {
+    var oi: usize = 0;
+    var i: usize = 0;
+    while (i < data.len) {
+        const b0 = data[i];
+        const b1: u8 = if (i + 1 < data.len) data[i + 1] else 0;
+        const b2: u8 = if (i + 2 < data.len) data[i + 2] else 0;
+        if (oi < out.len) out[oi] = bcrypt_alphabet[b0 >> 2];
+        oi += 1;
+        if (oi < out.len) out[oi] = bcrypt_alphabet[((b0 & 0x03) << 4) | (b1 >> 4)];
+        oi += 1;
+        if (i + 1 < data.len and oi < out.len) {
+            out[oi] = bcrypt_alphabet[((b1 & 0x0f) << 2) | (b2 >> 6)];
+            oi += 1;
+        }
+        if (i + 2 < data.len and oi < out.len) {
+            out[oi] = bcrypt_alphabet[b2 & 0x3f];
+            oi += 1;
+        }
+        i += 3;
+    }
 }
 
 fn native_password_hash(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
