@@ -624,7 +624,9 @@ fn translateReplacement(allocator: std.mem.Allocator, src: []const u8) ![]u8 {
                 continue;
             }
             if (n == '$') {
-                try out.append(allocator, '\\');
+                // PHP '\$' means a literal '$' in the output. PCRE2 substitute
+                // emits a literal '$' for '$$', so translate accordingly
+                try out.append(allocator, '$');
                 try out.append(allocator, '$');
                 i += 2;
                 continue;
@@ -865,6 +867,10 @@ fn pregReplaceLimited(ctx: *NativeContext, code: *pcre2.Code, match_data: *pcre2
                         try parts.appendSlice(ctx.allocator, subject[gs..ge]);
                     }
                 }
+            } else if (replacement[ri] == '\\' and ri + 1 < replacement.len and (replacement[ri + 1] == '\\' or replacement[ri + 1] == '$')) {
+                // \\ -> literal \; \$ -> literal $
+                try parts.append(ctx.allocator, replacement[ri + 1]);
+                ri += 2;
             } else {
                 try parts.append(ctx.allocator, replacement[ri]);
                 ri += 1;
