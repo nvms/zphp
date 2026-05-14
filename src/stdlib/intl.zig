@@ -1573,11 +1573,112 @@ pub fn register(vm: *VM, a: Allocator) !void {
 }
 
 fn registerIntlCharStub(vm: *VM, a: Allocator) !void {
-    // IntlChar is a large class with many Unicode-character utility methods.
-    // register the class shell so class_exists / instanceof checks pass even
-    // without the full ICU character database integration behind it
-    const def = ClassDef{ .name = "IntlChar" };
+    // small subset of IntlChar's utility methods (ord/chr + the common
+    // category predicates). full ICU UChar database integration is much
+    // bigger but these covers what most apps actually use
+    var def = ClassDef{ .name = "IntlChar" };
+    inline for (.{ "ord", "chr", "isalpha", "isdigit", "isalnum", "isupper", "islower", "isspace", "iscntrl", "ispunct", "isgraph", "isprint", "isxdigit", "isblank", "tolower", "toupper" }) |m| {
+        try def.methods.put(a, m, .{ .name = m, .arity = 1, .is_static = true });
+    }
     try vm.classes.put(a, "IntlChar", def);
+    try vm.native_fns.put(a, "IntlChar::ord", intlCharOrd);
+    try vm.native_fns.put(a, "IntlChar::chr", intlCharChr);
+    try vm.native_fns.put(a, "IntlChar::isalpha", intlCharIsalpha);
+    try vm.native_fns.put(a, "IntlChar::isdigit", intlCharIsdigit);
+    try vm.native_fns.put(a, "IntlChar::isalnum", intlCharIsalnum);
+    try vm.native_fns.put(a, "IntlChar::isupper", intlCharIsupper);
+    try vm.native_fns.put(a, "IntlChar::islower", intlCharIslower);
+    try vm.native_fns.put(a, "IntlChar::isspace", intlCharIsspace);
+    try vm.native_fns.put(a, "IntlChar::iscntrl", intlCharIscntrl);
+    try vm.native_fns.put(a, "IntlChar::ispunct", intlCharIspunct);
+    try vm.native_fns.put(a, "IntlChar::isgraph", intlCharIsgraph);
+    try vm.native_fns.put(a, "IntlChar::isprint", intlCharIsprint);
+    try vm.native_fns.put(a, "IntlChar::isxdigit", intlCharIsxdigit);
+    try vm.native_fns.put(a, "IntlChar::isblank", intlCharIsblank);
+    try vm.native_fns.put(a, "IntlChar::tolower", intlCharTolower);
+    try vm.native_fns.put(a, "IntlChar::toupper", intlCharToupper);
+}
+
+// decode the first UTF-8 codepoint of a string, or accept an int directly.
+// returns null on empty/invalid input. matches PHP's IntlChar input rules
+fn intlCharCodepoint(v: Value) ?u32 {
+    if (v == .int) {
+        if (v.int < 0 or v.int > 0x10ffff) return null;
+        return @intCast(v.int);
+    }
+    if (v != .string or v.string.len == 0) return null;
+    const s = v.string;
+    const len = std.unicode.utf8ByteSequenceLength(s[0]) catch return null;
+    if (len > s.len) return null;
+    return std.unicode.utf8Decode(s[0..len]) catch null;
+}
+
+fn intlCharOrd(_: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len == 0) return .null;
+    const cp = intlCharCodepoint(args[0]) orelse return .null;
+    return .{ .int = @intCast(cp) };
+}
+
+fn intlCharChr(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len == 0) return .null;
+    const cp = intlCharCodepoint(args[0]) orelse return .null;
+    var buf: [4]u8 = undefined;
+    const n = std.unicode.utf8Encode(@intCast(cp), &buf) catch return .null;
+    const owned = try ctx.allocator.dupe(u8, buf[0..n]);
+    try ctx.strings.append(ctx.allocator, owned);
+    return .{ .string = owned };
+}
+
+fn intlBoolPredicate(args: []const Value, comptime pred: fn (u32) bool) Value {
+    if (args.len == 0) return .{ .bool = false };
+    const cp = intlCharCodepoint(args[0]) orelse return .{ .bool = false };
+    return .{ .bool = pred(cp) };
+}
+
+fn isAlphaCp(cp: u32) bool {
+    return (cp >= 'A' and cp <= 'Z') or (cp >= 'a' and cp <= 'z') or cp >= 0x80;
+}
+fn isDigitCp(cp: u32) bool { return cp >= '0' and cp <= '9'; }
+fn isAlnumCp(cp: u32) bool { return isAlphaCp(cp) or isDigitCp(cp); }
+fn isUpperCp(cp: u32) bool { return cp >= 'A' and cp <= 'Z'; }
+fn isLowerCp(cp: u32) bool { return cp >= 'a' and cp <= 'z'; }
+fn isSpaceCp(cp: u32) bool {
+    return cp == ' ' or cp == '\t' or cp == '\n' or cp == '\r' or cp == 0x0b or cp == 0x0c or cp == 0xa0 or cp == 0x1680 or (cp >= 0x2000 and cp <= 0x200a) or cp == 0x2028 or cp == 0x2029 or cp == 0x202f or cp == 0x205f or cp == 0x3000;
+}
+fn isCntrlCp(cp: u32) bool { return cp < 0x20 or cp == 0x7f or (cp >= 0x80 and cp < 0xa0); }
+fn isBlankCp(cp: u32) bool { return cp == ' ' or cp == '\t'; }
+fn isPunctCp(cp: u32) bool {
+    return (cp >= 0x21 and cp <= 0x2f) or (cp >= 0x3a and cp <= 0x40) or (cp >= 0x5b and cp <= 0x60) or (cp >= 0x7b and cp <= 0x7e);
+}
+fn isGraphCp(cp: u32) bool { return cp > 0x20 and cp != 0x7f and !isCntrlCp(cp); }
+fn isPrintCp(cp: u32) bool { return isGraphCp(cp) or cp == ' '; }
+fn isXDigitCp(cp: u32) bool { return isDigitCp(cp) or (cp >= 'a' and cp <= 'f') or (cp >= 'A' and cp <= 'F'); }
+
+fn intlCharIsalpha(_: *NativeContext, args: []const Value) RuntimeError!Value { return intlBoolPredicate(args, isAlphaCp); }
+fn intlCharIsdigit(_: *NativeContext, args: []const Value) RuntimeError!Value { return intlBoolPredicate(args, isDigitCp); }
+fn intlCharIsalnum(_: *NativeContext, args: []const Value) RuntimeError!Value { return intlBoolPredicate(args, isAlnumCp); }
+fn intlCharIsupper(_: *NativeContext, args: []const Value) RuntimeError!Value { return intlBoolPredicate(args, isUpperCp); }
+fn intlCharIslower(_: *NativeContext, args: []const Value) RuntimeError!Value { return intlBoolPredicate(args, isLowerCp); }
+fn intlCharIsspace(_: *NativeContext, args: []const Value) RuntimeError!Value { return intlBoolPredicate(args, isSpaceCp); }
+fn intlCharIscntrl(_: *NativeContext, args: []const Value) RuntimeError!Value { return intlBoolPredicate(args, isCntrlCp); }
+fn intlCharIsblank(_: *NativeContext, args: []const Value) RuntimeError!Value { return intlBoolPredicate(args, isBlankCp); }
+fn intlCharIspunct(_: *NativeContext, args: []const Value) RuntimeError!Value { return intlBoolPredicate(args, isPunctCp); }
+fn intlCharIsgraph(_: *NativeContext, args: []const Value) RuntimeError!Value { return intlBoolPredicate(args, isGraphCp); }
+fn intlCharIsprint(_: *NativeContext, args: []const Value) RuntimeError!Value { return intlBoolPredicate(args, isPrintCp); }
+fn intlCharIsxdigit(_: *NativeContext, args: []const Value) RuntimeError!Value { return intlBoolPredicate(args, isXDigitCp); }
+
+fn intlCharTolower(_: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len == 0) return .null;
+    const cp = intlCharCodepoint(args[0]) orelse return .null;
+    const out: u32 = if (cp >= 'A' and cp <= 'Z') cp + 32 else cp;
+    return .{ .int = @intCast(out) };
+}
+
+fn intlCharToupper(_: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len == 0) return .null;
+    const cp = intlCharCodepoint(args[0]) orelse return .null;
+    const out: u32 = if (cp >= 'a' and cp <= 'z') cp - 32 else cp;
+    return .{ .int = @intCast(out) };
 }
 
 fn registerBreakIteratorClass(vm: *VM, a: Allocator) !void {
