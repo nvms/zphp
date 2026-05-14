@@ -21,6 +21,7 @@ pub const entries = .{
     .{ "dl", native_dl },
     .{ "phpinfo", native_phpinfo },
     .{ "phpcredits", native_phpcredits },
+    .{ "php_strip_whitespace", native_php_strip_whitespace },
     .{ "move_uploaded_file", native_move_uploaded_file },
     .{ "is_uploaded_file", native_is_uploaded_file },
     .{ "sys_get_temp_dir", native_sys_get_temp_dir },
@@ -432,6 +433,16 @@ fn native_phpinfo(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
 
 fn native_phpcredits(_: *NativeContext, _: []const Value) RuntimeError!Value {
     return .{ .bool = true };
+}
+
+fn native_php_strip_whitespace(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    // PHP's php_strip_whitespace runs the source through the tokenizer and
+    // emits only the non-whitespace tokens; without a real tokenizer we return
+    // the original source so callers that use the result still see valid PHP
+    if (args.len == 0 or args[0] != .string) return .{ .string = "" };
+    const content = std.fs.cwd().readFileAlloc(ctx.allocator, args[0].string, 1024 * 1024 * 64) catch return .{ .string = "" };
+    try ctx.strings.append(ctx.allocator, content);
+    return .{ .string = content };
 }
 
 fn native_php_uname(_: *NativeContext, args: []const Value) RuntimeError!Value {

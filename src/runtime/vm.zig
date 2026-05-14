@@ -624,6 +624,13 @@ pub const VM = struct {
         const hash_ctx_def = ClassDef{ .name = "HashContext" };
         try vm.classes.put(allocator, "HashContext", hash_ctx_def);
 
+        // tidy and tidyNode - stub classes for the deprecated tidy ext. zphp
+        // doesn't link libtidy but class_exists checks still need to pass
+        const tidy_def = ClassDef{ .name = "tidy" };
+        try vm.classes.put(allocator, "tidy", tidy_def);
+        const tidynode_def = ClassDef{ .name = "tidyNode" };
+        try vm.classes.put(allocator, "tidyNode", tidynode_def);
+
         // PHP 8.4 RoundingMode enum. registered as a unit (unbacked) enum to
         // match PHP's exposed surface - the cases have a `name` property only,
         // and the internal mapping from case -> mode int happens inside round()
