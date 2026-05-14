@@ -2128,6 +2128,37 @@ fn tryParseKeyword(s: []const u8, base: i64) ?i64 {
     return null;
 }
 
+// parses "+N month(s)", "-N month(s)", "N months ago", "+/- N year(s)" ...
+// returns a signed delta in months. only month-grained for now since the
+// helper is used by "first/last day of <month-relative>"
+fn parseSignedMonthDelta(input: []const u8) ?i64 {
+    var s = input;
+    var sign: i64 = 1;
+    var ago = false;
+    if (s.len > 0 and s[0] == '+') { s = s[1..]; }
+    else if (s.len > 0 and s[0] == '-') { sign = -1; s = s[1..]; }
+    while (s.len > 0 and s[0] == ' ') s = s[1..];
+    if (s.len == 0 or s[0] < '0' or s[0] > '9') return null;
+    var end: usize = 0;
+    while (end < s.len and s[end] >= '0' and s[end] <= '9') end += 1;
+    const n = std.fmt.parseInt(i64, s[0..end], 10) catch return null;
+    var rest = s[end..];
+    while (rest.len > 0 and rest[0] == ' ') rest = rest[1..];
+    var unit_months: i64 = 0;
+    if (startsWithLower(rest, "months")) { unit_months = 1; rest = rest[6..]; }
+    else if (startsWithLower(rest, "month")) { unit_months = 1; rest = rest[5..]; }
+    else if (startsWithLower(rest, "years")) { unit_months = 12; rest = rest[5..]; }
+    else if (startsWithLower(rest, "year")) { unit_months = 12; rest = rest[4..]; }
+    else return null;
+    while (rest.len > 0 and rest[0] == ' ') rest = rest[1..];
+    if (startsWithLower(rest, "ago")) { ago = true; rest = rest[3..]; }
+    while (rest.len > 0 and rest[0] == ' ') rest = rest[1..];
+    if (rest.len != 0) return null;
+    var delta = n * unit_months * sign;
+    if (ago) delta = -delta;
+    return delta;
+}
+
 fn tryParseFirstLastDay(input: []const u8, base: i64) ?i64 {
     var s = input;
     const is_first = startsWithLower(s, "first day of ");
@@ -2152,6 +2183,11 @@ fn tryParseFirstLastDay(input: []const u8, base: i64) ?i64 {
     } else if (eqlLower(s, "last month") or eqlLower(s, "previous month")) {
         month -= 1;
         if (month < 1) { month = 12; year -= 1; }
+    } else if (parseSignedMonthDelta(s)) |delta| {
+        // "+N month(s)", "-N month(s)", "N months ago"
+        month += delta;
+        while (month > 12) { month -= 12; year += 1; }
+        while (month < 1) { month += 12; year -= 1; }
     } else if (parseMonthName(s) != null) {
         month = parseMonthName(s).?;
         const mname_len = monthNameLen(s);
