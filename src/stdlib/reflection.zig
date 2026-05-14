@@ -13,6 +13,20 @@ const Allocator = std.mem.Allocator;
 const RuntimeError = error{ RuntimeError, OutOfMemory };
 
 pub fn register(vm: *VM, a: Allocator) !void {
+    // Reflector marker interface - all Reflection* implement it
+    var reflector_iface = @import("../runtime/vm.zig").InterfaceDef{ .name = "Reflector" };
+    try reflector_iface.methods.append(a, "__toString");
+    try vm.interfaces.put(a, "Reflector", reflector_iface);
+
+    // ReflectionType abstract base class. ReflectionNamedType / Union / Intersection
+    // all extend it. registering as a concrete class is fine since user code only
+    // checks instanceof / get_parent_class
+    var rt_def = ClassDef{ .name = "ReflectionType" };
+    rt_def.is_abstract = true;
+    try rt_def.methods.put(a, "allowsNull", .{ .name = "allowsNull", .arity = 0 });
+    try rt_def.methods.put(a, "__toString", .{ .name = "__toString", .arity = 0 });
+    try vm.classes.put(a, "ReflectionType", rt_def);
+
     // Attribute class with target constants
     var attr_def = ClassDef{ .name = "Attribute" };
     try attr_def.static_props.put(a, "TARGET_CLASS", .{ .int = 1 });

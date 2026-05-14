@@ -1568,7 +1568,16 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try registerMessageFormatterClass(vm, a);
     try registerIntlCalendarClass(vm, a);
     try registerBreakIteratorClass(vm, a);
+    try registerIntlCharStub(vm, a);
     try registerConstants(vm, a);
+}
+
+fn registerIntlCharStub(vm: *VM, a: Allocator) !void {
+    // IntlChar is a large class with many Unicode-character utility methods.
+    // register the class shell so class_exists / instanceof checks pass even
+    // without the full ICU character database integration behind it
+    const def = ClassDef{ .name = "IntlChar" };
+    try vm.classes.put(a, "IntlChar", def);
 }
 
 fn registerBreakIteratorClass(vm: *VM, a: Allocator) !void {
