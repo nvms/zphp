@@ -2871,22 +2871,27 @@ fn rpropGetType(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
     if (prop_name_v != .string) return .null;
     const prop_name = prop_name_v.string;
 
-    // promoted properties carry their type on the ctor param; look up via
-    // type_info on "Class::__construct" and match by param name
-    const ctor_name = try std.fmt.allocPrint(ctx.allocator, "{s}::__construct", .{class_name});
-    defer ctx.allocator.free(ctor_name);
-    if (@import("../runtime/vm.zig").g_type_info.get(ctor_name)) |ti| {
-        if (ctx.vm.functions.get(ctor_name)) |func| {
-            for (func.params, 0..) |pname, i| {
-                const base = if (pname.len > 0 and pname[0] == '$') pname[1..] else pname;
-                if (std.mem.eql(u8, base, prop_name)) {
-                    if (i < ti.param_types.len and ti.param_types[i].len > 0) {
-                        return try makeReflectionType(ctx, ti.param_types[i]);
+    // walk the class chain looking for a declared property with a type. each
+    // ClassDef.PropertyDef carries the source-form type string (set at class
+    // load time by the bytecode reader)
+    var current: ?[]const u8 = class_name;
+    while (current) |cn| {
+        if (ctx.vm.classes.get(cn)) |cls| {
+            for (cls.properties.items) |p| {
+                if (std.mem.eql(u8, p.name, prop_name)) {
+                    if (p.type_str.len > 0) {
+                        // createTypeObj handles union / intersection / nullable
+                        // normalisation, so unions like 'string|int' come back
+                        // as ReflectionUnionType rather than collapsing to the
+                        // first segment
+                        const obj = try createTypeObj(ctx, p.type_str, false, cn);
+                        return .{ .object = obj };
                     }
                     break;
                 }
             }
-        }
+            current = cls.parent;
+        } else break;
     }
     return .null;
 }

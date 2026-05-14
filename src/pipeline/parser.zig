@@ -1222,13 +1222,18 @@ const Parser = struct {
                 self.nodes.items[cd].data.rhs = visibility | (if (is_final) @as(u32, 1) << 4 else 0);
                 try members.append(self.allocator, cd);
             } else if (self.isTypeName() or self.peek() == .question or self.peek() == .l_paren) {
-                self.skipTypeHint();
+                const tr = self.collectTypeHint();
                 if (self.peek() == .variable) {
                     const prop = try self.parseClassProperty();
                     if (is_static) {
                         self.nodes.items[prop].tag = .static_class_property;
                     }
-                    self.nodes.items[prop].data.rhs = visibility | (if (is_readonly) @as(u32, 4) else 0) | (set_visibility << 3) | (if (has_set_vis) @as(u32, 1) << 5 else 0);
+                    var rhs: u32 = visibility | (if (is_readonly) @as(u32, 4) else 0) | (set_visibility << 3) | (if (has_set_vis) @as(u32, 1) << 5 else 0);
+                    if (tr[0] != tr[1]) {
+                        const ext = try self.addExtra(&tr);
+                        rhs |= (ext + 1) << 16;
+                    }
+                    self.nodes.items[prop].data.rhs = rhs;
                     try members.append(self.allocator, prop);
                 } else {
                     _ = self.advance();
@@ -1383,13 +1388,18 @@ const Parser = struct {
                 self.nodes.items[cd].data.rhs = visibility | (if (is_final) @as(u32, 1) << 4 else 0);
                 try members.append(self.allocator, cd);
             } else if (self.isTypeName() or self.peek() == .question or self.peek() == .l_paren) {
-                self.skipTypeHint();
+                const tr = self.collectTypeHint();
                 if (self.peek() == .variable) {
                     const prop = try self.parseClassProperty();
                     if (is_static) {
                         self.nodes.items[prop].tag = .static_class_property;
                     }
-                    self.nodes.items[prop].data.rhs = visibility | (if (is_readonly) @as(u32, 4) else 0) | (set_visibility << 3) | (if (has_set_vis) @as(u32, 1) << 5 else 0);
+                    var rhs: u32 = visibility | (if (is_readonly) @as(u32, 4) else 0) | (set_visibility << 3) | (if (has_set_vis) @as(u32, 1) << 5 else 0);
+                    if (tr[0] != tr[1]) {
+                        const ext = try self.addExtra(&tr);
+                        rhs |= (ext + 1) << 16;
+                    }
+                    self.nodes.items[prop].data.rhs = rhs;
                     try members.append(self.allocator, prop);
                 } else {
                     _ = self.advance();
@@ -1550,11 +1560,15 @@ const Parser = struct {
                 }
                 try members.append(self.allocator, prop);
             } else if (self.isTypeName() or self.peek() == .question or self.peek() == .l_paren) {
-                self.skipTypeHint();
+                const tr = self.collectTypeHint();
                 if (self.peek() == .variable) {
                     const prop = try self.parseClassProperty();
                     if (is_static) {
                         self.nodes.items[prop].tag = .static_class_property;
+                    }
+                    if (tr[0] != tr[1]) {
+                        const ext = try self.addExtra(&tr);
+                        self.nodes.items[prop].data.rhs |= (ext + 1) << 16;
                     }
                     try members.append(self.allocator, prop);
                 } else {

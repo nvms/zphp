@@ -460,6 +460,19 @@ fn isPrimitiveType(name: []const u8) bool {
     return false;
 }
 
+// reads the type-hint token range out of a class_property node's rhs upper
+// bits (set by the parser) and returns a constant-pool index for the rendered
+// type string, or 0xFFFF when the property had no type declaration
+fn propertyTypeConst(self: *Compiler, prop_rhs: u32) Error!u16 {
+    const type_extra = prop_rhs >> 16;
+    if (type_extra == 0) return 0xffff;
+    const idx = type_extra - 1;
+    const start_tok = self.ast.extra_data[idx];
+    const end_tok = self.ast.extra_data[idx + 1];
+    const type_str = try buildTypeString(self, start_tok, end_tok);
+    return @intCast(try self.addConstant(.{ .string = type_str }));
+}
+
 fn extractParamTypes(self: *Compiler, param_nodes: []const u32) Error![]const []const u8 {
     var has_any = false;
     for (param_nodes) |p| {
@@ -1062,7 +1075,8 @@ pub fn compileClassDecl(self: *Compiler, node: Ast.Node) Error!void {
             const pname_idx = try self.addConstant(.{ .string = prop_name });
             try self.emitU16(pname_idx);
             try self.emitByte(if (member.data.lhs != 0) @as(u8, 1) else @as(u8, 0));
-            try self.emitByte(@intCast(member.data.rhs));
+            try self.emitByte(@intCast(member.data.rhs & 0xff));
+            try self.emitU16(try propertyTypeConst(self, member.data.rhs));
         } else if (member.tag == .class_property_hooks) {
             var prop_name = self.ast.tokenSlice(member.main_token);
             if (prop_name.len > 0 and prop_name[0] == '$') prop_name = prop_name[1..];
@@ -1070,7 +1084,8 @@ pub fn compileClassDecl(self: *Compiler, node: Ast.Node) Error!void {
             try self.emitU16(pname_idx);
             const default_idx = self.ast.extra_data[member.data.lhs];
             try self.emitByte(if (default_idx != 0) @as(u8, 1) else @as(u8, 0));
-            try self.emitByte(@intCast(member.data.rhs));
+            try self.emitByte(@intCast(member.data.rhs & 0xff));
+            try self.emitU16(try propertyTypeConst(self, member.data.rhs));
         }
     }
     // trait properties
@@ -1081,7 +1096,8 @@ pub fn compileClassDecl(self: *Compiler, node: Ast.Node) Error!void {
         const tpname_idx = try self.addConstant(.{ .string = tprop_name });
         try self.emitU16(tpname_idx);
         try self.emitByte(if (tmember.data.lhs != 0) @as(u8, 1) else @as(u8, 0));
-        try self.emitByte(@intCast(tmember.data.rhs));
+        try self.emitByte(@intCast(tmember.data.rhs & 0xff));
+        try self.emitU16(try propertyTypeConst(self, tmember.data.rhs));
     }
     // promoted constructor params as properties
     for (constructor_params) |p| {
@@ -1093,13 +1109,21 @@ pub fn compileClassDecl(self: *Compiler, node: Ast.Node) Error!void {
             const pname_idx = try self.addConstant(.{ .string = param_name });
             try self.emitU16(pname_idx);
             try self.emitByte(1); // has default (null placeholder)
-            // bits 0-1: visibility, bit 2: readonly, bits 3-4: set visibility, bit 5: has asymmetric set
             const is_ro: u8 = if ((pnode.data.rhs & 16) != 0) 4 else 0;
             const set_promo = (pnode.data.rhs >> 5) & 3;
             const asymm_bits: u8 = if (set_promo > 0) (@as(u8, @intCast(set_promo - 1)) << 3) | 0x20 else 0;
-            // bit 6: marks this property as constructor-promoted so reflection
-            // can answer isPromoted()
             try self.emitByte(@as(u8, @intCast(promotion - 1)) | is_ro | asymm_bits | 0x40);
+            // a promoted param's type lives in the param's rhs bits 7+ (same
+            // encoding used by extractParamTypes), so emit it here too
+            const param_type_extra = pnode.data.rhs >> 7;
+            if (param_type_extra == 0) {
+                try self.emitU16(0xffff);
+            } else {
+                const start_tok = self.ast.extra_data[param_type_extra - 1];
+                const end_tok = self.ast.extra_data[param_type_extra];
+                const type_str = try buildTypeString(self, start_tok, end_tok);
+                try self.emitU16(try self.addConstant(.{ .string = type_str }));
+            }
         }
     }
 
@@ -1112,7 +1136,7 @@ pub fn compileClassDecl(self: *Compiler, node: Ast.Node) Error!void {
             const pname_idx = try self.addConstant(.{ .string = prop_name });
             try self.emitU16(pname_idx);
             try self.emitByte(if (member.data.lhs != 0) @as(u8, 1) else @as(u8, 0));
-            try self.emitByte(@intCast(member.data.rhs));
+            try self.emitByte(@intCast(member.data.rhs & 0xff));
             try self.emitByte(0); // 0 = static property
         } else if (member.tag == .const_decl) {
             const cname = self.ast.tokenSlice(member.main_token);
@@ -1487,7 +1511,8 @@ pub fn compileAnonymousClass(self: *Compiler, node: Ast.Node) Error!void {
             const pname_idx = try self.addConstant(.{ .string = prop_name });
             try self.emitU16(pname_idx);
             try self.emitByte(if (member.data.lhs != 0) @as(u8, 1) else @as(u8, 0));
-            try self.emitByte(@intCast(member.data.rhs));
+            try self.emitByte(@intCast(member.data.rhs & 0xff));
+            try self.emitU16(try propertyTypeConst(self, member.data.rhs));
         }
     }
     for (trait_prop_members.items) |tpi| {
@@ -1497,7 +1522,8 @@ pub fn compileAnonymousClass(self: *Compiler, node: Ast.Node) Error!void {
         const tpname_idx = try self.addConstant(.{ .string = tprop_name });
         try self.emitU16(tpname_idx);
         try self.emitByte(if (tmember.data.lhs != 0) @as(u8, 1) else @as(u8, 0));
-        try self.emitByte(@intCast(tmember.data.rhs));
+        try self.emitByte(@intCast(tmember.data.rhs & 0xff));
+        try self.emitU16(try propertyTypeConst(self, tmember.data.rhs));
     }
     for (constructor_params) |p| {
         const pnode = self.ast.nodes[p];
@@ -1511,9 +1537,16 @@ pub fn compileAnonymousClass(self: *Compiler, node: Ast.Node) Error!void {
             const is_ro: u8 = if ((pnode.data.rhs & 16) != 0) 4 else 0;
             const set_promo = (pnode.data.rhs >> 5) & 3;
             const asymm_bits: u8 = if (set_promo > 0) (@as(u8, @intCast(set_promo - 1)) << 3) | 0x20 else 0;
-            // bit 6: marks this property as constructor-promoted so reflection
-            // can answer isPromoted()
             try self.emitByte(@as(u8, @intCast(promotion - 1)) | is_ro | asymm_bits | 0x40);
+            const param_type_extra = pnode.data.rhs >> 7;
+            if (param_type_extra == 0) {
+                try self.emitU16(0xffff);
+            } else {
+                const start_tok = self.ast.extra_data[param_type_extra - 1];
+                const end_tok = self.ast.extra_data[param_type_extra];
+                const type_str = try buildTypeString(self, start_tok, end_tok);
+                try self.emitU16(try self.addConstant(.{ .string = type_str }));
+            }
         }
     }
 
@@ -1526,7 +1559,7 @@ pub fn compileAnonymousClass(self: *Compiler, node: Ast.Node) Error!void {
             const pname_idx = try self.addConstant(.{ .string = prop_name });
             try self.emitU16(pname_idx);
             try self.emitByte(if (member.data.lhs != 0) @as(u8, 1) else @as(u8, 0));
-            try self.emitByte(@intCast(member.data.rhs));
+            try self.emitByte(@intCast(member.data.rhs & 0xff));
             try self.emitByte(0); // 0 = static property
         } else if (member.tag == .const_decl) {
             const cname = self.ast.tokenSlice(member.main_token);
@@ -1870,7 +1903,7 @@ pub fn compileTraitDecl(self: *Compiler, node: Ast.Node) Error!void {
         const pname_idx = try self.addConstant(.{ .string = pname });
         try self.emitU16(pname_idx);
         try self.emitByte(if (pmember.data.lhs != 0) @as(u8, 1) else @as(u8, 0));
-        try self.emitByte(@intCast(pmember.data.rhs));
+        try self.emitByte(@intCast(pmember.data.rhs & 0xff));
     }
     try self.emitByte(@intCast(static_props.items.len));
     for (static_props.items) |pi| {
@@ -1880,7 +1913,7 @@ pub fn compileTraitDecl(self: *Compiler, node: Ast.Node) Error!void {
         const pname_idx = try self.addConstant(.{ .string = pname });
         try self.emitU16(pname_idx);
         try self.emitByte(if (pmember.data.lhs != 0) @as(u8, 1) else @as(u8, 0));
-        try self.emitByte(@intCast(pmember.data.rhs));
+        try self.emitByte(@intCast(pmember.data.rhs & 0xff));
     }
 
     // trait constants (PHP 8.2+)

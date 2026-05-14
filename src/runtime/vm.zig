@@ -275,6 +275,9 @@ pub const ClassDef = struct {
         set_visibility: Visibility = .public,
         is_readonly: bool = false,
         is_promoted: bool = false,
+        // PHP type hint as written in source. empty when the property had no
+        // type declaration. reflection consumes this verbatim
+        type_str: []const u8 = "",
     };
 
     fn freeAttributeDefs(allocator: Allocator, attrs: []const AttributeDef) void {
@@ -7331,6 +7334,7 @@ pub const VM = struct {
         var prop_set_vis: [256]ClassDef.Visibility = undefined;
         var prop_readonly: [256]bool = .{false} ** 256;
         var prop_promoted: [256]bool = .{false} ** 256;
+        var prop_type: [256][]const u8 = .{""} ** 256;
         for (0..prop_count) |pi| {
             const pname_idx = self.readU16();
             prop_names[pi] = self.currentChunk().constants.items[pname_idx].string;
@@ -7341,6 +7345,8 @@ pub const VM = struct {
             const has_asymm = (vis_byte & 0x20) != 0;
             prop_set_vis[pi] = if (has_asymm) @enumFromInt((vis_byte >> 3) & 0x03) else prop_vis[pi];
             prop_promoted[pi] = (vis_byte & 0x40) != 0;
+            const type_idx = self.readU16();
+            prop_type[pi] = if (type_idx == 0xffff) "" else self.currentChunk().constants.items[type_idx].string;
         }
 
         const static_prop_count = self.readU16();
@@ -7374,6 +7380,7 @@ pub const VM = struct {
                 .set_visibility = prop_set_vis[pi],
                 .is_readonly = prop_readonly[pi] or def.is_readonly,
                 .is_promoted = prop_promoted[pi],
+                .type_str = prop_type[pi],
             });
         }
 
