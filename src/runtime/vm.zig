@@ -2693,12 +2693,29 @@ pub const VM = struct {
                             const arr = try self.allocator.create(PhpArray);
                             arr.* = .{};
                             try self.arrays.append(self.allocator, arr);
+                            // when foreach runs inside a class method whose
+                            // scope can see private/protected on this object,
+                            // include those too (PHP's foreach($this as ...)
+                            // sees the full property set). private requires
+                            // exact class match; protected requires inheritance
+                            const scope_class: ?[]const u8 = if (self.frame_count > 0)
+                                self.frames[self.frame_count - 1].called_class orelse self.currentDefiningClass()
+                            else
+                                null;
+                            const includeProp = struct {
+                                fn check(vm: *VM, scope: ?[]const u8, vis: ClassDef.Visibility, declaring: []const u8) bool {
+                                    if (vis == .public) return true;
+                                    const sc = scope orelse return false;
+                                    if (vis == .private) return std.mem.eql(u8, sc, declaring);
+                                    return vm.isInstanceOf(sc, declaring) or vm.isInstanceOf(declaring, sc);
+                                }
+                            }.check;
                             if (obj.slots) |slots| {
                                 if (obj.slot_layout) |layout| {
                                     for (layout.names, 0..) |name, i| {
                                         if (i < slots.len) {
                                             const vr = self.findPropertyVisibility(obj.class_name, name);
-                                            if (vr.visibility == .public) {
+                                            if (includeProp(self, scope_class, vr.visibility, vr.defining_class)) {
                                                 try arr.set(self.allocator, .{ .string = name }, slots[i]);
                                             }
                                         }
@@ -2708,7 +2725,7 @@ pub const VM = struct {
                             var it = obj.properties.iterator();
                             while (it.next()) |entry| {
                                 const vr = self.findPropertyVisibility(obj.class_name, entry.key_ptr.*);
-                                if (vr.visibility == .public) {
+                                if (includeProp(self, scope_class, vr.visibility, vr.defining_class)) {
                                     try arr.set(self.allocator, .{ .string = entry.key_ptr.* }, entry.value_ptr.*);
                                 }
                             }
