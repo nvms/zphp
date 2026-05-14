@@ -16,6 +16,11 @@ pub const entries = .{
     .{ "uniqid", native_uniqid },
     .{ "getcwd", native_getcwd },
     .{ "php_uname", native_php_uname },
+    .{ "php_ini_loaded_file", native_php_ini_loaded_file },
+    .{ "php_ini_scanned_files", native_php_ini_scanned_files },
+    .{ "dl", native_dl },
+    .{ "phpinfo", native_phpinfo },
+    .{ "phpcredits", native_phpcredits },
     .{ "move_uploaded_file", native_move_uploaded_file },
     .{ "is_uploaded_file", native_is_uploaded_file },
     .{ "sys_get_temp_dir", native_sys_get_temp_dir },
@@ -396,6 +401,37 @@ fn native_getcwd(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
     var buf: [std.fs.max_path_bytes]u8 = undefined;
     const cwd = std.fs.cwd().realpath(".", &buf) catch return Value{ .bool = false };
     return .{ .string = try ctx.createString(cwd) };
+}
+
+fn native_php_ini_loaded_file(_: *NativeContext, _: []const Value) RuntimeError!Value {
+    // zphp doesn't read a php.ini file; report false to match PHP behavior
+    // when no ini was loaded
+    return .{ .bool = false };
+}
+
+fn native_php_ini_scanned_files(_: *NativeContext, _: []const Value) RuntimeError!Value {
+    // PHP returns false when no additional ini directory was scanned
+    return .{ .bool = false };
+}
+
+fn native_dl(_: *NativeContext, _: []const Value) RuntimeError!Value {
+    // dynamic loading: PHP's dl() is restricted in CGI/CLI in modern installs;
+    // we don't support runtime extension loading, return false
+    return .{ .bool = false };
+}
+
+fn native_phpinfo(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    _ = args;
+    // minimal output: enough for callers to verify the function exists. real
+    // PHP prints a giant HTML/text dump of the environment
+    const out = try std.fmt.allocPrint(ctx.allocator, "PHP Version => 8.4.0\n", .{});
+    try ctx.strings.append(ctx.allocator, out);
+    try ctx.vm.output.appendSlice(ctx.allocator, out);
+    return .{ .bool = true };
+}
+
+fn native_phpcredits(_: *NativeContext, _: []const Value) RuntimeError!Value {
+    return .{ .bool = true };
 }
 
 fn native_php_uname(_: *NativeContext, args: []const Value) RuntimeError!Value {
