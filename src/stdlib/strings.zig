@@ -2311,16 +2311,21 @@ fn matchEntity(s: []const u8) ?EntityMatch {
 fn native_hex2bin(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len == 0) return .{ .bool = false };
     const s = if (args[0] == .string) args[0].string else return Value{ .bool = false };
-    if (s.len % 2 != 0) return .{ .bool = false };
+    if (s.len % 2 != 0) {
+        ctx.vm.emitWarning("hex2bin(): Input string must be hexadecimal string");
+        return .{ .bool = false };
+    }
     const out_len = s.len / 2;
     const buf = try ctx.allocator.alloc(u8, out_len);
     for (0..out_len) |j| {
         const hi = hexVal(s[j * 2]) orelse {
             ctx.allocator.free(buf);
+            ctx.vm.emitWarning("hex2bin(): Input string must be hexadecimal string");
             return .{ .bool = false };
         };
         const lo = hexVal(s[j * 2 + 1]) orelse {
             ctx.allocator.free(buf);
+            ctx.vm.emitWarning("hex2bin(): Input string must be hexadecimal string");
             return .{ .bool = false };
         };
         buf[j] = (hi << 4) | lo;

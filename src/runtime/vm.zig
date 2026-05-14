@@ -6969,7 +6969,10 @@ pub const VM = struct {
     }
 
     fn emitNonNumericWarning(self: *VM) void {
-        const msg = "A non-numeric value encountered";
+        self.emitWarning("A non-numeric value encountered");
+    }
+
+    pub fn emitWarning(self: *VM, msg: []const u8) void {
         const ip = if (self.frame_count > 0) self.currentFrame().ip else 0;
         const line: i64 = if (self.frame_count > 0)
             if (self.currentChunk().getSourceLocation(if (ip > 0) ip - 1 else 0, self.source)) |loc| @intCast(loc.line) else 0
