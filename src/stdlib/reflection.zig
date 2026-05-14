@@ -1529,12 +1529,17 @@ fn rcGetConstants(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
     const class_name = if (this.get("name") == .string) this.get("name").string else return .null;
 
     const arr = try ctx.createArray();
+    var is_own = true;
     var current: ?[]const u8 = class_name;
     while (current) |name| {
         const cls = ctx.vm.classes.get(name) orelse break;
-        // iterate in declaration order if available, else fall back to hashmap
         if (cls.constant_order.items.len > 0) {
             for (cls.constant_order.items) |cname| {
+                // private constants do not propagate to subclasses
+                if (!is_own) {
+                    const vis = cls.const_visibility.get(cname) orelse ClassDef.Visibility.public;
+                    if (vis == .private) continue;
+                }
                 if (cls.static_props.get(cname)) |val| {
                     try arr.set(ctx.allocator, .{ .string = cname }, val);
                 }
@@ -1542,12 +1547,17 @@ fn rcGetConstants(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
         } else {
             var it = cls.constant_names.iterator();
             while (it.next()) |entry| {
+                if (!is_own) {
+                    const vis = cls.const_visibility.get(entry.key_ptr.*) orelse ClassDef.Visibility.public;
+                    if (vis == .private) continue;
+                }
                 if (cls.static_props.get(entry.key_ptr.*)) |val| {
                     try arr.set(ctx.allocator, .{ .string = entry.key_ptr.* }, val);
                 }
             }
         }
         current = cls.parent;
+        is_own = false;
     }
     return .{ .array = arr };
 }
