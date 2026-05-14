@@ -54,12 +54,14 @@ ZPHP_PID=$!
 php -S "localhost:$PHP_PORT" -t "$APP_DIR" "$ROUTER" >/tmp/php_serve.log 2>&1 &
 PHP_PID=$!
 
-# wait for both
-for i in $(seq 1 50); do
-    z=$(curl -s -o /dev/null -w '%{http_code}' "http://localhost:$ZPHP_PORT/" 2>/dev/null || echo 0)
-    p=$(curl -s -o /dev/null -w '%{http_code}' "http://localhost:$PHP_PORT/" 2>/dev/null || echo 0)
-    if [ "$z" != "0" ] && [ "$p" != "0" ]; then break; fi
-    sleep 0.1
+# wait for both servers' TCP accept. each curl gets its own short timeout so
+# this loop completes within a few seconds even if WP boot is slow (the real
+# request curls below have generous timeouts of their own)
+for i in $(seq 1 60); do
+    z=$(curl -s -m 1 --connect-timeout 1 -o /dev/null -w '%{http_code}' "http://localhost:$ZPHP_PORT/health-check-zphp-harness" 2>/dev/null || echo 000)
+    p=$(curl -s -m 1 --connect-timeout 1 -o /dev/null -w '%{http_code}' "http://localhost:$PHP_PORT/" 2>/dev/null || echo 000)
+    if [ "$z" != "000" ] && [ "$p" != "000" ]; then break; fi
+    sleep 0.5
 done
 
 passed=0
