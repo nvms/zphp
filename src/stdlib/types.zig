@@ -151,6 +151,11 @@ pub const entries = .{
     .{ "iterator_count", native_iterator_count },
     .{ "iterator_apply", native_iterator_apply },
     .{ "filter_var", native_filter_var },
+    .{ "filter_id", native_filter_id },
+    .{ "filter_list", native_filter_list },
+    .{ "filter_has_var", native_filter_has_var },
+    .{ "filter_input", native_filter_input },
+    .{ "filter_input_array", native_filter_input_array },
     .{ "filter_var_array", native_filter_var_array },
     .{ "is_resource", native_is_resource },
     .{ "get_resource_type", native_get_resource_type },
@@ -2447,6 +2452,72 @@ fn native_iterator_apply(ctx: *NativeContext, args: []const Value) RuntimeError!
     }
 
     return .{ .int = 0 };
+}
+
+fn native_filter_id(_: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len < 1 or args[0] != .string) return .{ .bool = false };
+    const name = args[0].string;
+    // PHP's filter_id maps a filter name to its numeric ID (matches the
+    // FILTER_VALIDATE_*/FILTER_SANITIZE_* / FILTER_DEFAULT constants)
+    const Pair = struct { name: []const u8, id: i64 };
+    const filters = [_]Pair{
+        .{ .name = "int", .id = 257 },
+        .{ .name = "boolean", .id = 258 },
+        .{ .name = "float", .id = 259 },
+        .{ .name = "validate_regexp", .id = 272 },
+        .{ .name = "validate_domain", .id = 277 },
+        .{ .name = "validate_url", .id = 273 },
+        .{ .name = "validate_email", .id = 274 },
+        .{ .name = "validate_ip", .id = 275 },
+        .{ .name = "validate_mac", .id = 276 },
+        .{ .name = "string", .id = 513 },
+        .{ .name = "stripped", .id = 513 },
+        .{ .name = "encoded", .id = 514 },
+        .{ .name = "special_chars", .id = 515 },
+        .{ .name = "full_special_chars", .id = 522 },
+        .{ .name = "unsafe_raw", .id = 516 },
+        .{ .name = "email", .id = 517 },
+        .{ .name = "url", .id = 518 },
+        .{ .name = "number_int", .id = 519 },
+        .{ .name = "number_float", .id = 520 },
+        .{ .name = "add_slashes", .id = 523 },
+        .{ .name = "unsafe_html", .id = 521 },
+        .{ .name = "callback", .id = 1024 },
+    };
+    for (filters) |f| if (std.mem.eql(u8, f.name, name)) return .{ .int = f.id };
+    return .{ .bool = false };
+}
+
+fn native_filter_list(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const arr = try ctx.createArray();
+    const names = [_][]const u8{
+        "int", "boolean", "float", "validate_regexp", "validate_domain",
+        "validate_url", "validate_email", "validate_ip", "validate_mac",
+        "string", "stripped", "encoded", "special_chars", "full_special_chars",
+        "unsafe_raw", "email", "url", "number_int", "number_float",
+        "add_slashes", "callback",
+    };
+    var i: usize = 0;
+    while (i < names.len) : (i += 1) {
+        try arr.set(ctx.allocator, .{ .int = @intCast(i) }, .{ .string = names[i] });
+    }
+    return .{ .array = arr };
+}
+
+fn native_filter_has_var(_: *NativeContext, _: []const Value) RuntimeError!Value {
+    // filter_has_var inspects INPUT_* superglobals which zphp populates per
+    // request. for the CLI / generic context, returning false is the safest
+    // PHP-compatible answer
+    return .{ .bool = false };
+}
+
+fn native_filter_input(_: *NativeContext, _: []const Value) RuntimeError!Value {
+    // CLI / no-request context: no INPUT_* values to read, return null
+    return .null;
+}
+
+fn native_filter_input_array(_: *NativeContext, _: []const Value) RuntimeError!Value {
+    return .null;
 }
 
 fn native_filter_var_array(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
