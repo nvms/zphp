@@ -125,10 +125,21 @@ pub fn enumFrom(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
             if (Value.identical(case_val, lookup)) return entry.value_ptr.*;
         }
     }
-    const arg_str = try argDisplayString(ctx, args[0]);
+    const arg_str = try argDisplayStringFor(ctx, def.backed_type, args[0]);
     const msg = try std.fmt.allocPrint(ctx.allocator, "{s} is not a valid backing value for enum {s}", .{ arg_str, enum_name });
     try ctx.vm.strings.append(ctx.allocator, msg);
     return throwBuiltin(ctx, "ValueError", msg);
+}
+
+fn argDisplayStringFor(ctx: *NativeContext, backed: anytype, arg: Value) ![]const u8 {
+    // string-backed enums coerce int args to string for the error message,
+    // so the value is rendered as "123" rather than 123
+    if (backed == .string_type and arg == .int) {
+        const out = try std.fmt.allocPrint(ctx.allocator, "\"{d}\"", .{arg.int});
+        try ctx.vm.strings.append(ctx.allocator, out);
+        return out;
+    }
+    return argDisplayString(ctx, arg);
 }
 
 pub fn enumTryFrom(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
