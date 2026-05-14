@@ -41,6 +41,17 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try def.methods.put(a, "getMetadata", .{ .name = "getMetadata", .arity = 0 });
     try def.methods.put(a, "setMetadata", .{ .name = "setMetadata", .arity = 1 });
     try def.methods.put(a, "hasMetadata", .{ .name = "hasMetadata", .arity = 0 });
+    try def.methods.put(a, "canWrite", .{ .name = "canWrite", .arity = 0, .is_static = true });
+    try def.methods.put(a, "canCompress", .{ .name = "canCompress", .arity = 1, .is_static = true });
+    try def.methods.put(a, "running", .{ .name = "running", .arity = 1, .is_static = true });
+    try def.methods.put(a, "loadPhar", .{ .name = "loadPhar", .arity = 2, .is_static = true });
+    try def.methods.put(a, "getSupportedCompression", .{ .name = "getSupportedCompression", .arity = 0, .is_static = true });
+    try def.methods.put(a, "getSupportedSignatures", .{ .name = "getSupportedSignatures", .arity = 0, .is_static = true });
+    try def.methods.put(a, "isValidPharFilename", .{ .name = "isValidPharFilename", .arity = 2, .is_static = true });
+    try def.methods.put(a, "mungServer", .{ .name = "mungServer", .arity = 1, .is_static = true });
+    try def.methods.put(a, "unlinkArchive", .{ .name = "unlinkArchive", .arity = 1, .is_static = true });
+    try def.methods.put(a, "interceptFileFuncs", .{ .name = "interceptFileFuncs", .arity = 0, .is_static = true });
+    try def.methods.put(a, "mapPhar", .{ .name = "mapPhar", .arity = 2, .is_static = true });
 
     try vm.classes.put(a, "Phar", def);
 
@@ -69,6 +80,17 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try vm.native_fns.put(a, "Phar::getMetadata", phGetMetadata);
     try vm.native_fns.put(a, "Phar::setMetadata", phSetMetadata);
     try vm.native_fns.put(a, "Phar::hasMetadata", phHasMetadata);
+    try vm.native_fns.put(a, "Phar::canWrite", phCanWrite);
+    try vm.native_fns.put(a, "Phar::canCompress", phCanCompress);
+    try vm.native_fns.put(a, "Phar::running", phRunning);
+    try vm.native_fns.put(a, "Phar::loadPhar", phLoadPhar);
+    try vm.native_fns.put(a, "Phar::getSupportedCompression", phGetSupportedCompression);
+    try vm.native_fns.put(a, "Phar::getSupportedSignatures", phGetSupportedSignatures);
+    try vm.native_fns.put(a, "Phar::isValidPharFilename", phIsValidPharFilename);
+    try vm.native_fns.put(a, "Phar::mungServer", phMungServer);
+    try vm.native_fns.put(a, "Phar::unlinkArchive", phUnlinkArchive);
+    try vm.native_fns.put(a, "Phar::interceptFileFuncs", phInterceptFileFuncs);
+    try vm.native_fns.put(a, "Phar::mapPhar", phMapPhar);
 
     // stub classes so class_exists and instanceof work even without the full
     // Phar feature surface behind them
@@ -354,6 +376,68 @@ fn phHasMetadata(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
     const obj = getThis(ctx) orelse return .{ .bool = false };
     const v = obj.get("__metadata");
     return .{ .bool = v != .null };
+}
+
+fn phCanWrite(_: *NativeContext, _: []const Value) RuntimeError!Value {
+    // Phar::canWrite() reports whether the phar.readonly ini setting allows
+    // writing. zphp doesn't enforce that flag and always writes
+    return .{ .bool = true };
+}
+
+fn phCanCompress(_: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len == 0) return .{ .bool = true };
+    if (args[0] != .int) return .{ .bool = false };
+    // 4096 = Phar::GZ (we support), 8192 = Phar::BZ2 (we don't)
+    return .{ .bool = args[0].int == 0 or args[0].int == 4096 };
+}
+
+fn phRunning(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    // returns the path to the currently-executing phar, or "" when not running from one
+    _ = ctx;
+    return .{ .string = "" };
+}
+
+fn phLoadPhar(_: *NativeContext, _: []const Value) RuntimeError!Value {
+    return .{ .bool = true };
+}
+
+fn phGetSupportedCompression(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const arr = try ctx.createArray();
+    try arr.append(ctx.allocator, .{ .string = "GZ" });
+    return .{ .array = arr };
+}
+
+fn phGetSupportedSignatures(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const arr = try ctx.createArray();
+    try arr.append(ctx.allocator, .{ .string = "MD5" });
+    try arr.append(ctx.allocator, .{ .string = "SHA-1" });
+    try arr.append(ctx.allocator, .{ .string = "SHA-256" });
+    try arr.append(ctx.allocator, .{ .string = "SHA-512" });
+    return .{ .array = arr };
+}
+
+fn phIsValidPharFilename(_: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len < 1 or args[0] != .string) return .{ .bool = false };
+    const name = args[0].string;
+    return .{ .bool = std.mem.endsWith(u8, name, ".phar") or std.mem.endsWith(u8, name, ".phar.gz") };
+}
+
+fn phMungServer(_: *NativeContext, _: []const Value) RuntimeError!Value {
+    return .null;
+}
+
+fn phUnlinkArchive(_: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len < 1 or args[0] != .string) return .{ .bool = false };
+    std.fs.cwd().deleteFile(args[0].string) catch return .{ .bool = false };
+    return .{ .bool = true };
+}
+
+fn phInterceptFileFuncs(_: *NativeContext, _: []const Value) RuntimeError!Value {
+    return .null;
+}
+
+fn phMapPhar(_: *NativeContext, _: []const Value) RuntimeError!Value {
+    return .{ .bool = true };
 }
 
 fn saveIfNotBuffering(ctx: *NativeContext, obj: *PhpObject) !void {
