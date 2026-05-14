@@ -1920,17 +1920,33 @@ fn native_strtotime(_: *NativeContext, args: []const Value) RuntimeError!Value {
         var sec: i64 = 0;
         var tz_offset: i64 = 0;
         var consumed: usize = 10;
-        if (input.len >= 19 and (input[10] == ' ' or input[10] == 'T') and input[13] == ':' and input[16] == ':') {
-            hour = std.fmt.parseInt(i64, input[11..13], 10) catch 0;
-            min = std.fmt.parseInt(i64, input[14..16], 10) catch 0;
-            sec = std.fmt.parseInt(i64, input[17..19], 10) catch 0;
-            consumed = 19;
-            var rest = input[19..];
-            while (rest.len > 0 and rest[0] == ' ') { rest = rest[1..]; consumed += 1; }
-            if (rest.len > 0) {
-                if (parseTimezoneOffset(rest)) |off| {
-                    tz_offset = off;
-                    consumed = input.len;
+        if (input.len > 10 and (input[10] == ' ' or input[10] == 'T')) {
+            var time_start: usize = 11;
+            while (time_start < input.len and input[time_start] == ' ') time_start += 1;
+            const tail = input[time_start..];
+            if (parseTimeOfDay(tail)) |tod| {
+                hour = tod.hour;
+                min = tod.min;
+                sec = tod.sec;
+                // advance consumed past the parsed HH:MM[:SS]
+                var i: usize = 0;
+                while (i < tail.len and tail[i] >= '0' and tail[i] <= '9') i += 1;
+                if (i < tail.len and tail[i] == ':') {
+                    i += 1;
+                    while (i < tail.len and tail[i] >= '0' and tail[i] <= '9') i += 1;
+                    if (i < tail.len and tail[i] == ':') {
+                        i += 1;
+                        while (i < tail.len and tail[i] >= '0' and tail[i] <= '9') i += 1;
+                    }
+                }
+                consumed = time_start + i;
+                var rest = input[consumed..];
+                while (rest.len > 0 and rest[0] == ' ') { rest = rest[1..]; consumed += 1; }
+                if (rest.len > 0) {
+                    if (parseTimezoneOffset(rest)) |off| {
+                        tz_offset = off;
+                        consumed = input.len;
+                    }
                 }
             }
         }
@@ -2033,16 +2049,18 @@ fn tryParseTextualDate(input: []const u8) ?i64 {
     s = s[match_len..];
 
     if (leading_day) |dd| {
-        // DD Month YYYY
+        // DD Month YYYY [HH:MM[:SS]]
         while (s.len > 0 and (s[0] == ' ' or s[0] == ',')) s = s[1..];
         var yend: usize = 0;
         while (yend < s.len and s[yend] >= '0' and s[yend] <= '9') yend += 1;
         if (yend == 0) return null;
         const year = std.fmt.parseInt(i64, s[0..yend], 10) catch return null;
-        return dateToTimestamp(year, month_num.?, dd, 0, 0, 0);
+        s = s[yend..];
+        const tod = parseTrailingTime(s);
+        return dateToTimestamp(year, month_num.?, dd, tod.hour, tod.min, tod.sec);
     }
 
-    // Month DD[,] YYYY or Month DD
+    // Month DD[,] YYYY [HH:MM[:SS]]
     while (s.len > 0 and s[0] == ' ') s = s[1..];
     var dend: usize = 0;
     while (dend < s.len and s[dend] >= '0' and s[dend] <= '9') dend += 1;
@@ -2055,7 +2073,16 @@ fn tryParseTextualDate(input: []const u8) ?i64 {
     while (yend < s.len and s[yend] >= '0' and s[yend] <= '9') yend += 1;
     if (yend == 0) return null;
     const year = std.fmt.parseInt(i64, s[0..yend], 10) catch return null;
-    return dateToTimestamp(year, month_num.?, day, 0, 0, 0);
+    s = s[yend..];
+    const tod = parseTrailingTime(s);
+    return dateToTimestamp(year, month_num.?, day, tod.hour, tod.min, tod.sec);
+}
+
+fn parseTrailingTime(rest: []const u8) TimeOfDay {
+    var s = rest;
+    while (s.len > 0 and (s[0] == ' ' or s[0] == 'T' or s[0] == ',')) s = s[1..];
+    if (s.len == 0) return .{ .hour = 0, .min = 0, .sec = 0 };
+    return parseTimeOfDay(s) orelse TimeOfDay{ .hour = 0, .min = 0, .sec = 0 };
 }
 
 fn native_time(_: *NativeContext, _: []const Value) RuntimeError!Value {
