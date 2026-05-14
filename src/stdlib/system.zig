@@ -22,6 +22,9 @@ pub const entries = .{
     .{ "phpinfo", native_phpinfo },
     .{ "phpcredits", native_phpcredits },
     .{ "php_strip_whitespace", native_php_strip_whitespace },
+    .{ "getlastmod", native_getlastmod },
+    .{ "cli_get_process_title", native_cli_get_process_title },
+    .{ "cli_set_process_title", native_cli_set_process_title },
     .{ "move_uploaded_file", native_move_uploaded_file },
     .{ "is_uploaded_file", native_is_uploaded_file },
     .{ "sys_get_temp_dir", native_sys_get_temp_dir },
@@ -432,6 +435,27 @@ fn native_phpinfo(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
 }
 
 fn native_phpcredits(_: *NativeContext, _: []const Value) RuntimeError!Value {
+    return .{ .bool = true };
+}
+
+fn native_getlastmod(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    // PHP returns the last modification time of the main script. zphp tracks
+    // the running file path; stat it to produce a real mtime
+    const path = ctx.vm.file_path;
+    if (path.len == 0) return .{ .bool = false };
+    const stat = std.fs.cwd().statFile(path) catch return .{ .bool = false };
+    return .{ .int = @intCast(@divTrunc(stat.mtime, std.time.ns_per_s)) };
+}
+
+fn native_cli_get_process_title(_: *NativeContext, _: []const Value) RuntimeError!Value {
+    // not actually tracking the process title; PHP returns false when no title
+    // was set explicitly via cli_set_process_title earlier in the run
+    return .{ .bool = false };
+}
+
+fn native_cli_set_process_title(_: *NativeContext, _: []const Value) RuntimeError!Value {
+    // best-effort no-op; the real prctl(PR_SET_NAME) syscall is linux-only and
+    // the cosmetic effect rarely matters for scripts that defensively set it
     return .{ .bool = true };
 }
 
