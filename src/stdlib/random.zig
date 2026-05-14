@@ -282,7 +282,11 @@ fn engine(ctx: *NativeContext) ?*PhpObject {
 
 fn rzConstruct(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     const this = getThis(ctx) orelse return .null;
-    if (args.len >= 1 and args[0] == .object) {
+    if (args.len >= 1 and args[0] != .null) {
+        if (args[0] != .object) {
+            try ctx.vm.setPendingException("TypeError", "Random\\Randomizer::__construct(): Argument #1 ($engine) must be of type ?Random\\Engine");
+            return error.RuntimeError;
+        }
         try this.set(ctx.allocator, "_engine", args[0]);
     }
     return .null;
