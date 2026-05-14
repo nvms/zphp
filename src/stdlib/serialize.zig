@@ -332,6 +332,31 @@ fn serializeValue(ctx: *NativeContext, buf: *std.ArrayListUnmanaged(u8), sctx: *
                 }
             }
 
+            // legacy Serializable interface: serialize() returns a string and
+            // the wire format is C:<class_name_len>:"<class_name>":<data_len>:{<data>}
+            // PHP prefers __serialize/__unserialize when both are present so
+            // this check sits BELOW the __serialize path is wrong - actually PHP
+            // checks Serializable first only if __serialize is absent. handle
+            // the Serializable path here so it precedes the regular property
+            // serialization but does not override __serialize/__sleep below
+            if (!ctx.vm.hasMethod(obj.class_name, "__serialize") and ctx.vm.isInstanceOf(obj.class_name, "Serializable")) {
+                const ser_result = try ctx.vm.callMethod(obj, "serialize", &.{});
+                const payload: []const u8 = if (ser_result == .string) ser_result.string else "";
+                try buf.appendSlice(a, "C:");
+                var tmp: [20]u8 = undefined;
+                const nl = std.fmt.bufPrint(&tmp, "{d}", .{obj.class_name.len}) catch return;
+                try buf.appendSlice(a, nl);
+                try buf.appendSlice(a, ":\"");
+                try buf.appendSlice(a, obj.class_name);
+                try buf.appendSlice(a, "\":");
+                const dl = std.fmt.bufPrint(&tmp, "{d}", .{payload.len}) catch return;
+                try buf.appendSlice(a, dl);
+                try buf.appendSlice(a, ":{");
+                try buf.appendSlice(a, payload);
+                try buf.append(a, '}');
+                return;
+            }
+
             // PHP 7.4+ __serialize: returns the array used as the object's serialized payload
             if (ctx.vm.hasMethod(obj.class_name, "__serialize")) {
                 const ser_result = try ctx.vm.callMethod(obj, "__serialize", &.{});
@@ -646,6 +671,38 @@ fn unserializeValue(ctx: *NativeContext, uctx: *UnserCtx, s: []const u8, pos: us
                 _ = try ctx.vm.callMethod(obj, "__wakeup", &.{});
             }
 
+            return .{ .value = .{ .object = obj }, .pos = p };
+        },
+        'C' => {
+            // Serializable interface payload: C:<nlen>:"<name>":<dlen>:{<raw>}
+            if (pos + 2 >= s.len or s[pos + 1] != ':') return error.RuntimeError;
+            const colon1 = std.mem.indexOfPos(u8, s, pos + 2, ":") orelse return error.RuntimeError;
+            const name_len = std.fmt.parseInt(usize, s[pos + 2 .. colon1], 10) catch return error.RuntimeError;
+            if (colon1 + 2 + name_len + 1 >= s.len) return error.RuntimeError;
+            const orig_class = s[colon1 + 2 .. colon1 + 2 + name_len];
+            const class_allowed = uctx.classAllowed(orig_class) and ctx.vm.classes.contains(orig_class);
+            const class_name = try ctx.createString(if (class_allowed) orig_class else "__PHP_Incomplete_Class");
+            var p = colon1 + 2 + name_len + 2;
+            const len_end = std.mem.indexOfPos(u8, s, p, ":") orelse return error.RuntimeError;
+            const data_len = std.fmt.parseInt(usize, s[p..len_end], 10) catch return error.RuntimeError;
+            if (len_end + 1 >= s.len or s[len_end + 1] != '{') return error.RuntimeError;
+            const data_start = len_end + 2;
+            if (data_start + data_len > s.len) return error.RuntimeError;
+            const payload = s[data_start .. data_start + data_len];
+            p = data_start + data_len;
+            if (p < s.len and s[p] == '}') p += 1;
+
+            const obj = try ctx.createObject(class_name);
+            const slot_idx = try uctx.reserve(ctx.allocator);
+            uctx.store(slot_idx, .{ .object = obj });
+
+            if (class_allowed and ctx.vm.hasMethod(class_name, "unserialize")) {
+                const payload_str = try ctx.createString(payload);
+                _ = try ctx.vm.callMethod(obj, "unserialize", &.{.{ .string = payload_str }});
+            } else if (!class_allowed) {
+                try obj.set(ctx.allocator, "__PHP_Incomplete_Class_Name", .{ .string = try ctx.createString(orig_class) });
+                try obj.set(ctx.allocator, "__serialized_data", .{ .string = try ctx.createString(payload) });
+            }
             return .{ .value = .{ .object = obj }, .pos = p };
         },
         'r', 'R' => {
