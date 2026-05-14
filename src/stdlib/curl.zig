@@ -24,6 +24,8 @@ pub const entries = .{
     .{ "curl_reset", curlReset },
     .{ "curl_version", curlVersion },
     .{ "curl_strerror", curlStrerror },
+    .{ "curl_escape", curlEscape },
+    .{ "curl_unescape", curlUnescape },
 };
 
 var global_init_done: bool = false;
@@ -658,6 +660,35 @@ fn curlStrerror(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (msg == null) return .null;
     const span = std.mem.span(msg);
     const owned = try ctx.allocator.dupe(u8, span);
+    try ctx.strings.append(ctx.allocator, owned);
+    return .{ .string = owned };
+}
+
+fn curlEscape(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len < 2 or args[1] != .string) return .{ .bool = false };
+    if (args[0] != .object) return .{ .bool = false };
+    const handle = getHandle(args[0].object) orelse return .{ .bool = false };
+    const s = args[1].string;
+    const encoded = c.curl_easy_escape(handle, s.ptr, @intCast(s.len));
+    if (encoded == null) return .{ .bool = false };
+    defer c.curl_free(encoded);
+    const span = std.mem.span(encoded);
+    const owned = try ctx.allocator.dupe(u8, span);
+    try ctx.strings.append(ctx.allocator, owned);
+    return .{ .string = owned };
+}
+
+fn curlUnescape(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len < 2 or args[1] != .string) return .{ .bool = false };
+    if (args[0] != .object) return .{ .bool = false };
+    const handle = getHandle(args[0].object) orelse return .{ .bool = false };
+    const s = args[1].string;
+    var out_len: c_int = 0;
+    const decoded = c.curl_easy_unescape(handle, s.ptr, @intCast(s.len), &out_len);
+    if (decoded == null) return .{ .bool = false };
+    defer c.curl_free(decoded);
+    const slice = decoded[0..@as(usize, @intCast(out_len))];
+    const owned = try ctx.allocator.dupe(u8, slice);
     try ctx.strings.append(ctx.allocator, owned);
     return .{ .string = owned };
 }
