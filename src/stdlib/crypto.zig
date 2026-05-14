@@ -491,8 +491,16 @@ fn native_hash_hmac(ctx: *NativeContext, args: []const Value) RuntimeError!Value
     const key = args[2].string;
     const raw_output = args.len >= 4 and args[3].isTruthy();
 
-    const algo = HashAlgo.fromString(algo_name) orelse return Value{ .bool = false };
-    if (algo == .crc32) return Value{ .bool = false };
+    const algo = HashAlgo.fromString(algo_name) orelse {
+        const msg = try std.fmt.allocPrint(ctx.allocator, "hash_hmac(): Argument #1 ($algo) must be a valid cryptographic hashing algorithm", .{});
+        try ctx.strings.append(ctx.allocator, msg);
+        try ctx.vm.setPendingException("ValueError", msg);
+        return error.RuntimeError;
+    };
+    if (algo == .crc32) {
+        try ctx.vm.setPendingException("ValueError", "hash_hmac(): Argument #1 ($algo) must be a cryptographic hashing algorithm");
+        return error.RuntimeError;
+    }
 
     var digest: [64]u8 = undefined;
     const dlen = algo.digestLen();
@@ -658,10 +666,20 @@ fn native_hash_pbkdf2(ctx: *NativeContext, args: []const Value) RuntimeError!Val
     const algo_name = args[0].string;
     const password = args[1].string;
     const salt = args[2].string;
-    const iterations: usize = @intCast(@max(1, Value.toInt(args[3])));
+    const iter_signed = Value.toInt(args[3]);
+    if (iter_signed <= 0) {
+        try ctx.vm.setPendingException("ValueError", "hash_pbkdf2(): Argument #4 ($iterations) must be greater than 0");
+        return error.RuntimeError;
+    }
+    const iterations: usize = @intCast(iter_signed);
     const length_arg: usize = if (args.len >= 5) @intCast(@max(0, Value.toInt(args[4]))) else 0;
     const raw_output = args.len >= 6 and args[5].isTruthy();
-    const algo = HashAlgo.fromString(algo_name) orelse return .{ .bool = false };
+    const algo = HashAlgo.fromString(algo_name) orelse {
+        const msg = try std.fmt.allocPrint(ctx.allocator, "hash_pbkdf2(): Argument #1 ($algo) must be a valid cryptographic hashing algorithm", .{});
+        try ctx.strings.append(ctx.allocator, msg);
+        try ctx.vm.setPendingException("ValueError", msg);
+        return error.RuntimeError;
+    };
     const dlen = algo.digestLen();
 
     const out_bytes: usize = blk: {
