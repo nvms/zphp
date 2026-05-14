@@ -58,8 +58,31 @@ pub const entries = .{
     .{ "fdiv", native_fdiv },
 };
 
-fn native_abs(_: *NativeContext, args: []const Value) RuntimeError!Value {
+/// PHP's int|float math params reject non-coercible values with TypeError.
+/// numeric strings coerce silently; arrays / objects without __toString and
+/// non-numeric strings raise TypeError. used by abs/sqrt/etc
+fn requireNumeric(ctx: *NativeContext, v: Value, comptime fn_name: []const u8, comptime type_label: []const u8) !bool {
+    if (v == .int or v == .float or v == .bool or v == .null) return false;
+    if (v == .string and Value.isNumericString(v.string)) return false;
+    const tn: []const u8 = switch (v) {
+        .array => "array",
+        .object => v.object.class_name,
+        .string => "string",
+        else => "unknown",
+    };
+    const msg = try std.fmt.allocPrint(
+        ctx.allocator,
+        "{s}(): Argument #1 ($num) must be of type {s}, {s} given",
+        .{ fn_name, type_label, tn },
+    );
+    try ctx.strings.append(ctx.allocator, msg);
+    try ctx.vm.setPendingException("TypeError", msg);
+    return true;
+}
+
+fn native_abs(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len == 0) return .{ .int = 0 };
+    if (try requireNumeric(ctx, args[0], "abs", "int|float")) return error.RuntimeError;
     return switch (args[0]) {
         .int => |i| if (i == std.math.minInt(i64))
             .{ .float = -@as(f64, @floatFromInt(i)) }
@@ -216,8 +239,9 @@ fn native_pow(_: *NativeContext, args: []const Value) RuntimeError!Value {
     return Value.power(args[0], args[1]);
 }
 
-fn native_sqrt(_: *NativeContext, args: []const Value) RuntimeError!Value {
+fn native_sqrt(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len == 0) return .{ .float = 0.0 };
+    if (try requireNumeric(ctx, args[0], "sqrt", "float")) return error.RuntimeError;
     return .{ .float = @sqrt(Value.toFloat(args[0])) };
 }
 
