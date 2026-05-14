@@ -91,6 +91,7 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try dt_def.methods.put(a, "diff", .{ .name = "diff", .arity = 1 });
     try dt_def.methods.put(a, "setDate", .{ .name = "setDate", .arity = 3 });
     try dt_def.methods.put(a, "setTime", .{ .name = "setTime", .arity = 2 });
+    try dt_def.methods.put(a, "setISODate", .{ .name = "setISODate", .arity = 2 });
     try dt_def.methods.put(a, "createFromTimestamp", .{ .name = "createFromTimestamp", .arity = 1, .is_static = true });
     try dt_def.methods.put(a, "createFromFormat", .{ .name = "createFromFormat", .arity = 2, .is_static = true });
     try dt_def.methods.put(a, "getMicrosecond", .{ .name = "getMicrosecond", .arity = 0 });
@@ -116,6 +117,7 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try vm.native_fns.put(a, "DateTime::diff", dtDiff);
     try vm.native_fns.put(a, "DateTime::setDate", dtSetDate);
     try vm.native_fns.put(a, "DateTime::setTime", dtSetTime);
+    try vm.native_fns.put(a, "DateTime::setISODate", dtSetISODate);
     try vm.native_fns.put(a, "DateTime::createFromTimestamp", dtCreateFromTimestamp);
     try vm.native_fns.put(a, "DateTime::createFromFormat", dtCreateFromFormat);
     try vm.native_fns.put(a, "DateTime::getMicrosecond", dtGetMicrosecond);
@@ -146,6 +148,7 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try dti_def.methods.put(a, "createFromFormat", .{ .name = "createFromFormat", .arity = 2, .is_static = true });
     try dti_def.methods.put(a, "createFromMutable", .{ .name = "createFromMutable", .arity = 1, .is_static = true });
     try dti_def.methods.put(a, "createFromInterface", .{ .name = "createFromInterface", .arity = 1, .is_static = true });
+    try dti_def.methods.put(a, "setISODate", .{ .name = "setISODate", .arity = 2 });
     inline for (DT_FORMAT_CONSTS) |c| {
         try dti_def.static_props.put(a, c[0], .{ .string = c[1] });
     }
@@ -166,6 +169,7 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try vm.native_fns.put(a, "DateTimeImmutable::createFromFormat", dtiCreateFromFormat);
     try vm.native_fns.put(a, "DateTimeImmutable::setDate", dtiSetDate);
     try vm.native_fns.put(a, "DateTimeImmutable::setTime", dtiSetTime);
+    try vm.native_fns.put(a, "DateTimeImmutable::setISODate", dtiSetISODate);
     try vm.native_fns.put(a, "DateTimeImmutable::setTimestamp", dtiSetTimestamp);
     try vm.native_fns.put(a, "DateTimeImmutable::createFromMutable", dtiCreateFromMutable);
     try vm.native_fns.put(a, "DateTime::createFromImmutable", dtCreateFromImmutable);
@@ -1009,6 +1013,60 @@ fn dtiSetDate(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     const new_ts = dateToTimestamp(Value.toInt(args[0]), Value.toInt(args[1]), Value.toInt(args[2]), h, m, s);
     const new_obj = try ctx.createObject("DateTimeImmutable");
     try new_obj.set(ctx.allocator, "timestamp", .{ .int = new_ts });
+    const tz = obj.get("__timezone");
+    if (tz != .null) try new_obj.set(ctx.allocator, "__timezone", tz);
+    return .{ .object = new_obj };
+}
+
+// ISO 8601 week date -> Gregorian date: jan 4 always falls in ISO week 1
+// (the iso-week that contains the first Thursday of the year). The Monday
+// of week 1 is jan4 minus (iso_dow_of_jan4 - 1) days, then advance by
+// (week - 1) * 7 + (day - 1) days
+fn isoWeekDateToTimestamp(year: i64, week: i64, day_of_week: i64, h: i64, m: i64, s: i64) i64 {
+    // jan 4 unix timestamp at 00:00
+    const jan4_ts = dateToTimestamp(year, 1, 4, 0, 0, 0);
+    // PHP date('N') for jan 4: 1..7 (Monday..Sunday)
+    const day_of_jan4 = @divFloor(jan4_ts, 86400);
+    // 1970-01-01 was Thursday -> N=4. so iso_dow = ((day_of_jan4 + 3) mod 7) + 1
+    var dow = @mod(day_of_jan4 + 3, 7) + 1;
+    if (dow < 1) dow += 7;
+    const offset_days = (week - 1) * 7 + (day_of_week - 1) - (dow - 1);
+    const target_ts = jan4_ts + offset_days * 86400;
+    return target_ts + h * 3600 + m * 60 + s;
+}
+
+fn dtSetISODate(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    const obj = getThis(ctx) orelse return .null;
+    if (args.len < 2) return .{ .object = obj };
+    const year = Value.toInt(args[0]);
+    const week = Value.toInt(args[1]);
+    const dow = if (args.len >= 3) Value.toInt(args[2]) else 1;
+    const ts = getTimestamp(obj);
+    const epoch_secs: u64 = @intCast(if (ts < 0) 0 else ts);
+    const es = std.time.epoch.EpochSeconds{ .secs = epoch_secs };
+    const day_seconds = es.getDaySeconds();
+    const h: i64 = day_seconds.getHoursIntoDay();
+    const m: i64 = day_seconds.getMinutesIntoHour();
+    const s: i64 = day_seconds.getSecondsIntoMinute();
+    try obj.set(ctx.allocator, "timestamp", .{ .int = isoWeekDateToTimestamp(year, week, dow, h, m, s) });
+    return .{ .object = obj };
+}
+
+fn dtiSetISODate(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    const obj = getThis(ctx) orelse return .null;
+    if (args.len < 2) return .{ .object = obj };
+    const year = Value.toInt(args[0]);
+    const week = Value.toInt(args[1]);
+    const dow = if (args.len >= 3) Value.toInt(args[2]) else 1;
+    const ts = getTimestamp(obj);
+    const epoch_secs: u64 = @intCast(if (ts < 0) 0 else ts);
+    const es = std.time.epoch.EpochSeconds{ .secs = epoch_secs };
+    const day_seconds = es.getDaySeconds();
+    const h: i64 = day_seconds.getHoursIntoDay();
+    const m: i64 = day_seconds.getMinutesIntoHour();
+    const s: i64 = day_seconds.getSecondsIntoMinute();
+    const new_obj = try ctx.createObject("DateTimeImmutable");
+    try new_obj.set(ctx.allocator, "timestamp", .{ .int = isoWeekDateToTimestamp(year, week, dow, h, m, s) });
     const tz = obj.get("__timezone");
     if (tz != .null) try new_obj.set(ctx.allocator, "__timezone", tz);
     return .{ .object = new_obj };
