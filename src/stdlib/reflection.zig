@@ -728,7 +728,11 @@ fn createTypeObj(ctx: *NativeContext, type_name: []const u8, nullable: bool, sel
                 only_non_null = trimmed;
             }
         }
-        if (has_null and non_null_count == 1) {
+        // collapse `T|null` to a nullable named type only when T is a simple
+        // type. PHP keeps `(I1&I2)|null` as a ReflectionUnionType (DNF form)
+        const non_null_is_intersection = std.mem.indexOfScalar(u8, only_non_null, '&') != null or
+            (only_non_null.len > 0 and only_non_null[0] == '(');
+        if (has_null and non_null_count == 1 and !non_null_is_intersection) {
             var resolved = only_non_null;
             if (self_class) |sc| {
                 if (std.mem.eql(u8, resolved, "self")) resolved = sc;
