@@ -242,7 +242,9 @@ fn encodeValue(buf: *std.ArrayListUnmanaged(u8), a: std.mem.Allocator, val: Valu
                             }
                             const cp = codepoint.?;
                             const sl = seq_len_or catch unreachable;
-                            if (unescape_unicode) {
+                            const unescape_line_term = (flags & 2048) != 0; // JSON_UNESCAPED_LINE_TERMINATORS
+                            const is_line_term = cp == 0x2028 or cp == 0x2029;
+                            if (unescape_unicode and !(is_line_term and !unescape_line_term)) {
                                 try buf.appendSlice(a, s[i..][0..sl]);
                             } else if (cp <= 0xFFFF) {
                                 var hex_buf: [6]u8 = undefined;
