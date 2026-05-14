@@ -498,16 +498,22 @@ fn dtFormat(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     const tz_val = obj.get("__timezone");
     const tz_name = if (tz_val == .string) tz_val.string else ctx.vm.default_tz_name;
     const offset = if (lookupTimezone(tz_name)) |tz| tzOffsetAt(tz, ts) else @as(i32, 0);
-    return formatTimestampTz(ctx, ts, args[0].string, offset, tz_name);
+    const us_v = obj.get("__microseconds");
+    const us: i64 = if (us_v == .int) us_v.int else 0;
+    return formatTimestampTzMicros(ctx, ts, args[0].string, offset, tz_name, us);
 }
 
 pub fn formatTimestamp(ctx: *NativeContext, timestamp: i64, format: []const u8) RuntimeError!Value {
     const tz_name = ctx.vm.default_tz_name;
     const offset = if (lookupTimezone(tz_name)) |tz| tzOffsetAt(tz, timestamp) else @as(i32, 0);
-    return formatTimestampTz(ctx, timestamp, format, offset, tz_name);
+    return formatTimestampTzMicros(ctx, timestamp, format, offset, tz_name, 0);
 }
 
 pub fn formatTimestampTz(ctx: *NativeContext, timestamp: i64, format: []const u8, tz_offset: i32, tz_name: []const u8) RuntimeError!Value {
+    return formatTimestampTzMicros(ctx, timestamp, format, tz_offset, tz_name, 0);
+}
+
+pub fn formatTimestampTzMicros(ctx: *NativeContext, timestamp: i64, format: []const u8, tz_offset: i32, tz_name: []const u8, microseconds: i64) RuntimeError!Value {
     const local_ts = timestamp + @as(i64, tz_offset);
     const dc = baseComponents(local_ts);
     const day_seconds = FmtDaySec{ .h = @intCast(dc.hour), .mi = @intCast(dc.min), .s = @intCast(dc.sec) };
@@ -734,8 +740,18 @@ pub fn formatTimestampTz(ctx: *NativeContext, timestamp: i64, format: []const u8
                 };
                 try buf.appendSlice(a, suffix);
             },
-            'u' => try buf.appendSlice(a, "000000"),
-            'v' => try buf.appendSlice(a, "000"),
+            'u' => {
+                var tmp: [16]u8 = undefined;
+                const us_abs: u64 = @intCast(if (microseconds < 0) -microseconds else microseconds);
+                const s = std.fmt.bufPrint(&tmp, "{d:0>6}", .{us_abs}) catch "000000";
+                try buf.appendSlice(a, s);
+            },
+            'v' => {
+                var tmp: [16]u8 = undefined;
+                const ms_abs: u64 = @intCast(@divFloor(if (microseconds < 0) -microseconds else microseconds, 1000));
+                const s = std.fmt.bufPrint(&tmp, "{d:0>3}", .{ms_abs}) catch "000";
+                try buf.appendSlice(a, s);
+            },
             'Z' => {
                 var tmp: [12]u8 = undefined;
                 const s = std.fmt.bufPrint(&tmp, "{d}", .{tz_offset}) catch "0";
@@ -1358,10 +1374,11 @@ fn createFromFormatImpl(ctx: *NativeContext, args: []const Value, default_class:
     }
     try obj.set(ctx.allocator, "timestamp", .{ .int = final_ts });
     if (tz_name_opt) |n| try obj.set(ctx.allocator, "__timezone", .{ .string = n });
+    if (res.microseconds != 0) try obj.set(ctx.allocator, "__microseconds", .{ .int = res.microseconds });
     return .{ .object = obj };
 }
 
-const ParsedDateTime = struct { ts: i64, tz_offset_seconds: ?i32 };
+const ParsedDateTime = struct { ts: i64, tz_offset_seconds: ?i32, microseconds: i64 = 0 };
 
 // PHP createFromFormat parser. Supports the common specifiers: Y y m n M F d j D l
 // H G h g i s U a A e T P O Z, plus literal escape (\X) and reset markers (! and |).
@@ -1379,6 +1396,7 @@ fn parseDateTimeFormat(format: []const u8, datetime: []const u8, now: i64) ?Pars
     var tz_parsed: bool = false;
     var is_pm: ?bool = null;
     var hour_is_12: bool = false;
+    var microseconds: i64 = 0;
 
     // PHP `!` reset semantics: track which fields have been parsed so far so `|` can reset the rest
     var parsed_year = false;
@@ -1499,11 +1517,21 @@ fn parseDateTimeFormat(format: []const u8, datetime: []const u8, now: i64) ?Pars
                 const start = di;
                 while (di < datetime.len and di - start < 6 and datetime[di] >= '0' and datetime[di] <= '9') : (di += 1) {}
                 if (di == start) return null;
+                var parsed_u = std.fmt.parseInt(i64, datetime[start..di], 10) catch 0;
+                // pad to 6-digit microsecond resolution (PHP's u is microseconds)
+                var pad = 6 - (di - start);
+                while (pad > 0) : (pad -= 1) parsed_u *= 10;
+                microseconds = parsed_u;
             },
             'v' => {
                 const start = di;
                 while (di < datetime.len and di - start < 3 and datetime[di] >= '0' and datetime[di] <= '9') : (di += 1) {}
                 if (di == start) return null;
+                var parsed_v = std.fmt.parseInt(i64, datetime[start..di], 10) catch 0;
+                // v is milliseconds; scale to microseconds
+                var pad = 3 - (di - start);
+                while (pad > 0) : (pad -= 1) parsed_v *= 10;
+                microseconds = parsed_v * 1000;
             },
             'a', 'A' => {
                 if (di + 2 > datetime.len) return null;
@@ -1577,7 +1605,7 @@ fn parseDateTimeFormat(format: []const u8, datetime: []const u8, now: i64) ?Pars
 
     const parsed_off: ?i32 = if (tz_parsed) @intCast(tz_offset) else null;
 
-    if (u_ts) |ts| return .{ .ts = ts - tz_offset, .tz_offset_seconds = parsed_off };
+    if (u_ts) |ts| return .{ .ts = ts - tz_offset, .tz_offset_seconds = parsed_off, .microseconds = microseconds };
 
     if (hour_is_12) {
         if (is_pm) |pm| {
@@ -1595,7 +1623,7 @@ fn parseDateTimeFormat(format: []const u8, datetime: []const u8, now: i64) ?Pars
         if (!parsed_sec) sec = 0;
     }
 
-    return .{ .ts = dateToTimestamp(year, month, day, hour, min, sec) - tz_offset, .tz_offset_seconds = parsed_off };
+    return .{ .ts = dateToTimestamp(year, month, day, hour, min, sec) - tz_offset, .tz_offset_seconds = parsed_off, .microseconds = microseconds };
 }
 
 fn isDigit(c: u8) bool { return c >= '0' and c <= '9'; }
@@ -1634,14 +1662,18 @@ fn dtiCreateFromTimestamp(ctx: *NativeContext, args: []const Value) RuntimeError
     return .{ .object = obj };
 }
 
-fn dtGetMicrosecond(_: *NativeContext, _: []const Value) RuntimeError!Value {
-    // zphp timestamps are second-precision, microseconds always 0
+fn dtGetMicrosecond(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const obj = getThis(ctx) orelse return .{ .int = 0 };
+    const v = obj.get("__microseconds");
+    if (v == .int) return v;
     return .{ .int = 0 };
 }
 
-fn dtSetMicrosecond(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    // no-op since we don't store microseconds, return $this
+fn dtSetMicrosecond(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     const obj = getThis(ctx) orelse return .null;
+    if (args.len >= 1 and args[0] == .int) {
+        try obj.set(ctx.allocator, "__microseconds", .{ .int = args[0].int });
+    }
     return .{ .object = obj };
 }
 
