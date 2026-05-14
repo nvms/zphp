@@ -434,6 +434,7 @@ pub const VM = struct {
     prop_hook_guard: std.ArrayListUnmanaged(struct { obj_ptr: usize, prop_name: []const u8 }) = .{},
     user_error_handler: ?Value = null,
     user_error_handler_mask: i64 = -1,
+    user_exception_handler: ?Value = null,
     error_handler_stack: std.ArrayListUnmanaged(ErrorHandlerEntry) = .{},
     error_silenced_depth: u32 = 0,
     last_error_type: i64 = 0,

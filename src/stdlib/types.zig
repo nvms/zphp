@@ -106,6 +106,8 @@ pub const entries = .{
     .{ "set_exception_handler", native_set_exception_handler },
     .{ "restore_error_handler", native_restore_error_handler },
     .{ "restore_exception_handler", native_noop_true },
+    .{ "get_error_handler", native_get_error_handler },
+    .{ "get_exception_handler", native_get_exception_handler },
     .{ "register_shutdown_function", native_register_shutdown_function },
     .{ "error_reporting", native_error_reporting },
     .{ "error_get_last", native_error_get_last },
@@ -1638,9 +1640,21 @@ fn native_error_clear_last(ctx: *NativeContext, _: []const Value) RuntimeError!V
 }
 
 fn native_set_exception_handler(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    _ = ctx;
-    _ = args;
-    return .null;
+    const prev = ctx.vm.user_exception_handler orelse Value.null;
+    if (args.len > 0 and args[0] != .null) {
+        ctx.vm.user_exception_handler = args[0];
+    } else {
+        ctx.vm.user_exception_handler = null;
+    }
+    return prev;
+}
+
+fn native_get_error_handler(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    return ctx.vm.user_error_handler orelse Value.null;
+}
+
+fn native_get_exception_handler(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    return ctx.vm.user_exception_handler orelse Value.null;
 }
 
 fn native_restore_error_handler(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
