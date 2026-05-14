@@ -4748,13 +4748,30 @@ pub const VM = struct {
                                 continue;
                             }
                         } else if (self.hasPropHook(obj.class_name, prop_name, .get) and !self.inPropHook(obj, prop_name)) {
-                            // get hook exists but no set hook: PHP makes the
-                            // property read-only (the hook owns reads and there's
-                            // no way to express writes)
-                            const msg = std.fmt.allocPrint(self.allocator, "Property {s}::${s} is read-only", .{ obj.class_name, prop_name }) catch return error.RuntimeError;
-                            try self.strings.append(self.allocator, msg);
-                            if (try self.throwBuiltinException("Error", msg)) continue;
-                            return error.RuntimeError;
+                            // get hook exists but no set hook. PHP allows the
+                            // write when the property is "backed" (a default
+                            // was declared, in which case there's storage to
+                            // write to). purely virtual properties with no
+                            // default are read-only
+                            const has_default = blk: {
+                                var current: ?[]const u8 = obj.class_name;
+                                while (current) |cn| {
+                                    if (self.classes.get(cn)) |cls_def| {
+                                        for (cls_def.properties.items) |p| {
+                                            if (std.mem.eql(u8, p.name, prop_name)) break :blk p.has_default;
+                                        }
+                                        current = cls_def.parent;
+                                    } else break;
+                                }
+                                break :blk false;
+                            };
+                            if (!has_default) {
+                                const msg = std.fmt.allocPrint(self.allocator, "Property {s}::${s} is read-only", .{ obj.class_name, prop_name }) catch return error.RuntimeError;
+                                try self.strings.append(self.allocator, msg);
+                                if (try self.throwBuiltinException("Error", msg)) continue;
+                                return error.RuntimeError;
+                            }
+                            // fall through to the regular slot/property write
                         }
 
                         // IC: slot-indexed fast path
