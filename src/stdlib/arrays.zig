@@ -1397,19 +1397,23 @@ fn compactValue(ctx: *NativeContext, arg: Value, arr: *PhpArray, frame: anytype,
         const name = arg.string;
         const var_name = try std.fmt.allocPrint(ctx.allocator, "${s}", .{name});
         try ctx.strings.append(ctx.allocator, var_name);
-        var found = false;
+        var in_slot = false;
         for (slot_names, 0..) |sn, i| {
             if (std.mem.eql(u8, sn, var_name)) {
-                if (i < frame.locals.len and frame.locals[i] != .null) {
+                in_slot = true;
+                if (i < frame.locals.len) {
                     try arr.set(ctx.allocator, .{ .string = name }, frame.locals[i]);
-                    found = true;
                 }
                 break;
             }
         }
-        if (!found) {
+        if (!in_slot) {
             if (frame.vars.get(var_name)) |val| {
                 try arr.set(ctx.allocator, .{ .string = name }, val);
+            } else {
+                const w = try std.fmt.allocPrint(ctx.allocator, "compact(): Undefined variable ${s}", .{name});
+                try ctx.strings.append(ctx.allocator, w);
+                ctx.vm.emitWarning(w);
             }
         }
     } else if (arg == .array) {
