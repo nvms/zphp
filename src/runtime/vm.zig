@@ -2234,6 +2234,54 @@ pub const VM = struct {
                         self.push(.null);
                     }
                 },
+                .array_get_coalesce => {
+                    // like array_get but with isset-style semantics for `??`:
+                    // OOB string offsets and missing array keys are null, and we
+                    // route object access through offsetExists+offsetGet so user
+                    // ArrayAccess types don't synthesize a value when the key is
+                    // absent
+                    const key = self.pop();
+                    const arr_val = self.pop();
+                    if (arr_val == .array) {
+                        if (key == .array or key == .object) {
+                            self.push(.null);
+                            continue;
+                        }
+                        self.push(arr_val.array.get(Value.toArrayKey(key)));
+                    } else if (arr_val == .object and self.hasMethod(arr_val.object.class_name, "offsetGet")) {
+                        if (self.hasMethod(arr_val.object.class_name, "offsetExists")) {
+                            const exists = self.callMethod(arr_val.object, "offsetExists", &.{key}) catch {
+                                if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
+                                return error.RuntimeError;
+                            };
+                            if (!exists.isTruthy()) {
+                                self.push(.null);
+                                continue;
+                            }
+                        }
+                        const result = self.callMethod(arr_val.object, "offsetGet", &.{key}) catch {
+                            if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
+                            return error.RuntimeError;
+                        };
+                        self.push(result);
+                    } else if (arr_val == .string) {
+                        const s = arr_val.string;
+                        const idx = Value.toInt(key);
+                        const resolved: ?usize = if (idx >= 0)
+                            if (@as(usize, @intCast(idx)) < s.len) @as(usize, @intCast(idx)) else null
+                        else if (@as(usize, @intCast(-idx)) <= s.len)
+                            s.len - @as(usize, @intCast(-idx))
+                        else
+                            null;
+                        if (resolved) |ri| {
+                            self.push(.{ .string = s[ri..][0..1] });
+                        } else {
+                            self.push(.null);
+                        }
+                    } else {
+                        self.push(.null);
+                    }
+                },
                 .array_get_vivify => {
                     const key = self.pop();
                     const arr_val = self.pop();

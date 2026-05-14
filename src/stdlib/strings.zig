@@ -943,6 +943,12 @@ fn native_chunk_split(ctx: *NativeContext, args: []const Value) RuntimeError!Val
 
 fn native_number_format(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len == 0) return .{ .string = "0" };
+    // PHP returns the literal "nan" / "inf" / "-inf" for non-finite floats
+    if (args[0] == .float) {
+        const f = args[0].float;
+        if (std.math.isNan(f)) return Value{ .string = "nan" };
+        if (std.math.isInf(f)) return Value{ .string = if (f < 0) "-inf" else "inf" };
+    }
     const decimals_signed: i64 = if (args.len >= 2) Value.toInt(args[1]) else 0;
     const decimals: usize = if (decimals_signed > 0) @intCast(decimals_signed) else 0;
     const dec_point = if (args.len >= 3 and args[2] == .string) args[2].string else ".";

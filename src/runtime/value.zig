@@ -405,14 +405,20 @@ pub const Value = union(enum) {
             if (av == 0.0) return .{ .float = std.math.nan(f64) };
             return .{ .float = if (av > 0.0) std.math.inf(f64) else -std.math.inf(f64) };
         }
-        const av = toFloat(a);
-        const result = av / bv;
         const both_int = (a == .int or (a == .string and isNumericIntString(a.string))) and
             (b == .int or (b == .string and isNumericIntString(b.string)));
-        if (both_int and result == @trunc(result) and result >= @as(f64, @floatFromInt(std.math.minInt(i64))) and result <= @as(f64, @floatFromInt(std.math.maxInt(i64)))) {
-            return .{ .int = @intFromFloat(result) };
+        // both-int path: check exact divisibility in integer space so we don't
+        // lose precision routing through f64 (PHP_INT_MAX is exactly divisible
+        // by 7 but float div rounds the quotient down). PHP_INT_MIN / -1 stays
+        // a float since the integer quotient overflows
+        if (both_int) {
+            const ai = toInt(a);
+            const bi = toInt(b);
+            if (bi != 0 and !(ai == std.math.minInt(i64) and bi == -1)) {
+                if (@rem(ai, bi) == 0) return .{ .int = @divTrunc(ai, bi) };
+            }
         }
-        return .{ .float = result };
+        return .{ .float = toFloat(a) / bv };
     }
 
     fn isNumericIntString(s: []const u8) bool {

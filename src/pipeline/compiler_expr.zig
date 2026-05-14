@@ -460,7 +460,19 @@ pub fn compileLogicalOr(self: *Compiler, node: Ast.Node) Error!void {
 }
 
 pub fn compileNullCoalesce(self: *Compiler, node: Ast.Node) Error!void {
-    try self.compileNode(node.data.lhs);
+    // PHP's `??` uses isset() semantics on the LHS rather than a plain null
+    // compare: an undefined array key or out-of-bounds string offset should
+    // route through to the RHS even though `array_get` would normally
+    // synthesize "" or push a warning. For array_access LHS we emit the
+    // coalesce-safe fetch variant so the offset behavior matches PHP
+    const lhs_node = self.ast.nodes[node.data.lhs];
+    if (lhs_node.tag == .array_access) {
+        try self.compileNode(lhs_node.data.lhs);
+        try self.compileNode(lhs_node.data.rhs);
+        try self.emitOp(.array_get_coalesce);
+    } else {
+        try self.compileNode(node.data.lhs);
+    }
     const end_jump = try self.emitJump(.jump_if_not_null);
     try self.emitOp(.pop);
     try self.compileNode(node.data.rhs);

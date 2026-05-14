@@ -73,6 +73,7 @@ pub const OpCode = enum(u8) {
     array_push, // pop value, append to array at stack top
     array_set_elem, // pop value, pop key, set on array at stack top
     array_get, // pop key, pop array, push value
+    array_get_coalesce, // pop key, pop array, push value or null (OOB string offset and missing assoc keys become null - for `??` semantics)
     array_get_vivify, // pop key, pop array, push value (create intermediate arrays if missing)
     array_set, // pop value, pop key, pop array, set, push value
     array_set_local, // u16: slot - pop value, pop key, set on local at slot (string char-write or array set with vivify), push value
@@ -217,7 +218,7 @@ pub const OpCode = enum(u8) {
             .get_prop,
             => 0,
             // binary ops: pop 2, push 1
-            .array_get, .array_get_vivify,
+            .array_get, .array_get_coalesce, .array_get_vivify,
             .get_prop_dynamic,
             .isset_prop_dynamic,
             .array_elem_inc, .array_elem_dec,
