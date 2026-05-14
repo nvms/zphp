@@ -6891,7 +6891,11 @@ pub const VM = struct {
     /// without __toString as arithmetic operands with TypeError. returns true
     /// when the throw was caught in-frame and the caller should `continue`
     pub fn checkArithOperands(self: *VM, a: Value, b: Value, comptime op: []const u8) RuntimeError!bool {
-        if (isArithOperand(a) and isArithOperand(b)) return false;
+        if (isArithOperand(a) and isArithOperand(b)) {
+            if (a == .string and isPartialNumericString(a.string)) self.emitNonNumericWarning();
+            if (b == .string and isPartialNumericString(b.string)) self.emitNonNumericWarning();
+            return false;
+        }
         const tn_a = arithTypeName(a);
         const tn_b = arithTypeName(b);
         const msg = try std.fmt.allocPrint(self.allocator, "Unsupported operand types: {s} " ++ op ++ " {s}", .{ tn_a, tn_b });
@@ -6931,6 +6935,58 @@ pub const VM = struct {
             .string => |s| stringHasLeadingNumericish(s),
             else => false,
         };
+    }
+
+    fn isPartialNumericString(s: []const u8) bool {
+        // string with a leading numeric prefix followed by non-numeric garbage
+        // (PHP emits "A non-numeric value encountered" when arithmetic uses
+        // such a string). pure-numeric and pure-non-numeric strings don't qualify
+        var i: usize = 0;
+        while (i < s.len and (s[i] == ' ' or s[i] == '\t' or s[i] == '\n' or s[i] == '\r' or s[i] == '\x0b' or s[i] == '\x0c')) i += 1;
+        if (i >= s.len) return false;
+        if (s[i] == '+' or s[i] == '-') i += 1;
+        if (i >= s.len) return false;
+        var saw_digit = false;
+        while (i < s.len and s[i] >= '0' and s[i] <= '9') : (i += 1) saw_digit = true;
+        if (i < s.len and s[i] == '.') {
+            i += 1;
+            while (i < s.len and s[i] >= '0' and s[i] <= '9') : (i += 1) saw_digit = true;
+        }
+        if (!saw_digit) return false;
+        if (i < s.len and (s[i] == 'e' or s[i] == 'E')) {
+            const save = i;
+            i += 1;
+            if (i < s.len and (s[i] == '+' or s[i] == '-')) i += 1;
+            const exp_start = i;
+            while (i < s.len and s[i] >= '0' and s[i] <= '9') : (i += 1) {}
+            if (i == exp_start) i = save; // no exponent digits, roll back so 'e' is trailing garbage
+        }
+        // skip trailing whitespace (PHP treats "  5  " as fully numeric)
+        while (i < s.len and (s[i] == ' ' or s[i] == '\t' or s[i] == '\n' or s[i] == '\r' or s[i] == '\x0b' or s[i] == '\x0c')) i += 1;
+        return i < s.len;
+    }
+
+    fn emitNonNumericWarning(self: *VM) void {
+        const msg = "A non-numeric value encountered";
+        const ip = if (self.frame_count > 0) self.currentFrame().ip else 0;
+        const line: i64 = if (self.frame_count > 0)
+            if (self.currentChunk().getSourceLocation(if (ip > 0) ip - 1 else 0, self.source)) |loc| @intCast(loc.line) else 0
+        else
+            0;
+        const file = self.file_path;
+        if (self.error_silenced_depth != 0 or (self.error_reporting_level & 2) == 0) return;
+        if (self.output.items.len > 0) {
+            const stdout_file = std.fs.File{ .handle = 1 };
+            _ = stdout_file.write(self.output.items) catch {};
+            self.output.clearRetainingCapacity();
+        }
+        const stderr_text = std.fmt.allocPrint(self.allocator, "PHP Warning:  {s} in {s} on line {d}\n", .{ msg, file, line }) catch return;
+        self.strings.append(self.allocator, stderr_text) catch {};
+        const stderr_file = std.fs.File{ .handle = 2 };
+        _ = stderr_file.write(stderr_text) catch {};
+        const stdout_text = std.fmt.allocPrint(self.allocator, "\nWarning: {s} in {s} on line {d}\n", .{ msg, file, line }) catch return;
+        self.strings.append(self.allocator, stdout_text) catch {};
+        self.output.appendSlice(self.allocator, stdout_text) catch {};
     }
 
     fn stringHasLeadingNumericish(s: []const u8) bool {
