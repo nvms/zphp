@@ -2321,11 +2321,13 @@ pub const VM = struct {
                             if (try self.throwOffsetKeyType(key, .access)) continue;
                             return error.RuntimeError;
                         }
-                        const ak = Value.toArrayKey(key);
-                        if (!arr_val.array.contains(ak)) {
-                            self.emitUndefinedKeyWarning(ak);
-                        }
-                        self.push(arr_val.array.get(ak));
+                        // re-enabling "Undefined array key" warning is blocked
+                        // on full reference semantics. vendor code (Symfony /
+                        // Laravel) routes data through ref params zphp doesn't
+                        // yet persist, so the warning surfaces ghost-missing
+                        // keys. revisit once chained `$b = &$a` and multi-arg
+                        // closure refs are sound (see roadmap)
+                        self.push(arr_val.array.get(Value.toArrayKey(key)));
                     } else if (arr_val == .object and self.hasMethod(arr_val.object.class_name, "offsetGet")) {
                         const result = self.callMethod(arr_val.object, "offsetGet", &.{key}) catch {
                             if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
