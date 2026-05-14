@@ -764,7 +764,9 @@ fn compileUnset(self: *Compiler, args: []const u32) Error!void {
                 try self.emitU16(prop_idx);
             }
         } else if (arg.tag == .array_access) {
-            try self.compileNode(arg.data.lhs);
+            // for `unset($a[k1][k2]...[kn])`, the intermediate reads should
+            // use coalesce-safe semantics so missing keys don't warn
+            try compileCoalesceFetch(self, arg.data.lhs);
             try self.compileNode(arg.data.rhs);
             try self.emitOp(.unset_array_elem);
         }

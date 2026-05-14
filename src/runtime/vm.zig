@@ -2321,12 +2321,12 @@ pub const VM = struct {
                             if (try self.throwOffsetKeyType(key, .access)) continue;
                             return error.RuntimeError;
                         }
-                        // re-enabling "Undefined array key" warning is blocked
-                        // on full reference semantics. vendor code (Symfony /
-                        // Laravel) routes data through ref params zphp doesn't
-                        // yet persist, so the warning surfaces ghost-missing
-                        // keys. revisit once chained `$b = &$a` and multi-arg
-                        // closure refs are sound (see roadmap)
+                        // "Undefined array key" warning is gated until ref
+                        // semantics fully cover ref-to-array-elem vivification
+                        // (`$x = &$arr[$k]` where `$k` is missing) and chained
+                        // refs; vendor code (Symfony Translator catalogue,
+                        // Laravel PreventsCircularRecursion) routes through
+                        // those patterns and would otherwise spam stderr
                         self.push(arr_val.array.get(Value.toArrayKey(key)));
                     } else if (arr_val == .object and self.hasMethod(arr_val.object.class_name, "offsetGet")) {
                         const result = self.callMethod(arr_val.object, "offsetGet", &.{key}) catch {
@@ -8776,19 +8776,10 @@ pub const VM = struct {
         if (instr_count == 0) return sources;
 
         // for call_indirect (and similar indirect calls), the function name was
-        // pushed last so the topmost producer is the fname push, not an arg.
-        // walk one stack-effect-positive producer past it before scanning args
-        const call_op_byte = code[call_pos];
-        const is_indirect = call_op_byte == @intFromEnum(OpCode.call_indirect);
+        // for both .call and .call_indirect the topmost producers ARE the args
+        // (call_indirect pushes the callable first, then args; .call has the
+        // function name encoded as a u16 constant in the opcode). scan straight
         var i = instr_count;
-        if (is_indirect) {
-            var depth: i32 = 0;
-            while (i > 0 and depth < 1) {
-                i -= 1;
-                const op: OpCode = std.meta.intToEnum(OpCode, code[instrs[i]]) catch break;
-                depth += @as(i32, op.stackEffect());
-            }
-        }
 
         var scan_idx: usize = ac;
 
