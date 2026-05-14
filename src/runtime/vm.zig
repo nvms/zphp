@@ -6883,9 +6883,22 @@ pub const VM = struct {
     fn isArithOperand(v: Value) bool {
         return switch (v) {
             .int, .float, .bool, .null => true,
-            .string => |s| Value.isNumericString(s),
+            // PHP throws TypeError only for strings with no leading-numeric
+            // prefix. '5abc' / '  5  ' / '0xFF' all pass (PHP emits a warning
+            // and uses the numeric prefix, which is 0 for '0xFF'). truly
+            // alphabetic strings like 'abc' do not pass
+            .string => |s| stringHasLeadingNumericish(s),
             else => false,
         };
+    }
+
+    fn stringHasLeadingNumericish(s: []const u8) bool {
+        var i: usize = 0;
+        while (i < s.len and (s[i] == ' ' or s[i] == '\t' or s[i] == '\n' or s[i] == '\r')) i += 1;
+        if (i >= s.len) return false;
+        if (s[i] == '+' or s[i] == '-') i += 1;
+        if (i >= s.len) return false;
+        return s[i] >= '0' and s[i] <= '9' or s[i] == '.';
     }
 
     fn arithTypeName(v: Value) []const u8 {
