@@ -1709,8 +1709,19 @@ fn native_ftruncate(_: *NativeContext, args: []const Value) RuntimeError!Value {
 fn native_flock(_: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len < 2 or args[0] != .object or args[1] != .int) return .{ .bool = false };
     const file = getFileHandle(args[0].object) orelse return Value{ .bool = false };
-    const op: i32 = @intCast(args[1].int & 0xff);
-    std.posix.flock(file.handle, op) catch return Value{ .bool = false };
+    // PHP renumbers the lock op constants: LOCK_SH=1, LOCK_EX=2, LOCK_UN=3,
+    // LOCK_NB=4. translate to the OS values (LOCK_SH=1, LOCK_EX=2, LOCK_NB=4,
+    // LOCK_UN=8) before handing to flock(2)
+    const php_op = args[1].int;
+    const non_block: i32 = if ((php_op & 4) != 0) 4 else 0;
+    const base = php_op & 0x3;
+    const os_base: i32 = switch (base) {
+        1 => 1, // LOCK_SH
+        2 => 2, // LOCK_EX
+        3 => 8, // LOCK_UN
+        else => 0,
+    };
+    std.posix.flock(file.handle, os_base | non_block) catch return Value{ .bool = false };
     return .{ .bool = true };
 }
 
