@@ -144,6 +144,7 @@ pub const entries = .{
 
 fn substr(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len < 2) return .{ .string = "" };
+    if (try rejectArrayParam(ctx, args[0], "substr")) return error.RuntimeError;
     const s = try coerceToString(ctx, args[0]);
     const slen: i64 = @intCast(s.len);
     var start = Value.toInt(args[1]);
@@ -382,6 +383,7 @@ fn rtrim(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
 
 fn strtolower(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len == 0) return .{ .string = "" };
+    if (try rejectArrayParam(ctx, args[0], "strtolower")) return error.RuntimeError;
     const s = try coerceToString(ctx, args[0]);
     const buf = try ctx.allocator.alloc(u8, s.len);
     for (s, 0..) |c, i| buf[i] = std.ascii.toLower(c);
@@ -391,6 +393,7 @@ fn strtolower(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
 
 fn strtoupper(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len == 0) return .{ .string = "" };
+    if (try rejectArrayParam(ctx, args[0], "strtoupper")) return error.RuntimeError;
     const s = try coerceToString(ctx, args[0]);
     const buf = try ctx.allocator.alloc(u8, s.len);
     for (s, 0..) |c, i| buf[i] = std.ascii.toUpper(c);
@@ -3540,6 +3543,24 @@ fn native_rawurldecode(ctx: *NativeContext, args: []const Value) RuntimeError!Va
     const result = try buf.toOwnedSlice(ctx.allocator);
     try ctx.strings.append(ctx.allocator, result);
     return .{ .string = result };
+}
+
+/// PHP's `string` parameter type rejects arrays with a TypeError. Most native
+/// string functions in this file go through coerceToString which silently
+/// returns "" for arrays; call this first to match PHP behavior on the strict
+/// parameters
+fn rejectArrayParam(ctx: *NativeContext, v: Value, comptime func_name: []const u8) !bool {
+    if (v == .array) {
+        const msg = try std.fmt.allocPrint(
+            ctx.allocator,
+            "{s}(): Argument #1 ($string) must be of type string, array given",
+            .{func_name},
+        );
+        try ctx.strings.append(ctx.allocator, msg);
+        try ctx.vm.setPendingException("TypeError", msg);
+        return true;
+    }
+    return false;
 }
 
 fn coerceToString(ctx: *NativeContext, v: Value) ![]const u8 {
