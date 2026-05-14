@@ -216,6 +216,7 @@ pub fn register(vm: *VM, a: Allocator) !void {
     // ReflectionParameter
     var rp_def = ClassDef{ .name = "ReflectionParameter" };
     try rp_def.properties.append(a, .{ .name = "name", .default = .{ .string = "" } });
+    try rp_def.methods.put(a, "__construct", .{ .name = "__construct", .arity = 2 });
     try rp_def.methods.put(a, "getName", .{ .name = "getName", .arity = 0 });
     try rp_def.methods.put(a, "getType", .{ .name = "getType", .arity = 0 });
     try rp_def.methods.put(a, "isDefaultValueAvailable", .{ .name = "isDefaultValueAvailable", .arity = 0 });
@@ -235,6 +236,7 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try rp_def.methods.put(a, "getDefaultValueConstantName", .{ .name = "getDefaultValueConstantName", .arity = 0 });
     try vm.classes.put(a, "ReflectionParameter", rp_def);
 
+    try vm.native_fns.put(a, "ReflectionParameter::__construct", rpConstructParam);
     try vm.native_fns.put(a, "ReflectionParameter::getName", rpGetName);
     try vm.native_fns.put(a, "ReflectionParameter::getType", rpGetType);
     try vm.native_fns.put(a, "ReflectionParameter::isDefaultValueAvailable", rpIsDefaultValueAvailable);
@@ -575,10 +577,13 @@ fn getThis(ctx: *NativeContext) ?*PhpObject {
 }
 
 fn throwReflection(ctx: *NativeContext, msg: []const u8) RuntimeError {
-    // ensure the message buffer is tracked for cleanup. callers typically pass
-    // an allocPrint'd slice that would otherwise leak past throwBuiltinException
-    ctx.strings.append(ctx.allocator, msg) catch {};
-    _ = ctx.vm.throwBuiltinException("ReflectionException", msg) catch {};
+    // dupe so we own a single tracked buffer. callers mix literal slices with
+    // allocPrint'd ones; appending the caller's slice directly would either
+    // leak (literal-track no-op + heap leak) or double-free (heap msg already
+    // tracked elsewhere)
+    const owned = ctx.allocator.dupe(u8, msg) catch msg;
+    ctx.strings.append(ctx.allocator, owned) catch {};
+    _ = ctx.vm.throwBuiltinException("ReflectionException", owned) catch {};
     return error.RuntimeError;
 }
 
@@ -2347,6 +2352,119 @@ fn rfIsStatic(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
 }
 
 // --- shared helpers ---
+
+/// populate fields on a ReflectionParameter `this` object from a function +
+/// param index. shared between buildParamArray (constructing the full set for
+/// getParameters) and the public ReflectionParameter::__construct
+fn populateRpFields(ctx: *NativeContext, obj: *PhpObject, func: *const ObjFunction, type_key: []const u8, i: usize) RuntimeError!void {
+    const effective_key = if (std.mem.startsWith(u8, type_key, "__closure_")) blk: {
+        const after_prefix = type_key["__closure_".len..];
+        if (std.mem.lastIndexOf(u8, after_prefix, "_")) |last_us| {
+            break :blk type_key[0 .. "__closure_".len + last_us];
+        }
+        break :blk type_key;
+    } else type_key;
+    const type_info = vm_mod.getTypeInfo(effective_key) orelse vm_mod.getTypeInfo(type_key);
+
+    const param_name = func.params[i];
+    const clean_name = if (param_name.len > 0 and param_name[0] == '$') param_name[1..] else param_name;
+    try obj.set(ctx.allocator, "name", .{ .string = clean_name });
+    try obj.set(ctx.allocator, "_position", .{ .int = @intCast(i) });
+
+    if (type_info) |ti| {
+        if (i < ti.param_types.len and ti.param_types[i].len > 0) {
+            const raw_type = ti.param_types[i];
+            if (raw_type[0] == '?') {
+                try obj.set(ctx.allocator, "_type_name", .{ .string = raw_type[1..] });
+                try obj.set(ctx.allocator, "_nullable", .{ .bool = true });
+            } else {
+                try obj.set(ctx.allocator, "_type_name", .{ .string = raw_type });
+                try obj.set(ctx.allocator, "_nullable", .{ .bool = false });
+            }
+        } else {
+            try obj.set(ctx.allocator, "_type_name", .{ .string = "" });
+            try obj.set(ctx.allocator, "_nullable", .{ .bool = false });
+        }
+    } else {
+        try obj.set(ctx.allocator, "_type_name", .{ .string = "" });
+        try obj.set(ctx.allocator, "_nullable", .{ .bool = false });
+    }
+
+    const is_variadic = func.is_variadic and i == func.arity - 1;
+    try obj.set(ctx.allocator, "_is_variadic", .{ .bool = is_variadic });
+
+    const has_default = !is_variadic and i >= func.required_params;
+    try obj.set(ctx.allocator, "_has_default", .{ .bool = has_default });
+    if (has_default and i < func.defaults.len) {
+        const raw = func.defaults[i];
+        try obj.set(ctx.allocator, "_default_value", try ctx.vm.resolveDefault(raw));
+        if (try decodeConstSentinel(ctx, raw)) |const_name| {
+            try obj.set(ctx.allocator, "_default_const_name", .{ .string = const_name });
+        }
+    }
+
+    const by_ref = if (i < func.ref_params.len) func.ref_params[i] else false;
+    try obj.set(ctx.allocator, "_by_reference", .{ .bool = by_ref });
+
+    if (std.mem.indexOf(u8, type_key, "::")) |sep| {
+        const decl_class = try ctx.allocator.dupe(u8, type_key[0..sep]);
+        try ctx.strings.append(ctx.allocator, decl_class);
+        try obj.set(ctx.allocator, "_declaring_class", .{ .string = decl_class });
+        const meth_name = try ctx.allocator.dupe(u8, type_key[sep + 2 ..]);
+        try ctx.strings.append(ctx.allocator, meth_name);
+        try obj.set(ctx.allocator, "_method_name", .{ .string = meth_name });
+    }
+}
+
+fn rpConstructParam(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len < 2) return throwReflection(ctx, "ReflectionParameter::__construct expects function and parameter");
+    const this = getThis(ctx) orelse return .null;
+
+    // accept "func_name" | ["Class", "method"] | [$obj, "method"] | Closure-ish
+    var key_buf: [256]u8 = undefined;
+    var lookup_key: []const u8 = "";
+    switch (args[0]) {
+        .string => |s| {
+            lookup_key = s;
+        },
+        .array => |arr| {
+            if (arr.entries.items.len < 2) return throwReflection(ctx, "ReflectionParameter callable must have [class, method]");
+            const cls_val = arr.entries.items[0].value;
+            const meth_val = arr.entries.items[1].value;
+            if (meth_val != .string) return throwReflection(ctx, "ReflectionParameter method name must be string");
+            const cls_name: []const u8 = switch (cls_val) {
+                .string => cls_val.string,
+                .object => cls_val.object.class_name,
+                else => return throwReflection(ctx, "ReflectionParameter class must be a string or object"),
+            };
+            lookup_key = std.fmt.bufPrint(&key_buf, "{s}::{s}", .{ cls_name, meth_val.string }) catch return throwReflection(ctx, "ReflectionParameter name too long");
+        },
+        else => return throwReflection(ctx, "ReflectionParameter expects a function name or [class, method]"),
+    }
+
+    const func = ctx.vm.functions.get(lookup_key) orelse return throwReflection(ctx, "ReflectionParameter could not find function");
+
+    var idx: ?usize = null;
+    switch (args[1]) {
+        .int => |n| if (n >= 0 and @as(usize, @intCast(n)) < func.params.len) {
+            idx = @intCast(n);
+        },
+        .string => |want| {
+            for (func.params, 0..) |p, i| {
+                const clean = if (p.len > 0 and p[0] == '$') p[1..] else p;
+                if (std.mem.eql(u8, clean, want)) {
+                    idx = i;
+                    break;
+                }
+            }
+        },
+        else => {},
+    }
+    if (idx == null) return throwReflection(ctx, "ReflectionParameter could not find parameter");
+
+    try populateRpFields(ctx, this, func, lookup_key, idx.?);
+    return .null;
+}
 
 fn buildParamArray(ctx: *NativeContext, func: *const ObjFunction, type_key: []const u8) RuntimeError!Value {
     const arr = try ctx.createArray();
