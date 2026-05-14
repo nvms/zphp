@@ -69,6 +69,14 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try stringable.methods.append(a, "__toString");
     try vm.interfaces.put(a, "Stringable", stringable);
 
+    // Serializable - deprecated marker interface still present for code that
+    // checks for it. PHP 8 implemented as a soft-marker that types implementing
+    // it via __serialize / __unserialize still satisfy
+    var serializable = vm_mod.InterfaceDef{ .name = "Serializable" };
+    try serializable.methods.append(a, "serialize");
+    try serializable.methods.append(a, "unserialize");
+    try vm.interfaces.put(a, "Serializable", serializable);
+
     // SplStack
     var stack_def = ClassDef{ .name = "SplStack", .parent = "SplDoublyLinkedList" };
     try stack_def.interfaces.append(a, "Countable");
