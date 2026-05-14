@@ -399,6 +399,17 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try rf_def.methods.put(a, "getAttributes", .{ .name = "getAttributes", .arity = 0 });
     try rf_def.methods.put(a, "invoke", .{ .name = "invoke", .arity = 0 });
     try rf_def.methods.put(a, "invokeArgs", .{ .name = "invokeArgs", .arity = 1 });
+    try rf_def.methods.put(a, "getFileName", .{ .name = "getFileName", .arity = 0 });
+    try rf_def.methods.put(a, "getStartLine", .{ .name = "getStartLine", .arity = 0 });
+    try rf_def.methods.put(a, "getEndLine", .{ .name = "getEndLine", .arity = 0 });
+    try rf_def.methods.put(a, "getDocComment", .{ .name = "getDocComment", .arity = 0 });
+    try rf_def.methods.put(a, "getNamespaceName", .{ .name = "getNamespaceName", .arity = 0 });
+    try rf_def.methods.put(a, "getShortName", .{ .name = "getShortName", .arity = 0 });
+    try rf_def.methods.put(a, "inNamespace", .{ .name = "inNamespace", .arity = 0 });
+    try rf_def.methods.put(a, "getExtension", .{ .name = "getExtension", .arity = 0 });
+    try rf_def.methods.put(a, "getExtensionName", .{ .name = "getExtensionName", .arity = 0 });
+    try rf_def.methods.put(a, "isDeprecated", .{ .name = "isDeprecated", .arity = 0 });
+    try rf_def.methods.put(a, "isDisabled", .{ .name = "isDisabled", .arity = 0 });
     try vm.classes.put(a, "ReflectionFunction", rf_def);
 
     try vm.native_fns.put(a, "ReflectionFunction::__construct", rfConstruct);
@@ -424,6 +435,17 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try vm.native_fns.put(a, "ReflectionFunction::getClosureCalledClass", rfGetClosureCalledClass);
     try vm.native_fns.put(a, "ReflectionFunction::invoke", rfInvoke);
     try vm.native_fns.put(a, "ReflectionFunction::invokeArgs", rfInvokeArgs);
+    try vm.native_fns.put(a, "ReflectionFunction::getFileName", reflectionFalse);
+    try vm.native_fns.put(a, "ReflectionFunction::getStartLine", reflectionFalse);
+    try vm.native_fns.put(a, "ReflectionFunction::getEndLine", reflectionFalse);
+    try vm.native_fns.put(a, "ReflectionFunction::getDocComment", reflectionFalse);
+    try vm.native_fns.put(a, "ReflectionFunction::getNamespaceName", rfGetNamespaceName);
+    try vm.native_fns.put(a, "ReflectionFunction::getShortName", rfGetShortName);
+    try vm.native_fns.put(a, "ReflectionFunction::inNamespace", rfInNamespace);
+    try vm.native_fns.put(a, "ReflectionFunction::getExtension", reflectionFalse);
+    try vm.native_fns.put(a, "ReflectionFunction::getExtensionName", reflectionFalse);
+    try vm.native_fns.put(a, "ReflectionFunction::isDeprecated", reflectionFalse);
+    try vm.native_fns.put(a, "ReflectionFunction::isDisabled", reflectionFalse);
 
     // ReflectionProperty
     var rprop_def = ClassDef{ .name = "ReflectionProperty" };
@@ -2422,6 +2444,31 @@ fn rfGetNumberOfRequiredParameters(ctx: *NativeContext, _: []const Value) Runtim
     const func_name = if (this.get("name") == .string) this.get("name").string else return .{ .int = 0 };
     const func = ctx.vm.functions.get(func_name) orelse return .{ .int = 0 };
     return .{ .int = func.required_params };
+}
+
+fn rfGetNamespaceName(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const this = getThis(ctx) orelse return .{ .string = "" };
+    const name_v = this.get("name");
+    if (name_v != .string) return .{ .string = "" };
+    const name = name_v.string;
+    const last_bs = std.mem.lastIndexOfScalar(u8, name, '\\') orelse return .{ .string = "" };
+    return .{ .string = name[0..last_bs] };
+}
+
+fn rfGetShortName(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const this = getThis(ctx) orelse return .{ .string = "" };
+    const name_v = this.get("name");
+    if (name_v != .string) return .{ .string = "" };
+    const name = name_v.string;
+    const last_bs = std.mem.lastIndexOfScalar(u8, name, '\\') orelse return .{ .string = name };
+    return .{ .string = name[last_bs + 1 ..] };
+}
+
+fn rfInNamespace(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const this = getThis(ctx) orelse return .{ .bool = false };
+    const name_v = this.get("name");
+    if (name_v != .string) return .{ .bool = false };
+    return .{ .bool = std.mem.indexOfScalar(u8, name_v.string, '\\') != null };
 }
 
 fn rfIsAnonymous(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
