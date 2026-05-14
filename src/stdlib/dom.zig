@@ -1598,6 +1598,19 @@ fn domNodeListGet(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     return .null;
 }
 
+// DOMNamedNodeMap iterates with the attribute name as key (PHP semantics)
+// rather than the numeric index used for NodeList
+fn domNNMGetIterator(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const obj = getThis(ctx) orelse return .null;
+    const named = obj.get("__named");
+    if (named != .array) return .null;
+    const iter_obj = try ctx.createObject("ArrayIterator");
+    try iter_obj.set(ctx.allocator, "__data", named);
+    try iter_obj.set(ctx.allocator, "__cursor", .{ .int = 0 });
+    try iter_obj.set(ctx.allocator, "__flags", .{ .int = 0 });
+    return .{ .object = iter_obj };
+}
+
 fn domNodeListGetIterator(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
     const obj = getThis(ctx) orelse return .null;
     const items = obj.get("__items");
@@ -1623,7 +1636,7 @@ fn registerNamedNodeMapClass(vm: *VM, a: Allocator) !void {
     try vm.native_fns.put(a, "DOMNamedNodeMap::getNamedItem", domNNMGetNamedItem);
     try vm.native_fns.put(a, "DOMNamedNodeMap::item", domNNMItem);
     try vm.native_fns.put(a, "DOMNamedNodeMap::count", domNNMCount);
-    try vm.native_fns.put(a, "DOMNamedNodeMap::getIterator", domNodeListGetIterator);
+    try vm.native_fns.put(a, "DOMNamedNodeMap::getIterator", domNNMGetIterator);
     try vm.native_fns.put(a, "DOMNamedNodeMap::__get", domNodeListGet);
 }
 
