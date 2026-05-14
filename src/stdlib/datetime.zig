@@ -219,12 +219,14 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try dp_def.methods.put(a, "getStartDate", .{ .name = "getStartDate", .arity = 0 });
     try dp_def.methods.put(a, "getEndDate", .{ .name = "getEndDate", .arity = 0 });
     try dp_def.methods.put(a, "getDateInterval", .{ .name = "getDateInterval", .arity = 0 });
+    try dp_def.methods.put(a, "getRecurrences", .{ .name = "getRecurrences", .arity = 0 });
     try dp_def.methods.put(a, "getIterator", .{ .name = "getIterator", .arity = 0 });
     try vm.classes.put(a, "DatePeriod", dp_def);
     try vm.native_fns.put(a, "DatePeriod::__construct", dpConstruct);
     try vm.native_fns.put(a, "DatePeriod::getStartDate", dpGetStart);
     try vm.native_fns.put(a, "DatePeriod::getEndDate", dpGetEnd);
     try vm.native_fns.put(a, "DatePeriod::getDateInterval", dpGetInterval);
+    try vm.native_fns.put(a, "DatePeriod::getRecurrences", dpGetRecurrences);
     try vm.native_fns.put(a, "DatePeriod::getIterator", dpGetIterator);
 
     var dpi_def = ClassDef{ .name = "DatePeriodIterator" };
@@ -270,6 +272,15 @@ fn dpGetEnd(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
 fn dpGetInterval(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
     const obj = getThis(ctx) orelse return .null;
     return obj.get("__interval");
+}
+
+fn dpGetRecurrences(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const obj = getThis(ctx) orelse return .null;
+    // explicitly stored recurrence count (third constructor arg was an int).
+    // when constructed with an end-DateTime instead, PHP returns null
+    const rec = obj.get("__recurrences");
+    if (rec == .int) return rec;
+    return .null;
 }
 
 fn dpGetIterator(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
