@@ -69,6 +69,20 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try vm.native_fns.put(a, "Phar::getMetadata", phGetMetadata);
     try vm.native_fns.put(a, "Phar::setMetadata", phSetMetadata);
     try vm.native_fns.put(a, "Phar::hasMetadata", phHasMetadata);
+
+    // stub classes so class_exists and instanceof work even without the full
+    // Phar feature surface behind them
+    var pd_def = ClassDef{ .name = "PharData" };
+    pd_def.parent = "Phar";
+    try vm.classes.put(a, "PharData", pd_def);
+
+    var pfi_def = ClassDef{ .name = "PharFileInfo" };
+    pfi_def.parent = "SplFileInfo";
+    try vm.classes.put(a, "PharFileInfo", pfi_def);
+
+    var pe_def = ClassDef{ .name = "PharException" };
+    pe_def.parent = "Exception";
+    try vm.classes.put(a, "PharException", pe_def);
 }
 
 fn getThis(ctx: *NativeContext) ?*PhpObject {
