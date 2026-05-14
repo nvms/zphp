@@ -528,9 +528,36 @@ pub fn compileCall(self: *Compiler, node: Ast.Node) Error!void {
                         try self.emitU16(prop_idx);
                     }
                 } else if (arg.tag == .array_access) {
-                    try self.compileNode(arg.data.lhs);
-                    try self.compileNode(arg.data.rhs);
-                    try self.emitOp(.isset_index);
+                    const lhs_node = self.ast.nodes[arg.data.lhs];
+                    if (lhs_node.tag == .property_access and !self.isDynamicProp(lhs_node)) {
+                        // for isset($obj->prop[key]), PHP first calls __isset('prop')
+                        // and short-circuits to false without calling __get when the
+                        // property isn't set. emit: obj, dup, isset_prop, branch on
+                        // false (drop the obj, push false), else get_prop and isset_index
+                        try self.compileNode(lhs_node.data.lhs);
+                        try self.emitOp(.dup);
+                        const prop_name = self.propName(lhs_node);
+                        const prop_idx = try self.addConstant(.{ .string = prop_name });
+                        try self.emitOp(.isset_prop);
+                        try self.emitU16(prop_idx);
+                        // stack: [obj, bool]
+                        const false_jump = try self.emitJump(.jump_if_false);
+                        try self.emitOp(.pop); // drop true bool → [obj]
+                        try self.emitOp(.get_prop);
+                        try self.emitU16(prop_idx);
+                        try self.compileNode(arg.data.rhs);
+                        try self.emitOp(.isset_index); // → [bool]
+                        const done_jump = try self.emitJump(.jump);
+                        self.patchJump(false_jump);
+                        // stack: [obj, false] — swap and drop obj to leave [false]
+                        try self.emitOp(.swap);
+                        try self.emitOp(.pop);
+                        self.patchJump(done_jump);
+                    } else {
+                        try self.compileNode(arg.data.lhs);
+                        try self.compileNode(arg.data.rhs);
+                        try self.emitOp(.isset_index);
+                    }
                 } else {
                     try self.compileNode(arg_idx);
                     try self.emitOp(.op_null);
