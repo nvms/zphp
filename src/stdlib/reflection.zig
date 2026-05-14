@@ -122,6 +122,7 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try rc_def.methods.put(a, "isUserDefined", .{ .name = "isUserDefined", .arity = 0 });
     try rc_def.methods.put(a, "getFileName", .{ .name = "getFileName", .arity = 0 });
     try rc_def.methods.put(a, "getStartLine", .{ .name = "getStartLine", .arity = 0 });
+    try rc_def.methods.put(a, "getEndLine", .{ .name = "getEndLine", .arity = 0 });
     try rc_def.methods.put(a, "getDefaultProperties", .{ .name = "getDefaultProperties", .arity = 0 });
     try rc_def.methods.put(a, "getStaticProperties", .{ .name = "getStaticProperties", .arity = 0 });
     try rc_def.methods.put(a, "getStaticPropertyValue", .{ .name = "getStaticPropertyValue", .arity = 2 });
@@ -172,6 +173,7 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try vm.native_fns.put(a, "ReflectionClass::isUserDefined", rcIsUserDefined);
     try vm.native_fns.put(a, "ReflectionClass::getFileName", rcGetFileName);
     try vm.native_fns.put(a, "ReflectionClass::getStartLine", rcGetStartLine);
+    try vm.native_fns.put(a, "ReflectionClass::getEndLine", rcGetEndLine);
     try vm.native_fns.put(a, "ReflectionClass::getDefaultProperties", rcGetDefaultProperties);
     try vm.native_fns.put(a, "ReflectionClass::getStaticProperties", rcGetStaticProperties);
     try vm.native_fns.put(a, "ReflectionClass::getStaticPropertyValue", rcGetStaticPropertyValue);
@@ -222,6 +224,15 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try rm_def.methods.put(a, "getModifiers", .{ .name = "getModifiers", .arity = 0 });
     try rm_def.methods.put(a, "getAttributes", .{ .name = "getAttributes", .arity = 0 });
     try rm_def.methods.put(a, "getClosure", .{ .name = "getClosure", .arity = 1 });
+    try rm_def.methods.put(a, "getFileName", .{ .name = "getFileName", .arity = 0 });
+    try rm_def.methods.put(a, "getStartLine", .{ .name = "getStartLine", .arity = 0 });
+    try rm_def.methods.put(a, "getEndLine", .{ .name = "getEndLine", .arity = 0 });
+    try rm_def.methods.put(a, "getNamespaceName", .{ .name = "getNamespaceName", .arity = 0 });
+    try rm_def.methods.put(a, "getShortName", .{ .name = "getShortName", .arity = 0 });
+    try rm_def.methods.put(a, "inNamespace", .{ .name = "inNamespace", .arity = 0 });
+    try rm_def.methods.put(a, "isInternal", .{ .name = "isInternal", .arity = 0 });
+    try rm_def.methods.put(a, "isUserDefined", .{ .name = "isUserDefined", .arity = 0 });
+    try rm_def.methods.put(a, "isDeprecated", .{ .name = "isDeprecated", .arity = 0 });
     try vm.classes.put(a, "ReflectionMethod", rm_def);
 
     try vm.native_fns.put(a, "ReflectionMethod::__construct", rmConstruct);
@@ -249,6 +260,15 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try vm.native_fns.put(a, "ReflectionMethod::getModifiers", rmGetModifiers);
     try vm.native_fns.put(a, "ReflectionMethod::getAttributes", rmGetAttributes);
     try vm.native_fns.put(a, "ReflectionMethod::getClosure", rmGetClosure);
+    try vm.native_fns.put(a, "ReflectionMethod::getFileName", rmGetFileName);
+    try vm.native_fns.put(a, "ReflectionMethod::getStartLine", rmGetStartLine);
+    try vm.native_fns.put(a, "ReflectionMethod::getEndLine", rmGetEndLine);
+    try vm.native_fns.put(a, "ReflectionMethod::getNamespaceName", reflectionEmptyString);
+    try vm.native_fns.put(a, "ReflectionMethod::getShortName", rmGetName);
+    try vm.native_fns.put(a, "ReflectionMethod::inNamespace", reflectionFalse);
+    try vm.native_fns.put(a, "ReflectionMethod::isInternal", rmIsInternal);
+    try vm.native_fns.put(a, "ReflectionMethod::isUserDefined", rmIsUserDefined);
+    try vm.native_fns.put(a, "ReflectionMethod::isDeprecated", reflectionFalse);
 
     // ReflectionParameter
     var rp_def = ClassDef{ .name = "ReflectionParameter" };
@@ -1832,12 +1852,28 @@ fn isInternalClassName(name: []const u8) bool {
     return false;
 }
 
-fn rcGetFileName(_: *NativeContext, _: []const Value) RuntimeError!Value {
-    return .{ .bool = false };
+fn rcGetFileName(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const this = getThis(ctx) orelse return .{ .bool = false };
+    const name = if (this.get("name") == .string) this.get("name").string else return .{ .bool = false };
+    const cls = ctx.vm.classes.get(name) orelse return .{ .bool = false };
+    if (cls.file_path.len == 0) return .{ .bool = false };
+    return .{ .string = cls.file_path };
 }
 
-fn rcGetStartLine(_: *NativeContext, _: []const Value) RuntimeError!Value {
-    return .{ .bool = false };
+fn rcGetStartLine(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const this = getThis(ctx) orelse return .{ .bool = false };
+    const name = if (this.get("name") == .string) this.get("name").string else return .{ .bool = false };
+    const cls = ctx.vm.classes.get(name) orelse return .{ .bool = false };
+    if (cls.start_line == 0) return .{ .bool = false };
+    return .{ .int = @intCast(cls.start_line) };
+}
+
+fn rcGetEndLine(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const this = getThis(ctx) orelse return .{ .bool = false };
+    const name = if (this.get("name") == .string) this.get("name").string else return .{ .bool = false };
+    const cls = ctx.vm.classes.get(name) orelse return .{ .bool = false };
+    if (cls.end_line == 0) return .{ .bool = false };
+    return .{ .int = @intCast(cls.end_line) };
 }
 
 fn rcGetDefaultProperties(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
@@ -1997,6 +2033,49 @@ fn rmConstruct(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
 fn rmGetName(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
     const this = getThis(ctx) orelse return .null;
     return this.get("name");
+}
+
+fn rmLookupFunc(ctx: *NativeContext) ?@TypeOf(ctx.vm.functions.get("").?) {
+    const this = getThis(ctx) orelse return null;
+    const method_name = if (this.get("name") == .string) this.get("name").string else return null;
+    const declaring = if (this.get("_declaring_class") == .string) this.get("_declaring_class").string else return null;
+    var buf: [256]u8 = undefined;
+    const key = std.fmt.bufPrint(&buf, "{s}::{s}", .{ declaring, method_name }) catch return null;
+    return ctx.vm.functions.get(key);
+}
+
+fn rmGetFileName(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const func = rmLookupFunc(ctx) orelse return .{ .bool = false };
+    if (func.file_path.len == 0) return .{ .bool = false };
+    return .{ .string = func.file_path };
+}
+
+fn rmGetStartLine(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const func = rmLookupFunc(ctx) orelse return .{ .bool = false };
+    if (func.start_line == 0) return .{ .bool = false };
+    return .{ .int = @intCast(func.start_line) };
+}
+
+fn rmGetEndLine(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const func = rmLookupFunc(ctx) orelse return .{ .bool = false };
+    if (func.end_line == 0) return .{ .bool = false };
+    return .{ .int = @intCast(func.end_line) };
+}
+
+fn rmIsInternal(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const this = getThis(ctx) orelse return .{ .bool = false };
+    const dc = if (this.get("_declaring_class") == .string) this.get("_declaring_class").string else return .{ .bool = false };
+    return .{ .bool = isInternalClassName(dc) };
+}
+
+fn rmIsUserDefined(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const this = getThis(ctx) orelse return .{ .bool = true };
+    const dc = if (this.get("_declaring_class") == .string) this.get("_declaring_class").string else return .{ .bool = true };
+    return .{ .bool = !isInternalClassName(dc) };
+}
+
+fn reflectionEmptyString(_: *NativeContext, _: []const Value) RuntimeError!Value {
+    return .{ .string = "" };
 }
 
 fn rmGetParameters(ctx: *NativeContext, _: []const Value) RuntimeError!Value {

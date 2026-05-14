@@ -1120,6 +1120,13 @@ pub const Compiler = struct {
         try self.emitByte(@intCast(val & 0xff));
     }
 
+    pub fn emitU32(self: *Compiler, val: u32) Error!void {
+        try self.emitByte(@intCast((val >> 24) & 0xff));
+        try self.emitByte(@intCast((val >> 16) & 0xff));
+        try self.emitByte(@intCast((val >> 8) & 0xff));
+        try self.emitByte(@intCast(val & 0xff));
+    }
+
     pub fn emitConstant(self: *Compiler, idx: u16) Error!void {
         try self.emitOp(.constant);
         try self.emitU16(idx);

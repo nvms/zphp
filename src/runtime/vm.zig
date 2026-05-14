@@ -231,6 +231,9 @@ pub const ClassDef = struct {
     properties: std.ArrayListUnmanaged(PropertyDef) = .{},
     static_props: std.StringHashMapUnmanaged(Value) = .{},
     static_prop_types: std.StringHashMapUnmanaged([]const u8) = .{},
+    file_path: []const u8 = "",
+    start_line: u32 = 0,
+    end_line: u32 = 0,
     parent: ?[]const u8 = null,
     interfaces: std.ArrayListUnmanaged([]const u8) = .{},
     is_enum: bool = false,
@@ -7317,12 +7320,17 @@ pub const VM = struct {
         const class_modifiers = self.readByte();
         const name_idx = self.readU16();
         const class_name = self.currentChunk().constants.items[name_idx].string;
+        const start_line = self.readU32();
+        const end_line = self.readU32();
         const method_count = self.readU16();
 
         var def = ClassDef{ .name = class_name };
         def.is_abstract = (class_modifiers & 1) != 0;
         def.is_final = (class_modifiers & 2) != 0;
         def.is_readonly = (class_modifiers & 4) != 0;
+        def.file_path = self.file_path;
+        def.start_line = start_line;
+        def.end_line = end_line;
 
         for (0..method_count) |_| {
             const mi = self.readMethodInfo();
@@ -10736,6 +10744,14 @@ pub const VM = struct {
         const hi: u16 = self.readByte();
         const lo: u16 = self.readByte();
         return (hi << 8) | lo;
+    }
+
+    fn readU32(self: *VM) u32 {
+        const b0: u32 = self.readByte();
+        const b1: u32 = self.readByte();
+        const b2: u32 = self.readByte();
+        const b3: u32 = self.readByte();
+        return (b0 << 24) | (b1 << 16) | (b2 << 8) | b3;
     }
 
     pub fn currentChunk(self: *const VM) *const Chunk {

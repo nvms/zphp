@@ -479,6 +479,23 @@ fn lineForOffset(self: *Compiler, off: u32) u32 {
     return line;
 }
 
+// scans forward from a token, balancing braces, to find the matching r_brace
+// for a class/trait/interface/enum body. returns the line of the closing brace
+fn endLineForBlockStartingAt(self: *Compiler, start_tok: u32) u32 {
+    var depth: i32 = 0;
+    var i: u32 = start_tok;
+    while (i < self.ast.tokens.len) : (i += 1) {
+        const tag: Token.Tag = self.ast.tokens[i].tag;
+        if (tag == .l_brace) {
+            depth += 1;
+        } else if (tag == .r_brace) {
+            depth -= 1;
+            if (depth == 0) return lineForToken(self, i);
+        }
+    }
+    return 0;
+}
+
 // last source offset recorded in a function's chunk approximates the closing
 // brace - the implicit return instruction sits there
 fn endLineForChunk(self: *Compiler, chunk: *const Chunk) u32 {
@@ -635,7 +652,7 @@ pub fn compileFunction(self: *Compiler, node: Ast.Node) Error!void {
         .slot_names = slot_names,
         .file_path = self.file_path,
         .start_line = lineForToken(self, name_tok),
-        .end_line = endLineForChunk(self, &sub.chunk),
+        .end_line = endLineForBlockStartingAt(self, node.main_token),
     });
 
     const param_types = try extractParamTypes(self, param_nodes);
@@ -833,7 +850,7 @@ pub fn compileClosure(self: *Compiler, node: Ast.Node) Error!void {
         .slot_names = slot_names,
         .file_path = self.file_path,
         .start_line = lineForToken(self, node.main_token),
-        .end_line = endLineForChunk(self, &sub.chunk),
+        .end_line = endLineForBlockStartingAt(self, node.main_token),
     };
 
     try self.functions.append(self.allocator, func);
@@ -1041,6 +1058,8 @@ pub fn compileClassDecl(self: *Compiler, node: Ast.Node) Error!void {
     try self.emitOp(.class_decl);
     try self.emitByte(class_modifiers);
     try self.emitU16(name_idx);
+    try self.emitU32(lineForToken(self, node.main_token));
+    try self.emitU32(endLineForBlockStartingAt(self, node.main_token));
     try self.emitU16(method_count);
 
     for (members) |member_idx| {
@@ -1517,6 +1536,8 @@ pub fn compileAnonymousClass(self: *Compiler, node: Ast.Node) Error!void {
     try self.emitOp(.class_decl);
     try self.emitByte(0); // anonymous classes have no class modifiers
     try self.emitU16(name_idx);
+    try self.emitU32(lineForToken(self, node.main_token));
+    try self.emitU32(endLineForBlockStartingAt(self, node.main_token));
     try self.emitU16(method_count);
 
     for (members) |member_idx| {
@@ -2340,7 +2361,7 @@ fn compileClassMethodBody(self: *Compiler, class_name: []const u8, member: Ast.N
         .slot_names = slot_names,
         .file_path = self.file_path,
         .start_line = lineForToken(self, member.main_token),
-        .end_line = endLineForChunk(self, &sub.chunk),
+        .end_line = endLineForBlockStartingAt(self, member.main_token),
     });
 
     const param_types = try extractParamTypes(self, param_nodes);
