@@ -1438,6 +1438,24 @@ fn fetchRow(ctx: *NativeContext, stmt: *sqlite.Stmt, mode: i64) !*PhpArray {
                 const name = std.mem.span(name_ptr);
                 try row.set(ctx.allocator, .{ .string = try ctx.createString(name) }, val);
             }
+        } else if (mode == 11) {
+            // FETCH_NAMED: same as FETCH_ASSOC, but duplicate column names
+            // collapse into an array of values rather than overwriting
+            if (sqlite.sqlite3_column_name(stmt, i)) |name_ptr| {
+                const name = std.mem.span(name_ptr);
+                const key = PhpArray.Key{ .string = try ctx.createString(name) };
+                const existing = row.get(key);
+                if (existing == .null) {
+                    try row.set(ctx.allocator, key, val);
+                } else if (existing == .array) {
+                    try existing.array.append(ctx.allocator, val);
+                } else {
+                    const sub = try ctx.createArray();
+                    try sub.append(ctx.allocator, existing);
+                    try sub.append(ctx.allocator, val);
+                    try row.set(ctx.allocator, key, .{ .array = sub });
+                }
+            }
         }
     }
     return row;
