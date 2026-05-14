@@ -1761,10 +1761,18 @@ pub const VM = struct {
                     } else {
                         var buf = std.ArrayListUnmanaged(u8){};
                         if (a == .object) {
-                            try buf.appendSlice(self.allocator, try self.objectToString(a.object));
+                            const s = self.objectToString(a.object) catch {
+                                if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
+                                return error.RuntimeError;
+                            };
+                            try buf.appendSlice(self.allocator, s);
                         } else try a.format(&buf, self.allocator);
                         if (b == .object) {
-                            try buf.appendSlice(self.allocator, try self.objectToString(b.object));
+                            const s = self.objectToString(b.object) catch {
+                                if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
+                                return error.RuntimeError;
+                            };
+                            try buf.appendSlice(self.allocator, s);
                         } else try b.format(&buf, self.allocator);
                         const owned = try buf.toOwnedSlice(self.allocator);
                         try self.strings.append(self.allocator, owned);
@@ -2178,7 +2186,10 @@ pub const VM = struct {
                 .echo => {
                     const v = self.pop();
                     if (v == .object) {
-                        const s = try self.objectToString(v.object);
+                        const s = self.objectToString(v.object) catch {
+                            if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
+                            return error.RuntimeError;
+                        };
                         try self.output.appendSlice(self.allocator, s);
                     } else {
                         try v.format(&self.output, self.allocator);
