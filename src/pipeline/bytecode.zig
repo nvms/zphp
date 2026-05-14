@@ -17,6 +17,11 @@ pub const OpCode = enum(u8) {
 
     add,
     subtract,
+    // PHP `++`/`--` aren't just `+ 1` / `- 1`: alphabetic strings increment
+    // ('a'++ -> 'b', 'z'++ -> 'aa') and non-numeric strings don't decrement
+    // ('b'-- stays 'b'). emitted in place of `add 1` / `subtract 1` for ++/--
+    inc_value,
+    dec_value,
     multiply,
     divide,
     modulo,
@@ -231,6 +236,7 @@ pub const OpCode = enum(u8) {
             // unary ops: pop 1, push 1
             .negate, .bit_not, .not, .cast_int, .cast_float, .cast_string,
             .cast_bool, .cast_array, .cast_object, .get_obj_class,
+            .inc_value, .dec_value,
             => 0,
             else => 0,
         };

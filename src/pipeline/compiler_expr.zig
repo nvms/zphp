@@ -308,8 +308,7 @@ pub fn compilePrefixOp(self: *Compiler, node: Ast.Node) Error!void {
             const prop_idx = try self.addConstant(.{ .string = self.propName(target) });
             try self.emitOp(.get_prop);
             try self.emitU16(prop_idx);
-            try self.emitConstant(try self.addConstant(.{ .int = 1 }));
-            try self.emitOp(if (op_tag == .plus_plus) .add else .subtract);
+            try self.emitOp(if (op_tag == .plus_plus) .inc_value else .dec_value);
             try self.emitOp(.set_prop);
             try self.emitU16(prop_idx);
             return;
@@ -324,28 +323,24 @@ pub fn compilePrefixOp(self: *Compiler, node: Ast.Node) Error!void {
             try self.emitOp(.get_static_prop);
             try self.emitU16(class_idx);
             try self.emitU16(sprop_idx);
-            try self.emitConstant(try self.addConstant(.{ .int = 1 }));
-            try self.emitOp(if (op_tag == .plus_plus) .add else .subtract);
+            try self.emitOp(if (op_tag == .plus_plus) .inc_value else .dec_value);
             try self.emitOp(.set_static_prop);
             try self.emitU16(class_idx);
             try self.emitU16(sprop_idx);
             return;
         }
         if (target.tag == .array_access) {
-            // ++$arr[k]: arr, key, arr, key, array_get, +1, array_set
             try self.compileNode(target.data.lhs);
             try self.compileNode(target.data.rhs);
             try self.compileNode(target.data.lhs);
             try self.compileNode(target.data.rhs);
             try self.emitOp(.array_get);
-            try self.emitConstant(try self.addConstant(.{ .int = 1 }));
-            try self.emitOp(if (op_tag == .plus_plus) .add else .subtract);
+            try self.emitOp(if (op_tag == .plus_plus) .inc_value else .dec_value);
             try self.emitOp(.array_set);
             return;
         }
         try self.compileNode(node.data.lhs);
-        try self.emitConstant(try self.addConstant(.{ .int = 1 }));
-        try self.emitOp(if (op_tag == .plus_plus) .add else .subtract);
+        try self.emitOp(if (op_tag == .plus_plus) .inc_value else .dec_value);
         if (target.tag == .variable) {
             const name = self.ast.tokenSlice(target.main_token);
             try self.emitSetVar(name);
@@ -389,8 +384,7 @@ pub fn compilePostfixOp(self: *Compiler, node: Ast.Node) Error!void {
         try self.compileNode(target.data.lhs);
         try self.emitOp(.get_prop);
         try self.emitU16(prop_idx);
-        try self.emitConstant(try self.addConstant(.{ .int = 1 }));
-        try self.emitOp(if (op_tag == .plus_plus) .add else .subtract);
+        try self.emitOp(if (op_tag == .plus_plus) .inc_value else .dec_value);
         try self.emitOp(.set_prop);
         try self.emitU16(prop_idx);
         try self.emitOp(.pop);
@@ -413,8 +407,7 @@ pub fn compilePostfixOp(self: *Compiler, node: Ast.Node) Error!void {
         try self.emitOp(.get_static_prop);
         try self.emitU16(class_idx);
         try self.emitU16(sprop_idx);
-        try self.emitConstant(try self.addConstant(.{ .int = 1 }));
-        try self.emitOp(if (op_tag == .plus_plus) .add else .subtract);
+        try self.emitOp(if (op_tag == .plus_plus) .inc_value else .dec_value);
         try self.emitOp(.set_static_prop);
         try self.emitU16(class_idx);
         try self.emitU16(sprop_idx);
@@ -431,8 +424,7 @@ pub fn compilePostfixOp(self: *Compiler, node: Ast.Node) Error!void {
 
     try self.compileNode(node.data.lhs);
     try self.compileNode(node.data.lhs);
-    try self.emitConstant(try self.addConstant(.{ .int = 1 }));
-    try self.emitOp(if (op_tag == .plus_plus) .add else .subtract);
+    try self.emitOp(if (op_tag == .plus_plus) .inc_value else .dec_value);
 
     if (target.tag == .variable) {
         const name = self.ast.tokenSlice(target.main_token);

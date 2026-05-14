@@ -637,6 +637,14 @@ pub const Value = union(enum) {
                 .lt => -1, .eq => 0, .gt => 1,
             };
         }
+        // PHP: null vs string compares as "" vs string, so `null < 'abc'` is
+        // true and `null == ''` is true
+        if (a == .null and b == .string) {
+            return switch (std.mem.order(u8, "", b.string)) { .lt => -1, .eq => 0, .gt => 1 };
+        }
+        if (a == .string and b == .null) {
+            return switch (std.mem.order(u8, a.string, "")) { .lt => -1, .eq => 0, .gt => 1 };
+        }
         const af = toFloat(a);
         const bf = toFloat(b);
         if (af < bf) return -1;
@@ -905,6 +913,94 @@ pub const Value = union(enum) {
         const r = @subWithOverflow(a, @as(i64, 1));
         if (r[1] == 0) return .{ .int = r[0] };
         return .{ .float = @as(f64, @floatFromInt(a)) - 1.0 };
+    }
+
+    /// PHP `++` semantics. For non-numeric strings, applies Perl-style
+    /// alphabetic increment (a->b, z->aa, AZ->BA, Zz->AAa, ''->'1'). Numeric
+    /// strings increment numerically. null becomes 1. bool/array/object are
+    /// returned unchanged (matches PHP's no-op + deprecation notice path).
+    pub fn phpInc(a: Value, allocator: std.mem.Allocator) !Value {
+        switch (a) {
+            .int => |i| return intInc(i),
+            .float => |f| return .{ .float = f + 1.0 },
+            .null => return .{ .int = 1 },
+            .string => |s| {
+                if (s.len == 0) return .{ .string = "1" };
+                if (isNumericString(s)) {
+                    if (isNumericIntString(s)) {
+                        const parsed = std.fmt.parseInt(i64, s, 10) catch {
+                            const f = std.fmt.parseFloat(f64, s) catch 0.0;
+                            return .{ .float = f + 1.0 };
+                        };
+                        return intInc(parsed);
+                    }
+                    const f = std.fmt.parseFloat(f64, s) catch 0.0;
+                    return .{ .float = f + 1.0 };
+                }
+                return .{ .string = try incrementAlphaString(allocator, s) };
+            },
+            else => return a,
+        }
+    }
+
+    /// PHP `--` semantics. Non-numeric strings and null are returned unchanged
+    /// (PHP 8.3+ emits a deprecation notice but keeps the value).
+    pub fn phpDec(a: Value) Value {
+        switch (a) {
+            .int => |i| return intDec(i),
+            .float => |f| return .{ .float = f - 1.0 },
+            .null => return .null,
+            .string => |s| {
+                if (s.len == 0) return a;
+                if (isNumericString(s)) {
+                    if (isNumericIntString(s)) {
+                        const parsed = std.fmt.parseInt(i64, s, 10) catch {
+                            const f = std.fmt.parseFloat(f64, s) catch 0.0;
+                            return .{ .float = f - 1.0 };
+                        };
+                        return intDec(parsed);
+                    }
+                    const f = std.fmt.parseFloat(f64, s) catch 0.0;
+                    return .{ .float = f - 1.0 };
+                }
+                return a;
+            },
+            else => return a,
+        }
+    }
+
+    fn incrementAlphaString(allocator: std.mem.Allocator, s: []const u8) ![]const u8 {
+        var buf = try allocator.alloc(u8, s.len);
+        @memcpy(buf, s);
+        var i: usize = s.len;
+        var carry = true;
+        while (carry and i > 0) {
+            i -= 1;
+            const c = buf[i];
+            if (c >= 'a' and c <= 'z') {
+                if (c == 'z') { buf[i] = 'a'; } else { buf[i] = c + 1; carry = false; }
+            } else if (c >= 'A' and c <= 'Z') {
+                if (c == 'Z') { buf[i] = 'A'; } else { buf[i] = c + 1; carry = false; }
+            } else if (c >= '0' and c <= '9') {
+                if (c == '9') { buf[i] = '0'; } else { buf[i] = c + 1; carry = false; }
+            } else {
+                // non-alnum stops the carry without modification (PHP returns
+                // the original string)
+                carry = false;
+            }
+        }
+        if (carry) {
+            const first = s[0];
+            const prefix: u8 = if (first >= 'a' and first <= 'z') 'a'
+                else if (first >= 'A' and first <= 'Z') 'A'
+                else '1';
+            const grown = try allocator.alloc(u8, s.len + 1);
+            grown[0] = prefix;
+            @memcpy(grown[1..], buf);
+            allocator.free(buf);
+            return grown;
+        }
+        return buf;
     }
 
     const BinOp = enum { add, sub, mul };

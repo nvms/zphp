@@ -1696,6 +1696,22 @@ pub const VM = struct {
                     const a = self.pop();
                     self.push(Value.multiply(a, b));
                 },
+                .inc_value => {
+                    const v = self.pop();
+                    const incremented = try Value.phpInc(v, self.allocator);
+                    // phpInc allocates a new buffer only for the alpha-increment
+                    // path (existing non-empty non-numeric string). track those
+                    // for cleanup; other paths return scalars or string literals
+                    if (incremented == .string and v == .string and v.string.len > 0
+                        and !Value.isNumericString(v.string)) {
+                        try self.strings.append(self.allocator, @constCast(incremented.string));
+                    }
+                    self.push(incremented);
+                },
+                .dec_value => {
+                    const v = self.pop();
+                    self.push(Value.phpDec(v));
+                },
                 .divide => {
                     const b = self.pop();
                     const a = self.pop();
@@ -2582,8 +2598,17 @@ pub const VM = struct {
                     if (aei_arr == .array) {
                         const ak = Value.toArrayKey(aei_key);
                         const old = aei_arr.array.get(ak);
-                        const old_int = if (old == .int) old.int else if (old == .float) @as(i64, @intFromFloat(old.float)) else 0;
-                        const new_val: Value = if (op == .array_elem_inc) .{ .int = old_int + 1 } else .{ .int = old_int - 1 };
+                        const new_val: Value = blk: {
+                            if (op == .array_elem_inc) {
+                                const v = try Value.phpInc(old, self.allocator);
+                                if (v == .string and old == .string and old.string.len > 0
+                                    and !Value.isNumericString(old.string)) {
+                                    try self.strings.append(self.allocator, @constCast(v.string));
+                                }
+                                break :blk v;
+                            }
+                            break :blk Value.phpDec(old);
+                        };
                         try aei_arr.array.set(self.allocator, ak, new_val);
                         if (self.globals_array) |ga| {
                             if (aei_arr.array == ga and ak == .string) {
@@ -3060,7 +3085,18 @@ pub const VM = struct {
                     const frame_il = self.currentFrame();
                     if (slot < frame_il.locals.len) {
                         const v = frame_il.locals[slot];
-                        frame_il.locals[slot] = if (v == .int) Value.intInc(v.int) else if (v == .float) .{ .float = v.float + 1.0 } else Value.add(v, .{ .int = 1 });
+                        if (v == .int) {
+                            frame_il.locals[slot] = Value.intInc(v.int);
+                        } else if (v == .float) {
+                            frame_il.locals[slot] = .{ .float = v.float + 1.0 };
+                        } else {
+                            const incremented = try Value.phpInc(v, self.allocator);
+                            if (incremented == .string and v == .string and v.string.len > 0
+                                and !Value.isNumericString(v.string)) {
+                                try self.strings.append(self.allocator, @constCast(incremented.string));
+                            }
+                            frame_il.locals[slot] = incremented;
+                        }
                     }
                 },
                 .dec_local => {
@@ -3068,7 +3104,7 @@ pub const VM = struct {
                     const frame_dl = self.currentFrame();
                     if (slot < frame_dl.locals.len) {
                         const v = frame_dl.locals[slot];
-                        frame_dl.locals[slot] = if (v == .int) Value.intDec(v.int) else if (v == .float) .{ .float = v.float - 1.0 } else Value.subtract(v, .{ .int = 1 });
+                        frame_dl.locals[slot] = if (v == .int) Value.intDec(v.int) else if (v == .float) .{ .float = v.float - 1.0 } else Value.phpDec(v);
                     }
                 },
                 .add_local_to_local => {
