@@ -1546,16 +1546,40 @@ fn registerNodeListClass(vm: *VM, a: Allocator) !void {
     var def = ClassDef{ .name = "DOMNodeList" };
     try def.interfaces.append(a, "Countable");
     try def.interfaces.append(a, "IteratorAggregate");
+    try def.interfaces.append(a, "ArrayAccess");
     try def.methods.put(a, "item", .{ .name = "item", .arity = 1 });
     try def.methods.put(a, "count", .{ .name = "count", .arity = 0 });
     try def.methods.put(a, "getIterator", .{ .name = "getIterator", .arity = 0 });
     try def.methods.put(a, "__get", .{ .name = "__get", .arity = 1 });
+    try def.methods.put(a, "offsetExists", .{ .name = "offsetExists", .arity = 1 });
+    try def.methods.put(a, "offsetGet", .{ .name = "offsetGet", .arity = 1 });
+    try def.methods.put(a, "offsetSet", .{ .name = "offsetSet", .arity = 2 });
+    try def.methods.put(a, "offsetUnset", .{ .name = "offsetUnset", .arity = 1 });
     try vm.classes.put(a, "DOMNodeList", def);
 
     try vm.native_fns.put(a, "DOMNodeList::item", domNodeListItem);
     try vm.native_fns.put(a, "DOMNodeList::count", domNodeListCount);
     try vm.native_fns.put(a, "DOMNodeList::getIterator", domNodeListGetIterator);
     try vm.native_fns.put(a, "DOMNodeList::__get", domNodeListGet);
+    try vm.native_fns.put(a, "DOMNodeList::offsetExists", domNodeListOffsetExists);
+    try vm.native_fns.put(a, "DOMNodeList::offsetGet", domNodeListItem);
+    try vm.native_fns.put(a, "DOMNodeList::offsetSet", domNodeListReadOnly);
+    try vm.native_fns.put(a, "DOMNodeList::offsetUnset", domNodeListReadOnly);
+}
+
+fn domNodeListOffsetExists(_: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len < 1) return .{ .bool = false };
+    const obj = getThisGlobal() orelse return .{ .bool = false };
+    const arr = nlItems(obj) orelse return .{ .bool = false };
+    const idx = Value.toInt(args[0]);
+    return .{ .bool = idx >= 0 and idx < @as(i64, @intCast(arr.entries.items.len)) };
+}
+
+fn domNodeListReadOnly(_: *NativeContext, _: []const Value) RuntimeError!Value {
+    // PHP's DOMNodeList ArrayAccess is read-only; offsetSet/offsetUnset are
+    // no-ops in practice (they throw on some builds but the result is the
+    // same: the list isn't mutated). matching that is enough for compat
+    return .null;
 }
 
 fn domNodeListGet(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
