@@ -4999,6 +4999,17 @@ pub const VM = struct {
 
                     if (obj_val == .string and std.mem.startsWith(u8, obj_val.string, "__closure_")) {
                         const closure_name = obj_val.string;
+                        // __invoke(...args) on a closure is equivalent to
+                        // calling the closure directly. preserves the closure's
+                        // existing $this/scope binding
+                        if (std.mem.eql(u8, method_name, "__invoke")) {
+                            var call_args: [16]Value = undefined;
+                            for (0..ac) |i| call_args[i] = self.stack[self.sp - ac + i];
+                            self.sp -= ac + 1;
+                            const result = try self.callByName(closure_name, call_args[0..ac]);
+                            self.push(result);
+                            continue;
+                        }
                         if (std.mem.eql(u8, method_name, "bindTo")) {
                             const new_this = if (ac >= 1) self.stack[self.sp - ac] else Value.null;
                             const bt_scope: ClosureScope = blk: {
