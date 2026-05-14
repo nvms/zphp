@@ -15,6 +15,19 @@ const Allocator = std.mem.Allocator;
 const RuntimeError = error{ RuntimeError, OutOfMemory };
 
 pub fn register(vm: *VM, a: Allocator) !void {
+    // PHP 8.3+ Random\Engine and Random\CryptoSafeEngine interfaces.
+    // engines implement Engine; the Secure engine additionally implements
+    // CryptoSafeEngine. registering the interface objects so userland code
+    // can check `instanceof Random\Engine`
+    var engine_iface = vm_mod.InterfaceDef{ .name = "Random\\Engine" };
+    try engine_iface.methods.append(a, "generate");
+    try vm.interfaces.put(a, "Random\\Engine", engine_iface);
+
+    var crypto_engine_iface = vm_mod.InterfaceDef{ .name = "Random\\CryptoSafeEngine" };
+    try crypto_engine_iface.parents.append(a, "Random\\Engine");
+    try crypto_engine_iface.methods.append(a, "generate");
+    try vm.interfaces.put(a, "Random\\CryptoSafeEngine", crypto_engine_iface);
+
     var rndmizer = ClassDef{ .name = "Random\\Randomizer" };
     try rndmizer.methods.put(a, "__construct", .{ .name = "__construct", .arity = 1 });
     try rndmizer.methods.put(a, "getBytes", .{ .name = "getBytes", .arity = 1 });
@@ -38,6 +51,7 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try vm.native_fns.put(a, "Random\\Randomizer::pickArrayKeys", rzPickArrayKeys);
 
     var mt = ClassDef{ .name = "Random\\Engine\\Mt19937" };
+    try mt.interfaces.append(a, "Random\\Engine");
     try mt.methods.put(a, "__construct", .{ .name = "__construct", .arity = 2 });
     try mt.methods.put(a, "generate", .{ .name = "generate", .arity = 0 });
     try vm.classes.put(a, "Random\\Engine\\Mt19937", mt);
@@ -45,6 +59,7 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try vm.native_fns.put(a, "Random\\Engine\\Mt19937::generate", mtGenerate);
 
     var pcg = ClassDef{ .name = "Random\\Engine\\PcgOneseq128XslRr64" };
+    try pcg.interfaces.append(a, "Random\\Engine");
     try pcg.methods.put(a, "__construct", .{ .name = "__construct", .arity = 1 });
     try pcg.methods.put(a, "generate", .{ .name = "generate", .arity = 0 });
     try vm.classes.put(a, "Random\\Engine\\PcgOneseq128XslRr64", pcg);
@@ -52,6 +67,7 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try vm.native_fns.put(a, "Random\\Engine\\PcgOneseq128XslRr64::generate", pcgGenerate);
 
     var xosh = ClassDef{ .name = "Random\\Engine\\Xoshiro256StarStar" };
+    try xosh.interfaces.append(a, "Random\\Engine");
     try xosh.methods.put(a, "__construct", .{ .name = "__construct", .arity = 1 });
     try xosh.methods.put(a, "generate", .{ .name = "generate", .arity = 0 });
     try vm.classes.put(a, "Random\\Engine\\Xoshiro256StarStar", xosh);
@@ -59,6 +75,8 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try vm.native_fns.put(a, "Random\\Engine\\Xoshiro256StarStar::generate", xoshGenerate);
 
     var secure = ClassDef{ .name = "Random\\Engine\\Secure" };
+    try secure.interfaces.append(a, "Random\\CryptoSafeEngine");
+    try secure.interfaces.append(a, "Random\\Engine");
     try secure.methods.put(a, "__construct", .{ .name = "__construct", .arity = 0 });
     try secure.methods.put(a, "generate", .{ .name = "generate", .arity = 0 });
     try vm.classes.put(a, "Random\\Engine\\Secure", secure);
