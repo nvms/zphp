@@ -1307,6 +1307,15 @@ fn native_fclose(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
         obj.set(ctx.allocator, "__open", .{ .bool = false }) catch {};
         return .{ .bool = true };
     }
+    // closing a proc_open stdin pipe signals EOF to the deferred child -
+    // trigger the run so subsequent reads on stdout/stderr see the output
+    const proc_ref = obj.get("__proc_ref");
+    const proc_role = obj.get("__proc_role");
+    if (proc_ref == .object and proc_role == .int and proc_role.int == 0) {
+        try ensureProcRan(ctx, proc_ref.object);
+        obj.set(ctx.allocator, "__open", .{ .bool = false }) catch {};
+        return .{ .bool = true };
+    }
     const popen_cmd = obj.get("__popen_cmd");
     if (popen_cmd == .string) {
         const buf_v_p = obj.get("__buffer");
@@ -1378,6 +1387,22 @@ fn native_fread(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
         if (result == .string) return result;
         return .{ .string = "" };
     }
+    // proc_open stdout/stderr: drive the deferred process and read from its buffer
+    const proc_ref = obj.get("__proc_ref");
+    const proc_role = obj.get("__proc_role");
+    if (proc_ref == .object and proc_role == .int and (proc_role.int == 1 or proc_role.int == 2)) {
+        try ensureProcRan(ctx, proc_ref.object);
+        const key: []const u8 = if (proc_role.int == 1) "__stdout_buf" else "__stderr_buf";
+        const buf_v = proc_ref.object.get(key);
+        const buf: []const u8 = if (buf_v == .string) buf_v.string else "";
+        const pos = getBufferPos(obj);
+        if (pos >= buf.len) return .{ .string = "" };
+        const end = @min(pos + length, buf.len);
+        const slice = try ctx.allocator.dupe(u8, buf[pos..end]);
+        try ctx.strings.append(ctx.allocator, slice);
+        setBufferPos(obj, end);
+        return .{ .string = slice };
+    }
     if (getBufferBacking(obj)) |buffer| {
         const pos = getBufferPos(obj);
         if (pos >= buffer.len) return .{ .string = "" };
@@ -1440,6 +1465,20 @@ fn native_fwrite(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
         @memcpy(combined[cur_str.len..], data);
         try ctx.strings.append(ctx.allocator, combined);
         try obj.set(ctx.allocator, "__buffer", .{ .string = combined });
+        return .{ .int = @intCast(data.len) };
+    }
+    // proc_open stdin pipe: buffer onto the linked proc's __stdin_buf
+    const proc_ref = obj.get("__proc_ref");
+    const proc_role = obj.get("__proc_role");
+    if (proc_ref == .object and proc_role == .int and proc_role.int == 0) {
+        const proc = proc_ref.object;
+        const cur = proc.get("__stdin_buf");
+        const cur_str: []const u8 = if (cur == .string) cur.string else "";
+        const combined = try ctx.allocator.alloc(u8, cur_str.len + data.len);
+        @memcpy(combined[0..cur_str.len], cur_str);
+        @memcpy(combined[cur_str.len..], data);
+        try ctx.strings.append(ctx.allocator, combined);
+        try proc.set(ctx.allocator, "__stdin_buf", .{ .string = combined });
         return .{ .int = @intCast(data.len) };
     }
     const file = getFileHandle(obj) orelse return Value{ .bool = false };
@@ -2124,6 +2163,22 @@ fn stream_get_contents(ctx: *NativeContext, args: []const Value) RuntimeError!Va
     // offset: -1 (default) means start at current position; >=0 means seek
     const offset: i64 = if (args.len >= 3 and args[2] == .int) args[2].int else -1;
 
+    // proc_open stdout/stderr pipe: drive the deferred child then drain its buffer
+    const proc_ref = obj.get("__proc_ref");
+    const proc_role = obj.get("__proc_role");
+    if (proc_ref == .object and proc_role == .int and (proc_role.int == 1 or proc_role.int == 2)) {
+        try ensureProcRan(ctx, proc_ref.object);
+        const key: []const u8 = if (proc_role.int == 1) "__stdout_buf" else "__stderr_buf";
+        const buf_v = proc_ref.object.get(key);
+        const buf: []const u8 = if (buf_v == .string) buf_v.string else "";
+        if (offset >= 0) setBufferPos(obj, @intCast(offset));
+        const pos = getBufferPos(obj);
+        if (pos >= buf.len) return .{ .string = "" };
+        const remaining = buf[pos..];
+        const take = if (length >= 0) @min(@as(usize, @intCast(length)), remaining.len) else remaining.len;
+        setBufferPos(obj, pos + take);
+        return .{ .string = try ctx.createString(remaining[0..take]) };
+    }
     if (getBufferBacking(obj)) |buffer| {
         if (offset >= 0) setBufferPos(obj, @intCast(offset));
         const pos = getBufferPos(obj);
@@ -2565,11 +2620,39 @@ fn native_tempnam(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
 }
 
 
-fn runShellCapture(allocator: std.mem.Allocator, command: []const u8, stdin_data: ?[]const u8) !struct { stdout: []u8, stderr: []u8, exit: i64 } {
+const StdioBehavior = enum { capture, inherit };
+const ShellResult = struct { stdout: []u8, stderr: []u8, exit: i64 };
+
+fn runShellCapture(allocator: std.mem.Allocator, command: []const u8, stdin_data: ?[]const u8) !ShellResult {
+    return runShellWith(allocator, command, stdin_data, .capture, .capture);
+}
+
+// child process runner with per-stream behavior. capture pipes the stream and
+// returns it; inherit forwards to the parent's fds (matches popen('w') where
+// PHP's child writes straight to the terminal)
+// caller hook so callers with access to a VM can flush its output buffer
+// before spawning a child with inherited stdout/stderr. without flushing, any
+// preceding echo'd text lands AFTER the child's output because the child
+// writes directly to fd 1 while echo still sits in vm.output
+fn flushVmOutputForInheritedChild(vm: *@import("../runtime/vm.zig").VM, stdout_b: StdioBehavior, stderr_b: StdioBehavior) void {
+    if (stdout_b == .capture and stderr_b == .capture) return;
+    if (vm.output.items.len == 0) return;
+    const stdout = std.fs.File{ .handle = 1 };
+    _ = stdout.write(vm.output.items) catch {};
+    vm.output.clearRetainingCapacity();
+}
+
+fn runShellWith(
+    allocator: std.mem.Allocator,
+    command: []const u8,
+    stdin_data: ?[]const u8,
+    stdout_b: StdioBehavior,
+    stderr_b: StdioBehavior,
+) !ShellResult {
     var child = std.process.Child.init(&.{ "/bin/sh", "-c", command }, allocator);
     child.stdin_behavior = if (stdin_data != null) .Pipe else .Ignore;
-    child.stdout_behavior = .Pipe;
-    child.stderr_behavior = .Pipe;
+    child.stdout_behavior = if (stdout_b == .capture) .Pipe else .Inherit;
+    child.stderr_behavior = if (stderr_b == .capture) .Pipe else .Inherit;
     try child.spawn();
     if (stdin_data) |data| {
         if (child.stdin) |*stdin_file| {
@@ -2580,7 +2663,9 @@ fn runShellCapture(allocator: std.mem.Allocator, command: []const u8, stdin_data
     }
     var stdout_buf = std.ArrayListUnmanaged(u8){};
     var stderr_buf = std.ArrayListUnmanaged(u8){};
-    try child.collectOutput(allocator, &stdout_buf, &stderr_buf, 64 * 1024 * 1024);
+    if (stdout_b == .capture or stderr_b == .capture) {
+        try child.collectOutput(allocator, &stdout_buf, &stderr_buf, 64 * 1024 * 1024);
+    }
     const term = try child.wait();
     const stdout = try stdout_buf.toOwnedSlice(allocator);
     const stderr = try stderr_buf.toOwnedSlice(allocator);
@@ -2643,7 +2728,10 @@ fn native_pclose(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (cmd_v == .string) {
         const buf_v = obj.get("__buffer");
         const stdin_data: []const u8 = if (buf_v == .string) buf_v.string else "";
-        const result = runShellCapture(ctx.allocator, cmd_v.string, stdin_data) catch {
+        // popen('w') inherits the parent's stdout/stderr - children output goes
+        // straight to the terminal, matching PHP
+        flushVmOutputForInheritedChild(ctx.vm, .inherit, .inherit);
+        const result = runShellWith(ctx.allocator, cmd_v.string, stdin_data, .inherit, .inherit) catch {
             obj.set(ctx.allocator, "__open", .{ .bool = false }) catch {};
             return .{ .int = -1 };
         };
@@ -2661,9 +2749,24 @@ fn native_pclose(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
 fn native_proc_open(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len < 3 or args[0] != .string) return .{ .bool = false };
     const cmd = args[0].string;
-    const result = runShellCapture(ctx.allocator, cmd, null) catch return .{ .bool = false };
-    try ctx.vm.strings.append(ctx.allocator, result.stdout);
-    try ctx.vm.strings.append(ctx.allocator, result.stderr);
+
+    // deferred-run model: the child isn't spawned until either stdin is
+    // closed (signaling EOF) or a read happens on stdout/stderr. that lets
+    // the common pattern `proc_open -> fwrite(stdin) -> fclose(stdin) ->
+    // stream_get_contents(stdout)` work with a single synchronous run while
+    // still respecting the user's stdin bytes
+    const proc = try ctx.allocator.create(PhpObject);
+    proc.* = .{ .class_name = "ProcessResource" };
+    try ctx.vm.objects.append(ctx.allocator, proc);
+    const cmd_copy = try ctx.vm.allocator.dupe(u8, cmd);
+    try ctx.vm.strings.append(ctx.allocator, cmd_copy);
+    try proc.set(ctx.allocator, "__cmd", .{ .string = cmd_copy });
+    try proc.set(ctx.allocator, "__stdin_buf", .{ .string = "" });
+    try proc.set(ctx.allocator, "__stdout_buf", .{ .string = "" });
+    try proc.set(ctx.allocator, "__stderr_buf", .{ .string = "" });
+    try proc.set(ctx.allocator, "__ran", .{ .bool = false });
+    try proc.set(ctx.allocator, "__exit", .{ .int = 0 });
+    try proc.set(ctx.allocator, "__running", .{ .bool = true });
 
     const pipes = if (args[2] == .array) args[2].array else blk: {
         const a = try ctx.allocator.create(PhpArray);
@@ -2671,32 +2774,73 @@ fn native_proc_open(ctx: *NativeContext, args: []const Value) RuntimeError!Value
         try ctx.vm.arrays.append(ctx.allocator, a);
         break :blk a;
     };
-    // stdin (write-only no-op handle - process already ran)
     const stdin_obj = try ctx.allocator.create(PhpObject);
     stdin_obj.* = .{ .class_name = "FileHandle" };
     try ctx.vm.objects.append(ctx.allocator, stdin_obj);
-    try stdin_obj.set(ctx.allocator, "__buffer", .{ .string = "" });
-    try stdin_obj.set(ctx.allocator, "__pos", .{ .int = 0 });
     try stdin_obj.set(ctx.allocator, "__open", .{ .bool = true });
     try stdin_obj.set(ctx.allocator, "__mode", .{ .string = "w" });
+    try stdin_obj.set(ctx.allocator, "__proc_ref", .{ .object = proc });
+    try stdin_obj.set(ctx.allocator, "__proc_role", .{ .int = 0 });
     try pipes.set(ctx.allocator, .{ .int = 0 }, .{ .object = stdin_obj });
-    try pipes.set(ctx.allocator, .{ .int = 1 }, .{ .object = try makeReadBufferHandle(ctx, result.stdout) });
-    try pipes.set(ctx.allocator, .{ .int = 2 }, .{ .object = try makeReadBufferHandle(ctx, result.stderr) });
-    if (args[2] != .array) ctx.setCallerVar(2, args.len, .{ .array = pipes });
 
-    const proc = try ctx.allocator.create(PhpObject);
-    proc.* = .{ .class_name = "ProcessResource" };
-    try ctx.vm.objects.append(ctx.allocator, proc);
-    try proc.set(ctx.allocator, "__cmd", .{ .string = try ctx.vm.allocator.dupe(u8, cmd) });
-    try proc.set(ctx.allocator, "__exit", .{ .int = result.exit });
-    try proc.set(ctx.allocator, "__running", .{ .bool = false });
-    try ctx.vm.strings.append(ctx.allocator, proc.get("__cmd").string);
+    const stdout_obj = try ctx.allocator.create(PhpObject);
+    stdout_obj.* = .{ .class_name = "FileHandle" };
+    try ctx.vm.objects.append(ctx.allocator, stdout_obj);
+    try stdout_obj.set(ctx.allocator, "__open", .{ .bool = true });
+    try stdout_obj.set(ctx.allocator, "__mode", .{ .string = "r" });
+    try stdout_obj.set(ctx.allocator, "__pos", .{ .int = 0 });
+    try stdout_obj.set(ctx.allocator, "__proc_ref", .{ .object = proc });
+    try stdout_obj.set(ctx.allocator, "__proc_role", .{ .int = 1 });
+    try pipes.set(ctx.allocator, .{ .int = 1 }, .{ .object = stdout_obj });
+
+    const stderr_obj = try ctx.allocator.create(PhpObject);
+    stderr_obj.* = .{ .class_name = "FileHandle" };
+    try ctx.vm.objects.append(ctx.allocator, stderr_obj);
+    try stderr_obj.set(ctx.allocator, "__open", .{ .bool = true });
+    try stderr_obj.set(ctx.allocator, "__mode", .{ .string = "r" });
+    try stderr_obj.set(ctx.allocator, "__pos", .{ .int = 0 });
+    try stderr_obj.set(ctx.allocator, "__proc_ref", .{ .object = proc });
+    try stderr_obj.set(ctx.allocator, "__proc_role", .{ .int = 2 });
+    try pipes.set(ctx.allocator, .{ .int = 2 }, .{ .object = stderr_obj });
+
+    if (args[2] != .array) ctx.setCallerVar(2, args.len, .{ .array = pipes });
     return .{ .object = proc };
 }
 
-fn native_proc_close(_: *NativeContext, args: []const Value) RuntimeError!Value {
+// runs the deferred process if it hasn't run yet, feeding accumulated stdin
+// and capturing stdout/stderr onto the proc object
+fn ensureProcRan(ctx: *NativeContext, proc: *PhpObject) !void {
+    const ran = proc.get("__ran");
+    if (ran == .bool and ran.bool) return;
+    const cmd_v = proc.get("__cmd");
+    if (cmd_v != .string) return;
+    const sin = proc.get("__stdin_buf");
+    const stdin_data: []const u8 = if (sin == .string) sin.string else "";
+    const result = runShellCapture(ctx.allocator, cmd_v.string, stdin_data) catch {
+        try proc.set(ctx.allocator, "__ran", .{ .bool = true });
+        try proc.set(ctx.allocator, "__running", .{ .bool = false });
+        try proc.set(ctx.allocator, "__exit", .{ .int = -1 });
+        return;
+    };
+    const out_copy = try ctx.allocator.dupe(u8, result.stdout);
+    const err_copy = try ctx.allocator.dupe(u8, result.stderr);
+    ctx.allocator.free(result.stdout);
+    ctx.allocator.free(result.stderr);
+    try ctx.vm.strings.append(ctx.allocator, out_copy);
+    try ctx.vm.strings.append(ctx.allocator, err_copy);
+    try proc.set(ctx.allocator, "__stdout_buf", .{ .string = out_copy });
+    try proc.set(ctx.allocator, "__stderr_buf", .{ .string = err_copy });
+    try proc.set(ctx.allocator, "__exit", .{ .int = result.exit });
+    try proc.set(ctx.allocator, "__ran", .{ .bool = true });
+    try proc.set(ctx.allocator, "__running", .{ .bool = false });
+}
+
+fn native_proc_close(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len == 0 or args[0] != .object) return .{ .int = -1 };
     const obj = args[0].object;
+    // if proc_open's child never ran (no fclose stdin, no fread), drive it
+    // now so the exit code reflects an actual run
+    if (obj.get("__cmd") == .string) try ensureProcRan(ctx, obj);
     const exit = obj.get("__exit");
     if (exit == .int) return .{ .int = exit.int };
     return .{ .int = 0 };
