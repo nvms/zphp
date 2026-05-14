@@ -20,6 +20,18 @@ pub fn compileAssign(self: *Compiler, node: Ast.Node) Error!void {
     // (the Arr::except → Arr::forget chain run during Route::__construct
     // triggers the divergence). break_var_ref alone preserves today's
     // baseline. see roadmap item #1 for the next push
+    // gated: enabling make_var_ref emission below correctly implements
+    // PHP's `$b = &$a` aliasing in isolation, but during Laravel's route
+    // registration the cumulative effect causes $this->groupStack[last] to
+    // lose its 'prefix' key between Router::mergeWithLastGroup invocations.
+    // bisected to: somewhere inside RouteGroup::merge → Arr::except → forget,
+    // $old (which should be a callLocalsOnly clone of array_last result) gets
+    // mutated AND the mutation propagates to $groupStack[last]. callLocalsOnly
+    // calls copyValue, which calls cloneArrayInner, which deep-clones nested
+    // arrays. yet the source array gets mutated. either there's a clone path
+    // that returns the original pointer, or there's a fast_loop path that
+    // skips the copy. tracking down requires deeper instrumentation of the
+    // call site that produces merge's $old
     if (op_tag == .equal and (target.tag == .variable or target.tag == .identifier)) {
         const rhs_node = self.ast.nodes[node.data.rhs];
         if (rhs_node.tag == .ref_target) {

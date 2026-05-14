@@ -2952,21 +2952,6 @@ pub const VM = struct {
                     const src_idx = self.readU16();
                     const dst_name = self.currentChunk().constants.items[dst_idx].string;
                     const src_name = self.currentChunk().constants.items[src_idx].string;
-                    if (std.posix.getenv("ZPHP_DBG_REF") != null) {
-                        const sfe = std.fs.File{ .handle = 2 };
-                        const m = std.fmt.allocPrint(self.allocator, "[MVR] dst={s} src={s}\n", .{ dst_name, src_name }) catch return error.RuntimeError;
-                        _ = sfe.write(m) catch {};
-                        self.allocator.free(m);
-                        // print caller frames
-                        for (0..self.frame_count) |fi| {
-                            const f = &self.frames[self.frame_count - 1 - fi];
-                            const fn_n = if (f.func) |fn_| fn_.name else "<g>";
-                            const cls = f.called_class orelse "";
-                            const m2 = std.fmt.allocPrint(self.allocator, "    at {s}::{s}\n", .{ cls, fn_n }) catch continue;
-                            _ = sfe.write(m2) catch {};
-                            self.allocator.free(m2);
-                        }
-                    }
                     const frame = self.currentFrame();
                     var cell: *Value = undefined;
                     if (frame.ref_slots.get(src_name)) |existing| {
