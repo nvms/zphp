@@ -646,6 +646,34 @@ fn readProperty(ctx: *NativeContext, obj: *PhpObject, prop: []const u8) RuntimeE
     if (std.mem.eql(u8, prop, "nextSibling")) {
         return wrapNode(ctx, node.next, owner);
     }
+    if (std.mem.eql(u8, prop, "previousElementSibling")) {
+        var p = node.prev;
+        while (p != null and p.*.type != c.XML_ELEMENT_NODE) : (p = p.*.prev) {}
+        return wrapNode(ctx, p, owner);
+    }
+    if (std.mem.eql(u8, prop, "nextElementSibling")) {
+        var n = node.next;
+        while (n != null and n.*.type != c.XML_ELEMENT_NODE) : (n = n.*.next) {}
+        return wrapNode(ctx, n, owner);
+    }
+    if (std.mem.eql(u8, prop, "firstElementChild")) {
+        var k = node.children;
+        while (k != null and k.*.type != c.XML_ELEMENT_NODE) : (k = k.*.next) {}
+        return wrapNode(ctx, k, owner);
+    }
+    if (std.mem.eql(u8, prop, "lastElementChild")) {
+        var k = node.last;
+        while (k != null and k.*.type != c.XML_ELEMENT_NODE) : (k = k.*.prev) {}
+        return wrapNode(ctx, k, owner);
+    }
+    if (std.mem.eql(u8, prop, "childElementCount")) {
+        var k = node.children;
+        var count: i64 = 0;
+        while (k != null) : (k = k.*.next) {
+            if (k.*.type == c.XML_ELEMENT_NODE) count += 1;
+        }
+        return .{ .int = count };
+    }
     if (std.mem.eql(u8, prop, "childNodes")) {
         var list = std.ArrayList(*c.xmlNode){};
         defer list.deinit(ctx.allocator);
