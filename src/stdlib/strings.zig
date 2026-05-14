@@ -87,6 +87,8 @@ pub const entries = .{
     .{ "mb_strimwidth", native_mb_strimwidth },
     .{ "mb_strcut", native_mb_strcut },
     .{ "mb_str_pad", native_mb_str_pad },
+    .{ "mb_encoding_aliases", native_mb_encoding_aliases },
+    .{ "mb_list_encodings", native_mb_list_encodings },
     .{ "str_getcsv", native_str_getcsv },
     .{ "base64_encode", native_base64_encode },
     .{ "base64_decode", native_base64_decode },
@@ -3313,6 +3315,34 @@ fn native_mb_strcut(ctx: *NativeContext, args: []const Value) RuntimeError!Value
     }
     if (end <= ustart) return .{ .string = "" };
     return .{ .string = try ctx.createString(s[ustart..end]) };
+}
+
+fn native_mb_encoding_aliases(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len < 1 or args[0] != .string) return .{ .bool = false };
+    const enc = args[0].string;
+    var lower_buf: [32]u8 = undefined;
+    if (enc.len > lower_buf.len) return .{ .bool = false };
+    for (enc, 0..) |c, i| lower_buf[i] = std.ascii.toLower(c);
+    const e = lower_buf[0..enc.len];
+    const arr = try ctx.createArray();
+    // small known-alias table covering encodings zphp actually surfaces
+    if (std.mem.eql(u8, e, "utf-8") or std.mem.eql(u8, e, "utf8")) {
+        try arr.append(ctx.allocator, .{ .string = "utf8" });
+    } else if (std.mem.eql(u8, e, "ascii") or std.mem.eql(u8, e, "us-ascii")) {
+        try arr.append(ctx.allocator, .{ .string = "ANSI_X3.4-1968" });
+        try arr.append(ctx.allocator, .{ .string = "iso-ir-6" });
+    } else if (std.mem.eql(u8, e, "iso-8859-1") or std.mem.eql(u8, e, "latin1")) {
+        try arr.append(ctx.allocator, .{ .string = "ISO_8859-1" });
+        try arr.append(ctx.allocator, .{ .string = "latin1" });
+    }
+    return .{ .array = arr };
+}
+
+fn native_mb_list_encodings(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const arr = try ctx.createArray();
+    const list = [_][]const u8{ "UTF-8", "UTF-16", "UTF-16BE", "UTF-16LE", "UTF-32", "UTF-32BE", "UTF-32LE", "ASCII", "ISO-8859-1", "ISO-8859-15", "Windows-1252" };
+    for (list) |n| try arr.append(ctx.allocator, .{ .string = n });
+    return .{ .array = arr };
 }
 
 fn native_mb_str_pad(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
