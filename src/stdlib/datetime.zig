@@ -469,7 +469,17 @@ fn dtConstruct(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
             }
         } else {
             const result = parseRelativeTime(s, ts);
-            if (result == .int) ts = result.int;
+            if (result == .int) {
+                ts = result.int;
+            } else {
+                // parseRelativeTime returns bool(false) when it failed to
+                // recognize the format at all - PHP throws
+                // DateMalformedStringException here
+                const msg = try std.fmt.allocPrint(ctx.allocator, "Failed to parse time string ({s}) at position 0", .{s});
+                try ctx.strings.append(ctx.allocator, msg);
+                try ctx.vm.setPendingException("DateMalformedStringException", msg);
+                return error.RuntimeError;
+            }
         }
     }
 
@@ -1637,7 +1647,7 @@ fn dtzConstruct(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
         if (!valid) {
             const msg = try std.fmt.allocPrint(ctx.allocator, "DateTimeZone::__construct(): Unknown or bad timezone ({s})", .{name});
             try ctx.strings.append(ctx.allocator, msg);
-            try ctx.vm.setPendingException("Exception", msg);
+            try ctx.vm.setPendingException("DateInvalidTimeZoneException", msg);
             return error.RuntimeError;
         }
         try obj.set(ctx.allocator, "timezone", .{ .string = name });
