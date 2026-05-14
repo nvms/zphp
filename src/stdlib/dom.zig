@@ -150,6 +150,11 @@ fn domDocConstruct(ctx: *NativeContext, args: []const Value) RuntimeError!Value 
     try obj.set(ctx.allocator, "__owner", .{ .object = obj });
     try obj.set(ctx.allocator, "formatOutput", .{ .bool = false });
     try obj.set(ctx.allocator, "preserveWhiteSpace", .{ .bool = true });
+    try obj.set(ctx.allocator, "validateOnParse", .{ .bool = false });
+    try obj.set(ctx.allocator, "resolveExternals", .{ .bool = false });
+    try obj.set(ctx.allocator, "substituteEntities", .{ .bool = false });
+    try obj.set(ctx.allocator, "strictErrorChecking", .{ .bool = true });
+    try obj.set(ctx.allocator, "recover", .{ .bool = false });
     return .null;
 }
 
