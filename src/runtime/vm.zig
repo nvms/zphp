@@ -618,6 +618,34 @@ pub const VM = struct {
         try @import("../stdlib/gd.zig").register(vm, allocator);
         try @import("../stdlib/soap.zig").register(vm, allocator);
         try @import("../stdlib/mysqli.zig").register(vm, allocator);
+
+        // PHP 8.4 RoundingMode enum. registered as a unit (unbacked) enum to
+        // match PHP's exposed surface - the cases have a `name` property only,
+        // and the internal mapping from case -> mode int happens inside round()
+        var rm_def = ClassDef{ .name = "RoundingMode", .is_enum = true };
+        const rm_cases = [_][]const u8{
+            "HalfAwayFromZero",
+            "HalfTowardsZero",
+            "HalfEven",
+            "HalfOdd",
+            "TowardsZero",
+            "AwayFromZero",
+            "NegativeInfinity",
+            "PositiveInfinity",
+        };
+        for (rm_cases) |name| {
+            const case_obj = try allocator.create(PhpObject);
+            case_obj.* = .{ .class_name = "RoundingMode" };
+            try vm.objects.append(allocator, case_obj);
+            try case_obj.set(allocator, "name", .{ .string = name });
+            try rm_def.static_props.put(allocator, name, .{ .object = case_obj });
+            try rm_def.constant_names.put(allocator, name, {});
+            try rm_def.constant_order.append(allocator, name);
+            try rm_def.case_order.append(allocator, name);
+        }
+        try rm_def.interfaces.append(allocator, "UnitEnum");
+        try vm.classes.put(allocator, "RoundingMode", rm_def);
+        try vm.registerEnumMethods("RoundingMode", 0);
     }
 
     fn initConstants(c: *std.StringHashMapUnmanaged(Value), a: Allocator) !void {

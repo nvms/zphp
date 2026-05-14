@@ -119,7 +119,28 @@ fn native_round(_: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len == 0) return .{ .float = 0.0 };
     const v = Value.toFloat(args[0]);
     const precision: i64 = if (args.len >= 2) Value.toInt(args[1]) else 0;
-    const mode: i64 = if (args.len >= 3) Value.toInt(args[2]) else 1; // PHP_ROUND_HALF_UP=1
+    // PHP 8.4 accepts a RoundingMode enum case for the mode arg; map case
+    // name to the legacy PHP_ROUND_HALF_* integer codes
+    var mode: i64 = 1;
+    if (args.len >= 3) {
+        const m = args[2];
+        if (m == .object and std.mem.eql(u8, m.object.class_name, "RoundingMode")) {
+            const case_name = m.object.get("name");
+            if (case_name == .string) {
+                const n = case_name.string;
+                if (std.mem.eql(u8, n, "HalfAwayFromZero")) mode = 1
+                else if (std.mem.eql(u8, n, "HalfTowardsZero")) mode = 2
+                else if (std.mem.eql(u8, n, "HalfEven")) mode = 3
+                else if (std.mem.eql(u8, n, "HalfOdd")) mode = 4
+                else if (std.mem.eql(u8, n, "TowardsZero")) mode = 5
+                else if (std.mem.eql(u8, n, "AwayFromZero")) mode = 6
+                else if (std.mem.eql(u8, n, "NegativeInfinity")) mode = 7
+                else if (std.mem.eql(u8, n, "PositiveInfinity")) mode = 8;
+            }
+        } else {
+            mode = Value.toInt(m);
+        }
+    }
     const factor = std.math.pow(f64, 10.0, @floatFromInt(precision));
     const scaled = v * factor;
     const rounded = roundWithMode(scaled, mode);
