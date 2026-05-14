@@ -2919,7 +2919,26 @@ fn rpropIsStatic(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
     return .{ .bool = v == .bool and v.bool };
 }
 
-fn rpropIsPromoted(_: *NativeContext, _: []const Value) RuntimeError!Value {
+fn rpropIsPromoted(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    // a property is promoted iff it appears as a constructor parameter that
+    // had a visibility modifier (zphp tracks promotion on the constructor's
+    // params; detect it by matching the property name against the ctor's
+    // param list)
+    const this = getThis(ctx) orelse return .{ .bool = false };
+    const class_name = if (this.get("_declaring_class") == .string)
+        this.get("_declaring_class").string
+    else if (this.get("class") == .string)
+        this.get("class").string
+    else
+        return .{ .bool = false };
+    const prop_name_v = this.get("name");
+    if (prop_name_v != .string) return .{ .bool = false };
+    const prop_name = prop_name_v.string;
+
+    const cls = ctx.vm.classes.get(class_name) orelse return .{ .bool = false };
+    for (cls.properties.items) |prop| {
+        if (std.mem.eql(u8, prop.name, prop_name) and prop.is_promoted) return .{ .bool = true };
+    }
     return .{ .bool = false };
 }
 

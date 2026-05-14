@@ -1097,7 +1097,9 @@ pub fn compileClassDecl(self: *Compiler, node: Ast.Node) Error!void {
             const is_ro: u8 = if ((pnode.data.rhs & 16) != 0) 4 else 0;
             const set_promo = (pnode.data.rhs >> 5) & 3;
             const asymm_bits: u8 = if (set_promo > 0) (@as(u8, @intCast(set_promo - 1)) << 3) | 0x20 else 0;
-            try self.emitByte(@as(u8, @intCast(promotion - 1)) | is_ro | asymm_bits);
+            // bit 6: marks this property as constructor-promoted so reflection
+            // can answer isPromoted()
+            try self.emitByte(@as(u8, @intCast(promotion - 1)) | is_ro | asymm_bits | 0x40);
         }
     }
 
@@ -1509,7 +1511,9 @@ pub fn compileAnonymousClass(self: *Compiler, node: Ast.Node) Error!void {
             const is_ro: u8 = if ((pnode.data.rhs & 16) != 0) 4 else 0;
             const set_promo = (pnode.data.rhs >> 5) & 3;
             const asymm_bits: u8 = if (set_promo > 0) (@as(u8, @intCast(set_promo - 1)) << 3) | 0x20 else 0;
-            try self.emitByte(@as(u8, @intCast(promotion - 1)) | is_ro | asymm_bits);
+            // bit 6: marks this property as constructor-promoted so reflection
+            // can answer isPromoted()
+            try self.emitByte(@as(u8, @intCast(promotion - 1)) | is_ro | asymm_bits | 0x40);
         }
     }
 
