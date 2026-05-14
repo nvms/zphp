@@ -1716,17 +1716,20 @@ pub const VM = struct {
                     if (a == .array and b == .array) {
                         self.push(.{ .array = try self.arrayUnion(a.array, b.array) });
                     } else {
+                        if (try self.checkArithOperands(a, b, "+")) continue;
                         self.push(Value.add(a, b));
                     }
                 },
                 .subtract => {
                     const b = self.pop();
                     const a = self.pop();
+                    if (try self.checkArithOperands(a, b, "-")) continue;
                     self.push(Value.subtract(a, b));
                 },
                 .multiply => {
                     const b = self.pop();
                     const a = self.pop();
+                    if (try self.checkArithOperands(a, b, "*")) continue;
                     self.push(Value.multiply(a, b));
                 },
                 .inc_value => {
@@ -6813,6 +6816,41 @@ pub const VM = struct {
                 _ = self.dispatchPendingException(base_frame);
             }
         }
+    }
+
+    /// PHP 8 rejects non-numeric strings, arrays (except for +), and objects
+    /// without __toString as arithmetic operands with TypeError. returns true
+    /// when the throw was caught in-frame and the caller should `continue`
+    pub fn checkArithOperands(self: *VM, a: Value, b: Value, comptime op: []const u8) RuntimeError!bool {
+        if (isArithOperand(a) and isArithOperand(b)) return false;
+        const tn_a = arithTypeName(a);
+        const tn_b = arithTypeName(b);
+        const msg = try std.fmt.allocPrint(self.allocator, "Unsupported operand types: {s} " ++ op ++ " {s}", .{ tn_a, tn_b });
+        try self.strings.append(self.allocator, msg);
+        if (try self.throwBuiltinException("TypeError", msg)) return true;
+        return error.RuntimeError;
+    }
+
+    fn isArithOperand(v: Value) bool {
+        return switch (v) {
+            .int, .float, .bool, .null => true,
+            .string => |s| Value.isNumericString(s),
+            else => false,
+        };
+    }
+
+    fn arithTypeName(v: Value) []const u8 {
+        return switch (v) {
+            .int => "int",
+            .float => "float",
+            .bool => "bool",
+            .string => "string",
+            .array => "array",
+            .object => |obj| obj.class_name,
+            .null => "null",
+            .generator => "Generator",
+            .fiber => "Fiber",
+        };
     }
 
     pub fn throwBuiltinException(self: *VM, class_name: []const u8, message: []const u8) !bool {
