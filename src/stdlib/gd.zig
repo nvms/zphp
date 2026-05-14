@@ -530,9 +530,83 @@ fn imgGetSize(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     return .{ .array = arr };
 }
 
+// PHP IMAGETYPE_* constants -> mime/extension mappings
+fn imageTypeToMimeType(_: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len == 0) return .{ .string = "application/octet-stream" };
+    const t = Value.toInt(args[0]);
+    return .{ .string = switch (t) {
+        1 => "image/gif",
+        2 => "image/jpeg",
+        3 => "image/png",
+        4 => "application/x-shockwave-flash",
+        5 => "image/psd",
+        6 => "image/bmp",
+        7, 8 => "image/tiff",
+        9 => "application/octet-stream", // JPC
+        10 => "image/jp2",
+        11, 12 => "application/octet-stream",
+        13 => "application/x-shockwave-flash",
+        14 => "image/iff",
+        15 => "image/vnd.wap.wbmp",
+        16 => "image/xbm",
+        17 => "image/x-icon",
+        18 => "image/webp",
+        19 => "image/avif",
+        else => "application/octet-stream",
+    } };
+}
+
+fn imageTypeToExtension(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len == 0) return .{ .bool = false };
+    const t = Value.toInt(args[0]);
+    const include_dot = args.len < 2 or args[1].isTruthy();
+    const ext: []const u8 = switch (t) {
+        1 => "gif",
+        2 => "jpeg",
+        3 => "png",
+        4 => "swf",
+        5 => "psd",
+        6 => "bmp",
+        7, 8 => "tiff",
+        14 => "iff",
+        15 => "wbmp",
+        16 => "xbm",
+        17 => "ico",
+        18 => "webp",
+        19 => "avif",
+        else => return .{ .bool = false },
+    };
+    if (!include_dot) return .{ .string = try ctx.createString(ext) };
+    const out = try std.fmt.allocPrint(ctx.allocator, ".{s}", .{ext});
+    try ctx.strings.append(ctx.allocator, out);
+    return .{ .string = out };
+}
+
+fn gdInfo(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const arr = try ctx.createArray();
+    try arr.set(ctx.allocator, .{ .string = "GD Version" }, .{ .string = "bundled (2.x compatible)" });
+    try arr.set(ctx.allocator, .{ .string = "FreeType Support" }, .{ .bool = false });
+    try arr.set(ctx.allocator, .{ .string = "GIF Read Support" }, .{ .bool = true });
+    try arr.set(ctx.allocator, .{ .string = "GIF Create Support" }, .{ .bool = true });
+    try arr.set(ctx.allocator, .{ .string = "JPEG Support" }, .{ .bool = true });
+    try arr.set(ctx.allocator, .{ .string = "PNG Support" }, .{ .bool = true });
+    try arr.set(ctx.allocator, .{ .string = "WBMP Support" }, .{ .bool = false });
+    try arr.set(ctx.allocator, .{ .string = "XPM Support" }, .{ .bool = false });
+    try arr.set(ctx.allocator, .{ .string = "XBM Support" }, .{ .bool = false });
+    try arr.set(ctx.allocator, .{ .string = "WebP Support" }, .{ .bool = false });
+    try arr.set(ctx.allocator, .{ .string = "BMP Support" }, .{ .bool = false });
+    try arr.set(ctx.allocator, .{ .string = "AVIF Support" }, .{ .bool = false });
+    try arr.set(ctx.allocator, .{ .string = "TGA Read Support" }, .{ .bool = false });
+    try arr.set(ctx.allocator, .{ .string = "JIS-mapped Japanese Font Support" }, .{ .bool = false });
+    return .{ .array = arr };
+}
+
 // ---------------- registration ----------------
 
 pub const entries = .{
+    .{ "image_type_to_mime_type", imageTypeToMimeType },
+    .{ "image_type_to_extension", imageTypeToExtension },
+    .{ "gd_info", gdInfo },
     .{ "imagecreate", imgCreate },
     .{ "imagecreatetruecolor", imgCreateTrueColor },
     .{ "imagedestroy", imgDestroy },
