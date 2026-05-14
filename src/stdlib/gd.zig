@@ -451,6 +451,82 @@ fn imgCopyResized(_: *NativeContext, args: []const Value) RuntimeError!Value {
     return .{ .bool = true };
 }
 
+fn imgScale(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    const src = argImg(args, 0) orelse return .{ .bool = false };
+    const new_w = argInt(args, 1) orelse return .{ .bool = false };
+    var new_h = argInt(args, 2) orelse -1;
+    if (new_h <= 0) {
+        // preserve aspect ratio when height is -1 or unspecified
+        const sw_f: f64 = @floatFromInt(src.sx);
+        const sh_f: f64 = @floatFromInt(src.sy);
+        const nw_f: f64 = @floatFromInt(new_w);
+        new_h = @intFromFloat(@round(nw_f * sh_f / sw_f));
+        if (new_h < 1) new_h = 1;
+    }
+    const dst = c.gdImageCreateTrueColor(@intCast(new_w), @intCast(new_h)) orelse return .{ .bool = false };
+    c.gdImageCopyResampled(dst, src, 0, 0, 0, 0, @intCast(new_w), @intCast(new_h), src.sx, src.sy);
+    return wrapImg(ctx, dst);
+}
+
+fn imgFilter(_: *NativeContext, args: []const Value) RuntimeError!Value {
+    const im = argImg(args, 0) orelse return .{ .bool = false };
+    const kind = argInt(args, 1) orelse return .{ .bool = false };
+    // PHP's IMG_FILTER_* constants:
+    // 0 NEGATE, 1 GRAYSCALE, 2 BRIGHTNESS, 3 CONTRAST, 4 COLORIZE,
+    // 5 EDGEDETECT, 6 EMBOSS, 7 GAUSSIAN_BLUR, 8 SELECTIVE_BLUR,
+    // 9 MEAN_REMOVAL, 10 SMOOTH, 11 PIXELATE, 12 SCATTER
+    const ok: c_int = switch (kind) {
+        0 => c.gdImageNegate(im),
+        1 => c.gdImageGrayScale(im),
+        2 => blk: {
+            const b = argInt(args, 2) orelse break :blk 0;
+            break :blk c.gdImageBrightness(im, @intCast(b));
+        },
+        3 => blk: {
+            const v_v = if (args.len > 2) args[2] else Value{ .int = 0 };
+            const v: f64 = if (v_v == .float) v_v.float else @floatFromInt(Value.toInt(v_v));
+            break :blk c.gdImageContrast(im, v);
+        },
+        4 => blk: {
+            const r = argInt(args, 2) orelse break :blk 0;
+            const g = argInt(args, 3) orelse break :blk 0;
+            const b = argInt(args, 4) orelse break :blk 0;
+            const a = argInt(args, 5) orelse 0;
+            break :blk c.gdImageColor(im, @intCast(r), @intCast(g), @intCast(b), @intCast(a));
+        },
+        5 => c.gdImageEdgeDetectQuick(im),
+        7 => c.gdImageGaussianBlur(im),
+        else => return .{ .bool = false },
+    };
+    return .{ .bool = ok != 0 or kind == 1 or kind == 0 or kind == 5 or kind == 7 };
+}
+
+fn imgCrop(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    const src = argImg(args, 0) orelse return .{ .bool = false };
+    if (args.len < 2 or args[1] != .array) return .{ .bool = false };
+    const rect = args[1].array;
+    const x = blk: {
+        const v = rect.get(.{ .string = "x" });
+        break :blk if (v == .int) v.int else 0;
+    };
+    const y = blk: {
+        const v = rect.get(.{ .string = "y" });
+        break :blk if (v == .int) v.int else 0;
+    };
+    const w = blk: {
+        const v = rect.get(.{ .string = "width" });
+        break :blk if (v == .int) v.int else 0;
+    };
+    const h = blk: {
+        const v = rect.get(.{ .string = "height" });
+        break :blk if (v == .int) v.int else 0;
+    };
+    if (w <= 0 or h <= 0) return .{ .bool = false };
+    const dst = c.gdImageCreateTrueColor(@intCast(w), @intCast(h)) orelse return .{ .bool = false };
+    c.gdImageCopy(dst, src, 0, 0, @intCast(x), @intCast(y), @intCast(w), @intCast(h));
+    return wrapImg(ctx, dst);
+}
+
 // ---------------- dimensions ----------------
 
 fn imgSx(_: *NativeContext, args: []const Value) RuntimeError!Value {
@@ -636,6 +712,9 @@ pub const entries = .{
     .{ "imagecopy", imgCopy },
     .{ "imagecopyresampled", imgCopyResampled },
     .{ "imagecopyresized", imgCopyResized },
+    .{ "imagescale", imgScale },
+    .{ "imagecrop", imgCrop },
+    .{ "imagefilter", imgFilter },
     .{ "imagesx", imgSx },
     .{ "imagesy", imgSy },
     .{ "imagealphablending", imgAlphaBlending },
@@ -659,6 +738,20 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try vm.php_constants.put(a, "IMG_COLOR_STYLED", .{ .int = -2 });
     try vm.php_constants.put(a, "IMG_COLOR_BRUSHED", .{ .int = -3 });
     try vm.php_constants.put(a, "IMG_COLOR_TRANSPARENT", .{ .int = -6 });
+    // imagefilter() kind selectors. values match PHP's GD extension
+    try vm.php_constants.put(a, "IMG_FILTER_NEGATE", .{ .int = 0 });
+    try vm.php_constants.put(a, "IMG_FILTER_GRAYSCALE", .{ .int = 1 });
+    try vm.php_constants.put(a, "IMG_FILTER_BRIGHTNESS", .{ .int = 2 });
+    try vm.php_constants.put(a, "IMG_FILTER_CONTRAST", .{ .int = 3 });
+    try vm.php_constants.put(a, "IMG_FILTER_COLORIZE", .{ .int = 4 });
+    try vm.php_constants.put(a, "IMG_FILTER_EDGEDETECT", .{ .int = 5 });
+    try vm.php_constants.put(a, "IMG_FILTER_EMBOSS", .{ .int = 6 });
+    try vm.php_constants.put(a, "IMG_FILTER_GAUSSIAN_BLUR", .{ .int = 7 });
+    try vm.php_constants.put(a, "IMG_FILTER_SELECTIVE_BLUR", .{ .int = 8 });
+    try vm.php_constants.put(a, "IMG_FILTER_MEAN_REMOVAL", .{ .int = 9 });
+    try vm.php_constants.put(a, "IMG_FILTER_SMOOTH", .{ .int = 10 });
+    try vm.php_constants.put(a, "IMG_FILTER_PIXELATE", .{ .int = 11 });
+    try vm.php_constants.put(a, "IMG_FILTER_SCATTER", .{ .int = 12 });
 }
 
 pub fn cleanupResources(objects: std.ArrayListUnmanaged(*PhpObject)) void {
