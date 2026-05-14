@@ -463,6 +463,30 @@ fn isPrimitiveType(name: []const u8) bool {
 // reads the type-hint token range out of a class_property node's rhs upper
 // bits (set by the parser) and returns a constant-pool index for the rendered
 // type string, or 0xFFFF when the property had no type declaration
+// counts newlines from the start of source up to a byte offset to derive a
+// 1-based line number. used to populate ObjFunction.start_line so that
+// ReflectionFunction::getStartLine can report PHP-style line numbers
+fn lineForToken(self: *Compiler, tok_idx: u32) u32 {
+    if (tok_idx >= self.ast.tokens.len) return 0;
+    return lineForOffset(self, self.ast.tokens[tok_idx].start);
+}
+
+fn lineForOffset(self: *Compiler, off: u32) u32 {
+    const src = self.ast.source;
+    const clamped = @min(off, src.len);
+    var line: u32 = 1;
+    for (src[0..clamped]) |c| if (c == '\n') { line += 1; };
+    return line;
+}
+
+// last source offset recorded in a function's chunk approximates the closing
+// brace - the implicit return instruction sits there
+fn endLineForChunk(self: *Compiler, chunk: *const Chunk) u32 {
+    if (chunk.lines.items.len == 0) return 0;
+    const last = chunk.lines.items[chunk.lines.items.len - 1];
+    return lineForOffset(self, last);
+}
+
 fn propertyTypeConst(self: *Compiler, prop_rhs: u32) Error!u16 {
     const type_extra = prop_rhs >> 16;
     if (type_extra == 0) return 0xffff;
@@ -609,6 +633,9 @@ pub fn compileFunction(self: *Compiler, node: Ast.Node) Error!void {
         .chunk = sub.chunk,
         .local_count = local_count,
         .slot_names = slot_names,
+        .file_path = self.file_path,
+        .start_line = lineForToken(self, name_tok),
+        .end_line = endLineForChunk(self, &sub.chunk),
     });
 
     const param_types = try extractParamTypes(self, param_nodes);
@@ -804,6 +831,9 @@ pub fn compileClosure(self: *Compiler, node: Ast.Node) Error!void {
         .ref_params = ref_params,
         .local_count = local_count,
         .slot_names = slot_names,
+        .file_path = self.file_path,
+        .start_line = lineForToken(self, node.main_token),
+        .end_line = endLineForChunk(self, &sub.chunk),
     };
 
     try self.functions.append(self.allocator, func);
@@ -2308,6 +2338,9 @@ fn compileClassMethodBody(self: *Compiler, class_name: []const u8, member: Ast.N
         .chunk = sub.chunk,
         .local_count = local_count,
         .slot_names = slot_names,
+        .file_path = self.file_path,
+        .start_line = lineForToken(self, member.main_token),
+        .end_line = endLineForChunk(self, &sub.chunk),
     });
 
     const param_types = try extractParamTypes(self, param_nodes);
@@ -2425,6 +2458,8 @@ fn compilePropertyHook(self: *Compiler, class_name: []const u8, prop_name: []con
         .locals_only = method_lo,
         .local_count = local_count,
         .slot_names = slot_names,
+        .file_path = self.file_path,
+        .start_line = if (body_idx != 0) lineForToken(self, self.ast.nodes[body_idx].main_token) else 0,
     });
 
     for (sub.functions.items) |f| try self.functions.append(self.allocator, f);
@@ -2483,6 +2518,8 @@ fn compileInterfaceMethodStub(self: *Compiler, owner_name: []const u8, member: A
         .params = param_names[0..param_nodes.len],
         .defaults = defaults_owned,
         .ref_params = ref_flags,
+        .file_path = self.file_path,
+        .start_line = lineForToken(self, member.main_token),
     });
 
     const param_types = try extractParamTypes(self, param_nodes);

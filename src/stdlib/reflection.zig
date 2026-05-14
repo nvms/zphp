@@ -435,9 +435,9 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try vm.native_fns.put(a, "ReflectionFunction::getClosureCalledClass", rfGetClosureCalledClass);
     try vm.native_fns.put(a, "ReflectionFunction::invoke", rfInvoke);
     try vm.native_fns.put(a, "ReflectionFunction::invokeArgs", rfInvokeArgs);
-    try vm.native_fns.put(a, "ReflectionFunction::getFileName", reflectionFalse);
-    try vm.native_fns.put(a, "ReflectionFunction::getStartLine", reflectionFalse);
-    try vm.native_fns.put(a, "ReflectionFunction::getEndLine", reflectionFalse);
+    try vm.native_fns.put(a, "ReflectionFunction::getFileName", rfGetFileName);
+    try vm.native_fns.put(a, "ReflectionFunction::getStartLine", rfGetStartLine);
+    try vm.native_fns.put(a, "ReflectionFunction::getEndLine", rfGetEndLine);
     try vm.native_fns.put(a, "ReflectionFunction::getDocComment", reflectionFalse);
     try vm.native_fns.put(a, "ReflectionFunction::getNamespaceName", rfGetNamespaceName);
     try vm.native_fns.put(a, "ReflectionFunction::getShortName", rfGetShortName);
@@ -2444,6 +2444,36 @@ fn rfGetNumberOfRequiredParameters(ctx: *NativeContext, _: []const Value) Runtim
     const func_name = if (this.get("name") == .string) this.get("name").string else return .{ .int = 0 };
     const func = ctx.vm.functions.get(func_name) orelse return .{ .int = 0 };
     return .{ .int = func.required_params };
+}
+
+// internal builtins (registered in vm.native_fns) have no file/line. user-
+// defined functions live in vm.functions and carry the source path on their
+// ObjFunction. start line comes from the first instruction's stored line
+fn rfGetFileName(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const this = getThis(ctx) orelse return .{ .bool = false };
+    const name_v = this.get("name");
+    if (name_v != .string) return .{ .bool = false };
+    const func = ctx.vm.functions.get(name_v.string) orelse return .{ .bool = false };
+    if (func.file_path.len == 0) return .{ .bool = false };
+    return .{ .string = func.file_path };
+}
+
+fn rfGetStartLine(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const this = getThis(ctx) orelse return .{ .bool = false };
+    const name_v = this.get("name");
+    if (name_v != .string) return .{ .bool = false };
+    const func = ctx.vm.functions.get(name_v.string) orelse return .{ .bool = false };
+    if (func.start_line == 0) return .{ .bool = false };
+    return .{ .int = @intCast(func.start_line) };
+}
+
+fn rfGetEndLine(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const this = getThis(ctx) orelse return .{ .bool = false };
+    const name_v = this.get("name");
+    if (name_v != .string) return .{ .bool = false };
+    const func = ctx.vm.functions.get(name_v.string) orelse return .{ .bool = false };
+    if (func.end_line == 0) return .{ .bool = false };
+    return .{ .int = @intCast(func.end_line) };
 }
 
 fn rfGetNamespaceName(ctx: *NativeContext, _: []const Value) RuntimeError!Value {

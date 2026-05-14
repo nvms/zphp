@@ -351,4 +351,7 @@ pub const ObjFunction = struct {
     local_count: u16 = 0,
     slot_names: []const []const u8 = &.{},
     strict_types: bool = false,
+    file_path: []const u8 = "",
+    start_line: u32 = 0,
+    end_line: u32 = 0,
 };
