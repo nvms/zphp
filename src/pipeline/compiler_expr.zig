@@ -26,7 +26,10 @@ pub fn compileAssign(self: *Compiler, node: Ast.Node) Error!void {
 
     if (target.tag == .array_access) {
         if (op_tag == .question_question_equal) {
-            try self.compileNode(node.data.lhs);
+            // read with coalesce-safe fetch so undefined keys don't warn
+            try self.compileNode(target.data.lhs);
+            try self.compileNode(target.data.rhs);
+            try self.emitOp(.array_get_coalesce);
             const skip_jump = try self.emitJump(.jump_if_not_null);
             try self.emitOp(.pop);
             try compileVivifyChain(self,target.data.lhs);
@@ -455,20 +458,25 @@ pub fn compileNullCoalesce(self: *Compiler, node: Ast.Node) Error!void {
     // PHP's `??` uses isset() semantics on the LHS rather than a plain null
     // compare: an undefined array key or out-of-bounds string offset should
     // route through to the RHS even though `array_get` would normally
-    // synthesize "" or push a warning. For array_access LHS we emit the
-    // coalesce-safe fetch variant so the offset behavior matches PHP
-    const lhs_node = self.ast.nodes[node.data.lhs];
-    if (lhs_node.tag == .array_access) {
-        try self.compileNode(lhs_node.data.lhs);
-        try self.compileNode(lhs_node.data.rhs);
-        try self.emitOp(.array_get_coalesce);
-    } else {
-        try self.compileNode(node.data.lhs);
-    }
+    // synthesize "" or push a warning. For nested array_access chains we
+    // emit array_get_coalesce all the way down so intermediate misses don't
+    // warn either
+    try compileCoalesceFetch(self, node.data.lhs);
     const end_jump = try self.emitJump(.jump_if_not_null);
     try self.emitOp(.pop);
     try self.compileNode(node.data.rhs);
     self.patchJump(end_jump);
+}
+
+fn compileCoalesceFetch(self: *Compiler, node_idx: u32) Error!void {
+    const n = self.ast.nodes[node_idx];
+    if (n.tag == .array_access) {
+        try compileCoalesceFetch(self, n.data.lhs);
+        try self.compileNode(n.data.rhs);
+        try self.emitOp(.array_get_coalesce);
+        return;
+    }
+    try self.compileNode(node_idx);
 }
 
 pub fn compileTernary(self: *Compiler, node: Ast.Node) Error!void {
@@ -507,6 +515,20 @@ pub fn compileCall(self: *Compiler, node: Ast.Node) Error!void {
     if (callee.tag == .identifier and std.mem.eql(u8, self.ast.tokenSlice(callee.main_token), "settype")) {
         try compileSettype(self, args);
         return;
+    }
+
+    if (callee.tag == .identifier and std.mem.eql(u8, self.ast.tokenSlice(callee.main_token), "empty")) {
+        // empty() uses isset semantics for the read so undefined keys/props
+        // don't warn; the result is "not truthy" rather than "isset"
+        if (args.len == 1) {
+            const arg = self.ast.nodes[args[0]];
+            if (arg.tag == .array_access) {
+                try compileCoalesceFetch(self, args[0]);
+                try self.emitOp(.cast_bool);
+                try self.emitOp(.not);
+                return;
+            }
+        }
     }
 
     if (callee.tag == .identifier and std.mem.eql(u8, self.ast.tokenSlice(callee.main_token), "isset")) {
@@ -554,7 +576,9 @@ pub fn compileCall(self: *Compiler, node: Ast.Node) Error!void {
                         try self.emitOp(.pop);
                         self.patchJump(done_jump);
                     } else {
-                        try self.compileNode(arg.data.lhs);
+                        // use coalesce fetch for the LHS chain so nested
+                        // isset($a[x][y]) doesn't warn on the inner read
+                        try compileCoalesceFetch(self, arg.data.lhs);
                         try self.compileNode(arg.data.rhs);
                         try self.emitOp(.isset_index);
                     }

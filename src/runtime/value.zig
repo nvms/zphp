@@ -110,6 +110,13 @@ pub const PhpArray = struct {
         }
     }
 
+    pub fn contains(self: *const PhpArray, raw_key: Key) bool {
+        const key = normalizeKey(raw_key);
+        if (key == .string) return self.string_index.contains(key.string);
+        for (self.entries.items) |e| if (e.key.eql(key)) return true;
+        return false;
+    }
+
     pub fn get(self: *const PhpArray, raw_key: Key) Value {
         const key = normalizeKey(raw_key);
         if (key == .int) {

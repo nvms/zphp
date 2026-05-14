@@ -4470,6 +4470,22 @@ fn native_parse_url(ctx: *NativeContext, args: []const Value) RuntimeError!Value
     var has_authority = false;
 
     if (std.mem.indexOf(u8, url, "://")) |pos| {
+        // empty or invalid scheme - PHP treats the whole input as a path
+        // (a scheme must start with a letter and contain only [a-zA-Z0-9+.-])
+        var scheme_ok = pos > 0 and std.ascii.isAlphabetic(url[0]);
+        if (scheme_ok) {
+            for (url[0..pos]) |c| {
+                if (!std.ascii.isAlphanumeric(c) and c != '+' and c != '-' and c != '.') {
+                    scheme_ok = false;
+                    break;
+                }
+            }
+        }
+        if (!scheme_ok) {
+            var arr = try ctx.createArray();
+            try arr.set(ctx.allocator, .{ .string = "path" }, .{ .string = try ctx.createString(url) });
+            return .{ .array = arr };
+        }
         scheme = url[0..pos];
         scheme_end = pos + 3;
         authority_start = scheme_end;
