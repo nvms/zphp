@@ -198,6 +198,8 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try ai_def.methods.put(a, "asort", .{ .name = "asort", .arity = 1 });
     try ai_def.methods.put(a, "uksort", .{ .name = "uksort", .arity = 1 });
     try ai_def.methods.put(a, "uasort", .{ .name = "uasort", .arity = 1 });
+    try ai_def.methods.put(a, "natsort", .{ .name = "natsort", .arity = 0 });
+    try ai_def.methods.put(a, "natcasesort", .{ .name = "natcasesort", .arity = 0 });
     try ai_def.methods.put(a, "seek", .{ .name = "seek", .arity = 1 });
     try vm.classes.put(a, "ArrayIterator", ai_def);
 
@@ -220,6 +222,8 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try vm.native_fns.put(a, "ArrayIterator::asort", aoAsort);
     try vm.native_fns.put(a, "ArrayIterator::uksort", aoUksort);
     try vm.native_fns.put(a, "ArrayIterator::uasort", aoUasort);
+    try vm.native_fns.put(a, "ArrayIterator::natsort", aoNatsort);
+    try vm.native_fns.put(a, "ArrayIterator::natcasesort", aoNatcasesort);
     try vm.native_fns.put(a, "ArrayIterator::seek", aiSeek);
 
     // WeakMap (simplified - uses spl_object_id as key, no weak reference semantics)
