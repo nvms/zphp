@@ -8120,13 +8120,39 @@ pub const VM = struct {
         set: []const u8, // explicit class name
     };
 
+    fn emitStaticClosureBindWarning(self: *VM) void {
+        const msg = "Cannot bind an instance to a static closure, this will be an error in PHP 9";
+        const ip = if (self.frame_count > 0) self.currentFrame().ip else 0;
+        const line: i64 = if (self.frame_count > 0)
+            if (self.currentChunk().getSourceLocation(if (ip > 0) ip - 1 else 0, self.source)) |loc| @intCast(loc.line) else 0
+        else
+            0;
+        const file = self.file_path;
+        if (self.error_silenced_depth != 0 or (self.error_reporting_level & 2) == 0) return;
+        if (self.output.items.len > 0) {
+            const stdout_file = std.fs.File{ .handle = 1 };
+            _ = stdout_file.write(self.output.items) catch {};
+            self.output.clearRetainingCapacity();
+        }
+        const stderr_text = std.fmt.allocPrint(self.allocator, "PHP Warning:  {s} in {s} on line {d}\n", .{ msg, file, line }) catch return;
+        self.strings.append(self.allocator, stderr_text) catch {};
+        const stderr_file = std.fs.File{ .handle = 2 };
+        _ = stderr_file.write(stderr_text) catch {};
+        const stdout_text = std.fmt.allocPrint(self.allocator, "\nWarning: {s} in {s} on line {d}\n", .{ msg, file, line }) catch return;
+        self.strings.append(self.allocator, stdout_text) catch {};
+        self.output.appendSlice(self.allocator, stdout_text) catch {};
+    }
+
     pub fn cloneClosureWithThis(self: *VM, closure_name: []const u8, new_this: Value, scope_action: ClosureScope) !Value {
         const func = self.functions.get(closure_name) orelse return .null;
 
         // static closures cannot be bound to a non-null $this. PHP emits a
         // warning and returns null in that case; match the null return so
         // callers see the same observable behavior
-        if (func.is_static and new_this != .null) return .null;
+        if (func.is_static and new_this != .null) {
+            self.emitStaticClosureBindWarning();
+            return .null;
+        }
 
         const id = self.closure_instance_count;
         self.closure_instance_count += 1;
