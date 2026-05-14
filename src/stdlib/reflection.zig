@@ -496,6 +496,7 @@ pub fn register(vm: *VM, a: Allocator) !void {
     var rcc_def = ClassDef{ .name = "ReflectionClassConstant" };
     try rcc_def.properties.append(a, .{ .name = "name", .default = .{ .string = "" } });
     try rcc_def.properties.append(a, .{ .name = "class", .default = .{ .string = "" } });
+    try rcc_def.methods.put(a, "__construct", .{ .name = "__construct", .arity = 2 });
     try rcc_def.methods.put(a, "getName", .{ .name = "getName", .arity = 0 });
     try rcc_def.methods.put(a, "getValue", .{ .name = "getValue", .arity = 0 });
     try rcc_def.methods.put(a, "getDeclaringClass", .{ .name = "getDeclaringClass", .arity = 0 });
@@ -507,6 +508,7 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try rcc_def.methods.put(a, "isEnumCase", .{ .name = "isEnumCase", .arity = 0 });
     try vm.classes.put(a, "ReflectionClassConstant", rcc_def);
 
+    try vm.native_fns.put(a, "ReflectionClassConstant::__construct", rccConstruct);
     try vm.native_fns.put(a, "ReflectionClassConstant::getName", rccGetName);
     try vm.native_fns.put(a, "ReflectionClassConstant::getValue", rccGetValue);
     try vm.native_fns.put(a, "ReflectionClassConstant::getDeclaringClass", rccGetDeclaringClass);
@@ -1583,6 +1585,24 @@ fn rccGetDeclaringClass(ctx: *NativeContext, _: []const Value) RuntimeError!Valu
     const rc = try ctx.createObject("ReflectionClass");
     try rc.set(ctx.allocator, "name", .{ .string = class_name });
     return .{ .object = rc };
+}
+
+fn rccConstruct(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len < 2) return throwReflection(ctx, "ReflectionClassConstant::__construct expects class and constant name");
+    const this = getThis(ctx) orelse return .null;
+    const raw_class: []const u8 = switch (args[0]) {
+        .string => args[0].string,
+        .object => args[0].object.class_name,
+        else => return throwReflection(ctx, "ReflectionClassConstant::__construct class must be a string or object"),
+    };
+    const class_name = if (raw_class.len > 0 and raw_class[0] == '\\') raw_class[1..] else raw_class;
+    if (args[1] != .string) return throwReflection(ctx, "ReflectionClassConstant::__construct constant name must be a string");
+    const const_name = args[1].string;
+    const cls = ctx.vm.classes.get(class_name) orelse return throwReflection(ctx, "Class not found");
+    if (!cls.constant_names.contains(const_name)) return throwReflection(ctx, "Constant not found");
+    try this.set(ctx.allocator, "name", .{ .string = const_name });
+    try this.set(ctx.allocator, "class", .{ .string = class_name });
+    return .null;
 }
 
 fn rccGetAttributes(ctx: *NativeContext, _: []const Value) RuntimeError!Value {

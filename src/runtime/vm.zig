@@ -7566,6 +7566,16 @@ pub const VM = struct {
             try def.method_attributes.put(self.allocator, ma_name, ma_attrs);
         }
 
+        // case attributes - stored as constant_attributes so
+        // ReflectionClassConstant::getAttributes finds them
+        const enum_case_attr_count = self.readByte();
+        for (0..enum_case_attr_count) |_| {
+            const ca_name_idx = self.readU16();
+            const ca_name = self.currentChunk().constants.items[ca_name_idx].string;
+            const ca_attrs = try self.readAttributeDefs();
+            try def.constant_attributes.put(self.allocator, ca_name, ca_attrs);
+        }
+
         // enum constant names (const decls, not cases)
         const enum_const_count = self.readByte();
         for (0..enum_const_count) |_| {

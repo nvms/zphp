@@ -24,7 +24,7 @@ fn isModifierToken(tag: Token.Tag) bool {
         .kw_public, .kw_protected, .kw_private, .kw_static,
         .kw_abstract, .kw_readonly, .kw_final, .kw_function,
         .kw_class, .kw_var, .kw_enum, .kw_interface, .kw_trait,
-        .kw_const,
+        .kw_const, .kw_case,
         => true,
         else => false,
     };
@@ -2072,6 +2072,32 @@ pub fn compileEnumDecl(self: *Compiler, node: Ast.Node) Error!void {
         try emitAttributeData(self, ma.attrs);
     }
     for (methods_with_attrs.items) |ma| freeAttrSlice(self.allocator, ma.attrs);
+
+    // case attributes - emit attrs for each enum case that has any.
+    // these end up as constant_attributes so ReflectionClassConstant of an
+    // enum case can find them
+    const CaseAttr = struct { name: []const u8, attrs: []const ParsedAttr };
+    var cases_with_attrs = std.ArrayListUnmanaged(CaseAttr){};
+    defer cases_with_attrs.deinit(self.allocator);
+    for (members) |member_idx| {
+        const member = self.ast.nodes[member_idx];
+        if (member.tag == .enum_case) {
+            const cattrs = extractAttributes(self, member.main_token);
+            if (cattrs.len > 0) {
+                try cases_with_attrs.append(self.allocator, .{
+                    .name = self.ast.tokenSlice(member.main_token),
+                    .attrs = cattrs,
+                });
+            }
+        }
+    }
+    try self.emitByte(@intCast(cases_with_attrs.items.len));
+    for (cases_with_attrs.items) |ca| {
+        const cname_idx2 = try self.addConstant(.{ .string = ca.name });
+        try self.emitU16(cname_idx2);
+        try emitAttributeData(self, ca.attrs);
+    }
+    for (cases_with_attrs.items) |ca| freeAttrSlice(self.allocator, ca.attrs);
 
     // enum constant names (not cases - actual const decls)
     var enum_const_count: u8 = 0;
