@@ -1777,10 +1777,33 @@ fn faFromArray(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     return .{ .object = obj };
 }
 
+fn faRejectNonIntKey(ctx: *NativeContext, key: Value) !bool {
+    // PHP throws TypeError when the offset isn't an int and can't be coerced
+    // from a numeric string. silent coercion of "x" -> 0 would otherwise let
+    // string-key access return the first element
+    if (key == .int) return false;
+    if (key == .string) {
+        const s = key.string;
+        if (s.len > 0) {
+            var i: usize = 0;
+            if (s[0] == '+' or s[0] == '-') i = 1;
+            var saw_digit = false;
+            while (i < s.len) : (i += 1) {
+                if (s[i] < '0' or s[i] > '9') break;
+                saw_digit = true;
+            }
+            if (saw_digit and i == s.len) return false;
+        }
+    }
+    try ctx.vm.setPendingException("TypeError", "Illegal offset type");
+    return true;
+}
+
 fn faOffsetGet(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     const obj = getThis(ctx) orelse return .null;
     const arr = getData(obj) orelse return .null;
     if (args.len == 0) return .null;
+    if (try faRejectNonIntKey(ctx, args[0])) return error.RuntimeError;
     const raw = Value.toInt(args[0]);
     if (raw < 0 or @as(usize, @intCast(raw)) >= arr.entries.items.len) {
         try ctx.vm.setPendingException("OutOfBoundsException", "Index invalid or out of range");
@@ -1793,6 +1816,7 @@ fn faOffsetSet(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     const obj = getThis(ctx) orelse return .null;
     const arr = getData(obj) orelse return .null;
     if (args.len < 2) return .null;
+    if (try faRejectNonIntKey(ctx, args[0])) return error.RuntimeError;
     const raw = Value.toInt(args[0]);
     if (raw < 0 or @as(usize, @intCast(raw)) >= arr.entries.items.len) {
         try ctx.vm.setPendingException("OutOfBoundsException", "Index invalid or out of range");
