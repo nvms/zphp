@@ -673,6 +673,30 @@ pub fn formatTimestampTz(ctx: *NativeContext, timestamp: i64, format: []const u8
                 const s = std.fmt.bufPrint(&tmp, "{d}", .{week.year}) catch "0000";
                 try buf.appendSlice(a, s);
             },
+            'X' => {
+                // PHP 8.4: ISO 8601 expanded year with mandatory leading sign,
+                // four-digit minimum
+                var tmp: [12]u8 = undefined;
+                const yr = year_day.year;
+                const s = if (yr >= 0)
+                    std.fmt.bufPrint(&tmp, "+{d:0>4}", .{@as(u64, @intCast(yr))}) catch "+0000"
+                else
+                    std.fmt.bufPrint(&tmp, "-{d:0>4}", .{@as(u64, @intCast(-yr))}) catch "-0000";
+                try buf.appendSlice(a, s);
+            },
+            'x' => {
+                // PHP 8.4: like X but the leading sign is omitted for years
+                // in [0, 9999]
+                var tmp: [12]u8 = undefined;
+                const yr = year_day.year;
+                const s = if (yr < 0)
+                    std.fmt.bufPrint(&tmp, "-{d:0>4}", .{@as(u64, @intCast(-yr))}) catch "-0000"
+                else if (yr > 9999)
+                    std.fmt.bufPrint(&tmp, "+{d}", .{@as(u64, @intCast(yr))}) catch "+0000"
+                else
+                    std.fmt.bufPrint(&tmp, "{d:0>4}", .{@as(u64, @intCast(yr))}) catch "0000";
+                try buf.appendSlice(a, s);
+            },
             'S' => {
                 const day_val = month_day.day_index + 1;
                 const suffix: []const u8 = if (day_val == 11 or day_val == 12 or day_val == 13)
