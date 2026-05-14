@@ -59,6 +59,7 @@ pub const entries = .{
     .{ "fputs", native_fwrite },
     .{ "fpassthru", native_fpassthru },
     .{ "fgets", native_fgets },
+    .{ "stream_get_line", native_stream_get_line },
     .{ "fgetc", native_fgetc },
     .{ "feof", native_feof },
     .{ "fseek", native_fseek },
@@ -1437,6 +1438,66 @@ fn native_fgets(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     }
     if (hit_eof) try obj.set(ctx.allocator, "__eof", .{ .bool = true });
     if (buf.items.len == 0) return .{ .bool = false };
+    const result = try buf.toOwnedSlice(ctx.allocator);
+    try ctx.strings.append(ctx.allocator, result);
+    return .{ .string = result };
+}
+
+fn native_stream_get_line(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    // stream_get_line(handle, length[, ending]) - reads up to length bytes,
+    // stopping when `ending` is encountered (consumed but not returned) or EOF
+    if (args.len < 2 or args[0] != .object) return .{ .bool = false };
+    const obj = args[0].object;
+    const max_len: usize = @intCast(@max(Value.toInt(args[1]), 0));
+    const ending = if (args.len >= 3 and args[2] == .string) args[2].string else "";
+    const cap = if (max_len == 0) std.math.maxInt(usize) else max_len;
+
+    if (getBufferBacking(obj)) |buffer| {
+        const pos = getBufferPos(obj);
+        if (pos >= buffer.len) return .{ .bool = false };
+        var end = pos;
+        var hit_delim_at: ?usize = null;
+        while (end < buffer.len and end - pos < cap) {
+            if (ending.len > 0 and end + ending.len <= buffer.len and std.mem.eql(u8, buffer[end .. end + ending.len], ending)) {
+                hit_delim_at = end;
+                break;
+            }
+            end += 1;
+        }
+        const out_end = hit_delim_at orelse end;
+        const slice = try ctx.allocator.dupe(u8, buffer[pos..out_end]);
+        try ctx.strings.append(ctx.allocator, slice);
+        const new_pos = if (hit_delim_at) |d| d + ending.len else end;
+        setBufferPos(obj, new_pos);
+        return .{ .string = slice };
+    }
+    const file = getFileHandle(obj) orelse return Value{ .bool = false };
+
+    var buf = std.ArrayListUnmanaged(u8){};
+    var byte: [1]u8 = undefined;
+    var matched: usize = 0;
+    while (buf.items.len + matched < cap) {
+        const n = file.read(&byte) catch break;
+        if (n == 0) {
+            try obj.set(ctx.allocator, "__eof", .{ .bool = true });
+            break;
+        }
+        if (ending.len > 0 and byte[0] == ending[matched]) {
+            matched += 1;
+            if (matched == ending.len) break;
+        } else {
+            if (matched > 0) {
+                try buf.appendSlice(ctx.allocator, ending[0..matched]);
+                matched = 0;
+                if (byte[0] == ending[0] and ending.len > 0) {
+                    matched = 1;
+                    continue;
+                }
+            }
+            try buf.append(ctx.allocator, byte[0]);
+        }
+    }
+    if (buf.items.len == 0 and matched == 0) return .{ .bool = false };
     const result = try buf.toOwnedSlice(ctx.allocator);
     try ctx.strings.append(ctx.allocator, result);
     return .{ .string = result };
