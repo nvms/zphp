@@ -99,6 +99,18 @@ pub fn register(vm: *VM, a: Allocator) !void {
         .{ "FiberError", "Error" },
         .{ "ValueError", "Error" },
         .{ "UnhandledMatchError", "Error" },
+        // PHP 8.3 date hierarchy: DateError -> Error; the three concrete
+        // subclasses extend it. add the legacy DateInvalidOperationException
+        // alias (PHP 8.2) at the same level
+        .{ "DateError", "Error" },
+        .{ "DateObjectError", "DateError" },
+        .{ "DateRangeError", "DateError" },
+        .{ "DateException", "Exception" },
+        .{ "DateInvalidTimeZoneException", "DateException" },
+        .{ "DateInvalidOperationException", "DateException" },
+        .{ "DateMalformedStringException", "DateException" },
+        .{ "DateMalformedIntervalStringException", "DateException" },
+        .{ "DateMalformedPeriodStringException", "DateException" },
     };
 
     inline for (subclasses) |entry| {

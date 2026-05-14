@@ -25,6 +25,27 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try attr_def.static_props.put(a, "IS_REPEATABLE", .{ .int = 128 });
     try vm.classes.put(a, "Attribute", attr_def);
 
+    // PHP 8.3 #[Override] marker. enforcement happens elsewhere - here we
+    // register the class so attribute reflection and class_exists pick it up
+    var override_def = ClassDef{ .name = "Override" };
+    try override_def.methods.put(a, "__construct", .{ .name = "__construct", .arity = 0 });
+    try override_def.attributes.append(a, .{ .name = "Attribute", .args = &.{} });
+    try vm.classes.put(a, "Override", override_def);
+
+    // PHP 8.2 #[SensitiveParameter] - marks parameters whose values should be
+    // redacted from stack traces. Stub the class for attribute usage
+    var sp_def = ClassDef{ .name = "SensitiveParameter" };
+    try sp_def.methods.put(a, "__construct", .{ .name = "__construct", .arity = 0 });
+    try sp_def.attributes.append(a, .{ .name = "Attribute", .args = &.{} });
+    try vm.classes.put(a, "SensitiveParameter", sp_def);
+
+    // SensitiveParameterValue (PHP 8.2) - returned by debug_backtrace for
+    // redacted sensitive params. simple value wrapper
+    var spv_def = ClassDef{ .name = "SensitiveParameterValue" };
+    try spv_def.methods.put(a, "__construct", .{ .name = "__construct", .arity = 1 });
+    try spv_def.methods.put(a, "getValue", .{ .name = "getValue", .arity = 0 });
+    try vm.classes.put(a, "SensitiveParameterValue", spv_def);
+
     // ReflectionException
     var exc_def = ClassDef{ .name = "ReflectionException" };
     exc_def.parent = "Exception";

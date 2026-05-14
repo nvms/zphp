@@ -8892,6 +8892,22 @@ pub const VM = struct {
 
     fn builtinExceptionParent(class_name: []const u8) ?[]const u8 {
         if (std.mem.eql(u8, class_name, "Exception") or std.mem.eql(u8, class_name, "Error")) return "Throwable";
+        const date_exception_children = [_][]const u8{
+            "DateInvalidTimeZoneException", "DateInvalidOperationException",
+            "DateMalformedStringException", "DateMalformedIntervalStringException",
+            "DateMalformedPeriodStringException",
+        };
+        for (date_exception_children) |name| {
+            if (std.mem.eql(u8, class_name, name)) return "DateException";
+        }
+        if (std.mem.eql(u8, class_name, "DateException")) return "Exception";
+        const date_error_children = [_][]const u8{
+            "DateObjectError", "DateRangeError",
+        };
+        for (date_error_children) |name| {
+            if (std.mem.eql(u8, class_name, name)) return "DateError";
+        }
+        if (std.mem.eql(u8, class_name, "DateError")) return "Error";
         const exception_children = [_][]const u8{
             "RuntimeException",     "LogicException",          "InvalidArgumentException",
             "BadMethodCallException", "BadFunctionCallException", "OutOfRangeException",
