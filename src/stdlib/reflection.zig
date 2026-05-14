@@ -686,7 +686,14 @@ fn createTypeObj(ctx: *NativeContext, type_name: []const u8, nullable: bool, sel
             }
         }
         if (has_null and non_null_count == 1) {
-            return createNamedTypeObj(ctx, only_non_null, true);
+            // resolve self/static when the union collapses to ?Named
+            var resolved = only_non_null;
+            if (self_class) |sc| {
+                if (std.mem.eql(u8, resolved, "self") or std.mem.eql(u8, resolved, "static")) {
+                    resolved = sc;
+                }
+            }
+            return createNamedTypeObj(ctx, resolved, true);
         }
         const obj = try ctx.createObject("ReflectionUnionType");
         try obj.set(ctx.allocator, "type_str", .{ .string = clean });
