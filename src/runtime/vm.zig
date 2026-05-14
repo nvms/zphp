@@ -619,6 +619,11 @@ pub const VM = struct {
         try @import("../stdlib/soap.zig").register(vm, allocator);
         try @import("../stdlib/mysqli.zig").register(vm, allocator);
 
+        // HashContext is the type returned by hash_init - register so
+        // class_exists('HashContext') and instanceof checks see it
+        const hash_ctx_def = ClassDef{ .name = "HashContext" };
+        try vm.classes.put(allocator, "HashContext", hash_ctx_def);
+
         // PHP 8.4 RoundingMode enum. registered as a unit (unbacked) enum to
         // match PHP's exposed surface - the cases have a `name` property only,
         // and the internal mapping from case -> mode int happens inside round()
