@@ -1970,7 +1970,25 @@ fn array_multisort(ctx: *NativeContext, args: []const Value) RuntimeError!Value 
         defer ctx.allocator.free(tmp);
         for (indices, 0..) |src, dst| tmp[dst] = s.arr.entries.items[src];
         @memcpy(s.arr.entries.items[0..n], tmp);
-        reindexArray(s.arr);
+        // PHP's array_multisort renumbers integer keys (0..n-1) but preserves
+        // string keys. reindexArray would clobber both, so renumber only the
+        // int keys and leave string keys in place
+        s.arr.string_index.clearRetainingCapacity();
+        var next_int: i64 = 0;
+        for (s.arr.entries.items, 0..) |*entry, idx| {
+            switch (entry.key) {
+                .int => {
+                    entry.key = .{ .int = next_int };
+                    next_int += 1;
+                },
+                .string => |str| {
+                    try s.arr.string_index.put(ctx.allocator, str, idx);
+                },
+            }
+        }
+        s.arr.next_int_key = next_int;
+        s.arr.has_int_keys = next_int > 0;
+        s.arr.cursor = 0;
     }
 
     return .{ .bool = true };
