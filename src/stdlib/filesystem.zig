@@ -99,6 +99,10 @@ pub const entries = .{
     .{ "stream_get_transports", native_stream_get_transports },
     .{ "touch", native_touch },
     .{ "chmod", native_chmod },
+    .{ "chown", native_chown },
+    .{ "chgrp", native_chgrp },
+    .{ "lchown", native_chown },
+    .{ "lchgrp", native_chgrp },
     .{ "stat", native_stat },
     .{ "chdir", native_chdir },
     .{ "stream_resolve_include_path", native_stream_resolve_include_path },
@@ -2403,6 +2407,56 @@ fn native_chmod(_: *NativeContext, args: []const Value) RuntimeError!Value {
     defer file.close();
     file.chmod(mode) catch return Value{ .bool = false };
     return .{ .bool = true };
+}
+
+// chown / chgrp: accept either a numeric uid/gid or a name and pass to the
+// posix chown(2) syscall. silently degrade to false on failure (most failures
+// are EPERM when not root)
+fn native_chown(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len < 2 or args[0] != .string) return .{ .bool = false };
+    const path = args[0].string;
+    var path_z: [std.fs.max_path_bytes:0]u8 = undefined;
+    if (path.len >= path_z.len) return .{ .bool = false };
+    @memcpy(path_z[0..path.len], path);
+    path_z[path.len] = 0;
+    const uid: std.c.uid_t = if (args[1] == .int) @intCast(args[1].int) else blk: {
+        if (args[1] != .string) return .{ .bool = false };
+        const name_z = try dupZ(ctx, args[1].string);
+        const pw = std.c.getpwnam(name_z.ptr) orelse return .{ .bool = false };
+        break :blk pw.uid;
+    };
+    if (chown_extern(@ptrCast(&path_z), uid, std.math.maxInt(std.c.gid_t)) != 0) return .{ .bool = false };
+    return .{ .bool = true };
+}
+
+fn native_chgrp(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len < 2 or args[0] != .string) return .{ .bool = false };
+    const path = args[0].string;
+    var path_z: [std.fs.max_path_bytes:0]u8 = undefined;
+    if (path.len >= path_z.len) return .{ .bool = false };
+    @memcpy(path_z[0..path.len], path);
+    path_z[path.len] = 0;
+    const gid: std.c.gid_t = if (args[1] == .int) @intCast(args[1].int) else blk: {
+        if (args[1] != .string) return .{ .bool = false };
+        const name_z = try dupZ(ctx, args[1].string);
+        const gr = std.c.getgrnam(name_z.ptr) orelse return .{ .bool = false };
+        break :blk gr.gid;
+    };
+    if (chown_extern(@ptrCast(&path_z), std.math.maxInt(std.c.uid_t), gid) != 0) return .{ .bool = false };
+    return .{ .bool = true };
+}
+
+extern "c" fn chown(path: [*:0]const u8, owner: std.c.uid_t, group: std.c.gid_t) c_int;
+fn chown_extern(p: [*:0]const u8, o: std.c.uid_t, g: std.c.gid_t) c_int {
+    return chown(p, o, g);
+}
+
+fn dupZ(ctx: *NativeContext, s: []const u8) ![:0]u8 {
+    const z = try ctx.allocator.alloc(u8, s.len + 1);
+    @memcpy(z[0..s.len], s);
+    z[s.len] = 0;
+    try ctx.strings.append(ctx.allocator, z);
+    return z[0..s.len :0];
 }
 
 fn native_stat(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
