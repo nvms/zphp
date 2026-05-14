@@ -76,6 +76,12 @@ fn encodeValue(buf: *std.ArrayListUnmanaged(u8), a: std.mem.Allocator, val: Valu
         };
         for (visited.items) |seen| {
             if (seen == ptr) {
+                if ((flags & 0x200) != 0) { // JSON_PARTIAL_OUTPUT_ON_ERROR
+                    // replace the cyclic value with null so the rest of the
+                    // structure still encodes - matches PHP behavior
+                    try buf.appendSlice(a, "null");
+                    return;
+                }
                 last_error = 6;
                 last_error_msg = "Recursion detected";
                 return error.RuntimeError;
