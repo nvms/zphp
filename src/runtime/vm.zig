@@ -234,6 +234,7 @@ pub const ClassDef = struct {
     file_path: []const u8 = "",
     start_line: u32 = 0,
     end_line: u32 = 0,
+    doc_comment: []const u8 = "",
     parent: ?[]const u8 = null,
     interfaces: std.ArrayListUnmanaged([]const u8) = .{},
     is_enum: bool = false,
@@ -279,9 +280,8 @@ pub const ClassDef = struct {
         set_visibility: Visibility = .public,
         is_readonly: bool = false,
         is_promoted: bool = false,
-        // PHP type hint as written in source. empty when the property had no
-        // type declaration. reflection consumes this verbatim
         type_str: []const u8 = "",
+        doc_comment: []const u8 = "",
     };
 
     fn freeAttributeDefs(allocator: Allocator, attrs: []const AttributeDef) void {
@@ -7322,6 +7322,7 @@ pub const VM = struct {
         const class_name = self.currentChunk().constants.items[name_idx].string;
         const start_line = self.readU32();
         const end_line = self.readU32();
+        const doc_idx = self.readU16();
         const method_count = self.readU16();
 
         var def = ClassDef{ .name = class_name };
@@ -7331,6 +7332,7 @@ pub const VM = struct {
         def.file_path = self.file_path;
         def.start_line = start_line;
         def.end_line = end_line;
+        if (doc_idx != 0xffff) def.doc_comment = self.currentChunk().constants.items[doc_idx].string;
 
         for (0..method_count) |_| {
             const mi = self.readMethodInfo();
@@ -7345,6 +7347,7 @@ pub const VM = struct {
         var prop_readonly: [256]bool = .{false} ** 256;
         var prop_promoted: [256]bool = .{false} ** 256;
         var prop_type: [256][]const u8 = .{""} ** 256;
+        var prop_doc: [256][]const u8 = .{""} ** 256;
         for (0..prop_count) |pi| {
             const pname_idx = self.readU16();
             prop_names[pi] = self.currentChunk().constants.items[pname_idx].string;
@@ -7357,6 +7360,8 @@ pub const VM = struct {
             prop_promoted[pi] = (vis_byte & 0x40) != 0;
             const type_idx = self.readU16();
             prop_type[pi] = if (type_idx == 0xffff) "" else self.currentChunk().constants.items[type_idx].string;
+            const doc_idx_p = self.readU16();
+            prop_doc[pi] = if (doc_idx_p == 0xffff) "" else self.currentChunk().constants.items[doc_idx_p].string;
         }
 
         const static_prop_count = self.readU16();
@@ -7365,6 +7370,7 @@ pub const VM = struct {
         var sprop_is_const: [256]u8 = undefined;
         var sprop_visibility: [256]u8 = undefined;
         var sprop_type: [256][]const u8 = .{""} ** 256;
+        var sprop_doc: [256][]const u8 = .{""} ** 256;
         for (0..static_prop_count) |pi| {
             const pname_idx = self.readU16();
             sprop_names[pi] = self.currentChunk().constants.items[pname_idx].string;
@@ -7373,6 +7379,8 @@ pub const VM = struct {
             sprop_is_const[pi] = self.readByte();
             const t_idx = self.readU16();
             sprop_type[pi] = if (t_idx == 0xffff) "" else self.currentChunk().constants.items[t_idx].string;
+            const sd_idx = self.readU16();
+            sprop_doc[pi] = if (sd_idx == 0xffff) "" else self.currentChunk().constants.items[sd_idx].string;
         }
 
         const sdefaults = self.popDefaults(256, sprop_has_default[0..static_prop_count]);
@@ -7394,6 +7402,7 @@ pub const VM = struct {
                 .is_readonly = prop_readonly[pi] or def.is_readonly,
                 .is_promoted = prop_promoted[pi],
                 .type_str = prop_type[pi],
+                .doc_comment = prop_doc[pi],
             });
         }
 

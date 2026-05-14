@@ -354,4 +354,5 @@ pub const ObjFunction = struct {
     file_path: []const u8 = "",
     start_line: u32 = 0,
     end_line: u32 = 0,
+    doc_comment: []const u8 = "",
 };

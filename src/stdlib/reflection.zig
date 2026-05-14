@@ -148,7 +148,7 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try vm.native_fns.put(a, "ReflectionClass::getInterfaceNames", rcGetInterfaceNames);
     try vm.native_fns.put(a, "ReflectionClass::getInterfaces", rcGetInterfaces);
     try vm.native_fns.put(a, "ReflectionClass::getAttributes", rcGetAttributes);
-    try vm.native_fns.put(a, "ReflectionClass::getDocComment", reflectionGetDocCommentFalse);
+    try vm.native_fns.put(a, "ReflectionClass::getDocComment", rcGetDocComment);
     try vm.native_fns.put(a, "ReflectionClass::getProperties", rcGetProperties);
     try vm.native_fns.put(a, "ReflectionClass::getProperty", rcGetProperty);
     try vm.native_fns.put(a, "ReflectionClass::hasProperty", rcHasProperty);
@@ -245,7 +245,7 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try vm.native_fns.put(a, "ReflectionMethod::getDeclaringClass", rmGetDeclaringClass);
     try vm.native_fns.put(a, "ReflectionMethod::getReturnType", rmGetReturnType);
     try vm.native_fns.put(a, "ReflectionMethod::isConstructor", rmIsConstructor);
-    try vm.native_fns.put(a, "ReflectionMethod::getDocComment", reflectionGetDocCommentFalse);
+    try vm.native_fns.put(a, "ReflectionMethod::getDocComment", rmGetDocComment);
     try vm.native_fns.put(a, "ReflectionMethod::getNumberOfParameters", rmGetNumberOfParameters);
     try vm.native_fns.put(a, "ReflectionMethod::getNumberOfRequiredParameters", rmGetNumberOfRequiredParameters);
     try vm.native_fns.put(a, "ReflectionMethod::setAccessible", reflectionNoop);
@@ -460,7 +460,7 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try vm.native_fns.put(a, "ReflectionFunction::getFileName", rfGetFileName);
     try vm.native_fns.put(a, "ReflectionFunction::getStartLine", rfGetStartLine);
     try vm.native_fns.put(a, "ReflectionFunction::getEndLine", rfGetEndLine);
-    try vm.native_fns.put(a, "ReflectionFunction::getDocComment", reflectionFalse);
+    try vm.native_fns.put(a, "ReflectionFunction::getDocComment", rfGetDocComment);
     try vm.native_fns.put(a, "ReflectionFunction::getNamespaceName", rfGetNamespaceName);
     try vm.native_fns.put(a, "ReflectionFunction::getShortName", rfGetShortName);
     try vm.native_fns.put(a, "ReflectionFunction::inNamespace", rfInNamespace);
@@ -1361,6 +1361,29 @@ fn buildAttributeArrayWithFlags(ctx: *NativeContext, attrs: []const AttributeDef
         try arr.append(ctx.allocator, try buildReflectionAttribute(ctx, attr, target, count > 1));
     }
     return .{ .array = arr };
+}
+
+fn rcGetDocComment(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const this = getThis(ctx) orelse return .{ .bool = false };
+    const name = if (this.get("name") == .string) this.get("name").string else return .{ .bool = false };
+    const cls = ctx.vm.classes.get(name) orelse return .{ .bool = false };
+    if (cls.doc_comment.len == 0) return .{ .bool = false };
+    return .{ .string = cls.doc_comment };
+}
+
+fn rmGetDocComment(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const func = rmLookupFunc(ctx) orelse return .{ .bool = false };
+    if (func.doc_comment.len == 0) return .{ .bool = false };
+    return .{ .string = func.doc_comment };
+}
+
+fn rfGetDocComment(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const this = getThis(ctx) orelse return .{ .bool = false };
+    const name_v = this.get("name");
+    if (name_v != .string) return .{ .bool = false };
+    const func = ctx.vm.functions.get(name_v.string) orelse return .{ .bool = false };
+    if (func.doc_comment.len == 0) return .{ .bool = false };
+    return .{ .string = func.doc_comment };
 }
 
 fn reflectionGetDocCommentFalse(_: *NativeContext, _: []const Value) RuntimeError!Value {
@@ -3255,7 +3278,24 @@ fn rpropGetAttributes(ctx: *NativeContext, args: []const Value) RuntimeError!Val
     return buildAttributeArrayWithFlags(ctx, attrs, filter, 8, flags);
 }
 
-fn rpropGetDocComment(_: *NativeContext, _: []const Value) RuntimeError!Value {
+fn rpropGetDocComment(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const this = getThis(ctx) orelse return .{ .bool = false };
+    const dc_v = this.get("_declaring_class");
+    if (dc_v != .string) return .{ .bool = false };
+    const prop_name_v = this.get("name");
+    if (prop_name_v != .string) return .{ .bool = false };
+    var current: ?[]const u8 = dc_v.string;
+    while (current) |cn| {
+        if (ctx.vm.classes.get(cn)) |cls| {
+            for (cls.properties.items) |p| {
+                if (std.mem.eql(u8, p.name, prop_name_v.string)) {
+                    if (p.doc_comment.len == 0) return .{ .bool = false };
+                    return .{ .string = p.doc_comment };
+                }
+            }
+            current = cls.parent;
+        } else break;
+    }
     return .{ .bool = false };
 }
 

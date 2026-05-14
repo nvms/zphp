@@ -481,6 +481,74 @@ fn lineForOffset(self: *Compiler, off: u32) u32 {
 
 // scans forward from a token, balancing braces, to find the matching r_brace
 // for a class/trait/interface/enum body. returns the line of the closing brace
+// scans source backwards from a token's start position through trivia
+// (whitespace + line/block comments) looking for the last `/** ... */` doc
+// comment that immediately precedes it. returns the full comment text or ""
+fn isDeclLeadingTokenTag(tag: Token.Tag) bool {
+    return switch (tag) {
+        .kw_function, .kw_class, .kw_interface, .kw_trait, .kw_enum,
+        .kw_public, .kw_protected, .kw_private,
+        .kw_static, .kw_final, .kw_abstract, .kw_readonly,
+        // type hints in front of a parameter / property
+        .identifier, .kw_array, .kw_callable, .kw_self, .kw_parent,
+        .question, .pipe, .amp, .backslash, .l_paren, .r_paren,
+        => true,
+        else => false,
+    };
+}
+
+fn docCommentForToken(self: *Compiler, tok_idx: u32) []const u8 {
+    if (tok_idx >= self.ast.tokens.len) return "";
+    // walk back through modifier/keyword tokens (function, class, public,
+    // static, etc) to find the leading edge of the declaration. the doc
+    // comment lives in the trivia that precedes that leading token
+    var lead = tok_idx;
+    while (lead > 0) {
+        const prev_tag = self.ast.tokens[lead - 1].tag;
+        if (!isDeclLeadingTokenTag(prev_tag)) break;
+        lead -= 1;
+    }
+    const tok_start = self.ast.tokens[lead].start;
+    var trivia_start: usize = 0;
+    if (lead > 0) trivia_start = self.ast.tokens[lead - 1].end;
+    if (trivia_start >= tok_start) return "";
+    const trivia = self.ast.source[trivia_start..tok_start];
+
+    // walk trivia forwards collecting doc comments; keep the LAST one found
+    var last_start: ?usize = null;
+    var last_end: usize = 0;
+    var i: usize = 0;
+    while (i < trivia.len) {
+        const c = trivia[i];
+        if (c == ' ' or c == '\t' or c == '\n' or c == '\r') { i += 1; continue; }
+        if (c == '/' and i + 1 < trivia.len and trivia[i + 1] == '/') {
+            while (i < trivia.len and trivia[i] != '\n') i += 1;
+            continue;
+        }
+        if (c == '#' and (i + 1 >= trivia.len or trivia[i + 1] != '[')) {
+            while (i < trivia.len and trivia[i] != '\n') i += 1;
+            continue;
+        }
+        if (c == '/' and i + 1 < trivia.len and trivia[i + 1] == '*') {
+            const block_start = i;
+            const is_doc = i + 2 < trivia.len and trivia[i + 2] == '*' and (i + 3 >= trivia.len or trivia[i + 3] != '/');
+            i += 2;
+            while (i + 1 < trivia.len) : (i += 1) {
+                if (trivia[i] == '*' and trivia[i + 1] == '/') { i += 2; break; }
+            } else { i = trivia.len; }
+            if (is_doc) {
+                last_start = block_start;
+                last_end = i;
+            }
+            continue;
+        }
+        // unrecognized char in trivia - bail
+        break;
+    }
+    if (last_start) |s| return trivia[s..last_end];
+    return "";
+}
+
 fn endLineForBlockStartingAt(self: *Compiler, start_tok: u32) u32 {
     var depth: i32 = 0;
     var i: u32 = start_tok;
@@ -502,6 +570,12 @@ fn endLineForChunk(self: *Compiler, chunk: *const Chunk) u32 {
     if (chunk.lines.items.len == 0) return 0;
     const last = chunk.lines.items[chunk.lines.items.len - 1];
     return lineForOffset(self, last);
+}
+
+fn docCommentConst(self: *Compiler, tok_idx: u32) Error!u16 {
+    const doc = docCommentForToken(self, tok_idx);
+    if (doc.len == 0) return 0xffff;
+    return @intCast(try self.addConstant(.{ .string = doc }));
 }
 
 fn propertyTypeConst(self: *Compiler, prop_rhs: u32) Error!u16 {
@@ -653,6 +727,7 @@ pub fn compileFunction(self: *Compiler, node: Ast.Node) Error!void {
         .file_path = self.file_path,
         .start_line = lineForToken(self, name_tok),
         .end_line = endLineForBlockStartingAt(self, node.main_token),
+        .doc_comment = docCommentForToken(self, node.main_token),
     });
 
     const param_types = try extractParamTypes(self, param_nodes);
@@ -851,6 +926,7 @@ pub fn compileClosure(self: *Compiler, node: Ast.Node) Error!void {
         .file_path = self.file_path,
         .start_line = lineForToken(self, node.main_token),
         .end_line = endLineForBlockStartingAt(self, node.main_token),
+        .doc_comment = docCommentForToken(self, node.main_token),
     };
 
     try self.functions.append(self.allocator, func);
@@ -1060,6 +1136,7 @@ pub fn compileClassDecl(self: *Compiler, node: Ast.Node) Error!void {
     try self.emitU16(name_idx);
     try self.emitU32(lineForToken(self, node.main_token));
     try self.emitU32(endLineForBlockStartingAt(self, node.main_token));
+    try self.emitU16(try docCommentConst(self, node.main_token));
     try self.emitU16(method_count);
 
     for (members) |member_idx| {
@@ -1126,6 +1203,7 @@ pub fn compileClassDecl(self: *Compiler, node: Ast.Node) Error!void {
             try self.emitByte(if (member.data.lhs != 0) @as(u8, 1) else @as(u8, 0));
             try self.emitByte(@intCast(member.data.rhs & 0xff));
             try self.emitU16(try propertyTypeConst(self, member.data.rhs));
+            try self.emitU16(try docCommentConst(self, member.main_token));
         } else if (member.tag == .class_property_hooks) {
             var prop_name = self.ast.tokenSlice(member.main_token);
             if (prop_name.len > 0 and prop_name[0] == '$') prop_name = prop_name[1..];
@@ -1135,6 +1213,7 @@ pub fn compileClassDecl(self: *Compiler, node: Ast.Node) Error!void {
             try self.emitByte(if (default_idx != 0) @as(u8, 1) else @as(u8, 0));
             try self.emitByte(@intCast(member.data.rhs & 0xff));
             try self.emitU16(try propertyTypeConst(self, member.data.rhs));
+            try self.emitU16(try docCommentConst(self, member.main_token));
         }
     }
     // trait properties
@@ -1147,6 +1226,7 @@ pub fn compileClassDecl(self: *Compiler, node: Ast.Node) Error!void {
         try self.emitByte(if (tmember.data.lhs != 0) @as(u8, 1) else @as(u8, 0));
         try self.emitByte(@intCast(tmember.data.rhs & 0xff));
         try self.emitU16(try propertyTypeConst(self, tmember.data.rhs));
+        try self.emitU16(try docCommentConst(self, tmember.main_token));
     }
     // promoted constructor params as properties
     for (constructor_params) |p| {
@@ -1157,13 +1237,11 @@ pub fn compileClassDecl(self: *Compiler, node: Ast.Node) Error!void {
             if (param_name.len > 0 and param_name[0] == '$') param_name = param_name[1..];
             const pname_idx = try self.addConstant(.{ .string = param_name });
             try self.emitU16(pname_idx);
-            try self.emitByte(1); // has default (null placeholder)
+            try self.emitByte(1);
             const is_ro: u8 = if ((pnode.data.rhs & 16) != 0) 4 else 0;
             const set_promo = (pnode.data.rhs >> 5) & 3;
             const asymm_bits: u8 = if (set_promo > 0) (@as(u8, @intCast(set_promo - 1)) << 3) | 0x20 else 0;
             try self.emitByte(@as(u8, @intCast(promotion - 1)) | is_ro | asymm_bits | 0x40);
-            // a promoted param's type lives in the param's rhs bits 7+ (same
-            // encoding used by extractParamTypes), so emit it here too
             const param_type_extra = pnode.data.rhs >> 7;
             if (param_type_extra == 0) {
                 try self.emitU16(0xffff);
@@ -1173,6 +1251,7 @@ pub fn compileClassDecl(self: *Compiler, node: Ast.Node) Error!void {
                 const type_str = try buildTypeString(self, start_tok, end_tok);
                 try self.emitU16(try self.addConstant(.{ .string = type_str }));
             }
+            try self.emitU16(0xffff); // promoted params don't carry their own doc comment
         }
     }
 
@@ -1188,6 +1267,7 @@ pub fn compileClassDecl(self: *Compiler, node: Ast.Node) Error!void {
             try self.emitByte(@intCast(member.data.rhs & 0xff));
             try self.emitByte(0); // 0 = static property
             try self.emitU16(try propertyTypeConst(self, member.data.rhs));
+            try self.emitU16(try docCommentConst(self, member.main_token));
         } else if (member.tag == .const_decl) {
             const cname = self.ast.tokenSlice(member.main_token);
             const cname_idx = try self.addConstant(.{ .string = cname });
@@ -1196,6 +1276,7 @@ pub fn compileClassDecl(self: *Compiler, node: Ast.Node) Error!void {
             try self.emitByte(@intCast(member.data.rhs & 0x13)); // bits 0-1 visibility, bit 4 final
             try self.emitByte(1); // 1 = constant
             try self.emitU16(0xffff); // no type info on a class constant slot
+            try self.emitU16(try docCommentConst(self, member.main_token));
         }
     }
 
@@ -1538,6 +1619,7 @@ pub fn compileAnonymousClass(self: *Compiler, node: Ast.Node) Error!void {
     try self.emitU16(name_idx);
     try self.emitU32(lineForToken(self, node.main_token));
     try self.emitU32(endLineForBlockStartingAt(self, node.main_token));
+    try self.emitU16(try docCommentConst(self, node.main_token));
     try self.emitU16(method_count);
 
     for (members) |member_idx| {
@@ -1566,6 +1648,7 @@ pub fn compileAnonymousClass(self: *Compiler, node: Ast.Node) Error!void {
             try self.emitByte(if (member.data.lhs != 0) @as(u8, 1) else @as(u8, 0));
             try self.emitByte(@intCast(member.data.rhs & 0xff));
             try self.emitU16(try propertyTypeConst(self, member.data.rhs));
+            try self.emitU16(try docCommentConst(self, member.main_token));
         }
     }
     for (trait_prop_members.items) |tpi| {
@@ -1577,6 +1660,7 @@ pub fn compileAnonymousClass(self: *Compiler, node: Ast.Node) Error!void {
         try self.emitByte(if (tmember.data.lhs != 0) @as(u8, 1) else @as(u8, 0));
         try self.emitByte(@intCast(tmember.data.rhs & 0xff));
         try self.emitU16(try propertyTypeConst(self, tmember.data.rhs));
+        try self.emitU16(try docCommentConst(self, tmember.main_token));
     }
     for (constructor_params) |p| {
         const pnode = self.ast.nodes[p];
@@ -1600,6 +1684,7 @@ pub fn compileAnonymousClass(self: *Compiler, node: Ast.Node) Error!void {
                 const type_str = try buildTypeString(self, start_tok, end_tok);
                 try self.emitU16(try self.addConstant(.{ .string = type_str }));
             }
+            try self.emitU16(0xffff);
         }
     }
 
@@ -1615,6 +1700,7 @@ pub fn compileAnonymousClass(self: *Compiler, node: Ast.Node) Error!void {
             try self.emitByte(@intCast(member.data.rhs & 0xff));
             try self.emitByte(0); // 0 = static property
             try self.emitU16(try propertyTypeConst(self, member.data.rhs));
+            try self.emitU16(try docCommentConst(self, member.main_token));
         } else if (member.tag == .const_decl) {
             const cname = self.ast.tokenSlice(member.main_token);
             const cname_idx = try self.addConstant(.{ .string = cname });
@@ -1622,6 +1708,8 @@ pub fn compileAnonymousClass(self: *Compiler, node: Ast.Node) Error!void {
             try self.emitByte(1);
             try self.emitByte(@intCast(member.data.rhs & 0x13)); // bits 0-1 visibility, bit 4 final
             try self.emitByte(1); // 1 = constant
+            try self.emitU16(0xffff);
+            try self.emitU16(try docCommentConst(self, member.main_token));
         }
     }
 
@@ -2362,6 +2450,7 @@ fn compileClassMethodBody(self: *Compiler, class_name: []const u8, member: Ast.N
         .file_path = self.file_path,
         .start_line = lineForToken(self, member.main_token),
         .end_line = endLineForBlockStartingAt(self, member.main_token),
+        .doc_comment = docCommentForToken(self, member.main_token),
     });
 
     const param_types = try extractParamTypes(self, param_nodes);
