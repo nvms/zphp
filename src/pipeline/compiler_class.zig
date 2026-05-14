@@ -1327,7 +1327,7 @@ pub fn compileClassDecl(self: *Compiler, node: Ast.Node) Error!void {
             try self.emitByte(1); // always has a value
             try self.emitByte(@intCast(member.data.rhs & 0x13)); // bits 0-1 visibility, bit 4 final
             try self.emitByte(1); // 1 = constant
-            try self.emitU16(0xffff); // no type info on a class constant slot
+            try self.emitU16(try propertyTypeConst(self, member.data.rhs));
             try self.emitU16(try docCommentConst(self, member.main_token));
         }
     }

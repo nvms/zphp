@@ -728,6 +728,7 @@ const Parser = struct {
         // looking past an optional `?` and a type token to see whether a const
         // name + `=` follows
         const at0 = self.peek();
+        var type_range: [2]u32 = .{ 0, 0 };
         if (at0 == .question or (self.isTypeName() and at0 != .identifier) or
             (at0 == .identifier and (self.peekAt(1) == .identifier or isSemiReserved(self.peekAt(1))) and self.peekAt(2) == .equal))
         {
@@ -735,14 +736,19 @@ const Parser = struct {
             const next_tag = self.peekAt(probe);
             const after_tag = self.peekAt(probe + 1);
             if ((next_tag == .identifier or isSemiReserved(next_tag)) and after_tag == .equal) {
-                self.skipTypeHint();
+                type_range = self.collectTypeHint();
             }
         }
         const name_tok = try self.expectFunctionName();
         _ = try self.expect(.equal);
         const value = try self.parseExpression();
         _ = try self.expect(.semicolon);
-        return self.addNode(.{ .tag = .const_decl, .main_token = name_tok, .data = .{ .lhs = value } });
+        var rhs: u32 = 0;
+        if (type_range[0] != type_range[1]) {
+            const ext = try self.addExtra(&type_range);
+            rhs = (ext + 1) << 16;
+        }
+        return self.addNode(.{ .tag = .const_decl, .main_token = name_tok, .data = .{ .lhs = value, .rhs = rhs } });
     }
 
     fn parseSwitchStmt(self: *Parser) Error!u32 {
@@ -1218,8 +1224,9 @@ const Parser = struct {
                 try members.append(self.allocator, prop);
             } else if (self.peek() == .kw_const) {
                 const cd = try self.parseConstDecl();
-                // bits 0-1: visibility, bit 4: final
-                self.nodes.items[cd].data.rhs = visibility | (if (is_final) @as(u32, 1) << 4 else 0);
+                // bits 0-1: visibility, bit 4: final, bits 16+: type extra idx
+                const type_bits = self.nodes.items[cd].data.rhs & ~@as(u32, 0xffff);
+                self.nodes.items[cd].data.rhs = visibility | (if (is_final) @as(u32, 1) << 4 else 0) | type_bits;
                 try members.append(self.allocator, cd);
             } else if (self.isTypeName() or self.peek() == .question or self.peek() == .l_paren) {
                 const tr = self.collectTypeHint();
@@ -1384,8 +1391,9 @@ const Parser = struct {
                 try members.append(self.allocator, prop);
             } else if (self.peek() == .kw_const) {
                 const cd = try self.parseConstDecl();
-                // bits 0-1: visibility, bit 4: final
-                self.nodes.items[cd].data.rhs = visibility | (if (is_final) @as(u32, 1) << 4 else 0);
+                // bits 0-1: visibility, bit 4: final, bits 16+: type extra idx
+                const type_bits = self.nodes.items[cd].data.rhs & ~@as(u32, 0xffff);
+                self.nodes.items[cd].data.rhs = visibility | (if (is_final) @as(u32, 1) << 4 else 0) | type_bits;
                 try members.append(self.allocator, cd);
             } else if (self.isTypeName() or self.peek() == .question or self.peek() == .l_paren) {
                 const tr = self.collectTypeHint();

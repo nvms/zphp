@@ -591,6 +591,8 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try rcc_def.methods.put(a, "isPrivate", .{ .name = "isPrivate", .arity = 0 });
     try rcc_def.methods.put(a, "isFinal", .{ .name = "isFinal", .arity = 0 });
     try rcc_def.methods.put(a, "isEnumCase", .{ .name = "isEnumCase", .arity = 0 });
+    try rcc_def.methods.put(a, "getType", .{ .name = "getType", .arity = 0 });
+    try rcc_def.methods.put(a, "hasType", .{ .name = "hasType", .arity = 0 });
     try vm.classes.put(a, "ReflectionClassConstant", rcc_def);
 
     try vm.native_fns.put(a, "ReflectionClassConstant::__construct", rccConstruct);
@@ -603,6 +605,8 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try vm.native_fns.put(a, "ReflectionClassConstant::isPrivate", rccIsPrivate);
     try vm.native_fns.put(a, "ReflectionClassConstant::isFinal", rccIsFinal);
     try vm.native_fns.put(a, "ReflectionClassConstant::isEnumCase", rccIsEnumCase);
+    try vm.native_fns.put(a, "ReflectionClassConstant::getType", rccGetType);
+    try vm.native_fns.put(a, "ReflectionClassConstant::hasType", rccHasType);
 
     // Closure class (static methods only - instance methods handled in VM dispatch)
     var closure_def = ClassDef{ .name = "Closure" };
@@ -1807,6 +1811,38 @@ fn rccIsEnumCase(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
     if (!cls.is_enum) return .{ .bool = false };
     for (cls.case_order.items) |case_name| {
         if (std.mem.eql(u8, case_name, const_name)) return .{ .bool = true };
+    }
+    return .{ .bool = false };
+}
+
+fn rccGetType(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const this = getThis(ctx) orelse return .null;
+    const class_name = if (this.get("class") == .string) this.get("class").string else return .null;
+    const const_name = if (this.get("name") == .string) this.get("name").string else return .null;
+    var current: ?[]const u8 = class_name;
+    while (current) |cn| {
+        if (ctx.vm.classes.get(cn)) |cls| {
+            if (cls.static_prop_types.get(const_name)) |type_str| {
+                if (cls.constant_names.contains(const_name)) {
+                    return .{ .object = try createTypeObj(ctx, type_str, false, cn) };
+                }
+            }
+            current = cls.parent;
+        } else break;
+    }
+    return .null;
+}
+
+fn rccHasType(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const this = getThis(ctx) orelse return .{ .bool = false };
+    const class_name = if (this.get("class") == .string) this.get("class").string else return .{ .bool = false };
+    const const_name = if (this.get("name") == .string) this.get("name").string else return .{ .bool = false };
+    var current: ?[]const u8 = class_name;
+    while (current) |cn| {
+        if (ctx.vm.classes.get(cn)) |cls| {
+            if (cls.static_prop_types.get(const_name) != null and cls.constant_names.contains(const_name)) return .{ .bool = true };
+            current = cls.parent;
+        } else break;
     }
     return .{ .bool = false };
 }
