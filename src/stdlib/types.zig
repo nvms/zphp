@@ -115,6 +115,7 @@ pub const entries = .{
     .{ "restore_include_path", native_noop_null },
     .{ "trigger_error", native_trigger_error },
     .{ "user_error", native_trigger_error },
+    .{ "__zphp_match_unhandled_msg", native_match_unhandled_msg },
     .{ "class_alias", native_class_alias },
     .{ "assert", native_assert },
     .{ "assert_options", native_assert_options },
@@ -1892,6 +1893,43 @@ fn native_error_reporting(ctx: *NativeContext, args: []const Value) RuntimeError
         ctx.vm.error_reporting_level = Value.toInt(args[0]);
     }
     return .{ .int = prev };
+}
+
+// runtime helper emitted by the compiler for match-without-default. produces
+// the message body PHP's UnhandledMatchError uses:
+//   int/float/bool/null  -> "Unhandled match case 99"
+//   string               -> "Unhandled match case 'hello'"
+//   array/object         -> "Unhandled match case of type array" / "...stdClass"
+fn native_match_unhandled_msg(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    const v = if (args.len > 0) args[0] else Value{ .null = {} };
+    var buf = std.ArrayListUnmanaged(u8){};
+    try buf.appendSlice(ctx.allocator, "Unhandled match case ");
+    switch (v) {
+        .int => |i| try std.fmt.format(buf.writer(ctx.allocator), "{d}", .{i}),
+        .float => try v.format(&buf, ctx.allocator),
+        .bool => |b| try buf.appendSlice(ctx.allocator, if (b) "true" else "false"),
+        .null => try buf.appendSlice(ctx.allocator, "null"),
+        .string => |s| {
+            // closures stored as Value.string with a __closure_ prefix are objects
+            if (std.mem.startsWith(u8, s, "__closure_")) {
+                try buf.appendSlice(ctx.allocator, "of type Closure");
+            } else {
+                try buf.append(ctx.allocator, '\'');
+                try buf.appendSlice(ctx.allocator, s);
+                try buf.append(ctx.allocator, '\'');
+            }
+        },
+        .array => try buf.appendSlice(ctx.allocator, "of type array"),
+        .object => |o| {
+            try buf.appendSlice(ctx.allocator, "of type ");
+            try buf.appendSlice(ctx.allocator, o.class_name);
+        },
+        .generator => try buf.appendSlice(ctx.allocator, "of type Generator"),
+        .fiber => try buf.appendSlice(ctx.allocator, "of type Fiber"),
+    }
+    const owned = try buf.toOwnedSlice(ctx.allocator);
+    try ctx.strings.append(ctx.allocator, owned);
+    return .{ .string = owned };
 }
 
 fn native_trigger_error(ctx: *NativeContext, args: []const Value) RuntimeError!Value {

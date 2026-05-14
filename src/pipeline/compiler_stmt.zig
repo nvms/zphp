@@ -491,10 +491,15 @@ pub fn compileMatch(self: *Compiler, node: Ast.Node) Error!void {
     if (default_arm) |da| {
         try self.compileNode(self.ast.nodes[da].data.rhs);
     } else {
-        // no default: throw UnhandledMatchError
+        // no default: format an UnhandledMatchError matching PHP's output
+        //   "Unhandled match case 99" / "case 'foo'" / "case of type array"
+        // by calling a runtime helper with the matched value
+        try self.emitGetVar(temp_name);
+        const helper_idx = try self.addConstant(.{ .string = "__zphp_match_unhandled_msg" });
+        try self.emitOp(.call);
+        try self.emitU16(helper_idx);
+        try self.emitByte(1);
         const cls_idx = try self.addConstant(.{ .string = "UnhandledMatchError" });
-        const msg_idx = try self.addConstant(.{ .string = "Unhandled match case" });
-        try self.emitConstant(msg_idx);
         try self.emitOp(.new_obj);
         try self.emitU16(cls_idx);
         try self.emitByte(1);
