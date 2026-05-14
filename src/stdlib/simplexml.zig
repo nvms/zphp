@@ -456,7 +456,8 @@ fn sxmlAttributes(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     try wrapper.set(ctx.allocator, "__doc", .{ .int = @intCast(@intFromPtr(doc)) });
     try wrapper.set(ctx.allocator, "__is_attr", .{ .bool = false });
     try wrapper.set(ctx.allocator, "__attr_view", .{ .bool = true });
-    // optional namespace filter mirrors children()
+    // namespace filter mirrors children(): when called without args, PHP only
+    // emits no-namespace attrs (so empty string __ns acts as the default)
     var resolved_ns: []const u8 = "";
     if (args.len >= 1 and args[0] == .string) {
         const ns_or_prefix = args[0].string;
@@ -470,11 +471,29 @@ fn sxmlAttributes(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
                 resolved_ns = href[0..cstrLen(href)];
             }
         }
-        const owned = try ctx.allocator.dupe(u8, resolved_ns);
-        try ctx.strings.append(ctx.allocator, owned);
-        try wrapper.set(ctx.allocator, "__ns", .{ .string = owned });
     }
+    const owned = try ctx.allocator.dupe(u8, resolved_ns);
+    try ctx.strings.append(ctx.allocator, owned);
+    try wrapper.set(ctx.allocator, "__ns", .{ .string = owned });
     return .{ .object = wrapper };
+}
+
+// walks all element nodes from the given root, registering each declared
+// xmlns:prefix mapping into the xpath context. mirrors PHP's behavior where
+// `SimpleXMLElement::xpath('//ns:item')` works without an explicit register
+fn autoRegisterNamespaces(ctx: *NativeContext, xctx: *c.xmlXPathContext, node: *c.xmlNode) !void {
+    var ns = node.nsDef;
+    while (ns != null) : (ns = ns.*.next) {
+        if (ns.*.href == null) continue;
+        const prefix = if (ns.*.prefix != null) ns.*.prefix[0..cstrLen(ns.*.prefix)] else continue;
+        const prefix_z = try dupZ(ctx, prefix);
+        const uri_z = try dupZ(ctx, ns.*.href[0..cstrLen(ns.*.href)]);
+        _ = c.xmlXPathRegisterNs(xctx, @ptrCast(prefix_z.ptr), @ptrCast(uri_z.ptr));
+    }
+    var ch = node.children;
+    while (ch != null) : (ch = ch.*.next) {
+        if (ch.*.type == c.XML_ELEMENT_NODE) try autoRegisterNamespaces(ctx, xctx, ch);
+    }
 }
 
 fn sxmlXpath(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
@@ -487,7 +506,13 @@ fn sxmlXpath(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     defer c.xmlXPathFreeContext(xctx);
     xctx.*.node = node;
 
-    // register any namespaces stored on this wrapper
+    // auto-register namespaces declared in the document (matches PHP's
+    // SimpleXMLElement::xpath which walks xmlDoc's namespace table)
+    {
+        const root = c.xmlDocGetRootElement(doc);
+        if (root != null) try autoRegisterNamespaces(ctx, xctx, root);
+    }
+    // also register any namespaces stored on this wrapper via registerXPathNamespace
     const ns_map = obj.get("__namespaces");
     if (ns_map == .array) {
         for (ns_map.array.entries.items) |e| {
@@ -537,17 +562,43 @@ fn sxmlAddChild(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     const obj = getThis(ctx) orelse return .null;
     const node = getNodePtr(obj) orelse return .null;
     const doc = getDocPtr(obj) orelse return .null;
-    const name_z = try dupZ(ctx, args[0].string);
     const content_z: ?[:0]u8 = if (args.len > 1 and args[1] == .string) try dupZ(ctx, args[1].string) else null;
-    const ns_z: ?[:0]u8 = if (args.len > 2 and args[2] == .string and args[2].string.len > 0) try dupZ(ctx, args[2].string) else null;
+    const ns_str: ?[]const u8 = if (args.len > 2 and args[2] == .string and args[2].string.len > 0) args[2].string else null;
+
+    // split "prefix:local" so the namespace is created with the right prefix
+    // (PHP attaches xmlns:prefix to the new child rather than xmlns on root)
+    const raw_name = args[0].string;
+    var prefix_part: ?[]const u8 = null;
+    var local_name = raw_name;
+    if (std.mem.indexOfScalar(u8, raw_name, ':')) |colon| {
+        prefix_part = raw_name[0..colon];
+        local_name = raw_name[colon + 1 ..];
+    }
+    const local_z = try dupZ(ctx, local_name);
 
     var ns_ptr: ?*c.xmlNs = null;
-    if (ns_z) |nz| {
-        ns_ptr = c.xmlSearchNsByHref(doc, node, @ptrCast(nz.ptr));
-        if (ns_ptr == null) ns_ptr = c.xmlNewNs(node, @ptrCast(nz.ptr), null);
+    if (ns_str) |ns_href| {
+        const href_z = try dupZ(ctx, ns_href);
+        ns_ptr = c.xmlSearchNsByHref(doc, node, @ptrCast(href_z.ptr));
+        if (ns_ptr == null) {
+            if (prefix_part) |p| {
+                const prefix_z = try dupZ(ctx, p);
+                ns_ptr = c.xmlNewNs(null, @ptrCast(href_z.ptr), @ptrCast(prefix_z.ptr));
+            } else {
+                ns_ptr = c.xmlNewNs(null, @ptrCast(href_z.ptr), null);
+            }
+        }
     }
     const content_ptr: [*c]const u8 = if (content_z) |cz| @ptrCast(cz.ptr) else null;
-    const child = c.xmlNewTextChild(node, ns_ptr, @ptrCast(name_z.ptr), content_ptr) orelse return .null;
+    const child_raw = c.xmlNewTextChild(node, ns_ptr, @ptrCast(local_z.ptr), content_ptr);
+    if (child_raw == null) return .null;
+    const child: *c.xmlNode = @ptrCast(child_raw);
+    // attach the namespace to the child itself so it serializes as
+    // <prefix:local xmlns:prefix="..."> when the prefix wasn't already in scope
+    if (ns_ptr) |np| if (np.*.context == null) {
+        np.*.next = child.nsDef;
+        child.nsDef = np;
+    };
     const wrapper = try buildWrapper(ctx, doc, child);
     return .{ .object = wrapper };
 }
@@ -896,6 +947,10 @@ fn sxmlGetIterator(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
     const iter_obj = try ctx.createObject("SimpleXMLChildrenIter");
     try iter_obj.set(ctx.allocator, "__doc", .{ .int = @intCast(@intFromPtr(doc)) });
     try iter_obj.set(ctx.allocator, "__cursor", .{ .int = 0 });
+    // forward namespace filter from the wrapper to the iter so sxiAcceptable
+    // can drop nodes outside the requested namespace
+    const fwd_ns = obj.get("__ns");
+    if (fwd_ns == .string) try iter_obj.set(ctx.allocator, "__ns", .{ .string = fwd_ns.string });
     if (obj.get("__iter_children") == .bool and obj.get("__iter_children").bool) {
         // start from the node's first child
         try iter_obj.set(ctx.allocator, "__node", .{ .int = @intCast(@intFromPtr(node)) });
@@ -1134,6 +1189,18 @@ fn sxiAcceptable(obj: *PhpObject, n: *c.xmlNode) bool {
     const same = obj.get("__same_name");
     if (same == .string and same.string.len > 0) {
         if (!std.mem.eql(u8, n.name[0..cstrLen(n.name)], same.string)) return false;
+    }
+    // namespace filter set by children() / attributes() with a $ns arg
+    const ns_v = obj.get("__ns");
+    if (ns_v == .string) {
+        const has_ns = n.ns != null and n.ns.*.href != null;
+        if (ns_v.string.len == 0) {
+            if (has_ns) return false;
+        } else {
+            if (!has_ns) return false;
+            const href = n.ns.*.href;
+            if (!std.mem.eql(u8, href[0..cstrLen(href)], ns_v.string)) return false;
+        }
     }
     return true;
 }
