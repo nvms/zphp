@@ -2369,8 +2369,8 @@ fn native_iterator_apply(ctx: *NativeContext, args: []const Value) RuntimeError!
         var n: i64 = 0;
         while (gen.state != .completed) {
             const r = try ctx.invokeCallable(args[1], call_args);
-            if (!r.isTruthy()) break;
             n += 1;
+            if (!r.isTruthy()) break;
             try ctx.vm.resumeGenerator(gen, .null);
         }
         return .{ .int = n };
@@ -2380,8 +2380,8 @@ fn native_iterator_apply(ctx: *NativeContext, args: []const Value) RuntimeError!
         var n: i64 = 0;
         for (args[0].array.entries.items) |_| {
             const r = try ctx.invokeCallable(args[1], call_args);
-            if (!r.isTruthy()) break;
             n += 1;
+            if (!r.isTruthy()) break;
         }
         return .{ .int = n };
     }
@@ -2410,8 +2410,8 @@ fn native_iterator_apply(ctx: *NativeContext, args: []const Value) RuntimeError!
                 const valid = try ctx.vm.callMethod(obj, "valid", &.{});
                 if (!valid.isTruthy()) break;
                 const r = try ctx.invokeCallable(args[1], call_args);
-                if (!r.isTruthy()) break;
                 n += 1;
+                if (!r.isTruthy()) break;
                 _ = try ctx.vm.callMethod(obj, "next", &.{});
             }
             return .{ .int = n };

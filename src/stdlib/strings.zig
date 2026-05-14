@@ -27,6 +27,7 @@ pub const entries = .{
     .{ "lcfirst", lcfirst },
     .{ "str_pad", str_pad },
     .{ "strcmp", native_strcmp },
+    .{ "strcoll", native_strcmp },
     .{ "strcasecmp", native_strcasecmp },
     .{ "strnatcmp", native_strnatcmp },
     .{ "strnatcasecmp", native_strnatcasecmp },

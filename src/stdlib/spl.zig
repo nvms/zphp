@@ -1343,13 +1343,29 @@ fn pqEntryPriority(entry: PhpArray.Entry) Value {
     return entry.value.array.get(.{ .int = 1 });
 }
 
-fn pqSiftUp(arr: *PhpArray, start: usize) void {
+// dispatches to a subclass-defined compare() when present so user subclasses
+// (e.g. inverting to a min-heap by returning $b <=> $a) actually take effect.
+// the base SplPriorityQueue has no native compare method so this returns null
+// for the unsubclassed case and we fall back to Value.compare
+fn pqUserCompare(ctx: *NativeContext, obj: *PhpObject, a: Value, b: Value) RuntimeError!?i64 {
+    if (!ctx.vm.hasMethod(obj.class_name, "compare")) return null;
+    const r = try ctx.vm.callMethod(obj, "compare", &.{ a, b });
+    return Value.toInt(r);
+}
+
+fn pqCompareEntries(ctx: *NativeContext, obj: *PhpObject, lhs: PhpArray.Entry, rhs: PhpArray.Entry) RuntimeError!i64 {
+    const pa = pqEntryPriority(lhs);
+    const pb = pqEntryPriority(rhs);
+    if (try pqUserCompare(ctx, obj, pa, pb)) |c| return c;
+    return Value.compare(pa, pb);
+}
+
+fn pqSiftUp(ctx: *NativeContext, obj: *PhpObject, arr: *PhpArray, start: usize) RuntimeError!void {
     var i = start;
     while (i > 0) {
         const parent = (i - 1) / 2;
-        const a = pqEntryPriority(arr.entries.items[i]);
-        const b = pqEntryPriority(arr.entries.items[parent]);
-        if (Value.compare(a, b) <= 0) break;
+        const c = try pqCompareEntries(ctx, obj, arr.entries.items[i], arr.entries.items[parent]);
+        if (c <= 0) break;
         const tmp = arr.entries.items[i];
         arr.entries.items[i] = arr.entries.items[parent];
         arr.entries.items[parent] = tmp;
@@ -1357,15 +1373,21 @@ fn pqSiftUp(arr: *PhpArray, start: usize) void {
     }
 }
 
-fn pqSiftDown(arr: *PhpArray, start: usize) void {
+fn pqSiftDown(ctx: *NativeContext, obj: *PhpObject, arr: *PhpArray, start: usize) RuntimeError!void {
     var i = start;
     const n = arr.entries.items.len;
     while (true) {
         const l = 2 * i + 1;
         const r = 2 * i + 2;
         var best = i;
-        if (l < n and Value.compare(pqEntryPriority(arr.entries.items[l]), pqEntryPriority(arr.entries.items[best])) > 0) best = l;
-        if (r < n and Value.compare(pqEntryPriority(arr.entries.items[r]), pqEntryPriority(arr.entries.items[best])) > 0) best = r;
+        if (l < n) {
+            const c = try pqCompareEntries(ctx, obj, arr.entries.items[l], arr.entries.items[best]);
+            if (c > 0) best = l;
+        }
+        if (r < n) {
+            const c = try pqCompareEntries(ctx, obj, arr.entries.items[r], arr.entries.items[best]);
+            if (c > 0) best = r;
+        }
         if (best == i) break;
         const tmp = arr.entries.items[i];
         arr.entries.items[i] = arr.entries.items[best];
@@ -1386,7 +1408,7 @@ fn pqInsert(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
 
     const new_idx = arr.entries.items.len;
     try arr.entries.append(ctx.allocator, .{ .key = .{ .int = @intCast(new_idx) }, .value = .{ .array = pair } });
-    pqSiftUp(arr, new_idx);
+    try pqSiftUp(ctx, obj, arr, new_idx);
     return .null;
 }
 
@@ -1401,7 +1423,7 @@ fn pqExtractValue(ctx: *NativeContext, obj: *PhpObject) RuntimeError!Value {
     arr.entries.items.len -= 1;
     if (arr.entries.items.len > 0) {
         arr.entries.items[0] = last;
-        pqSiftDown(arr, 0);
+        try pqSiftDown(ctx, obj, arr, 0);
     }
     return pqFormatEntry(ctx, obj, top);
 }
