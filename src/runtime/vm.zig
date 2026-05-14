@@ -2321,17 +2321,11 @@ pub const VM = struct {
                             if (try self.throwOffsetKeyType(key, .access)) continue;
                             return error.RuntimeError;
                         }
-                        // NOTE: PHP emits "Undefined array key X" warnings on missing
-                        // array reads. zphp can't enable that generally yet because
-                        // it surfaces a deeper, known limitation: pass-by-reference
-                        // through closure params (e.g. Laravel's `tap()` with
-                        // `fn (&$stack) => $stack[$h] = $v`) doesn't persist the
-                        // mutation, so vendor code ends up reading a "missing" key
-                        // that PHP populated via reference. Emitting the warning
-                        // here would expose that divergence as a torrent of false
-                        // stderr noise across every Laravel/Symfony test. Re-enable
-                        // once reference semantics are upgraded
-                        self.push(arr_val.array.get(Value.toArrayKey(key)));
+                        const ak = Value.toArrayKey(key);
+                        if (!arr_val.array.contains(ak)) {
+                            self.emitUndefinedKeyWarning(ak);
+                        }
+                        self.push(arr_val.array.get(ak));
                     } else if (arr_val == .object and self.hasMethod(arr_val.object.class_name, "offsetGet")) {
                         const result = self.callMethod(arr_val.object, "offsetGet", &.{key}) catch {
                             if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
@@ -6996,6 +6990,15 @@ pub const VM = struct {
         self.emitWarning("A non-numeric value encountered");
     }
 
+    fn emitUndefinedKeyWarning(self: *VM, key: PhpArray.Key) void {
+        const msg = switch (key) {
+            .int => |n| std.fmt.allocPrint(self.allocator, "Undefined array key {d}", .{n}) catch return,
+            .string => |s| std.fmt.allocPrint(self.allocator, "Undefined array key \"{s}\"", .{s}) catch return,
+        };
+        self.strings.append(self.allocator, msg) catch {};
+        self.emitWarning(msg);
+    }
+
 
     pub fn emitWarning(self: *VM, msg: []const u8) void {
         const ip = if (self.frame_count > 0) self.currentFrame().ip else 0;
@@ -8724,9 +8727,26 @@ pub const VM = struct {
         const caller = self.currentFrame();
         const chunk = caller.chunk;
         const ip = caller.ip;
-        if (ip < 4) return sources;
-        const call_pos = ip - 4;
+        if (ip < 2) return sources;
         const code = chunk.code.items;
+        // determine the call op width: try each plausible op width and pick the one
+        // whose byte at (ip - width) matches its widthFromByte. .call is 4 bytes;
+        // call_indirect / require / method_call_dynamic are 2; etc
+        var call_pos: usize = 0;
+        var found_call = false;
+        const candidates = [_]usize{ 4, 2, 1, 3 };
+        for (candidates) |w| {
+            if (ip < w) continue;
+            const p = ip - w;
+            const b = code[p];
+            const probe_w = OpCode.widthFromByte(b);
+            if (probe_w == w) {
+                call_pos = p;
+                found_call = true;
+                break;
+            }
+        }
+        if (!found_call) return sources;
 
         // bytes to walk backwards from the call site. each PHP arg can
         // compile to ~3 instructions of ~3 bytes per level of access chain;
@@ -8753,8 +8773,22 @@ pub const VM = struct {
         }
         if (instr_count == 0) return sources;
 
-        var scan_idx: usize = ac;
+        // for call_indirect (and similar indirect calls), the function name was
+        // pushed last so the topmost producer is the fname push, not an arg.
+        // walk one stack-effect-positive producer past it before scanning args
+        const call_op_byte = code[call_pos];
+        const is_indirect = call_op_byte == @intFromEnum(OpCode.call_indirect);
         var i = instr_count;
+        if (is_indirect) {
+            var depth: i32 = 0;
+            while (i > 0 and depth < 1) {
+                i -= 1;
+                const op: OpCode = std.meta.intToEnum(OpCode, code[instrs[i]]) catch break;
+                depth += @as(i32, op.stackEffect());
+            }
+        }
+
+        var scan_idx: usize = ac;
 
         while (scan_idx > 0 and i > 0) {
             scan_idx -= 1;
@@ -10448,7 +10482,13 @@ pub const VM = struct {
             } else {
                 const bind_count = @min(ac, func.arity);
                 for (0..bind_count) |i| {
-                    try new_vars.put(self.allocator, func.params[i], try self.copyValue(self.stack[self.sp - ac + i]));
+                    // for ref params, share the caller's value (especially the
+                    // array/object pointer) so mutations through the param
+                    // surface back. copyValue would deep-clone the array and
+                    // sever the ref relationship
+                    const is_ref = i < func.ref_params.len and func.ref_params[i];
+                    const slot_val = if (is_ref) self.stack[self.sp - ac + i] else try self.copyValue(self.stack[self.sp - ac + i]);
+                    try new_vars.put(self.allocator, func.params[i], slot_val);
                 }
             }
             self.saveFrameArgs(arg_count);
