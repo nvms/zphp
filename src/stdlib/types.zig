@@ -917,6 +917,7 @@ fn native_settype(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
         return .{ .float = Value.toFloat(val) };
     if (std.mem.eql(u8, type_name, "string")) {
         if (val == .string) return val;
+        if (val == .array) ctx.vm.emitWarning("Array to string conversion");
         var buf = std.ArrayListUnmanaged(u8){};
         try val.format(&buf, ctx.allocator);
         const s = try buf.toOwnedSlice(ctx.allocator);

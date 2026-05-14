@@ -3396,6 +3396,13 @@ pub const VM = struct {
                         };
                         self.push(.{ .int = Value.toInt(.{ .string = s }) });
                     } else {
+                        if (v == .object) {
+                            const w = std.fmt.allocPrint(self.allocator, "Object of class {s} could not be converted to int", .{v.object.class_name}) catch null;
+                            if (w) |m| {
+                                self.strings.append(self.allocator, m) catch {};
+                                self.emitWarning(m);
+                            }
+                        }
                         self.push(.{ .int = Value.toInt(v) });
                     }
                 },
@@ -3408,6 +3415,13 @@ pub const VM = struct {
                         };
                         self.push(.{ .float = Value.toFloat(.{ .string = s }) });
                     } else {
+                        if (v == .object) {
+                            const w = std.fmt.allocPrint(self.allocator, "Object of class {s} could not be converted to float", .{v.object.class_name}) catch null;
+                            if (w) |m| {
+                                self.strings.append(self.allocator, m) catch {};
+                                self.emitWarning(m);
+                            }
+                        }
                         self.push(.{ .float = Value.toFloat(v) });
                     }
                 },
