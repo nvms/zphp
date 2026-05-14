@@ -1643,7 +1643,11 @@ fn array_replace(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
 }
 
 fn array_find(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len < 2 or args[0] != .array) return .null;
+    if (args.len < 2) return .null;
+    if (args[0] != .array) {
+        try ctx.vm.setPendingException("TypeError", "array_find(): Argument #1 ($array) must be of type array");
+        return error.RuntimeError;
+    }
     const arr = args[0].array;
     for (arr.entries.items) |entry| {
         const key_val: Value = switch (entry.key) {
@@ -1657,7 +1661,11 @@ fn array_find(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
 }
 
 fn array_find_key(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len < 2 or args[0] != .array) return .null;
+    if (args.len < 2) return .null;
+    if (args[0] != .array) {
+        try ctx.vm.setPendingException("TypeError", "array_find_key(): Argument #1 ($array) must be of type array");
+        return error.RuntimeError;
+    }
     const arr = args[0].array;
     for (arr.entries.items) |entry| {
         const key_val: Value = switch (entry.key) {
@@ -1676,7 +1684,11 @@ fn array_find_key(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
 }
 
 fn array_any(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len < 2 or args[0] != .array) return .{ .bool = false };
+    if (args.len < 2) return .{ .bool = false };
+    if (args[0] != .array) {
+        try ctx.vm.setPendingException("TypeError", "array_any(): Argument #1 ($array) must be of type array");
+        return error.RuntimeError;
+    }
     const arr = args[0].array;
     for (arr.entries.items) |entry| {
         const key_val: Value = switch (entry.key) {
@@ -1690,7 +1702,11 @@ fn array_any(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
 }
 
 fn array_all(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len < 2 or args[0] != .array) return .{ .bool = true };
+    if (args.len < 2) return .{ .bool = true };
+    if (args[0] != .array) {
+        try ctx.vm.setPendingException("TypeError", "array_all(): Argument #1 ($array) must be of type array");
+        return error.RuntimeError;
+    }
     const arr = args[0].array;
     for (arr.entries.items) |entry| {
         const key_val: Value = switch (entry.key) {
