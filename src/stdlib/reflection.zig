@@ -70,6 +70,7 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try rc_def.methods.put(a, "isInstance", .{ .name = "isInstance", .arity = 1 });
     try rc_def.methods.put(a, "isFinal", .{ .name = "isFinal", .arity = 0 });
     try rc_def.methods.put(a, "isReadOnly", .{ .name = "isReadOnly", .arity = 0 });
+    try rc_def.methods.put(a, "getModifiers", .{ .name = "getModifiers", .arity = 0 });
     try rc_def.methods.put(a, "isCloneable", .{ .name = "isCloneable", .arity = 0 });
     try rc_def.methods.put(a, "newInstanceArgs", .{ .name = "newInstanceArgs", .arity = 1 });
     try rc_def.methods.put(a, "newInstance", .{ .name = "newInstance", .arity = 0 });
@@ -163,6 +164,7 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try vm.native_fns.put(a, "ReflectionClass::setStaticPropertyValue", rcSetStaticPropertyValue);
     try vm.native_fns.put(a, "ReflectionClass::isFinal", rcIsFinal);
     try vm.native_fns.put(a, "ReflectionClass::isReadOnly", rcIsReadOnly);
+    try vm.native_fns.put(a, "ReflectionClass::getModifiers", rcGetModifiers);
     try vm.native_fns.put(a, "ReflectionClass::isCloneable", rcIsCloneable);
 
     // ReflectionMethod
@@ -370,6 +372,8 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try rf_def.methods.put(a, "getNumberOfRequiredParameters", .{ .name = "getNumberOfRequiredParameters", .arity = 0 });
     try rf_def.methods.put(a, "isAnonymous", .{ .name = "isAnonymous", .arity = 0 });
     try rf_def.methods.put(a, "isClosure", .{ .name = "isClosure", .arity = 0 });
+    try rf_def.methods.put(a, "isInternal", .{ .name = "isInternal", .arity = 0 });
+    try rf_def.methods.put(a, "isUserDefined", .{ .name = "isUserDefined", .arity = 0 });
     try rf_def.methods.put(a, "isGenerator", .{ .name = "isGenerator", .arity = 0 });
     try rf_def.methods.put(a, "isVariadic", .{ .name = "isVariadic", .arity = 0 });
     try rf_def.methods.put(a, "returnsReference", .{ .name = "returnsReference", .arity = 0 });
@@ -391,6 +395,8 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try vm.native_fns.put(a, "ReflectionFunction::getNumberOfRequiredParameters", rfGetNumberOfRequiredParameters);
     try vm.native_fns.put(a, "ReflectionFunction::isAnonymous", rfIsAnonymous);
     try vm.native_fns.put(a, "ReflectionFunction::isClosure", rfIsAnonymous);
+    try vm.native_fns.put(a, "ReflectionFunction::isInternal", rfIsInternal);
+    try vm.native_fns.put(a, "ReflectionFunction::isUserDefined", rfIsUserDefined);
     try vm.native_fns.put(a, "ReflectionFunction::isGenerator", rfIsGenerator);
     try vm.native_fns.put(a, "ReflectionFunction::isVariadic", rfIsVariadic);
     try vm.native_fns.put(a, "ReflectionFunction::returnsReference", reflectionFalse);
@@ -1091,7 +1097,19 @@ fn rcHasMethod(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len < 1 or args[0] != .string) return .{ .bool = false };
     const this = getThis(ctx) orelse return .{ .bool = false };
     const class_name = if (this.get("name") == .string) this.get("name").string else return .{ .bool = false };
-    return .{ .bool = ctx.vm.hasMethod(class_name, args[0].string) };
+    // PHP method names are case-insensitive
+    if (ctx.vm.hasMethod(class_name, args[0].string)) return .{ .bool = true };
+    var current: ?[]const u8 = class_name;
+    while (current) |cn| {
+        if (ctx.vm.classes.get(cn)) |cls| {
+            var it = cls.methods.iterator();
+            while (it.next()) |entry| {
+                if (std.ascii.eqlIgnoreCase(entry.key_ptr.*, args[0].string)) return .{ .bool = true };
+            }
+            current = cls.parent;
+        } else break;
+    }
+    return .{ .bool = false };
 }
 
 fn rcIsAbstract(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
@@ -1109,6 +1127,19 @@ fn rcIsFinal(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
     const cls = ctx.vm.classes.get(class_name) orelse return .{ .bool = false };
     if (cls.is_enum) return .{ .bool = true };
     return .{ .bool = cls.is_final };
+}
+
+fn rcGetModifiers(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    // PHP class modifier bitmask: IS_EXPLICIT_ABSTRACT=32, IS_IMPLICIT_ABSTRACT=16,
+    // IS_FINAL=4, IS_READONLY=65536. these are used by ReflectionClass::getModifiers
+    const this = getThis(ctx) orelse return .{ .int = 0 };
+    const class_name = if (this.get("name") == .string) this.get("name").string else return .{ .int = 0 };
+    const cls = ctx.vm.classes.get(class_name) orelse return .{ .int = 0 };
+    var mods: i64 = 0;
+    if (cls.is_abstract) mods |= 32;
+    if (cls.is_final) mods |= 4;
+    if (cls.is_readonly) mods |= 65536;
+    return .{ .int = mods };
 }
 
 fn rcIsReadOnly(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
@@ -2308,6 +2339,22 @@ fn rfIsAnonymous(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
     const this = getThis(ctx) orelse return .{ .bool = false };
     const name = if (this.get("name") == .string) this.get("name").string else return .{ .bool = false };
     return .{ .bool = std.mem.startsWith(u8, name, "__closure_") };
+}
+
+fn rfIsInternal(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    // built-in native functions register in vm.native_fns. user functions
+    // land in vm.functions. closures sit under __closure_ keys which are
+    // also user-defined
+    const this = getThis(ctx) orelse return .{ .bool = false };
+    const name = if (this.get("name") == .string) this.get("name").string else return .{ .bool = false };
+    if (std.mem.startsWith(u8, name, "__closure_")) return .{ .bool = false };
+    if (ctx.vm.functions.contains(name)) return .{ .bool = false };
+    return .{ .bool = ctx.vm.native_fns.contains(name) };
+}
+
+fn rfIsUserDefined(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const internal = try rfIsInternal(ctx, &.{});
+    return .{ .bool = !(internal == .bool and internal.bool) };
 }
 
 fn rfIsGenerator(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
