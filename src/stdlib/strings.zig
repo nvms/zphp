@@ -5533,7 +5533,18 @@ fn native_count_chars(ctx: *NativeContext, args: []const Value) RuntimeError!Val
 fn native_str_increment(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len == 0 or args[0] != .string) return .{ .string = "" };
     const s = args[0].string;
-    if (s.len == 0) return .{ .string = "" };
+    // PHP 8.3+ rejects empty strings and strings containing non-alphanumeric
+    // bytes with ValueError
+    if (s.len == 0) {
+        try ctx.vm.setPendingException("ValueError", "str_increment(): Argument #1 ($string) cannot be empty");
+        return error.RuntimeError;
+    }
+    for (s) |c| {
+        if (!((c >= 'a' and c <= 'z') or (c >= 'A' and c <= 'Z') or (c >= '0' and c <= '9'))) {
+            try ctx.vm.setPendingException("ValueError", "str_increment(): Argument #1 ($string) must be composed only of alphanumeric ASCII characters");
+            return error.RuntimeError;
+        }
+    }
 
     var buf3 = try ctx.allocator.alloc(u8, s.len + 1);
     @memcpy(buf3[1..], s);
@@ -5591,7 +5602,16 @@ fn native_str_increment(ctx: *NativeContext, args: []const Value) RuntimeError!V
 fn native_str_decrement(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len == 0 or args[0] != .string) return .{ .string = "" };
     const s = args[0].string;
-    if (s.len == 0) return .{ .string = "" };
+    if (s.len == 0) {
+        try ctx.vm.setPendingException("ValueError", "str_decrement(): Argument #1 ($string) cannot be empty");
+        return error.RuntimeError;
+    }
+    for (s) |c| {
+        if (!((c >= 'a' and c <= 'z') or (c >= 'A' and c <= 'Z') or (c >= '0' and c <= '9'))) {
+            try ctx.vm.setPendingException("ValueError", "str_decrement(): Argument #1 ($string) must be composed only of alphanumeric ASCII characters");
+            return error.RuntimeError;
+        }
+    }
 
     if (s.len == 1) {
         if (s[0] == 'a' or s[0] == 'A' or s[0] == '0') return .{ .string = s };
