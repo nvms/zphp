@@ -53,6 +53,19 @@ pub const entries = .{
     .{ "filetype", native_filetype },
     .{ "fileinode", native_fileinode },
     .{ "fopen", native_fopen },
+    .{ "gzopen", native_gzopen },
+    .{ "gzwrite", native_fwrite },
+    .{ "gzputs", native_fwrite },
+    .{ "gzread", native_fread },
+    .{ "gzgets", native_fgets },
+    .{ "gzgetc", native_fgetc },
+    .{ "gzeof", native_feof },
+    .{ "gzclose", native_fclose },
+    .{ "gzrewind", native_rewind },
+    .{ "gzseek", native_fseek },
+    .{ "gztell", native_ftell },
+    .{ "gzpassthru", native_fpassthru },
+    .{ "gzfile", native_gzfile },
     .{ "fclose", native_fclose },
     .{ "fread", native_fread },
     .{ "fwrite", native_fwrite },
@@ -1088,6 +1101,53 @@ fn native_readfile(ctx: *NativeContext, args: []const Value) RuntimeError!Value 
 }
 
 // file handle operations (fopen/fclose/fread/fwrite/fgets/feof/fseek/ftell)
+
+fn native_gzopen(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    // gzopen($path, $mode) opens a gzipped file with transparent compression.
+    // route through fopen with the compress.zlib stream wrapper so a single
+    // backend handles read/write, seek, eof, etc
+    if (args.len < 2 or args[0] != .string) return .{ .bool = false };
+    const path = args[0].string;
+    if (std.mem.startsWith(u8, path, "compress.zlib://")) {
+        return native_fopen(ctx, args);
+    }
+    const wrapped = try std.fmt.allocPrint(ctx.allocator, "compress.zlib://{s}", .{path});
+    try ctx.strings.append(ctx.allocator, wrapped);
+    var new_args: [4]Value = undefined;
+    new_args[0] = .{ .string = wrapped };
+    var i: usize = 1;
+    while (i < args.len and i < new_args.len) : (i += 1) new_args[i] = args[i];
+    return native_fopen(ctx, new_args[0..i]);
+}
+
+fn native_gzfile(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    // gzfile($path) reads the whole gzipped file and returns an array of lines
+    if (args.len < 1 or args[0] != .string) return .{ .bool = false };
+    const path = args[0].string;
+    const wrapped = try std.fmt.allocPrint(ctx.allocator, "compress.zlib://{s}", .{path});
+    try ctx.strings.append(ctx.allocator, wrapped);
+    var fgc_args = [_]Value{.{ .string = wrapped }};
+    const contents_val = try native_file_get_contents(ctx, &fgc_args);
+    if (contents_val != .string) return .{ .bool = false };
+    const arr = try ctx.createArray();
+    const contents = contents_val.string;
+    var start: usize = 0;
+    var pos: usize = 0;
+    while (pos < contents.len) : (pos += 1) {
+        if (contents[pos] == '\n') {
+            const slice = try ctx.allocator.dupe(u8, contents[start .. pos + 1]);
+            try ctx.strings.append(ctx.allocator, slice);
+            try arr.append(ctx.allocator, .{ .string = slice });
+            start = pos + 1;
+        }
+    }
+    if (start < contents.len) {
+        const slice = try ctx.allocator.dupe(u8, contents[start..]);
+        try ctx.strings.append(ctx.allocator, slice);
+        try arr.append(ctx.allocator, .{ .string = slice });
+    }
+    return .{ .array = arr };
+}
 
 fn native_fopen(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len < 2 or args[0] != .string or args[1] != .string) return .{ .bool = false };
