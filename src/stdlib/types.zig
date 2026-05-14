@@ -352,7 +352,7 @@ fn get_debug_type(_: *NativeContext, args: []const Value) RuntimeError!Value {
         .float => "float",
         .string => |s| if (std.mem.startsWith(u8, s, "__closure_")) "Closure" else "string",
         .array => "array",
-        .object => |o| o.class_name,
+        .object => |o| if (std.mem.eql(u8, o.class_name, "FileHandle")) "resource (stream)" else o.class_name,
         .generator => "Generator",
         .fiber => "Fiber",
     } };
@@ -486,7 +486,10 @@ fn is_object(_: *NativeContext, args: []const Value) RuntimeError!Value {
 fn is_scalar(_: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len == 0) return .{ .bool = false };
     return .{ .bool = switch (args[0]) {
-        .int, .float, .string, .bool => true,
+        .int, .float, .bool => true,
+        // closures are stored as a Value.string with a "__closure_" prefix;
+        // PHP treats Closure as an object, not a scalar
+        .string => |s| !std.mem.startsWith(u8, s, "__closure_"),
         else => false,
     } };
 }
