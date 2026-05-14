@@ -218,9 +218,26 @@ fn varDumpValue(ctx: *NativeContext, val: Value, depth: usize) !void {
             try appendIndent(out, a, indent);
             try out.appendSlice(a, "}\n");
         },
-        .generator, .fiber => {
+        .generator => |g| {
             try appendIndent(out, a, indent);
-            try out.appendSlice(a, if (val == .generator) "object(Generator)#1 (0) {\n" else "object(Fiber)#1 (0) {\n");
+            try out.appendSlice(a, "object(Generator)#1 (1) {\n");
+            try appendIndent(out, a, indent + 2);
+            try out.appendSlice(a, "[\"function\"]=>\n");
+            try appendIndent(out, a, indent + 2);
+            try out.appendSlice(a, "string(");
+            var tmp: [32]u8 = undefined;
+            const fname = g.func.name;
+            const len_s = std.fmt.bufPrint(&tmp, "{d}", .{fname.len}) catch return;
+            try out.appendSlice(a, len_s);
+            try out.appendSlice(a, ") \"");
+            try out.appendSlice(a, fname);
+            try out.appendSlice(a, "\"\n");
+            try appendIndent(out, a, indent);
+            try out.appendSlice(a, "}\n");
+        },
+        .fiber => {
+            try appendIndent(out, a, indent);
+            try out.appendSlice(a, "object(Fiber)#1 (0) {\n");
             try appendIndent(out, a, indent);
             try out.appendSlice(a, "}\n");
         },
