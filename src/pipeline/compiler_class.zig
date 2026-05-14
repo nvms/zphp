@@ -1065,6 +1065,8 @@ pub fn compileClassDecl(self: *Compiler, node: Ast.Node) Error!void {
     // collect trait property indices for this class
     var trait_prop_members = std.ArrayListUnmanaged(u32){};
     defer trait_prop_members.deinit(self.allocator);
+    var trait_hook_members = std.ArrayListUnmanaged(u32){};
+    defer trait_hook_members.deinit(self.allocator);
     for (members) |member_idx| {
         const member = self.ast.nodes[member_idx];
         if (member.tag == .trait_use) {
@@ -1074,6 +1076,31 @@ pub fn compileClassDecl(self: *Compiler, node: Ast.Node) Error!void {
                     for (props) |pi| try trait_prop_members.append(self.allocator, pi);
                 }
             }
+        }
+    }
+    // emit hook bodies for trait properties as methods on the using class.
+    // mirrors the regular class-property-hook codepath above
+    for (trait_prop_members.items) |tpi| {
+        const tmember = self.ast.nodes[tpi];
+        if (tmember.tag != .class_property_hooks) continue;
+        const ext = tmember.data.lhs;
+        const get_body = self.ast.extra_data[ext + 1];
+        const set_body = self.ast.extra_data[ext + 2];
+        const set_param_tok = self.ast.extra_data[ext + 3];
+        const get_short = self.ast.extra_data[ext + 4];
+        const set_short = self.ast.extra_data[ext + 5];
+        var prop_name = self.ast.tokenSlice(tmember.main_token);
+        if (prop_name.len > 0 and prop_name[0] == '$') prop_name = prop_name[1..];
+        if (get_body != 0) {
+            try compilePropertyHook(self, class_name, prop_name, get_body, .get, get_short != 0, 0);
+            method_count += 1;
+            try trait_hook_members.append(self.allocator, tpi);
+        }
+        if (set_body != 0) {
+            try compilePropertyHook(self, class_name, prop_name, set_body, .set, set_short != 0, set_param_tok);
+            method_count += 1;
+            // mark second slot for emitting set-method metadata too
+            try trait_hook_members.append(self.allocator, tpi | 0x80000000);
         }
     }
 
@@ -1096,10 +1123,14 @@ pub fn compileClassDecl(self: *Compiler, node: Ast.Node) Error!void {
             if (default_idx != 0) try self.compileNode(default_idx);
         }
     }
-    // compile trait property defaults
+    // compile trait property defaults (hook properties keep their default in
+    // extra_data[lhs], regular properties keep it directly in lhs)
     for (trait_prop_members.items) |tpi| {
         const tmember = self.ast.nodes[tpi];
-        if (tmember.data.lhs != 0) {
+        if (tmember.tag == .class_property_hooks) {
+            const default_idx = self.ast.extra_data[tmember.data.lhs];
+            if (default_idx != 0) try self.compileNode(default_idx);
+        } else if (tmember.data.lhs != 0) {
             try self.compileNode(tmember.data.lhs);
         }
     }
@@ -1191,6 +1222,23 @@ pub fn compileClassDecl(self: *Compiler, node: Ast.Node) Error!void {
             try self.emitByte(1); // abstract
         }
     }
+    // method metadata for trait property hooks compiled above
+    for (trait_hook_members.items) |encoded| {
+        const is_set = (encoded & 0x80000000) != 0;
+        const tpi: u32 = encoded & 0x7fffffff;
+        const tmember = self.ast.nodes[tpi];
+        var prop_name = self.ast.tokenSlice(tmember.main_token);
+        if (prop_name.len > 0 and prop_name[0] == '$') prop_name = prop_name[1..];
+        const suffix = if (is_set) "$hook_set" else "$hook_get";
+        const hk_name = try std.fmt.allocPrint(self.allocator, "{s}{s}", .{ prop_name, suffix });
+        try self.string_allocs.append(self.allocator, hk_name);
+        const mname_idx = try self.addConstant(.{ .string = hk_name });
+        try self.emitU16(mname_idx);
+        try self.emitByte(if (is_set) @as(u8, 1) else @as(u8, 0));
+        try self.emitByte(0); // not static
+        try self.emitByte(2); // private vis
+        try self.emitByte(0); // flags
+    }
 
     try self.emitU16(prop_count);
     for (members) |member_idx| {
@@ -1216,14 +1264,18 @@ pub fn compileClassDecl(self: *Compiler, node: Ast.Node) Error!void {
             try self.emitU16(try docCommentConst(self, member.main_token));
         }
     }
-    // trait properties
+    // trait properties (own + hook variants)
     for (trait_prop_members.items) |tpi| {
         const tmember = self.ast.nodes[tpi];
         var tprop_name = self.ast.tokenSlice(tmember.main_token);
         if (tprop_name.len > 0 and tprop_name[0] == '$') tprop_name = tprop_name[1..];
         const tpname_idx = try self.addConstant(.{ .string = tprop_name });
         try self.emitU16(tpname_idx);
-        try self.emitByte(if (tmember.data.lhs != 0) @as(u8, 1) else @as(u8, 0));
+        const has_default: u8 = if (tmember.tag == .class_property_hooks) blk: {
+            const default_idx = self.ast.extra_data[tmember.data.lhs];
+            break :blk if (default_idx != 0) @as(u8, 1) else @as(u8, 0);
+        } else if (tmember.data.lhs != 0) @as(u8, 1) else @as(u8, 0);
+        try self.emitByte(has_default);
         try self.emitByte(@intCast(tmember.data.rhs & 0xff));
         try self.emitU16(try propertyTypeConst(self, tmember.data.rhs));
         try self.emitU16(try docCommentConst(self, tmember.main_token));
@@ -1968,7 +2020,7 @@ pub fn compileTraitDecl(self: *Compiler, node: Ast.Node) Error!void {
     }
     for (members) |member_idx| {
         const member = self.ast.nodes[member_idx];
-        if (member.tag == .class_property) {
+        if (member.tag == .class_property or member.tag == .class_property_hooks) {
             try prop_indices.append(self.allocator, member_idx);
         }
     }
@@ -1984,7 +2036,7 @@ pub fn compileTraitDecl(self: *Compiler, node: Ast.Node) Error!void {
     defer own_props.deinit(self.allocator);
     for (members) |member_idx| {
         const member = self.ast.nodes[member_idx];
-        if (member.tag == .class_property) {
+        if (member.tag == .class_property or member.tag == .class_property_hooks) {
             try own_props.append(self.allocator, member_idx);
         }
     }
