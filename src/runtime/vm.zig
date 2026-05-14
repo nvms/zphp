@@ -1926,27 +1926,27 @@ pub const VM = struct {
                 .less => {
                     const b = self.pop();
                     const a = self.pop();
-                    self.push(.{ .bool = Value.lessThan(a, b) });
+                    self.push(.{ .bool = try self.compareWithStringable(a, b) < 0 });
                 },
                 .less_equal => {
                     const b = self.pop();
                     const a = self.pop();
-                    self.push(.{ .bool = !Value.lessThan(b, a) });
+                    self.push(.{ .bool = try self.compareWithStringable(a, b) <= 0 });
                 },
                 .greater => {
                     const b = self.pop();
                     const a = self.pop();
-                    self.push(.{ .bool = Value.lessThan(b, a) });
+                    self.push(.{ .bool = try self.compareWithStringable(a, b) > 0 });
                 },
                 .greater_equal => {
                     const b = self.pop();
                     const a = self.pop();
-                    self.push(.{ .bool = !Value.lessThan(a, b) });
+                    self.push(.{ .bool = try self.compareWithStringable(a, b) >= 0 });
                 },
                 .spaceship => {
                     const b = self.pop();
                     const a = self.pop();
-                    self.push(.{ .int = Value.compare(a, b) });
+                    self.push(.{ .int = try self.compareWithStringable(a, b) });
                 },
 
                 .not => {
@@ -9049,6 +9049,22 @@ pub const VM = struct {
             }
             if (self.classes.contains(class_name)) return;
         }
+    }
+
+    // mirror of looseEqualWithStringable for ordered comparisons
+    pub fn compareWithStringable(self: *VM, a: Value, b: Value) RuntimeError!i64 {
+        if (a == .object and b == .string) {
+            if (self.hasMethod(a.object.class_name, "__toString")) {
+                const s = try self.callMethod(a.object, "__toString", &.{});
+                if (s == .string) return Value.compare(s, b);
+            }
+        } else if (b == .object and a == .string) {
+            if (self.hasMethod(b.object.class_name, "__toString")) {
+                const s = try self.callMethod(b.object, "__toString", &.{});
+                if (s == .string) return Value.compare(a, s);
+            }
+        }
+        return Value.compare(a, b);
     }
 
     // PHP's == between an object with __toString and a scalar string runs

@@ -184,7 +184,7 @@ fn array_values(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     return .{ .array = arr };
 }
 
-fn in_array(_: *NativeContext, args: []const Value) RuntimeError!Value {
+fn in_array(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len < 2 or args[1] != .array) return .{ .bool = false };
     const needle = args[0];
     const arr = args[1].array;
@@ -193,7 +193,7 @@ fn in_array(_: *NativeContext, args: []const Value) RuntimeError!Value {
         if (strict) {
             if (Value.identical(needle, entry.value)) return .{ .bool = true };
         } else {
-            if (Value.equal(needle, entry.value)) return .{ .bool = true };
+            if (try ctx.vm.looseEqualWithStringable(needle, entry.value)) return .{ .bool = true };
         }
     }
     return .{ .bool = false };
