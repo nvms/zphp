@@ -738,11 +738,11 @@ fn sxmlGetIterator(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
     const node = getNodePtr(obj) orelse return .null;
     const doc = getDocPtr(obj) orelse return .null;
 
-    const arr = try ctx.createArray();
-    var i: usize = 0;
-
+    // attribute view still uses the ArrayIterator path because attribute names
+    // are unique per element (so dedup in a PhpArray is harmless and the
+    // existing iter contract is what userland expects)
     if (obj.get("__attr_view") == .bool and obj.get("__attr_view").bool) {
-        // attribute view: yield each attribute as an attr-pseudo wrapper, keyed by attr name
+        const arr = try ctx.createArray();
         var attr = node.properties;
         while (attr != null) : (attr = attr.*.next) {
             if (attr.*.name == null) continue;
@@ -750,57 +750,31 @@ fn sxmlGetIterator(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
             const wrapped_obj = try buildAttrWrapper(ctx, doc, node, an);
             const key = try dupString(ctx, an);
             try arr.set(ctx.allocator, .{ .string = key }, .{ .object = wrapped_obj });
-            i += 1;
         }
-    } else if (obj.get("__iter_children") == .bool and obj.get("__iter_children").bool) {
-        // root iteration: yield each child element keyed by its tag name
-        var ch = node.children;
-        while (ch != null) : (ch = ch.*.next) {
-            if (ch.*.type != c.XML_ELEMENT_NODE) continue;
-            const wrapped_obj = try buildWrapper(ctx, doc, ch);
-            if (ch.*.name != null) {
-                const key = try dupString(ctx, ch.*.name[0..cstrLen(ch.*.name)]);
-                try arr.set(ctx.allocator, .{ .string = key }, .{ .object = wrapped_obj });
-            } else {
-                try arr.set(ctx.allocator, .{ .int = @intCast(i) }, .{ .object = wrapped_obj });
-            }
-            i += 1;
-        }
-    } else {
-        // sibling iteration: walk same-named siblings starting from $this,
-        // filtering to the same namespace as the starting node (PHP behavior)
-        if (node.name == null) return .null;
-        const self_name = node.name[0..cstrLen(node.name)];
-        const self_ns: ?[]const u8 = if (node.ns != null and node.ns.*.href != null)
-            node.ns.*.href[0..cstrLen(node.ns.*.href)]
-        else
-            null;
-        var ch: ?*c.xmlNode = node;
-        while (ch != null) : (ch = ch.?.next) {
-            const cn = ch.?;
-            if (cn.type != c.XML_ELEMENT_NODE) continue;
-            if (cn.name == null) continue;
-            if (!std.mem.eql(u8, cn.name[0..cstrLen(cn.name)], self_name)) continue;
-            // namespace filter: include only siblings in the same namespace
-            const cn_ns: ?[]const u8 = if (cn.ns != null and cn.ns.*.href != null)
-                cn.ns.*.href[0..cstrLen(cn.ns.*.href)]
-            else
-                null;
-            const ns_match = if (self_ns) |sns|
-                (cn_ns != null and std.mem.eql(u8, cn_ns.?, sns))
-            else
-                cn_ns == null;
-            if (!ns_match) continue;
-            const wrapped_obj = try buildWrapper(ctx, doc, cn);
-            try arr.set(ctx.allocator, .{ .int = @intCast(i) }, .{ .object = wrapped_obj });
-            i += 1;
-        }
+        const iter_obj = try ctx.createObject("ArrayIterator");
+        try iter_obj.set(ctx.allocator, "__data", .{ .array = arr });
+        try iter_obj.set(ctx.allocator, "__cursor", .{ .int = 0 });
+        try iter_obj.set(ctx.allocator, "__flags", .{ .int = 0 });
+        return .{ .object = iter_obj };
     }
 
-    const iter_obj = try ctx.createObject("ArrayIterator");
-    try iter_obj.set(ctx.allocator, "__data", .{ .array = arr });
+    // children / sibling iteration uses a custom xml-tree walker so duplicate-
+    // name children each get their own (name, child) pair in foreach
+    const iter_obj = try ctx.createObject("SimpleXMLChildrenIter");
+    try iter_obj.set(ctx.allocator, "__doc", .{ .int = @intCast(@intFromPtr(doc)) });
     try iter_obj.set(ctx.allocator, "__cursor", .{ .int = 0 });
-    try iter_obj.set(ctx.allocator, "__flags", .{ .int = 0 });
+    if (obj.get("__iter_children") == .bool and obj.get("__iter_children").bool) {
+        // start from the node's first child
+        try iter_obj.set(ctx.allocator, "__node", .{ .int = @intCast(@intFromPtr(node)) });
+        try iter_obj.set(ctx.allocator, "__mode", .{ .string = "children" });
+    } else {
+        // sibling mode: start from $this and only emit same-named siblings
+        if (node.name == null) return .{ .object = iter_obj };
+        try iter_obj.set(ctx.allocator, "__node", .{ .int = @intCast(@intFromPtr(node)) });
+        try iter_obj.set(ctx.allocator, "__mode", .{ .string = "siblings" });
+        const name_copy = try dupString(ctx, node.name[0..cstrLen(node.name)]);
+        try iter_obj.set(ctx.allocator, "__same_name", .{ .string = name_copy });
+    }
     return .{ .object = iter_obj };
 }
 
@@ -856,7 +830,108 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try vm.native_fns.put(a, "SimpleXMLElement::offsetSet", sxmlOffsetSet);
     try vm.native_fns.put(a, "SimpleXMLElement::offsetExists", sxmlOffsetExists);
     try vm.native_fns.put(a, "SimpleXMLElement::offsetUnset", sxmlOffsetUnset);
+
+    // SimpleXMLChildrenIter - a dedicated iterator that walks xml children/
+    // siblings without going through a deduplicating PhpArray, so duplicate-
+    // name siblings (multiple <a> under a parent) each get their own iteration
+    // step and the foreach key is the actual element name
+    var iter_def = ClassDef{ .name = "SimpleXMLChildrenIter" };
+    try iter_def.interfaces.append(a, "Iterator");
+    try iter_def.methods.put(a, "rewind", .{ .name = "rewind", .arity = 0 });
+    try iter_def.methods.put(a, "valid", .{ .name = "valid", .arity = 0 });
+    try iter_def.methods.put(a, "current", .{ .name = "current", .arity = 0 });
+    try iter_def.methods.put(a, "key", .{ .name = "key", .arity = 0 });
+    try iter_def.methods.put(a, "next", .{ .name = "next", .arity = 0 });
+    try vm.classes.put(a, "SimpleXMLChildrenIter", iter_def);
+    try vm.native_fns.put(a, "SimpleXMLChildrenIter::rewind", sxiRewind);
+    try vm.native_fns.put(a, "SimpleXMLChildrenIter::valid", sxiValid);
+    try vm.native_fns.put(a, "SimpleXMLChildrenIter::current", sxiCurrent);
+    try vm.native_fns.put(a, "SimpleXMLChildrenIter::key", sxiKey);
+    try vm.native_fns.put(a, "SimpleXMLChildrenIter::next", sxiNext);
 }
+
+// these walk xml node siblings via the underlying libxml node pointers stored
+// on the SimpleXMLChildrenIter. fields: __node (starting parent or sibling),
+// __doc (xmlDoc), __mode ("children" | "siblings"), __cursor (current xmlNode*
+// or 0 when done), __same_name (the element name to filter by in sibling mode)
+
+fn sxiRewind(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const obj = getThis(ctx) orelse return .null;
+    const node = getIterStartPtr(obj) orelse {
+        try obj.set(ctx.allocator, "__cursor", .{ .int = 0 });
+        return .null;
+    };
+    const mode = obj.get("__mode");
+    const start_ptr: ?*c.xmlNode = if (mode == .string and std.mem.eql(u8, mode.string, "children"))
+        @ptrCast(node.children)
+    else
+        node;
+    var p = start_ptr;
+    while (p != null) : (p = @ptrCast(p.?.next)) {
+        if (sxiAcceptable(obj, p.?)) break;
+    }
+    const cur: usize = if (p) |np| @intFromPtr(np) else 0;
+    try obj.set(ctx.allocator, "__cursor", .{ .int = @intCast(cur) });
+    return .null;
+}
+
+fn sxiValid(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const obj = getThis(ctx) orelse return .{ .bool = false };
+    const cur = obj.get("__cursor");
+    return .{ .bool = cur == .int and cur.int != 0 };
+}
+
+fn sxiCurrent(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const obj = getThis(ctx) orelse return .null;
+    const cur = obj.get("__cursor");
+    if (cur != .int or cur.int == 0) return .null;
+    const node: *c.xmlNode = @ptrFromInt(@as(usize, @intCast(cur.int)));
+    const doc: *c.xmlDoc = @ptrFromInt(@as(usize, @intCast(obj.get("__doc").int)));
+    const wrapper = try buildWrapper(ctx, doc, node);
+    return .{ .object = wrapper };
+}
+
+fn sxiKey(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const obj = getThis(ctx) orelse return .null;
+    const cur = obj.get("__cursor");
+    if (cur != .int or cur.int == 0) return .null;
+    const node: *c.xmlNode = @ptrFromInt(@as(usize, @intCast(cur.int)));
+    if (node.name == null) return .null;
+    const name = node.name[0..cstrLen(node.name)];
+    return .{ .string = try dupString(ctx, name) };
+}
+
+fn sxiNext(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const obj = getThis(ctx) orelse return .null;
+    const cur = obj.get("__cursor");
+    if (cur != .int or cur.int == 0) return .null;
+    var p: ?*c.xmlNode = @ptrFromInt(@as(usize, @intCast(cur.int)));
+    if (p) |cp| p = @ptrCast(cp.next);
+    while (p != null) : (p = @ptrCast(p.?.next)) {
+        if (sxiAcceptable(obj, p.?)) break;
+    }
+    const nxt: usize = if (p) |np| @intFromPtr(np) else 0;
+    try obj.set(ctx.allocator, "__cursor", .{ .int = @intCast(nxt) });
+    return .null;
+}
+
+fn sxiAcceptable(obj: *PhpObject, n: *c.xmlNode) bool {
+    if (n.type != c.XML_ELEMENT_NODE) return false;
+    if (n.name == null) return false;
+    // sibling mode filters by element name
+    const same = obj.get("__same_name");
+    if (same == .string and same.string.len > 0) {
+        if (!std.mem.eql(u8, n.name[0..cstrLen(n.name)], same.string)) return false;
+    }
+    return true;
+}
+
+fn getIterStartPtr(obj: *PhpObject) ?*c.xmlNode {
+    const v = obj.get("__node");
+    if (v != .int or v.int == 0) return null;
+    return @ptrFromInt(@as(usize, @intCast(v.int)));
+}
+
 
 pub fn cleanupResources(objects: std.ArrayListUnmanaged(*PhpObject)) void {
     for (objects.items) |obj| {
