@@ -213,7 +213,14 @@ fn preg_match(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len >= 3) {
         const matches_arr = if (args[2] == .array) args[2].array else try ctx.createArray();
         const ovector = pcre2.pcre2_get_ovector_pointer_8(match_data);
-        const count: usize = @intCast(rc);
+        const matched_count: usize = @intCast(rc);
+
+        // with PREG_UNMATCHED_AS_NULL, include every group in the pattern
+        // (matched or not), so vendor code can index into named groups whose
+        // captures didn't fire without triggering "Undefined array key"
+        var total_groups: u32 = 0;
+        _ = pcre2.pcre2_pattern_info_8(code, pcre2.INFO_CAPTURECOUNT, @ptrCast(&total_groups));
+        const count: usize = if (unmatched_as_null) @as(usize, total_groups) + 1 else matched_count;
 
         matches_arr.entries.items.len = 0;
         matches_arr.next_int_key = 0;

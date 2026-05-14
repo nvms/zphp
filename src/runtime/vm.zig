@@ -2321,11 +2321,17 @@ pub const VM = struct {
                             if (try self.throwOffsetKeyType(key, .access)) continue;
                             return error.RuntimeError;
                         }
-                        const ak = Value.toArrayKey(key);
-                        if (!arr_val.array.contains(ak)) {
-                            self.emitUndefinedKeyWarning(ak);
-                        }
-                        self.push(arr_val.array.get(ak));
+                        // NOTE: PHP emits "Undefined array key X" warnings on missing
+                        // array reads. zphp can't enable that generally yet because
+                        // it surfaces a deeper, known limitation: pass-by-reference
+                        // through closure params (e.g. Laravel's `tap()` with
+                        // `fn (&$stack) => $stack[$h] = $v`) doesn't persist the
+                        // mutation, so vendor code ends up reading a "missing" key
+                        // that PHP populated via reference. Emitting the warning
+                        // here would expose that divergence as a torrent of false
+                        // stderr noise across every Laravel/Symfony test. Re-enable
+                        // once reference semantics are upgraded
+                        self.push(arr_val.array.get(Value.toArrayKey(key)));
                     } else if (arr_val == .object and self.hasMethod(arr_val.object.class_name, "offsetGet")) {
                         const result = self.callMethod(arr_val.object, "offsetGet", &.{key}) catch {
                             if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
@@ -6990,14 +6996,6 @@ pub const VM = struct {
         self.emitWarning("A non-numeric value encountered");
     }
 
-    fn emitUndefinedKeyWarning(self: *VM, key: PhpArray.Key) void {
-        const msg = switch (key) {
-            .int => |n| std.fmt.allocPrint(self.allocator, "Undefined array key {d}", .{n}) catch return,
-            .string => |s| std.fmt.allocPrint(self.allocator, "Undefined array key \"{s}\"", .{s}) catch return,
-        };
-        self.strings.append(self.allocator, msg) catch {};
-        self.emitWarning(msg);
-    }
 
     pub fn emitWarning(self: *VM, msg: []const u8) void {
         const ip = if (self.frame_count > 0) self.currentFrame().ip else 0;
