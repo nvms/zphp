@@ -1008,6 +1008,13 @@ const Parser = struct {
     fn parseNewExpr(self: *Parser) Error!u32 {
         const new_tok = self.advance(); // new
 
+        // attributes preceding an anonymous class: `new #[Attr] class { ... }`
+        // skip the attributes (parseAnonymousClass picks them up via the
+        // shared attr_ranges target_tok mechanism)
+        if (self.peek() == .hash_bracket) {
+            self.skipAttributes();
+        }
+
         // anonymous class: new class (...) { ... }, or new readonly|abstract|final class ...
         if (self.peek() == .kw_class) {
             return self.parseAnonymousClass(new_tok);
