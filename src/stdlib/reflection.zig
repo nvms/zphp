@@ -1369,9 +1369,10 @@ fn rcGetProperties(ctx: *NativeContext, args: []const Value) RuntimeError!Value 
                     .default = entry.value_ptr.*,
                     .has_default = true,
                     .visibility = vis,
+                    .type_str = cls.static_prop_types.get(sp_name) orelse "",
                 };
                 const obj = try buildPropertyObj(ctx, class_name, pdef, name);
-                try obj.set(ctx.allocator, "__is_static", .{ .bool = true });
+                try obj.set(ctx.allocator, "_is_static", .{ .bool = true });
                 try arr.append(ctx.allocator, .{ .object = obj });
             }
         }
@@ -2880,15 +2881,15 @@ fn rpropGetType(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
             for (cls.properties.items) |p| {
                 if (std.mem.eql(u8, p.name, prop_name)) {
                     if (p.type_str.len > 0) {
-                        // createTypeObj handles union / intersection / nullable
-                        // normalisation, so unions like 'string|int' come back
-                        // as ReflectionUnionType rather than collapsing to the
-                        // first segment
                         const obj = try createTypeObj(ctx, p.type_str, false, cn);
                         return .{ .object = obj };
                     }
-                    break;
+                    return .null;
                 }
+            }
+            if (cls.static_prop_types.get(prop_name)) |type_str| {
+                const obj = try createTypeObj(ctx, type_str, false, cn);
+                return .{ .object = obj };
             }
             current = cls.parent;
         } else break;

@@ -1138,6 +1138,7 @@ pub fn compileClassDecl(self: *Compiler, node: Ast.Node) Error!void {
             try self.emitByte(if (member.data.lhs != 0) @as(u8, 1) else @as(u8, 0));
             try self.emitByte(@intCast(member.data.rhs & 0xff));
             try self.emitByte(0); // 0 = static property
+            try self.emitU16(try propertyTypeConst(self, member.data.rhs));
         } else if (member.tag == .const_decl) {
             const cname = self.ast.tokenSlice(member.main_token);
             const cname_idx = try self.addConstant(.{ .string = cname });
@@ -1145,6 +1146,7 @@ pub fn compileClassDecl(self: *Compiler, node: Ast.Node) Error!void {
             try self.emitByte(1); // always has a value
             try self.emitByte(@intCast(member.data.rhs & 0x13)); // bits 0-1 visibility, bit 4 final
             try self.emitByte(1); // 1 = constant
+            try self.emitU16(0xffff); // no type info on a class constant slot
         }
     }
 
@@ -1561,6 +1563,7 @@ pub fn compileAnonymousClass(self: *Compiler, node: Ast.Node) Error!void {
             try self.emitByte(if (member.data.lhs != 0) @as(u8, 1) else @as(u8, 0));
             try self.emitByte(@intCast(member.data.rhs & 0xff));
             try self.emitByte(0); // 0 = static property
+            try self.emitU16(try propertyTypeConst(self, member.data.rhs));
         } else if (member.tag == .const_decl) {
             const cname = self.ast.tokenSlice(member.main_token);
             const cname_idx = try self.addConstant(.{ .string = cname });

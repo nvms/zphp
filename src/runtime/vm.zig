@@ -230,6 +230,7 @@ pub const ClassDef = struct {
     method_order: std.ArrayListUnmanaged([]const u8) = .{},
     properties: std.ArrayListUnmanaged(PropertyDef) = .{},
     static_props: std.StringHashMapUnmanaged(Value) = .{},
+    static_prop_types: std.StringHashMapUnmanaged([]const u8) = .{},
     parent: ?[]const u8 = null,
     interfaces: std.ArrayListUnmanaged([]const u8) = .{},
     is_enum: bool = false,
@@ -294,6 +295,7 @@ pub const ClassDef = struct {
         self.const_final.deinit(allocator);
         self.properties.deinit(allocator);
         self.static_props.deinit(allocator);
+        self.static_prop_types.deinit(allocator);
         self.interfaces.deinit(allocator);
         self.used_traits.deinit(allocator);
         self.case_order.deinit(allocator);
@@ -7354,12 +7356,15 @@ pub const VM = struct {
         var sprop_has_default: [256]u8 = undefined;
         var sprop_is_const: [256]u8 = undefined;
         var sprop_visibility: [256]u8 = undefined;
+        var sprop_type: [256][]const u8 = .{""} ** 256;
         for (0..static_prop_count) |pi| {
             const pname_idx = self.readU16();
             sprop_names[pi] = self.currentChunk().constants.items[pname_idx].string;
             sprop_has_default[pi] = self.readByte();
             sprop_visibility[pi] = self.readByte();
             sprop_is_const[pi] = self.readByte();
+            const t_idx = self.readU16();
+            sprop_type[pi] = if (t_idx == 0xffff) "" else self.currentChunk().constants.items[t_idx].string;
         }
 
         const sdefaults = self.popDefaults(256, sprop_has_default[0..static_prop_count]);
@@ -7392,6 +7397,7 @@ pub const VM = struct {
                 break :blk v;
             } else Value{ .null = {} };
             try def.static_props.put(self.allocator, sprop_names[pi], default_val);
+            if (sprop_type[pi].len > 0) try def.static_prop_types.put(self.allocator, sprop_names[pi], sprop_type[pi]);
             const vis_byte = sprop_visibility[pi] & 0x03;
             if (vis_byte != 0) {
                 try def.const_visibility.put(self.allocator, sprop_names[pi], @enumFromInt(vis_byte));
