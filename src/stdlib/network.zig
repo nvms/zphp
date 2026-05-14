@@ -56,6 +56,41 @@ fn native_stream_context_get_params(_: *NativeContext, args: []const Value) Runt
 
 fn native_stream_context_set_options(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len < 2 or args[0] != .object) return .{ .bool = false };
+    // 4-arg form: stream_context_set_option($ctx, $wrapper, $option, $value)
+    // merges the (wrapper, option) into the existing options array
+    if (args.len >= 4 and args[1] == .string and args[2] == .string) {
+        const opts_v = args[0].object.get("options");
+        var opts: *PhpArray = undefined;
+        if (opts_v == .array) {
+            opts = opts_v.array;
+        } else {
+            opts = try ctx.createArray();
+            try args[0].object.set(ctx.allocator, "options", .{ .array = opts });
+        }
+        const wrap_key: PhpArray.Key = .{ .string = args[1].string };
+        const wrap_v = opts.get(wrap_key);
+        var wrap_arr: *PhpArray = undefined;
+        if (wrap_v == .array) {
+            wrap_arr = wrap_v.array;
+        } else {
+            wrap_arr = try ctx.createArray();
+            try opts.set(ctx.allocator, wrap_key, .{ .array = wrap_arr });
+        }
+        try wrap_arr.set(ctx.allocator, PhpArray.Key{ .string = args[2].string }, args[3]);
+        return .{ .bool = true };
+    }
+    // 3-arg form: stream_context_set_option($ctx, $wrapper, $options_assoc) -
+    // PHP also accepts this; merge per-wrapper
+    if (args.len == 3 and args[1] == .string and args[2] == .array) {
+        const opts_v = args[0].object.get("options");
+        var opts: *PhpArray = undefined;
+        if (opts_v == .array) opts = opts_v.array else {
+            opts = try ctx.createArray();
+            try args[0].object.set(ctx.allocator, "options", .{ .array = opts });
+        }
+        try opts.set(ctx.allocator, PhpArray.Key{ .string = args[1].string }, args[2]);
+        return .{ .bool = true };
+    }
     if (args[1] == .array) {
         try args[0].object.set(ctx.allocator, "options", args[1]);
         return .{ .bool = true };
