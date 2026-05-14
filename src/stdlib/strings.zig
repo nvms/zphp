@@ -2601,6 +2601,19 @@ fn unicodeToUpper(cp: u21) u21 {
     }
     // greek lowercase to uppercase (03B1-03C9 -> 0391-03A9)
     if (cp >= 0x03B1 and cp <= 0x03C9) return cp - 0x20;
+    // greek precomposed lowercase letters with tonos
+    switch (cp) {
+        0x03AC => return 0x0386, // ά -> Ά
+        0x03AD => return 0x0388, // έ -> Έ
+        0x03AE => return 0x0389, // ή -> Ή
+        0x03AF => return 0x038A, // ί -> Ί
+        0x03CC => return 0x038C, // ό -> Ό
+        0x03CD => return 0x038E, // ύ -> Ύ
+        0x03CE => return 0x038F, // ώ -> Ώ
+        0x03CA => return 0x03AA, // ϊ -> Ϊ
+        0x03CB => return 0x03AB, // ϋ -> Ϋ
+        else => {},
+    }
     // cyrillic lowercase to uppercase (0430-044F -> 0410-042F)
     if (cp >= 0x0430 and cp <= 0x044F) return cp - 0x20;
     return cp;
@@ -2617,6 +2630,19 @@ fn unicodeToLower(cp: u21) u21 {
     }
     // greek uppercase to lowercase (0391-03A9 -> 03B1-03C9)
     if (cp >= 0x0391 and cp <= 0x03A9) return cp + 0x20;
+    // greek precomposed uppercase letters with tonos
+    switch (cp) {
+        0x0386 => return 0x03AC,
+        0x0388 => return 0x03AD,
+        0x0389 => return 0x03AE,
+        0x038A => return 0x03AF,
+        0x038C => return 0x03CC,
+        0x038E => return 0x03CD,
+        0x038F => return 0x03CE,
+        0x03AA => return 0x03CA,
+        0x03AB => return 0x03CB,
+        else => {},
+    }
     // cyrillic uppercase to lowercase (0410-042F -> 0430-044F)
     if (cp >= 0x0410 and cp <= 0x042F) return cp + 0x20;
     return cp;
