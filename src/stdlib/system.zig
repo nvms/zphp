@@ -56,6 +56,9 @@ pub const entries = .{
     .{ "posix_ttyname", native_posix_ttyname },
     .{ "posix_getpwuid", native_posix_getpwuid },
     .{ "posix_getgrgid", native_posix_getgrgid },
+    .{ "posix_getpwnam", native_posix_getpwnam },
+    .{ "posix_getgrnam", native_posix_getgrnam },
+    .{ "posix_getgroups", native_posix_getgroups },
     .{ "posix_setsid", native_posix_setsid },
     .{ "posix_setpgid", native_posix_setpgid },
     .{ "posix_getpgid", native_posix_getpgid },
@@ -135,6 +138,9 @@ const c_struct_group = extern struct {
 };
 extern "c" fn getpwuid(uid: std.c.uid_t) ?*c_struct_passwd;
 extern "c" fn getgrgid(gid: std.c.gid_t) ?*c_struct_group;
+extern "c" fn getpwnam(name: [*:0]const u8) ?*c_struct_passwd;
+extern "c" fn getgrnam(name: [*:0]const u8) ?*c_struct_group;
+extern "c" fn getgroups(size: c_int, list: [*]std.c.gid_t) c_int;
 const Rlimit = extern struct { rlim_cur: u64, rlim_max: u64 };
 extern "c" fn getrlimit(resource: c_int, rlim: *Rlimit) c_int;
 extern "c" fn setrlimit(resource: c_int, rlim: *const Rlimit) c_int;
@@ -209,6 +215,53 @@ fn native_posix_getgrgid(ctx: *NativeContext, args: []const Value) RuntimeError!
     try arr.set(ctx.allocator, .{ .string = "passwd" }, .{ .string = try cstrToStr(ctx, g.gr_passwd) });
     try arr.set(ctx.allocator, .{ .string = "gid" }, .{ .int = @intCast(g.gr_gid) });
     try arr.set(ctx.allocator, .{ .string = "members" }, .{ .array = try ctx.createArray() });
+    return .{ .array = arr };
+}
+
+fn native_posix_getpwnam(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len < 1 or args[0] != .string) return .{ .bool = false };
+    const name_buf = try ctx.allocator.alloc(u8, args[0].string.len + 1);
+    @memcpy(name_buf[0..args[0].string.len], args[0].string);
+    name_buf[args[0].string.len] = 0;
+    try ctx.strings.append(ctx.allocator, name_buf);
+    const name_z: [*:0]const u8 = @ptrCast(name_buf.ptr);
+    const pw = getpwnam(name_z) orelse return .{ .bool = false };
+    const arr = try ctx.createArray();
+    try arr.set(ctx.allocator, .{ .string = "name" }, .{ .string = try cstrToStr(ctx, pw.pw_name) });
+    try arr.set(ctx.allocator, .{ .string = "passwd" }, .{ .string = try cstrToStr(ctx, pw.pw_passwd) });
+    try arr.set(ctx.allocator, .{ .string = "uid" }, .{ .int = @intCast(pw.pw_uid) });
+    try arr.set(ctx.allocator, .{ .string = "gid" }, .{ .int = @intCast(pw.pw_gid) });
+    try arr.set(ctx.allocator, .{ .string = "gecos" }, .{ .string = "" });
+    try arr.set(ctx.allocator, .{ .string = "dir" }, .{ .string = "" });
+    try arr.set(ctx.allocator, .{ .string = "shell" }, .{ .string = "" });
+    return .{ .array = arr };
+}
+
+fn native_posix_getgrnam(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len < 1 or args[0] != .string) return .{ .bool = false };
+    const name_buf = try ctx.allocator.alloc(u8, args[0].string.len + 1);
+    @memcpy(name_buf[0..args[0].string.len], args[0].string);
+    name_buf[args[0].string.len] = 0;
+    try ctx.strings.append(ctx.allocator, name_buf);
+    const name_z: [*:0]const u8 = @ptrCast(name_buf.ptr);
+    const g = getgrnam(name_z) orelse return .{ .bool = false };
+    const arr = try ctx.createArray();
+    try arr.set(ctx.allocator, .{ .string = "name" }, .{ .string = try cstrToStr(ctx, g.gr_name) });
+    try arr.set(ctx.allocator, .{ .string = "passwd" }, .{ .string = try cstrToStr(ctx, g.gr_passwd) });
+    try arr.set(ctx.allocator, .{ .string = "gid" }, .{ .int = @intCast(g.gr_gid) });
+    try arr.set(ctx.allocator, .{ .string = "members" }, .{ .array = try ctx.createArray() });
+    return .{ .array = arr };
+}
+
+fn native_posix_getgroups(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    var buf: [256]std.c.gid_t = undefined;
+    const n = getgroups(@intCast(buf.len), &buf);
+    if (n < 0) return .{ .bool = false };
+    const arr = try ctx.createArray();
+    var i: usize = 0;
+    while (i < @as(usize, @intCast(n))) : (i += 1) {
+        try arr.append(ctx.allocator, .{ .int = @intCast(buf[i]) });
+    }
     return .{ .array = arr };
 }
 
