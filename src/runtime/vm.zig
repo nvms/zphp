@@ -2938,6 +2938,9 @@ pub const VM = struct {
                 .unset_var => {
                     const idx = self.readU16();
                     const name = self.currentChunk().constants.items[idx].string;
+                    if (self.currentFrame().vars.get(name)) |existing| {
+                        if (existing == .generator) self.closeGenerator(existing.generator, self.frame_count) catch {};
+                    }
                     _ = self.currentFrame().vars.remove(name);
                 },
                 .unset_prop => {
