@@ -2001,7 +2001,8 @@ const Parser = struct {
         const tag = self.peek();
         return tag == .identifier or tag == .kw_array or tag == .kw_callable or
             tag == .kw_self or tag == .kw_static or tag == .kw_null or
-            tag == .kw_true or tag == .kw_false or tag == .backslash;
+            tag == .kw_true or tag == .kw_false or tag == .backslash or
+            tag == .kw_parent;
     }
 
     fn skipTypeName(self: *Parser) void {
