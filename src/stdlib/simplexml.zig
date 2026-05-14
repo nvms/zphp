@@ -145,9 +145,10 @@ fn nodeToJsonValue(ctx: *NativeContext, node: *c.xmlNode) RuntimeError!Value {
         if (cn.type == c.XML_ELEMENT_NODE) { has_elem_child = true; break; }
     }
 
-    // PHP's json_encode on SimpleXMLElement mirrors the iterator: if the
-    // element has direct text content, that text is the value (attributes and
-    // children are ignored). this matches `(string)$elem` semantics
+    // PHP's json_encode on SimpleXMLElement: if the element has non-whitespace
+    // text content (no element children), the text is the value. when there
+    // are element children, indentation text is not considered "text content"
+    // so we only flip has_text on non-whitespace runs
     var has_text = false;
     ch = @ptrCast(node.children);
     while (ch) |cn| : (ch = @ptrCast(cn.next)) {
@@ -155,7 +156,15 @@ fn nodeToJsonValue(ctx: *NativeContext, node: *c.xmlNode) RuntimeError!Value {
             const txt = c.xmlNodeGetContent(cn);
             if (txt != null) {
                 defer c.xmlFree.?(txt);
-                if (cstrLen(txt) > 0) { has_text = true; break; }
+                const s = txt[0..cstrLen(txt)];
+                if (s.len == 0) continue;
+                if (has_elem_child) {
+                    var any_non_ws = false;
+                    for (s) |b| if (b != ' ' and b != '\t' and b != '\n' and b != '\r') { any_non_ws = true; break; };
+                    if (!any_non_ws) continue;
+                }
+                has_text = true;
+                break;
             }
         }
     }
