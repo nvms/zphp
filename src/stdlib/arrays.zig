@@ -54,6 +54,8 @@ pub const entries = .{
     .{ "array_reduce", array_reduce },
     .{ "array_key_first", array_key_first },
     .{ "array_key_last", array_key_last },
+    .{ "array_first", array_first },
+    .{ "array_last", array_last },
     .{ "uasort", native_uasort },
     .{ "uksort", native_uksort },
     .{ "array_replace", array_replace },
@@ -1587,6 +1589,22 @@ fn array_key_last(_: *NativeContext, args: []const Value) RuntimeError!Value {
         .int => |i| .{ .int = i },
         .string => |s| .{ .string = s },
     };
+}
+
+fn array_first(_: *NativeContext, args: []const Value) RuntimeError!Value {
+    // PHP 8.4
+    if (args.len == 0 or args[0] != .array) return .null;
+    const arr = args[0].array;
+    if (arr.entries.items.len == 0) return .null;
+    return arr.entries.items[0].value;
+}
+
+fn array_last(_: *NativeContext, args: []const Value) RuntimeError!Value {
+    // PHP 8.4
+    if (args.len == 0 or args[0] != .array) return .null;
+    const arr = args[0].array;
+    if (arr.entries.items.len == 0) return .null;
+    return arr.entries.items[arr.entries.items.len - 1].value;
 }
 
 fn native_uasort(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
