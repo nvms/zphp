@@ -286,6 +286,7 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try rp_def.methods.put(a, "hasType", .{ .name = "hasType", .arity = 0 });
     try rp_def.methods.put(a, "getAttributes", .{ .name = "getAttributes", .arity = 0 });
     try rp_def.methods.put(a, "getDeclaringClass", .{ .name = "getDeclaringClass", .arity = 0 });
+    try rp_def.methods.put(a, "getDeclaringFunction", .{ .name = "getDeclaringFunction", .arity = 0 });
     try rp_def.methods.put(a, "isVariadic", .{ .name = "isVariadic", .arity = 0 });
     try rp_def.methods.put(a, "isPromoted", .{ .name = "isPromoted", .arity = 0 });
     try rp_def.methods.put(a, "getClass", .{ .name = "getClass", .arity = 0 });
@@ -306,6 +307,7 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try vm.native_fns.put(a, "ReflectionParameter::hasType", rpHasType);
     try vm.native_fns.put(a, "ReflectionParameter::getAttributes", rpGetAttributes);
     try vm.native_fns.put(a, "ReflectionParameter::getDeclaringClass", rpGetDeclaringClass);
+    try vm.native_fns.put(a, "ReflectionParameter::getDeclaringFunction", rpGetDeclaringFunction);
     try vm.native_fns.put(a, "ReflectionParameter::isVariadic", rpIsVariadic);
     try vm.native_fns.put(a, "ReflectionParameter::isPromoted", rpIsPromoted);
     try vm.native_fns.put(a, "ReflectionParameter::getClass", rpGetClass);
@@ -2180,7 +2182,13 @@ fn rpGetType(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
     if (type_val != .string or type_val.string.len == 0) return .null;
 
     const nullable = this.get("_nullable");
-    const is_nullable = nullable == .bool and nullable.bool;
+    var is_nullable = nullable == .bool and nullable.bool;
+    // PHP's implicit-nullable: `foo($x = null)` reports the type as nullable
+    // even though source didn't write '?'. detect by checking default == null
+    const has_default = this.get("_has_default");
+    if (!is_nullable and has_default == .bool and has_default.bool) {
+        if (this.get("_default_value") == .null) is_nullable = true;
+    }
     const declaring = this.get("_declaring_class");
     const self_class: ?[]const u8 = if (declaring == .string and declaring.string.len > 0) declaring.string else null;
     const obj = try createTypeObj(ctx, type_val.string, is_nullable, self_class);
@@ -2306,6 +2314,21 @@ fn rpIsVariadic(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
     const this = getThis(ctx) orelse return .{ .bool = false };
     const v = this.get("_is_variadic");
     return .{ .bool = v == .bool and v.bool };
+}
+
+fn rpGetDeclaringFunction(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const this = getThis(ctx) orelse return .null;
+    const func_name = if (this.get("_function") == .string) this.get("_function").string else "";
+    const declaring = if (this.get("_declaring_class") == .string) this.get("_declaring_class").string else "";
+    if (declaring.len > 0) {
+        const obj = try ctx.createObject("ReflectionMethod");
+        try obj.set(ctx.allocator, "name", .{ .string = func_name });
+        try obj.set(ctx.allocator, "_declaring_class", .{ .string = declaring });
+        return .{ .object = obj };
+    }
+    const obj = try ctx.createObject("ReflectionFunction");
+    try obj.set(ctx.allocator, "name", .{ .string = func_name });
+    return .{ .object = obj };
 }
 
 // --- ReflectionNamedType ---
@@ -2857,7 +2880,7 @@ fn buildParamArray(ctx: *NativeContext, func: *const ObjFunction, type_key: []co
         const by_ref = if (i < func.ref_params.len) func.ref_params[i] else false;
         try obj.set(ctx.allocator, "_by_reference", .{ .bool = by_ref });
 
-        // declaring class and method name
+        // declaring class and method name (or bare function name for free fns)
         if (std.mem.indexOf(u8, type_key, "::")) |sep| {
             const decl_class = try ctx.allocator.dupe(u8, type_key[0..sep]);
             try ctx.strings.append(ctx.allocator, decl_class);
@@ -2865,6 +2888,11 @@ fn buildParamArray(ctx: *NativeContext, func: *const ObjFunction, type_key: []co
             const meth_name = try ctx.allocator.dupe(u8, type_key[sep + 2 ..]);
             try ctx.strings.append(ctx.allocator, meth_name);
             try obj.set(ctx.allocator, "_method_name", .{ .string = meth_name });
+            try obj.set(ctx.allocator, "_function", .{ .string = meth_name });
+        } else {
+            const fname = try ctx.allocator.dupe(u8, type_key);
+            try ctx.strings.append(ctx.allocator, fname);
+            try obj.set(ctx.allocator, "_function", .{ .string = fname });
         }
 
         try arr.append(ctx.allocator, .{ .object = obj });
