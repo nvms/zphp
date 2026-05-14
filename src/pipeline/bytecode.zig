@@ -166,6 +166,22 @@ pub const OpCode = enum(u8) {
     // optimized concat-assign: $var .= expr without full copy
     concat_assign, // u16: var name constant index - pop value, append to var's string
 
+    // `$dst = &$src` between two plain variables — installs a shared Value cell
+    // in ref_slots for both names. seeds the cell with src's current value
+    // (uncopied pointer for arrays so the alias is genuine)
+    make_var_ref, // u16: dst name const, u16: src name const
+
+    // `$dst = &$arr[$key]` — pops [array, key], creates a cell holding the
+    // (uncopied) array[key] value, registers a writeback so subsequent
+    // assignments to $dst propagate to array[key], and installs the cell in
+    // ref_slots[dst]. tolerates missing keys (vivifies to null)
+    make_var_array_elem_ref, // u16: dst name const
+
+    // remove a name from ref_slots so a subsequent normal assignment doesn't
+    // write through an existing ref-binding. emitted before the value-write
+    // path for `=&` shapes we don't yet bind explicitly
+    break_var_ref, // u16: dst name const
+
     // local variable slots (indexed access, no hash lookup)
     get_local, // u16: slot index - push locals[slot]
     set_local, // u16: slot index - peek value, store in locals[slot]
@@ -192,8 +208,9 @@ pub const OpCode = enum(u8) {
             .iter_check, .inc_local, .dec_local,
             .get_static_prop_dynamic,
             .ensure_array_local, .ensure_array_var,
+            .make_var_array_elem_ref, .break_var_ref,
             => 3,
-            .call, .call_spread, .new_obj, .method_call, .method_call_spread, .static_call_dyn_method => 4,
+            .call, .call_spread, .new_obj, .method_call, .method_call_spread, .static_call_dyn_method, .make_var_ref => 4,
             .get_static_prop, .set_static_prop, .get_static, .set_static,
             .static_call_spread, .add_local_to_local, .sub_local_to_local, .mul_local_to_local,
             => 5,

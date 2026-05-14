@@ -2941,6 +2941,102 @@ pub const VM = struct {
                     }
                 },
 
+                .break_var_ref => {
+                    const idx = self.readU16();
+                    const name = self.currentChunk().constants.items[idx].string;
+                    _ = self.currentFrame().ref_slots.remove(name);
+                },
+
+                .make_var_ref => {
+                    const dst_idx = self.readU16();
+                    const src_idx = self.readU16();
+                    const dst_name = self.currentChunk().constants.items[dst_idx].string;
+                    const src_name = self.currentChunk().constants.items[src_idx].string;
+                    if (std.posix.getenv("ZPHP_DBG_REF") != null) {
+                        const sfe = std.fs.File{ .handle = 2 };
+                        const m = std.fmt.allocPrint(self.allocator, "[MVR] dst={s} src={s}\n", .{ dst_name, src_name }) catch return error.RuntimeError;
+                        _ = sfe.write(m) catch {};
+                        self.allocator.free(m);
+                        // print caller frames
+                        for (0..self.frame_count) |fi| {
+                            const f = &self.frames[self.frame_count - 1 - fi];
+                            const fn_n = if (f.func) |fn_| fn_.name else "<g>";
+                            const cls = f.called_class orelse "";
+                            const m2 = std.fmt.allocPrint(self.allocator, "    at {s}::{s}\n", .{ cls, fn_n }) catch continue;
+                            _ = sfe.write(m2) catch {};
+                            self.allocator.free(m2);
+                        }
+                    }
+                    const frame = self.currentFrame();
+                    var cell: *Value = undefined;
+                    if (frame.ref_slots.get(src_name)) |existing| {
+                        cell = existing;
+                    } else {
+                        cell = try self.allocator.create(Value);
+                        // seed without copyValue so cell shares any array pointer
+                        var seed: Value = .null;
+                        const sn = if (frame.func) |fn_| fn_.slot_names else self.global_slot_names;
+                        var found_slot = false;
+                        for (sn, 0..) |s, si| {
+                            if (std.mem.eql(u8, s, src_name) and si < frame.locals.len) {
+                                seed = frame.locals[si];
+                                found_slot = true;
+                                break;
+                            }
+                        }
+                        if (!found_slot) {
+                            if (frame.vars.get(src_name)) |v| seed = v;
+                        }
+                        cell.* = seed;
+                        try self.ref_cells.append(self.allocator, cell);
+                        try frame.ref_slots.put(self.allocator, src_name, cell);
+                    }
+                    try frame.ref_slots.put(self.allocator, dst_name, cell);
+                },
+
+                .make_var_array_elem_ref => {
+                    const dst_idx = self.readU16();
+                    const dst_name = self.currentChunk().constants.items[dst_idx].string;
+                    if (std.posix.getenv("ZPHP_DBG_REF") != null) {
+                        const sfe = std.fs.File{ .handle = 2 };
+                        const f_dbg = self.currentFrame();
+                        const fname = if (f_dbg.func) |fn_| fn_.name else "<g>";
+                        const cls = f_dbg.called_class orelse "";
+                        const fp = if (f_dbg.func) |fn_| fn_.file_path else "";
+                        const ln: i64 = if (f_dbg.ip > 0)
+                            if (f_dbg.chunk.getSourceLocation(f_dbg.ip - 1, self.source)) |l| @intCast(l.line) else 0
+                        else 0;
+                        const m = std.fmt.allocPrint(self.allocator, "[MVAER] dst={s} at {s}::{s} {s}:{d}\n", .{ dst_name, cls, fname, fp, ln }) catch return error.RuntimeError;
+                        _ = sfe.write(m) catch {};
+                        self.allocator.free(m);
+                    }
+                    const key_val = self.pop();
+                    const arr_val = self.pop();
+                    const frame = self.currentFrame();
+                    _ = frame.ref_slots.remove(dst_name);
+                    if (arr_val != .array) {
+                        try frame.ref_slots.put(self.allocator, dst_name, blk: {
+                            const c = try self.allocator.create(Value);
+                            c.* = .null;
+                            try self.ref_cells.append(self.allocator, c);
+                            break :blk c;
+                        });
+                    } else {
+                        const arr_ptr = arr_val.array;
+                        const key: PhpArray.Key = switch (key_val) {
+                            .int => |i| .{ .int = i },
+                            .string => |s| .{ .string = s },
+                            else => .{ .int = Value.toInt(key_val) },
+                        };
+                        const cell = try self.allocator.create(Value);
+                        // seed without cloning so cell shares any nested array pointer
+                        cell.* = arr_ptr.get(key);
+                        try self.ref_cells.append(self.allocator, cell);
+                        try frame.ref_slots.put(self.allocator, dst_name, cell);
+                        try frame.ref_array_bindings.append(self.allocator, .{ .cell = cell, .array = arr_ptr, .key = key });
+                    }
+                },
+
                 .unset_var => {
                     const idx = self.readU16();
                     const name = self.currentChunk().constants.items[idx].string;

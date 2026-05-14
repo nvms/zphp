@@ -2245,7 +2245,16 @@ const Parser = struct {
             const op_tok = self.advance();
             const op_tag = self.tokens[op_tok].tag;
             const right_min = if (isRightAssoc(op_tag)) prec - 1 else prec;
-            const right = try self.parseExprPrec(right_min);
+            const is_ref_assign = op_tag == .equal and self.peek() == .amp;
+            var ref_amp_tok: u32 = 0;
+            if (is_ref_assign) {
+                ref_amp_tok = self.advance();
+            }
+            const right_inner = try self.parseExprPrec(right_min);
+            const right = if (is_ref_assign)
+                try self.addNode(.{ .tag = .ref_target, .main_token = ref_amp_tok, .data = .{ .lhs = right_inner } })
+            else
+                right_inner;
             const node_tag = infixNodeTag(op_tag);
 
             left = try self.addNode(.{ .tag = node_tag, .main_token = op_tok, .data = .{ .lhs = left, .rhs = right } });

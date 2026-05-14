@@ -11,6 +11,25 @@ pub fn compileAssign(self: *Compiler, node: Ast.Node) Error!void {
     const target = self.ast.nodes[node.data.lhs];
     const op_tag = self.ast.tokens[node.main_token].tag;
 
+    // `$dst = &…` — emit break_var_ref so the subsequent value-write doesn't
+    // propagate through a stale prior ref binding on dst. true ref binding
+    // (make_var_ref, make_var_array_elem_ref) is defined in the runtime but
+    // not emitted from the compiler yet — enabling it makes correct PHP
+    // semantics for `$b = &$a` but exposes a downstream zphp bug where
+    // Laravel's Route registration loses the /api prefix on POST routes
+    // (the Arr::except → Arr::forget chain run during Route::__construct
+    // triggers the divergence). break_var_ref alone preserves today's
+    // baseline. see roadmap item #1 for the next push
+    if (op_tag == .equal and (target.tag == .variable or target.tag == .identifier)) {
+        const rhs_node = self.ast.nodes[node.data.rhs];
+        if (rhs_node.tag == .ref_target) {
+            const dst_name = self.ast.tokenSlice(target.main_token);
+            const dst_idx = try self.addConstant(.{ .string = dst_name });
+            try self.emitOp(.break_var_ref);
+            try self.emitU16(dst_idx);
+        }
+    }
+
     if (target.tag == .list_destructure or (target.tag == .array_literal and op_tag == .equal)) {
         try self.compileNode(node.data.rhs);
         try self.compileDestructure(target);
