@@ -61,6 +61,8 @@ pub const entries = .{
     .{ "date_timezone_set", native_date_timezone_set },
     .{ "localtime", native_localtime },
     .{ "idate", native_idate },
+    .{ "date_interval_create_from_date_string", native_date_interval_create_from_date_string },
+    .{ "date_interval_format", native_date_interval_format },
 };
 
 pub fn register(vm: *VM, a: Allocator) !void {
@@ -184,6 +186,8 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try dtz_def.methods.put(a, "getOffset", .{ .name = "getOffset", .arity = 1 });
     try dtz_def.methods.put(a, "__toString", .{ .name = "__toString", .arity = 0 });
     try dtz_def.methods.put(a, "listIdentifiers", .{ .name = "listIdentifiers", .arity = 2, .is_static = true });
+    try dtz_def.methods.put(a, "getLocation", .{ .name = "getLocation", .arity = 0 });
+    try dtz_def.methods.put(a, "getTransitions", .{ .name = "getTransitions", .arity = 2 });
     try vm.classes.put(a, "DateTimeZone", dtz_def);
 
     try vm.native_fns.put(a, "DateTimeZone::__construct", dtzConstruct);
@@ -191,6 +195,8 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try vm.native_fns.put(a, "DateTimeZone::getOffset", dtzGetOffset);
     try vm.native_fns.put(a, "DateTimeZone::__toString", dtzGetName);
     try vm.native_fns.put(a, "DateTimeZone::listIdentifiers", dtzListIdentifiers);
+    try vm.native_fns.put(a, "DateTimeZone::getLocation", dtzGetLocation);
+    try vm.native_fns.put(a, "DateTimeZone::getTransitions", dtzGetTransitions);
 
     // DateInterval
     var di_def = ClassDef{ .name = "DateInterval" };
@@ -298,6 +304,7 @@ fn dpGetIterator(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
     try iter.set(ctx.allocator, "__recurrences", obj.get("__recurrences"));
     const opts = obj.get("__options");
     const exclude_start = opts == .int and (opts.int & 1) != 0;
+    const include_end = opts == .int and (opts.int & 2) != 0;
     const start_v = obj.get("__start");
     if (start_v != .object) return .null;
     var ts = getTimestamp(start_v.object);
@@ -311,6 +318,7 @@ fn dpGetIterator(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
     try iter.set(ctx.allocator, "__cursor_ts", .{ .int = ts });
     try iter.set(ctx.allocator, "__index", .{ .int = 0 });
     try iter.set(ctx.allocator, "__exclude_start", .{ .bool = exclude_start });
+    try iter.set(ctx.allocator, "__include_end", .{ .bool = include_end });
     return .{ .object = iter };
 }
 
@@ -319,7 +327,8 @@ fn dpiTimestampInRange(this: *@import("../runtime/value.zig").PhpObject) bool {
     const end_v = this.get("__end");
     if (end_v == .object) {
         const end_ts = getTimestamp(end_v.object);
-        return ts < end_ts;
+        const include_end = this.get("__include_end") == .bool and this.get("__include_end").bool;
+        return if (include_end) ts <= end_ts else ts < end_ts;
     }
     const rec_v = this.get("__recurrences");
     if (rec_v == .int) {
@@ -1227,6 +1236,20 @@ fn native_date_format(ctx: *NativeContext, args: []const Value) RuntimeError!Val
     return formatTimestampTz(ctx, ts, args[1].string, offset, tz_name);
 }
 
+// procedural alias for DateInterval::createFromDateString
+fn native_date_interval_create_from_date_string(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    return diCreateFromDateString(ctx, args);
+}
+
+// procedural alias for DateInterval::format($interval, $format)
+fn native_date_interval_format(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len < 2 or args[0] != .object or args[1] != .string) return .{ .bool = false };
+    const saved = ctx.vm.currentFrame().vars.get("$this");
+    try ctx.vm.currentFrame().vars.put(ctx.allocator, "$this", args[0]);
+    defer if (saved) |s| (ctx.vm.currentFrame().vars.put(ctx.allocator, "$this", s) catch {});
+    return diFormat(ctx, args[1..]);
+}
+
 fn native_date_modify(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     const obj = argObj(args) orelse return .{ .bool = false };
     if (args.len < 2 or args[1] != .string) return .{ .object = obj };
@@ -1793,6 +1816,28 @@ fn dtzGetOffset(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
         return .{ .int = @intCast(tzOffsetAt(tz, ref_ts)) };
     }
     return .{ .int = 0 };
+}
+
+// PHP's getLocation returns {country_code, latitude, longitude, comments}
+// for named tz, and false for offset-only zones. zphp doesn't ship the IANA
+// tzdata, so named zones return placeholder data with the right structure
+fn dtzGetLocation(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const obj = getThis(ctx) orelse return .{ .bool = false };
+    const tz_val = obj.get("timezone");
+    const tz_name = if (tz_val == .string) tz_val.string else "UTC";
+    // offset-only zones report false
+    if (tz_name.len > 0 and (tz_name[0] == '+' or tz_name[0] == '-')) return .{ .bool = false };
+    const arr = try ctx.createArray();
+    try arr.set(ctx.allocator, .{ .string = "country_code" }, .{ .string = "??" });
+    try arr.set(ctx.allocator, .{ .string = "latitude" }, .{ .float = 0.0 });
+    try arr.set(ctx.allocator, .{ .string = "longitude" }, .{ .float = 0.0 });
+    try arr.set(ctx.allocator, .{ .string = "comments" }, .{ .string = "" });
+    return .{ .array = arr };
+}
+
+// stub that returns an empty list - we don't track historical transitions
+fn dtzGetTransitions(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    return .{ .array = try ctx.createArray() };
 }
 
 // standalone PHP functions: date(), mktime(), strtotime(), time(), microtime()
