@@ -579,13 +579,9 @@ fn getThis(ctx: *NativeContext) ?*PhpObject {
 }
 
 fn throwReflection(ctx: *NativeContext, msg: []const u8) RuntimeError {
-    // dupe so we own a single tracked buffer. callers mix literal slices with
-    // allocPrint'd ones; appending the caller's slice directly would either
-    // leak (literal-track no-op + heap leak) or double-free (heap msg already
-    // tracked elsewhere)
-    const owned = ctx.allocator.dupe(u8, msg) catch msg;
-    ctx.strings.append(ctx.allocator, owned) catch {};
-    _ = ctx.vm.throwBuiltinException("ReflectionException", owned) catch {};
+    // callers own msg lifetime. literal callers pass static strings safely;
+    // heap callers must track msg in ctx.strings before invoking this
+    _ = ctx.vm.throwBuiltinException("ReflectionException", msg) catch {};
     return error.RuntimeError;
 }
 
@@ -1059,6 +1055,7 @@ fn rcGetMethod(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
 
     if (!ctx.vm.hasMethod(class_name, method_name)) {
         const msg = std.fmt.allocPrint(ctx.allocator, "Method {s}::{s}() does not exist", .{ class_name, method_name }) catch return error.OutOfMemory;
+        try ctx.strings.append(ctx.allocator, msg);
         return throwReflection(ctx, msg);
     }
 
@@ -1343,6 +1340,7 @@ fn rcGetProperty(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
         return .{ .object = obj };
     }
     const msg = std.fmt.allocPrint(ctx.allocator, "Property {s}::${s} does not exist", .{ class_name, prop_name }) catch return error.OutOfMemory;
+    try ctx.strings.append(ctx.allocator, msg);
     return throwReflection(ctx, msg);
 }
 
@@ -1797,6 +1795,7 @@ fn rmConstruct(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
             !hasAbstractMethodInChain(ctx.vm, class_name, method_name))
         {
             const msg = std.fmt.allocPrint(ctx.allocator, "Method {s}::{s}() does not exist", .{ class_name, method_name }) catch return error.OutOfMemory;
+            try ctx.strings.append(ctx.allocator, msg);
             return throwReflection(ctx, msg);
         }
     }
