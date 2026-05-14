@@ -16,6 +16,7 @@ pub const entries = .{
     .{ "trim", trim },
     .{ "ltrim", ltrim },
     .{ "rtrim", rtrim },
+    .{ "chop", rtrim },
     .{ "strtolower", strtolower },
     .{ "strtoupper", strtoupper },
     .{ "str_contains", str_contains },

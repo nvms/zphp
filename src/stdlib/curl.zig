@@ -26,6 +26,14 @@ pub const entries = .{
     .{ "curl_strerror", curlStrerror },
     .{ "curl_escape", curlEscape },
     .{ "curl_unescape", curlUnescape },
+    // curl_share_* - minimal stubs that return plausible values. real
+    // cross-handle sharing isn't supported but most code paths only use these
+    // for cookie / DNS jar setup and tolerate the no-op
+    .{ "curl_share_init", curlShareInit },
+    .{ "curl_share_close", curlShareClose },
+    .{ "curl_share_setopt", curlShareSetopt },
+    .{ "curl_share_errno", curlShareErrno },
+    .{ "curl_share_strerror", curlStrerror },
 };
 
 var global_init_done: bool = false;
@@ -664,6 +672,25 @@ fn curlStrerror(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     return .{ .string = owned };
 }
 
+fn curlShareInit(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const obj = try ctx.createObject("CurlShareHandle");
+    return .{ .object = obj };
+}
+
+fn curlShareClose(_: *NativeContext, _: []const Value) RuntimeError!Value {
+    return .null;
+}
+
+fn curlShareSetopt(_: *NativeContext, _: []const Value) RuntimeError!Value {
+    // sharing isn't actually wired through libcurl's share interface; accept
+    // any CURLSHOPT_* setopt call so userland doesn't see a hard failure
+    return .{ .bool = true };
+}
+
+fn curlShareErrno(_: *NativeContext, _: []const Value) RuntimeError!Value {
+    return .{ .int = 0 };
+}
+
 fn curlEscape(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len < 2 or args[1] != .string) return .{ .bool = false };
     if (args[0] != .object) return .{ .bool = false };
@@ -752,6 +779,14 @@ pub fn register(vm: *VM, a: std.mem.Allocator) !void {
     var curl_def = ClassDef{ .name = "CurlHandle" };
     try vm.classes.put(a, "CurlHandle", curl_def);
     _ = &curl_def;
+
+    var share_def = ClassDef{ .name = "CurlShareHandle" };
+    try vm.classes.put(a, "CurlShareHandle", share_def);
+    _ = &share_def;
+
+    var mh_def = ClassDef{ .name = "CurlMultiHandle" };
+    try vm.classes.put(a, "CurlMultiHandle", mh_def);
+    _ = &mh_def;
 
     // CURLOPT constants
     try vm.php_constants.put(a, "CURLOPT_URL", .{ .int = c.CURLOPT_URL });
