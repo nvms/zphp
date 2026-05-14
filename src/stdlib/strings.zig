@@ -2603,7 +2603,58 @@ fn unicodeToLower(cp: u21) u21 {
 
 fn native_mb_detect_encoding(_: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len == 0 or args[0] != .string) return .{ .bool = false };
-    return .{ .string = "UTF-8" };
+    const s = args[0].string;
+    // walk the candidate list in order and return the first encoding the
+    // input is valid for. matches PHP behavior - ASCII before UTF-8 in the
+    // candidate list will report ASCII for plain ASCII text
+    const Probe = struct {
+        fn isAscii(input: []const u8) bool {
+            for (input) |b| if (b > 0x7f) return false;
+            return true;
+        }
+        fn isUtf8(input: []const u8) bool {
+            var i: usize = 0;
+            while (i < input.len) {
+                const b = input[i];
+                if (b < 0x80) { i += 1; continue; }
+                const len: usize = if ((b & 0xe0) == 0xc0) 2
+                    else if ((b & 0xf0) == 0xe0) 3
+                    else if ((b & 0xf8) == 0xf0) 4
+                    else return false;
+                if (i + len > input.len) return false;
+                var j: usize = 1;
+                while (j < len) : (j += 1) if ((input[i + j] & 0xc0) != 0x80) return false;
+                i += len;
+            }
+            return true;
+        }
+        fn match(input: []const u8, candidate: []const u8) ?[]const u8 {
+            if (isAsciiEncoding(candidate)) {
+                if (isAscii(input)) return "ASCII";
+            } else if (isUtf8Encoding(candidate)) {
+                if (isUtf8(input)) return "UTF-8";
+            } else if (isLatin1Encoding(candidate)) {
+                return "ISO-8859-1";
+            }
+            return null;
+        }
+    };
+
+    if (args.len >= 2 and args[1] == .array) {
+        for (args[1].array.entries.items) |entry| {
+            if (entry.value == .string) {
+                if (Probe.match(s, entry.value.string)) |hit| return .{ .string = hit };
+            }
+        }
+        return .{ .bool = false };
+    }
+    if (args.len >= 2 and args[1] == .string) {
+        if (Probe.match(s, args[1].string)) |hit| return .{ .string = hit };
+        return .{ .bool = false };
+    }
+    if (Probe.isAscii(s)) return .{ .string = "ASCII" };
+    if (Probe.isUtf8(s)) return .{ .string = "UTF-8" };
+    return .{ .bool = false };
 }
 
 fn encodingMatches(name: []const u8, options: anytype) bool {
