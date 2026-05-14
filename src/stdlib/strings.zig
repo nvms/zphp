@@ -61,6 +61,8 @@ pub const entries = .{
     .{ "mb_check_encoding", native_mb_check_encoding },
     .{ "mb_detect_encoding", native_mb_detect_encoding },
     .{ "mb_convert_encoding", native_mb_convert_encoding },
+    .{ "utf8_encode", native_utf8_encode },
+    .{ "utf8_decode", native_utf8_decode },
     .{ "iconv", native_iconv },
     .{ "iconv_strlen", native_mb_strlen },
     .{ "iconv_strpos", native_mb_strpos },
@@ -2660,6 +2662,20 @@ fn convertLatin1ToUtf8(allocator: std.mem.Allocator, input: []const u8) ![]u8 {
         }
     }
     return try out.toOwnedSlice(allocator);
+}
+
+fn native_utf8_encode(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len < 1 or args[0] != .string) return .{ .bool = false };
+    const out = convertLatin1ToUtf8(ctx.allocator, args[0].string) catch return .{ .bool = false };
+    try ctx.strings.append(ctx.allocator, out);
+    return .{ .string = out };
+}
+
+fn native_utf8_decode(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len < 1 or args[0] != .string) return .{ .bool = false };
+    const out = convertUtf8ToLatin1(ctx.allocator, args[0].string) catch return .{ .bool = false };
+    try ctx.strings.append(ctx.allocator, out);
+    return .{ .string = out };
 }
 
 fn native_mb_convert_encoding(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
