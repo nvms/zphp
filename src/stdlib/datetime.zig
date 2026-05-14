@@ -98,6 +98,7 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try dt_def.methods.put(a, "getLastErrors", .{ .name = "getLastErrors", .arity = 0, .is_static = true });
     try dt_def.methods.put(a, "getTimezone", .{ .name = "getTimezone", .arity = 0 });
     try dt_def.methods.put(a, "setTimezone", .{ .name = "setTimezone", .arity = 1 });
+    try dt_def.methods.put(a, "getOffset", .{ .name = "getOffset", .arity = 0 });
     try dt_def.methods.put(a, "createFromImmutable", .{ .name = "createFromImmutable", .arity = 1, .is_static = true });
     try dt_def.methods.put(a, "createFromInterface", .{ .name = "createFromInterface", .arity = 1, .is_static = true });
     inline for (DT_FORMAT_CONSTS) |c| {
@@ -122,6 +123,8 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try vm.native_fns.put(a, "DateTime::getLastErrors", dtGetLastErrors);
     try vm.native_fns.put(a, "DateTime::getTimezone", dtGetTimezone);
     try vm.native_fns.put(a, "DateTime::setTimezone", dtSetTimezone);
+    try vm.native_fns.put(a, "DateTime::getOffset", dtGetOffset);
+    try vm.native_fns.put(a, "DateTimeImmutable::getOffset", dtGetOffset);
 
     // DateTimeImmutable
     var dti_def = ClassDef{ .name = "DateTimeImmutable" };
@@ -139,6 +142,7 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try dti_def.methods.put(a, "getLastErrors", .{ .name = "getLastErrors", .arity = 0, .is_static = true });
     try dti_def.methods.put(a, "getTimezone", .{ .name = "getTimezone", .arity = 0 });
     try dti_def.methods.put(a, "setTimezone", .{ .name = "setTimezone", .arity = 1 });
+    try dti_def.methods.put(a, "getOffset", .{ .name = "getOffset", .arity = 0 });
     try dti_def.methods.put(a, "createFromFormat", .{ .name = "createFromFormat", .arity = 2, .is_static = true });
     try dti_def.methods.put(a, "createFromMutable", .{ .name = "createFromMutable", .arity = 1, .is_static = true });
     try dti_def.methods.put(a, "createFromInterface", .{ .name = "createFromInterface", .arity = 1, .is_static = true });
@@ -1545,6 +1549,17 @@ fn dtGetTimezone(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
     const tz_obj = try ctx.createObject("DateTimeZone");
     try tz_obj.set(ctx.allocator, "timezone", .{ .string = tz_name });
     return .{ .object = tz_obj };
+}
+
+fn dtGetOffset(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const obj = getThis(ctx) orelse return .{ .int = 0 };
+    const tz_val = obj.get("__timezone");
+    const tz_name = if (tz_val == .string) tz_val.string else "UTC";
+    const ts = getTimestamp(obj);
+    if (lookupTimezone(tz_name)) |tz| {
+        return .{ .int = @intCast(tzOffsetAt(tz, ts)) };
+    }
+    return .{ .int = 0 };
 }
 
 fn dtSetTimezone(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
