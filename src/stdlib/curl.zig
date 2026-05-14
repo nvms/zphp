@@ -274,7 +274,9 @@ fn applySetopt(ctx: *NativeContext, handle: *c.CURL, obj: *PhpObject, option: i6
         return .{ .bool = true };
     }
 
-    return .{ .bool = false };
+    // PHP throws ValueError for unrecognized CURLOPT_* constants
+    try ctx.vm.setPendingException("ValueError", "curl_setopt(): Argument #2 ($option) is not a valid cURL option");
+    return error.RuntimeError;
 }
 
 fn curlSetoptArray(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
