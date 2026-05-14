@@ -1270,7 +1270,15 @@ fn riiGetSubIterator(ctx: *NativeContext, args: []const Value) RuntimeError!Valu
 fn iiConstruct(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     const obj = getThis(ctx) orelse return .null;
     if (args.len < 1) return .null;
-    const inner = try wrapAsIterator(ctx, args[0]);
+    var inner = try wrapAsIterator(ctx, args[0]);
+    // unwrap IteratorAggregate chains (PHP follows getIterator until it reaches
+    // a real Iterator; depth-limit guards against runaway recursion)
+    var depth: u8 = 0;
+    while (inner == .object and depth < 8) : (depth += 1) {
+        if (ctx.vm.isInstanceOf(inner.object.class_name, "Iterator")) break;
+        if (!ctx.vm.isInstanceOf(inner.object.class_name, "IteratorAggregate")) break;
+        inner = try ctx.vm.callMethod(inner.object, "getIterator", &.{});
+    }
     if (inner != .object) return .null;
     try obj.set(ctx.allocator, "__ii_inner", inner);
     return .null;
