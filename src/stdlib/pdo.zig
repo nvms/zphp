@@ -775,6 +775,13 @@ fn pdoSetAttribute(ctx: *NativeContext, args: []const Value) RuntimeError!Value 
     } else if (attr == 3) {
         try obj.set(ctx.allocator, "__errmode", args[1]);
     }
+    // general attribute storage so subsequent getAttribute() reads return the
+    // last value set even for attributes that don't influence native behavior
+    var key_buf: [32]u8 = undefined;
+    const key = std.fmt.bufPrint(&key_buf, "__attr_{d}", .{attr}) catch return .{ .bool = true };
+    const owned_key = try ctx.allocator.dupe(u8, key);
+    try ctx.vm.strings.append(ctx.allocator, owned_key);
+    try obj.set(ctx.allocator, owned_key, args[1]);
     return .{ .bool = true };
 }
 
@@ -793,6 +800,17 @@ fn pdoGetAttribute(ctx: *NativeContext, args: []const Value) RuntimeError!Value 
         return .{ .int = 2 };
     }
     if (attr == 16) return .{ .string = getDriver(obj) };
+    // ATTR_SERVER_VERSION / ATTR_CLIENT_VERSION just need to return a string;
+    // most callers only test is_string. zphp links sqlite at build time so a
+    // generic placeholder is fine
+    if (attr == 4 or attr == 5) {
+        return .{ .string = "0" };
+    }
+    // fall back to the generic attribute store populated by setAttribute
+    var key_buf: [32]u8 = undefined;
+    const key = std.fmt.bufPrint(&key_buf, "__attr_{d}", .{attr}) catch return .null;
+    const stored = obj.get(key);
+    if (stored != .null) return stored;
     return .null;
 }
 
