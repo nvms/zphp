@@ -783,9 +783,15 @@ pub const Value = union(enum) {
             while (end < s.len and s[end] >= '0' and s[end] <= '9') { end += 1; has_digit = true; }
         }
         if (end < s.len and (s[end] == 'e' or s[end] == 'E')) {
-            end += 1;
-            if (end < s.len and (s[end] == '-' or s[end] == '+')) end += 1;
-            while (end < s.len and s[end] >= '0' and s[end] <= '9') end += 1;
+            // only consume the exponent when at least one exponent digit
+            // follows (with an optional sign). matches PHP, which treats
+            // "1e" as 1.0 and "1e+" as 1.0
+            var ej = end + 1;
+            if (ej < s.len and (s[ej] == '-' or s[ej] == '+')) ej += 1;
+            if (ej < s.len and s[ej] >= '0' and s[ej] <= '9') {
+                end = ej;
+                while (end < s.len and s[end] >= '0' and s[end] <= '9') end += 1;
+            }
         }
         if (!has_digit) return 0.0;
         return std.fmt.parseFloat(f64, s[start..end]) catch 0.0;
