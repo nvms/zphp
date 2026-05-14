@@ -930,7 +930,11 @@ fn native_wordwrap(ctx: *NativeContext, args: []const Value) RuntimeError!Value 
 fn native_chunk_split(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len == 0) return .{ .string = "" };
     const s = if (args[0] == .string) args[0].string else return Value{ .string = "" };
-    const chunklen: usize = if (args.len >= 2) @intCast(@max(1, Value.toInt(args[1]))) else 76;
+    if (args.len >= 2 and Value.toInt(args[1]) <= 0) {
+        try ctx.vm.setPendingException("ValueError", "chunk_split(): Argument #2 ($length) must be greater than 0");
+        return error.RuntimeError;
+    }
+    const chunklen: usize = if (args.len >= 2) @intCast(Value.toInt(args[1])) else 76;
     const end = if (args.len >= 3 and args[2] == .string) args[2].string else "\r\n";
 
     var buf = std.ArrayListUnmanaged(u8){};

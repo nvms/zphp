@@ -276,6 +276,7 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try pdo_def.static_props.put(a, "FETCH_LAZY", .{ .int = 1 });
     try pdo_def.static_props.put(a, "FETCH_INTO", .{ .int = 9 });
     try pdo_def.static_props.put(a, "FETCH_NAMED", .{ .int = 11 });
+    try pdo_def.static_props.put(a, "FETCH_FUNC", .{ .int = 10 });
     try pdo_def.static_props.put(a, "ATTR_ERRMODE", .{ .int = 3 });
     try pdo_def.static_props.put(a, "ATTR_DEFAULT_FETCH_MODE", .{ .int = 19 });
     try pdo_def.static_props.put(a, "ERRMODE_EXCEPTION", .{ .int = 2 });
@@ -1046,6 +1047,34 @@ fn stmtFetchAll(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
         while (rc == sqlite.ROW) {
             try populateObjectFromRow(ctx, target, stmt);
             try result.append(ctx.allocator, .{ .object = target });
+            rc = sqlite.sqlite3_step(stmt);
+        }
+        try obj.set(ctx.allocator, "__has_row", .{ .bool = false });
+        return .{ .array = result };
+    }
+
+    // FETCH_FUNC (10): pass each row's columns as args to a callable, collect
+    // the return value as the row in the result array
+    if (mode == 10) {
+        if (args.len < 2) return .{ .bool = false };
+        const callable = args[1];
+        const col_count = sqlite.sqlite3_column_count(stmt);
+        if (start_with_row) {
+            var call_args = try ctx.allocator.alloc(Value, @intCast(col_count));
+            defer ctx.allocator.free(call_args);
+            var i: c_int = 0;
+            while (i < col_count) : (i += 1) call_args[@intCast(i)] = try columnToValue(ctx, stmt, i);
+            const r = try ctx.invokeCallable(callable, call_args);
+            try result.append(ctx.allocator, r);
+        }
+        var rc = sqlite.sqlite3_step(stmt);
+        while (rc == sqlite.ROW) {
+            var call_args = try ctx.allocator.alloc(Value, @intCast(col_count));
+            defer ctx.allocator.free(call_args);
+            var i: c_int = 0;
+            while (i < col_count) : (i += 1) call_args[@intCast(i)] = try columnToValue(ctx, stmt, i);
+            const r = try ctx.invokeCallable(callable, call_args);
+            try result.append(ctx.allocator, r);
             rc = sqlite.sqlite3_step(stmt);
         }
         try obj.set(ctx.allocator, "__has_row", .{ .bool = false });
