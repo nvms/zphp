@@ -63,6 +63,7 @@ pub const entries = .{
     .{ "getmypid", native_getmypid },
     .{ "getmyuid", native_getmyuid },
     .{ "getmygid", native_getmygid },
+    .{ "get_current_user", native_get_current_user },
     .{ "getmyinode", native_noop_zero },
     .{ "ini_get", native_ini_get },
     .{ "ini_get_all", native_ini_get_all },
@@ -1423,6 +1424,33 @@ fn native_getmygid(_: *NativeContext, _: []const Value) RuntimeError!Value {
 
 fn native_get_cfg_var(_: *NativeContext, _: []const Value) RuntimeError!Value {
     return Value{ .bool = false };
+}
+
+extern "c" fn getlogin() ?[*:0]const u8;
+
+fn native_get_current_user(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    // PHP returns the owner of the running script. for the CLI that's the
+    // current process user; for SAPIs without that distinction, it's the
+    // login. fall back to USER / LOGNAME env vars when the syscall returns
+    // null (containers where /etc/passwd has no matching uid)
+    if (getlogin()) |raw| {
+        const span = std.mem.span(raw);
+        if (span.len > 0) {
+            const owned = try ctx.allocator.dupe(u8, span);
+            try ctx.strings.append(ctx.allocator, owned);
+            return .{ .string = owned };
+        }
+    }
+    inline for ([_][]const u8{ "USER", "LOGNAME" }) |key| {
+        if (std.posix.getenv(key)) |val| {
+            if (val.len > 0) {
+                const owned = try ctx.allocator.dupe(u8, val);
+                try ctx.strings.append(ctx.allocator, owned);
+                return .{ .string = owned };
+            }
+        }
+    }
+    return .{ .string = "" };
 }
 
 fn iniDefault(name: []const u8) ?[]const u8 {
