@@ -1906,12 +1906,12 @@ pub const VM = struct {
                 .equal => {
                     const b = self.pop();
                     const a = self.pop();
-                    self.push(.{ .bool = Value.equal(a, b) });
+                    self.push(.{ .bool = try self.looseEqualWithStringable(a, b) });
                 },
                 .not_equal => {
                     const b = self.pop();
                     const a = self.pop();
-                    self.push(.{ .bool = !Value.equal(a, b) });
+                    self.push(.{ .bool = !try self.looseEqualWithStringable(a, b) });
                 },
                 .identical => {
                     const b = self.pop();
@@ -9049,6 +9049,24 @@ pub const VM = struct {
             }
             if (self.classes.contains(class_name)) return;
         }
+    }
+
+    // PHP's == between an object with __toString and a scalar string runs
+    // __toString and compares as strings. Value.equal can't reach into the VM
+    // to call methods, so this wrapper does that coercion before delegating
+    pub fn looseEqualWithStringable(self: *VM, a: Value, b: Value) RuntimeError!bool {
+        if (a == .object and b == .string) {
+            if (self.hasMethod(a.object.class_name, "__toString")) {
+                const s = try self.callMethod(a.object, "__toString", &.{});
+                if (s == .string) return Value.equal(s, b);
+            }
+        } else if (b == .object and a == .string) {
+            if (self.hasMethod(b.object.class_name, "__toString")) {
+                const s = try self.callMethod(b.object, "__toString", &.{});
+                if (s == .string) return Value.equal(a, s);
+            }
+        }
+        return Value.equal(a, b);
     }
 
     pub fn isInstanceOf(self: *VM, raw_obj_class: []const u8, raw_target: []const u8) bool {

@@ -313,6 +313,15 @@ fn floatval(_: *NativeContext, args: []const Value) RuntimeError!Value {
 fn strval(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len == 0) return .{ .string = "" };
     if (args[0] == .string) return args[0];
+    // PHP's strval on an object dispatches through __toString. Without this,
+    // we'd print "Object" instead of the user-defined string form
+    if (args[0] == .object) {
+        const obj = args[0].object;
+        if (ctx.vm.hasMethod(obj.class_name, "__toString")) {
+            const r = try ctx.vm.callMethod(obj, "__toString", &.{});
+            if (r == .string) return r;
+        }
+    }
     var buf = std.ArrayListUnmanaged(u8){};
     try args[0].format(&buf, ctx.allocator);
     const s = try buf.toOwnedSlice(ctx.allocator);
@@ -878,6 +887,9 @@ fn native_is_callable(ctx: *NativeContext, args: []const Value) RuntimeError!Val
         if (ctx.vm.classes.get(class_name)) |cdef| {
             if (cdef.methods.get(method)) |mi| {
                 if (mi.visibility != .public) return .{ .bool = false };
+                // [ClassName, 'method'] is only callable when method is static.
+                // instance methods need an actual object on the left
+                if (target == .string and !mi.is_static) return .{ .bool = false };
             }
         }
         var buf: [256]u8 = undefined;
