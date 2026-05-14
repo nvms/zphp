@@ -8,6 +8,9 @@ const RuntimeError = error{ RuntimeError, OutOfMemory };
 pub const entries = .{
     .{ "sleep", native_sleep },
     .{ "usleep", native_usleep },
+    .{ "time_nanosleep", native_time_nanosleep },
+    .{ "time_sleep_until", native_time_sleep_until },
+    .{ "sys_getloadavg", native_sys_getloadavg },
     .{ "getenv", native_getenv },
     .{ "putenv", native_putenv },
     .{ "uniqid", native_uniqid },
@@ -294,6 +297,41 @@ fn native_usleep(_: *NativeContext, args: []const Value) RuntimeError!Value {
     const usecs = Value.toInt(args[0]);
     if (usecs > 0) std.Thread.sleep(@intCast(usecs * 1_000));
     return .null;
+}
+
+fn native_time_nanosleep(_: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len < 2) return .{ .bool = false };
+    const secs = Value.toInt(args[0]);
+    const nsecs = Value.toInt(args[1]);
+    if (secs < 0 or nsecs < 0) return .{ .bool = false };
+    const total_ns: u64 = @intCast(secs * 1_000_000_000 + nsecs);
+    std.Thread.sleep(total_ns);
+    return .{ .bool = true };
+}
+
+fn native_time_sleep_until(_: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len == 0) return .{ .bool = false };
+    const target = Value.toFloat(args[0]);
+    const now: f64 = @floatFromInt(std.time.timestamp());
+    if (target <= now) return .{ .bool = true };
+    const delta_ns: u64 = @intFromFloat(@max(0, (target - now) * 1e9));
+    std.Thread.sleep(delta_ns);
+    return .{ .bool = true };
+}
+
+extern fn getloadavg(loadavg: [*]f64, nelem: c_int) c_int;
+
+fn native_sys_getloadavg(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    var samples: [3]f64 = .{ 0, 0, 0 };
+    const got = getloadavg(&samples, 3);
+    if (got < 0) return .{ .bool = false };
+    const arr = try ctx.createArray();
+    var i: usize = 0;
+    const count: usize = @intCast(got);
+    while (i < count) : (i += 1) {
+        try arr.set(ctx.allocator, .{ .int = @intCast(i) }, .{ .float = samples[i] });
+    }
+    return .{ .array = arr };
 }
 
 fn native_getenv(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
