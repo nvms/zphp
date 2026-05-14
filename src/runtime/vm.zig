@@ -8908,6 +8908,7 @@ pub const VM = struct {
             if (std.mem.eql(u8, class_name, name)) return "DateError";
         }
         if (std.mem.eql(u8, class_name, "DateError")) return "Error";
+        if (std.mem.eql(u8, class_name, "SodiumException")) return "Exception";
         const exception_children = [_][]const u8{
             "RuntimeException",     "LogicException",          "InvalidArgumentException",
             "BadMethodCallException", "BadFunctionCallException", "OutOfRangeException",

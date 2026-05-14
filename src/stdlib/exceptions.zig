@@ -111,6 +111,7 @@ pub fn register(vm: *VM, a: Allocator) !void {
         .{ "DateMalformedStringException", "DateException" },
         .{ "DateMalformedIntervalStringException", "DateException" },
         .{ "DateMalformedPeriodStringException", "DateException" },
+        .{ "SodiumException", "Exception" },
     };
 
     inline for (subclasses) |entry| {
