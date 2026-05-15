@@ -6078,20 +6078,24 @@ pub const VM = struct {
                                 if (func.is_variadic) {
                                     const fixed: usize = func.arity - 1;
                                     for (0..@min(ac, fixed)) |i| {
-                                        try new_vars.put(self.allocator, func.params[i], self.stack[self.sp - ac + i]);
+                                        const is_ref = i < func.ref_params.len and func.ref_params[i];
+                                        const sv = self.stack[self.sp - ac + i];
+                                        try new_vars.put(self.allocator, func.params[i], if (is_ref) sv else try self.copyValue(sv));
                                     }
                                     const rest_arr = try self.allocator.create(PhpArray);
                                     rest_arr.* = .{};
                                     if (ac > fixed) {
                                         for (fixed..ac) |i| {
-                                            try rest_arr.append(self.allocator, self.stack[self.sp - ac + i]);
+                                            try rest_arr.append(self.allocator, try self.copyValue(self.stack[self.sp - ac + i]));
                                         }
                                     }
                                     try self.arrays.append(self.allocator, rest_arr);
                                     try new_vars.put(self.allocator, func.params[fixed], .{ .array = rest_arr });
                                 } else {
                                     for (0..@min(ac, func.arity)) |i| {
-                                        try new_vars.put(self.allocator, func.params[i], self.stack[self.sp - ac + i]);
+                                        const is_ref = i < func.ref_params.len and func.ref_params[i];
+                                        const sv = self.stack[self.sp - ac + i];
+                                        try new_vars.put(self.allocator, func.params[i], if (is_ref) sv else try self.copyValue(sv));
                                     }
                                 }
                                 if (self.frame_count >= 2047) {

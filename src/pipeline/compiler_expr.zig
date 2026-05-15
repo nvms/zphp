@@ -37,6 +37,30 @@ pub fn compileAssign(self: *Compiler, node: Ast.Node) Error!void {
         if (rhs_node.tag == .ref_target) {
             const dst_name = self.ast.tokenSlice(target.main_token);
             const dst_idx = try self.addConstant(.{ .string = dst_name });
+            const inner = self.ast.nodes[rhs_node.data.lhs];
+            // when emitting make_var_ref / make_var_array_elem_ref, do NOT
+            // emit break_var_ref first - those opcodes replace dst's ref_slot
+            // atomically, and a prior break_var_ref would drop the slot before
+            // we push the rhs, causing the rhs's get_var to fall back to stale
+            // frame.vars
+            if (inner.tag == .variable or inner.tag == .identifier) {
+                const src_name = self.ast.tokenSlice(inner.main_token);
+                const src_idx = try self.addConstant(.{ .string = src_name });
+                try self.emitOp(.make_var_ref);
+                try self.emitU16(dst_idx);
+                try self.emitU16(src_idx);
+                try self.compileNode(rhs_node.data.lhs);
+                return;
+            }
+            if (inner.tag == .array_access) {
+                try self.compileNode(inner.data.lhs); // push array (must read via current ref_slot)
+                try self.compileNode(inner.data.rhs); // push key
+                try self.emitOp(.make_var_array_elem_ref);
+                try self.emitU16(dst_idx);
+                try self.emitOp(.op_null);
+                return;
+            }
+            // fallback for shapes we don't yet emit a real ref for (e.g. $dst = &$obj->prop)
             try self.emitOp(.break_var_ref);
             try self.emitU16(dst_idx);
         }
