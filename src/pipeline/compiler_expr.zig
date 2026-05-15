@@ -451,12 +451,21 @@ pub fn compilePrefixOp(self: *Compiler, node: Ast.Node) Error!void {
         return;
     }
     try self.compileNode(node.data.lhs);
-    try self.emitOp(switch (op_tag) {
-        .minus => .negate,
-        .bang => .not,
-        .tilde => .bit_not,
+    switch (op_tag) {
+        // unary `+` coerces to numeric per PHP. an integer/float passes through;
+        // a numeric string converts via +0. emit `0 + operand` to leverage the
+        // existing arithmetic coercion path without a dedicated opcode
+        .plus => {
+            const zero_idx = try self.addConstant(.{ .int = 0 });
+            try self.emitOp(.constant);
+            try self.emitU16(zero_idx);
+            try self.emitOp(.add);
+        },
+        .minus => try self.emitOp(.negate),
+        .bang => try self.emitOp(.not),
+        .tilde => try self.emitOp(.bit_not),
         else => unreachable,
-    });
+    }
 }
 
 pub fn compilePostfixOp(self: *Compiler, node: Ast.Node) Error!void {

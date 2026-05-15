@@ -790,6 +790,13 @@ pub const Compiler = struct {
                         else => {},
                     }
                 }
+                if (tok.tag == .plus) {
+                    const inner = self.evalConstExpr(n.data.lhs);
+                    switch (inner) {
+                        .int, .float => break :blk inner,
+                        else => {},
+                    }
+                }
                 break :blk .null;
             },
             .binary_op => blk: {

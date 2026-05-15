@@ -344,13 +344,19 @@ const Parser = struct {
 
         // namespace App\Models\User;  or  namespace App\Models { ... }
         // or unnamed:  namespace { ... }
-        if (self.peek() == .identifier) {
+        if (self.peek() == .identifier or isSemiReserved(self.peek())) {
             try parts.append(self.allocator, self.pos);
             _ = self.advance();
             while (self.peek() == .backslash) {
                 _ = self.advance();
+                // PHP allows reserved words (Default, Use, Catch, etc.) as
+                // namespace segments
                 try parts.append(self.allocator, self.pos);
-                _ = try self.expect(.identifier);
+                if (self.peek() == .identifier or isSemiReserved(self.peek())) {
+                    _ = self.advance();
+                } else {
+                    _ = try self.expect(.identifier);
+                }
             }
         }
 
@@ -396,12 +402,20 @@ const Parser = struct {
         defer prefix.deinit(self.allocator);
 
         try prefix.append(self.allocator, self.pos);
-        _ = try self.expect(.identifier);
+        if (self.peek() == .identifier or isSemiReserved(self.peek())) {
+            _ = self.advance();
+        } else {
+            _ = try self.expect(.identifier);
+        }
         while (self.peek() == .backslash) {
             _ = self.advance();
             if (self.peek() == .l_brace) break;
             try prefix.append(self.allocator, self.pos);
-            _ = try self.expect(.identifier);
+            if (self.peek() == .identifier or isSemiReserved(self.peek())) {
+                _ = self.advance();
+            } else {
+                _ = try self.expect(.identifier);
+            }
         }
 
         // group use: use Prefix\{Name [as Alias], ...};
@@ -1637,7 +1651,11 @@ const Parser = struct {
             self.skipAttributes();
             if (self.peek() == .kw_case) {
                 _ = self.advance();
-                const case_name = try self.expect(.identifier);
+                // PHP allows reserved words as enum case names (Array, Bool, Int, etc.)
+                const case_name = if (self.peek() == .identifier or isSemiReserved(self.peek()))
+                    self.advance()
+                else
+                    try self.expect(.identifier);
                 var value_expr: u32 = 0;
                 if (self.peek() == .equal) {
                     _ = self.advance();
@@ -2014,7 +2032,10 @@ const Parser = struct {
         const has_leading = self.peek() == .backslash;
         if (has_leading) _ = self.advance();
 
-        const first_tok = try self.expect(.identifier);
+        const first_tok = if (self.peek() == .identifier or isSemiReserved(self.peek()))
+            self.advance()
+        else
+            try self.expect(.identifier);
         if (self.peek() != .backslash) {
             if (has_leading) {
                 var parts = std.ArrayListUnmanaged(u32){};
@@ -2031,7 +2052,12 @@ const Parser = struct {
         try parts.append(self.allocator, first_tok);
         while (self.peek() == .backslash) {
             _ = self.advance();
-            try parts.append(self.allocator, try self.expect(.identifier));
+            // PHP allows reserved words as namespace segments
+            const seg = if (self.peek() == .identifier or isSemiReserved(self.peek()))
+                self.advance()
+            else
+                try self.expect(.identifier);
+            try parts.append(self.allocator, seg);
         }
         const extra = try self.addExtraList(parts.items);
         return self.addNode(.{ .tag = .qualified_name, .main_token = first_tok, .data = .{ .lhs = extra, .rhs = if (has_leading) 1 else 0 } });
@@ -2282,7 +2308,7 @@ const Parser = struct {
                 const operand = try self.parseExprPrec(16);
                 return self.addNode(.{ .tag = .prefix_op, .main_token = tok, .data = .{ .lhs = operand } });
             },
-            .minus, .tilde => {
+            .plus, .minus, .tilde => {
                 const tok = self.advance();
                 const operand = try self.parseExprPrec(18);
                 return self.addNode(.{ .tag = .prefix_op, .main_token = tok, .data = .{ .lhs = operand } });

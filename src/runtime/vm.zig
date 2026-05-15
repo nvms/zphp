@@ -8048,17 +8048,27 @@ pub const VM = struct {
                     current_parent = pc.parent;
                 } else break;
             }
-            for (def.interfaces.items) |iname| {
-                var current_iface: ?[]const u8 = iname;
-                while (current_iface) |in| {
-                    if (self.interfaces.get(in)) |idef| {
-                        for (idef.methods.items) |mname| {
-                            if (seen_abstract.contains(mname)) continue;
-                            try seen_abstract.put(self.allocator, mname, in);
+            // walk both the class's direct interfaces AND any interfaces
+            // declared by its parent chain (an `abstract class Foo implements Bar`
+            // means subclasses of Foo must satisfy Bar even though Foo's subclass
+            // doesn't `implements Bar` directly)
+            var iface_walk_parent: ?[]const u8 = class_name;
+            while (iface_walk_parent) |cn| {
+                if (self.classes.get(cn)) |cd| {
+                    for (cd.interfaces.items) |iname| {
+                        var current_iface: ?[]const u8 = iname;
+                        while (current_iface) |in| {
+                            if (self.interfaces.get(in)) |idef| {
+                                for (idef.methods.items) |mname| {
+                                    if (seen_abstract.contains(mname)) continue;
+                                    try seen_abstract.put(self.allocator, mname, in);
+                                }
+                                current_iface = idef.parent;
+                            } else break;
                         }
-                        current_iface = idef.parent;
-                    } else break;
-                }
+                    }
+                    iface_walk_parent = cd.parent;
+                } else break;
             }
             var sa_iter = seen_abstract.iterator();
             while (sa_iter.next()) |se| {
@@ -10095,20 +10105,21 @@ pub const VM = struct {
     }
 
     fn buildSlotLayout(self: *VM, def: *const ClassDef) RuntimeError!?*PhpObject.SlotLayout {
-        // collect all properties walking parent chain (parent first)
-        var all_names: [64][]const u8 = undefined;
-        var all_defaults: [64]Value = undefined;
-        var count: usize = 0;
+        // collect all properties walking parent chain (parent first). PHPUnit
+        // and similar mature codebases have >64 props in deep hierarchies, so
+        // use a growable list instead of a fixed stack buffer
+        var all_names: std.ArrayListUnmanaged([]const u8) = .{};
+        var all_defaults: std.ArrayListUnmanaged(Value) = .{};
+        defer all_names.deinit(self.allocator);
+        defer all_defaults.deinit(self.allocator);
 
         var walk_name = def.parent;
         while (walk_name) |pname| {
             const pcls = self.classes.get(pname) orelse break;
-            // parent's slot layout already has the full parent chain flattened
             if (pcls.slot_layout) |pl| {
                 for (0..pl.names.len) |i| {
-                    all_names[count] = pl.names[i];
-                    all_defaults[count] = pl.defaults[i];
-                    count += 1;
+                    try all_names.append(self.allocator, pl.names[i]);
+                    try all_defaults.append(self.allocator, pl.defaults[i]);
                 }
                 break;
             }
@@ -10116,29 +10127,27 @@ pub const VM = struct {
         }
 
         for (def.properties.items) |prop| {
-            // check if parent already defined this slot
             var found = false;
-            for (all_names[0..count], 0..) |n, i| {
+            for (all_names.items, 0..) |n, i| {
                 if (std.mem.eql(u8, n, prop.name)) {
-                    all_defaults[i] = prop.default;
+                    all_defaults.items[i] = prop.default;
                     found = true;
                     break;
                 }
             }
             if (!found) {
-                all_names[count] = prop.name;
-                all_defaults[count] = prop.default;
-                count += 1;
+                try all_names.append(self.allocator, prop.name);
+                try all_defaults.append(self.allocator, prop.default);
             }
         }
 
-        if (count == 0) return null;
+        if (all_names.items.len == 0) return null;
 
         const layout = self.allocator.create(PhpObject.SlotLayout) catch return error.RuntimeError;
-        const names = self.allocator.alloc([]const u8, count) catch return error.RuntimeError;
-        const defaults = self.allocator.alloc(Value, count) catch return error.RuntimeError;
-        @memcpy(names, all_names[0..count]);
-        @memcpy(defaults, all_defaults[0..count]);
+        const names = self.allocator.alloc([]const u8, all_names.items.len) catch return error.RuntimeError;
+        const defaults = self.allocator.alloc(Value, all_defaults.items.len) catch return error.RuntimeError;
+        @memcpy(names, all_names.items);
+        @memcpy(defaults, all_defaults.items);
         layout.* = .{ .names = names, .defaults = defaults };
         return layout;
     }
