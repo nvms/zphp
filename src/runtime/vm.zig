@@ -2438,6 +2438,174 @@ pub const VM = struct {
                         self.push(.null);
                     }
                 },
+                .prop_set_chain => {
+                    // depth-2 write for `$obj->prop[i] = v`. always uses
+                    // direct property access on base (never offsetGet/Set)
+                    const v = self.pop();
+                    const inner_key = self.pop();
+                    const prop_key = self.pop();
+                    const base = self.pop();
+                    if (base != .object or prop_key != .string) {
+                        self.push(v);
+                        continue;
+                    }
+                    const obj = base.object;
+                    const pname = prop_key.string;
+                    const ik = Value.toArrayKey(inner_key);
+                    const existing = obj.get(pname);
+                    if (existing == .string) {
+                        const s = existing.string;
+                        var idx: i64 = switch (ik) { .int => |n| n, .string => |str| @intCast(std.fmt.parseInt(i64, str, 10) catch 0) };
+                        if (idx < 0) idx = @as(i64, @intCast(s.len)) + idx;
+                        if (idx < 0) { self.push(v); continue; }
+                        var write_byte: u8 = 0;
+                        if (v == .string) {
+                            if (v.string.len > 0) write_byte = v.string[0];
+                        } else {
+                            var tmp: std.ArrayListUnmanaged(u8) = .{};
+                            defer tmp.deinit(self.allocator);
+                            try v.format(&tmp, self.allocator);
+                            if (tmp.items.len > 0) write_byte = tmp.items[0];
+                        }
+                        const target_idx: usize = @intCast(idx);
+                        const new_len: usize = @max(s.len, target_idx + 1);
+                        const buf = try self.allocator.alloc(u8, new_len);
+                        @memcpy(buf[0..s.len], s);
+                        if (new_len > s.len) @memset(buf[s.len..], ' ');
+                        buf[target_idx] = write_byte;
+                        try self.strings.append(self.allocator, buf);
+                        try obj.set(self.allocator, pname, .{ .string = buf });
+                        self.push(v);
+                        continue;
+                    }
+                    if (existing == .array) {
+                        try existing.array.set(self.allocator, ik, v);
+                        self.push(v);
+                        continue;
+                    }
+                    if (existing == .null or (existing == .bool and !existing.bool)) {
+                        const new_arr = try self.allocator.create(PhpArray);
+                        new_arr.* = .{};
+                        try self.arrays.append(self.allocator, new_arr);
+                        try new_arr.set(self.allocator, ik, v);
+                        try obj.set(self.allocator, pname, .{ .array = new_arr });
+                        self.push(v);
+                        continue;
+                    }
+                    if (existing == .object and self.hasMethod(existing.object.class_name, "offsetSet")) {
+                        _ = self.callMethod(existing.object, "offsetSet", &.{ inner_key, v }) catch {
+                            if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
+                            return error.RuntimeError;
+                        };
+                        self.push(v);
+                        continue;
+                    }
+                    self.push(v);
+                },
+
+                .array_set_chain => {
+                    // depth-2 write: $base[outer][inner] = val, or $obj->prop[inner] = val
+                    // pops [val, inner_key, outer_key, base]
+                    const v = self.pop();
+                    const inner_key = self.pop();
+                    const outer_key = self.pop();
+                    const base = self.pop();
+                    const ik = Value.toArrayKey(inner_key);
+                    var existing: Value = .null;
+                    var base_is_array_access_obj = false;
+                    if (base == .array) {
+                        existing = base.array.get(Value.toArrayKey(outer_key));
+                    } else if (base == .object and self.hasMethod(base.object.class_name, "offsetGet")) {
+                        // ArrayObject / WeakMap / custom ArrayAccess: fetch the
+                        // inner element via offsetGet so the write is on the
+                        // underlying stored value (or routed back through
+                        // offsetSet for scalar inners)
+                        existing = self.callMethod(base.object, "offsetGet", &.{outer_key}) catch {
+                            if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
+                            return error.RuntimeError;
+                        };
+                        base_is_array_access_obj = true;
+                    } else if (base == .object and outer_key == .string) {
+                        existing = base.object.get(outer_key.string);
+                    } else {
+                        self.push(v);
+                        continue;
+                    }
+                    const ok = Value.toArrayKey(outer_key);
+                    if (existing == .string) {
+                        const s = existing.string;
+                        var idx: i64 = switch (ik) { .int => |n| n, .string => |str| @intCast(std.fmt.parseInt(i64, str, 10) catch 0) };
+                        if (idx < 0) idx = @as(i64, @intCast(s.len)) + idx;
+                        if (idx < 0) { self.push(v); continue; }
+                        var write_byte: u8 = 0;
+                        if (v == .string) {
+                            if (v.string.len > 0) write_byte = v.string[0];
+                        } else {
+                            var tmp: std.ArrayListUnmanaged(u8) = .{};
+                            defer tmp.deinit(self.allocator);
+                            try v.format(&tmp, self.allocator);
+                            if (tmp.items.len > 0) write_byte = tmp.items[0];
+                        }
+                        const target_idx: usize = @intCast(idx);
+                        const new_len: usize = @max(s.len, target_idx + 1);
+                        const buf = try self.allocator.alloc(u8, new_len);
+                        @memcpy(buf[0..s.len], s);
+                        if (new_len > s.len) @memset(buf[s.len..], ' ');
+                        buf[target_idx] = write_byte;
+                        try self.strings.append(self.allocator, buf);
+                        if (base == .array) {
+                            try base.array.set(self.allocator, ok, .{ .string = buf });
+                        } else if (base_is_array_access_obj) {
+                            _ = self.callMethod(base.object, "offsetSet", &.{ outer_key, .{ .string = buf } }) catch {
+                                if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
+                                return error.RuntimeError;
+                            };
+                        } else if (outer_key == .string) {
+                            try base.object.set(self.allocator, outer_key.string, .{ .string = buf });
+                        }
+                        self.push(v);
+                        continue;
+                    }
+                    if (existing == .array) {
+                        try existing.array.set(self.allocator, ik, v);
+                        self.push(v);
+                        continue;
+                    }
+                    if (existing == .null or (existing == .bool and !existing.bool)) {
+                        const new_arr = try self.allocator.create(PhpArray);
+                        new_arr.* = .{};
+                        try self.arrays.append(self.allocator, new_arr);
+                        try new_arr.set(self.allocator, ik, v);
+                        if (base == .array) {
+                            try base.array.set(self.allocator, ok, .{ .array = new_arr });
+                        } else if (base_is_array_access_obj) {
+                            _ = self.callMethod(base.object, "offsetSet", &.{ outer_key, .{ .array = new_arr } }) catch {
+                                if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
+                                return error.RuntimeError;
+                            };
+                        } else if (outer_key == .string) {
+                            try base.object.set(self.allocator, outer_key.string, .{ .array = new_arr });
+                        }
+                        self.push(v);
+                        continue;
+                    }
+                    if (existing == .int or existing == .float or (existing == .bool and existing.bool)) {
+                        if (try self.throwBuiltinException("Error", "Cannot use a scalar value as an array")) continue;
+                        return error.RuntimeError;
+                    }
+                    if (existing == .object) {
+                        if (self.hasMethod(existing.object.class_name, "offsetSet")) {
+                            _ = self.callMethod(existing.object, "offsetSet", &.{ inner_key, v }) catch {
+                                if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
+                                return error.RuntimeError;
+                            };
+                            self.push(v);
+                            continue;
+                        }
+                    }
+                    self.push(v);
+                },
+
                 .array_set => {
                     const val = self.pop();
                     const key = self.pop();

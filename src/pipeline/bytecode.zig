@@ -205,6 +205,17 @@ pub const OpCode = enum(u8) {
     array_elem_inc, // pop key, pop array, arr[key]++, push old value
     array_elem_dec, // pop key, pop array, arr[key]--, push old value
 
+    // `$arr[k][i] = v` for depth-2 chains where the inner can be a string
+    // (char-write), an array (set element), or absent (vivify). pops
+    // [val, i, k, base_arr] and writes back into base_arr at k when the inner
+    // is a string. push val. avoids the legacy clobber-string-with-array
+    // behaviour of array_get_vivify + array_set
+    array_set_chain,
+    // `$obj->prop[i] = v` — variant for property-rooted chains. always
+    // accesses prop directly (never routes through offsetGet/offsetSet
+    // on the base object). pops [val, i, prop_name, base_obj]
+    prop_set_chain,
+
     pub fn width(self: OpCode) usize {
         return switch (self) {
             .constant, .get_var, .set_var, .jump, .jump_back, .jump_if_false, .jump_if_true,

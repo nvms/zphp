@@ -131,6 +131,29 @@ pub fn compileAssign(self: *Compiler, node: Ast.Node) Error!void {
                     return;
                 }
             }
+            // depth-2 chain `$base[k][i] = v` or `$obj->prop[i] = v` —
+            // route through array_set_chain so a string at the parent
+            // position gets a char-write written back into the parent
+            // instead of being clobbered with a new array
+            if (target_lhs.tag == .array_access) {
+                try compileVivifyChain(self, target_lhs.data.lhs); // push base
+                try self.compileNode(target_lhs.data.rhs);          // push outer key
+                try self.compileNode(target.data.rhs);              // push inner key
+                try self.compileNode(node.data.rhs);                // push value
+                try self.emitOp(.array_set_chain);
+                return;
+            }
+            if (target_lhs.tag == .property_access and !self.isDynamicProp(target_lhs)) {
+                try self.compileNode(target_lhs.data.lhs);               // push $obj
+                const prop_name = self.propName(target_lhs);
+                const cidx = try self.addConstant(.{ .string = prop_name });
+                try self.emitOp(.constant);
+                try self.emitU16(cidx);                                  // push prop name
+                try self.compileNode(target.data.rhs);                   // push inner key
+                try self.compileNode(node.data.rhs);                     // push value
+                try self.emitOp(.prop_set_chain);
+                return;
+            }
             try compileVivifyChain(self,target.data.lhs);
             try self.compileNode(target.data.rhs);
             try self.compileNode(node.data.rhs);
