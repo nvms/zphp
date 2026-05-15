@@ -1779,11 +1779,22 @@ fn native_opcache_get_configuration(ctx: *NativeContext, _: []const Value) Runti
 }
 
 fn native_gc_status(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    // PHP 8.3+ adds several GC introspection keys; vendor code (PHPUnit's
+    // ResourceUsageFormatter, etc.) reads them via $st['application_time']
+    // and friends, so emit the full key set to keep the array shape consistent
     const arr = try ctx.createArray();
+    try arr.set(ctx.allocator, .{ .string = "running" }, .{ .bool = false });
+    try arr.set(ctx.allocator, .{ .string = "protected" }, .{ .bool = false });
+    try arr.set(ctx.allocator, .{ .string = "full" }, .{ .bool = false });
     try arr.set(ctx.allocator, .{ .string = "runs" }, .{ .int = 0 });
     try arr.set(ctx.allocator, .{ .string = "collected" }, .{ .int = 0 });
     try arr.set(ctx.allocator, .{ .string = "threshold" }, .{ .int = 10001 });
+    try arr.set(ctx.allocator, .{ .string = "buffer_size" }, .{ .int = 16384 });
     try arr.set(ctx.allocator, .{ .string = "roots" }, .{ .int = 0 });
+    try arr.set(ctx.allocator, .{ .string = "application_time" }, .{ .float = 0 });
+    try arr.set(ctx.allocator, .{ .string = "collector_time" }, .{ .float = 0 });
+    try arr.set(ctx.allocator, .{ .string = "destructor_time" }, .{ .float = 0 });
+    try arr.set(ctx.allocator, .{ .string = "free_time" }, .{ .float = 0 });
     return .{ .array = arr };
 }
 
