@@ -68,6 +68,7 @@ pub const Ast = struct {
             match_expr, // main_token = match, lhs = condition, rhs = extra index -> {count, arm_nodes...}
             match_arm, // lhs = extra index -> {count, value_expr...}, rhs = result expr. count=0 means default
             inline_html, // main_token = inline_html token
+            empty_stmt,  // no-op (e.g. __HALT_COMPILER terminator)
 
             // literals
             integer_literal,

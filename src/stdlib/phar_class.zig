@@ -436,7 +436,18 @@ fn phInterceptFileFuncs(_: *NativeContext, _: []const Value) RuntimeError!Value 
     return .null;
 }
 
-fn phMapPhar(_: *NativeContext, _: []const Value) RuntimeError!Value {
+fn phMapPhar(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    // `Phar::mapPhar('alias')` registers an alias for the currently-running
+    // phar file so subsequent `phar://alias/...` reads resolve to it
+    if (args.len < 1 or args[0] != .string) return .{ .bool = true };
+    const alias = args[0].string;
+    const fp = ctx.vm.file_path;
+    if (fp.len == 0) return .{ .bool = true };
+    const alias_dup = try ctx.allocator.dupe(u8, alias);
+    const fp_dup = try ctx.allocator.dupe(u8, fp);
+    try ctx.vm.strings.append(ctx.allocator, alias_dup);
+    try ctx.vm.strings.append(ctx.allocator, fp_dup);
+    try ctx.vm.phar_aliases.put(ctx.allocator, alias_dup, fp_dup);
     return .{ .bool = true };
 }
 

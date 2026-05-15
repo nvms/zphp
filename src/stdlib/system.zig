@@ -6,6 +6,7 @@ const VM = @import("../runtime/vm.zig").VM;
 const RuntimeError = error{ RuntimeError, OutOfMemory };
 
 pub const entries = .{
+    .{ "getopt", native_getopt },
     .{ "sleep", native_sleep },
     .{ "usleep", native_usleep },
     .{ "time_nanosleep", native_time_nanosleep },
@@ -359,6 +360,118 @@ fn native_posix_strerror(ctx: *NativeContext, args: []const Value) RuntimeError!
     if (args.len < 1 or args[0] != .int) return .{ .string = "" };
     const s = strerror(@intCast(args[0].int)) orelse return .{ .string = "" };
     return .{ .string = try cstrToStr(ctx, s) };
+}
+
+// getopt(short, long?, &rest_index?) — PHP-style CLI option parser.
+// short is a string like "ab:c::" (a = no arg, b: = required, c:: = optional);
+// long is a list of strings with the same suffix convention. options stop at
+// the first non-option arg or at "--". returns assoc array of seen options.
+fn native_getopt(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    const short: []const u8 = if (args.len >= 1 and args[0] == .string) args[0].string else "";
+    const argv_val = ctx.vm.request_vars.get("$argv") orelse return .{ .array = try ctx.createArray() };
+    if (argv_val != .array) return .{ .array = try ctx.createArray() };
+    const argv = argv_val.array;
+
+    var shorts: std.StringHashMapUnmanaged(u8) = .{};
+    defer shorts.deinit(ctx.allocator);
+    var i: usize = 0;
+    while (i < short.len) : (i += 1) {
+        const ch = short[i];
+        var mode: u8 = 'n'; // none
+        if (i + 1 < short.len and short[i + 1] == ':') {
+            if (i + 2 < short.len and short[i + 2] == ':') {
+                mode = 'o'; // optional
+                i += 2;
+            } else {
+                mode = 'r'; // required
+                i += 1;
+            }
+        }
+        const k2 = try ctx.allocator.dupe(u8, &[_]u8{ch});
+        try ctx.vm.strings.append(ctx.allocator, k2);
+        try shorts.put(ctx.allocator, k2, mode);
+    }
+
+    var longs: std.StringHashMapUnmanaged(u8) = .{};
+    defer longs.deinit(ctx.allocator);
+    if (args.len >= 2 and args[1] == .array) {
+        for (args[1].array.entries.items) |e| {
+            if (e.value != .string) continue;
+            var s = e.value.string;
+            var mode: u8 = 'n';
+            if (std.mem.endsWith(u8, s, "::")) {
+                mode = 'o';
+                s = s[0 .. s.len - 2];
+            } else if (std.mem.endsWith(u8, s, ":")) {
+                mode = 'r';
+                s = s[0 .. s.len - 1];
+            }
+            const k = try ctx.allocator.dupe(u8, s);
+            try ctx.vm.strings.append(ctx.allocator, k);
+            try longs.put(ctx.allocator, k, mode);
+        }
+    }
+
+    const out = try ctx.createArray();
+    var idx: usize = 1; // skip $argv[0] (script name)
+    while (idx < argv.entries.items.len) : (idx += 1) {
+        const v = argv.entries.items[idx].value;
+        if (v != .string) continue;
+        const arg = v.string;
+        if (std.mem.eql(u8, arg, "--")) { idx += 1; break; }
+        if (arg.len < 2 or arg[0] != '-') break;
+        if (arg[1] == '-') {
+            // long
+            const eq_idx = std.mem.indexOfScalar(u8, arg[2..], '=');
+            const name = if (eq_idx) |e| arg[2 .. 2 + e] else arg[2..];
+            const inline_val: ?[]const u8 = if (eq_idx) |e| arg[2 + e + 1 ..] else null;
+            const mode = longs.get(name) orelse continue;
+            var stored: Value = .{ .bool = false };
+            if (inline_val) |iv| {
+                stored = .{ .string = try ctx.allocator.dupe(u8, iv) };
+                try ctx.vm.strings.append(ctx.allocator, stored.string);
+            } else if (mode == 'r' and idx + 1 < argv.entries.items.len) {
+                idx += 1;
+                const nxt = argv.entries.items[idx].value;
+                if (nxt == .string) {
+                    stored = .{ .string = try ctx.allocator.dupe(u8, nxt.string) };
+                    try ctx.vm.strings.append(ctx.allocator, stored.string);
+                }
+            }
+            try out.set(ctx.allocator, .{ .string = name }, stored);
+        } else {
+            // short cluster: -abc or -a value or -avalue
+            var j: usize = 1;
+            while (j < arg.len) : (j += 1) {
+                const ch = arg[j];
+                const key = &[_]u8{ch};
+                const mode = shorts.get(key) orelse continue;
+                var stored: Value = .{ .bool = false };
+                if (mode == 'r' or mode == 'o') {
+                    if (j + 1 < arg.len) {
+                        const rest = arg[j + 1 ..];
+                        const dup = try ctx.allocator.dupe(u8, rest);
+                        try ctx.vm.strings.append(ctx.allocator, dup);
+                        stored = .{ .string = dup };
+                        j = arg.len;
+                    } else if (mode == 'r' and idx + 1 < argv.entries.items.len) {
+                        idx += 1;
+                        const nxt = argv.entries.items[idx].value;
+                        if (nxt == .string) {
+                            const dup = try ctx.allocator.dupe(u8, nxt.string);
+                            try ctx.vm.strings.append(ctx.allocator, dup);
+                            stored = .{ .string = dup };
+                        }
+                    }
+                }
+                const kk = try ctx.allocator.dupe(u8, key);
+                try ctx.vm.strings.append(ctx.allocator, kk);
+                try out.set(ctx.allocator, .{ .string = kk }, stored);
+                if (j == arg.len) break;
+            }
+        }
+    }
+    return .{ .array = out };
 }
 
 fn native_sleep(_: *NativeContext, args: []const Value) RuntimeError!Value {

@@ -206,7 +206,7 @@ const Worker = struct {
     n_fds: usize,
 };
 
-fn loadFile(path: []const u8, allocator: Allocator) ?*CompileResult {
+fn loadFile(path: []const u8, allocator: Allocator, _: *@import("runtime/vm.zig").VM) ?*CompileResult {
     const abs_path = std.fs.cwd().realpathAlloc(allocator, path) catch allocator.dupe(u8, path) catch return null;
     const source = std.fs.cwd().readFileAlloc(allocator, abs_path, 1024 * 1024 * 10) catch {
         allocator.free(abs_path);

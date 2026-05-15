@@ -150,6 +150,17 @@ const Parser = struct {
             return self.addNode(.{ .tag = .inline_html, .main_token = tok, .data = .{} });
         }
         if (self.peek() == .open_tag_echo) return self.parseOpenTagEcho();
+        // __HALT_COMPILER(); — stops compilation. PHAR files use it to mark
+        // the boundary between the loader stub and the embedded archive.
+        // consume the syntactic form and skip everything else to EOF
+        if (self.peek() == .identifier and std.mem.eql(u8, self.lexemeAt(0), "__HALT_COMPILER")) {
+            const tok = self.advance();
+            if (self.peek() == .l_paren) _ = self.advance();
+            if (self.peek() == .r_paren) _ = self.advance();
+            if (self.peek() == .semicolon) _ = self.advance();
+            while (self.peek() != .eof) _ = self.advance();
+            return self.addNode(.{ .tag = .empty_stmt, .main_token = tok, .data = .{} });
+        }
         return switch (self.peek()) {
             .kw_echo => self.parseEchoStmt(),
             .kw_print => self.parsePrintStmt(),
@@ -2324,7 +2335,14 @@ const Parser = struct {
             .variable => self.addLiteral(.variable),
             .dollar => self.parseVariableVariable(),
             .identifier => if (self.peekAt(1) == .backslash) self.parseQualifiedName() else self.addLiteral(.identifier),
-            .backslash => self.parseQualifiedName(),
+            .backslash => blk: {
+                // PHP treats `\true`, `\false`, `\null` as the literal values
+                // regardless of namespace (they're not namespaceable)
+                if (self.peekAt(1) == .kw_true) { _ = self.advance(); break :blk self.addLiteral(.true_literal); }
+                if (self.peekAt(1) == .kw_false) { _ = self.advance(); break :blk self.addLiteral(.false_literal); }
+                if (self.peekAt(1) == .kw_null) { _ = self.advance(); break :blk self.addLiteral(.null_literal); }
+                break :blk self.parseQualifiedName();
+            },
             .kw_isset, .kw_empty, .kw_unset, .kw_eval, .kw_exit, .kw_die => self.addLiteral(.identifier),
             .kw_list => self.parseListDestructure(),
             .kw_match => if (self.isMatchExpr()) self.parseMatchExpr() else self.addLiteral(.identifier),

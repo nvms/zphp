@@ -256,8 +256,25 @@ const PharResolved = struct {
 // path components from longest to shortest until one names a real file on disk.
 // PHP allows phars without a .phar extension, so we can't shortcut on suffix
 fn resolvePharPath(path: []const u8) ?PharResolved {
+    return resolvePharPathWithCtx(path, null);
+}
+
+fn resolvePharPathWithCtx(path: []const u8, ctx: ?*NativeContext) ?PharResolved {
     if (!std.mem.startsWith(u8, path, "phar://")) return null;
     const tail = path[7..];
+    // try alias resolution first: the leading path component before the next
+    // slash may be a registered phar alias (set by Phar::mapPhar). this lets
+    // a phar self-reference its embedded files via `phar://my-alias/foo.php`
+    if (ctx) |c| {
+        if (c.vm.phar_aliases.count() > 0) {
+            const sep = std.mem.indexOfScalar(u8, tail, '/') orelse tail.len;
+            const alias = tail[0..sep];
+            if (c.vm.phar_aliases.get(alias)) |archive| {
+                const inner = if (sep < tail.len) tail[sep + 1 ..] else "";
+                return .{ .archive_path = archive, .internal_path = inner };
+            }
+        }
+    }
     var split: usize = tail.len;
     while (split > 0) {
         // find the next slash from the right
@@ -445,7 +462,7 @@ fn native_file_get_contents(ctx: *NativeContext, args: []const Value) RuntimeErr
         return .{ .string = payload };
     }
     if (std.mem.startsWith(u8, path, "phar://")) {
-        const r = resolvePharPath(path) orelse return .{ .bool = false };
+        const r = resolvePharPathWithCtx(path, ctx) orelse return .{ .bool = false };
         const payload = (readPharEntry(ctx.allocator, r.archive_path, r.internal_path) catch return Value{ .bool = false }) orelse return Value{ .bool = false };
         try ctx.strings.append(ctx.allocator, payload);
         return .{ .string = payload };
@@ -548,7 +565,7 @@ fn native_file_exists(ctx: *NativeContext, args: []const Value) RuntimeError!Val
         if (isBuiltinWrapper(s) and isWrapperUnregistered(ctx.vm, s)) return .{ .bool = false };
     }
     if (std.mem.startsWith(u8, path, "phar://")) {
-        const r = resolvePharPath(path) orelse return .{ .bool = false };
+        const r = resolvePharPathWithCtx(path, ctx) orelse return .{ .bool = false };
         if (r.internal_path.len == 0) return .{ .bool = true }; // archive itself
         var loaded = loadPhar(ctx.allocator, r.archive_path) catch return Value{ .bool = false };
         defer freePhar(ctx.allocator, &loaded);
@@ -576,7 +593,7 @@ fn native_is_file(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
         if (isBuiltinWrapper(s) and isWrapperUnregistered(ctx.vm, s)) return .{ .bool = false };
     }
     if (std.mem.startsWith(u8, path, "phar://")) {
-        const r = resolvePharPath(path) orelse return .{ .bool = false };
+        const r = resolvePharPathWithCtx(path, ctx) orelse return .{ .bool = false };
         if (r.internal_path.len == 0) return .{ .bool = true };
         var loaded = loadPhar(ctx.allocator, r.archive_path) catch return Value{ .bool = false };
         defer freePhar(ctx.allocator, &loaded);
@@ -603,7 +620,7 @@ fn native_is_dir(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
         if (isBuiltinWrapper(s) and isWrapperUnregistered(ctx.vm, s)) return .{ .bool = false };
     }
     if (std.mem.startsWith(u8, path, "phar://")) {
-        const r = resolvePharPath(path) orelse return .{ .bool = false };
+        const r = resolvePharPathWithCtx(path, ctx) orelse return .{ .bool = false };
         if (r.internal_path.len == 0) return .{ .bool = false }; // the archive is a file, not a dir
         var loaded = loadPhar(ctx.allocator, r.archive_path) catch return Value{ .bool = false };
         defer freePhar(ctx.allocator, &loaded);
@@ -1229,7 +1246,7 @@ fn native_fopen(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
         return .{ .object = obj };
     }
     if (std.mem.startsWith(u8, path, "phar://")) {
-        const r = resolvePharPath(path) orelse return .{ .bool = false };
+        const r = resolvePharPathWithCtx(path, ctx) orelse return .{ .bool = false };
         const payload = (readPharEntry(ctx.allocator, r.archive_path, r.internal_path) catch return Value{ .bool = false }) orelse return Value{ .bool = false };
         try ctx.strings.append(ctx.allocator, payload);
         const obj = try ctx.allocator.create(PhpObject);

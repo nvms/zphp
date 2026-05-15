@@ -29,7 +29,7 @@ pub fn getTypeInfo(key: []const u8) ?TypeInfo {
     return g_type_info.get(key);
 }
 
-pub const FileLoader = fn (path: []const u8, allocator: Allocator) ?*CompileResult;
+pub const FileLoader = fn (path: []const u8, allocator: Allocator, vm: *VM) ?*CompileResult;
 
 pub const OutputBufferLevel = struct {
     start: usize,
@@ -445,6 +445,10 @@ pub const VM = struct {
     error_reporting_level: i64 = 30719,
     ob_stack: std.ArrayListUnmanaged(OutputBufferLevel) = .{},
     request_vars: std.StringHashMapUnmanaged(Value) = .{},
+    // maps a phar alias (e.g. "phpunit-11.5.55.phar") to the on-disk archive
+    // path. populated by Phar::mapPhar()/Phar::loadPhar() and read by the
+    // phar:// stream wrapper to resolve `phar://alias/internal/path`
+    phar_aliases: std.StringHashMapUnmanaged([]const u8) = .{},
     exception_handlers: [1024]ExceptionHandler = undefined,
     handler_count: usize = 0,
     handler_floor: usize = 0,
@@ -4096,7 +4100,7 @@ pub const VM = struct {
                             const result: ?*CompileResult = if (from_cache)
                                 self.serve_compile_cache.get(path).?
                             else if (self.file_loader) |loader|
-                                loader(path, self.allocator)
+                                loader(path, self.allocator, self)
                             else
                                 null;
 

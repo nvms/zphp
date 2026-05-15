@@ -126,9 +126,56 @@ fn resolvePath(allocator: std.mem.Allocator, path: []const u8) []const u8 {
     return std.fs.cwd().realpathAlloc(allocator, path) catch path;
 }
 
-fn loadFile(path: []const u8, allocator: std.mem.Allocator) ?*CompileResult {
-    const abs_path = std.fs.cwd().realpathAlloc(allocator, path) catch allocator.dupe(u8, path) catch return null;
-    const source = std.fs.cwd().readFileAlloc(allocator, abs_path, max_source_size) catch return null;
+fn loadFile(path: []const u8, allocator: std.mem.Allocator, vm: *@import("runtime/vm.zig").VM) ?*CompileResult {
+    var abs_path: []const u8 = undefined;
+    var source: []const u8 = undefined;
+
+    if (std.mem.startsWith(u8, path, "phar://")) {
+        // resolve phar://[alias-or-fspath]/[internal-path] to (archive-path, internal-path)
+        // alias-aware lookup uses the VM's phar_aliases table populated by Phar::mapPhar
+        const tail = path[7..];
+        var archive: []const u8 = "";
+        var internal: []const u8 = "";
+        const sep = std.mem.indexOfScalar(u8, tail, '/') orelse tail.len;
+        const head = tail[0..sep];
+        if (vm.phar_aliases.get(head)) |arc| {
+            archive = arc;
+            internal = if (sep < tail.len) tail[sep + 1 ..] else "";
+        } else {
+            var split: usize = tail.len;
+            while (split > 0) {
+                while (split > 0 and tail[split - 1] != '/') split -= 1;
+                if (split == 0) break;
+                const candidate = tail[0 .. split - 1];
+                if (std.fs.cwd().statFile(candidate)) |st| {
+                    if (st.kind == .file) {
+                        archive = candidate;
+                        internal = tail[split..];
+                        break;
+                    }
+                } else |_| {}
+                split -= 1;
+            }
+        }
+        if (archive.len == 0) return null;
+
+        const archive_bytes = std.fs.cwd().readFileAlloc(allocator, archive, 256 * 1024 * 1024) catch return null;
+        defer allocator.free(archive_bytes);
+        const phar_mod = @import("stdlib/phar.zig");
+        var parsed = phar_mod.parse(allocator, archive_bytes) catch return null;
+        defer parsed.deinit(allocator);
+        const entry = parsed.lookup(internal) orelse return null;
+        const payload = phar_mod.extract(allocator, &parsed, entry) catch return null;
+        source = payload;
+        // synthesize a display path so error messages identify the entry inside the phar
+        abs_path = std.fmt.allocPrint(allocator, "phar://{s}/{s}", .{ archive, internal }) catch {
+            allocator.free(payload);
+            return null;
+        };
+    } else {
+        abs_path = std.fs.cwd().realpathAlloc(allocator, path) catch allocator.dupe(u8, path) catch return null;
+        source = std.fs.cwd().readFileAlloc(allocator, abs_path, max_source_size) catch return null;
+    }
 
     var ast = parser.parse(allocator, source) catch {
         allocator.free(source);

@@ -400,6 +400,7 @@ const Formatter = struct {
         const node = self.ast.nodes[node_idx];
         switch (node.tag) {
             .root => self.formatRoot(),
+            .empty_stmt => {},
             .inline_html => self.write(self.ast.tokens[node.main_token].lexeme(self.source)),
             .expression_stmt => {
                 self.formatNode(node.data.lhs);

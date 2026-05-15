@@ -53,6 +53,7 @@ fn renderNode(ast: *const Ast, idx: u32, buf: *Buf) !void {
         .true_literal => try w.writeAll("true"),
         .false_literal => try w.writeAll("false"),
         .null_literal => try w.writeAll("null"),
+        .empty_stmt => try w.writeAll("(empty)"),
         .expression_stmt => try renderNode(ast, node.data.lhs, buf),
         .echo_stmt => {
             try w.writeAll("(echo");

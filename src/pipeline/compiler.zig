@@ -392,6 +392,7 @@ pub const Compiler = struct {
                 try self.emitConstant(idx2);
                 try self.emitOp(.echo);
             },
+            .empty_stmt => {},
             .integer_literal => try self.compileInteger(node),
             .float_literal => try self.compileFloat(node),
             .string_literal => try compiler_strings.compileString(self, node),
