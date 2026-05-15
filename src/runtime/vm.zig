@@ -622,6 +622,7 @@ pub const VM = struct {
         try @import("../stdlib/simplexml.zig").register(vm, allocator);
         try @import("../stdlib/xmlreader.zig").register(vm, allocator);
         try @import("../stdlib/xmlwriter.zig").register(vm, allocator);
+        try @import("../stdlib/xml_parser.zig").register(vm, allocator);
         try @import("../stdlib/intl.zig").register(vm, allocator);
         try @import("../stdlib/gmp.zig").register(vm, allocator);
         try @import("../stdlib/gd.zig").register(vm, allocator);
