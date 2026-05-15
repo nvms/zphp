@@ -7327,7 +7327,14 @@ pub const VM = struct {
         obj.* = .{ .class_name = class_name };
         try obj.set(self.allocator, "message", .{ .string = message });
         try obj.set(self.allocator, "code", .{ .int = 0 });
-        try obj.set(self.allocator, "file", .{ .string = self.file_path });
+        // file/line should reflect the throwing frame (often a function in a
+        // required file), not the top-level script. fall back to self.file_path
+        // when the current frame has no associated source
+        const frame_file: []const u8 = if (self.frame_count > 0)
+            if (self.currentFrame().func) |fn_| fn_.file_path else self.file_path
+        else
+            self.file_path;
+        try obj.set(self.allocator, "file", .{ .string = if (frame_file.len > 0) frame_file else self.file_path });
         const ip = if (self.frame_count > 0) self.currentFrame().ip else 0;
         const line: i64 = if (self.frame_count > 0)
             if (self.currentChunk().getSourceLocation(if (ip > 0) ip - 1 else 0, self.source)) |loc| @intCast(loc.line) else 0

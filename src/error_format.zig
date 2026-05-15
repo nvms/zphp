@@ -153,8 +153,23 @@ fn formatUncaughtException(buf: *Writer, alloc: std.mem.Allocator, vm: *const VM
     const frame_idx = if (vm.frame_count > 0) vm.frame_count - 1 else 0;
     const frame = &vm.frames[frame_idx];
     const ip = if (frame.ip > 0) frame.ip - 1 else 0;
-    const source = vm.source;
-    const path = displayPath(vm.file_path);
+    // prefer the frame's own file - functions defined in required files
+    // should report their own file path, not the top-level script's
+    const frame_path: []const u8 = if (frame.func) |fn_| fn_.file_path else "";
+    const path_raw: []const u8 = if (frame_path.len > 0) frame_path else vm.file_path;
+    const path = displayPath(path_raw);
+    // when the frame is in a different file from vm.source, the lines table
+    // for that chunk holds byte offsets into the FILE's source, not vm.source.
+    // load the file once for accurate line resolution; fall back to vm.source
+    var loaded_source: []const u8 = "";
+    var source: []const u8 = vm.source;
+    if (frame_path.len > 0 and !std.mem.eql(u8, frame_path, vm.file_path)) {
+        if (std.fs.cwd().readFileAlloc(alloc, frame_path, 8 * 1024 * 1024)) |contents| {
+            loaded_source = contents;
+            source = contents;
+        } else |_| {}
+    }
+    defer if (loaded_source.len > 0) alloc.free(loaded_source);
 
     // uncatchable fatals (e.g. execution-time exceeded) are formatted as
     // bare fatals without the "Uncaught Class:" prefix or stack trace - this
