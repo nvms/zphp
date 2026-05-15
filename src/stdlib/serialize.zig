@@ -27,6 +27,10 @@ const AllowedClasses = union(enum) {
 const UnserCtx = struct {
     slots: std.ArrayListUnmanaged(Value) = .{},
     allowed: AllowedClasses = .all,
+    // set when we threw a user-visible exception (e.g. TypeError on a typed
+    // property) so native_unserialize knows to propagate the error instead
+    // of swallowing it as a parse-failure `false`
+    threw: bool = false,
 
     fn deinit(self: *UnserCtx, a: Allocator) void {
         self.slots.deinit(a);
@@ -180,6 +184,18 @@ fn findPropertyVisibility(cls: ClassDef, name: []const u8) ClassDef.Visibility {
         if (std.mem.eql(u8, pdef.name, name)) return pdef.visibility;
     }
     return .public;
+}
+
+fn findPropertyType(vm: anytype, class_name: []const u8, prop_name: []const u8) []const u8 {
+    var cur: ?[]const u8 = class_name;
+    while (cur) |cn| {
+        const cls = vm.classes.get(cn) orelse return "";
+        for (cls.properties.items) |pdef| {
+            if (std.mem.eql(u8, pdef.name, prop_name)) return pdef.type_str;
+        }
+        cur = cls.parent;
+    }
+    return "";
 }
 
 fn emitObjectPropertyKey(
@@ -471,7 +487,14 @@ fn native_unserialize(ctx: *NativeContext, args: []const Value) RuntimeError!Val
             else => {},
         }
     }
-    const result = unserializeValue(ctx, &uctx, s, 0) catch return Value{ .bool = false };
+    const result = unserializeValue(ctx, &uctx, s, 0) catch {
+        // if a user-visible exception was raised (TypeError on a typed
+        // property restoring an __PHP_Incomplete_Class), propagate it so
+        // userland try/catch can see it; otherwise downgrade parse failures
+        // to PHP's traditional `false` return
+        if (uctx.threw) return error.RuntimeError;
+        return Value{ .bool = false };
+    };
     return result.value;
 }
 
@@ -653,6 +676,19 @@ fn unserializeValue(ctx: *NativeContext, uctx: *UnserCtx, s: []const u8, pos: us
                     if (key_result.value == .int) try arr.set(ctx.allocator, .{ .int = key_result.value.int }, val_result.value);
                 } else if (key_result.value == .string) {
                     const stripped = stripVisibilityPrefix(key_result.value.string);
+                    // when restoring into a kept class, assigning an
+                    // __PHP_Incomplete_Class value to a typed property whose
+                    // declared type isn't compatible is a TypeError in PHP
+                    if (class_allowed and val_result.value == .object and std.mem.eql(u8, val_result.value.object.class_name, "__PHP_Incomplete_Class")) {
+                        const ptype = findPropertyType(ctx.vm, class_name, stripped);
+                        if (ptype.len > 0 and !ctx.vm.checkTypeMatch(val_result.value, ptype)) {
+                            const msg = try std.fmt.allocPrint(ctx.allocator, "Cannot assign __PHP_Incomplete_Class to property {s}::${s} of type {s}", .{ class_name, stripped, ptype });
+                            try ctx.strings.append(ctx.allocator, msg);
+                            uctx.threw = true;
+                            _ = try ctx.vm.throwBuiltinException("TypeError", msg);
+                            return error.RuntimeError;
+                        }
+                    }
                     try obj.set(ctx.allocator, stripped, val_result.value);
                 }
             }

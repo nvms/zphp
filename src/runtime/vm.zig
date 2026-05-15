@@ -10378,7 +10378,7 @@ pub const VM = struct {
         return false;
     }
 
-    noinline fn checkTypeMatch(self: *VM, val: Value, type_str: []const u8) bool {
+    pub noinline fn checkTypeMatch(self: *VM, val: Value, type_str: []const u8) bool {
         if (type_str.len == 0) return true;
         if (type_str[0] == '?') {
             if (val == .null) return true;
@@ -10526,6 +10526,7 @@ pub const VM = struct {
             const ac: usize = arg_count;
             for (0..ac) |i| args[i] = self.stack[self.sp - ac + i];
             self.sp -= ac;
+            const pre_handler_count = self.handler_count;
             var ctx = self.makeContext(name);
             const result = native(&ctx, args[0..ac]) catch {
                 if (self.pending_exception) |exc| {
@@ -10543,6 +10544,11 @@ pub const VM = struct {
                         return;
                     }
                     self.pending_exception = exc;
+                } else if (self.handler_count < pre_handler_count) {
+                    // throwBuiltinException already claimed a handler during the
+                    // native (decremented handler_count, set ip to catch_ip, pushed
+                    // exc on stack). just resume so the catch block runs
+                    return;
                 }
                 return error.RuntimeError;
             };
