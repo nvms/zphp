@@ -60,7 +60,17 @@ pub fn compileAssign(self: *Compiler, node: Ast.Node) Error!void {
                 try self.emitOp(.op_null);
                 return;
             }
-            // fallback for shapes we don't yet emit a real ref for (e.g. $dst = &$obj->prop)
+            if (inner.tag == .property_access and !self.isDynamicProp(inner)) {
+                try self.compileNode(inner.data.lhs); // push object
+                const prop_idx = try self.addConstant(.{ .string = self.propName(inner) });
+                try self.emitOp(.make_var_prop_ref);
+                try self.emitU16(dst_idx);
+                try self.emitU16(prop_idx);
+                try self.emitOp(.op_null);
+                return;
+            }
+            // fallback for shapes we don't yet bind explicitly (dynamic property,
+            // static property, chained ref-assign)
             try self.emitOp(.break_var_ref);
             try self.emitU16(dst_idx);
         }

@@ -177,6 +177,12 @@ pub const OpCode = enum(u8) {
     // ref_slots[dst]. tolerates missing keys (vivifies to null)
     make_var_array_elem_ref, // u16: dst name const
 
+    // `$dst = &$obj->prop` — pops [object], reads prop_name from constants,
+    // creates a cell holding the (uncopied) prop value, registers a writeback
+    // so subsequent assignments to $dst propagate to obj->prop, installs the
+    // cell in ref_slots[dst]
+    make_var_prop_ref, // u16: dst name const, u16: prop name const
+
     // remove a name from ref_slots so a subsequent normal assignment doesn't
     // write through an existing ref-binding. emitted before the value-write
     // path for `=&` shapes we don't yet bind explicitly
@@ -210,7 +216,7 @@ pub const OpCode = enum(u8) {
             .ensure_array_local, .ensure_array_var,
             .make_var_array_elem_ref, .break_var_ref,
             => 3,
-            .call, .call_spread, .new_obj, .method_call, .method_call_spread, .static_call_dyn_method, .make_var_ref => 4,
+            .call, .call_spread, .new_obj, .method_call, .method_call_spread, .static_call_dyn_method, .make_var_ref, .make_var_prop_ref => 4,
             .get_static_prop, .set_static_prop, .get_static, .set_static,
             .static_call_spread, .add_local_to_local, .sub_local_to_local, .mul_local_to_local,
             => 5,

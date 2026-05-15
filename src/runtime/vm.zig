@@ -3022,6 +3022,29 @@ pub const VM = struct {
                     }
                 },
 
+                .make_var_prop_ref => {
+                    const dst_idx = self.readU16();
+                    const prop_idx = self.readU16();
+                    const dst_name = self.currentChunk().constants.items[dst_idx].string;
+                    const prop_name = self.currentChunk().constants.items[prop_idx].string;
+                    const obj_val = self.pop();
+                    const frame = self.currentFrame();
+                    _ = frame.ref_slots.remove(dst_name);
+                    if (obj_val != .object) {
+                        const c = try self.allocator.create(Value);
+                        c.* = .null;
+                        try self.ref_cells.append(self.allocator, c);
+                        try frame.ref_slots.put(self.allocator, dst_name, c);
+                    } else {
+                        const obj_ptr = obj_val.object;
+                        const cell = try self.allocator.create(Value);
+                        cell.* = obj_ptr.get(prop_name);
+                        try self.ref_cells.append(self.allocator, cell);
+                        try frame.ref_slots.put(self.allocator, dst_name, cell);
+                        try frame.ref_object_bindings.append(self.allocator, .{ .cell = cell, .object = obj_ptr, .prop_name = prop_name });
+                    }
+                },
+
                 .unset_var => {
                     const idx = self.readU16();
                     const name = self.currentChunk().constants.items[idx].string;
