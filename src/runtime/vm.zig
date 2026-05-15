@@ -572,6 +572,11 @@ pub const VM = struct {
         // (which all share the same ObjFunction) for per-instance static state.
         call_name: ?[]const u8 = null,
         entry_sp: usize = 0,
+        // the script file currently executing in this frame. used by class/
+        // function declarations inside required files so ReflectionClass::
+        // getFileName reports the *declaring* file rather than vm.file_path
+        // (which only tracks the top-level script)
+        script_path: []const u8 = "",
     };
 
     pub fn init(allocator: Allocator) RuntimeError!VM {
@@ -4159,6 +4164,7 @@ pub const VM = struct {
                                     .ip = 0,
                                     .vars = inherited_vars,
                                     .locals = req_locals,
+                                    .script_path = r.file_path,
                                 };
                                 self.frames[self.frame_count].entry_sp = self.sp;
                                 self.frame_count += 1;
@@ -7778,7 +7784,16 @@ pub const VM = struct {
         def.is_abstract = (class_modifiers & 1) != 0;
         def.is_final = (class_modifiers & 2) != 0;
         def.is_readonly = (class_modifiers & 4) != 0;
-        def.file_path = self.file_path;
+        // prefer the executing frame's script_path so classes declared in
+        // required files report the right file via Reflection. fall back to
+        // the VM's top-level file_path for the main script
+        def.file_path = blk: {
+            if (self.frame_count > 0) {
+                const sp = self.currentFrame().script_path;
+                if (sp.len > 0) break :blk sp;
+            }
+            break :blk self.file_path;
+        };
         def.start_line = start_line;
         def.end_line = end_line;
         if (doc_idx != 0xffff) def.doc_comment = self.currentChunk().constants.items[doc_idx].string;

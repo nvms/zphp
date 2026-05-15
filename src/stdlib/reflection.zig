@@ -96,6 +96,8 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try rc_def.methods.put(a, "isAnonymous", .{ .name = "isAnonymous", .arity = 0 });
     try rc_def.methods.put(a, "getInterfaceNames", .{ .name = "getInterfaceNames", .arity = 0 });
     try rc_def.methods.put(a, "getInterfaces", .{ .name = "getInterfaces", .arity = 0 });
+    try rc_def.methods.put(a, "getTraits", .{ .name = "getTraits", .arity = 0 });
+    try rc_def.methods.put(a, "getTraitNames", .{ .name = "getTraitNames", .arity = 0 });
     try rc_def.methods.put(a, "getAttributes", .{ .name = "getAttributes", .arity = 0 });
     try rc_def.methods.put(a, "getDocComment", .{ .name = "getDocComment", .arity = 0 });
     try rc_def.methods.put(a, "getProperties", .{ .name = "getProperties", .arity = 1 });
@@ -147,6 +149,8 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try vm.native_fns.put(a, "ReflectionClass::isAnonymous", rcIsAnonymous);
     try vm.native_fns.put(a, "ReflectionClass::getInterfaceNames", rcGetInterfaceNames);
     try vm.native_fns.put(a, "ReflectionClass::getInterfaces", rcGetInterfaces);
+    try vm.native_fns.put(a, "ReflectionClass::getTraits", rcGetTraits);
+    try vm.native_fns.put(a, "ReflectionClass::getTraitNames", rcGetTraitNames);
     try vm.native_fns.put(a, "ReflectionClass::getAttributes", rcGetAttributes);
     try vm.native_fns.put(a, "ReflectionClass::getDocComment", rcGetDocComment);
     try vm.native_fns.put(a, "ReflectionClass::getProperties", rcGetProperties);
@@ -1289,6 +1293,31 @@ fn rcGetInterfaces(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
         if (ctx.vm.classes.get(iface)) |idef| {
             for (idef.interfaces.items) |sub| try queue.append(ctx.allocator, sub);
         }
+    }
+    return .{ .array = arr };
+}
+
+// getTraits returns an array keyed by trait name with ReflectionClass instances
+// as values, covering traits used by the class and its parent chain
+fn rcGetTraits(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const this = getThis(ctx) orelse return .null;
+    const class_name = if (this.get("name") == .string) this.get("name").string else return .null;
+
+    const arr = try ctx.createArray();
+    var seen = std.StringHashMapUnmanaged(void){};
+    defer seen.deinit(ctx.allocator);
+
+    var current: ?[]const u8 = class_name;
+    while (current) |cn| {
+        const cls = ctx.vm.classes.get(cn) orelse break;
+        for (cls.used_traits.items) |tname| {
+            if (seen.contains(tname)) continue;
+            try seen.put(ctx.allocator, tname, {});
+            const refobj = try ctx.createObject("ReflectionClass");
+            try refobj.set(ctx.allocator, "name", .{ .string = tname });
+            try arr.set(ctx.allocator, .{ .string = tname }, .{ .object = refobj });
+        }
+        current = cls.parent;
     }
     return .{ .array = arr };
 }
