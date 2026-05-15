@@ -2321,13 +2321,11 @@ pub const VM = struct {
                             if (try self.throwOffsetKeyType(key, .access)) continue;
                             return error.RuntimeError;
                         }
-                        // "Undefined array key" warning is gated until ref
-                        // semantics fully cover ref-to-array-elem vivification
-                        // (`$x = &$arr[$k]` where `$k` is missing) and chained
-                        // refs; vendor code (Symfony Translator catalogue,
-                        // Laravel PreventsCircularRecursion) routes through
-                        // those patterns and would otherwise spam stderr
-                        self.push(arr_val.array.get(Value.toArrayKey(key)));
+                        const ak = Value.toArrayKey(key);
+                        if (!arr_val.array.contains(ak)) {
+                            self.emitUndefinedKeyWarning(ak);
+                        }
+                        self.push(arr_val.array.get(ak));
                     } else if (arr_val == .object and self.hasMethod(arr_val.object.class_name, "offsetGet")) {
                         const result = self.callMethod(arr_val.object, "offsetGet", &.{key}) catch {
                             if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
@@ -8758,14 +8756,22 @@ pub const VM = struct {
     }
 
     fn propagateCellWrite(self: *VM, cell: *Value, val: Value) !void {
-        for (self.currentFrame().ref_array_bindings.items) |binding| {
-            if (binding.cell == cell) {
-                try binding.array.set(self.allocator, binding.key, val);
+        // bindings live on the frame that established the ref-to-elem/prop
+        // binding, but the cell can be shared via bindRefParams into callee
+        // frames. walk all active frames so a callee's write through the
+        // shared cell still triggers the writeback registered by the caller
+        var fi = self.frame_count;
+        while (fi > 0) {
+            fi -= 1;
+            for (self.frames[fi].ref_array_bindings.items) |binding| {
+                if (binding.cell == cell) {
+                    try binding.array.set(self.allocator, binding.key, val);
+                }
             }
-        }
-        for (self.currentFrame().ref_object_bindings.items) |binding| {
-            if (binding.cell == cell) {
-                try binding.object.set(self.allocator, binding.prop_name, val);
+            for (self.frames[fi].ref_object_bindings.items) |binding| {
+                if (binding.cell == cell) {
+                    try binding.object.set(self.allocator, binding.prop_name, val);
+                }
             }
         }
     }
