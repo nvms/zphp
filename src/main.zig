@@ -126,6 +126,28 @@ fn resolvePath(allocator: std.mem.Allocator, path: []const u8) []const u8 {
     return std.fs.cwd().realpathAlloc(allocator, path) catch path;
 }
 
+fn dumpProfile(vm: *@import("runtime/vm.zig").VM) void {
+    const Entry = struct { name: []const u8, count: u64 };
+    const a = vm.allocator;
+    var list = std.ArrayListUnmanaged(Entry){};
+    defer list.deinit(a);
+    var it = vm.profile_calls.iterator();
+    while (it.next()) |e| {
+        list.append(a, .{ .name = e.key_ptr.*, .count = e.value_ptr.* }) catch return;
+    }
+    std.sort.heap(Entry, list.items, {}, struct {
+        fn lt(_: void, x: Entry, y: Entry) bool { return x.count > y.count; }
+    }.lt);
+    const sfe = std.fs.File{ .handle = 2 };
+    _ = sfe.write("[profile] top callees:\n") catch {};
+    const n = @min(list.items.len, 30);
+    for (list.items[0..n]) |e| {
+        const m = std.fmt.allocPrint(a, "  {d: >12} {s}\n", .{ e.count, e.name }) catch return;
+        _ = sfe.write(m) catch {};
+        a.free(m);
+    }
+}
+
 fn loadFile(path: []const u8, allocator: std.mem.Allocator, vm: *@import("runtime/vm.zig").VM) ?*CompileResult {
     var abs_path: []const u8 = undefined;
     var source: []const u8 = undefined;
@@ -159,13 +181,46 @@ fn loadFile(path: []const u8, allocator: std.mem.Allocator, vm: *@import("runtim
         }
         if (archive.len == 0) return null;
 
-        const archive_bytes = std.fs.cwd().readFileAlloc(allocator, archive, 256 * 1024 * 1024) catch return null;
-        defer allocator.free(archive_bytes);
         const phar_mod = @import("stdlib/phar.zig");
-        var parsed = phar_mod.parse(allocator, archive_bytes) catch return null;
-        defer parsed.deinit(allocator);
-        const entry = parsed.lookup(internal) orelse return null;
-        const payload = phar_mod.extract(allocator, &parsed, entry) catch return null;
+        const PharCacheEntry = @import("runtime/vm.zig").PharCacheEntry;
+        // cache parsed phars on the VM so 350+ require_once calls into the
+        // same archive (PHPUnit's stub) don't re-read + re-parse every time
+        const cached = vm.phar_cache.get(archive);
+        var cache_entry: *PharCacheEntry = undefined;
+        if (cached) |c| {
+            cache_entry = c;
+        } else {
+            const archive_bytes_owned = std.fs.cwd().readFileAlloc(allocator, archive, 256 * 1024 * 1024) catch return null;
+            const parsed = phar_mod.parse(allocator, archive_bytes_owned) catch {
+                allocator.free(archive_bytes_owned);
+                return null;
+            };
+            const e = allocator.create(PharCacheEntry) catch {
+                allocator.free(archive_bytes_owned);
+                var p = parsed;
+                p.deinit(allocator);
+                return null;
+            };
+            e.* = .{ .bytes = archive_bytes_owned, .parsed = parsed };
+            const archive_key = allocator.dupe(u8, archive) catch {
+                allocator.free(archive_bytes_owned);
+                var p = parsed;
+                p.deinit(allocator);
+                allocator.destroy(e);
+                return null;
+            };
+            vm.phar_cache.put(allocator, archive_key, e) catch {
+                allocator.free(archive_key);
+                allocator.free(archive_bytes_owned);
+                var p = parsed;
+                p.deinit(allocator);
+                allocator.destroy(e);
+                return null;
+            };
+            cache_entry = e;
+        }
+        const entry = cache_entry.parsed.lookup(internal) orelse return null;
+        const payload = phar_mod.extract(allocator, &cache_entry.parsed, entry) catch return null;
         source = payload;
         // synthesize a display path so error messages identify the entry inside the phar
         abs_path = std.fmt.allocPrint(allocator, "phar://{s}/{s}", .{ archive, internal }) catch {
@@ -335,6 +390,7 @@ fn runWithVM(allocator: std.mem.Allocator, result: *CompileResult, script_path: 
         std.process.exit(1);
     };
     defer {
+        if (std.posix.getenv("ZPHP_DBG_PROFILE") != null) dumpProfile(vm);
         vm.deinit();
         allocator.destroy(vm);
     }
@@ -344,6 +400,7 @@ fn runWithVM(allocator: std.mem.Allocator, result: *CompileResult, script_path: 
     vm.interpret(result) catch {
         vm.runShutdownCallbacks() catch {};
         if (vm.output.items.len > 0) try writeStdout(vm.output.items);
+        if (std.posix.getenv("ZPHP_DBG_PROFILE") != null) dumpProfile(vm);
         if (vm.exit_requested) std.process.exit(vm.exit_code);
         const msg = error_format.formatRuntimeError(allocator, vm);
         if (msg.len > 0) {

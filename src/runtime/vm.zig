@@ -31,6 +31,13 @@ pub fn getTypeInfo(key: []const u8) ?TypeInfo {
 
 pub const FileLoader = fn (path: []const u8, allocator: Allocator, vm: *VM) ?*CompileResult;
 
+// holds a phar archive's raw bytes + parsed manifest, kept alive for the
+// VM's lifetime so subsequent require_once calls reuse the parse
+pub const PharCacheEntry = struct {
+    bytes: []const u8,
+    parsed: @import("../stdlib/phar.zig").Phar,
+};
+
 pub const OutputBufferLevel = struct {
     start: usize,
     callback: ?Value = null,
@@ -445,10 +452,15 @@ pub const VM = struct {
     error_reporting_level: i64 = 30719,
     ob_stack: std.ArrayListUnmanaged(OutputBufferLevel) = .{},
     request_vars: std.StringHashMapUnmanaged(Value) = .{},
+    profile_calls: std.StringHashMapUnmanaged(u64) = .{},
     // maps a phar alias (e.g. "phpunit-11.5.55.phar") to the on-disk archive
     // path. populated by Phar::mapPhar()/Phar::loadPhar() and read by the
     // phar:// stream wrapper to resolve `phar://alias/internal/path`
     phar_aliases: std.StringHashMapUnmanaged([]const u8) = .{},
+    // cache of parsed phars by archive path so each require_once doesn't
+    // re-read + re-parse the entire archive (PHPUnit's stub fires 350+
+    // require_once calls; without the cache that's ~2GB of redundant reads)
+    phar_cache: std.StringHashMapUnmanaged(*PharCacheEntry) = .{},
     exception_handlers: [1024]ExceptionHandler = undefined,
     handler_count: usize = 0,
     handler_floor: usize = 0,
@@ -10776,6 +10788,14 @@ pub const VM = struct {
     fn callNamedFunction(self: *VM, raw_name: []const u8, arg_count: u8) RuntimeError!void {
         // PHP normalizes leading-backslash on function callable strings
         const name = if (raw_name.len > 0 and raw_name[0] == '\\') raw_name[1..] else raw_name;
+        if (std.posix.getenv("ZPHP_DBG_PROFILE") != null) {
+            const e = self.profile_calls.getOrPut(self.allocator, name) catch null;
+            if (e) |ee| {
+                if (!ee.found_existing) ee.value_ptr.* = 0;
+                ee.value_ptr.* += 1;
+                // bail after a budget so we can profile long-running scripts
+            }
+        }
         if (self.native_fns.get(name)) |native| {
             var args: [64]Value = undefined;
             const ac: usize = arg_count;
@@ -10914,12 +10934,40 @@ pub const VM = struct {
         }
     }
 
+    pub fn dumpProfilePublic(self: *VM) void {
+        const Entry = struct { name: []const u8, count: u64 };
+        var list = std.ArrayListUnmanaged(Entry){};
+        defer list.deinit(self.allocator);
+        var it = self.profile_calls.iterator();
+        while (it.next()) |e| {
+            list.append(self.allocator, .{ .name = e.key_ptr.*, .count = e.value_ptr.* }) catch return;
+        }
+        std.sort.heap(Entry, list.items, {}, struct {
+            fn lt(_: void, x: Entry, y: Entry) bool { return x.count > y.count; }
+        }.lt);
+        const sfe = std.fs.File{ .handle = 2 };
+        _ = sfe.write("[profile] top callees:\n") catch {};
+        const n = @min(list.items.len, 30);
+        for (list.items[0..n]) |e| {
+            const m = std.fmt.allocPrint(self.allocator, "  {d: >12} {s}\n", .{ e.count, e.name }) catch return;
+            _ = sfe.write(m) catch {};
+            self.allocator.free(m);
+        }
+    }
+
     pub fn callMethod(self: *VM, obj: *PhpObject, method_name: []const u8, args: []const Value) RuntimeError!Value {
         if (self.frame_count >= 2047) {
             self.error_msg = "Fatal error: maximum call stack depth exceeded";
             return error.RuntimeError;
         }
         const full_name = self.resolveMethod(obj.class_name, method_name) catch return error.RuntimeError;
+        if (std.posix.getenv("ZPHP_DBG_PROFILE") != null) {
+            const e = self.profile_calls.getOrPut(self.allocator, full_name) catch null;
+            if (e) |ee| {
+                if (!ee.found_existing) ee.value_ptr.* = 0;
+                ee.value_ptr.* += 1;
+            }
+        }
         if (self.native_fns.get(full_name)) |native| {
             var tmp_vars: std.StringHashMapUnmanaged(Value) = .{};
             try tmp_vars.put(self.allocator, "$this", .{ .object = obj });
