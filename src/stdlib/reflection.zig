@@ -617,6 +617,12 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try vm.native_fns.put(a, "Closure::bind", closureBind);
     try vm.native_fns.put(a, "Closure::fromCallable", closureFromCallable);
 
+    // virtual ClassDefs for builtin tagged-value types so ReflectionClass(name) succeeds.
+    // Generator and Fiber are runtime concepts, not stored as PhpObject, but PHP exposes
+    // them via Reflection. Empty methods table is fine - dispatch handles them separately.
+    try vm.classes.put(a, "Generator", ClassDef{ .name = "Generator" });
+    try vm.classes.put(a, "Fiber", ClassDef{ .name = "Fiber" });
+
     var rref_def = ClassDef{ .name = "ReflectionReference" };
     try rref_def.methods.put(a, "fromArrayElement", .{ .name = "fromArrayElement", .arity = 2, .is_static = true });
     try rref_def.methods.put(a, "getId", .{ .name = "getId", .arity = 0 });
@@ -827,8 +833,12 @@ fn buildPropertyObjStatic(ctx: *NativeContext, class_name: []const u8, prop: Cla
     try obj.set(ctx.allocator, "name", .{ .string = prop.name });
     try obj.set(ctx.allocator, "class", .{ .string = class_name });
     try obj.set(ctx.allocator, "_visibility", .{ .int = @intFromEnum(prop.visibility) });
-    try obj.set(ctx.allocator, "_has_default", .{ .bool = prop.has_default });
-    try obj.set(ctx.allocator, "_default_value", prop.default);
+    // PHP's ReflectionProperty::hasDefaultValue() always returns false for
+    // constructor-promoted properties, regardless of whether the promoted param
+    // has a default in the constructor signature
+    const effective_has_default = prop.has_default and !prop.is_promoted;
+    try obj.set(ctx.allocator, "_has_default", .{ .bool = effective_has_default });
+    try obj.set(ctx.allocator, "_default_value", if (effective_has_default) prop.default else .null);
     try obj.set(ctx.allocator, "_declaring_class", .{ .string = declaring_class });
     try obj.set(ctx.allocator, "_is_readonly", .{ .bool = prop.is_readonly });
     try obj.set(ctx.allocator, "_is_static", .{ .bool = is_static });
@@ -1893,6 +1903,7 @@ fn isInternalClassName(name: []const u8) bool {
         "SplFileObject", "SplFileInfo", "SplTempFileObject",
         "PDO", "PDOStatement", "PDOException",
         "SimpleXMLElement", "SimpleXMLIterator", "SimpleXMLChildrenIter",
+        "XMLReader", "XMLWriter", "XMLParser",
         "DOMDocument", "DOMElement", "DOMNode", "DOMAttr", "DOMText", "DOMComment",
         "DOMCdataSection", "DOMDocumentType", "DOMNodeList", "DOMNamedNodeMap",
         "DOMXPath", "DOMException", "DOMProcessingInstruction", "DOMEntityReference",
@@ -3071,8 +3082,9 @@ fn rpConstruct(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
 
     if (findPropertyDef(ctx.vm, class_name, prop_name)) |result| {
         try this.set(ctx.allocator, "_visibility", .{ .int = @intFromEnum(result.prop.visibility) });
-        try this.set(ctx.allocator, "_has_default", .{ .bool = result.prop.default != .null });
-        try this.set(ctx.allocator, "_default_value", result.prop.default);
+        const effective_has_default = result.prop.has_default and !result.prop.is_promoted;
+        try this.set(ctx.allocator, "_has_default", .{ .bool = effective_has_default });
+        try this.set(ctx.allocator, "_default_value", if (effective_has_default) result.prop.default else .null);
         try this.set(ctx.allocator, "_declaring_class", .{ .string = result.declaring_class });
         try this.set(ctx.allocator, "_is_readonly", .{ .bool = result.prop.is_readonly });
     } else {
