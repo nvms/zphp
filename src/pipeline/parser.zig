@@ -440,11 +440,19 @@ const Parser = struct {
                 defer item_parts.deinit(self.allocator);
                 try item_parts.appendSlice(self.allocator, prefix.items);
                 try item_parts.append(self.allocator, self.pos);
-                _ = try self.expect(.identifier);
+                if (self.peek() == .identifier or isSemiReserved(self.peek())) {
+                    _ = self.advance();
+                } else {
+                    _ = try self.expect(.identifier);
+                }
                 while (self.peek() == .backslash) {
                     _ = self.advance();
                     try item_parts.append(self.allocator, self.pos);
-                    _ = try self.expect(.identifier);
+                    if (self.peek() == .identifier or isSemiReserved(self.peek())) {
+                        _ = self.advance();
+                    } else {
+                        _ = try self.expect(.identifier);
+                    }
                 }
                 var alias: u32 = 0;
                 if (self.peek() == .kw_as) {
@@ -1124,12 +1132,17 @@ const Parser = struct {
         }
 
         // consume qualified name parts: \Identifier\Identifier...
+        // PHP allows reserved words as namespace segments (Default, Use, Catch, ...)
         var name_parts = std.ArrayListUnmanaged(u32){};
         defer name_parts.deinit(self.allocator);
         try name_parts.append(self.allocator, name_tok);
         while (self.peek() == .backslash) {
             _ = self.advance();
-            try name_parts.append(self.allocator, try self.expect(.identifier));
+            const seg = if (self.peek() == .identifier or isSemiReserved(self.peek()))
+                self.advance()
+            else
+                try self.expect(.identifier);
+            try name_parts.append(self.allocator, seg);
         }
 
         var args = std.ArrayListUnmanaged(u32){};
@@ -2076,7 +2089,7 @@ const Parser = struct {
         if (self.isTypeName()) _ = self.advance();
         while (self.peek() == .backslash) {
             _ = self.advance();
-            if (self.peek() == .identifier) _ = self.advance();
+            if (self.peek() == .identifier or isSemiReserved(self.peek())) _ = self.advance();
         }
     }
 
