@@ -478,7 +478,7 @@ fn dtConstruct(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
                 ts -= off;
                 try obj.set(ctx.allocator, "__timezone", .{ .string = explicit_name.? });
             } else if (lookupTimezone(tz_name)) |tz| {
-                ts -= @as(i64, tzOffsetAt(tz, ts));
+                ts -= @as(i64, tzOffsetForWall(tz, ts));
             }
         } else {
             const result = parseRelativeTime(s, ts);
@@ -944,15 +944,15 @@ fn dtDiff(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     const invert: i64 = if (diff_secs < 0) 1 else 0;
     if (diff_secs < 0) diff_secs = -diff_secs;
 
-    const total_days = @divFloor(diff_secs, 86400);
+    // `days` is the total elapsed days, rounded to nearest. floor would
+    // mis-report `Mar 9 00:00 → Mar 10 00:00` (which spans spring forward and
+    // is 82800s real, i.e. 0.958 days) as 0 — PHP reports 1
+    const total_days = @divFloor(diff_secs + 43200, 86400);
 
-    // calendar-based y/m/d/h/i/s with borrowing - matches PHP's behaviour where
-    // wall-clock components are subtracted with carry, decrementing the larger
-    // unit on underflow.
     const early_ts = if (ts1 < ts2) ts1 else ts2;
     const late_ts = if (ts1 < ts2) ts2 else ts1;
-    // diff is calendar-based in the receiver's timezone so DST boundaries don't
-    // bleed into hour-of-day arithmetic
+    // calendar arithmetic happens in the receiver's timezone so DST boundaries
+    // don't bleed into hour-of-day computation
     const tz_val = obj.get("__timezone");
     const tz_name = if (tz_val == .string) tz_val.string else ctx.vm.default_tz_name;
     const tz = lookupTimezone(tz_name);
@@ -960,6 +960,7 @@ fn dtDiff(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     const off_late: i64 = if (tz) |t| @as(i64, tzOffsetAt(t, late_ts)) else 0;
     const c1 = baseComponents(early_ts + off_early);
     const c2 = baseComponents(late_ts + off_late);
+
     var s = c2.sec - c1.sec;
     var mi = c2.min - c1.min;
     var hh = c2.hour - c1.hour;
@@ -970,9 +971,6 @@ fn dtDiff(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (mi < 0) { mi += 60; hh -= 1; }
     if (hh < 0) { hh += 24; d -= 1; }
     if (d < 0) {
-        // borrow from month: PHP uses different anchors depending on direction.
-        // forward (receiver < arg): days from the month preceding the late date.
-        // reverse (receiver > arg): days from the early date's own month.
         const borrow_month: i64 = if (invert == 0) c2.month - 1 else c1.month;
         const borrow_year: i64 = if (invert == 0) c2.year else c1.year;
         var bm = borrow_month;
@@ -982,6 +980,19 @@ fn dtDiff(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
         mo -= 1;
     }
     if (mo < 0) { mo += 12; y -= 1; }
+
+    // DST correction: when the diff is entirely within one calendar day, PHP
+    // reports REAL elapsed h/i/s rather than wall-clock subtraction, so
+    // spring-forward `01:30 EST → 03:30 EDT` is 1h (real) not 2h (wall) and
+    // fall-back `01:30 EDT → 03:30 EST` is 3h (real) not 1h (wall).
+    // for multi-day diffs we leave the calendar walk alone — PHP's algorithm
+    // there treats d as wall-calendar days
+    if (y == 0 and mo == 0 and d == 0 and total_days == 0) {
+        const remaining_secs = diff_secs;
+        s = @mod(remaining_secs, 60);
+        mi = @mod(@divFloor(remaining_secs, 60), 60);
+        hh = @divFloor(remaining_secs, 3600);
+    }
 
     const interval = try ctx.createObject("DateInterval");
     try interval.set(ctx.allocator, "y", .{ .int = y });
@@ -1196,7 +1207,7 @@ fn createBareDt(ctx: *NativeContext, class_name: []const u8, args: []const Value
             }
             ts = dateToTimestamp(year, month, day, hour, min, sec);
             if (lookupTimezone(tz_name)) |tz| {
-                ts -= @as(i64, tzOffsetAt(tz, ts));
+                ts -= @as(i64, tzOffsetForWall(tz, ts));
             }
         } else {
             const result = parseRelativeTime(s, ts);
@@ -1884,7 +1895,7 @@ fn native_mktime(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     const year: i64 = if (args.len > 5) Value.toInt(args[5]) else 1970;
     var ts = dateToTimestamp(year, month, day, hour, min, sec);
     if (lookupTimezone(ctx.vm.default_tz_name)) |tz| {
-        ts -= @as(i64, tzOffsetAt(tz, ts));
+        ts -= @as(i64, tzOffsetForWall(tz, ts));
     }
     return .{ .int = ts };
 }
@@ -2859,6 +2870,20 @@ fn isDst(utc_ts: i64, tz: TzEntry) bool {
 
 pub fn tzOffsetAt(tz: TzEntry, utc_ts: i64) i32 {
     if (isDst(utc_ts, tz)) return tz.dst_offset;
+    return tz.std_offset;
+}
+
+// resolve the local offset for a wall-clock-naive timestamp (seconds as if
+// the local wall clock were UTC). probe DST first: if interpreting the wall
+// time as a DST-local moment lands inside the DST window, use the DST
+// offset; otherwise fall back to standard. this picks the earlier
+// interpretation for ambiguous fall-back times (01:00-02:00 local) and
+// shifts forward for missing spring-forward times (02:00-03:00 local),
+// matching PHP
+pub fn tzOffsetForWall(tz: TzEntry, wall_naive_ts: i64) i32 {
+    if (tz.dst_rule != .none) {
+        if (isDst(wall_naive_ts - tz.dst_offset, tz)) return tz.dst_offset;
+    }
     return tz.std_offset;
 }
 
