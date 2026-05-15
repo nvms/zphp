@@ -54,6 +54,7 @@ pub const entries = .{
     .{ "date_default_timezone_set", native_tz_set },
     .{ "date_default_timezone_get", native_tz_get },
     .{ "timezone_identifiers_list", dtzListIdentifiers },
+    .{ "timezone_abbreviations_list", dtzListAbbreviations },
     .{ "timezone_name_get", native_timezone_name_get },
     .{ "timezone_offset_get", native_timezone_offset_get },
     .{ "timezone_open", native_timezone_open },
@@ -1804,6 +1805,69 @@ fn dtzListIdentifiers(ctx: *NativeContext, _: []const Value) RuntimeError!Value 
     var arr = try ctx.createArray();
     for (ids) |id| try arr.append(ctx.allocator, .{ .string = id });
     return .{ .array = arr };
+}
+
+fn dtzListAbbreviations(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const arr = try ctx.createArray();
+    // PHP keys are lowercase abbreviation strings; each value is a list of
+    // {dst, offset, timezone_id} entries. iterate our tz_table and emit one
+    // entry per (zone, dst-side) where the abbreviation is non-empty.
+    for (tz_table) |z| {
+        // build the canonical PHP timezone id (e.g. "America/New_York" from
+        // the lowercased table name). reusing the tz_table entry's name as
+        // lowercase is fine — PHP accepts case-insensitive zone names
+        var key_buf: [16]u8 = undefined;
+        // emit std side
+        if (z.std_abbrev.len > 0 and z.std_abbrev.len < key_buf.len) {
+            for (z.std_abbrev, 0..) |c, i| key_buf[i] = std.ascii.toLower(c);
+            const key = try ctx.allocator.dupe(u8, key_buf[0..z.std_abbrev.len]);
+            try ctx.vm.strings.append(ctx.allocator, key);
+            const canonical = try canonicalizeZoneName(ctx, z.name);
+            try appendAbbrevEntry(ctx, arr, key, false, z.std_offset, canonical);
+        }
+        // emit dst side only when distinct
+        if (z.dst_rule != .none and z.dst_abbrev.len > 0 and !std.mem.eql(u8, z.std_abbrev, z.dst_abbrev) and z.dst_abbrev.len < key_buf.len) {
+            for (z.dst_abbrev, 0..) |c, i| key_buf[i] = std.ascii.toLower(c);
+            const key = try ctx.allocator.dupe(u8, key_buf[0..z.dst_abbrev.len]);
+            try ctx.vm.strings.append(ctx.allocator, key);
+            const canonical = try canonicalizeZoneName(ctx, z.name);
+            try appendAbbrevEntry(ctx, arr, key, true, z.dst_offset, canonical);
+        }
+    }
+    return .{ .array = arr };
+}
+
+fn canonicalizeZoneName(ctx: *NativeContext, lower_name: []const u8) ![]const u8 {
+    // turn "america/new_york" into "America/New_York"
+    const out = try ctx.allocator.dupe(u8, lower_name);
+    var capitalize_next = true;
+    for (out, 0..) |c, i| {
+        if (c == '/' or c == '_') {
+            capitalize_next = true;
+        } else if (capitalize_next) {
+            out[i] = std.ascii.toUpper(c);
+            capitalize_next = false;
+        }
+    }
+    try ctx.vm.strings.append(ctx.allocator, out);
+    return out;
+}
+
+fn appendAbbrevEntry(ctx: *NativeContext, outer: *@import("../runtime/value.zig").PhpArray, key: []const u8, dst: bool, offset: i32, tz_id: []const u8) !void {
+    const PA = @import("../runtime/value.zig").PhpArray;
+    var list: *PA = undefined;
+    const existing = outer.get(.{ .string = key });
+    if (existing == .array) {
+        list = existing.array;
+    } else {
+        list = try ctx.createArray();
+        try outer.set(ctx.allocator, .{ .string = key }, .{ .array = list });
+    }
+    const entry = try ctx.createArray();
+    try entry.set(ctx.allocator, .{ .string = "dst" }, .{ .bool = dst });
+    try entry.set(ctx.allocator, .{ .string = "offset" }, .{ .int = @as(i64, offset) });
+    try entry.set(ctx.allocator, .{ .string = "timezone_id" }, .{ .string = tz_id });
+    try list.append(ctx.allocator, .{ .array = entry });
 }
 
 fn dtzGetName(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
