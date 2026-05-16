@@ -458,6 +458,13 @@ pub const VM = struct {
     // path. populated by Phar::mapPhar()/Phar::loadPhar() and read by the
     // phar:// stream wrapper to resolve `phar://alias/internal/path`
     phar_aliases: std.StringHashMapUnmanaged([]const u8) = .{},
+    // chunk-ptr → all registered function names whose chunk lives at that
+    // pointer. populated at every self.functions.put site (registerFunction,
+    // trait flattening, closure-instance/bound creation). lets
+    // currentDefiningClass / closureScopeForFrame / parentResolvingClass
+    // resolve a frame's class scope in O(K) (K = small) instead of O(N)
+    // iterating self.functions (~10k entries under PHPUnit).
+    chunk_to_func_names: std.AutoHashMapUnmanaged(usize, std.ArrayListUnmanaged([]const u8)) = .{},
     // cache of parsed phars by archive path so each require_once doesn't
     // re-read + re-parse the entire archive (PHPUnit's stub fires 350+
     // require_once calls; without the cache that's ~2GB of redundant reads)
@@ -1418,6 +1425,9 @@ pub const VM = struct {
         g_type_info.deinit(self.allocator);
         g_type_info = .{};
         self.functions.deinit(self.allocator);
+        var ctfn_iter = self.chunk_to_func_names.iterator();
+        while (ctfn_iter.next()) |e| e.value_ptr.*.deinit(self.allocator);
+        self.chunk_to_func_names.deinit(self.allocator);
         self.phar_aliases.deinit(self.allocator);
         var pc_iter = self.phar_cache.iterator();
         while (pc_iter.next()) |e| {
@@ -1628,6 +1638,14 @@ pub const VM = struct {
     pub fn registerFunction(self: *VM, func: *const ObjFunction) RuntimeError!void {
         if (self.functions.contains(func.name)) return;
         try self.functions.put(self.allocator, func.name, func);
+        try self.indexFunctionByChunk(func.name, &func.chunk);
+    }
+
+    pub fn indexFunctionByChunk(self: *VM, name: []const u8, chunk: *const Chunk) RuntimeError!void {
+        const gop = try self.chunk_to_func_names.getOrPut(self.allocator, @intFromPtr(chunk));
+        if (!gop.found_existing) gop.value_ptr.* = .{};
+        for (gop.value_ptr.*.items) |existing| if (std.mem.eql(u8, existing, name)) return;
+        try gop.value_ptr.*.append(self.allocator, name);
     }
 
     fn runUntilFrame(self: *VM, base_frame: usize) RuntimeError!void {
@@ -8510,6 +8528,7 @@ pub const VM = struct {
                         try self.strings.append(self.allocator, alias_method);
                         if (!self.functions.contains(alias_method)) {
                             try self.functions.put(self.allocator, alias_method, tm.func);
+                            try self.indexFunctionByChunk(alias_method, &tm.func.chunk);
                             try def.addMethod(self.allocator, .{ .name = rule.alias, .arity = tm.func.arity, .visibility = if (rule.visibility != 0) rule_vis else .public });
                         }
                     }
@@ -8532,6 +8551,7 @@ pub const VM = struct {
             try self.strings.append(self.allocator, class_method);
             if (!self.functions.contains(class_method)) {
                 try self.functions.put(self.allocator, class_method, tm.func);
+                try self.indexFunctionByChunk(class_method, &tm.func.chunk);
                 try def.addMethod(self.allocator, .{
                     .name = tm.name,
                     .arity = tm.func.arity,
@@ -8585,6 +8605,7 @@ pub const VM = struct {
             try self.strings.append(self.allocator, inst_name);
             if (self.functions.get(compile_name)) |func| {
                 try self.functions.put(self.allocator, inst_name, func);
+                try self.indexFunctionByChunk(inst_name, &func.chunk);
             }
             self.stack[self.sp - 1] = .{ .string = inst_name };
         }
@@ -8635,6 +8656,7 @@ pub const VM = struct {
         const new_name = try std.fmt.allocPrint(self.allocator, "__closure_bound_{d}", .{id});
         try self.strings.append(self.allocator, new_name);
         try self.functions.put(self.allocator, new_name, func);
+        try self.indexFunctionByChunk(new_name, &func.chunk);
 
         if (self.capture_index.get(closure_name)) |cr| {
             // copy source captures to a heap buffer to avoid dangling slice
@@ -9897,20 +9919,16 @@ pub const VM = struct {
                 }
             }
         }
-        // fallback - iterate functions for this chunk (rare, for older paths
-        // that didn't set call_name)
-        const frame_chunk_ptr = frame.chunk;
-        var iter = self.functions.iterator();
-        while (iter.next()) |entry| {
-            if (frame_chunk_ptr == &entry.value_ptr.*.chunk) {
-                const name = entry.key_ptr.*;
-                if (std.mem.startsWith(u8, name, "__closure_")) {
-                    if (self.capture_index.get(name)) |cr| {
-                        const caps = self.captures.items[cr.start .. cr.start + cr.len];
-                        for (caps) |cap| {
-                            if (std.mem.eql(u8, cap.var_name, "$__closure_scope") and cap.value == .string)
-                                return cap.value.string;
-                        }
+        // fallback - look up compile-time names registered for this chunk
+        // (handles older paths that don't set call_name)
+        if (self.chunk_to_func_names.get(@intFromPtr(frame.chunk))) |names| {
+            for (names.items) |name| {
+                if (!std.mem.startsWith(u8, name, "__closure_")) continue;
+                if (self.capture_index.get(name)) |cr| {
+                    const caps = self.captures.items[cr.start .. cr.start + cr.len];
+                    for (caps) |cap| {
+                        if (std.mem.eql(u8, cap.var_name, "$__closure_scope") and cap.value == .string)
+                            return cap.value.string;
                     }
                 }
             }
@@ -9955,10 +9973,8 @@ pub const VM = struct {
                 if (this_val == .object) break :blk this_val.object.class_name;
                 break :blk frame.called_class;
             };
-            var iter = self.functions.iterator();
-            while (iter.next()) |entry| {
-                if (frame_chunk_ptr == &entry.value_ptr.*.chunk) {
-                    const name = entry.key_ptr.*;
+            if (self.chunk_to_func_names.get(@intFromPtr(frame_chunk_ptr))) |names| {
+                for (names.items) |name| {
                     if (std.mem.indexOf(u8, name, "::")) |sep| {
                         const class_part = name[0..sep];
                         if (self.traits.contains(class_part)) {
@@ -10015,10 +10031,8 @@ pub const VM = struct {
                 if (this_val == .object) break :blk this_val.object.class_name;
                 break :blk null;
             };
-            var iter = self.functions.iterator();
-            while (iter.next()) |entry| {
-                if (frame_chunk_ptr == &entry.value_ptr.*.chunk) {
-                    const name = entry.key_ptr.*;
+            if (self.chunk_to_func_names.get(@intFromPtr(frame_chunk_ptr))) |names| {
+                for (names.items) |name| {
                     if (std.mem.indexOf(u8, name, "::")) |sep| {
                         const class_part = name[0..sep];
                         if (self.traits.contains(class_part)) {
