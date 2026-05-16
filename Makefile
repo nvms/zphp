@@ -2,8 +2,12 @@ PKG_CONFIG_PATH := /opt/homebrew/opt/mysql-client/lib/pkgconfig:/opt/homebrew/op
 export PKG_CONFIG_PATH
 
 .PHONY: build
-build: ## Build zphp
+build: ## Build zphp (Debug; ~30x slower than release due to Zig's debug allocator stack-trace capture). use `make release` for benchmarking
 	zig build
+
+.PHONY: release
+release: ## Build zphp in ReleaseFast (no debug allocator overhead). prefer for any perf-sensitive run; for testing zphp's actual PHP-execution speed
+	zig build -Doptimize=ReleaseFast
 
 .PHONY: test
 test: ## Run zig unit tests
