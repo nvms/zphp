@@ -227,6 +227,8 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try rm_def.methods.put(a, "setAccessible", .{ .name = "setAccessible", .arity = 1 });
     try rm_def.methods.put(a, "invoke", .{ .name = "invoke", .arity = 1 });
     try rm_def.methods.put(a, "hasReturnType", .{ .name = "hasReturnType", .arity = 0 });
+    try rm_def.methods.put(a, "hasTentativeReturnType", .{ .name = "hasTentativeReturnType", .arity = 0 });
+    try rm_def.methods.put(a, "getTentativeReturnType", .{ .name = "getTentativeReturnType", .arity = 0 });
     try rm_def.methods.put(a, "invokeArgs", .{ .name = "invokeArgs", .arity = 2 });
     try rm_def.methods.put(a, "isAbstract", .{ .name = "isAbstract", .arity = 0 });
     try rm_def.methods.put(a, "isFinal", .{ .name = "isFinal", .arity = 0 });
@@ -263,6 +265,8 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try vm.native_fns.put(a, "ReflectionMethod::setAccessible", reflectionNoop);
     try vm.native_fns.put(a, "ReflectionMethod::invoke", rmInvoke);
     try vm.native_fns.put(a, "ReflectionMethod::hasReturnType", rmHasReturnType);
+    try vm.native_fns.put(a, "ReflectionMethod::hasTentativeReturnType", reflectionFalse);
+    try vm.native_fns.put(a, "ReflectionMethod::getTentativeReturnType", reflectionNoop);
     try vm.native_fns.put(a, "ReflectionMethod::invokeArgs", rmInvokeArgs);
     try vm.native_fns.put(a, "ReflectionMethod::isAbstract", rmIsAbstract);
     try vm.native_fns.put(a, "ReflectionMethod::isFinal", rmIsFinal);
