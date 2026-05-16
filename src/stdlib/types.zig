@@ -98,6 +98,7 @@ pub const entries = .{
     .{ "get_required_files", native_get_included_files },
     .{ "memory_get_usage", native_memory_get_usage },
     .{ "memory_get_peak_usage", native_memory_get_usage },
+    .{ "memory_reset_peak_usage", native_noop_null },
     .{ "gc_enabled", native_noop_true },
     .{ "gc_disable", native_noop_null },
     .{ "gc_enable", native_noop_null },
