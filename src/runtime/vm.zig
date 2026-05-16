@@ -442,6 +442,11 @@ pub const VM = struct {
     user_error_handler: ?Value = null,
     user_error_handler_mask: i64 = -1,
     user_exception_handler: ?Value = null,
+    // stack of previously-installed exception handlers. set_exception_handler
+    // pushes, restore_exception_handler pops. PHPUnit's TestCase::
+    // activeExceptionHandlers walks this stack to inventory installed handlers,
+    // and without proper push/pop semantics it spins forever
+    exception_handler_stack: std.ArrayListUnmanaged(?Value) = .{},
     error_handler_stack: std.ArrayListUnmanaged(ErrorHandlerEntry) = .{},
     error_silenced_depth: u32 = 0,
     last_error_type: i64 = 0,
@@ -1429,6 +1434,7 @@ pub const VM = struct {
         while (ctfn_iter.next()) |e| e.value_ptr.*.deinit(self.allocator);
         self.chunk_to_func_names.deinit(self.allocator);
         self.phar_aliases.deinit(self.allocator);
+        self.exception_handler_stack.deinit(self.allocator);
         var pc_iter = self.phar_cache.iterator();
         while (pc_iter.next()) |e| {
             self.allocator.free(e.value_ptr.*.bytes);

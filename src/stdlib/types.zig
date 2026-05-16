@@ -105,7 +105,7 @@ pub const entries = .{
     .{ "set_error_handler", native_set_error_handler },
     .{ "set_exception_handler", native_set_exception_handler },
     .{ "restore_error_handler", native_restore_error_handler },
-    .{ "restore_exception_handler", native_noop_true },
+    .{ "restore_exception_handler", native_restore_exception_handler },
     .{ "get_error_handler", native_get_error_handler },
     .{ "get_exception_handler", native_get_exception_handler },
     .{ "register_shutdown_function", native_register_shutdown_function },
@@ -1641,7 +1641,10 @@ fn native_error_clear_last(ctx: *NativeContext, _: []const Value) RuntimeError!V
 }
 
 fn native_set_exception_handler(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    // push onto stack so restore_exception_handler can pop later; PHPUnit's
+    // TestCase::activeExceptionHandlers spins forever without the pop side
     const prev = ctx.vm.user_exception_handler orelse Value.null;
+    try ctx.vm.exception_handler_stack.append(ctx.allocator, ctx.vm.user_exception_handler);
     if (args.len > 0 and args[0] != .null) {
         ctx.vm.user_exception_handler = args[0];
     } else {
@@ -1656,6 +1659,15 @@ fn native_get_error_handler(ctx: *NativeContext, _: []const Value) RuntimeError!
 
 fn native_get_exception_handler(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
     return ctx.vm.user_exception_handler orelse Value.null;
+}
+
+fn native_restore_exception_handler(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    if (ctx.vm.exception_handler_stack.items.len > 0) {
+        ctx.vm.user_exception_handler = ctx.vm.exception_handler_stack.pop().?;
+    } else {
+        ctx.vm.user_exception_handler = null;
+    }
+    return .{ .bool = true };
 }
 
 fn native_restore_error_handler(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
