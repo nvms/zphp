@@ -1111,15 +1111,27 @@ fn arrayFillKeysKey(ctx: *NativeContext, v: Value) !PhpArray.Key {
 }
 
 fn valuesEqualAsString(a: Value, b: Value) bool {
-    var ga = std.heap.GeneralPurposeAllocator(.{}){};
-    defer _ = ga.deinit();
-    const alloc = ga.allocator();
+    // fast paths for the common cases - avoids the format() round-trip and
+    // its associated allocations. PHPUnit's TestSuiteLoader runs
+    // array_diff(get_declared_classes(), $before), with both sides .string,
+    // 1M+ times during bootstrap; the previous per-call GeneralPurposeAllocator
+    // was dominating wall-clock
+    if (a == .string and b == .string) return std.mem.eql(u8, a.string, b.string);
+    if (a == .int and b == .int) return a.int == b.int;
+    if (a == .float and b == .float) return a.float == b.float;
+    if (a == .bool and b == .bool) return a.bool == b.bool;
+    if (a == .null and b == .null) return true;
+    // mixed-type or complex (array/object): format via a fixed stack buffer.
+    // 256 bytes covers the overwhelming majority of scalar stringifications;
+    // longer cases fall through to Value.equal which compares structurally
+    var sa: [256]u8 = undefined;
+    var sb: [256]u8 = undefined;
+    var fba_a = std.heap.FixedBufferAllocator.init(&sa);
+    var fba_b = std.heap.FixedBufferAllocator.init(&sb);
     var ba = std.ArrayListUnmanaged(u8){};
     var bb = std.ArrayListUnmanaged(u8){};
-    defer ba.deinit(alloc);
-    defer bb.deinit(alloc);
-    a.format(&ba, alloc) catch return Value.equal(a, b);
-    b.format(&bb, alloc) catch return Value.equal(a, b);
+    a.format(&ba, fba_a.allocator()) catch return Value.equal(a, b);
+    b.format(&bb, fba_b.allocator()) catch return Value.equal(a, b);
     return std.mem.eql(u8, ba.items, bb.items);
 }
 

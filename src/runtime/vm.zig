@@ -453,6 +453,7 @@ pub const VM = struct {
     ob_stack: std.ArrayListUnmanaged(OutputBufferLevel) = .{},
     request_vars: std.StringHashMapUnmanaged(Value) = .{},
     profile_calls: std.StringHashMapUnmanaged(u64) = .{},
+    profile_opcodes: [256]u64 = [_]u64{0} ** 256,
     // maps a phar alias (e.g. "phpunit-11.5.55.phar") to the on-disk archive
     // path. populated by Phar::mapPhar()/Phar::loadPhar() and read by the
     // phar:// stream wrapper to resolve `phar://alias/internal/path`
@@ -1417,6 +1418,16 @@ pub const VM = struct {
         g_type_info.deinit(self.allocator);
         g_type_info = .{};
         self.functions.deinit(self.allocator);
+        self.phar_aliases.deinit(self.allocator);
+        var pc_iter = self.phar_cache.iterator();
+        while (pc_iter.next()) |e| {
+            self.allocator.free(e.value_ptr.*.bytes);
+            e.value_ptr.*.parsed.deinit(self.allocator);
+            self.allocator.destroy(e.value_ptr.*);
+            self.allocator.free(e.key_ptr.*);
+        }
+        self.phar_cache.deinit(self.allocator);
+        self.profile_calls.deinit(self.allocator);
         var fa_iter = self.function_attributes.valueIterator();
         while (fa_iter.next()) |attrs| {
             for (attrs.*) |a| {
@@ -9867,6 +9878,27 @@ pub const VM = struct {
     }
 
     fn closureScopeForFrame(self: *VM, frame: *const CallFrame) ?[]const u8 {
+        // fast path: only closure frames can return a scope, and a frame is
+        // only a closure when its func.name has the __closure_ prefix. this
+        // lets the common case (regular method/function frame) return null
+        // in O(1) instead of iterating self.functions (~10k entries under
+        // PHPUnit). for closure frames we still iterate, but those are far
+        // less frequent than method calls
+        const compile_name = if (frame.func) |fn_| fn_.name else "";
+        if (!std.mem.startsWith(u8, compile_name, "__closure_")) return null;
+        // the runtime instance name (e.g. "__closure_5_3") is in call_name;
+        // capture_index is keyed by instance name
+        if (frame.call_name) |inst_name| {
+            if (self.capture_index.get(inst_name)) |cr| {
+                const caps = self.captures.items[cr.start .. cr.start + cr.len];
+                for (caps) |cap| {
+                    if (std.mem.eql(u8, cap.var_name, "$__closure_scope") and cap.value == .string)
+                        return cap.value.string;
+                }
+            }
+        }
+        // fallback - iterate functions for this chunk (rare, for older paths
+        // that didn't set call_name)
         const frame_chunk_ptr = frame.chunk;
         var iter = self.functions.iterator();
         while (iter.next()) |entry| {
@@ -10931,6 +10963,34 @@ pub const VM = struct {
             if (try self.throwBuiltinException("Error", msg)) return;
             self.setErrorMsg("Fatal error: Uncaught Error: {s}\n", .{msg});
             return error.RuntimeError;
+        }
+    }
+
+    pub fn dumpOpcodeProfile(self: *VM) void {
+        const Entry = struct { name: []const u8, count: u64 };
+        var list = std.ArrayListUnmanaged(Entry){};
+        defer list.deinit(self.allocator);
+        for (self.profile_opcodes, 0..) |c, i| {
+            if (c == 0) continue;
+            const op: OpCode = std.meta.intToEnum(OpCode, i) catch continue;
+            list.append(self.allocator, .{ .name = @tagName(op), .count = c }) catch return;
+        }
+        std.sort.heap(Entry, list.items, {}, struct {
+            fn lt(_: void, x: Entry, y: Entry) bool { return x.count > y.count; }
+        }.lt);
+        const sfe = std.fs.File{ .handle = 2 };
+        _ = sfe.write("[opcode-profile] top opcodes:\n") catch {};
+        const n = @min(list.items.len, 25);
+        var total: u64 = 0;
+        for (list.items) |e| total += e.count;
+        const tm = std.fmt.allocPrint(self.allocator, "  total: {d}\n", .{total}) catch return;
+        _ = sfe.write(tm) catch {};
+        self.allocator.free(tm);
+        for (list.items[0..n]) |e| {
+            const pct: f64 = if (total > 0) (@as(f64, @floatFromInt(e.count)) * 100.0 / @as(f64, @floatFromInt(total))) else 0;
+            const m = std.fmt.allocPrint(self.allocator, "  {d: >12} {d:>5.2}%  {s}\n", .{ e.count, pct, e.name }) catch return;
+            _ = sfe.write(m) catch {};
+            self.allocator.free(m);
         }
     }
 
