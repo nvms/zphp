@@ -82,6 +82,7 @@ pub const OpCode = enum(u8) {
     array_get_vivify, // pop key, pop array, push value (create intermediate arrays if missing)
     array_set, // pop value, pop key, pop array, set, push value (value-assign: clones array values)
     array_set_ref, // same as array_set but does NOT clone (for `$arr[k] = &$other` ref-assign)
+    array_set_if_present, // foreach by-ref writeback: only write if arr has key. silent no-op when body unset()'d the key during iteration. doesn't push back the value
     array_set_local, // u16: slot - pop value, pop key, set on local at slot (string char-write or array set with vivify), push value (value-assign: clones)
     array_set_local_ref, // same as array_set_local but does NOT clone
     ensure_array_local, // u16: slot - read local, vivify null/false to array, error on scalar, push result

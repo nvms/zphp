@@ -2905,6 +2905,25 @@ pub const VM = struct {
                     self.push(val);
                 },
 
+                .array_set_if_present => {
+                    // foreach by-ref writeback: pops [arr, key, val]. writes
+                    // val to arr[key] only if key still exists. silent no-op
+                    // when the iteration body unset()'d the key - PHP's true-
+                    // ref semantics drop the binding, so the writeback must
+                    // not resurrect the entry. doesn't push the value (the
+                    // foreach writeback never reads it)
+                    const val = self.pop();
+                    const key = self.pop();
+                    const arr_val = self.pop();
+                    if (arr_val == .array) {
+                        const ak = Value.toArrayKey(key);
+                        if (arr_val.array.contains(ak)) {
+                            const cloned = if (val == .array) try self.copyValue(val) else val;
+                            try arr_val.array.set(self.allocator, ak, cloned);
+                        }
+                    }
+                },
+
                 .array_set_local, .array_set_local_ref => {
                     const is_ref = op == .array_set_local_ref;
                     const slot = self.readU16();

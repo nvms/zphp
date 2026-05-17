@@ -278,15 +278,17 @@ pub fn compileForeach(self: *Compiler, node: Ast.Node) Error!void {
     // continue lands here, before iter_advance (same pattern as for loop update)
     try self.patchContinues(&prev_continues);
 
-    // by-ref writeback: $arr[$key] = $val. emitted at end-of-iteration so the
-    // current iteration's mutation reaches the source array
+    // by-ref writeback: $arr[$key] = $val. emitted at end-of-iteration so
+    // the current iteration's mutation reaches the source array. uses
+    // array_set_if_present so an unset($arr[$key]) inside the body isn't
+    // resurrected by the writeback (PHP's true-ref binding drops, ours
+    // emulates with a write-back guard)
     if (ref_val_name) |vn| {
         if (ref_key_name) |kn| {
             try self.compileNode(iter_n);
             try self.emitGetVar(kn);
             try self.emitGetVar(vn);
-            try self.emitOp(.array_set);
-            try self.emitOp(.pop);
+            try self.emitOp(.array_set_if_present);
         }
     }
 
@@ -308,8 +310,7 @@ pub fn compileForeach(self: *Compiler, node: Ast.Node) Error!void {
                 try self.compileNode(iter_n);
                 try self.emitGetVar(kn);
                 try self.emitGetVar(vn);
-                try self.emitOp(.array_set);
-                try self.emitOp(.pop);
+                try self.emitOp(.array_set_if_present);
             }
         }
         const skip_iter_end_jump = try self.emitJump(.jump);
