@@ -17,6 +17,7 @@ pub const entries = .{
     .{ "hash", native_hash },
     .{ "hash_hmac", native_hash_hmac },
     .{ "hash_algos", native_hash_algos },
+    .{ "hash_hmac_algos", native_hash_hmac_algos },
     .{ "hash_equals", native_hash_equals },
     .{ "hash_file", native_hash_file },
     .{ "hash_init", native_hash_init },
@@ -631,6 +632,17 @@ fn native_hash_hkdf(ctx: *NativeContext, args: []const Value) RuntimeError!Value
 fn native_hash_algos(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
     var arr = try ctx.createArray();
     const algos = [_][]const u8{ "md5", "sha1", "sha224", "sha256", "sha384", "sha512", "sha3-224", "sha3-256", "sha3-384", "sha3-512", "crc32", "crc32b", "crc32c", "xxh32", "xxh64", "xxh3", "xxh128", "adler32", "fnv132", "fnv1a32", "fnv164", "fnv1a64" };
+    for (algos) |name| {
+        try arr.append(ctx.allocator, .{ .string = name });
+    }
+    return .{ .array = arr };
+}
+
+fn native_hash_hmac_algos(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    // HMAC requires algorithms with a fixed-size compression function; CRC and
+    // similar non-cryptographic checksums are excluded. matches PHP's surface
+    var arr = try ctx.createArray();
+    const algos = [_][]const u8{ "md5", "sha1", "sha224", "sha256", "sha384", "sha512", "sha3-224", "sha3-256", "sha3-384", "sha3-512" };
     for (algos) |name| {
         try arr.append(ctx.allocator, .{ .string = name });
     }
