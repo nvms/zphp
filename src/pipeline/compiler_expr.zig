@@ -114,6 +114,7 @@ pub fn compileAssign(self: *Compiler, node: Ast.Node) Error!void {
             try emitCompoundOp(self, op_tag);
             try self.emitOp(.array_set);
         } else {
+            const rhs_is_ref = self.ast.nodes[node.data.rhs].tag == .ref_target;
             const target_lhs = self.ast.nodes[target.data.lhs];
             if (target_lhs.tag == .variable) {
                 const var_name = self.ast.tokenSlice(target_lhs.main_token);
@@ -126,7 +127,10 @@ pub fn compileAssign(self: *Compiler, node: Ast.Node) Error!void {
                 if (slot_opt) |slot| {
                     try self.compileNode(target.data.rhs);
                     try self.compileNode(node.data.rhs);
-                    try self.emitOp(.array_set_local);
+                    // ref-assign skips clone so the destination shares the
+                    // underlying array pointer (needed for cycle detection
+                    // in print_r/var_dump/var_export)
+                    try self.emitOp(if (rhs_is_ref) .array_set_local_ref else .array_set_local);
                     try self.emitU16(slot);
                     return;
                 }
@@ -157,7 +161,7 @@ pub fn compileAssign(self: *Compiler, node: Ast.Node) Error!void {
             try compileVivifyChain(self,target.data.lhs);
             try self.compileNode(target.data.rhs);
             try self.compileNode(node.data.rhs);
-            try self.emitOp(.array_set);
+            try self.emitOp(if (rhs_is_ref) .array_set_ref else .array_set);
         }
         return;
     }

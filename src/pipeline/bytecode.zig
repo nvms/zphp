@@ -80,8 +80,10 @@ pub const OpCode = enum(u8) {
     array_get, // pop key, pop array, push value
     array_get_coalesce, // pop key, pop array, push value or null (OOB string offset and missing assoc keys become null - for `??` semantics)
     array_get_vivify, // pop key, pop array, push value (create intermediate arrays if missing)
-    array_set, // pop value, pop key, pop array, set, push value
-    array_set_local, // u16: slot - pop value, pop key, set on local at slot (string char-write or array set with vivify), push value
+    array_set, // pop value, pop key, pop array, set, push value (value-assign: clones array values)
+    array_set_ref, // same as array_set but does NOT clone (for `$arr[k] = &$other` ref-assign)
+    array_set_local, // u16: slot - pop value, pop key, set on local at slot (string char-write or array set with vivify), push value (value-assign: clones)
+    array_set_local_ref, // same as array_set_local but does NOT clone
     ensure_array_local, // u16: slot - read local, vivify null/false to array, error on scalar, push result
     ensure_array_var, // u16: name const - read var, vivify null/false to array, error on scalar, push result
 
@@ -226,6 +228,7 @@ pub const OpCode = enum(u8) {
             .get_static_prop_dynamic,
             .ensure_array_local, .ensure_array_var,
             .make_var_array_elem_ref, .break_var_ref,
+            .array_set_local, .array_set_local_ref,
             => 3,
             .call, .call_spread, .new_obj, .method_call, .method_call_spread, .static_call_dyn_method, .make_var_ref, .make_var_prop_ref => 4,
             .get_static_prop, .set_static_prop, .get_static, .set_static,

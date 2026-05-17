@@ -2695,8 +2695,10 @@ pub const VM = struct {
                 },
                 .prop_set_chain => {
                     // depth-2 write for `$obj->prop[i] = v`. always uses
-                    // direct property access on base (never offsetGet/Set)
-                    const v = self.pop();
+                    // direct property access on base (never offsetGet/Set).
+                    // clone array values for copy-on-assign semantics
+                    const raw_v = self.pop();
+                    const v = if (raw_v == .array) try self.copyValue(raw_v) else raw_v;
                     const inner_key = self.pop();
                     const prop_key = self.pop();
                     const base = self.pop();
@@ -2761,7 +2763,9 @@ pub const VM = struct {
                 .array_set_chain => {
                     // depth-2 write: $base[outer][inner] = val, or $obj->prop[inner] = val
                     // pops [val, inner_key, outer_key, base]
-                    const v = self.pop();
+                    // clone array values for copy-on-assign semantics
+                    const raw_v = self.pop();
+                    const v = if (raw_v == .array) try self.copyValue(raw_v) else raw_v;
                     const inner_key = self.pop();
                     const outer_key = self.pop();
                     const base = self.pop();
@@ -2861,23 +2865,20 @@ pub const VM = struct {
                     self.push(v);
                 },
 
-                .array_set => {
-                    // KNOWN BUG: this op is emitted for both `$arr[k] = $v`
-                    // (value assign) and `$arr[k] = &$v` (ref assign). value
-                    // assignment should clone arrays so the destination has
-                    // an independent iterator pointer (PHP copy-on-assign);
-                    // ref assignment should share the underlying PhpArray so
-                    // mutations through either side are visible. cloning here
-                    // unconditionally fixes the value path but breaks self-
-                    // referencing arrays (`$arr['self'] = &$arr;` no longer
-                    // produces a cycle for *RECURSION* detection). a correct
-                    // fix needs the compiler to emit a separate array_set_ref
-                    // op for `=&` so this site can clone for value assigns
-                    // only. for now we leave the value path slightly wrong
-                    // to keep the ref path working
-                    const val = self.pop();
+                .array_set, .array_set_ref => {
+                    const is_ref = op == .array_set_ref;
+                    const raw_val = self.pop();
                     const key = self.pop();
                     const arr_val = self.pop();
+                    // value-assign clones so the destination has an
+                    // independent iterator pointer (PHP copy-on-assign).
+                    // ref-assign (=&) intentionally shares the underlying
+                    // PhpArray so cycle identity survives for print_r /
+                    // var_dump / var_export recursion detection
+                    const val = if (!is_ref and raw_val == .array)
+                        try self.copyValue(raw_val)
+                    else
+                        raw_val;
                     if (arr_val == .array) {
                         if (key == .array or key == .object) {
                             if (try self.throwOffsetKeyType(key, .access)) continue;
@@ -2904,10 +2905,17 @@ pub const VM = struct {
                     self.push(val);
                 },
 
-                .array_set_local => {
+                .array_set_local, .array_set_local_ref => {
+                    const is_ref = op == .array_set_local_ref;
                     const slot = self.readU16();
-                    const val = self.pop();
+                    const raw_val = self.pop();
                     const key = self.pop();
+                    // value-assign clones; ref-assign keeps the underlying
+                    // PhpArray shared. see array_set above for rationale
+                    const val = if (!is_ref and raw_val == .array)
+                        try self.copyValue(raw_val)
+                    else
+                        raw_val;
                     const frame = self.currentFrame();
 
                     var cur: Value = .null;
