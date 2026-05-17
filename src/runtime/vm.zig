@@ -445,14 +445,13 @@ pub const VM = struct {
     user_error_handler_mask: i64 = -1,
     user_exception_handler: ?Value = null,
     // stack of previously-installed exception handlers. set_exception_handler
-    // pushes, restore_exception_handler pops. PHPUnit's TestCase::
-    // activeExceptionHandlers walks this stack to inventory installed handlers,
-    // and without proper push/pop semantics it spins forever
+    // pushes, restore_exception_handler pops - PHP exposes a real LIFO of
+    // installed handlers (mirrors the older error_handler_stack)
     exception_handler_stack: std.ArrayListUnmanaged(?Value) = .{},
     // pool of frame.vars hashmaps. each entry's buckets stay allocated; on
     // recycle we clear() instead of deinit() so the next acquisition skips
-    // the initial bucket alloc. dominates PHPUnit's per-call overhead since
-    // every method call previously mmap'd a fresh bucket array
+    // the initial bucket alloc. recursive-call heavy workloads previously
+    // mmap'd a fresh bucket array per call - this turns it into a pop()
     vars_pool: std.ArrayListUnmanaged(std.StringHashMapUnmanaged(Value)) = .{},
     error_handler_stack: std.ArrayListUnmanaged(ErrorHandlerEntry) = .{},
     error_silenced_depth: u32 = 0,
@@ -466,20 +465,20 @@ pub const VM = struct {
     request_vars: std.StringHashMapUnmanaged(Value) = .{},
     profile_calls: std.StringHashMapUnmanaged(u64) = .{},
     profile_opcodes: [256]u64 = [_]u64{0} ** 256,
-    // maps a phar alias (e.g. "phpunit-11.5.55.phar") to the on-disk archive
-    // path. populated by Phar::mapPhar()/Phar::loadPhar() and read by the
-    // phar:// stream wrapper to resolve `phar://alias/internal/path`
+    // maps a phar alias (the name registered via Phar::mapPhar) to the on-disk
+    // archive path. populated by Phar::mapPhar()/Phar::loadPhar() and read by
+    // the phar:// stream wrapper to resolve `phar://alias/internal/path`
     phar_aliases: std.StringHashMapUnmanaged([]const u8) = .{},
     // chunk-ptr → all registered function names whose chunk lives at that
     // pointer. populated at every self.functions.put site (registerFunction,
     // trait flattening, closure-instance/bound creation). lets
     // currentDefiningClass / closureScopeForFrame / parentResolvingClass
     // resolve a frame's class scope in O(K) (K = small) instead of O(N)
-    // iterating self.functions (~10k entries under PHPUnit).
+    // iterating self.functions (grows large in framework-heavy workloads).
     chunk_to_func_names: std.AutoHashMapUnmanaged(usize, std.ArrayListUnmanaged([]const u8)) = .{},
     // cache of parsed phars by archive path so each require_once doesn't
-    // re-read + re-parse the entire archive (PHPUnit's stub fires 350+
-    // require_once calls; without the cache that's ~2GB of redundant reads)
+    // re-read + re-parse the entire archive (large phars with many internal
+    // entries can pile up GBs of redundant reads otherwise)
     phar_cache: std.StringHashMapUnmanaged(*PharCacheEntry) = .{},
     exception_handlers: [1024]ExceptionHandler = undefined,
     handler_count: usize = 0,
@@ -507,9 +506,9 @@ pub const VM = struct {
     method_cache_class: []const u8 = "",
     method_cache_method: []const u8 = "",
     method_cache_result: []const u8 = "",
-    // hasMethod single-entry cache. PHPUnit's hot path probes the same
-    // (class, method) pair per call to decide method-call dispatch vs the
-    // __call fallback - this skips the bufPrint("{s}::{s}") cost on hits
+    // hasMethod single-entry cache. method dispatch repeatedly probes the
+    // same (class, method) pair per call site (decide method-call vs __call
+    // fallback) - this skips the bufPrint("{s}::{s}") cost on hits
     has_method_cache_class: []const u8 = "",
     has_method_cache_method: []const u8 = "",
     has_method_cache_result: bool = false,
@@ -1687,11 +1686,11 @@ pub const VM = struct {
     }
 
     // minimal PHP eval(): parses+compiles a code string and runs it as a
-    // nested frame. PHPUnit's MockBuilder uses eval to declare mock classes
-    // at runtime; class decls land in vm.classes naturally so no scope
-    // merging is needed. local variables in the eval'd code do NOT leak
-    // into the caller's scope (PHP eval merges in both directions; zphp's
-    // version is forward-only for now - enough for class/function decls).
+    // nested frame. class/function/const declarations land in the VM tables
+    // naturally so no scope merging is needed. local variables in the eval'd
+    // code do NOT leak into the caller's scope (PHP eval merges in both
+    // directions; this implementation is forward-only - sufficient for
+    // mock/template generators that eval class declarations at runtime).
     // returns null on success, throws ParseError on syntax error
     pub fn evalSource(self: *VM, source: []const u8) RuntimeError!Value {
         // prepend <?php so the lexer enters PHP mode. dupe so the source
@@ -9138,7 +9137,7 @@ pub const VM = struct {
         if (func.local_count == 0) return &.{};
         // fast path: pull from the IC's pre-allocated locals stack. mmap/munmap
         // for every function call dominates the profile under recursive-call
-        // workloads (PHPUnit's nested assert delegation chain); the IC pool
+        // workloads (deep method-call delegation chains); the IC pool
         // turns it into a pointer bump. freeLocals already recognizes pool
         // slices and pops the sp without freeing.
         // generators/fibers suspend with the locals pointer captured; the
@@ -9684,9 +9683,9 @@ pub const VM = struct {
         if (func.ref_params.len == 0) return;
         // ref_params is per-position. if none of the actually-passed args land
         // on a ref position, we can skip the expensive bytecode scan entirely.
-        // PHPUnit's assert chain calls methods like createTestEvent() that
-        // declare ref_params via __construct's reflection but never receive
-        // ref args in practice - the scan was 30% of release-mode samples
+        // many framework helpers declare ref params via reflection but
+        // their hot callers never pass an arg in the ref-typed position -
+        // the bytecode scan was a large fraction of release-mode samples
         const ref_window = @min(ac, func.ref_params.len);
         var any_ref = false;
         for (0..ref_window) |ri| {
@@ -10092,9 +10091,9 @@ pub const VM = struct {
         // fast path: only closure frames can return a scope, and a frame is
         // only a closure when its func.name has the __closure_ prefix. this
         // lets the common case (regular method/function frame) return null
-        // in O(1) instead of iterating self.functions (~10k entries under
-        // PHPUnit). for closure frames we still iterate, but those are far
-        // less frequent than method calls
+        // in O(1) instead of iterating self.functions (can grow large in
+        // framework-heavy workloads). for closure frames we still iterate,
+        // but those are far less frequent than method calls
         const compile_name = if (frame.func) |fn_| fn_.name else "";
         if (!std.mem.startsWith(u8, compile_name, "__closure_")) return null;
         // the runtime instance name (e.g. "__closure_5_3") is in call_name;
@@ -10336,7 +10335,8 @@ pub const VM = struct {
     pub fn hasMethod(self: *VM, class_name: []const u8, method_name: []const u8) bool {
         // single-entry cache. verify content (callers pass stack-local slices
         // whose pointer address gets reused). bufPrint into a 256-byte stack
-        // buffer was 4%+ of PHPUnit assertion-loop samples
+        // buffer was a noticeable fraction of release-mode samples on
+        // assertion-heavy workloads
         const fn_count = self.functions.count() + self.native_fns.count();
         const cls_count = self.classes.count();
         if (self.has_method_cache_fn_count == fn_count and
@@ -10407,9 +10407,9 @@ pub const VM = struct {
     }
 
     fn buildSlotLayout(self: *VM, def: *const ClassDef) RuntimeError!?*PhpObject.SlotLayout {
-        // collect all properties walking parent chain (parent first). PHPUnit
-        // and similar mature codebases have >64 props in deep hierarchies, so
-        // use a growable list instead of a fixed stack buffer
+        // collect all properties walking parent chain (parent first). mature
+        // codebases routinely have >64 props in deep hierarchies, so use a
+        // growable list instead of a fixed stack buffer
         var all_names: std.ArrayListUnmanaged([]const u8) = .{};
         var all_defaults: std.ArrayListUnmanaged(Value) = .{};
         defer all_names.deinit(self.allocator);

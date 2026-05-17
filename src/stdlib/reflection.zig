@@ -187,10 +187,9 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try vm.native_fns.put(a, "ReflectionClass::getModifiers", rcGetModifiers);
     try vm.native_fns.put(a, "ReflectionClass::isCloneable", rcIsCloneable);
 
-    // ReflectionObject extends ReflectionClass; PHPUnit's TestCase bootstrap
-    // does `new ReflectionObject($this)` to read instance metadata. behavior
-    // is identical to ReflectionClass(get_class($obj)), so we register an
-    // empty subclass and let method dispatch fall through to the parent
+    // ReflectionObject extends ReflectionClass. behavior is identical to
+    // ReflectionClass(get_class($obj)) when constructed with an instance,
+    // so register an empty subclass and let method dispatch fall through
     var ro_def = ClassDef{ .name = "ReflectionObject", .parent = "ReflectionClass" };
     try ro_def.properties.append(a, .{ .name = "name", .default = .{ .string = "" } });
     try vm.classes.put(a, "ReflectionObject", ro_def);

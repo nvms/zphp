@@ -790,8 +790,8 @@ fn buildBacktrace(ctx: *NativeContext, ignore_args: bool, provide_object: bool, 
         }
 
         // DEBUG_BACKTRACE_PROVIDE_OBJECT: include the $this bound to this
-        // frame. PHPUnit's Util\Test::currentTestCase walks the backtrace
-        // looking for a frame whose object is a TestCase
+        // frame. callers walk the backtrace looking for a frame whose object
+        // is a particular type (e.g. test runners locating the current test)
         if (provide_object) {
             if (frame.vars.get("$this")) |val| {
                 if (val == .object) try entry.set(alloc, .{ .string = "object" }, val);
@@ -882,9 +882,9 @@ fn native_get_defined_vars(ctx: *NativeContext, _: []const Value) RuntimeError!V
     const frame = &vm.frames[vm.frame_count - 1];
 
     // slot-based locals first (compile-time named slots). PHP excludes $this
-    // from get_defined_vars() even inside instance methods; PHPUnit's mock
-    // method template depends on this to avoid iterating $this when calling
-    // new ReflectionParameter(..., $name)
+    // from get_defined_vars() even inside instance methods. code that
+    // iterates the result and reflects on each name (e.g. checking which
+    // local is a function parameter) breaks if $this is included
     const slot_names = if (frame.func) |func| func.slot_names else vm.global_slot_names;
     for (slot_names, 0..) |sn, i| {
         if (sn.len == 0) continue;

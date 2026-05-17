@@ -1643,8 +1643,10 @@ fn native_error_clear_last(ctx: *NativeContext, _: []const Value) RuntimeError!V
 }
 
 fn native_set_exception_handler(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    // push onto stack so restore_exception_handler can pop later; PHPUnit's
-    // TestCase::activeExceptionHandlers spins forever without the pop side
+    // push onto stack so restore_exception_handler can pop later. PHP
+    // exposes a real LIFO of installed handlers - code that inventories the
+    // active handlers by repeatedly calling set then restore spins forever
+    // without true pop semantics
     const prev = ctx.vm.user_exception_handler orelse Value.null;
     try ctx.vm.exception_handler_stack.append(ctx.allocator, ctx.vm.user_exception_handler);
     if (args.len > 0 and args[0] != .null) {
@@ -1798,9 +1800,9 @@ fn native_opcache_get_configuration(ctx: *NativeContext, _: []const Value) Runti
 }
 
 fn native_gc_status(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    // PHP 8.3+ adds several GC introspection keys; vendor code (PHPUnit's
-    // ResourceUsageFormatter, etc.) reads them via $st['application_time']
-    // and friends, so emit the full key set to keep the array shape consistent
+    // PHP 8.3+ adds several GC introspection keys (application_time,
+    // collector_time, etc.). emit the full key set so callers that read
+    // them via array access don't see undefined-index notices
     const arr = try ctx.createArray();
     try arr.set(ctx.allocator, .{ .string = "running" }, .{ .bool = false });
     try arr.set(ctx.allocator, .{ .string = "protected" }, .{ .bool = false });
