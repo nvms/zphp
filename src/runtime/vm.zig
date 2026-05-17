@@ -465,6 +465,12 @@ pub const VM = struct {
     request_vars: std.StringHashMapUnmanaged(Value) = .{},
     profile_calls: std.StringHashMapUnmanaged(u64) = .{},
     profile_opcodes: [256]u64 = [_]u64{0} ** 256,
+    // ZPHP_DBG_PROFILE env check cached at init. previously each native and
+    // method dispatch called posix.getenv. macOS appears to cache getenv
+    // internally so end-to-end perf didn't move measurably, but the call
+    // showed up in profiles as a stable mid-tier hot spot and the cached
+    // bool is strictly cheaper plus removes a syscall surface
+    dbg_profile_enabled: bool = false,
     // maps a phar alias (the name registered via Phar::mapPhar) to the on-disk
     // archive path. populated by Phar::mapPhar()/Phar::loadPhar() and read by
     // the phar:// stream wrapper to resolve `phar://alias/internal/path`
@@ -650,6 +656,7 @@ pub const VM = struct {
 
     fn initVm(vm: *VM, allocator: Allocator) RuntimeError!void {
         vm.default_tz_name = "UTC";
+        vm.dbg_profile_enabled = std.posix.getenv("ZPHP_DBG_PROFILE") != null;
         try @import("../stdlib/registry.zig").register(&vm.native_fns, allocator);
         try initConstants(&vm.php_constants, allocator);
         try registerStdlibClasses(vm, allocator);
@@ -11063,7 +11070,7 @@ pub const VM = struct {
     fn callNamedFunction(self: *VM, raw_name: []const u8, arg_count: u8) RuntimeError!void {
         // PHP normalizes leading-backslash on function callable strings
         const name = if (raw_name.len > 0 and raw_name[0] == '\\') raw_name[1..] else raw_name;
-        if (std.posix.getenv("ZPHP_DBG_PROFILE") != null) {
+        if (self.dbg_profile_enabled) {
             const e = self.profile_calls.getOrPut(self.allocator, name) catch null;
             if (e) |ee| {
                 if (!ee.found_existing) ee.value_ptr.* = 0;
@@ -11264,7 +11271,7 @@ pub const VM = struct {
             return error.RuntimeError;
         }
         const full_name = self.resolveMethod(obj.class_name, method_name) catch return error.RuntimeError;
-        if (std.posix.getenv("ZPHP_DBG_PROFILE") != null) {
+        if (self.dbg_profile_enabled) {
             const e = self.profile_calls.getOrPut(self.allocator, full_name) catch null;
             if (e) |ee| {
                 if (!ee.found_existing) ee.value_ptr.* = 0;
