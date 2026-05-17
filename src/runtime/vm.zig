@@ -2862,6 +2862,19 @@ pub const VM = struct {
                 },
 
                 .array_set => {
+                    // KNOWN BUG: this op is emitted for both `$arr[k] = $v`
+                    // (value assign) and `$arr[k] = &$v` (ref assign). value
+                    // assignment should clone arrays so the destination has
+                    // an independent iterator pointer (PHP copy-on-assign);
+                    // ref assignment should share the underlying PhpArray so
+                    // mutations through either side are visible. cloning here
+                    // unconditionally fixes the value path but breaks self-
+                    // referencing arrays (`$arr['self'] = &$arr;` no longer
+                    // produces a cycle for *RECURSION* detection). a correct
+                    // fix needs the compiler to emit a separate array_set_ref
+                    // op for `=&` so this site can clone for value assigns
+                    // only. for now we leave the value path slightly wrong
+                    // to keep the ref path working
                     const val = self.pop();
                     const key = self.pop();
                     const arr_val = self.pop();
