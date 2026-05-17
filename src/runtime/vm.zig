@@ -9662,8 +9662,19 @@ pub const VM = struct {
         object_bindings: *std.ArrayListUnmanaged(ObjectRefBinding),
     ) !void {
         if (func.ref_params.len == 0) return;
+        // ref_params is per-position. if none of the actually-passed args land
+        // on a ref position, we can skip the expensive bytecode scan entirely.
+        // PHPUnit's assert chain calls methods like createTestEvent() that
+        // declare ref_params via __construct's reflection but never receive
+        // ref args in practice - the scan was 30% of release-mode samples
+        const ref_window = @min(ac, func.ref_params.len);
+        var any_ref = false;
+        for (0..ref_window) |ri| {
+            if (func.ref_params[ri]) { any_ref = true; break; }
+        }
+        if (!any_ref) return;
         const arg_sources = self.scanCallerArgSources(ac);
-        for (0..@min(ac, func.ref_params.len)) |ri| {
+        for (0..ref_window) |ri| {
             if (!func.ref_params[ri]) continue;
             switch (arg_sources[ri]) {
                 .simple => |caller_var| {
