@@ -733,7 +733,7 @@ fn native_tempnam(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     return .{ .bool = false };
 }
 
-fn buildBacktrace(ctx: *NativeContext, ignore_args: bool, limit: usize) RuntimeError!*PhpArray {
+fn buildBacktrace(ctx: *NativeContext, ignore_args: bool, provide_object: bool, limit: usize) RuntimeError!*PhpArray {
     const vm = ctx.vm;
     const alloc = ctx.allocator;
     var result = try ctx.createArray();
@@ -789,6 +789,15 @@ fn buildBacktrace(ctx: *NativeContext, ignore_args: bool, limit: usize) RuntimeE
             try entry.set(alloc, .{ .string = "args" }, .{ .array = args_arr });
         }
 
+        // DEBUG_BACKTRACE_PROVIDE_OBJECT: include the $this bound to this
+        // frame. PHPUnit's Util\Test::currentTestCase walks the backtrace
+        // looking for a frame whose object is a TestCase
+        if (provide_object) {
+            if (frame.vars.get("$this")) |val| {
+                if (val == .object) try entry.set(alloc, .{ .string = "object" }, val);
+            }
+        }
+
         try result.append(alloc, .{ .array = entry });
     }
 
@@ -796,11 +805,14 @@ fn buildBacktrace(ctx: *NativeContext, ignore_args: bool, limit: usize) RuntimeE
 }
 
 fn native_debug_backtrace(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    // PHP options: 0 = DEBUG_BACKTRACE_PROVIDE_OBJECT (default), 2 = DEBUG_BACKTRACE_IGNORE_ARGS.
+    // PROVIDE_OBJECT is on by default (option=0); only the inverse bit (1) suppresses it
     const options = if (args.len >= 1) Value.toInt(args[0]) else 0;
     const limit_raw = if (args.len >= 2) Value.toInt(args[1]) else 0;
     const ignore_args = (options & 2) != 0;
+    const provide_object = (options & 1) == 0;
     const limit: usize = if (limit_raw > 0) @intCast(limit_raw) else 0;
-    return .{ .array = try buildBacktrace(ctx, ignore_args, limit) };
+    return .{ .array = try buildBacktrace(ctx, ignore_args, provide_object, limit) };
 }
 
 fn native_debug_print_backtrace(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
@@ -808,7 +820,7 @@ fn native_debug_print_backtrace(ctx: *NativeContext, args: []const Value) Runtim
     const limit_raw = if (args.len >= 2) Value.toInt(args[1]) else 0;
     const ignore_args = (options & 2) != 0;
     const limit: usize = if (limit_raw > 0) @intCast(limit_raw) else 0;
-    const trace = try buildBacktrace(ctx, ignore_args, limit);
+    const trace = try buildBacktrace(ctx, ignore_args, false, limit);
 
     const out = &ctx.vm.output;
     const alloc = ctx.allocator;

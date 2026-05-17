@@ -221,6 +221,7 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try rm_def.methods.put(a, "getDeclaringClass", .{ .name = "getDeclaringClass", .arity = 0 });
     try rm_def.methods.put(a, "getReturnType", .{ .name = "getReturnType", .arity = 0 });
     try rm_def.methods.put(a, "isConstructor", .{ .name = "isConstructor", .arity = 0 });
+    try rm_def.methods.put(a, "isDestructor", .{ .name = "isDestructor", .arity = 0 });
     try rm_def.methods.put(a, "getDocComment", .{ .name = "getDocComment", .arity = 0 });
     try rm_def.methods.put(a, "getNumberOfParameters", .{ .name = "getNumberOfParameters", .arity = 0 });
     try rm_def.methods.put(a, "getNumberOfRequiredParameters", .{ .name = "getNumberOfRequiredParameters", .arity = 0 });
@@ -259,6 +260,7 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try vm.native_fns.put(a, "ReflectionMethod::getDeclaringClass", rmGetDeclaringClass);
     try vm.native_fns.put(a, "ReflectionMethod::getReturnType", rmGetReturnType);
     try vm.native_fns.put(a, "ReflectionMethod::isConstructor", rmIsConstructor);
+    try vm.native_fns.put(a, "ReflectionMethod::isDestructor", rmIsDestructor);
     try vm.native_fns.put(a, "ReflectionMethod::getDocComment", rmGetDocComment);
     try vm.native_fns.put(a, "ReflectionMethod::getNumberOfParameters", rmGetNumberOfParameters);
     try vm.native_fns.put(a, "ReflectionMethod::getNumberOfRequiredParameters", rmGetNumberOfRequiredParameters);
@@ -331,7 +333,7 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try vm.native_fns.put(a, "ReflectionParameter::getDefaultValueConstantName", rpGetDefaultValueConstantName);
 
     // ReflectionNamedType
-    var rnt_def = ClassDef{ .name = "ReflectionNamedType" };
+    var rnt_def = ClassDef{ .name = "ReflectionNamedType", .parent = "ReflectionType" };
     try rnt_def.properties.append(a, .{ .name = "type_name", .default = .{ .string = "" } });
     try rnt_def.properties.append(a, .{ .name = "nullable", .default = .{ .bool = false } });
     try rnt_def.methods.put(a, "getName", .{ .name = "getName", .arity = 0 });
@@ -346,7 +348,7 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try vm.native_fns.put(a, "ReflectionNamedType::__toString", rntToString);
 
     // ReflectionUnionType
-    var rut_def = ClassDef{ .name = "ReflectionUnionType" };
+    var rut_def = ClassDef{ .name = "ReflectionUnionType", .parent = "ReflectionType" };
     try rut_def.properties.append(a, .{ .name = "type_str", .default = .{ .string = "" } });
     try rut_def.properties.append(a, .{ .name = "nullable", .default = .{ .bool = false } });
     try rut_def.methods.put(a, "getTypes", .{ .name = "getTypes", .arity = 0 });
@@ -358,7 +360,7 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try vm.native_fns.put(a, "ReflectionUnionType::__toString", rutToString);
 
     // ReflectionIntersectionType
-    var rit_def = ClassDef{ .name = "ReflectionIntersectionType" };
+    var rit_def = ClassDef{ .name = "ReflectionIntersectionType", .parent = "ReflectionType" };
     try rit_def.properties.append(a, .{ .name = "type_str", .default = .{ .string = "" } });
     try rit_def.methods.put(a, "getTypes", .{ .name = "getTypes", .arity = 0 });
     try rit_def.methods.put(a, "allowsNull", .{ .name = "allowsNull", .arity = 0 });
@@ -2270,6 +2272,12 @@ fn rmIsConstructor(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
     const this = getThis(ctx) orelse return .{ .bool = false };
     const name = this.get("name");
     return .{ .bool = name == .string and std.mem.eql(u8, name.string, "__construct") };
+}
+
+fn rmIsDestructor(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const this = getThis(ctx) orelse return .{ .bool = false };
+    const name = this.get("name");
+    return .{ .bool = name == .string and std.mem.eql(u8, name.string, "__destruct") };
 }
 
 fn rmGetNumberOfParameters(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
