@@ -7569,7 +7569,9 @@ pub const VM = struct {
                 fi -= 1;
                 const f = &self.frames[fi];
                 const name: []const u8 = if (f.func) |fd| fd.name else "<top>";
-                std.debug.print("  #{d} {s} ip={d}\n", .{ fi, name, f.ip });
+                var line_raw: u32 = 0;
+                if (f.ip > 0 and f.ip - 1 < f.chunk.lines.items.len) line_raw = f.chunk.lines.items[f.ip - 1];
+                std.debug.print("  #{d} {s} ip={d} src_off={d}\n", .{ fi, name, f.ip, line_raw });
             }
         }
         self.emitWarning(msg);
