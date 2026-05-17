@@ -1806,6 +1806,16 @@ pub const VM = struct {
             // message. captures the current function name and IP so the user
             // gets a real diagnostic instead of a bare RuntimeError
             if (self.error_msg == null and self.pending_exception == null) {
+                // ZPHP_DBG_PANIC_INTERNAL=1 prints the Zig error-return trace
+                // so we can find which native raised error.RuntimeError
+                // without setting an exception or error_msg. invaluable when
+                // bisecting an 'internal RuntimeError' to its source
+                if (std.posix.getenv("ZPHP_DBG_PANIC_INTERNAL") != null) {
+                    std.debug.print("\n[ZPHP_DBG_PANIC_INTERNAL] uncontexted {s}\n", .{@errorName(err)});
+                    if (@errorReturnTrace()) |trace| {
+                        std.debug.dumpStackTrace(trace.*);
+                    }
+                }
                 const cur_frame = if (self.frame_count > 0) &self.frames[self.frame_count - 1] else null;
                 const ip: usize = if (cur_frame) |f| f.ip else 0;
                 const func_name: []const u8 = if (cur_frame) |f|
@@ -5750,7 +5760,17 @@ pub const VM = struct {
         if (self.frame_count > self.frame_high_water) self.frame_high_water = self.frame_count;
                                 const saved_fc = self.frame_count;
                                 var ctx = self.makeContext(null);
-                                const result = try native(&ctx, args_buf[0..ac]);
+                                // a native that calls throwBuiltinException
+                                // and gets in-place dispatch unwinds frames
+                                // below saved_fc, then returns RuntimeError
+                                // to abort its hijacked stack. detect that
+                                // case and treat as a benign control-flow
+                                // signal so the catch handler runs instead
+                                // of surfacing as 'internal RuntimeError'
+                                const result = native(&ctx, args_buf[0..ac]) catch |native_err| {
+                                    if (self.frame_count < saved_fc) continue;
+                                    return native_err;
+                                };
                                 if (self.frame_count >= saved_fc) {
                                     self.frame_count -= 1;
                                     self.deinitFrameSlot(self.frame_count);
@@ -11294,10 +11314,19 @@ pub const VM = struct {
             self.frames[self.frame_count] = .{ .chunk = self.currentChunk(), .ip = self.currentFrame().ip, .vars = tmp_vars };
             self.frame_count += 1;
         if (self.frame_count > self.frame_high_water) self.frame_high_water = self.frame_count;
+            const saved_fc = self.frame_count;
             var ctx = self.makeContext(null);
-            const result = try native(&ctx, args);
-            self.frame_count -= 1;
-            self.deinitFrameSlot(self.frame_count);
+            // throwBuiltinException can dispatch in-place and the native
+            // returns error.RuntimeError to unwind. detect that and let
+            // the caller resume from the dispatched handler frame
+            const result = native(&ctx, args) catch |native_err| {
+                if (self.frame_count < saved_fc) return .null;
+                return native_err;
+            };
+            if (self.frame_count >= saved_fc) {
+                self.frame_count -= 1;
+                self.deinitFrameSlot(self.frame_count);
+            }
             return result;
         } else if (self.functions.get(full_name)) |func| {
             if (args.len < func.required_params) return error.RuntimeError;
