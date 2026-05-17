@@ -5346,8 +5346,13 @@ pub const VM = struct {
                         if (self.ic) |ic| {
                             const sp_idx = InlineCache.propIndex(@intFromPtr(self.currentChunk()), sp_ip);
                             const sp_entry = &ic.prop[sp_idx];
-                            if (sp_entry.key == sp_ip and sp_entry.chunk_key == @intFromPtr(self.currentChunk()) and sp_entry.class_ptr == @intFromPtr(obj.class_name.ptr) and sp_entry.slot_index != 0xFFFF) {
+                            if (sp_entry.key == sp_ip and sp_entry.chunk_key == @intFromPtr(self.currentChunk()) and sp_entry.slot_index != 0xFFFF and sp_entry.class_ptr == @intFromPtr(obj.class_name.ptr)) {
                                 if (obj.slots) |s| {
+                                    // a write resurrects a previously-unset
+                                    // property; without this, init()'s prior
+                                    // unset() leaves the slot looking absent
+                                    // to get_prop even after we write to it
+                                    obj.clearUnset(prop_name);
                                     s[sp_entry.slot_index] = val;
                                     self.push(val);
                                     continue;
