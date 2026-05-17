@@ -507,6 +507,17 @@ pub const VM = struct {
     method_cache_class: []const u8 = "",
     method_cache_method: []const u8 = "",
     method_cache_result: []const u8 = "",
+    // hasMethod single-entry cache. PHPUnit's hot path probes the same
+    // (class, method) pair per call to decide method-call dispatch vs the
+    // __call fallback - this skips the bufPrint("{s}::{s}") cost on hits
+    has_method_cache_class: []const u8 = "",
+    has_method_cache_method: []const u8 = "",
+    has_method_cache_result: bool = false,
+    // snapshot of total registered function/class count when has_method_cache
+    // was last populated. used to detect when a new func/class registration
+    // could invalidate a previous cache hit
+    has_method_cache_fn_count: usize = 0,
+    has_method_cache_cls_count: usize = 0,
     ic: ?*InlineCache = null,
     serve_mode: bool = false,
     // deadline enforcement for set_time_limit / max_execution_time. 0 means
@@ -10294,16 +10305,36 @@ pub const VM = struct {
     }
 
     pub fn hasMethod(self: *VM, class_name: []const u8, method_name: []const u8) bool {
+        // single-entry cache. verify content (callers pass stack-local slices
+        // whose pointer address gets reused). bufPrint into a 256-byte stack
+        // buffer was 4%+ of PHPUnit assertion-loop samples
+        const fn_count = self.functions.count() + self.native_fns.count();
+        const cls_count = self.classes.count();
+        if (self.has_method_cache_fn_count == fn_count and
+            self.has_method_cache_cls_count == cls_count and
+            self.has_method_cache_class.len == class_name.len and
+            self.has_method_cache_method.len == method_name.len and
+            std.mem.eql(u8, self.has_method_cache_class, class_name) and
+            std.mem.eql(u8, self.has_method_cache_method, method_name))
+        {
+            return self.has_method_cache_result;
+        }
         var current = class_name;
         var buf: [256]u8 = undefined;
-        while (true) {
-            const full = std.fmt.bufPrint(&buf, "{s}::{s}", .{ current, method_name }) catch return false;
-            if (self.functions.get(full) != null or self.native_fns.get(full) != null) return true;
+        const result = while (true) {
+            const full = std.fmt.bufPrint(&buf, "{s}::{s}", .{ current, method_name }) catch break false;
+            if (self.functions.get(full) != null or self.native_fns.get(full) != null) break true;
             if (self.classes.get(current)) |cls| {
                 if (cls.parent) |p| { current = p; continue; }
             }
-            return false;
-        }
+            break false;
+        };
+        self.has_method_cache_class = class_name;
+        self.has_method_cache_method = method_name;
+        self.has_method_cache_result = result;
+        self.has_method_cache_fn_count = fn_count;
+        self.has_method_cache_cls_count = cls_count;
+        return result;
     }
 
     pub fn resolveMethod(self: *VM, class_name: []const u8, method_name: []const u8) RuntimeError![]const u8 {
