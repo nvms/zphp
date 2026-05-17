@@ -869,7 +869,10 @@ fn native_get_defined_vars(ctx: *NativeContext, _: []const Value) RuntimeError!V
     if (vm.frame_count == 0) return .{ .array = result };
     const frame = &vm.frames[vm.frame_count - 1];
 
-    // slot-based locals first (compile-time named slots)
+    // slot-based locals first (compile-time named slots). PHP excludes $this
+    // from get_defined_vars() even inside instance methods; PHPUnit's mock
+    // method template depends on this to avoid iterating $this when calling
+    // new ReflectionParameter(..., $name)
     const slot_names = if (frame.func) |func| func.slot_names else vm.global_slot_names;
     for (slot_names, 0..) |sn, i| {
         if (sn.len == 0) continue;
@@ -877,6 +880,7 @@ fn native_get_defined_vars(ctx: *NativeContext, _: []const Value) RuntimeError!V
         if (frame.locals[i] == .null) continue;
         const name = if (sn.len > 0 and sn[0] == '$') sn[1..] else sn;
         if (name.len == 0) continue;
+        if (std.mem.eql(u8, name, "this")) continue;
         try result.set(alloc, .{ .string = name }, frame.locals[i]);
     }
 
@@ -887,6 +891,7 @@ fn native_get_defined_vars(ctx: *NativeContext, _: []const Value) RuntimeError!V
         const name = if (raw.len > 0 and raw[0] == '$') raw[1..] else raw;
         if (name.len == 0) continue;
         if (entry.value_ptr.* == .null) continue;
+        if (std.mem.eql(u8, name, "this")) continue;
         try result.set(alloc, .{ .string = name }, entry.value_ptr.*);
     }
     return .{ .array = result };

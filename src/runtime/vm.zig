@@ -11,6 +11,8 @@ const Chunk = bytecode.Chunk;
 const OpCode = bytecode.OpCode;
 const ObjFunction = bytecode.ObjFunction;
 const CompileResult = @import("../pipeline/compiler.zig").CompileResult;
+const parser_mod = @import("../pipeline/parser.zig");
+const compiler_mod = @import("../pipeline/compiler.zig");
 const enums = @import("../stdlib/enums.zig");
 
 const Allocator = std.mem.Allocator;
@@ -1652,6 +1654,104 @@ pub const VM = struct {
         if (!gop.found_existing) gop.value_ptr.* = .{};
         for (gop.value_ptr.*.items) |existing| if (std.mem.eql(u8, existing, name)) return;
         try gop.value_ptr.*.append(self.allocator, name);
+    }
+
+    // minimal PHP eval(): parses+compiles a code string and runs it as a
+    // nested frame. PHPUnit's MockBuilder uses eval to declare mock classes
+    // at runtime; class decls land in vm.classes naturally so no scope
+    // merging is needed. local variables in the eval'd code do NOT leak
+    // into the caller's scope (PHP eval merges in both directions; zphp's
+    // version is forward-only for now - enough for class/function decls).
+    // returns null on success, throws ParseError on syntax error
+    pub fn evalSource(self: *VM, source: []const u8) RuntimeError!Value {
+        // prepend <?php so the lexer enters PHP mode. dupe so the source
+        // slice can be owned by the heap CompileResult's string_allocs
+        const wrapped = std.fmt.allocPrint(self.allocator, "<?php {s}", .{source}) catch return error.OutOfMemory;
+        var ast = parser_mod.parse(self.allocator, wrapped) catch {
+            self.allocator.free(wrapped);
+            return error.OutOfMemory;
+        };
+        if (ast.errors.len > 0) {
+            ast.deinit();
+            self.allocator.free(wrapped);
+            self.setErrorMsg("eval(): syntax error in evaluated code", .{});
+            try self.setPendingException("ParseError", self.error_msg orelse "syntax error");
+            return error.RuntimeError;
+        }
+        const display_path = self.allocator.dupe(u8, "eval()'d code") catch {
+            ast.deinit();
+            self.allocator.free(wrapped);
+            return error.OutOfMemory;
+        };
+        var result = compiler_mod.compileWithPath(&ast, self.allocator, display_path) catch {
+            ast.deinit();
+            self.allocator.free(wrapped);
+            self.allocator.free(display_path);
+            self.setErrorMsg("eval(): compile error", .{});
+            return error.RuntimeError;
+        };
+        ast.deinit();
+
+        const heap_result = self.allocator.create(CompileResult) catch {
+            result.deinit();
+            self.allocator.free(wrapped);
+            self.allocator.free(display_path);
+            return error.OutOfMemory;
+        };
+        heap_result.* = result;
+        // source and display_path slices are referenced by compiled bytecode
+        try heap_result.string_allocs.append(self.allocator, wrapped);
+        try heap_result.string_allocs.append(self.allocator, display_path);
+        try self.compile_results.append(self.allocator, heap_result);
+
+        for (heap_result.functions.items) |*func| {
+            try self.registerFunction(func);
+        }
+        for (heap_result.type_hints.items) |th| {
+            try g_type_info.put(self.allocator, th.name, .{ .param_types = th.param_types, .return_type = th.return_type });
+        }
+
+        if (self.frame_count >= 2047) {
+            self.setErrorMsg("Fatal error: maximum call stack depth exceeded", .{});
+            return error.RuntimeError;
+        }
+        const return_frame = self.frame_count;
+        var eval_locals: []Value = &.{};
+        if (heap_result.local_count > 0) {
+            eval_locals = try self.allocator.alloc(Value, heap_result.local_count);
+            @memset(eval_locals, .null);
+        }
+        const saved_slot_names = self.global_slot_names;
+        self.global_slot_names = heap_result.slot_names;
+        const saved_strict = self.script_strict_types;
+        self.script_strict_types = heap_result.strict_types;
+        self.frames[self.frame_count] = .{
+            .chunk = &heap_result.chunk,
+            .ip = 0,
+            .vars = .{},
+            .locals = eval_locals,
+            .script_path = heap_result.file_path,
+        };
+        self.frames[self.frame_count].entry_sp = self.sp;
+        self.frame_count += 1;
+        if (self.frame_count > self.frame_high_water) self.frame_high_water = self.frame_count;
+
+        self.runUntilFrame(return_frame) catch {
+            while (self.frame_count > return_frame) {
+                self.frame_count -= 1;
+                self.deinitFrameSlot(self.frame_count);
+            }
+            self.global_slot_names = saved_slot_names;
+            self.script_strict_types = saved_strict;
+            return error.RuntimeError;
+        };
+        while (self.frame_count > return_frame) {
+            self.frame_count -= 1;
+            self.deinitFrameSlot(self.frame_count);
+        }
+        self.global_slot_names = saved_slot_names;
+        self.script_strict_types = saved_strict;
+        return .null;
     }
 
     fn runUntilFrame(self: *VM, base_frame: usize) RuntimeError!void {

@@ -99,6 +99,7 @@ pub const entries = .{
     .{ "memory_get_usage", native_memory_get_usage },
     .{ "memory_get_peak_usage", native_memory_get_usage },
     .{ "memory_reset_peak_usage", native_noop_null },
+    .{ "eval", native_eval },
     .{ "gc_enabled", native_noop_true },
     .{ "gc_disable", native_noop_null },
     .{ "gc_enable", native_noop_null },
@@ -1660,6 +1661,11 @@ fn native_get_error_handler(ctx: *NativeContext, _: []const Value) RuntimeError!
 
 fn native_get_exception_handler(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
     return ctx.vm.user_exception_handler orelse Value.null;
+}
+
+fn native_eval(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len < 1 or args[0] != .string) return .null;
+    return ctx.vm.evalSource(args[0].string);
 }
 
 fn native_restore_exception_handler(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
