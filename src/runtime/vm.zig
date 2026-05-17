@@ -7560,6 +7560,18 @@ pub const VM = struct {
             .string => |s| std.fmt.allocPrint(self.allocator, "Undefined array key \"{s}\"", .{s}) catch return,
         };
         self.strings.append(self.allocator, msg) catch {};
+        // ZPHP_DBG_UKW=1 dumps the frame stack on each warning - invaluable
+        // for tracking down false-positives where zphp warns but PHP doesn't
+        if (std.posix.getenv("ZPHP_DBG_UKW") != null) {
+            std.debug.print("[UKW] {s} frames:\n", .{msg});
+            var fi: usize = self.frame_count;
+            while (fi > 0) {
+                fi -= 1;
+                const f = &self.frames[fi];
+                const name: []const u8 = if (f.func) |fd| fd.name else "<top>";
+                std.debug.print("  #{d} {s} ip={d}\n", .{ fi, name, f.ip });
+            }
+        }
         self.emitWarning(msg);
     }
 
