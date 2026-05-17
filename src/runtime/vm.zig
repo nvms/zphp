@@ -9085,7 +9085,28 @@ pub const VM = struct {
 
     fn allocLocals(self: *VM, func: *const ObjFunction, vars: *const std.StringHashMapUnmanaged(Value)) ![]Value {
         if (func.local_count == 0) return &.{};
-        const locals = try self.allocator.alloc(Value, func.local_count);
+        // fast path: pull from the IC's pre-allocated locals stack. mmap/munmap
+        // for every function call dominates the profile under recursive-call
+        // workloads (PHPUnit's nested assert delegation chain); the IC pool
+        // turns it into a pointer bump. freeLocals already recognizes pool
+        // slices and pops the sp without freeing.
+        // generators/fibers suspend with the locals pointer captured; the
+        // pool's LIFO discipline doesn't survive a suspension, so those
+        // routes must allocate on the heap
+        const lc = func.local_count;
+        var locals: []Value = undefined;
+        if (self.ic != null and !func.is_generator) {
+            const ic = self.ic.?;
+            const base = ic.locals_sp;
+            if (base + lc <= ic.locals_cap) {
+                locals = ic.locals_buf[base .. base + lc];
+                ic.locals_sp = base + lc;
+            } else {
+                locals = try self.allocator.alloc(Value, lc);
+            }
+        } else {
+            locals = try self.allocator.alloc(Value, lc);
+        }
         @memset(locals, .null);
         for (func.slot_names, 0..) |name, i| {
             if (name.len > 0) {
