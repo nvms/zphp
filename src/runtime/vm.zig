@@ -449,6 +449,11 @@ pub const VM = struct {
     // activeExceptionHandlers walks this stack to inventory installed handlers,
     // and without proper push/pop semantics it spins forever
     exception_handler_stack: std.ArrayListUnmanaged(?Value) = .{},
+    // pool of frame.vars hashmaps. each entry's buckets stay allocated; on
+    // recycle we clear() instead of deinit() so the next acquisition skips
+    // the initial bucket alloc. dominates PHPUnit's per-call overhead since
+    // every method call previously mmap'd a fresh bucket array
+    vars_pool: std.ArrayListUnmanaged(std.StringHashMapUnmanaged(Value)) = .{},
     error_handler_stack: std.ArrayListUnmanaged(ErrorHandlerEntry) = .{},
     error_silenced_depth: u32 = 0,
     last_error_type: i64 = 0,
@@ -1437,6 +1442,11 @@ pub const VM = struct {
         self.chunk_to_func_names.deinit(self.allocator);
         self.phar_aliases.deinit(self.allocator);
         self.exception_handler_stack.deinit(self.allocator);
+        for (self.vars_pool.items) |*hm| {
+            var m = hm.*;
+            m.deinit(self.allocator);
+        }
+        self.vars_pool.deinit(self.allocator);
         var pc_iter = self.phar_cache.iterator();
         while (pc_iter.next()) |e| {
             self.allocator.free(e.value_ptr.*.bytes);
@@ -4932,7 +4942,7 @@ pub const VM = struct {
                                 }
                                 _ = self.pop();
                             } else {
-                                var new_vars: std.StringHashMapUnmanaged(Value) = .{};
+                                var new_vars = self.acquireFrameVars();
                                 try new_vars.put(self.allocator, "$this", .{ .object = obj });
                                 if (func.is_variadic) {
                                     const fixed: usize = func.arity - 1;
@@ -5059,7 +5069,7 @@ pub const VM = struct {
                             self.frame_count -= 1;
                             self.deinitFrameSlot(self.frame_count);
                         } else if (self.functions.get(cn)) |func| {
-                            var new_vars: std.StringHashMapUnmanaged(Value) = .{};
+                            var new_vars = self.acquireFrameVars();
                             try new_vars.put(self.allocator, "$this", .{ .object = obj });
                             for (0..@min(ac, func.arity)) |i| {
                                 try new_vars.put(self.allocator, func.params[i], self.stack[self.sp - ac + i]);
@@ -5848,7 +5858,7 @@ pub const VM = struct {
                                 ic.method[mc_idx2] = .{ .key = mc_ip2, .chunk_key = mc_chunk_key2, .class_ptr = @intFromPtr(obj.class_name.ptr), .func = func, .full_name = full_name };
                             }
                         }
-                        var new_vars: std.StringHashMapUnmanaged(Value) = .{};
+                        var new_vars = self.acquireFrameVars();
                         try new_vars.put(self.allocator, "$this", .{ .object = obj });
 
                         try self.bindClosures(&new_vars, null, full_name);
@@ -6029,7 +6039,7 @@ pub const VM = struct {
                             self.push(result);
                         } else continue;
                     } else if (self.functions.get(full_name)) |func| {
-                        var new_vars: std.StringHashMapUnmanaged(Value) = .{};
+                        var new_vars = self.acquireFrameVars();
                         try new_vars.put(self.allocator, "$this", .{ .object = obj });
                         try self.bindClosures(&new_vars, null, full_name);
                         if (func.is_variadic) {
@@ -6167,7 +6177,7 @@ pub const VM = struct {
                             self.push(result);
                         } else continue;
                     } else if (self.functions.get(full_name)) |func| {
-                        var new_vars: std.StringHashMapUnmanaged(Value) = .{};
+                        var new_vars = self.acquireFrameVars();
                         try new_vars.put(self.allocator, "$this", .{ .object = obj });
                         try self.bindClosures(&new_vars, null, full_name);
                         if (func.is_variadic) {
@@ -6324,7 +6334,7 @@ pub const VM = struct {
                             self.push(result);
                         } else continue;
                     } else if (self.functions.get(full_name)) |func| {
-                        var new_vars: std.StringHashMapUnmanaged(Value) = .{};
+                        var new_vars = self.acquireFrameVars();
                         try new_vars.put(self.allocator, "$this", .{ .object = obj });
                         try self.bindClosures(&new_vars, null, full_name);
                         if (func.is_variadic) {
@@ -6471,7 +6481,7 @@ pub const VM = struct {
                                     try self.callStaticFunction(full_name, arg_count, effective_called);
                                 } else {
                                 const ac: usize = arg_count;
-                                var new_vars: std.StringHashMapUnmanaged(Value) = .{};
+                                var new_vars = self.acquireFrameVars();
                                 try new_vars.put(self.allocator, "$this", tv);
                                 if (func.is_variadic) {
                                     const fixed: usize = func.arity - 1;
@@ -6673,7 +6683,7 @@ pub const VM = struct {
                                 if (func.is_generator) {
                                     try self.callStaticFunction(full_name, @intCast(resolved_ac), effective_called);
                                 } else {
-                                var new_vars: std.StringHashMapUnmanaged(Value) = .{};
+                                var new_vars = self.acquireFrameVars();
                                 try new_vars.put(self.allocator, "$this", tv);
                                 if (func.is_variadic) {
                                     const fixed: usize = func.arity - 1;
@@ -7877,7 +7887,7 @@ pub const VM = struct {
             return error.RuntimeError;
         };
         if (self.functions.get(method_name)) |func| {
-            var new_vars: std.StringHashMapUnmanaged(Value) = .{};
+            var new_vars = self.acquireFrameVars();
             try new_vars.put(self.allocator, "$this", .{ .object = obj });
             self.frames[self.frame_count] = .{ .chunk = &func.chunk, .ip = 0, .vars = new_vars, .locals = try self.allocLocals(func, &new_vars), .func = func };
             self.frames[self.frame_count].entry_sp = self.sp;
@@ -8923,7 +8933,7 @@ pub const VM = struct {
                 (cap.closure_name.len == name.len and std.mem.eql(u8, cap.closure_name, name))))
             {
                 // fall through to non-locals path via callNamedFunction's slow path
-                var new_vars: std.StringHashMapUnmanaged(Value) = .{};
+                var new_vars = self.acquireFrameVars();
                 var closure_refs: std.StringHashMapUnmanaged(*Value) = .{};
                 try self.bindClosures(&new_vars, &closure_refs, name);
                 const bind_count = @min(ac, func.arity);
@@ -9083,6 +9093,27 @@ pub const VM = struct {
         return self.pop();
     }
 
+    pub fn acquireFrameVars(self: *VM) std.StringHashMapUnmanaged(Value) {
+        if (self.vars_pool.pop()) |hm| return hm;
+        return .{};
+    }
+
+    pub fn releaseFrameVars(self: *VM, hm: *std.StringHashMapUnmanaged(Value)) void {
+        // cap the pool: hashmaps that grew very large should be freed rather
+        // than held forever. typical frame.vars has 1-5 entries; anything
+        // beyond a moderate cap is likely a `extract()` or `compact()` user
+        // and not worth retaining
+        if (hm.capacity() > 256 or self.vars_pool.items.len >= 64) {
+            hm.deinit(self.allocator);
+            return;
+        }
+        hm.clearRetainingCapacity();
+        self.vars_pool.append(self.allocator, hm.*) catch {
+            hm.deinit(self.allocator);
+            return;
+        };
+    }
+
     fn allocLocals(self: *VM, func: *const ObjFunction, vars: *const std.StringHashMapUnmanaged(Value)) ![]Value {
         if (func.local_count == 0) return &.{};
         // fast path: pull from the IC's pre-allocated locals stack. mmap/munmap
@@ -9148,7 +9179,7 @@ pub const VM = struct {
         // the Generator and will be freed during freeHeapItems. freeing it
         // here too causes a double-free during VM cleanup
         if (self.frames[idx].generator == null) {
-            self.frames[idx].vars.deinit(self.allocator);
+            self.releaseFrameVars(&self.frames[idx].vars);
         }
         if (self.frames[idx].locals.len > 0) {
             self.freeLocals(self.frames[idx].locals);
@@ -11020,7 +11051,7 @@ pub const VM = struct {
                 if (std.mem.startsWith(u8, name, "__closure_"))
                     return self.callClosureLocalsOnly(func, name, arg_count);
             }
-            var new_vars: std.StringHashMapUnmanaged(Value) = .{};
+            var new_vars = self.acquireFrameVars();
             var closure_refs: std.StringHashMapUnmanaged(*Value) = .{};
             try self.bindClosures(&new_vars, &closure_refs, name);
             if (func.is_variadic) {
@@ -11182,7 +11213,7 @@ pub const VM = struct {
             return result;
         } else if (self.functions.get(full_name)) |func| {
             if (args.len < func.required_params) return error.RuntimeError;
-            var new_vars: std.StringHashMapUnmanaged(Value) = .{};
+            var new_vars = self.acquireFrameVars();
             try new_vars.put(self.allocator, "$this", .{ .object = obj });
             try self.bindClosures(&new_vars, null, full_name);
             const trimmed = if (func.is_variadic) args else args[0..@min(args.len, func.arity)];
@@ -11277,7 +11308,7 @@ pub const VM = struct {
                         return self.executeFunctionLocalsOnly(func, args);
                 }
             }
-            var new_vars: std.StringHashMapUnmanaged(Value) = .{};
+            var new_vars = self.acquireFrameVars();
             var closure_refs: std.StringHashMapUnmanaged(*Value) = .{};
             try self.bindClosures(&new_vars, &closure_refs, name);
             const trimmed = if (func.is_variadic) args else args[0..@min(args.len, func.arity)];
@@ -11371,7 +11402,7 @@ pub const VM = struct {
                 return self.callByName(name, args);
             }
             const bind_count = @min(args.len, func.arity);
-            var new_vars: std.StringHashMapUnmanaged(Value) = .{};
+            var new_vars = self.acquireFrameVars();
             var ref_slots: std.StringHashMapUnmanaged(*Value) = .{};
             try self.bindClosures(&new_vars, &ref_slots, name);
 
