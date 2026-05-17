@@ -518,6 +518,15 @@ pub const VM = struct {
     // could invalidate a previous cache hit
     has_method_cache_fn_count: usize = 0,
     has_method_cache_cls_count: usize = 0,
+    // hasPropHook single-entry cache. saves bufPrint('{prop}$hook_{kind}')
+    // before delegating to hasMethod. kind packed into low bit of the cls
+    // count snapshot
+    has_hook_cache_class: []const u8 = "",
+    has_hook_cache_prop: []const u8 = "",
+    has_hook_cache_kind: u2 = 0,
+    has_hook_cache_result: bool = false,
+    has_hook_cache_fn_count: usize = 0,
+    has_hook_cache_cls_count: usize = 0,
     ic: ?*InlineCache = null,
     serve_mode: bool = false,
     // deadline enforcement for set_time_limit / max_execution_time. 0 means
@@ -10298,10 +10307,30 @@ pub const VM = struct {
     }
 
     pub fn hasPropHook(self: *VM, class_name: []const u8, prop_name: []const u8, kind: enum { get, set }) bool {
+        const kind_bit: u2 = switch (kind) { .get => 1, .set => 2 };
+        const fn_count = self.functions.count() + self.native_fns.count();
+        const cls_count = self.classes.count();
+        if (self.has_hook_cache_fn_count == fn_count and
+            self.has_hook_cache_cls_count == cls_count and
+            self.has_hook_cache_kind == kind_bit and
+            self.has_hook_cache_class.len == class_name.len and
+            self.has_hook_cache_prop.len == prop_name.len and
+            std.mem.eql(u8, self.has_hook_cache_class, class_name) and
+            std.mem.eql(u8, self.has_hook_cache_prop, prop_name))
+        {
+            return self.has_hook_cache_result;
+        }
         const suffix = switch (kind) { .get => "$hook_get", .set => "$hook_set" };
         var buf: [256]u8 = undefined;
         const hook_name = std.fmt.bufPrint(&buf, "{s}{s}", .{ prop_name, suffix }) catch return false;
-        return self.hasMethod(class_name, hook_name);
+        const result = self.hasMethod(class_name, hook_name);
+        self.has_hook_cache_class = class_name;
+        self.has_hook_cache_prop = prop_name;
+        self.has_hook_cache_kind = kind_bit;
+        self.has_hook_cache_result = result;
+        self.has_hook_cache_fn_count = fn_count;
+        self.has_hook_cache_cls_count = cls_count;
+        return result;
     }
 
     pub fn hasMethod(self: *VM, class_name: []const u8, method_name: []const u8) bool {
