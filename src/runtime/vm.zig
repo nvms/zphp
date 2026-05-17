@@ -512,6 +512,8 @@ pub const VM = struct {
     method_cache_class: []const u8 = "",
     method_cache_method: []const u8 = "",
     method_cache_result: []const u8 = "",
+    method_cache_fn_count: usize = 0,
+    method_cache_cls_count: usize = 0,
     // hasMethod single-entry cache. method dispatch repeatedly probes the
     // same (class, method) pair per call site (decide method-call vs __call
     // fallback) - this skips the bufPrint("{s}::{s}") cost on hits
@@ -10374,12 +10376,18 @@ pub const VM = struct {
     }
 
     pub fn resolveMethod(self: *VM, class_name: []const u8, method_name: []const u8) RuntimeError![]const u8 {
-        // single-entry cache: skip string format + hashmap lookup on repeat calls.
-        // verify content as well as pointer because callers may pass stack-local
-        // bufPrint slices whose memory address gets reused across calls
-        if (self.method_cache_class.ptr == class_name.ptr and
+        // single-entry cache: skip string format + hashmap lookup on repeat
+        // calls. content-equal on both sides; callers pass stack-local
+        // bufPrint slices whose pointer address gets reused across calls.
+        // invalidate when total function/class count changes so dynamic
+        // registration (eval, autoload) re-walks correctly
+        const fn_count = self.functions.count() + self.native_fns.count();
+        const cls_count = self.classes.count();
+        if (self.method_cache_fn_count == fn_count and
+            self.method_cache_cls_count == cls_count and
             self.method_cache_class.len == class_name.len and
             self.method_cache_method.len == method_name.len and
+            std.mem.eql(u8, self.method_cache_class, class_name) and
             std.mem.eql(u8, self.method_cache_method, method_name))
         {
             return self.method_cache_result;
@@ -10388,6 +10396,8 @@ pub const VM = struct {
         self.method_cache_class = class_name;
         self.method_cache_method = method_name;
         self.method_cache_result = result;
+        self.method_cache_fn_count = fn_count;
+        self.method_cache_cls_count = cls_count;
         return result;
     }
 
