@@ -2666,6 +2666,35 @@ fn native_filter_var(_ctx: *NativeContext, args: []const Value) RuntimeError!Val
     const eff_flags = flags | opt_flags;
     const fail_default = default_val orelse Value{ .bool = false };
 
+    // FILTER_REQUIRE_ARRAY (0x1000000): input must be an array; apply filter
+    // to each element and return an array. FILTER_FORCE_ARRAY (0x2000000):
+    // wrap scalar in single-element array, then apply per-element
+    const require_array = (eff_flags & 0x01000000) != 0; // FILTER_REQUIRE_ARRAY
+    const force_array = (eff_flags & 0x04000000) != 0; // FILTER_FORCE_ARRAY
+    if (require_array or force_array) {
+        if (value != .array) {
+            if (require_array) return fail_default;
+            // force_array wraps scalar
+            const out = try _ctx.createArray();
+            const single_flags = eff_flags & ~@as(i64, 0x05000000);
+            const sub_args = [_]Value{ value, args[1], .{ .int = single_flags } };
+            const filtered = try native_filter_var(_ctx, &sub_args);
+            try out.append(_ctx.allocator, filtered);
+            return .{ .array = out };
+        }
+        const out = try _ctx.createArray();
+        const single_flags = eff_flags & ~@as(i64, 0x05000000);
+        for (value.array.entries.items) |e| {
+            const sub_args = [_]Value{ e.value, args[1], .{ .int = single_flags } };
+            const filtered = try native_filter_var(_ctx, &sub_args);
+            try out.set(_ctx.allocator, switch (e.key) {
+                .int => |i| .{ .int = i },
+                .string => |s| .{ .string = s },
+            }, filtered);
+        }
+        return .{ .array = out };
+    }
+
     switch (filter) {
         275 => { // FILTER_VALIDATE_IP
             const s = if (value == .string) value.string else return .{ .bool = false };
@@ -2853,6 +2882,26 @@ fn native_filter_var(_ctx: *NativeContext, args: []const Value) RuntimeError!Val
                     '"' => try buf.appendSlice(_ctx.allocator, "&quot;"),
                     '\'' => try buf.appendSlice(_ctx.allocator, "&#039;"),
                     else => try buf.append(_ctx.allocator, c),
+                }
+            }
+            const out = try buf.toOwnedSlice(_ctx.allocator);
+            try _ctx.strings.append(_ctx.allocator, out);
+            return .{ .string = out };
+        },
+        518 => { // FILTER_SANITIZE_URL
+            const s = if (value == .string) value.string else return .{ .bool = false };
+            var buf = std.ArrayListUnmanaged(u8){};
+            for (s) |c| {
+                // PHP strips all chars except a-zA-Z0-9 and the URL-reserved set
+                if (std.ascii.isAlphanumeric(c)) {
+                    try buf.append(_ctx.allocator, c);
+                    continue;
+                }
+                switch (c) {
+                    '$', '-', '_', '.', '+', '!', '*', '\'', '(', ')', ',', '{', '}', '|',
+                    '\\', '^', '~', '[', ']', '`', '<', '>', '#', '%', '"', ';', '/', '?',
+                    ':', '@', '&', '=' => try buf.append(_ctx.allocator, c),
+                    else => {},
                 }
             }
             const out = try buf.toOwnedSlice(_ctx.allocator);
