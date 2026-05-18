@@ -1330,9 +1330,17 @@ fn sprintfImpl(ctx: *NativeContext, fmt_str: []const u8, args: []const Value) ![
             }
 
             var width: usize = 0;
-            while (i < fmt_str.len and fmt_str[i] >= '0' and fmt_str[i] <= '9') {
-                width = width * 10 + (fmt_str[i] - '0');
+            if (i < fmt_str.len and fmt_str[i] == '*') {
+                // dynamic width from next arg, matching PHP's printf-style * width
+                const w_arg = if (arg_idx < args.len) args[arg_idx] else Value.null;
+                arg_idx += 1;
+                width = @intCast(@max(0, Value.toInt(w_arg)));
                 i += 1;
+            } else {
+                while (i < fmt_str.len and fmt_str[i] >= '0' and fmt_str[i] <= '9') {
+                    width = width * 10 + (fmt_str[i] - '0');
+                    i += 1;
+                }
             }
 
             var precision: ?usize = null;
@@ -5293,6 +5301,14 @@ fn vsprintfArgsTooFew(ctx: *NativeContext, fmt: []const u8, argc: usize) Runtime
             i = j;
         } else {
             seq_count += 1;
+        }
+        // each '*' (dynamic width or precision) consumes an additional arg.
+        // scan from the current position through the rest of the specifier
+        var k = i;
+        while (k < fmt.len) : (k += 1) {
+            if (fmt[k] == '*') seq_count += 1;
+            const c = fmt[k];
+            if ((c >= 'a' and c <= 'z') or (c >= 'A' and c <= 'Z')) break;
         }
     }
     required = @max(positional_max, seq_count);
