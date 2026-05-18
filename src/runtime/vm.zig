@@ -7654,9 +7654,24 @@ pub const VM = struct {
         self.strings.append(self.allocator, stderr_text) catch {};
         const stderr_file = std.fs.File{ .handle = 2 };
         _ = stderr_file.write(stderr_text) catch {};
-        const stdout_text = std.fmt.allocPrint(self.allocator, "\nWarning: {s} in {s} on line {d}\n", .{ msg, file, line }) catch return;
-        self.strings.append(self.allocator, stdout_text) catch {};
-        self.output.appendSlice(self.allocator, stdout_text) catch {};
+        if (self.displayErrorsEnabled()) {
+            const stdout_text = std.fmt.allocPrint(self.allocator, "\nWarning: {s} in {s} on line {d}\n", .{ msg, file, line }) catch return;
+            self.strings.append(self.allocator, stdout_text) catch {};
+            self.output.appendSlice(self.allocator, stdout_text) catch {};
+        }
+    }
+
+    pub fn displayErrorsEnabled(self: *const VM) bool {
+        // PHP's display_errors: '1'/'On'/'stdout' enables a separate display
+        // copy that goes to stdout. '0'/'Off'/'stderr' (CLI default) suppress
+        // the display copy - only the 'PHP Label:' log copy goes to stderr
+        const val = self.ini_settings.get("display_errors") orelse "stderr";
+        if (val.len == 0) return false;
+        if (std.mem.eql(u8, val, "0")) return false;
+        if (std.ascii.eqlIgnoreCase(val, "off")) return false;
+        if (std.ascii.eqlIgnoreCase(val, "false")) return false;
+        if (std.ascii.eqlIgnoreCase(val, "stderr")) return false;
+        return true;
     }
 
     fn stringHasLeadingNumericish(s: []const u8) bool {
@@ -8893,9 +8908,11 @@ pub const VM = struct {
         self.strings.append(self.allocator, stderr_text) catch {};
         const stderr_file = std.fs.File{ .handle = 2 };
         _ = stderr_file.write(stderr_text) catch {};
-        const stdout_text = std.fmt.allocPrint(self.allocator, "\nWarning: {s} in {s} on line {d}\n", .{ msg, file, line }) catch return;
-        self.strings.append(self.allocator, stdout_text) catch {};
-        self.output.appendSlice(self.allocator, stdout_text) catch {};
+        if (self.displayErrorsEnabled()) {
+            const stdout_text = std.fmt.allocPrint(self.allocator, "\nWarning: {s} in {s} on line {d}\n", .{ msg, file, line }) catch return;
+            self.strings.append(self.allocator, stdout_text) catch {};
+            self.output.appendSlice(self.allocator, stdout_text) catch {};
+        }
     }
 
     pub fn cloneClosureWithThis(self: *VM, closure_name: []const u8, new_this: Value, scope_action: ClosureScope) !Value {

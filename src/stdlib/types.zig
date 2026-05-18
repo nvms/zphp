@@ -1507,7 +1507,13 @@ fn iniDefault(name: []const u8) ?[]const u8 {
     if (std.mem.eql(u8, name, "error_log")) return "";
     if (std.mem.eql(u8, name, "html_errors")) return "0";
     if (std.mem.eql(u8, name, "max_execution_time")) return "0";
-    if (std.mem.eql(u8, name, "display_errors")) return "1";
+    // 'stderr' matches PHP CLI's actual default in 8.0+. log_errors emission
+    // still goes to stderr; the bare display copy is suppressed because
+    // display_errors=STDERR collapses into the log stream. userland
+    // 'ini_set(display_errors, 1)' opts back into the dual-stream behavior of
+    // display_errors=STDOUT (display copy on stdout, log copy on stderr).
+    // displayErrorsEnabled treats this default + 0/Off as "no display copy"
+    if (std.mem.eql(u8, name, "display_errors")) return "stderr";
     if (std.mem.eql(u8, name, "error_reporting")) return "30719";
     if (std.mem.eql(u8, name, "zend.assertions")) return "1";
     if (std.mem.eql(u8, name, "assert.active")) return "1";
@@ -2036,9 +2042,11 @@ fn native_trigger_error(ctx: *NativeContext, args: []const Value) RuntimeError!V
         try ctx.vm.strings.append(ctx.allocator, stderr_text);
         const stderr_file = std.fs.File{ .handle = 2 };
         _ = stderr_file.write(stderr_text) catch {};
-        const stdout_text = std.fmt.allocPrint(ctx.allocator, "\n{s}: {s} in {s} on line {d}\n", .{ label, message, file, line }) catch return Value{ .bool = true };
-        try ctx.vm.strings.append(ctx.allocator, stdout_text);
-        try ctx.vm.output.appendSlice(ctx.allocator, stdout_text);
+        if (ctx.vm.displayErrorsEnabled()) {
+            const stdout_text = std.fmt.allocPrint(ctx.allocator, "\n{s}: {s} in {s} on line {d}\n", .{ label, message, file, line }) catch return Value{ .bool = true };
+            try ctx.vm.strings.append(ctx.allocator, stdout_text);
+            try ctx.vm.output.appendSlice(ctx.allocator, stdout_text);
+        }
     }
     return .{ .bool = true };
 }
