@@ -26,7 +26,7 @@ errors=""
 
 for f in "$SCRIPT_DIR"/harness/test-*.php; do
     name="$(basename "$f" .php)"
-    php_out="$(php -d error_reporting=E_ALL\&~E_DEPRECATED\&~E_WARNING -d display_errors=0 "$f" 2>&1)" || true
+    php_out="$(php -d error_reporting=E_ALL\&~E_DEPRECATED\&~E_WARNING -d display_errors=0 -d zend.exception_ignore_args=0 "$f" 2>&1)" || true
     TIMEOUT_CMD=""
     if command -v timeout &>/dev/null; then
         TIMEOUT_CMD="timeout 120"
