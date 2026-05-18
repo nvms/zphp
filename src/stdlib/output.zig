@@ -142,11 +142,12 @@ fn varDumpValue(ctx: *NativeContext, val: Value, depth: usize) !void {
             try appendIndent(out, a, indent);
             try out.appendSlice(a, "object(");
             try out.appendSlice(a, obj.class_name);
-            // zphp's arena memory model can't reproduce PHP's refcount-based id
-            // reuse, so a faithful sequential id would diverge from PHP whenever
-            // a transient object would otherwise have been freed. always emit #1
-            // for var_dump output; user code that distinguishes objects should
-            // use spl_object_id instead
+            // PHP's '#N' for var_dump is the refcount-reused object id; the
+            // dominant real-world pattern (allocate -> dump -> allocate ->
+            // dump) yields '#1' for every dump because the previous object's
+            // refcount dropped before the next allocation. zphp's arena keeps
+            // objects alive so monotonic obj.id would diverge. emit #1 here
+            // and let spl_object_id surface the underlying unique counter
             try out.appendSlice(a, ")#1 (");
             var tmp: [32]u8 = undefined;
             var prop_count: usize = 0;

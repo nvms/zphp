@@ -756,7 +756,8 @@ pub const VM = struct {
         };
         for (rm_cases) |name| {
             const case_obj = try allocator.create(PhpObject);
-            case_obj.* = .{ .class_name = "RoundingMode" };
+            vm.next_object_id += 1;
+            case_obj.* = .{ .class_name = "RoundingMode", .id = vm.next_object_id };
             try vm.objects.append(allocator, case_obj);
             try case_obj.set(allocator, "name", .{ .string = name });
             try rm_def.static_props.put(allocator, name, .{ .object = case_obj });
@@ -1692,6 +1693,10 @@ pub const VM = struct {
         self.frames[0] = .{ .chunk = &result.chunk, .ip = 0, .vars = vars, .locals = locals };
         self.frame_count = 1;
         self.obj_id_base = self.objects.items.len;
+        // reset the per-allocation id counter so user-visible '#N' starts at 1
+        // matching PHP. internal stdlib-init objects keep the ids they already
+        // got (some of those are case singletons we hold references to)
+        self.next_object_id = 0;
         try self.run();
     }
 
@@ -3956,7 +3961,8 @@ pub const VM = struct {
                     if (val == .object) {
                         const src = val.object;
                         const copy = try self.allocator.create(PhpObject);
-                        copy.* = .{ .class_name = src.class_name };
+                        self.next_object_id += 1;
+                        copy.* = .{ .class_name = src.class_name, .id = self.next_object_id };
                         if (src.slots) |src_slots| {
                             const new_slots = try self.allocator.alloc(Value, src_slots.len);
                             for (src_slots, 0..) |sv, i| {
@@ -4107,7 +4113,8 @@ pub const VM = struct {
                         self.push(v);
                     } else if (v == .array) {
                         const obj = try self.allocator.create(PhpObject);
-                        obj.* = .{ .class_name = "stdClass" };
+                        self.next_object_id += 1;
+                        obj.* = .{ .class_name = "stdClass", .id = self.next_object_id };
                         try self.objects.append(self.allocator, obj);
                         for (v.array.entries.items) |entry| {
                             const key_str: []const u8 = switch (entry.key) {
@@ -4123,12 +4130,14 @@ pub const VM = struct {
                         self.push(.{ .object = obj });
                     } else if (v == .null) {
                         const obj = try self.allocator.create(PhpObject);
-                        obj.* = .{ .class_name = "stdClass" };
+                        self.next_object_id += 1;
+                        obj.* = .{ .class_name = "stdClass", .id = self.next_object_id };
                         try self.objects.append(self.allocator, obj);
                         self.push(.{ .object = obj });
                     } else {
                         const obj = try self.allocator.create(PhpObject);
-                        obj.* = .{ .class_name = "stdClass" };
+                        self.next_object_id += 1;
+                        obj.* = .{ .class_name = "stdClass", .id = self.next_object_id };
                         try self.objects.append(self.allocator, obj);
                         try obj.set(self.allocator, "scalar", v);
                         self.push(.{ .object = obj });
@@ -4940,7 +4949,8 @@ pub const VM = struct {
                     }
 
                     const obj = try self.allocator.create(PhpObject);
-                    obj.* = .{ .class_name = class_name };
+                    self.next_object_id += 1;
+                    obj.* = .{ .class_name = class_name, .id = self.next_object_id };
                     try self.objects.append(self.allocator, obj);
 
                     // set property defaults from class and parent chain
@@ -5139,7 +5149,8 @@ pub const VM = struct {
                     }
 
                     const obj = try self.allocator.create(PhpObject);
-                    obj.* = .{ .class_name = class_name };
+                    self.next_object_id += 1;
+                    obj.* = .{ .class_name = class_name, .id = self.next_object_id };
                     try self.objects.append(self.allocator, obj);
                     try self.initObjectProperties(obj, class_name);
 
@@ -7485,7 +7496,8 @@ pub const VM = struct {
 
     pub fn setPendingException(self: *VM, class_name: []const u8, message: []const u8) !void {
         const obj = try self.allocator.create(PhpObject);
-        obj.* = .{ .class_name = class_name };
+        self.next_object_id += 1;
+        obj.* = .{ .class_name = class_name, .id = self.next_object_id };
         try obj.set(self.allocator, "message", .{ .string = message });
         try obj.set(self.allocator, "code", .{ .int = 0 });
         try obj.set(self.allocator, "file", .{ .string = self.file_path });
@@ -7519,7 +7531,8 @@ pub const VM = struct {
     pub fn closeGenerator(self: *VM, gen: *Generator, base_frame: usize) RuntimeError!void {
         if (gen.state != .suspended) return;
         const obj = try self.allocator.create(PhpObject);
-        obj.* = .{ .class_name = "Exception" };
+        self.next_object_id += 1;
+        obj.* = .{ .class_name = "Exception", .id = self.next_object_id };
         try obj.set(self.allocator, "message", .{ .string = "Generator closed" });
         try obj.set(self.allocator, "code", .{ .int = 0 });
         try self.objects.append(self.allocator, obj);
@@ -7711,7 +7724,8 @@ pub const VM = struct {
 
     pub fn throwBuiltinException(self: *VM, class_name: []const u8, message: []const u8) !bool {
         const obj = try self.allocator.create(PhpObject);
-        obj.* = .{ .class_name = class_name };
+        self.next_object_id += 1;
+        obj.* = .{ .class_name = class_name, .id = self.next_object_id };
         try obj.set(self.allocator, "message", .{ .string = message });
         try obj.set(self.allocator, "code", .{ .int = 0 });
         // file/line should reflect the throwing frame (often a function in a
@@ -8541,7 +8555,8 @@ pub const VM = struct {
         var vj: usize = 0;
         for (0..case_count) |ci| {
             const case_obj = try self.allocator.create(PhpObject);
-            case_obj.* = .{ .class_name = enum_name };
+            self.next_object_id += 1;
+            case_obj.* = .{ .class_name = enum_name, .id = self.next_object_id };
             try self.objects.append(self.allocator, case_obj);
             try case_obj.set(self.allocator, "name", .{ .string = case_names[ci] });
             if (case_has_value[ci] == 1) {
@@ -10847,7 +10862,8 @@ pub const VM = struct {
             return error.RuntimeError;
         }
         const obj = try self.allocator.create(PhpObject);
-        obj.* = .{ .class_name = class_name };
+        self.next_object_id += 1;
+        obj.* = .{ .class_name = class_name, .id = self.next_object_id };
         try self.objects.append(self.allocator, obj);
         try self.initObjectProperties(obj, class_name);
 
