@@ -174,6 +174,29 @@ pub const NativeContext = struct {
 
     pub fn invokeCallableRef(self: *NativeContext, callable: Value, args: []Value) RuntimeError!Value {
         if (callable == .string) return self.vm.callByNameRef(callable.string, args);
+        // __invoke on an object instance
+        if (callable == .object) {
+            if (self.vm.hasMethod(callable.object.class_name, "__invoke")) {
+                return self.vm.callMethodRef(callable.object, "__invoke", args);
+            }
+            return error.RuntimeError;
+        }
+        // [target, 'method'] callable - target may be an instance or a class name
+        if (callable == .array) {
+            const arr = callable.array;
+            if (arr.entries.items.len == 2) {
+                const target = arr.entries.items[0].value;
+                const method_val = arr.entries.items[1].value;
+                if (method_val == .string) {
+                    if (target == .object) return self.vm.callMethodRef(target.object, method_val.string, args);
+                    if (target == .string) {
+                        var buf: [512]u8 = undefined;
+                        const full = std.fmt.bufPrint(&buf, "{s}::{s}", .{ target.string, method_val.string }) catch return error.RuntimeError;
+                        return self.vm.callByNameRef(full, args);
+                    }
+                }
+            }
+        }
         return self.invokeCallable(callable, args);
     }
 };
@@ -11581,6 +11604,46 @@ pub const VM = struct {
         self.handler_count = base_handler;
         self.handler_floor = prev_floor;
         return self.pop();
+    }
+
+    // ref-propagating method dispatch. mirrors callByNameRef but resolves
+    // through the class's method table. needed for callables like
+    // [$obj, 'method'] or [Class::class, 'method'] when the target declares
+    // by-ref params - without writeback, array_walk + an object-method
+    // callback can't mutate the array entries
+    pub fn callMethodRef(self: *VM, obj: *PhpObject, method_name: []const u8, args: []Value) RuntimeError!Value {
+        const full_name = self.resolveMethod(obj.class_name, method_name) catch return error.RuntimeError;
+        if (self.functions.get(full_name)) |func| {
+            if (func.ref_params.len == 0) {
+                return self.callMethod(obj, method_name, args);
+            }
+            const bind_count = @min(args.len, func.arity);
+            var new_vars = self.acquireFrameVars();
+            try new_vars.put(self.allocator, "$this", .{ .object = obj });
+            var ref_slots: std.StringHashMapUnmanaged(*Value) = .{};
+            try self.bindClosures(&new_vars, &ref_slots, full_name);
+
+            var cells: [16]?*Value = .{null} ** 16;
+            for (0..bind_count) |i| {
+                try new_vars.put(self.allocator, func.params[i], try self.copyValue(args[i]));
+                if (i < func.ref_params.len and func.ref_params[i] and i < 16) {
+                    const cell = try self.allocator.create(Value);
+                    cell.* = args[i];
+                    try self.ref_cells.append(self.allocator, cell);
+                    try ref_slots.put(self.allocator, func.params[i], cell);
+                    cells[i] = cell;
+                }
+            }
+            try self.fillDefaults(&new_vars, func, bind_count);
+
+            const result = try self.executeFunctionWithRefs(func, new_vars, ref_slots);
+
+            for (0..bind_count) |i| {
+                if (cells[i]) |cell| args[i] = cell.*;
+            }
+            return result;
+        }
+        return self.callMethod(obj, method_name, args);
     }
 
     pub fn callByNameRef(self: *VM, raw_name: []const u8, args: []Value) RuntimeError!Value {
