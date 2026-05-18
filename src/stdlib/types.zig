@@ -2032,31 +2032,15 @@ fn native_trigger_error(ctx: *NativeContext, args: []const Value) RuntimeError!V
             _ = stdout_file.write(ctx.vm.output.items) catch {};
             ctx.vm.output.clearRetainingCapacity();
         }
-        // stderr emission (log_errors=On default) always runs. the bare
-        // 'Label: ...' copy is the display_errors output - emit it only when
-        // display_errors is on so '-d display_errors=0' suppresses the dup
         const stderr_text = std.fmt.allocPrint(ctx.allocator, "PHP {s}:  {s} in {s} on line {d}\n", .{ label, message, file, line }) catch return Value{ .bool = true };
         try ctx.vm.strings.append(ctx.allocator, stderr_text);
         const stderr_file = std.fs.File{ .handle = 2 };
         _ = stderr_file.write(stderr_text) catch {};
-        if (displayErrorsEnabled(ctx.vm)) {
-            const stdout_text = std.fmt.allocPrint(ctx.allocator, "\n{s}: {s} in {s} on line {d}\n", .{ label, message, file, line }) catch return Value{ .bool = true };
-            try ctx.vm.strings.append(ctx.allocator, stdout_text);
-            try ctx.vm.output.appendSlice(ctx.allocator, stdout_text);
-        }
+        const stdout_text = std.fmt.allocPrint(ctx.allocator, "\n{s}: {s} in {s} on line {d}\n", .{ label, message, file, line }) catch return Value{ .bool = true };
+        try ctx.vm.strings.append(ctx.allocator, stdout_text);
+        try ctx.vm.output.appendSlice(ctx.allocator, stdout_text);
     }
     return .{ .bool = true };
-}
-
-fn displayErrorsEnabled(vm: *@import("../runtime/vm.zig").VM) bool {
-    // PHP's display_errors accepts '0'/'Off'/empty as disabled; everything
-    // else (including 'stderr'/'stdout'/'1'/'On') counts as enabled
-    const val = vm.ini_settings.get("display_errors") orelse "1";
-    if (val.len == 0) return false;
-    if (std.mem.eql(u8, val, "0")) return false;
-    if (std.ascii.eqlIgnoreCase(val, "off")) return false;
-    if (std.ascii.eqlIgnoreCase(val, "false")) return false;
-    return true;
 }
 
 fn errnoLabel(errno: i64) []const u8 {

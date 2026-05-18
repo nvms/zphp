@@ -20,8 +20,6 @@ pub const entries = .{
     .{ "hash_hmac_algos", native_hash_hmac_algos },
     .{ "hash_equals", native_hash_equals },
     .{ "hash_file", native_hash_file },
-    .{ "md5_file", native_md5_file },
-    .{ "sha1_file", native_sha1_file },
     .{ "hash_init", native_hash_init },
     .{ "hash_update", native_hash_update },
     .{ "hash_update_file", native_hash_update_file },
@@ -664,29 +662,6 @@ fn native_hash_file(ctx: *NativeContext, args: []const Value) RuntimeError!Value
     computeHash(algo, data, digest[0..dlen]);
     if (raw_output) return .{ .string = try ctx.createString(digest[0..dlen]) };
     return .{ .string = try toHexString(ctx, digest[0..dlen]) };
-}
-
-fn native_md5_file(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    return hashFileWithWarning(ctx, args, "md5", "md5_file");
-}
-
-fn native_sha1_file(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    return hashFileWithWarning(ctx, args, "sha1", "sha1_file");
-}
-
-fn hashFileWithWarning(ctx: *NativeContext, args: []const Value, algo: []const u8, fn_name: []const u8) RuntimeError!Value {
-    if (args.len < 1 or args[0] != .string) return .{ .bool = false };
-    const raw = args.len >= 2 and args[1].isTruthy();
-    // probe the file first so we can emit PHP's exact warning text on failure;
-    // hash_file returns false silently which doesn't match md5_file/sha1_file
-    std.fs.cwd().access(args[0].string, .{}) catch {
-        const msg = std.fmt.allocPrint(ctx.allocator, "{s}({s}): Failed to open stream: No such file or directory", .{ fn_name, args[0].string }) catch return .{ .bool = false };
-        ctx.vm.strings.append(ctx.allocator, msg) catch {};
-        ctx.vm.emitWarning(msg);
-        return .{ .bool = false };
-    };
-    const hf_args = [_]Value{ .{ .string = algo }, args[0], .{ .bool = raw } };
-    return native_hash_file(ctx, &hf_args);
 }
 
 fn native_hash_equals(_: *NativeContext, args: []const Value) RuntimeError!Value {

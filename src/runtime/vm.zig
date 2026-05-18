@@ -7650,27 +7650,13 @@ pub const VM = struct {
             _ = stdout_file.write(self.output.items) catch {};
             self.output.clearRetainingCapacity();
         }
-        // stderr log_errors emission always runs; the bare 'Warning:' display
-        // copy goes to stdout only when display_errors is on so the user can
-        // suppress the dup via '-d display_errors=0'
         const stderr_text = std.fmt.allocPrint(self.allocator, "PHP Warning:  {s} in {s} on line {d}\n", .{ msg, file, line }) catch return;
         self.strings.append(self.allocator, stderr_text) catch {};
         const stderr_file = std.fs.File{ .handle = 2 };
         _ = stderr_file.write(stderr_text) catch {};
-        if (self.displayErrorsEnabled()) {
-            const stdout_text = std.fmt.allocPrint(self.allocator, "\nWarning: {s} in {s} on line {d}\n", .{ msg, file, line }) catch return;
-            self.strings.append(self.allocator, stdout_text) catch {};
-            self.output.appendSlice(self.allocator, stdout_text) catch {};
-        }
-    }
-
-    pub fn displayErrorsEnabled(self: *const VM) bool {
-        const val = self.ini_settings.get("display_errors") orelse "1";
-        if (val.len == 0) return false;
-        if (std.mem.eql(u8, val, "0")) return false;
-        if (std.ascii.eqlIgnoreCase(val, "off")) return false;
-        if (std.ascii.eqlIgnoreCase(val, "false")) return false;
-        return true;
+        const stdout_text = std.fmt.allocPrint(self.allocator, "\nWarning: {s} in {s} on line {d}\n", .{ msg, file, line }) catch return;
+        self.strings.append(self.allocator, stdout_text) catch {};
+        self.output.appendSlice(self.allocator, stdout_text) catch {};
     }
 
     fn stringHasLeadingNumericish(s: []const u8) bool {
@@ -8907,11 +8893,9 @@ pub const VM = struct {
         self.strings.append(self.allocator, stderr_text) catch {};
         const stderr_file = std.fs.File{ .handle = 2 };
         _ = stderr_file.write(stderr_text) catch {};
-        if (self.displayErrorsEnabled()) {
-            const stdout_text = std.fmt.allocPrint(self.allocator, "\nWarning: {s} in {s} on line {d}\n", .{ msg, file, line }) catch return;
-            self.strings.append(self.allocator, stdout_text) catch {};
-            self.output.appendSlice(self.allocator, stdout_text) catch {};
-        }
+        const stdout_text = std.fmt.allocPrint(self.allocator, "\nWarning: {s} in {s} on line {d}\n", .{ msg, file, line }) catch return;
+        self.strings.append(self.allocator, stdout_text) catch {};
+        self.output.appendSlice(self.allocator, stdout_text) catch {};
     }
 
     pub fn cloneClosureWithThis(self: *VM, closure_name: []const u8, new_this: Value, scope_action: ClosureScope) !Value {
