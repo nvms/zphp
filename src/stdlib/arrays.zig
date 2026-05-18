@@ -1,5 +1,6 @@
 const std = @import("std");
 const Value = @import("../runtime/value.zig").Value;
+const phpTypeName = @import("types.zig").phpTypeName;
 const PhpArray = @import("../runtime/value.zig").PhpArray;
 const NativeContext = @import("../runtime/vm.zig").NativeContext;
 const RuntimeError = error{ RuntimeError, OutOfMemory };
@@ -532,8 +533,16 @@ fn natcasesort_impl(_: *NativeContext, args: []const Value) RuntimeError!Value {
     return .{ .bool = true };
 }
 
-fn native_sort(_: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len == 0 or args[0] != .array) return .{ .bool = false };
+fn throwArrayTypeError(ctx: *NativeContext, fn_name: []const u8, arg_pos: u8, got: Value) RuntimeError {
+    const msg = std.fmt.allocPrint(ctx.allocator, "{s}(): Argument #{d} ($array) must be of type array, {s} given", .{ fn_name, arg_pos, phpTypeName(got) }) catch return error.RuntimeError;
+    ctx.vm.strings.append(ctx.allocator, msg) catch {};
+    ctx.vm.setPendingException("TypeError", msg) catch {};
+    return error.RuntimeError;
+}
+
+fn native_sort(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len == 0) return .{ .bool = false };
+    if (args[0] != .array) return throwArrayTypeError(ctx, "sort", 1, args[0]);
     const arr = args[0].array;
     const flags: i64 = if (args.len >= 2) Value.toInt(args[1]) else 0;
     sortWithFlags(arr, flags, false);
@@ -541,8 +550,9 @@ fn native_sort(_: *NativeContext, args: []const Value) RuntimeError!Value {
     return .{ .bool = true };
 }
 
-fn native_rsort(_: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len == 0 or args[0] != .array) return .{ .bool = false };
+fn native_rsort(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len == 0) return .{ .bool = false };
+    if (args[0] != .array) return throwArrayTypeError(ctx, "rsort", 1, args[0]);
     const arr = args[0].array;
     const flags: i64 = if (args.len >= 2) Value.toInt(args[1]) else 0;
     sortWithFlags(arr, flags, true);
@@ -620,7 +630,13 @@ fn array_map(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len < 2) return .null;
     for (args[1..], 1..) |a, i| {
         if (a != .array) {
-            const msg = try std.fmt.allocPrint(ctx.allocator, "array_map(): Argument #{d} must be of type array", .{i + 1});
+            // PHP labels arg #2 as '($array)' but drops the param-name for
+            // subsequent array args (#3 → 'Argument #3 must be of type array')
+            const pos: u8 = @intCast(i + 1);
+            const msg = if (pos == 2)
+                try std.fmt.allocPrint(ctx.allocator, "array_map(): Argument #2 ($array) must be of type array, {s} given", .{phpTypeName(a)})
+            else
+                try std.fmt.allocPrint(ctx.allocator, "array_map(): Argument #{d} must be of type array, {s} given", .{ pos, phpTypeName(a) });
             try ctx.strings.append(ctx.allocator, msg);
             try ctx.vm.setPendingException("TypeError", msg);
             return error.RuntimeError;
@@ -1208,8 +1224,9 @@ fn array_count_values(ctx: *NativeContext, args: []const Value) RuntimeError!Val
     return .{ .array = result };
 }
 
-fn array_sum(_: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len == 0 or args[0] != .array) return .{ .int = 0 };
+fn array_sum(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len == 0) return .{ .int = 0 };
+    if (args[0] != .array) return throwArrayTypeError(ctx, "array_sum", 1, args[0]);
     const src = args[0].array;
     var has_float = false;
     var int_sum: i64 = 0;
