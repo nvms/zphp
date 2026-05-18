@@ -107,6 +107,7 @@ pub const entries = .{
     .{ "chdir", native_chdir },
     .{ "stream_resolve_include_path", native_stream_resolve_include_path },
     .{ "stream_isatty", native_stream_isatty },
+    .{ "stream_supports_lock", native_stream_supports_lock },
     .{ "stream_set_chunk_size", native_stream_set_chunk_size },
     .{ "stream_set_read_buffer", native_stream_set_buffer },
     .{ "stream_set_write_buffer", native_stream_set_buffer },
@@ -1290,7 +1291,13 @@ fn native_fopen(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
         std.fs.cwd().deleteFile(tmp) catch {};
         break :blk f;
     } else
-        openWithMode(path, mode) catch return Value{ .bool = false };
+        openWithMode(path, mode) catch |err| {
+            const reason = openErrorReason(err);
+            const msg = std.fmt.allocPrint(ctx.allocator, "fopen({s}): Failed to open stream: {s}", .{ path, reason }) catch return Value{ .bool = false };
+            ctx.vm.strings.append(ctx.allocator, msg) catch {};
+            ctx.vm.emitWarning(msg);
+            return Value{ .bool = false };
+        };
 
     const obj = try ctx.allocator.create(PhpObject);
     obj.* = .{ .class_name = "FileHandle" };
@@ -1301,6 +1308,21 @@ fn native_fopen(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (is_memory_stream) try obj.set(ctx.allocator, "__peek_eof", .{ .bool = true });
     try ctx.vm.objects.append(ctx.allocator, obj);
     return .{ .object = obj };
+}
+
+fn openErrorReason(err: anyerror) []const u8 {
+    return switch (err) {
+        error.FileNotFound => "No such file or directory",
+        error.PathAlreadyExists => "File exists",
+        error.AccessDenied, error.PermissionDenied => "Permission denied",
+        error.IsDir => "Is a directory",
+        error.NotDir => "Not a directory",
+        error.NameTooLong => "File name too long",
+        error.SymLinkLoop => "Too many levels of symbolic links",
+        error.NoSpaceLeft => "No space left on device",
+        error.ReadOnlyFileSystem => "Read-only file system",
+        else => "Unknown error",
+    };
 }
 
 fn openWithMode(path: []const u8, mode: []const u8) !std.fs.File {
@@ -2529,6 +2551,26 @@ fn native_stream_isatty(_: *NativeContext, args: []const Value) RuntimeError!Val
 
 fn native_clearstatcache(_: *NativeContext, _: []const Value) RuntimeError!Value {
     return .null;
+}
+
+fn native_stream_supports_lock(_: *NativeContext, args: []const Value) RuntimeError!Value {
+    // local file streams (FileHandle backed by an fd from open()) support
+    // flock; in-memory streams (php://memory, php://temp), HTTP/curl-backed
+    // streams, and other non-fd wrappers do not. detect by inspecting the
+    // path: anything starting with 'php://', 'http://', 'https://', 'data:',
+    // 'ftp://' is a non-fd stream
+    if (args.len == 0 or args[0] != .object) return .{ .bool = false };
+    const obj = args[0].object;
+    if (!std.mem.eql(u8, obj.class_name, "FileHandle")) return .{ .bool = false };
+    const path_v = obj.get("__path");
+    if (path_v != .string) return .{ .bool = true };
+    const p = path_v.string;
+    if (std.mem.startsWith(u8, p, "php://") or
+        std.mem.startsWith(u8, p, "http://") or
+        std.mem.startsWith(u8, p, "https://") or
+        std.mem.startsWith(u8, p, "ftp://") or
+        std.mem.startsWith(u8, p, "data:")) return .{ .bool = false };
+    return .{ .bool = true };
 }
 
 fn native_stream_set_chunk_size(_: *NativeContext, _: []const Value) RuntimeError!Value {
