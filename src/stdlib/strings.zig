@@ -2727,6 +2727,161 @@ fn isAsciiEncoding(name: []const u8) bool {
     return encodingMatches(name, .{ "ascii", "us-ascii" });
 }
 
+fn isUtf16Encoding(name: []const u8) bool {
+    return encodingMatches(name, .{ "utf-16", "utf16", "utf-16be", "utf16be", "utf-16le", "utf16le" });
+}
+
+fn isUtf16LE(name: []const u8) bool {
+    return encodingMatches(name, .{ "utf-16le", "utf16le" });
+}
+
+fn isUtf32Encoding(name: []const u8) bool {
+    return encodingMatches(name, .{ "utf-32", "utf32", "utf-32be", "utf32be", "utf-32le", "utf32le" });
+}
+
+fn isUtf32LE(name: []const u8) bool {
+    return encodingMatches(name, .{ "utf-32le", "utf32le" });
+}
+
+fn convertUtf8ToUtf16(allocator: std.mem.Allocator, input: []const u8, little_endian: bool) ![]u8 {
+    var out = std.ArrayListUnmanaged(u8){};
+    errdefer out.deinit(allocator);
+    var i: usize = 0;
+    while (i < input.len) {
+        const b = input[i];
+        const len = utf8CharLen(b);
+        if (i + len > input.len) break;
+        var cp: u21 = 0;
+        switch (len) {
+            1 => cp = b,
+            2 => cp = (@as(u21, b & 0x1f) << 6) | @as(u21, input[i + 1] & 0x3f),
+            3 => cp = (@as(u21, b & 0x0f) << 12) | (@as(u21, input[i + 1] & 0x3f) << 6) | @as(u21, input[i + 2] & 0x3f),
+            4 => cp = (@as(u21, b & 0x07) << 18) | (@as(u21, input[i + 1] & 0x3f) << 12) | (@as(u21, input[i + 2] & 0x3f) << 6) | @as(u21, input[i + 3] & 0x3f),
+            else => cp = '?',
+        }
+        if (cp <= 0xFFFF) {
+            try appendU16(&out, allocator, @intCast(cp), little_endian);
+        } else {
+            const adjusted: u21 = cp - 0x10000;
+            const high: u16 = 0xD800 + @as(u16, @intCast(adjusted >> 10));
+            const low: u16 = 0xDC00 + @as(u16, @intCast(adjusted & 0x3FF));
+            try appendU16(&out, allocator, high, little_endian);
+            try appendU16(&out, allocator, low, little_endian);
+        }
+        i += len;
+    }
+    return try out.toOwnedSlice(allocator);
+}
+
+fn appendU16(out: *std.ArrayListUnmanaged(u8), allocator: std.mem.Allocator, val: u16, little_endian: bool) !void {
+    if (little_endian) {
+        try out.append(allocator, @intCast(val & 0xFF));
+        try out.append(allocator, @intCast(val >> 8));
+    } else {
+        try out.append(allocator, @intCast(val >> 8));
+        try out.append(allocator, @intCast(val & 0xFF));
+    }
+}
+
+fn convertUtf16ToUtf8(allocator: std.mem.Allocator, input: []const u8, little_endian: bool) ![]u8 {
+    var out = std.ArrayListUnmanaged(u8){};
+    errdefer out.deinit(allocator);
+    var i: usize = 0;
+    while (i + 1 < input.len) : (i += 2) {
+        const hi: u16 = if (little_endian)
+            @as(u16, input[i]) | (@as(u16, input[i + 1]) << 8)
+        else
+            (@as(u16, input[i]) << 8) | @as(u16, input[i + 1]);
+        var cp: u21 = hi;
+        if (hi >= 0xD800 and hi <= 0xDBFF and i + 3 < input.len) {
+            const lo: u16 = if (little_endian)
+                @as(u16, input[i + 2]) | (@as(u16, input[i + 3]) << 8)
+            else
+                (@as(u16, input[i + 2]) << 8) | @as(u16, input[i + 3]);
+            if (lo >= 0xDC00 and lo <= 0xDFFF) {
+                cp = 0x10000 + ((@as(u21, hi) - 0xD800) << 10) + (@as(u21, lo) - 0xDC00);
+                i += 2;
+            }
+        }
+        try appendUtf8(&out, allocator, cp);
+    }
+    return try out.toOwnedSlice(allocator);
+}
+
+fn appendUtf8(out: *std.ArrayListUnmanaged(u8), allocator: std.mem.Allocator, cp: u21) !void {
+    if (cp < 0x80) {
+        try out.append(allocator, @intCast(cp));
+    } else if (cp < 0x800) {
+        try out.append(allocator, @intCast(0xc0 | (cp >> 6)));
+        try out.append(allocator, @intCast(0x80 | (cp & 0x3f)));
+    } else if (cp < 0x10000) {
+        try out.append(allocator, @intCast(0xe0 | (cp >> 12)));
+        try out.append(allocator, @intCast(0x80 | ((cp >> 6) & 0x3f)));
+        try out.append(allocator, @intCast(0x80 | (cp & 0x3f)));
+    } else {
+        try out.append(allocator, @intCast(0xf0 | (cp >> 18)));
+        try out.append(allocator, @intCast(0x80 | ((cp >> 12) & 0x3f)));
+        try out.append(allocator, @intCast(0x80 | ((cp >> 6) & 0x3f)));
+        try out.append(allocator, @intCast(0x80 | (cp & 0x3f)));
+    }
+}
+
+fn convertUtf8ToUtf32(allocator: std.mem.Allocator, input: []const u8, little_endian: bool) ![]u8 {
+    var out = std.ArrayListUnmanaged(u8){};
+    errdefer out.deinit(allocator);
+    var i: usize = 0;
+    while (i < input.len) {
+        const b = input[i];
+        const len = utf8CharLen(b);
+        if (i + len > input.len) break;
+        var cp: u32 = 0;
+        switch (len) {
+            1 => cp = b,
+            2 => cp = (@as(u32, b & 0x1f) << 6) | @as(u32, input[i + 1] & 0x3f),
+            3 => cp = (@as(u32, b & 0x0f) << 12) | (@as(u32, input[i + 1] & 0x3f) << 6) | @as(u32, input[i + 2] & 0x3f),
+            4 => cp = (@as(u32, b & 0x07) << 18) | (@as(u32, input[i + 1] & 0x3f) << 12) | (@as(u32, input[i + 2] & 0x3f) << 6) | @as(u32, input[i + 3] & 0x3f),
+            else => cp = '?',
+        }
+        try appendU32(&out, allocator, cp, little_endian);
+        i += len;
+    }
+    return try out.toOwnedSlice(allocator);
+}
+
+fn appendU32(out: *std.ArrayListUnmanaged(u8), allocator: std.mem.Allocator, val: u32, little_endian: bool) !void {
+    var bytes: [4]u8 = undefined;
+    if (little_endian) {
+        bytes[0] = @intCast(val & 0xFF);
+        bytes[1] = @intCast((val >> 8) & 0xFF);
+        bytes[2] = @intCast((val >> 16) & 0xFF);
+        bytes[3] = @intCast((val >> 24) & 0xFF);
+    } else {
+        bytes[0] = @intCast((val >> 24) & 0xFF);
+        bytes[1] = @intCast((val >> 16) & 0xFF);
+        bytes[2] = @intCast((val >> 8) & 0xFF);
+        bytes[3] = @intCast(val & 0xFF);
+    }
+    try out.appendSlice(allocator, &bytes);
+}
+
+fn convertUtf32ToUtf8(allocator: std.mem.Allocator, input: []const u8, little_endian: bool) ![]u8 {
+    var out = std.ArrayListUnmanaged(u8){};
+    errdefer out.deinit(allocator);
+    var i: usize = 0;
+    while (i + 3 < input.len) : (i += 4) {
+        const cp: u32 = if (little_endian)
+            @as(u32, input[i]) | (@as(u32, input[i + 1]) << 8) | (@as(u32, input[i + 2]) << 16) | (@as(u32, input[i + 3]) << 24)
+        else
+            (@as(u32, input[i]) << 24) | (@as(u32, input[i + 1]) << 16) | (@as(u32, input[i + 2]) << 8) | @as(u32, input[i + 3]);
+        if (cp > 0x10FFFF) {
+            try appendUtf8(&out, allocator, '?');
+        } else {
+            try appendUtf8(&out, allocator, @intCast(cp));
+        }
+    }
+    return try out.toOwnedSlice(allocator);
+}
+
 fn convertUtf8ToLatin1(allocator: std.mem.Allocator, input: []const u8) ![]u8 {
     var out = std.ArrayListUnmanaged(u8){};
     errdefer out.deinit(allocator);
@@ -2823,6 +2978,41 @@ fn native_mb_convert_encoding(ctx: *NativeContext, args: []const Value) RuntimeE
         const owned = try out.toOwnedSlice(ctx.allocator);
         try ctx.strings.append(ctx.allocator, owned);
         return .{ .string = owned };
+    }
+    // UTF-8/Latin1/ASCII <-> UTF-16{,BE,LE}. "UTF-16" without suffix is BE
+    if (isUtf8Encoding(from) and isUtf16Encoding(to)) {
+        const out = convertUtf8ToUtf16(ctx.allocator, input, isUtf16LE(to)) catch return .{ .bool = false };
+        try ctx.strings.append(ctx.allocator, out);
+        return .{ .string = out };
+    }
+    if (isUtf16Encoding(from) and isUtf8Encoding(to)) {
+        const out = convertUtf16ToUtf8(ctx.allocator, input, isUtf16LE(from)) catch return .{ .bool = false };
+        try ctx.strings.append(ctx.allocator, out);
+        return .{ .string = out };
+    }
+    if (isUtf8Encoding(from) and isUtf32Encoding(to)) {
+        const out = convertUtf8ToUtf32(ctx.allocator, input, isUtf32LE(to)) catch return .{ .bool = false };
+        try ctx.strings.append(ctx.allocator, out);
+        return .{ .string = out };
+    }
+    if (isUtf32Encoding(from) and isUtf8Encoding(to)) {
+        const out = convertUtf32ToUtf8(ctx.allocator, input, isUtf32LE(from)) catch return .{ .bool = false };
+        try ctx.strings.append(ctx.allocator, out);
+        return .{ .string = out };
+    }
+    if (isLatin1Encoding(from) and isUtf16Encoding(to)) {
+        const tmp = convertLatin1ToUtf8(ctx.allocator, input) catch return .{ .bool = false };
+        defer ctx.allocator.free(tmp);
+        const out = convertUtf8ToUtf16(ctx.allocator, tmp, isUtf16LE(to)) catch return .{ .bool = false };
+        try ctx.strings.append(ctx.allocator, out);
+        return .{ .string = out };
+    }
+    if (isUtf16Encoding(from) and isLatin1Encoding(to)) {
+        const tmp = convertUtf16ToUtf8(ctx.allocator, input, isUtf16LE(from)) catch return .{ .bool = false };
+        defer ctx.allocator.free(tmp);
+        const out = convertUtf8ToLatin1(ctx.allocator, tmp) catch return .{ .bool = false };
+        try ctx.strings.append(ctx.allocator, out);
+        return .{ .string = out };
     }
     // unknown encoding pair - pass through
     return args[0];
