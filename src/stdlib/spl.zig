@@ -519,6 +519,9 @@ pub fn register(vm: *VM, a: Allocator) !void {
     // SplObjectStorage
     var sos_def = ClassDef{ .name = "SplObjectStorage" };
     try sos_def.interfaces.append(a, "Countable");
+    try sos_def.interfaces.append(a, "Iterator");
+    try sos_def.interfaces.append(a, "Traversable");
+    try sos_def.interfaces.append(a, "ArrayAccess");
     try sos_def.methods.put(a, "__construct", .{ .name = "__construct", .arity = 0 });
     try sos_def.methods.put(a, "attach", .{ .name = "attach", .arity = 2 });
     try sos_def.methods.put(a, "detach", .{ .name = "detach", .arity = 1 });
