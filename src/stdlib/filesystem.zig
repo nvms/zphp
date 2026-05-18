@@ -2401,26 +2401,27 @@ fn native_touch(_: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len == 0 or args[0] != .string) return .{ .bool = false };
     const path = args[0].string;
 
-    // if file doesn't exist, create it
-    const file = std.fs.cwd().createFile(path, .{ .exclusive = true }) catch |err| switch (err) {
-        error.PathAlreadyExists => {
-            const f = std.fs.cwd().openFile(path, .{ .mode = .write_only }) catch return Value{ .bool = false };
-            defer f.close();
-            const now: i128 = std.time.nanoTimestamp();
-            const mtime: i128 = if (args.len >= 2 and args[1] != .null)
-                @as(i128, Value.toInt(args[1])) * 1_000_000_000
-            else
-                now;
-            const atime: i128 = if (args.len >= 3 and args[2] != .null)
-                @as(i128, Value.toInt(args[2])) * 1_000_000_000
-            else
-                mtime;
-            f.updateTimes(atime, mtime) catch return Value{ .bool = true };
-            return .{ .bool = true };
-        },
+    // create the file if it doesn't already exist, then fall through to the
+    // timestamp-application path so explicit mtime/atime args take effect
+    // regardless of whether the file pre-existed
+    const created = std.fs.cwd().createFile(path, .{ .exclusive = true }) catch |err| switch (err) {
+        error.PathAlreadyExists => null,
         else => return .{ .bool = false },
     };
-    file.close();
+    if (created) |c| c.close();
+
+    const f = std.fs.cwd().openFile(path, .{ .mode = .write_only }) catch return Value{ .bool = false };
+    defer f.close();
+    const now: i128 = std.time.nanoTimestamp();
+    const mtime: i128 = if (args.len >= 2 and args[1] != .null)
+        @as(i128, Value.toInt(args[1])) * 1_000_000_000
+    else
+        now;
+    const atime: i128 = if (args.len >= 3 and args[2] != .null)
+        @as(i128, Value.toInt(args[2])) * 1_000_000_000
+    else
+        mtime;
+    f.updateTimes(atime, mtime) catch return Value{ .bool = true };
     return .{ .bool = true };
 }
 
