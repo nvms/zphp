@@ -23,8 +23,12 @@ while (($n = $d->read()) !== false) $names[] = $n;
 sort($names);
 foreach ($names as $n) echo "read: $n\n";
 
+// rewind resets the cursor; re-reading should produce the same entries
+// (the order is filesystem-dependent so just verify the count matches)
 $d->rewind();
-echo "after rewind: " . $d->read() . "\n";   // first entry again
+$after = [];
+while (($n = $d->read()) !== false) $after[] = $n;
+echo "after rewind matches: " . (count($after) === count($names) ? 'y' : 'n') . "\n";
 
 $d->close();
 
