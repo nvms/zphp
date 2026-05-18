@@ -429,10 +429,22 @@ fn getNumFmt(obj: *const PhpObject) ?*UNumberFormat {
     return @ptrFromInt(@as(usize, @intCast(v.int)));
 }
 
-fn openNumFmt(ctx: *NativeContext, locale: []const u8, style: i32) !?*UNumberFormat {
+fn openNumFmt(ctx: *NativeContext, locale: []const u8, style: i32, pattern: ?[]const u8) !?*UNumberFormat {
     const loc_z = try dupZ(ctx, locale);
     var status: UErrorCode = U_ZERO_ERROR;
-    const f = zphp_unum_open(style, null, 0, loc_z.ptr, null, &status);
+    // pattern is consumed by ICU for PATTERN_DECIMAL/PATTERN_RULEBASED styles
+    // (and ignored otherwise). encode to UTF-16 for ICU
+    var pat_ptr: ?[*]const UChar = null;
+    var pat_len: i32 = 0;
+    var pat_owned: ?[]u16 = null;
+    defer if (pat_owned) |slice| ctx.allocator.free(slice);
+    if (pattern) |p| if (p.len > 0) {
+        const enc = try utf8ToU16(ctx, p);
+        pat_owned = enc;
+        pat_ptr = enc.ptr;
+        pat_len = @intCast(enc.len);
+    };
+    const f = zphp_unum_open(style, pat_ptr, pat_len, loc_z.ptr, null, &status);
     if (intlRecord(ctx.vm, status)) return null;
     return f;
 }
@@ -441,7 +453,8 @@ fn nfConstruct(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len < 2 or args[0] != .string) return .null;
     const obj = getThis(ctx) orelse return .null;
     const style: i32 = if (args[1] == .int) @intCast(args[1].int) else 1;
-    const f = (try openNumFmt(ctx, args[0].string, style)) orelse return .null;
+    const pattern: ?[]const u8 = if (args.len >= 3 and args[2] == .string) args[2].string else null;
+    const f = (try openNumFmt(ctx, args[0].string, style, pattern)) orelse return .null;
     try obj.set(ctx.allocator, "__nfmt", .{ .int = @intCast(@intFromPtr(f)) });
     return .null;
 }
@@ -450,7 +463,8 @@ fn nfCreateStatic(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len < 2 or args[0] != .string) return .null;
     const obj = try ctx.createObject("NumberFormatter");
     const style: i32 = if (args[1] == .int) @intCast(args[1].int) else 1;
-    const f = (try openNumFmt(ctx, args[0].string, style)) orelse return .null;
+    const pattern: ?[]const u8 = if (args.len >= 3 and args[2] == .string) args[2].string else null;
+    const f = (try openNumFmt(ctx, args[0].string, style, pattern)) orelse return .null;
     try obj.set(ctx.allocator, "__nfmt", .{ .int = @intCast(@intFromPtr(f)) });
     return .{ .object = obj };
 }
