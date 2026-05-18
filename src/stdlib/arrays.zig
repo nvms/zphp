@@ -1215,7 +1215,11 @@ fn array_count_values(ctx: *NativeContext, args: []const Value) RuntimeError!Val
     const src = args[0].array;
     var result = try ctx.createArray();
     for (src.entries.items) |entry| {
-        if (entry.value != .string and entry.value != .int) continue;
+        if (entry.value != .string and entry.value != .int) {
+            // PHP emits a warning per non-int/string entry encountered
+            ctx.vm.emitWarning("array_count_values(): Can only count string and integer values, entry skipped");
+            continue;
+        }
         const key = Value.toArrayKey(entry.value);
         const existing = result.get(key);
         if (existing == .int) {
