@@ -5179,6 +5179,31 @@ fn native_sscanf(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
                 const v = std.fmt.parseInt(i64, input[start..ip], 8) catch 0;
                 try captures.append(ctx.allocator, .{ .int = v });
             },
+            'u' => {
+                // unsigned decimal. PHP parses an optional sign then digits and
+                // reinterprets the i64 result as u64 when negative, returning
+                // the value as a string if it overflows i64
+                const start = ip;
+                if (ip < input.len and (input[ip] == '+' or input[ip] == '-')) ip += 1;
+                while (ip < input.len and input[ip] >= '0' and input[ip] <= '9') {
+                    if (has_width and ip - start >= width) break;
+                    ip += 1;
+                }
+                if (ip == start or (ip == start + 1 and (input[start] == '+' or input[start] == '-'))) break;
+                const i_val = std.fmt.parseInt(i64, input[start..ip], 10) catch 0;
+                if (i_val >= 0) {
+                    try captures.append(ctx.allocator, .{ .int = i_val });
+                } else {
+                    const u_val: u64 = @bitCast(i_val);
+                    const s = try std.fmt.allocPrint(ctx.allocator, "{d}", .{u_val});
+                    try ctx.vm.strings.append(ctx.allocator, s);
+                    try captures.append(ctx.allocator, .{ .string = s });
+                }
+            },
+            'n' => {
+                // consumed-byte-count. doesn't read from input
+                try captures.append(ctx.allocator, .{ .int = @intCast(ip) });
+            },
             '%' => {
                 if (ip < input.len and input[ip] == '%') ip += 1;
             },
