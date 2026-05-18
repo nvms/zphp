@@ -4031,6 +4031,7 @@ pub const VM = struct {
                         };
                         self.push(.{ .string = s });
                     } else {
+                        if (v == .array) self.emitWarning("Array to string conversion");
                         var buf = std.ArrayListUnmanaged(u8){};
                         try v.format(&buf, self.allocator);
                         const s = try buf.toOwnedSlice(self.allocator);
