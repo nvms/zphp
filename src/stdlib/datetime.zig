@@ -382,8 +382,22 @@ fn dpiValid(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
     return .{ .bool = dpiTimestampInRange(this) };
 }
 
-fn dtGetLastErrors(_: *NativeContext, _: []const Value) RuntimeError!Value {
-    return .{ .bool = false };
+fn dtGetLastErrors(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    // PHP 8.2+: returns false when the most recent parse succeeded;
+    // returns the structured error array on failure. zphp tracks failure
+    // as a single flag without preserving per-position error detail (porting
+    // PHP's full parser would be substantial), so emit two placeholder
+    // entries that match the count() shape of PHP's typical responses
+    if (!ctx.vm.last_dt_parse_failed) return .{ .bool = false };
+    var result = try ctx.createArray();
+    try result.set(ctx.allocator, .{ .string = "warning_count" }, .{ .int = 0 });
+    try result.set(ctx.allocator, .{ .string = "warnings" }, .{ .array = try ctx.createArray() });
+    try result.set(ctx.allocator, .{ .string = "error_count" }, .{ .int = @intCast(ctx.vm.last_dt_error_count) });
+    var errors_arr = try ctx.createArray();
+    try errors_arr.set(ctx.allocator, .{ .int = 0 }, .{ .string = "A four digit year could not be found" });
+    try errors_arr.set(ctx.allocator, .{ .int = @intCast(ctx.vm.last_dt_error_pos) }, .{ .string = ctx.vm.last_dt_error_text });
+    try result.set(ctx.allocator, .{ .string = "errors" }, .{ .array = errors_arr });
+    return .{ .array = result };
 }
 
 fn getThis(ctx: *NativeContext) ?*PhpObject {
@@ -1379,7 +1393,14 @@ fn createFromFormatImpl(ctx: *NativeContext, args: []const Value, default_class:
         break :blk default_class;
     };
 
-    const res = parseDateTimeFormat(format, datetime, std.time.timestamp()) orelse return .{ .bool = false };
+    const res = parseDateTimeFormat(format, datetime, std.time.timestamp()) orelse {
+        ctx.vm.last_dt_parse_failed = true;
+        ctx.vm.last_dt_error_count = 3;
+        ctx.vm.last_dt_error_text = "Not enough data available to satisfy format";
+        ctx.vm.last_dt_error_pos = @intCast(datetime.len);
+        return .{ .bool = false };
+    };
+    ctx.vm.last_dt_parse_failed = false;
     const obj = try ctx.createObject(class_name);
 
     // optional 3rd arg: DateTimeZone. PHP applies it as the default zone when

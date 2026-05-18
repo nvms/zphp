@@ -573,6 +573,13 @@ pub const VM = struct {
     response_headers: ?*PhpArray = null,
     headers_sent: bool = false,
     default_tz_name: []const u8 = "UTC",
+    // populated by DateTime/createFromFormat parsers when input is unparseable.
+    // DateTime::getLastErrors returns the structured form; false when the most
+    // recent parse succeeded (PHP 8.2+ behavior)
+    last_dt_error_count: u32 = 0,
+    last_dt_error_text: []const u8 = "",
+    last_dt_error_pos: u32 = 0,
+    last_dt_parse_failed: bool = false,
     default_tz_offset: i32 = 0,
 
     pub const InlineCache = struct {
