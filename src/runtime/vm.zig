@@ -434,6 +434,12 @@ pub const VM = struct {
     // pointer to the same value. lets writes propagate live to recursive calls
     globals_cells: std.StringHashMapUnmanaged(*Value) = .{},
     pending_call_name: ?[]const u8 = null,
+    // captures the most recent native function name + args when a native
+    // throws an uncaught exception, so writeStackTrace can synthesize the
+    // depth-0 frame ('#0 file(N): native_func(args)') that PHP includes
+    pending_native_name: ?[]const u8 = null,
+    pending_native_args: []const Value = &.{},
+    pending_native_args_buf: [16]Value = @splat(.null),
     // args slice for invocations driven from native code (callByName-style).
     // executeFunction consumes this to seed fga_buf so func_get_args inside
     // the called function sees the real args, not stale data from whatever
@@ -11293,8 +11299,18 @@ pub const VM = struct {
             var ctx = self.makeContext(name);
             const result = native(&ctx, args[0..ac]) catch {
                 if (self.pending_exception) |exc| {
+                    // capture the native's name + args so writeStackTrace
+                    // can emit '#0 file(line): name(args)' synthetic frame
+                    self.pending_native_name = name;
+                    const argc_cap: usize = @min(ac, self.pending_native_args_buf.len);
+                    for (0..argc_cap) |i| self.pending_native_args_buf[i] = args[i];
+                    self.pending_native_args = self.pending_native_args_buf[0..argc_cap];
                     self.pending_exception = null;
                     if (self.handler_count > self.handler_floor) {
+                        // exception caught: clear the native-trace state so
+                        // the next throw doesn't pick up stale info
+                        self.pending_native_name = null;
+                        self.pending_native_args = &.{};
                         const handler = self.exception_handlers[self.handler_count - 1];
                         self.handler_count -= 1;
                         while (self.frame_count > handler.frame_count) {

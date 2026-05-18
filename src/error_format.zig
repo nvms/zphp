@@ -247,6 +247,31 @@ fn writeStackTrace(buf: *Writer, alloc: std.mem.Allocator, vm: *const VM) void {
     }
 
     var depth: u32 = 0;
+    // synthetic depth-0 frame for the throwing native (e.g. random_bytes(-1))
+    // when an uncaught exception originated from a native call. matches PHP
+    // which always includes the native in the stack trace at #0
+    if (vm.pending_native_name) |nname| {
+        const top = &vm.frames[vm.frame_count - 1];
+        const top_ip = if (top.ip > 0) top.ip - 1 else 0;
+        const top_path = framePath(top, vm);
+        const top_source = resolveSource(alloc, &source_cache, top_path, vm);
+        const top_display = displayPath(top_path);
+        write(buf, alloc, "#");
+        writeFmt(buf, alloc, "{d} ", .{depth});
+        if (top.chunk.getSourceLocation(top_ip, top_source)) |loc| {
+            writeFmt(buf, alloc, "{s}({d}): ", .{ top_display, loc.line });
+        } else {
+            writeFmt(buf, alloc, "{s}: ", .{top_display});
+        }
+        writeFmt(buf, alloc, "{s}(", .{nname});
+        for (vm.pending_native_args, 0..) |a, ai| {
+            if (ai > 0) write(buf, alloc, ", ");
+            writeArgValue(buf, alloc, a);
+        }
+        write(buf, alloc, ")\n");
+        depth += 1;
+    }
+
     var i: usize = vm.frame_count - 1;
     while (i >= 1) : ({
         i -= 1;
