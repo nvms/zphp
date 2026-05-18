@@ -324,6 +324,7 @@ fn implode(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
             const r = try ctx.vm.callMethod(entry.value.object, "__toString", &.{});
             if (r == .string) try buf.appendSlice(ctx.allocator, r.string) else try r.format(&buf, ctx.allocator);
         } else {
+            if (entry.value == .array) ctx.vm.emitWarning("Array to string conversion");
             try entry.value.format(&buf, ctx.allocator);
         }
     }
@@ -1358,6 +1359,7 @@ fn sprintfImpl(ctx: *NativeContext, fmt_str: []const u8, args: []const Value) ![
             var tmp_buf = std.ArrayListUnmanaged(u8){};
             switch (spec) {
                 's' => {
+                    if (arg == .array) ctx.vm.emitWarning("Array to string conversion");
                     const s = blk: {
                         if (arg == .string) break :blk arg.string;
                         if (arg == .object) {

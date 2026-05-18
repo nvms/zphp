@@ -2100,6 +2100,8 @@ pub const VM = struct {
                         try self.strings.append(self.allocator, owned);
                         self.push(.{ .string = owned });
                     } else {
+                        if (a == .array) self.emitWarning("Array to string conversion");
+                        if (b == .array) self.emitWarning("Array to string conversion");
                         var buf = std.ArrayListUnmanaged(u8){};
                         if (a == .object) {
                             const s = self.objectToString(a.object) catch {
@@ -2551,6 +2553,7 @@ pub const VM = struct {
                         };
                         try self.output.appendSlice(self.allocator, s);
                     } else {
+                        if (v == .array) self.emitWarning("Array to string conversion");
                         try v.format(&self.output, self.allocator);
                     }
                     if (self.ob_stack.items.len == 0) self.headers_sent = true;
@@ -3619,6 +3622,7 @@ pub const VM = struct {
                     const name_idx = self.readU16();
                     const name = self.currentChunk().constants.items[name_idx].string;
                     const append_val = self.pop();
+                    if (append_val == .array) self.emitWarning("Array to string conversion");
                     const is_ref = self.currentFrame().ref_slots.get(name);
 
                     // find the local slot for this variable
