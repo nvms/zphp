@@ -228,29 +228,118 @@ fn appendLocationContext(buf: *Writer, alloc: std.mem.Allocator, vm: *const VM) 
 
 fn writeStackTrace(buf: *Writer, alloc: std.mem.Allocator, vm: *const VM) void {
     if (vm.frame_count == 0) return;
-    const source = vm.source;
-    const path = displayPath(vm.file_path);
-    var depth: u32 = 0;
 
-    // each entry shows where frame[i] was called from (frame[i-1]'s IP)
+    // cache loaded file contents so multi-frame traces don't reload the same
+    // file repeatedly. each entry's source is the caller frame's file (not
+    // vm.source) because the caller's bytecode-to-line table only resolves
+    // correctly against the source it was compiled from
+    var source_cache: std.StringHashMapUnmanaged([]const u8) = .{};
+    defer {
+        var it = source_cache.valueIterator();
+        while (it.next()) |v| if (v.*.len > 0) alloc.free(v.*);
+        source_cache.deinit(alloc);
+    }
+
+    var depth: u32 = 0;
     var i: usize = vm.frame_count - 1;
     while (i >= 1) : ({
         i -= 1;
         depth += 1;
     }) {
         const frame = &vm.frames[i];
-        const func_name = if (frame.func) |f| f.name else "{main}";
         const caller = &vm.frames[i - 1];
         const caller_ip = if (caller.ip > 0) caller.ip - 1 else 0;
 
-        if (caller.chunk.getSourceLocation(caller_ip, source)) |loc| {
-            writeFmt(buf, alloc, "#{d} {s}({d}): {s}()\n", .{ depth, path, loc.line, func_name });
+        const caller_path = framePath(caller, vm);
+        const caller_source = resolveSource(alloc, &source_cache, caller_path, vm);
+        const display = displayPath(caller_path);
+
+        write(buf, alloc, "#");
+        writeFmt(buf, alloc, "{d} ", .{depth});
+        if (caller.chunk.getSourceLocation(caller_ip, caller_source)) |loc| {
+            writeFmt(buf, alloc, "{s}({d}): ", .{ display, loc.line });
         } else {
-            writeFmt(buf, alloc, "#{d} {s}: {s}()\n", .{ depth, path, func_name });
+            writeFmt(buf, alloc, "{s}: ", .{display});
         }
+        writeFrameCallee(buf, alloc, vm, frame, i);
+        write(buf, alloc, "\n");
     }
 
     writeFmt(buf, alloc, "#{d} {{main}}\n", .{depth});
+}
+
+fn framePath(frame: anytype, vm: *const VM) []const u8 {
+    if (frame.script_path.len > 0) return frame.script_path;
+    if (frame.func) |f| if (f.file_path.len > 0) return f.file_path;
+    return vm.file_path;
+}
+
+fn resolveSource(alloc: std.mem.Allocator, cache: *std.StringHashMapUnmanaged([]const u8), path: []const u8, vm: *const VM) []const u8 {
+    if (std.mem.eql(u8, path, vm.file_path)) return vm.source;
+    if (cache.get(path)) |hit| return hit;
+    var loaded: []const u8 = "";
+    if (std.fs.cwd().readFileAlloc(alloc, path, 8 * 1024 * 1024)) |contents| {
+        loaded = contents;
+    } else |_| {}
+    cache.put(alloc, path, loaded) catch {};
+    return loaded;
+}
+
+fn writeFrameCallee(buf: *Writer, alloc: std.mem.Allocator, vm: *const VM, frame: anytype, frame_idx: usize) void {
+    const func = frame.func orelse {
+        write(buf, alloc, "{main}()");
+        return;
+    };
+    // method names are stored as "Class::method"; split on the separator and
+    // pick the call-type from the function's static flag. instance dispatch
+    // through fnames stored without the prefix falls back to called_class
+    if (std.mem.indexOf(u8, func.name, "::")) |sep| {
+        const class = func.name[0..sep];
+        const method = func.name[sep + 2 ..];
+        const type_str: []const u8 = if (func.is_static) "::" else "->";
+        writeFmt(buf, alloc, "{s}{s}{s}(", .{ class, type_str, method });
+    } else if (frame.called_class) |cls| {
+        const type_str: []const u8 = if (func.is_static) "::" else "->";
+        writeFmt(buf, alloc, "{s}{s}{s}(", .{ cls, type_str, func.name });
+    } else {
+        writeFmt(buf, alloc, "{s}(", .{func.name});
+    }
+    writeFrameArgs(buf, alloc, vm, frame_idx);
+    write(buf, alloc, ")");
+}
+
+fn writeFrameArgs(buf: *Writer, alloc: std.mem.Allocator, vm: *const VM, frame_idx: usize) void {
+    const ic = vm.ic orelse return;
+    if (frame_idx >= ic.arg_counts.len) return;
+    const ac = ic.arg_counts[frame_idx];
+    if (ac == 0xFF) return;
+    const offset: usize = ic.fga_offsets[frame_idx];
+    const arg_count: usize = ac;
+    if (offset + arg_count > ic.fga_buf.len) return;
+    for (0..arg_count) |a| {
+        if (a > 0) write(buf, alloc, ", ");
+        writeArgValue(buf, alloc, ic.fga_buf[offset + a]);
+    }
+}
+
+fn writeArgValue(buf: *Writer, alloc: std.mem.Allocator, v: Value) void {
+    switch (v) {
+        .null => write(buf, alloc, "NULL"),
+        .bool => |b| write(buf, alloc, if (b) "true" else "false"),
+        .int => |n| writeFmt(buf, alloc, "{d}", .{n}),
+        .float => |f| writeFmt(buf, alloc, "{d}", .{f}),
+        .string => |s| {
+            // PHP truncates long strings to 15 chars + '...'
+            if (s.len <= 15) {
+                writeFmt(buf, alloc, "'{s}'", .{s});
+            } else {
+                writeFmt(buf, alloc, "'{s}...'", .{s[0..15]});
+            }
+        },
+        .array => write(buf, alloc, "Array"),
+        .object => |o| writeFmt(buf, alloc, "Object({s})", .{o.class_name}),
+        else => write(buf, alloc, "?"),
+    }
 }
 
 fn estimateTokenLength(source: []const u8, loc: SourceLocation) u32 {
