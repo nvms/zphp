@@ -183,27 +183,23 @@ fn formatUncaughtException(buf: *Writer, alloc: std.mem.Allocator, vm: *const VM
         return;
     }
 
-    // matches PHP's uncaught-exception header: 'in {path}:{line}' (not 'on line N').
-    // PHP does not include a source-line snippet here - the stack trace below
-    // already tells the user where the throw originated.
-    // PHP CLI emits this twice by default: once with the 'PHP Fatal error:' prefix
-    // (the log_errors copy, written before the display block) and once with the
-    // bare 'Fatal error:' prefix (display_errors). emit both to match
+    // matches PHP CLI's default uncaught-exception output. when display_errors
+    // and log_errors both target stderr (the CLI default) PHP deduplicates into
+    // a single 'PHP Fatal error:' block. header uses 'in {path}:{line}' (the
+    // exception format, not the 'on line N' fatal format). PHP does not show a
+    // source-line snippet here - the stack trace below names the throw site
     const maybe_loc = frame.chunk.getSourceLocation(ip, source);
-    inline for ([_][]const u8{ "PHP Fatal error:  Uncaught", "Fatal error: Uncaught" }, 0..) |prefix, i| {
-        if (i == 1) write(buf, alloc, "\n");
-        if (maybe_loc) |loc| {
-            writeFmt(buf, alloc, "{s} {s}: {s} in {s}:{d}\n", .{ prefix, class_name, message, path, loc.line });
-        } else {
-            writeFmt(buf, alloc, "{s} {s}: {s} in {s}\n", .{ prefix, class_name, message, path });
-        }
-        write(buf, alloc, "Stack trace:\n");
-        writeStackTrace(buf, alloc, vm);
-        if (maybe_loc) |loc| {
-            writeFmt(buf, alloc, "  thrown in {s} on line {d}\n", .{ path, loc.line });
-        } else {
-            writeFmt(buf, alloc, "  thrown in {s}\n", .{path});
-        }
+    if (maybe_loc) |loc| {
+        writeFmt(buf, alloc, "PHP Fatal error:  Uncaught {s}: {s} in {s}:{d}\n", .{ class_name, message, path, loc.line });
+    } else {
+        writeFmt(buf, alloc, "PHP Fatal error:  Uncaught {s}: {s} in {s}\n", .{ class_name, message, path });
+    }
+    write(buf, alloc, "Stack trace:\n");
+    writeStackTrace(buf, alloc, vm);
+    if (maybe_loc) |loc| {
+        writeFmt(buf, alloc, "  thrown in {s} on line {d}\n", .{ path, loc.line });
+    } else {
+        writeFmt(buf, alloc, "  thrown in {s}\n", .{path});
     }
 }
 
