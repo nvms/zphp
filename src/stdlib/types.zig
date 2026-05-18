@@ -2332,12 +2332,18 @@ fn native_class_implements(ctx: *NativeContext, args: []const Value) RuntimeErro
     var result = try ctx.createArray();
     var queue = std.ArrayListUnmanaged([]const u8){};
     defer queue.deinit(ctx.allocator);
+    // PHP enumerates direct interfaces in declaration order, but interfaces
+    // reached via parent traversal in REVERSE declaration order. mimic both
     for (cls.interfaces.items) |iface| try queue.append(ctx.allocator, iface);
 
     var parent = cls.parent;
     while (parent) |p| {
         const pcls = ctx.vm.classes.get(p) orelse break;
-        for (pcls.interfaces.items) |iface| try queue.append(ctx.allocator, iface);
+        var pi = pcls.interfaces.items.len;
+        while (pi > 0) {
+            pi -= 1;
+            try queue.append(ctx.allocator, pcls.interfaces.items[pi]);
+        }
         parent = pcls.parent;
     }
 
