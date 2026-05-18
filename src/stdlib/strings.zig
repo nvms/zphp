@@ -5231,6 +5231,7 @@ fn native_vsprintf(ctx: *NativeContext, args: []const Value) RuntimeError!Value 
     for (arr.entries.items, 0..) |entry, i| {
         vals[i] = entry.value;
     }
+    if (try vsprintfArgsTooFew(ctx, fmt_str, vals.len)) return error.RuntimeError;
     const result = try sprintfImpl(ctx, fmt_str, vals);
     return .{ .string = result };
 }
@@ -5243,9 +5244,46 @@ fn native_vprintf(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     var vals = try ctx.allocator.alloc(Value, arr.entries.items.len);
     defer ctx.allocator.free(vals);
     for (arr.entries.items, 0..) |entry, i| vals[i] = entry.value;
+    if (try vsprintfArgsTooFew(ctx, fmt_str, vals.len)) return error.RuntimeError;
     const result = try sprintfImpl(ctx, fmt_str, vals);
     try ctx.vm.output.appendSlice(ctx.allocator, result);
     return .{ .int = @intCast(result.len) };
+}
+
+// PHP throws ValueError when vsprintf/vprintf is handed an args array
+// shorter than what the format string consumes. count specifiers in fmt,
+// taking %% literals and positional %N$ into account, and compare to argc
+fn vsprintfArgsTooFew(ctx: *NativeContext, fmt: []const u8, argc: usize) RuntimeError!bool {
+    var required: usize = 0;
+    var positional_max: usize = 0;
+    var seq_count: usize = 0;
+    var i: usize = 0;
+    while (i < fmt.len) : (i += 1) {
+        if (fmt[i] != '%') continue;
+        i += 1;
+        if (i >= fmt.len) break;
+        if (fmt[i] == '%') continue;
+        // positional %N$
+        var j = i;
+        var num: usize = 0;
+        while (j < fmt.len and fmt[j] >= '0' and fmt[j] <= '9') : (j += 1) {
+            num = num * 10 + (fmt[j] - '0');
+        }
+        if (j > i and j < fmt.len and fmt[j] == '$') {
+            if (num > positional_max) positional_max = num;
+            i = j;
+        } else {
+            seq_count += 1;
+        }
+    }
+    required = @max(positional_max, seq_count);
+    if (required > argc) {
+        const msg = try std.fmt.allocPrint(ctx.allocator, "The arguments array must contain {d} items, {d} given", .{ required, argc });
+        try ctx.vm.strings.append(ctx.allocator, msg);
+        try ctx.vm.setPendingException("ValueError", msg);
+        return true;
+    }
+    return false;
 }
 
 fn native_fscanf(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
