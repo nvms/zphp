@@ -11141,10 +11141,36 @@ pub const VM = struct {
                 }
                 self.sp -= ac;
                 const param_name = if (func) |f| (if (i < f.params.len) f.params[i] else "") else "";
+                // PHP suffixes the message with the call site: ", called in
+                // <file> on line N". the caller frame is frame_count-2 because
+                // the callee was already pushed before bindArgs runs
+                var cs_file: []const u8 = self.file_path;
+                var cs_line: u32 = 0;
+                // checkParamTypes runs before the callee frame is pushed, so
+                // the caller is the current top frame
+                if (self.frame_count >= 1) {
+                    const caller = &self.frames[self.frame_count - 1];
+                    if (caller.script_path.len > 0) cs_file = caller.script_path
+                    else if (caller.func) |cf| if (cf.file_path.len > 0) { cs_file = cf.file_path; };
+                    const cip: usize = if (caller.ip > 0) caller.ip - 1 else 0;
+                    // load the caller's own source if it differs from vm.source -
+                    // the chunk's lines table maps to byte offsets in the file
+                    // it was compiled from, not the entry-point script
+                    var caller_src: []const u8 = self.source;
+                    var loaded: []const u8 = "";
+                    if (!std.mem.eql(u8, cs_file, self.file_path)) {
+                        if (std.fs.cwd().readFileAlloc(self.allocator, cs_file, 8 * 1024 * 1024)) |contents| {
+                            loaded = contents;
+                            caller_src = contents;
+                        } else |_| {}
+                    }
+                    defer if (loaded.len > 0) self.allocator.free(loaded);
+                    if (caller.chunk.getSourceLocation(cip, caller_src)) |loc| cs_line = loc.line;
+                }
                 const msg = if (param_name.len > 0)
-                    std.fmt.allocPrint(self.allocator, "{s}(): Argument #{d} ({s}) must be of type {s}, {s} given", .{ name, i + 1, param_name, type_str, valueTypeName(val) }) catch return error.RuntimeError
+                    std.fmt.allocPrint(self.allocator, "{s}(): Argument #{d} ({s}) must be of type {s}, {s} given, called in {s} on line {d}", .{ name, i + 1, param_name, type_str, valueTypeName(val), cs_file, cs_line }) catch return error.RuntimeError
                 else
-                    std.fmt.allocPrint(self.allocator, "{s}(): Argument #{d} must be of type {s}, {s} given", .{ name, i + 1, type_str, valueTypeName(val) }) catch return error.RuntimeError;
+                    std.fmt.allocPrint(self.allocator, "{s}(): Argument #{d} must be of type {s}, {s} given, called in {s} on line {d}", .{ name, i + 1, type_str, valueTypeName(val), cs_file, cs_line }) catch return error.RuntimeError;
                 try self.strings.append(self.allocator, msg);
                 self.error_msg = msg;
                 if (try self.throwBuiltinException("TypeError", msg)) return true;
