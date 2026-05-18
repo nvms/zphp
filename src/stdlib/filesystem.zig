@@ -37,6 +37,7 @@ pub const entries = .{
     .{ "fnmatch", native_fnmatch },
     .{ "scandir", native_scandir },
     .{ "opendir", native_opendir },
+    .{ "dir", native_dir },
     .{ "readdir", native_readdir },
     .{ "closedir", native_closedir },
     .{ "rewinddir", native_rewinddir },
@@ -164,6 +165,19 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try vm.native_fns.put(a, "finfo::file", finfoFile);
     try vm.native_fns.put(a, "finfo::buffer", finfoBuffer);
     try vm.native_fns.put(a, "finfo::set_flags", finfoNoop);
+
+    // Directory class returned by dir() - thin OO wrapper. methods delegate
+    // to the underlying DirectoryHandle stored in the 'handle' property
+    var dir_def = ClassDef{ .name = "Directory" };
+    try dir_def.properties.append(a, .{ .name = "path", .default = .{ .string = "" } });
+    try dir_def.properties.append(a, .{ .name = "handle", .default = .null });
+    try dir_def.methods.put(a, "read", .{ .name = "read", .arity = 0 });
+    try dir_def.methods.put(a, "rewind", .{ .name = "rewind", .arity = 0 });
+    try dir_def.methods.put(a, "close", .{ .name = "close", .arity = 0 });
+    try vm.classes.put(a, "Directory", dir_def);
+    try vm.native_fns.put(a, "Directory::read", directoryRead);
+    try vm.native_fns.put(a, "Directory::rewind", directoryRewind);
+    try vm.native_fns.put(a, "Directory::close", directoryClose);
 
     inline for (.{ .{ "STDIN", 0, "r" }, .{ "STDOUT", 1, "w" }, .{ "STDERR", 2, "w" } }) |spec| {
         const obj = try a.create(PhpObject);
@@ -805,6 +819,43 @@ fn native_scandir(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     return .{ .array = result };
 }
 
+// dir($path) returns a Directory object with path, handle, and read/rewind/
+// close methods that delegate to the underlying DirectoryHandle. PHP's
+// 'Directory' is a thin OO wrapper around opendir/readdir/rewinddir/closedir
+fn native_dir(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len == 0 or args[0] != .string) return .{ .bool = false };
+    const handle = try native_opendir(ctx, args);
+    if (handle != .object) return .{ .bool = false };
+    const obj = try ctx.createObject("Directory");
+    try obj.set(ctx.allocator, "path", .{ .string = try ctx.createString(args[0].string) });
+    try obj.set(ctx.allocator, "handle", handle);
+    return .{ .object = obj };
+}
+
+fn directoryRead(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const this = ctx.vm.currentFrame().vars.get("$this") orelse return .{ .bool = false };
+    if (this != .object) return .{ .bool = false };
+    const h = this.object.get("handle");
+    if (h != .object) return .{ .bool = false };
+    return native_readdir(ctx, &.{h});
+}
+
+fn directoryRewind(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const this = ctx.vm.currentFrame().vars.get("$this") orelse return .null;
+    if (this != .object) return .null;
+    const h = this.object.get("handle");
+    if (h != .object) return .null;
+    return native_rewinddir(ctx, &.{h});
+}
+
+fn directoryClose(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const this = ctx.vm.currentFrame().vars.get("$this") orelse return .null;
+    if (this != .object) return .null;
+    const h = this.object.get("handle");
+    if (h != .object) return .null;
+    return native_closedir(ctx, &.{h});
+}
+
 fn native_opendir(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len == 0 or args[0] != .string) return .{ .bool = false };
     var dir = std.fs.cwd().openDir(args[0].string, .{ .iterate = true }) catch return Value{ .bool = false };
@@ -892,6 +943,12 @@ fn native_glob(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
 
     try globAppend(ctx, result, pattern, flags);
     if ((flags & GLOB_NOSORT) == 0) sortArrayValues(result);
+    // GLOB_NOCHECK: when no entries matched, return the literal pattern in
+    // a single-element array instead of an empty array
+    const GLOB_NOCHECK: i64 = 16;
+    if (result.entries.items.len == 0 and (flags & GLOB_NOCHECK) != 0) {
+        try result.append(ctx.allocator, .{ .string = try ctx.createString(pattern) });
+    }
     _ = GLOB_ONLYDIR;
     return .{ .array = result };
 }
