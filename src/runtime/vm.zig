@@ -1809,6 +1809,7 @@ pub const VM = struct {
         self.frame_count += 1;
         if (self.frame_count > self.frame_high_water) self.frame_high_water = self.frame_count;
 
+        const sp_before_eval = self.sp;
         self.runUntilFrame(return_frame) catch {
             while (self.frame_count > return_frame) {
                 self.frame_count -= 1;
@@ -1816,6 +1817,7 @@ pub const VM = struct {
             }
             self.global_slot_names = saved_slot_names;
             self.script_strict_types = saved_strict;
+            self.sp = sp_before_eval;
             return error.RuntimeError;
         };
         while (self.frame_count > return_frame) {
@@ -1824,6 +1826,15 @@ pub const VM = struct {
         }
         self.global_slot_names = saved_slot_names;
         self.script_strict_types = saved_strict;
+        // return_val from the eval frame pushed the returned value to the
+        // caller's stack; pop it so eval() callers see the actual value
+        // instead of null. when the eval'd code didn't return anything the
+        // stack is unchanged
+        if (self.sp > sp_before_eval) {
+            const r = self.stack[self.sp - 1];
+            self.sp = sp_before_eval;
+            return r;
+        }
         return .null;
     }
 
