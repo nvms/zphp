@@ -521,14 +521,16 @@ fn natsortImpl(arr: *PhpArray, fold_case: bool) void {
     arr.string_index.clearRetainingCapacity();
 }
 
-fn natsort_impl(_: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len == 0 or args[0] != .array) return .{ .bool = false };
+fn natsort_impl(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len == 0) return .{ .bool = false };
+    if (args[0] != .array) return throwArrayTypeError(ctx, "natsort", 1, args[0]);
     natsortImpl(args[0].array, false);
     return .{ .bool = true };
 }
 
-fn natcasesort_impl(_: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len == 0 or args[0] != .array) return .{ .bool = false };
+fn natcasesort_impl(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len == 0) return .{ .bool = false };
+    if (args[0] != .array) return throwArrayTypeError(ctx, "natcasesort", 1, args[0]);
     natsortImpl(args[0].array, true);
     return .{ .bool = true };
 }
@@ -749,7 +751,8 @@ fn array_filter(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
 }
 
 fn native_usort(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len < 2 or args[0] != .array) return .{ .bool = false };
+    if (args.len < 2) return .{ .bool = false };
+    if (args[0] != .array) return throwArrayTypeError(ctx, "usort", 1, args[0]);
     const arr = args[0].array;
     const callback = args[1];
     try mergeSort(PhpArray.Entry, arr.entries.items, ctx, callback, .value);
@@ -1255,8 +1258,9 @@ fn array_sum(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     return .{ .int = int_sum };
 }
 
-fn array_product(_: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len == 0 or args[0] != .array) return .{ .int = 0 };
+fn array_product(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len == 0) return .{ .int = 0 };
+    if (args[0] != .array) return throwArrayTypeError(ctx, "array_product", 1, args[0]);
     const src = args[0].array;
     if (src.entries.items.len == 0) return .{ .int = 1 };
     var has_float = false;
@@ -1557,7 +1561,8 @@ fn keyLessThan(_: void, a: PhpArray.Entry, b: PhpArray.Entry) bool {
 }
 
 fn native_ksort(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len == 0 or args[0] != .array) return .{ .bool = false };
+    if (args.len == 0) return .{ .bool = false };
+    if (args[0] != .array) return throwArrayTypeError(ctx, "ksort", 1, args[0]);
     const arr = args[0].array;
     const flags: i64 = if (args.len >= 2) Value.toInt(args[1]) else 0;
     sortKeysWithFlags(arr, flags, false);
@@ -1567,7 +1572,8 @@ fn native_ksort(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
 }
 
 fn native_krsort(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len == 0 or args[0] != .array) return .{ .bool = false };
+    if (args.len == 0) return .{ .bool = false };
+    if (args[0] != .array) return throwArrayTypeError(ctx, "krsort", 1, args[0]);
     const arr = args[0].array;
     const flags: i64 = if (args.len >= 2) Value.toInt(args[1]) else 0;
     sortKeysWithFlags(arr, flags, true);
@@ -1577,7 +1583,8 @@ fn native_krsort(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
 }
 
 fn native_asort(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len == 0 or args[0] != .array) return .{ .bool = false };
+    if (args.len == 0) return .{ .bool = false };
+    if (args[0] != .array) return throwArrayTypeError(ctx, "asort", 1, args[0]);
     const arr = args[0].array;
     const flags: i64 = if (args.len >= 2) Value.toInt(args[1]) else 0;
     sortWithFlags(arr, flags, false);
@@ -1587,7 +1594,8 @@ fn native_asort(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
 }
 
 fn native_arsort(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len == 0 or args[0] != .array) return .{ .bool = false };
+    if (args.len == 0) return .{ .bool = false };
+    if (args[0] != .array) return throwArrayTypeError(ctx, "arsort", 1, args[0]);
     const arr = args[0].array;
     const flags: i64 = if (args.len >= 2) Value.toInt(args[1]) else 0;
     sortWithFlags(arr, flags, true);
@@ -1643,7 +1651,8 @@ fn array_last(_: *NativeContext, args: []const Value) RuntimeError!Value {
 }
 
 fn native_uasort(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len < 2 or args[0] != .array) return .{ .bool = false };
+    if (args.len < 2) return .{ .bool = false };
+    if (args[0] != .array) return throwArrayTypeError(ctx, "uasort", 1, args[0]);
     const arr = args[0].array;
     const callback = args[1];
     try mergeSort(PhpArray.Entry, arr.entries.items, ctx, callback, .value);
@@ -1653,7 +1662,8 @@ fn native_uasort(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
 }
 
 fn native_uksort(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len < 2 or args[0] != .array) return .{ .bool = false };
+    if (args.len < 2) return .{ .bool = false };
+    if (args[0] != .array) return throwArrayTypeError(ctx, "uksort", 1, args[0]);
     const arr = args[0].array;
     const callback = args[1];
     try mergeSort(PhpArray.Entry, arr.entries.items, ctx, callback, .key);
