@@ -31,6 +31,16 @@ const UnserCtx = struct {
     // property) so native_unserialize knows to propagate the error instead
     // of swallowing it as a parse-failure `false`
     threw: bool = false,
+    // max_depth option for unserialize - matches PHP 7.4+ default of 4096.
+    // depth_exceeded flag distinguishes from generic parse errors so the
+    // warning text matches PHP exactly
+    max_depth: usize = 4096,
+    depth: usize = 0,
+    depth_exceeded: bool = false,
+    // tracks the source offset where parsing first failed, for the
+    // 'Error at offset N of M bytes' warning. start at 0 which matches
+    // PHP for entirely-bogus input
+    err_pos: usize = 0,
 
     fn deinit(self: *UnserCtx, a: Allocator) void {
         self.slots.deinit(a);
@@ -469,6 +479,8 @@ fn serializeValue(ctx: *NativeContext, buf: *std.ArrayListUnmanaged(u8), sctx: *
 fn native_unserialize(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len == 0 or args[0] != .string) return Value{ .bool = false };
     const s = args[0].string;
+    // PHP returns false silently for empty input - no warning
+    if (s.len == 0) return Value{ .bool = false };
     var uctx = UnserCtx{};
     defer uctx.deinit(ctx.allocator);
     var name_storage: std.ArrayListUnmanaged([]const u8) = .{};
@@ -486,13 +498,22 @@ fn native_unserialize(ctx: *NativeContext, args: []const Value) RuntimeError!Val
             },
             else => {},
         }
+        const md = opts.get(.{ .string = "max_depth" });
+        if (md == .int and md.int >= 0) uctx.max_depth = @intCast(md.int);
     }
     const result = unserializeValue(ctx, &uctx, s, 0) catch {
-        // if a user-visible exception was raised (TypeError on a typed
-        // property restoring an __PHP_Incomplete_Class), propagate it so
-        // userland try/catch can see it; otherwise downgrade parse failures
-        // to PHP's traditional `false` return
         if (uctx.threw) return error.RuntimeError;
+        // emit PHP's parse-failure warning. depth-exceeded gets its own
+        // message that names the option + ini setting; generic parse errors
+        // get 'Error at offset N of M bytes'
+        if (uctx.depth_exceeded) {
+            const msg = std.fmt.allocPrint(ctx.allocator, "unserialize(): Maximum depth of {d} exceeded. The depth limit can be changed using the max_depth unserialize() option or the unserialize_max_depth ini setting", .{uctx.max_depth}) catch return Value{ .bool = false };
+            ctx.vm.strings.append(ctx.allocator, msg) catch {};
+            ctx.vm.emitWarning(msg);
+        }
+        const msg2 = std.fmt.allocPrint(ctx.allocator, "unserialize(): Error at offset {d} of {d} bytes", .{ uctx.err_pos, s.len }) catch return Value{ .bool = false };
+        ctx.vm.strings.append(ctx.allocator, msg2) catch {};
+        ctx.vm.emitWarning(msg2);
         return Value{ .bool = false };
     };
     return result.value;
@@ -513,7 +534,10 @@ fn stripVisibilityPrefix(name: []const u8) []const u8 {
 }
 
 fn unserializeValue(ctx: *NativeContext, uctx: *UnserCtx, s: []const u8, pos: usize) !ParseResult {
-    if (pos >= s.len) return error.RuntimeError;
+    if (pos >= s.len) {
+        uctx.err_pos = pos;
+        return error.RuntimeError;
+    }
 
     switch (s[pos]) {
         'N' => {
@@ -562,6 +586,15 @@ fn unserializeValue(ctx: *NativeContext, uctx: *UnserCtx, s: []const u8, pos: us
             const count = std.fmt.parseInt(usize, s[count_start..colon], 10) catch return error.RuntimeError;
             if (colon + 1 >= s.len or s[colon + 1] != '{') return error.RuntimeError;
             var p = colon + 2;
+            // PHP counts arrays/objects toward depth; check after consuming
+            // 'a:N:{' so the err_pos points at the inner content start
+            uctx.depth += 1;
+            defer uctx.depth -= 1;
+            if (uctx.depth > uctx.max_depth) {
+                uctx.depth_exceeded = true;
+                uctx.err_pos = p;
+                return error.RuntimeError;
+            }
             var arr = try ctx.createArray();
             const slot_idx = try uctx.reserve(ctx.allocator);
             uctx.store(slot_idx, .{ .array = arr });
@@ -614,6 +647,13 @@ fn unserializeValue(ctx: *NativeContext, uctx: *UnserCtx, s: []const u8, pos: us
             const prop_count = std.fmt.parseInt(usize, s[p..count_end], 10) catch return error.RuntimeError;
             if (count_end + 1 >= s.len or s[count_end + 1] != '{') return error.RuntimeError;
             p = count_end + 2;
+            uctx.depth += 1;
+            defer uctx.depth -= 1;
+            if (uctx.depth > uctx.max_depth) {
+                uctx.depth_exceeded = true;
+                uctx.err_pos = p;
+                return error.RuntimeError;
+            }
 
             // ensure __PHP_Incomplete_Class exists in the class table
             if (!class_allowed and !ctx.vm.classes.contains("__PHP_Incomplete_Class")) {
