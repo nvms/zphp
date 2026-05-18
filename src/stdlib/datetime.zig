@@ -2496,9 +2496,10 @@ pub fn parseRelativeTime(input: []const u8, base: i64) Value {
     // "next/last <weekday>" or "next/last month/year"
     if (tryParseNextLast(s, base)) |ts| return .{ .int = ts };
 
-    // weekday name alone ("Monday", "Thursday") - next occurrence
+    // weekday name alone ("Monday", "Thursday") - PHP returns TODAY at
+    // midnight when the current weekday matches; otherwise the next occurrence
     if (parseWeekdayName(s)) |target_dow| {
-        return .{ .int = resolveNextWeekday(base, target_dow) };
+        return .{ .int = resolveThisWeekday(base, target_dow) };
     }
 
     // numeric relative: "+3 days", "-1 month", "2 weeks", "3 days ago"
@@ -2598,11 +2599,15 @@ fn tryParseFirstLastDay(input: []const u8, base: i64) ?i64 {
 fn tryParseNextLast(input: []const u8, base: i64) ?i64 {
     var s = input;
     var direction: i64 = 0;
+    var is_this = false;
     if (startsWithLower(s, "next ")) {
         direction = 1;
         s = s[5..];
     } else if (startsWithLower(s, "last ")) {
         direction = -1;
+        s = s[5..];
+    } else if (startsWithLower(s, "this ")) {
+        is_this = true;
         s = s[5..];
     } else {
         return null;
@@ -2643,7 +2648,12 @@ fn tryParseNextLast(input: []const u8, base: i64) ?i64 {
         const wname_len = weekdayNameLen(s) orelse s.len;
         var rest = s[wname_len..];
         while (rest.len > 0 and rest[0] == ' ') rest = rest[1..];
-        const ts = if (direction > 0) resolveNextWeekday(base, target_dow) else resolveLastWeekday(base, target_dow);
+        const ts = if (is_this)
+            resolveThisWeekday(base, target_dow)
+        else if (direction > 0)
+            resolveNextWeekday(base, target_dow)
+        else
+            resolveLastWeekday(base, target_dow);
         if (rest.len == 0) return ts;
         if (parseTimeOfDay(rest)) |tod| {
             return baseMidnight(ts) + tod.hour * 3600 + tod.min * 60 + tod.sec;
@@ -2801,6 +2811,21 @@ fn resolveNextWeekday(base: i64, target_dow: u3) i64 {
     const current_dow: u3 = @intCast(@mod(day_num + 3, 7));
     var diff: i64 = @as(i64, target_dow) - @as(i64, current_dow);
     if (diff <= 0) diff += 7;
+    return midnight + diff * 86400;
+}
+
+// PHP semantics for bare 'monday' / 'this monday': returns today at midnight
+// when the current weekday matches the target; otherwise the next occurrence.
+// resolveNextWeekday always advances at least 1 day, matching 'next monday'
+fn resolveThisWeekday(base: i64, target_dow: u3) i64 {
+    const midnight = baseMidnight(base);
+    const epoch_secs: u64 = @intCast(if (midnight < 0) 0 else midnight);
+    const es = std.time.epoch.EpochSeconds{ .secs = epoch_secs };
+    const epoch_day = es.getEpochDay();
+    const day_num: i64 = @intCast(epoch_day.day);
+    const current_dow: u3 = @intCast(@mod(day_num + 3, 7));
+    var diff: i64 = @as(i64, target_dow) - @as(i64, current_dow);
+    if (diff < 0) diff += 7;
     return midnight + diff * 86400;
 }
 
