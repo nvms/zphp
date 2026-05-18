@@ -398,10 +398,35 @@ fn runWithVM(allocator: std.mem.Allocator, result: *CompileResult, script_path: 
     try initCliServerVars(vm, allocator);
     try initArgv(vm, allocator, script_path, script_args);
     vm.interpret(result) catch {
+        if (vm.exit_requested) {
+            vm.runShutdownCallbacks() catch {};
+            if (vm.output.items.len > 0) try writeStdout(vm.output.items);
+            std.process.exit(vm.exit_code);
+        }
+        // dispatch to user exception handler if one is installed and we have
+        // an uncaught exception. handler runs, then we exit 0 unless it
+        // threw or the script set a different exit code
+        if (vm.pending_exception) |exc| {
+            if (vm.user_exception_handler) |handler| {
+                vm.user_exception_handler = null; // prevent recursion
+                vm.pending_exception = null;
+                var ctx = vm.makeContext(null);
+                _ = ctx.invokeCallable(handler, &.{exc}) catch {};
+                vm.runShutdownCallbacks() catch {};
+                if (vm.output.items.len > 0) try writeStdout(vm.output.items);
+                if (std.posix.getenv("ZPHP_DBG_PROFILE") != null) dumpProfile(vm);
+                if (vm.exit_requested) std.process.exit(vm.exit_code);
+                if (vm.pending_exception != null) {
+                    const fallback = error_format.formatRuntimeError(allocator, vm);
+                    if (fallback.len > 0) try writeStderr(fallback);
+                    std.process.exit(255);
+                }
+                return;
+            }
+        }
         vm.runShutdownCallbacks() catch {};
         if (vm.output.items.len > 0) try writeStdout(vm.output.items);
         if (std.posix.getenv("ZPHP_DBG_PROFILE") != null) dumpProfile(vm);
-        if (vm.exit_requested) std.process.exit(vm.exit_code);
         const msg = error_format.formatRuntimeError(allocator, vm);
         if (msg.len > 0) {
             try writeStderr(msg);
