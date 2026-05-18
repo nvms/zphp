@@ -22,7 +22,7 @@ for f in "$SCRIPT_DIR"/*.php; do
     name="$(basename "$f")"
     # skip tests that require external database servers
     case "$name" in pdo_mysql.php|pdo_pgsql.php) continue ;; esac
-    php_out="$(php -d error_reporting='E_ALL & ~E_DEPRECATED' -d display_errors=0 -d zend.exception_ignore_args=0 -d zend.exception_string_param_max_len=15 "$f" 2>&1)" || true
+    php_out="$(php -d error_reporting='E_ALL & ~E_DEPRECATED' -d zend.exception_ignore_args=0 -d zend.exception_string_param_max_len=15 "$f" 2>&1)" || true
     zphp_out="$("$ZPHP" run "$f" 2>&1)" || true
 
     if [ "$php_out" = "$zphp_out" ]; then
