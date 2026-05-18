@@ -610,6 +610,7 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try rcc_def.methods.put(a, "isEnumCase", .{ .name = "isEnumCase", .arity = 0 });
     try rcc_def.methods.put(a, "getType", .{ .name = "getType", .arity = 0 });
     try rcc_def.methods.put(a, "hasType", .{ .name = "hasType", .arity = 0 });
+    try rcc_def.methods.put(a, "getModifiers", .{ .name = "getModifiers", .arity = 0 });
     try vm.classes.put(a, "ReflectionClassConstant", rcc_def);
 
     try vm.native_fns.put(a, "ReflectionClassConstant::__construct", rccConstruct);
@@ -624,6 +625,7 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try vm.native_fns.put(a, "ReflectionClassConstant::isEnumCase", rccIsEnumCase);
     try vm.native_fns.put(a, "ReflectionClassConstant::getType", rccGetType);
     try vm.native_fns.put(a, "ReflectionClassConstant::hasType", rccHasType);
+    try vm.native_fns.put(a, "ReflectionClassConstant::getModifiers", rccGetModifiers);
 
     // Closure class (static methods only - instance methods handled in VM dispatch)
     var closure_def = ClassDef{ .name = "Closure" };
@@ -1766,11 +1768,13 @@ fn rcGetConstant(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     return .{ .bool = false };
 }
 
-fn buildReflectionClassConstant(ctx: *NativeContext, class_name: []const u8, const_name: []const u8, value: Value) RuntimeError!Value {
+fn buildReflectionClassConstant(ctx: *NativeContext, class_name: []const u8, const_name: []const u8, _: Value) RuntimeError!Value {
+    // PHP's ReflectionClassConstant only exposes 'name' and 'class' as public
+    // properties; the value is looked up from the class table on demand. zphp
+    // previously stored a third public '_value' which polluted print_r/iter
     const obj = try ctx.createObject("ReflectionClassConstant");
     try obj.set(ctx.allocator, "name", .{ .string = const_name });
     try obj.set(ctx.allocator, "class", .{ .string = class_name });
-    try obj.set(ctx.allocator, "_value", value);
     return .{ .object = obj };
 }
 
@@ -1781,7 +1785,35 @@ fn rccGetName(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
 
 fn rccGetValue(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
     const this = getThis(ctx) orelse return .null;
-    return this.get("_value");
+    const class_name = if (this.get("class") == .string) this.get("class").string else return .null;
+    const const_name = if (this.get("name") == .string) this.get("name").string else return .null;
+    var current: ?[]const u8 = class_name;
+    while (current) |name| {
+        const cls = ctx.vm.classes.get(name) orelse break;
+        if (cls.static_props.get(const_name)) |val| return val;
+        current = cls.parent;
+    }
+    return .null;
+}
+
+fn rccGetModifiers(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    // PHP returns a bitmask: ReflectionClassConstant::IS_PUBLIC=1,
+    // IS_PROTECTED=2, IS_PRIVATE=4, plus IS_FINAL=32 when declared `final`
+    var mods: i64 = 0;
+    if (rccVisibility(ctx)) |v| {
+        mods |= switch (v) {
+            .public => 1,
+            .protected => 2,
+            .private => 4,
+        };
+    } else mods |= 1;
+    const this = getThis(ctx) orelse return .{ .int = mods };
+    const class_name = if (this.get("class") == .string) this.get("class").string else return .{ .int = mods };
+    const const_name = if (this.get("name") == .string) this.get("name").string else return .{ .int = mods };
+    if (ctx.vm.classes.get(class_name)) |cls| {
+        if (cls.const_final.contains(const_name)) mods |= 32;
+    }
+    return .{ .int = mods };
 }
 
 fn rccGetDeclaringClass(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
