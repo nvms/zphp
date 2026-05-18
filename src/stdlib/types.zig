@@ -254,13 +254,34 @@ fn count(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
             if (ctx.vm.hasMethod(obj.class_name, "count")) {
                 return ctx.vm.callMethod(obj, "count", &.{}) catch .{ .int = 1 };
             }
-            try ctx.vm.setPendingException("TypeError", "count(): Argument #1 ($value) must be of type Countable|array");
+            const msg = try std.fmt.allocPrint(ctx.allocator, "count(): Argument #1 ($value) must be of type Countable|array, {s} given", .{phpTypeName(args[0])});
+            try ctx.vm.strings.append(ctx.allocator, msg);
+            try ctx.vm.setPendingException("TypeError", msg);
             return error.RuntimeError;
         },
         else => {
-            try ctx.vm.setPendingException("TypeError", "count(): Argument #1 ($value) must be of type Countable|array");
+            const msg = try std.fmt.allocPrint(ctx.allocator, "count(): Argument #1 ($value) must be of type Countable|array, {s} given", .{phpTypeName(args[0])});
+            try ctx.vm.strings.append(ctx.allocator, msg);
+            try ctx.vm.setPendingException("TypeError", msg);
             return error.RuntimeError;
         },
+    };
+}
+
+// PHP's type-name used in TypeError messages: 'string', 'int', 'float',
+// 'array', 'true', 'false', 'null', or the class name for objects.
+// closures live as strings tagged with the '__closure_' prefix in zphp
+pub fn phpTypeName(v: Value) []const u8 {
+    return switch (v) {
+        .null => "null",
+        .bool => |b| if (b) "true" else "false",
+        .int => "int",
+        .float => "float",
+        .string => |s| if (std.mem.startsWith(u8, s, "__closure_")) "Closure" else "string",
+        .array => "array",
+        .object => |o| o.class_name,
+        .generator => "Generator",
+        .fiber => "Fiber",
     };
 }
 
