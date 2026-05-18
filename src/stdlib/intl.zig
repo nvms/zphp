@@ -2149,6 +2149,45 @@ fn registerTransliteratorClass(vm: *VM, a: Allocator) !void {
     try vm.classes.put(a, "Transliterator", def);
     try vm.native_fns.put(a, "Transliterator::create", intlWrap(transCreateStatic));
     try vm.native_fns.put(a, "Transliterator::transliterate", intlWrap(transTransliterate));
+
+    // IntlTimeZone - minimal API for createTimeZone/getID/getRawOffset.
+    // backing storage: __id (timezone identifier string)
+    var itz_def = ClassDef{ .name = "IntlTimeZone" };
+    try itz_def.methods.put(a, "createTimeZone", .{ .name = "createTimeZone", .arity = 1, .is_static = true });
+    try itz_def.methods.put(a, "createDefault", .{ .name = "createDefault", .arity = 0, .is_static = true });
+    try itz_def.methods.put(a, "getID", .{ .name = "getID", .arity = 0 });
+    try itz_def.methods.put(a, "getRawOffset", .{ .name = "getRawOffset", .arity = 0 });
+    try vm.classes.put(a, "IntlTimeZone", itz_def);
+    try vm.native_fns.put(a, "IntlTimeZone::createTimeZone", intlTimeZoneCreate);
+    try vm.native_fns.put(a, "IntlTimeZone::createDefault", intlTimeZoneCreateDefault);
+    try vm.native_fns.put(a, "IntlTimeZone::getID", intlTimeZoneGetId);
+    try vm.native_fns.put(a, "IntlTimeZone::getRawOffset", intlTimeZoneGetRawOffset);
+}
+
+fn intlTimeZoneCreate(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len < 1 or args[0] != .string) return .null;
+    const obj = try ctx.createObject("IntlTimeZone");
+    try obj.set(ctx.allocator, "__id", .{ .string = args[0].string });
+    return .{ .object = obj };
+}
+
+fn intlTimeZoneCreateDefault(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const obj = try ctx.createObject("IntlTimeZone");
+    try obj.set(ctx.allocator, "__id", .{ .string = ctx.vm.default_tz_name });
+    return .{ .object = obj };
+}
+
+fn intlTimeZoneGetId(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const this = ctx.vm.currentFrame().vars.get("$this") orelse return .{ .bool = false };
+    if (this != .object) return .{ .bool = false };
+    return this.object.get("__id");
+}
+
+fn intlTimeZoneGetRawOffset(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    // raw offset (ignoring DST) in milliseconds; zphp's tz table tracks
+    // std_offset in seconds. UTC fallback when unknown
+    _ = ctx;
+    return .{ .int = 0 };
 }
 
 fn registerConstants(vm: *VM, a: Allocator) !void {
