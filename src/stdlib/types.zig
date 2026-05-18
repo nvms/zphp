@@ -465,7 +465,17 @@ fn native_empty(_: *NativeContext, args: []const Value) RuntimeError!Value {
 fn strlen(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len == 0) return .{ .int = 0 };
     return switch (args[0]) {
-        .string => |s| .{ .int = @intCast(s.len) },
+        .string => |s| blk: {
+            // closures live as '__closure_<id>' strings in zphp; treat them
+            // as object-class Closure for the TypeError, matching PHP
+            if (std.mem.startsWith(u8, s, "__closure_")) {
+                const msg = try std.fmt.allocPrint(ctx.allocator, "strlen(): Argument #1 ($string) must be of type string, Closure given", .{});
+                try ctx.vm.strings.append(ctx.allocator, msg);
+                try ctx.vm.setPendingException("TypeError", msg);
+                break :blk error.RuntimeError;
+            }
+            break :blk .{ .int = @intCast(s.len) };
+        },
         .int => |i| blk: {
             var buf: [32]u8 = undefined;
             const s = std.fmt.bufPrint(&buf, "{d}", .{i}) catch break :blk .{ .int = 0 };
@@ -483,8 +493,10 @@ fn strlen(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
                 const result = try ctx.vm.callMethod(obj, "__toString", &.{});
                 if (result == .string) break :blk .{ .int = @intCast(result.string.len) };
             }
-            // object without __toString: PHP throws TypeError
-            try ctx.vm.setPendingException("TypeError", "strlen(): Argument #1 ($string) must be of type string, object given");
+            // object without __toString: PHP throws TypeError with the class name
+            const msg = try std.fmt.allocPrint(ctx.allocator, "strlen(): Argument #1 ($string) must be of type string, {s} given", .{phpTypeName(args[0])});
+            try ctx.vm.strings.append(ctx.allocator, msg);
+            try ctx.vm.setPendingException("TypeError", msg);
             break :blk error.RuntimeError;
         },
         .array => blk: {

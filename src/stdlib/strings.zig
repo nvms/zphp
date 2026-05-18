@@ -5,6 +5,7 @@ const Value = @import("../runtime/value.zig").Value;
 const PhpArray = @import("../runtime/value.zig").PhpArray;
 const NativeContext = @import("../runtime/vm.zig").NativeContext;
 const RuntimeError = error{ RuntimeError, OutOfMemory };
+const phpTypeName = @import("types.zig").phpTypeName;
 
 pub const entries = .{
     .{ "substr", substr },
@@ -305,15 +306,22 @@ fn implode(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len == 0) return .{ .string = "" };
     var glue: []const u8 = "";
     var arr_val: Value = .null;
+    var arr_pos: u8 = 2;
 
     if (args.len == 1) {
         arr_val = args[0];
+        arr_pos = 1;
     } else {
         glue = if (args[0] == .string) args[0].string else "";
         arr_val = args[1];
     }
 
-    if (arr_val != .array) return .{ .string = "" };
+    if (arr_val != .array) {
+        const msg = try std.fmt.allocPrint(ctx.allocator, "implode(): Argument #{d} ($array) must be of type ?array, {s} given", .{ arr_pos, phpTypeName(arr_val) });
+        try ctx.strings.append(ctx.allocator, msg);
+        try ctx.vm.setPendingException("TypeError", msg);
+        return error.RuntimeError;
+    }
     const arr = arr_val.array;
     if (arr.entries.items.len == 0) return .{ .string = "" };
 
@@ -3886,11 +3894,20 @@ fn native_rawurldecode(ctx: *NativeContext, args: []const Value) RuntimeError!Va
 /// returns "" for arrays; call this first to match PHP behavior on the strict
 /// parameters
 fn rejectArrayParam(ctx: *NativeContext, v: Value, comptime func_name: []const u8) !bool {
-    if (v == .array) {
+    // PHP throws TypeError on any non-stringable: array, closure, and any
+    // object without __toString (objects WITH __toString stringify normally).
+    // emit the same 'must be of type string, <type> given' format
+    const bad_type: ?[]const u8 = switch (v) {
+        .array => "array",
+        .object => |o| if (ctx.vm.hasMethod(o.class_name, "__toString")) null else o.class_name,
+        .string => |s| if (std.mem.startsWith(u8, s, "__closure_")) "Closure" else null,
+        else => null,
+    };
+    if (bad_type) |bt| {
         const msg = try std.fmt.allocPrint(
             ctx.allocator,
-            "{s}(): Argument #1 ($string) must be of type string, array given",
-            .{func_name},
+            "{s}(): Argument #1 ($string) must be of type string, {s} given",
+            .{ func_name, bt },
         );
         try ctx.strings.append(ctx.allocator, msg);
         try ctx.vm.setPendingException("TypeError", msg);
