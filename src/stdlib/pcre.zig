@@ -54,6 +54,12 @@ const pcre2 = struct {
 
     extern "pcre2-8" fn pcre2_code_free_8(code: ?*Code) callconv(.c) void;
 
+    extern "pcre2-8" fn pcre2_get_error_message_8(
+        errorcode: c_int,
+        buffer: [*]u8,
+        bufflen: usize,
+    ) callconv(.c) c_int;
+
     extern "pcre2-8" fn pcre2_match_data_create_from_pattern_8(
         code: *const Code,
         gcontext: ?*anyopaque,
@@ -171,6 +177,26 @@ fn compilePattern(pattern: []const u8, flags: u32) ?*pcre2.Code {
     );
 }
 
+// emit a PHP-format 'preg_<fn>(): Compilation failed: <message> at offset N'
+// warning for a pattern that fails to compile. callers should already have
+// set preg_last_error to 1 before invoking this
+fn emitCompileWarning(ctx: *NativeContext, fn_name: []const u8, pattern: []const u8, flags: u32) void {
+    var err_code: c_int = 0;
+    var err_offset: usize = 0;
+    const probe = pcre2.pcre2_compile_8(pattern.ptr, pattern.len, flags, &err_code, &err_offset, null);
+    if (probe) |p| {
+        pcre2.pcre2_code_free_8(p);
+        return;
+    }
+    var msg_buf: [256]u8 = undefined;
+    const len = pcre2.pcre2_get_error_message_8(err_code, &msg_buf, msg_buf.len);
+    if (len <= 0) return;
+    const err_text = msg_buf[0..@intCast(len)];
+    const msg = std.fmt.allocPrint(ctx.allocator, "{s}(): Compilation failed: {s} at offset {d}", .{ fn_name, err_text, err_offset }) catch return;
+    ctx.vm.strings.append(ctx.allocator, msg) catch {};
+    ctx.vm.emitWarning(msg);
+}
+
 fn preg_match(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len < 2) return .{ .bool = false };
     const pat_str = coerceStrArg(ctx, args[0]) orelse return .{ .bool = false };
@@ -184,6 +210,7 @@ fn preg_match(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
 
     const code = compilePattern(info.pattern, info.flags) orelse {
         setPregError(1);
+        emitCompileWarning(ctx, "preg_match", info.pattern, info.flags);
         return Value{ .bool = false };
     };
     defer pcre2.pcre2_code_free_8(code);
@@ -378,6 +405,7 @@ fn preg_match_all(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
 
     const code = compilePattern(info.pattern, info.flags) orelse {
         setPregError(1);
+        emitCompileWarning(ctx, "preg_match_all", info.pattern, info.flags);
         return Value{ .bool = false };
     };
     defer pcre2.pcre2_code_free_8(code);
@@ -711,6 +739,7 @@ fn preg_replace(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
 
     const code = compilePattern(info.pattern, info.flags) orelse {
         setPregError(1);
+        emitCompileWarning(ctx, "preg_replace", info.pattern, info.flags);
         return .null;
     };
     defer pcre2.pcre2_code_free_8(code);
