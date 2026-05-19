@@ -84,6 +84,9 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try rc_def.methods.put(a, "isInstance", .{ .name = "isInstance", .arity = 1 });
     try rc_def.methods.put(a, "isFinal", .{ .name = "isFinal", .arity = 0 });
     try rc_def.methods.put(a, "isReadOnly", .{ .name = "isReadOnly", .arity = 0 });
+    // PHP 8.2+ docs use 'isReadonly' (lowercase o) and most code calls it
+    // that way. method lookup is case-sensitive in zphp so register both
+    try rc_def.methods.put(a, "isReadonly", .{ .name = "isReadonly", .arity = 0 });
     try rc_def.methods.put(a, "getModifiers", .{ .name = "getModifiers", .arity = 0 });
     try rc_def.methods.put(a, "isCloneable", .{ .name = "isCloneable", .arity = 0 });
     try rc_def.methods.put(a, "newInstanceArgs", .{ .name = "newInstanceArgs", .arity = 1 });
@@ -184,6 +187,7 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try vm.native_fns.put(a, "ReflectionClass::setStaticPropertyValue", rcSetStaticPropertyValue);
     try vm.native_fns.put(a, "ReflectionClass::isFinal", rcIsFinal);
     try vm.native_fns.put(a, "ReflectionClass::isReadOnly", rcIsReadOnly);
+    try vm.native_fns.put(a, "ReflectionClass::isReadonly", rcIsReadOnly);
     try vm.native_fns.put(a, "ReflectionClass::getModifiers", rcGetModifiers);
     try vm.native_fns.put(a, "ReflectionClass::isCloneable", rcIsCloneable);
 
@@ -3568,7 +3572,11 @@ fn rmGetAttributes(ctx: *NativeContext, args: []const Value) RuntimeError!Value 
 
 fn rpIsPromoted(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
     const this = getThis(ctx) orelse return .{ .bool = false };
-    // promoted iff declaring method is __construct AND the class has a matching property
+    // promoted iff declaring method is __construct AND the class has a
+    // matching property that is itself flagged as promoted. previously we
+    // returned true whenever any same-named property existed, which mis-
+    // classified plain '?string $name = null' params as promoted whenever
+    // the class happened to declare a separate '$name' property
     const method_v = this.get("_method_name");
     if (method_v != .string or !std.mem.eql(u8, method_v.string, "__construct")) return .{ .bool = false };
     const class_v = this.get("_declaring_class");
@@ -3577,7 +3585,7 @@ fn rpIsPromoted(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
     if (name_v != .string) return .{ .bool = false };
     const cls = ctx.vm.classes.getPtr(class_v.string) orelse return .{ .bool = false };
     for (cls.properties.items) |prop| {
-        if (std.mem.eql(u8, prop.name, name_v.string)) return .{ .bool = true };
+        if (std.mem.eql(u8, prop.name, name_v.string)) return .{ .bool = prop.is_promoted };
     }
     return .{ .bool = false };
 }
