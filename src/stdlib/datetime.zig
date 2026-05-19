@@ -2395,10 +2395,208 @@ fn native_date_parse(ctx: *NativeContext, args: []const Value) RuntimeError!Valu
 }
 
 fn native_date_parse_from_format(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    // for now just delegate to date_parse on the value - format-driven parsing
-    // is implemented for date_create_from_format; a full mirror is out of scope
-    if (args.len < 2 or args[1] != .string) return .{ .bool = false };
-    return native_date_parse(ctx, args[1..]);
+    if (args.len < 2 or args[0] != .string or args[1] != .string) return .{ .bool = false };
+    const format = args[0].string;
+    const datetime = args[1].string;
+
+    var year: ?i64 = null;
+    var month: ?i64 = null;
+    var day: ?i64 = null;
+    var hour: ?i64 = null;
+    var minute: ?i64 = null;
+    var second: ?i64 = null;
+    var fraction: ?f64 = null;
+    var is_pm: ?bool = null;
+    var hour_is_12: bool = false;
+
+    var errors_buf: [16][]const u8 = undefined;
+    var n_errors: usize = 0;
+
+    var fi: usize = 0;
+    var di: usize = 0;
+    while (fi < format.len) : (fi += 1) {
+        const c = format[fi];
+        switch (c) {
+            'Y' => {
+                if (di + 4 <= datetime.len) {
+                    if (std.fmt.parseInt(i64, datetime[di..di+4], 10)) |v| { year = v; di += 4; }
+                    else |_| { if (n_errors < errors_buf.len) { errors_buf[n_errors] = "A four digit year could not be found"; n_errors += 1; } }
+                } else if (n_errors < errors_buf.len) { errors_buf[n_errors] = "A four digit year could not be found"; n_errors += 1; }
+            },
+            'y' => {
+                if (di + 2 <= datetime.len) {
+                    if (std.fmt.parseInt(i64, datetime[di..di+2], 10)) |yy| { year = if (yy < 70) 2000 + yy else 1900 + yy; di += 2; }
+                    else |_| {}
+                }
+            },
+            'm' => {
+                if (di + 2 <= datetime.len) {
+                    if (std.fmt.parseInt(i64, datetime[di..di+2], 10)) |v| { month = v; di += 2; } else |_| {}
+                }
+            },
+            'n' => {
+                if (takeDigits(datetime, di, 1, 2)) |t| { month = t.value; di = t.next; }
+            },
+            'd' => {
+                if (di + 2 <= datetime.len) {
+                    if (std.fmt.parseInt(i64, datetime[di..di+2], 10)) |v| { day = v; di += 2; } else |_| {}
+                }
+            },
+            'j' => {
+                if (takeDigits(datetime, di, 1, 2)) |t| { day = t.value; di = t.next; }
+            },
+            'H' => {
+                if (di + 2 <= datetime.len) {
+                    if (std.fmt.parseInt(i64, datetime[di..di+2], 10)) |v| { hour = v; di += 2; } else |_| {}
+                }
+            },
+            'G' => {
+                if (takeDigits(datetime, di, 1, 2)) |t| { hour = t.value; di = t.next; }
+            },
+            'h' => {
+                if (di + 2 <= datetime.len) {
+                    if (std.fmt.parseInt(i64, datetime[di..di+2], 10)) |v| { hour = v; di += 2; hour_is_12 = true; } else |_| {}
+                }
+            },
+            'g' => {
+                if (takeDigits(datetime, di, 1, 2)) |t| { hour = t.value; di = t.next; hour_is_12 = true; }
+            },
+            'i' => {
+                if (di + 2 <= datetime.len) {
+                    if (std.fmt.parseInt(i64, datetime[di..di+2], 10)) |v| { minute = v; di += 2; } else |_| {}
+                }
+            },
+            's' => {
+                if (di + 2 <= datetime.len) {
+                    if (std.fmt.parseInt(i64, datetime[di..di+2], 10)) |v| { second = v; di += 2; } else |_| {}
+                }
+            },
+            'u' => {
+                // microseconds, variable digits
+                var end = di;
+                while (end < datetime.len and datetime[end] >= '0' and datetime[end] <= '9') end += 1;
+                if (end > di) {
+                    const us = std.fmt.parseInt(i64, datetime[di..end], 10) catch 0;
+                    const digits = end - di;
+                    var divisor: f64 = 1;
+                    var dd: usize = 0;
+                    while (dd < digits) : (dd += 1) divisor *= 10;
+                    fraction = @as(f64, @floatFromInt(us)) / divisor;
+                    di = end;
+                }
+            },
+            'v' => {
+                // milliseconds 3 digits
+                if (di + 3 <= datetime.len) {
+                    if (std.fmt.parseInt(i64, datetime[di..di+3], 10)) |ms| {
+                        fraction = @as(f64, @floatFromInt(ms)) / 1000.0;
+                        di += 3;
+                    } else |_| {}
+                }
+            },
+            'a', 'A' => {
+                if (di + 2 <= datetime.len) {
+                    const tok = datetime[di..di+2];
+                    if (std.ascii.eqlIgnoreCase(tok, "am")) { is_pm = false; di += 2; }
+                    else if (std.ascii.eqlIgnoreCase(tok, "pm")) { is_pm = true; di += 2; }
+                }
+            },
+            'D', 'l' => {
+                // skip alphabetic day name
+                while (di < datetime.len and std.ascii.isAlphabetic(datetime[di])) di += 1;
+            },
+            'M', 'F' => {
+                // month name - look up
+                var end = di;
+                while (end < datetime.len and std.ascii.isAlphabetic(datetime[end])) end += 1;
+                if (end > di) {
+                    const name = datetime[di..end];
+                    const months = [_][]const u8{ "january","february","march","april","may","june","july","august","september","october","november","december" };
+                    for (months, 0..) |mn, idx| {
+                        if (std.ascii.startsWithIgnoreCase(mn, name) and (name.len == mn.len or name.len == 3)) {
+                            month = @intCast(idx + 1);
+                            break;
+                        }
+                    }
+                    di = end;
+                }
+            },
+            ' ', '\t' => {
+                while (di < datetime.len and (datetime[di] == ' ' or datetime[di] == '\t')) di += 1;
+            },
+            '\\' => {
+                fi += 1;
+                if (fi < format.len and di < datetime.len and datetime[di] == format[fi]) di += 1;
+            },
+            '!' => {
+                if (year == null) year = 1970;
+                if (month == null) month = 1;
+                if (day == null) day = 1;
+                if (hour == null) hour = 0;
+                if (minute == null) minute = 0;
+                if (second == null) second = 0;
+                if (fraction == null) fraction = 0;
+            },
+            '|' => {
+                if (year == null) year = 1970;
+                if (month == null) month = 1;
+                if (day == null) day = 1;
+                if (hour == null) hour = 0;
+                if (minute == null) minute = 0;
+                if (second == null) second = 0;
+            },
+            else => {
+                // literal char: PHP advances input if it matches; mismatches
+                // are silent (no errors row) for ordinary punctuation
+                if (di < datetime.len and datetime[di] == c) di += 1;
+            },
+        }
+    }
+
+    if (hour_is_12) {
+        if (is_pm) |pm| {
+            if (pm and (hour orelse 0) < 12) hour = (hour orelse 0) + 12
+            else if (!pm and (hour orelse 0) == 12) hour = 0;
+        }
+    }
+
+    // PHP: if any time component was parsed, the other time components default
+    // to 0 (rather than remaining unset). hour-implies-min-sec-fraction-min,
+    // etc. all of h/m/s/fraction become 0 when ANY time field is touched
+    const any_time = hour != null or minute != null or second != null or fraction != null;
+    if (any_time) {
+        if (hour == null) hour = 0;
+        if (minute == null) minute = 0;
+        if (second == null) second = 0;
+        if (fraction == null) fraction = 0;
+    }
+
+    return buildDateParseResultOpt(ctx, year, month, day, hour, minute, second, fraction, errors_buf[0..n_errors]);
+}
+
+fn buildDateParseResultOpt(ctx: *NativeContext, year: ?i64, month: ?i64, day: ?i64, hour: ?i64, minute: ?i64, second: ?i64, fraction: ?f64, errors: []const []const u8) !Value {
+    const PhpArray = @import("../runtime/value.zig").PhpArray;
+    var arr = try ctx.createArray();
+    try arr.set(ctx.allocator, .{ .string = "year" }, if (year) |y| .{ .int = y } else .{ .bool = false });
+    try arr.set(ctx.allocator, .{ .string = "month" }, if (month) |m| .{ .int = m } else .{ .bool = false });
+    try arr.set(ctx.allocator, .{ .string = "day" }, if (day) |d| .{ .int = d } else .{ .bool = false });
+    try arr.set(ctx.allocator, .{ .string = "hour" }, if (hour) |h| .{ .int = h } else .{ .bool = false });
+    try arr.set(ctx.allocator, .{ .string = "minute" }, if (minute) |m| .{ .int = m } else .{ .bool = false });
+    try arr.set(ctx.allocator, .{ .string = "second" }, if (second) |s| .{ .int = s } else .{ .bool = false });
+    try arr.set(ctx.allocator, .{ .string = "fraction" }, if (fraction) |f| .{ .float = f } else .{ .bool = false });
+    try arr.set(ctx.allocator, .{ .string = "warning_count" }, .{ .int = 0 });
+    const warns = try ctx.allocator.create(PhpArray);
+    warns.* = .{};
+    try ctx.vm.arrays.append(ctx.allocator, warns);
+    try arr.set(ctx.allocator, .{ .string = "warnings" }, .{ .array = warns });
+    try arr.set(ctx.allocator, .{ .string = "error_count" }, .{ .int = @intCast(errors.len) });
+    const errs = try ctx.allocator.create(PhpArray);
+    errs.* = .{};
+    try ctx.vm.arrays.append(ctx.allocator, errs);
+    for (errors, 0..) |e, i| try errs.set(ctx.allocator, .{ .int = @intCast(i) }, .{ .string = e });
+    try arr.set(ctx.allocator, .{ .string = "errors" }, .{ .array = errs });
+    try arr.set(ctx.allocator, .{ .string = "is_localtime" }, .{ .bool = false });
+    return .{ .array = arr };
 }
 
 fn native_getdate(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
