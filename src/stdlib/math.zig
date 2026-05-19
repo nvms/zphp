@@ -251,7 +251,20 @@ fn native_rand(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     const hi: i64 = if (args.len >= 2) Value.toInt(args[1]) else 2147483647;
     // mt_rand() with no args returns a 31-bit value
     if (args.len < 2) return .{ .int = ctx.vm.mt19937.next31() };
-    if (lo >= hi) return .{ .int = lo };
+    // PHP 8+: mt_rand throws ValueError if max < min. rand silently swaps
+    // (a historical alias quirk preserved for back-compat). distinguish by
+    // the calling-name in ctx.call_name
+    if (lo > hi) {
+        const fn_name: []const u8 = if (ctx.call_name) |c| c else "mt_rand";
+        if (std.mem.eql(u8, fn_name, "rand")) {
+            return .{ .int = ctx.vm.mt19937.nextRange(hi, lo) };
+        }
+        const msg = try std.fmt.allocPrint(ctx.allocator, "{s}(): Argument #2 ($max) must be greater than or equal to argument #1 ($min)", .{fn_name});
+        try ctx.vm.strings.append(ctx.allocator, msg);
+        try ctx.vm.setPendingException("ValueError", msg);
+        return error.RuntimeError;
+    }
+    if (lo == hi) return .{ .int = lo };
     return .{ .int = ctx.vm.mt19937.nextRange(lo, hi) };
 }
 
