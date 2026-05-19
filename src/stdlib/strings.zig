@@ -93,6 +93,8 @@ pub const entries = .{
     .{ "str_getcsv", native_str_getcsv },
     .{ "base64_encode", native_base64_encode },
     .{ "base64_decode", native_base64_decode },
+    .{ "convert_uuencode", native_convert_uuencode },
+    .{ "convert_uudecode", native_convert_uudecode },
     .{ "urlencode", native_urlencode },
     .{ "urldecode", native_urldecode },
     .{ "rawurlencode", native_rawurlencode },
@@ -3828,6 +3830,89 @@ fn native_base64_decode(ctx: *NativeContext, args: []const Value) RuntimeError!V
     const result = try buf.toOwnedSlice(ctx.allocator);
     try ctx.strings.append(ctx.allocator, result);
     return .{ .string = result };
+}
+
+fn native_convert_uuencode(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len == 0 or args[0] != .string) return .{ .bool = false };
+    const s = args[0].string;
+    if (s.len == 0) return .{ .bool = false };
+    var buf = std.ArrayListUnmanaged(u8){};
+    var i: usize = 0;
+    while (i < s.len) {
+        const line_len = @min(@as(usize, 45), s.len - i);
+        // length byte = char(0x20 + line_len), except 0 chars on final terminator
+        try buf.append(ctx.allocator, @as(u8, @intCast(line_len)) + 0x20);
+        var j: usize = 0;
+        while (j < line_len) : (j += 3) {
+            const b0: u32 = if (i + j < s.len) @as(u32, s[i + j]) else 0;
+            const b1: u32 = if (i + j + 1 < s.len and j + 1 < line_len) @as(u32, s[i + j + 1]) else 0;
+            const b2: u32 = if (i + j + 2 < s.len and j + 2 < line_len) @as(u32, s[i + j + 2]) else 0;
+            const c0: u8 = @intCast((b0 >> 2) & 0x3f);
+            const c1: u8 = @intCast(((b0 << 4) | (b1 >> 4)) & 0x3f);
+            const c2: u8 = @intCast(((b1 << 2) | (b2 >> 6)) & 0x3f);
+            const c3: u8 = @intCast(b2 & 0x3f);
+            // empty 6-bit chunks encode as backtick, non-empty as 0x20+val
+            try buf.append(ctx.allocator, if (c0 == 0) 0x60 else c0 + 0x20);
+            try buf.append(ctx.allocator, if (c1 == 0) 0x60 else c1 + 0x20);
+            try buf.append(ctx.allocator, if (c2 == 0) 0x60 else c2 + 0x20);
+            try buf.append(ctx.allocator, if (c3 == 0) 0x60 else c3 + 0x20);
+        }
+        try buf.append(ctx.allocator, '\n');
+        i += line_len;
+    }
+    // trailing zero-length line marker + newline
+    try buf.append(ctx.allocator, 0x60);
+    try buf.append(ctx.allocator, '\n');
+    const out = try buf.toOwnedSlice(ctx.allocator);
+    try ctx.strings.append(ctx.allocator, out);
+    return .{ .string = out };
+}
+
+fn native_convert_uudecode(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len == 0 or args[0] != .string) return .{ .bool = false };
+    const s = args[0].string;
+    if (s.len == 0) return .{ .bool = false };
+    var buf = std.ArrayListUnmanaged(u8){};
+    var p: usize = 0;
+    while (p < s.len) {
+        // read length byte
+        const lb = s[p];
+        p += 1;
+        // backtick or space means end of stream
+        const decoded_len: usize = if (lb == 0x60 or lb < 0x20) 0 else @intCast(lb - 0x20);
+        if (decoded_len == 0) {
+            // skip optional newline and stop
+            if (p < s.len and (s[p] == '\n' or s[p] == '\r')) p += 1;
+            break;
+        }
+        // each 4 chars decode to 3 bytes; we emit decoded_len bytes total
+        var produced: usize = 0;
+        while (produced < decoded_len and p + 4 <= s.len) {
+            const c0: u32 = decodeUuChar(s[p]);
+            const c1: u32 = decodeUuChar(s[p + 1]);
+            const c2: u32 = decodeUuChar(s[p + 2]);
+            const c3: u32 = decodeUuChar(s[p + 3]);
+            p += 4;
+            const b0: u8 = @intCast(((c0 << 2) | (c1 >> 4)) & 0xff);
+            const b1: u8 = @intCast(((c1 << 4) | (c2 >> 2)) & 0xff);
+            const b2: u8 = @intCast(((c2 << 6) | c3) & 0xff);
+            if (produced < decoded_len) { try buf.append(ctx.allocator, b0); produced += 1; }
+            if (produced < decoded_len) { try buf.append(ctx.allocator, b1); produced += 1; }
+            if (produced < decoded_len) { try buf.append(ctx.allocator, b2); produced += 1; }
+        }
+        // skip the newline at end of line
+        if (p < s.len and s[p] == '\r') p += 1;
+        if (p < s.len and s[p] == '\n') p += 1;
+    }
+    const out = try buf.toOwnedSlice(ctx.allocator);
+    try ctx.strings.append(ctx.allocator, out);
+    return .{ .string = out };
+}
+
+fn decodeUuChar(c: u8) u8 {
+    // backtick = 0; otherwise (c - 0x20) & 0x3f
+    if (c == 0x60) return 0;
+    return (c - 0x20) & 0x3f;
 }
 
 fn native_urlencode(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
