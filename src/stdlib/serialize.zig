@@ -365,7 +365,11 @@ fn serializeValue(ctx: *NativeContext, buf: *std.ArrayListUnmanaged(u8), sctx: *
             // checks Serializable first only if __serialize is absent. handle
             // the Serializable path here so it precedes the regular property
             // serialization but does not override __serialize/__sleep below
-            if (!ctx.vm.hasMethod(obj.class_name, "__serialize") and ctx.vm.isInstanceOf(obj.class_name, "Serializable")) {
+            // a class that declares Serializable but provides no serialize()
+            // method (e.g. ArrayObject in PHP 8.4 - the interface is listed for
+            // BC but actual serialization goes through the default property path)
+            // falls through to default object serialization
+            if (!ctx.vm.hasMethod(obj.class_name, "__serialize") and ctx.vm.isInstanceOf(obj.class_name, "Serializable") and ctx.vm.hasMethod(obj.class_name, "serialize")) {
                 const ser_result = try ctx.vm.callMethod(obj, "serialize", &.{});
                 const payload: []const u8 = if (ser_result == .string) ser_result.string else "";
                 try buf.appendSlice(a, "C:");

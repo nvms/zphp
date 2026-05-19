@@ -1351,23 +1351,37 @@ fn rcGetInterfaceNames(ctx: *NativeContext, _: []const Value) RuntimeError!Value
     var queue = std.ArrayListUnmanaged([]const u8){};
     defer queue.deinit(ctx.allocator);
 
+    // PHP's order: parent class interfaces first, then own, with each interface
+    // immediately followed by its transitively-extended parents
+    // (IteratorAggregate -> Traversable). collect parent->child chain first
+    var chain = std.ArrayListUnmanaged([]const u8){};
+    defer chain.deinit(ctx.allocator);
     var current: ?[]const u8 = class_name;
     while (current) |cn| {
+        try chain.append(ctx.allocator, cn);
         const cls = ctx.vm.classes.get(cn) orelse break;
-        for (cls.interfaces.items) |iface| try queue.append(ctx.allocator, iface);
         current = cls.parent;
     }
-    var i: usize = 0;
-    while (i < queue.items.len) : (i += 1) {
-        const iface = queue.items[i];
-        if (seen.contains(iface)) continue;
-        try seen.put(ctx.allocator, iface, {});
-        try arr.append(ctx.allocator, .{ .string = iface });
-        if (ctx.vm.classes.get(iface)) |idef| {
-            for (idef.interfaces.items) |sub| try queue.append(ctx.allocator, sub);
-        }
+    var ci: usize = chain.items.len;
+    while (ci > 0) {
+        ci -= 1;
+        const cls = ctx.vm.classes.get(chain.items[ci]) orelse continue;
+        for (cls.interfaces.items) |iface| try emitInterfaceDeep(ctx, arr, &seen, iface);
     }
     return .{ .array = arr };
+}
+
+fn emitInterfaceDeep(ctx: *NativeContext, arr: *PhpArray, seen: *std.StringHashMapUnmanaged(void), name: []const u8) RuntimeError!void {
+    if (seen.contains(name)) return;
+    try seen.put(ctx.allocator, name, {});
+    try arr.append(ctx.allocator, .{ .string = name });
+    if (ctx.vm.interfaces.get(name)) |idef| {
+        if (idef.parent) |p| try emitInterfaceDeep(ctx, arr, seen, p);
+        for (idef.parents.items) |p| try emitInterfaceDeep(ctx, arr, seen, p);
+    }
+    if (ctx.vm.classes.get(name)) |idef| {
+        for (idef.interfaces.items) |sub| try emitInterfaceDeep(ctx, arr, seen, sub);
+    }
 }
 
 fn buildReflectionAttribute(ctx: *NativeContext, attr: AttributeDef, target: i64, is_repeated: bool) RuntimeError!Value {

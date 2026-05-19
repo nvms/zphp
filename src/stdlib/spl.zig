@@ -156,9 +156,12 @@ pub fn register(vm: *VM, a: Allocator) !void {
 
     // ArrayObject
     var ao_def = ClassDef{ .name = "ArrayObject" };
-    try ao_def.interfaces.append(a, "Countable");
-    try ao_def.interfaces.append(a, "ArrayAccess");
+    // matches PHP's interface order on ArrayObject so getInterfaceNames() lists
+    // them the way callers expect
     try ao_def.interfaces.append(a, "IteratorAggregate");
+    try ao_def.interfaces.append(a, "ArrayAccess");
+    try ao_def.interfaces.append(a, "Serializable");
+    try ao_def.interfaces.append(a, "Countable");
     try ao_def.methods.put(a, "__construct", .{ .name = "__construct", .arity = 3 });
     try ao_def.methods.put(a, "offsetGet", .{ .name = "offsetGet", .arity = 1 });
     try ao_def.methods.put(a, "offsetSet", .{ .name = "offsetSet", .arity = 2 });
