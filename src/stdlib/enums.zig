@@ -25,6 +25,9 @@ fn coerceForLookup(ctx: *NativeContext, def_backed: anytype, arg: Value) !Value 
     return switch (def_backed) {
         .int_type => switch (arg) {
             .int => arg,
+            .bool => |b| .{ .int = if (b) 1 else 0 },
+            .null => .{ .int = 0 },
+            .float => |f| .{ .int = @intFromFloat(f) },
             .string => |s| blk: {
                 const i = std.fmt.parseInt(i64, s, 10) catch break :blk arg;
                 break :blk .{ .int = i };
@@ -33,8 +36,16 @@ fn coerceForLookup(ctx: *NativeContext, def_backed: anytype, arg: Value) !Value 
         },
         .string_type => switch (arg) {
             .string => arg,
+            .bool => |b| .{ .string = if (b) "1" else "0" },
+            .null => .{ .string = "0" },
             .int => |n| blk: {
                 const s = try std.fmt.allocPrint(ctx.allocator, "{d}", .{n});
+                try ctx.vm.strings.append(ctx.allocator, s);
+                break :blk .{ .string = s };
+            },
+            .float => |f| blk: {
+                const truncated: i64 = @intFromFloat(f);
+                const s = try std.fmt.allocPrint(ctx.allocator, "{d}", .{truncated});
                 try ctx.vm.strings.append(ctx.allocator, s);
                 break :blk .{ .string = s };
             },
@@ -78,7 +89,7 @@ fn valueTypeName(v: Value) []const u8 {
         .bool => "bool",
         .null => "null",
         .array => "array",
-        .object => "object",
+        .object => |o| o.class_name,
         else => "value",
     };
 }
@@ -97,12 +108,13 @@ fn isNumericIntStr(s: []const u8) bool {
 fn checkEnumArgType(ctx: *NativeContext, backed: anytype, enum_name: []const u8, fn_name: []const u8, arg: Value) RuntimeError!?Value {
     const want: []const u8 = switch (backed) {
         .int_type => "int",
-        .string_type => "string",
+        .string_type => "string|int",
         else => return null,
     };
     const ok: bool = switch (backed) {
-        .int_type => arg == .int or arg == .float or (arg == .string and isNumericIntStr(arg.string)),
-        .string_type => arg == .string or arg == .int,
+        // PHP coerces scalars+null; only array/object/resource are rejected
+        .int_type => arg == .int or arg == .float or arg == .bool or arg == .null or (arg == .string and isNumericIntStr(arg.string)),
+        .string_type => arg == .string or arg == .int or arg == .float or arg == .bool or arg == .null,
         else => true,
     };
     if (ok) return null;
@@ -125,21 +137,10 @@ pub fn enumFrom(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
             if (Value.identical(case_val, lookup)) return entry.value_ptr.*;
         }
     }
-    const arg_str = try argDisplayStringFor(ctx, def.backed_type, args[0]);
+    const arg_str = try argDisplayString(ctx, lookup);
     const msg = try std.fmt.allocPrint(ctx.allocator, "{s} is not a valid backing value for enum {s}", .{ arg_str, enum_name });
     try ctx.vm.strings.append(ctx.allocator, msg);
     return throwBuiltin(ctx, "ValueError", msg);
-}
-
-fn argDisplayStringFor(ctx: *NativeContext, backed: anytype, arg: Value) ![]const u8 {
-    // string-backed enums coerce int args to string for the error message,
-    // so the value is rendered as "123" rather than 123
-    if (backed == .string_type and arg == .int) {
-        const out = try std.fmt.allocPrint(ctx.allocator, "\"{d}\"", .{arg.int});
-        try ctx.vm.strings.append(ctx.allocator, out);
-        return out;
-    }
-    return argDisplayString(ctx, arg);
 }
 
 pub fn enumTryFrom(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
