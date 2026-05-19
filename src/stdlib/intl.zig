@@ -958,10 +958,30 @@ fn calGet(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
 }
 
 fn calSet(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len < 2 or args[0] != .int or args[1] != .int) return .{ .bool = false };
+    if (args.len < 2) return .{ .bool = false };
+    for (args) |a| if (a != .int) return .{ .bool = false };
     const obj = getThis(ctx) orelse return .{ .bool = false };
     const cal = getCal(obj) orelse return .{ .bool = false };
-    zphp_ucal_set(cal, @intCast(args[0].int), @intCast(args[1].int));
+    // PHP overloads: set(field, value) | set(y, m, d) | set(y, m, d, h, i) |
+    // set(y, m, d, h, i, s). matches ICU's ucal_setDateTime convenience helpers
+    // by setting each field individually
+    if (args.len == 2) {
+        zphp_ucal_set(cal, @intCast(args[0].int), @intCast(args[1].int));
+        return .{ .bool = true };
+    }
+    // year/month/day positional form
+    const UCAL_YEAR: i32 = 1;
+    const UCAL_MONTH: i32 = 2;
+    const UCAL_DATE: i32 = 5;
+    const UCAL_HOUR_OF_DAY: i32 = 11;
+    const UCAL_MINUTE: i32 = 12;
+    const UCAL_SECOND: i32 = 13;
+    zphp_ucal_set(cal, UCAL_YEAR, @intCast(args[0].int));
+    zphp_ucal_set(cal, UCAL_MONTH, @intCast(args[1].int));
+    if (args.len >= 3) zphp_ucal_set(cal, UCAL_DATE, @intCast(args[2].int));
+    if (args.len >= 4) zphp_ucal_set(cal, UCAL_HOUR_OF_DAY, @intCast(args[3].int));
+    if (args.len >= 5) zphp_ucal_set(cal, UCAL_MINUTE, @intCast(args[4].int));
+    if (args.len >= 6) zphp_ucal_set(cal, UCAL_SECOND, @intCast(args[5].int));
     return .{ .bool = true };
 }
 
@@ -1771,7 +1791,7 @@ fn registerIntlCalendarClass(vm: *VM, a: Allocator) !void {
         try def.methods.put(a, "__construct", .{ .name = "__construct", .arity = 0 });
         try def.methods.put(a, "createInstance", .{ .name = "createInstance", .arity = 0, .is_static = true });
         try def.methods.put(a, "get", .{ .name = "get", .arity = 1 });
-        try def.methods.put(a, "set", .{ .name = "set", .arity = 2 });
+        try def.methods.put(a, "set", .{ .name = "set", .arity = 6 });
         try def.methods.put(a, "add", .{ .name = "add", .arity = 2 });
         try def.methods.put(a, "roll", .{ .name = "roll", .arity = 2 });
         try def.methods.put(a, "getTime", .{ .name = "getTime", .arity = 0 });
@@ -1797,6 +1817,9 @@ fn registerIntlCalendarClass(vm: *VM, a: Allocator) !void {
             .{ "FIELD_ERA", 0 },             .{ "FIELD_YEAR", 1 },
             .{ "FIELD_MONTH", 2 },           .{ "FIELD_WEEK_OF_YEAR", 3 },
             .{ "FIELD_WEEK_OF_MONTH", 4 },   .{ "FIELD_DATE", 5 },
+            // PHP exposes FIELD_DAY_OF_MONTH as the canonical name (FIELD_DATE
+            // is the ICU spelling); both have value 5
+            .{ "FIELD_DAY_OF_MONTH", 5 },
             .{ "FIELD_DAY_OF_YEAR", 6 },     .{ "FIELD_DAY_OF_WEEK", 7 },
             .{ "FIELD_DAY_OF_WEEK_IN_MONTH", 8 }, .{ "FIELD_AM_PM", 9 },
             .{ "FIELD_HOUR", 10 },           .{ "FIELD_HOUR_OF_DAY", 11 },
