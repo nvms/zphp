@@ -258,6 +258,18 @@ pub const Compiler = struct {
                     } else {
                         try self.emitOp(.op_null);
                     }
+                    // emit finally blocks (innermost first) before generator_return,
+                    // matching the non-generator return path. PHP's finally fires
+                    // on every exit including generator completion via return
+                    const saved_fd = self.finally_depth;
+                    var fd = self.finally_depth;
+                    while (fd > 0) {
+                        fd -= 1;
+                        self.finally_depth = fd;
+                        try self.emitOp(.pop_handler);
+                        try self.compileNode(self.finally_nodes[fd]);
+                    }
+                    self.finally_depth = saved_fd;
                     try self.emitOp(.generator_return);
                 } else {
                     // close suspended generators in active foreach scopes; the
