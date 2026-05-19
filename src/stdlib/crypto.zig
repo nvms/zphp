@@ -359,6 +359,7 @@ const HashAlgo = enum {
     fnv1a32,
     fnv164,
     fnv1a64,
+    joaat,
 
     fn fromString(name: []const u8) ?HashAlgo {
         if (std.mem.eql(u8, name, "md5")) return .md5;
@@ -385,6 +386,7 @@ const HashAlgo = enum {
         if (std.mem.eql(u8, name, "fnv1a32")) return .fnv1a32;
         if (std.mem.eql(u8, name, "fnv164")) return .fnv164;
         if (std.mem.eql(u8, name, "fnv1a64")) return .fnv1a64;
+        if (std.mem.eql(u8, name, "joaat")) return .joaat;
         return null;
     }
 
@@ -396,7 +398,7 @@ const HashAlgo = enum {
             .sha256, .sha3_256, .sha512_256 => 32,
             .sha384, .sha3_384 => 48,
             .sha512, .sha3_512 => 64,
-            .crc32, .crc32b, .crc32c, .xxh32, .adler32, .fnv132, .fnv1a32 => 4,
+            .crc32, .crc32b, .crc32c, .xxh32, .adler32, .fnv132, .fnv1a32, .joaat => 4,
             .xxh64, .xxh3, .fnv164, .fnv1a64 => 8,
             .xxh128 => 16,
         };
@@ -511,6 +513,22 @@ fn computeHash(algo: HashAlgo, data: []const u8, out: []u8) void {
             var i: usize = 0;
             while (i < 8) : (i += 1) out[i] = @intCast((h >> @intCast((7 - i) * 8)) & 0xff);
         },
+        .joaat => {
+            // Jenkins one-at-a-time hash. PHP renders as 4 bytes big-endian
+            var h: u32 = 0;
+            for (data) |byte| {
+                h = h +% byte;
+                h = h +% (h << 10);
+                h ^= h >> 6;
+            }
+            h = h +% (h << 3);
+            h ^= h >> 11;
+            h = h +% (h << 15);
+            out[0] = @intCast((h >> 24) & 0xff);
+            out[1] = @intCast((h >> 16) & 0xff);
+            out[2] = @intCast((h >> 8) & 0xff);
+            out[3] = @intCast(h & 0xff);
+        },
     }
 }
 
@@ -523,7 +541,7 @@ fn computeHmac(algo: HashAlgo, data: []const u8, key: []const u8, out: []u8) voi
         .sha512 => std.crypto.auth.hmac.sha2.HmacSha512.create(out[0..64], data, key),
         // hmac is only defined for proper cryptographic hashes; for unsupported
         // hmac variants we fall back to plain hashing of the data
-        .sha224, .sha512_224, .sha512_256, .sha3_224, .sha3_256, .sha3_384, .sha3_512, .crc32, .crc32b, .crc32c, .xxh32, .xxh64, .xxh3, .xxh128, .adler32, .fnv132, .fnv1a32, .fnv164, .fnv1a64 => computeHash(algo, data, out),
+        .sha224, .sha512_224, .sha512_256, .sha3_224, .sha3_256, .sha3_384, .sha3_512, .crc32, .crc32b, .crc32c, .xxh32, .xxh64, .xxh3, .xxh128, .adler32, .fnv132, .fnv1a32, .fnv164, .fnv1a64, .joaat => computeHash(algo, data, out),
     }
 }
 
@@ -633,7 +651,7 @@ fn native_hash_hkdf(ctx: *NativeContext, args: []const Value) RuntimeError!Value
 
 fn native_hash_algos(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
     var arr = try ctx.createArray();
-    const algos = [_][]const u8{ "md5", "sha1", "sha224", "sha256", "sha384", "sha512", "sha3-224", "sha3-256", "sha3-384", "sha3-512", "crc32", "crc32b", "crc32c", "xxh32", "xxh64", "xxh3", "xxh128", "adler32", "fnv132", "fnv1a32", "fnv164", "fnv1a64" };
+    const algos = [_][]const u8{ "md5", "sha1", "sha224", "sha256", "sha384", "sha512", "sha3-224", "sha3-256", "sha3-384", "sha3-512", "crc32", "crc32b", "crc32c", "xxh32", "xxh64", "xxh3", "xxh128", "adler32", "fnv132", "fnv1a32", "fnv164", "fnv1a64", "joaat" };
     for (algos) |name| {
         try arr.append(ctx.allocator, .{ .string = name });
     }
