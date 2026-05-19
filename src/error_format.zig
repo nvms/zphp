@@ -128,14 +128,42 @@ pub fn formatRuntimeError(alloc: std.mem.Allocator, vm: *const VM) []const u8 {
     if (vm.pending_exception) |exc| {
         formatUncaughtException(&buf, alloc, vm, exc);
     } else if (vm.error_msg) |msg| {
-        write(&buf, alloc, msg);
-        appendLocationContext(&buf, alloc, vm);
+        // some error_msg values already have a leading 'Fatal error:' or
+        // similar prefix (set via setErrorMsg("Fatal error: ..."). detect
+        // and pass through; otherwise treat as a bare message and add PHP's
+        // 'PHP Fatal error:' prefix + 'in {path} on line N' suffix
+        if (std.mem.startsWith(u8, msg, "PHP ") or std.mem.startsWith(u8, msg, "Fatal error:") or std.mem.startsWith(u8, msg, "\nFatal error:")) {
+            write(&buf, alloc, msg);
+            appendLocationContext(&buf, alloc, vm);
+        } else {
+            writeFmt(&buf, alloc, "PHP Fatal error:  {s}", .{msg});
+            appendPhpLocationLine(&buf, alloc, vm);
+            write(&buf, alloc, "Stack trace:\n");
+            writeStackTrace(&buf, alloc, vm);
+        }
     } else {
         write(&buf, alloc, "Fatal error: unknown runtime error");
         appendLocationContext(&buf, alloc, vm);
     }
 
     return buf.items;
+}
+
+// minimal PHP-format trailing 'in {path} on line N' line for bare fatals
+// (no source snippet, no stack trace - matches 'PHP Fatal error:' output)
+fn appendPhpLocationLine(buf: *Writer, alloc: std.mem.Allocator, vm: *const VM) void {
+    if (vm.frame_count == 0) {
+        write(buf, alloc, "\n");
+        return;
+    }
+    const frame = &vm.frames[vm.frame_count - 1];
+    const ip = if (frame.ip > 0) frame.ip - 1 else 0;
+    const path = displayPath(vm.file_path);
+    if (frame.chunk.getSourceLocation(ip, vm.source)) |loc| {
+        writeFmt(buf, alloc, " in {s} on line {d}\n", .{ path, loc.line });
+    } else {
+        writeFmt(buf, alloc, " in {s}\n", .{path});
+    }
 }
 
 fn formatUncaughtException(buf: *Writer, alloc: std.mem.Allocator, vm: *const VM, exc: Value) void {
