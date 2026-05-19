@@ -1399,6 +1399,14 @@ fn openWithMode(path: []const u8, mode: []const u8) !std.fs.File {
             break :blk file;
         },
         'x' => std.fs.cwd().createFile(path, .{ .exclusive = true, .read = has_plus }),
+        'c' => blk: {
+            // PHP 'c'/'c+' mode: open for writing without truncating; create
+            // if it doesn't exist. position is at 0 regardless of existing
+            // content (so a subsequent fwrite overwrites from the start)
+            const file = std.fs.cwd().openFile(path, .{ .mode = if (has_plus) .read_write else .write_only }) catch
+                std.fs.cwd().createFile(path, .{ .read = has_plus, .truncate = false }) catch |err| break :blk err;
+            break :blk file;
+        },
         else => error.RuntimeError,
     };
 }
