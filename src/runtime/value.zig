@@ -113,6 +113,17 @@ pub const PhpArray = struct {
     pub fn contains(self: *const PhpArray, raw_key: Key) bool {
         const key = normalizeKey(raw_key);
         if (key == .string) return self.string_index.contains(key.string);
+        if (key == .int) {
+            // mirror get()'s O(1) fast path for sequential dense int keys
+            const idx = key.int;
+            if (idx >= 0) {
+                const uidx: usize = @intCast(idx);
+                if (uidx < self.entries.items.len) {
+                    const entry = &self.entries.items[uidx];
+                    if (entry.key == .int and entry.key.int == idx) return true;
+                }
+            }
+        }
         for (self.entries.items) |e| if (e.key.eql(key)) return true;
         return false;
     }
