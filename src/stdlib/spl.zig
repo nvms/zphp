@@ -10,6 +10,18 @@ const ClassDef = vm_mod.ClassDef;
 const Allocator = std.mem.Allocator;
 const RuntimeError = error{ RuntimeError, OutOfMemory };
 const arrays_mod = @import("arrays.zig");
+const phpTypeName = @import("types.zig").phpTypeName;
+
+// PHP's SplObjectStorage offset* methods strictly require an object key
+// and throw TypeError on any other type. centralized helper so all four
+// offsetExists/Get/Set/Unset emit the same PHP-format message
+fn sosRequireObjectKey(ctx: *NativeContext, fn_name: []const u8, key: Value) !bool {
+    if (key == .object) return true;
+    const msg = try std.fmt.allocPrint(ctx.allocator, "SplObjectStorage::{s}(): Argument #1 ($object) must be of type object, {s} given", .{ fn_name, phpTypeName(key) });
+    try ctx.vm.strings.append(ctx.allocator, msg);
+    try ctx.vm.setPendingException("TypeError", msg);
+    return false;
+}
 
 pub fn register(vm: *VM, a: Allocator) !void {
     // stdClass - the default empty class for casting and json/pdo decoding
@@ -2588,7 +2600,8 @@ fn sosAddAll(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
 
 fn sosOffsetGet(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     const obj = getThis(ctx) orelse return .null;
-    if (args.len == 0 or args[0] != .object) return .null;
+    if (args.len == 0) return .null;
+    if (!try sosRequireObjectKey(ctx, "offsetGet", args[0])) return error.RuntimeError;
     const info = sosGetInfo(obj) orelse {
         try ctx.vm.setPendingException("UnexpectedValueException", "Object not found");
         return error.RuntimeError;
@@ -2603,14 +2616,22 @@ fn sosOffsetGet(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
 }
 
 fn sosOffsetSet(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    // offsetSet($obj, $data) is equivalent to attach($obj, $data)
+    // offsetSet($obj, $data) is equivalent to attach($obj, $data) but the
+    // offset* variant uses a TypeError-throwing key check (attach is now
+    // deprecated and tolerant of non-objects)
+    if (args.len == 0) return .null;
+    if (!try sosRequireObjectKey(ctx, "offsetSet", args[0])) return error.RuntimeError;
     return sosAttach(ctx, args);
 }
 
 fn sosOffsetExists(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len == 0) return .{ .bool = false };
+    if (!try sosRequireObjectKey(ctx, "offsetExists", args[0])) return error.RuntimeError;
     return sosContains(ctx, args);
 }
 
 fn sosOffsetUnset(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len == 0) return .null;
+    if (!try sosRequireObjectKey(ctx, "offsetUnset", args[0])) return error.RuntimeError;
     return sosDetach(ctx, args);
 }
