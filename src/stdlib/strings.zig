@@ -4784,14 +4784,19 @@ fn native_parse_url(ctx: *NativeContext, args: []const Value) RuntimeError!Value
             if (std.mem.indexOf(u8, authority, "]")) |bracket| {
                 host = authority[0 .. bracket + 1];
                 if (bracket + 1 < authority.len and authority[bracket + 1] == ':') {
-                    port = std.fmt.parseInt(i64, authority[bracket + 2 ..], 10) catch null;
+                    const port_str = authority[bracket + 2 ..];
+                    port = std.fmt.parseInt(i64, port_str, 10) catch return Value{ .bool = false };
+                    if (port.? < 0 or port.? > 65535) return Value{ .bool = false };
                 }
             } else {
                 host = authority;
             }
         } else if (std.mem.lastIndexOf(u8, authority, ":")) |pos| {
             host = authority[0..pos];
-            port = std.fmt.parseInt(i64, authority[pos + 1 ..], 10) catch null;
+            const port_str = authority[pos + 1 ..];
+            // PHP rejects URLs with non-numeric or out-of-range ports
+            port = std.fmt.parseInt(i64, port_str, 10) catch return Value{ .bool = false };
+            if (port.? < 0 or port.? > 65535) return Value{ .bool = false };
         } else if (authority.len > 0) {
             host = authority;
         }
