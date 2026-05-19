@@ -4978,6 +4978,16 @@ pub const VM = struct {
                     const ctor_name = self.resolveMethod(class_name, "__construct") catch null;
 
                     if (ctor_name) |cn| {
+                        // visibility check on the ctor itself (see other 'new' site)
+                        const mvr = self.findMethodVisibility(class_name, "__construct");
+                        if (!self.checkVisibility(mvr.defining_class, mvr.visibility)) {
+                            self.sp -= ac;
+                            const suffix = self.visScopeSuffix();
+                            const msg = try std.fmt.allocPrint(self.allocator, "Call to {s} {s}::__construct(){s}", .{ @tagName(mvr.visibility), mvr.defining_class, suffix });
+                            try self.strings.append(self.allocator, msg);
+                            if (try self.throwBuiltinException("Error", msg)) continue;
+                            return error.RuntimeError;
+                        }
                         if (self.native_fns.get(cn)) |native| {
                             // native constructor
                             var args_buf: [16]Value = undefined;
@@ -5180,6 +5190,20 @@ pub const VM = struct {
 
                     const ctor_name = self.resolveMethod(class_name, "__construct") catch null;
                     if (ctor_name) |cn| {
+                        // visibility check on the constructor itself: a private/
+                        // protected __construct called via 'new ClassName(...)' from
+                        // outside the class scope throws 'Call to <vis> ClassName::
+                        // __construct()'. matches PHP's error for factory-only
+                        // patterns. method_call already checks; this is the new path
+                        const mvr = self.findMethodVisibility(class_name, "__construct");
+                        if (!self.checkVisibility(mvr.defining_class, mvr.visibility)) {
+                            self.sp -= ac + 1;
+                            const suffix = self.visScopeSuffix();
+                            const msg = try std.fmt.allocPrint(self.allocator, "Call to {s} {s}::__construct(){s}", .{ @tagName(mvr.visibility), mvr.defining_class, suffix });
+                            try self.strings.append(self.allocator, msg);
+                            if (try self.throwBuiltinException("Error", msg)) continue;
+                            return error.RuntimeError;
+                        }
                         if (self.native_fns.get(cn)) |native| {
                             var args_buf: [16]Value = undefined;
                             for (0..ac) |i| args_buf[i] = self.stack[self.sp - ac + i];
