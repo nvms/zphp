@@ -1291,6 +1291,9 @@ pub const VM = struct {
         try c.put(a, "FILTER_VALIDATE_EMAIL", .{ .int = 274 });
         try c.put(a, "FILTER_VALIDATE_URL", .{ .int = 273 });
         try c.put(a, "FILTER_VALIDATE_BOOLEAN", .{ .int = 258 });
+        // PHP 8.0+ added FILTER_VALIDATE_BOOL as the canonical name for the
+        // same filter (BOOLEAN is the legacy spelling, both share id 258)
+        try c.put(a, "FILTER_VALIDATE_BOOL", .{ .int = 258 });
         try c.put(a, "FILTER_SANITIZE_STRING", .{ .int = 513 });
         try c.put(a, "FILTER_SANITIZE_SPECIAL_CHARS", .{ .int = 515 });
         try c.put(a, "FILTER_SANITIZE_FULL_SPECIAL_CHARS", .{ .int = 522 });

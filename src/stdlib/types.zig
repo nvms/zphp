@@ -2982,6 +2982,20 @@ fn native_filter_var(_ctx: *NativeContext, args: []const Value) RuntimeError!Val
             try _ctx.strings.append(_ctx.allocator, out);
             return .{ .string = out };
         },
+        1024 => { // FILTER_CALLBACK
+            // options is the callable; PHP invokes it with the value and uses
+            // the return as the result. unlike other filters, FILTER_CALLBACK
+            // doesn't have a fail_default fallback - the callback's return is
+            // what comes back (even if null/false)
+            if (args.len > 2 and args[2] == .array) {
+                const top = args[2].array;
+                const o = top.get(.{ .string = "options" });
+                if (o != .null) {
+                    return _ctx.invokeCallable(o, &.{value}) catch return .{ .bool = false };
+                }
+            }
+            return .{ .bool = false };
+        },
         else => return value,
     }
 }
