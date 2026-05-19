@@ -5024,6 +5024,13 @@ pub const VM = struct {
                             self.frame_count -= 1;
                             self.deinitFrameSlot(self.frame_count);
                         } else if (self.functions.get(cn)) |func| {
+                            if (ac < func.required_params) {
+                                self.sp -= ac;
+                                const msg = try self.formatTooFewArgs(cn, ac, func);
+                                if (try self.throwBuiltinException("ArgumentCountError", msg)) continue;
+                                self.setErrorMsg("Fatal error: Uncaught ArgumentCountError: {s}\n", .{msg});
+                                return error.RuntimeError;
+                            }
                             if (func.locals_only and self.ic != null) {
                                 const ctor_ic = self.ic.?;
                                 const ctor_lc: usize = func.local_count;
@@ -6005,6 +6012,13 @@ pub const VM = struct {
                             continue;
                         }
                     } else if (self.functions.get(full_name)) |func| {
+                        if (ac < func.required_params) {
+                            self.sp -= ac + 1;
+                            const msg = try self.formatTooFewArgs(full_name, ac, func);
+                            if (try self.throwBuiltinException("ArgumentCountError", msg)) continue;
+                            self.setErrorMsg("Fatal error: Uncaught ArgumentCountError: {s}\n", .{msg});
+                            return error.RuntimeError;
+                        }
                         // populate IC
                         if (self.ic) |ic| {
                             const mc_ip2 = self.currentFrame().ip - 4;
@@ -11335,30 +11349,7 @@ pub const VM = struct {
         } else if (self.functions.get(name)) |func| {
             const ac: usize = arg_count;
             if (ac < func.required_params) {
-                // PHP's full message includes the caller location and the
-                // expected-count modifier (exactly/at-least when there are
-                // optional params)
-                var caller_file: []const u8 = self.file_path;
-                var caller_line: u32 = 0;
-                if (self.frame_count >= 1) {
-                    const caller = &self.frames[self.frame_count - 1];
-                    if (caller.script_path.len > 0) caller_file = caller.script_path
-                    else if (caller.func) |cf| if (cf.file_path.len > 0) { caller_file = cf.file_path; };
-                    const cip: usize = if (caller.ip > 0) caller.ip - 1 else 0;
-                    var caller_src: []const u8 = self.source;
-                    var loaded: []const u8 = "";
-                    if (!std.mem.eql(u8, caller_file, self.file_path)) {
-                        if (std.fs.cwd().readFileAlloc(self.allocator, caller_file, 8 * 1024 * 1024)) |c| {
-                            loaded = c;
-                            caller_src = c;
-                        } else |_| {}
-                    }
-                    defer if (loaded.len > 0) self.allocator.free(loaded);
-                    if (caller.chunk.getSourceLocation(cip, caller_src)) |loc| caller_line = loc.line;
-                }
-                const modifier: []const u8 = if (func.required_params == func.arity) "exactly" else "at least";
-                const msg = std.fmt.allocPrint(self.allocator, "Too few arguments to function {s}(), {d} passed in {s} on line {d} and {s} {d} expected", .{ name, ac, caller_file, caller_line, modifier, func.required_params }) catch "Too few arguments";
-                try self.strings.append(self.allocator, msg);
+                const msg = try self.formatTooFewArgs(name, ac, func);
                 if (try self.throwBuiltinException("ArgumentCountError", msg)) return;
                 self.setErrorMsg("Fatal error: Uncaught ArgumentCountError: {s}\n", .{msg});
                 return error.RuntimeError;
@@ -11610,6 +11601,34 @@ pub const VM = struct {
             _ = result;
         }
         self.shutdown_callbacks.clearRetainingCapacity();
+    }
+
+    // shared formatter for ArgumentCountError messages: matches PHP's
+    // 'Too few arguments to function X(), N passed in <file> on line N and
+    // exactly|at least M expected'. caller location is the current top frame
+    fn formatTooFewArgs(self: *VM, name: []const u8, ac: usize, func: *const ObjFunction) ![]const u8 {
+        var caller_file: []const u8 = self.file_path;
+        var caller_line: u32 = 0;
+        if (self.frame_count >= 1) {
+            const caller = &self.frames[self.frame_count - 1];
+            if (caller.script_path.len > 0) caller_file = caller.script_path
+            else if (caller.func) |cf| if (cf.file_path.len > 0) { caller_file = cf.file_path; };
+            const cip: usize = if (caller.ip > 0) caller.ip - 1 else 0;
+            var caller_src: []const u8 = self.source;
+            var loaded: []const u8 = "";
+            if (!std.mem.eql(u8, caller_file, self.file_path)) {
+                if (std.fs.cwd().readFileAlloc(self.allocator, caller_file, 8 * 1024 * 1024)) |c| {
+                    loaded = c;
+                    caller_src = c;
+                } else |_| {}
+            }
+            defer if (loaded.len > 0) self.allocator.free(loaded);
+            if (caller.chunk.getSourceLocation(cip, caller_src)) |loc| caller_line = loc.line;
+        }
+        const modifier: []const u8 = if (func.required_params == func.arity) "exactly" else "at least";
+        const msg = try std.fmt.allocPrint(self.allocator, "Too few arguments to function {s}(), {d} passed in {s} on line {d} and {s} {d} expected", .{ name, ac, caller_file, caller_line, modifier, func.required_params });
+        try self.strings.append(self.allocator, msg);
+        return msg;
     }
 
     pub fn callByName(self: *VM, raw_name: []const u8, args: []const Value) RuntimeError!Value {
