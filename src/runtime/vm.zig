@@ -11083,6 +11083,52 @@ pub const VM = struct {
         return null;
     }
 
+    // mirror native is_callable: validates that a value can actually be
+    // invoked (function name resolves, [obj,method] exists, __invoke on
+    // object, etc.). used by the 'callable' parameter-type check to
+    // surface TypeError at the call site instead of an undefined-function
+    // fatal inside the callee
+    fn isValueCallable(self: *VM, val: Value) bool {
+        if (val == .string) {
+            const raw = val.string;
+            const name = if (raw.len > 0 and raw[0] == '\\') raw[1..] else raw;
+            if (self.native_fns.contains(name)) return true;
+            if (self.functions.contains(name)) return true;
+            if (std.mem.indexOf(u8, name, "::")) |sep| {
+                if (self.hasMethod(name[0..sep], name[sep + 2 ..])) return true;
+            }
+            return false;
+        }
+        if (val == .object) {
+            return self.hasMethod(val.object.class_name, "__invoke");
+        }
+        if (val == .array) {
+            const arr = val.array;
+            if (arr.entries.items.len != 2) return false;
+            const target = arr.entries.items[0].value;
+            const method_val = arr.entries.items[1].value;
+            if (method_val != .string) return false;
+            const method = method_val.string;
+            const raw_class = if (target == .object)
+                target.object.class_name
+            else if (target == .string)
+                target.string
+            else
+                return false;
+            const class_name = if (raw_class.len > 0 and raw_class[0] == '\\') raw_class[1..] else raw_class;
+            if (self.classes.get(class_name)) |cdef| {
+                if (cdef.methods.get(method)) |mi| {
+                    if (mi.visibility != .public) return false;
+                    if (target == .string and !mi.is_static) return false;
+                }
+            }
+            var buf: [256]u8 = undefined;
+            const full = std.fmt.bufPrint(&buf, "{s}::{s}", .{ class_name, method }) catch return false;
+            return self.native_fns.contains(full) or self.functions.contains(full);
+        }
+        return false;
+    }
+
     noinline fn checkSingleType(self: *VM, val: Value, type_name: []const u8) bool {
         if (std.mem.eql(u8, type_name, "mixed")) return true;
         if (std.mem.eql(u8, type_name, "void")) return val == .null;
@@ -11095,7 +11141,7 @@ pub const VM = struct {
             return false;
         }
         if (std.mem.eql(u8, type_name, "array")) return val == .array;
-        if (std.mem.eql(u8, type_name, "callable")) return val == .string or val == .array or val == .object;
+        if (std.mem.eql(u8, type_name, "callable")) return self.isValueCallable(val);
         if (std.mem.eql(u8, type_name, "null")) return val == .null;
         if (std.mem.eql(u8, type_name, "false")) return val == .bool and !val.bool;
         if (std.mem.eql(u8, type_name, "true")) return val == .bool and val.bool;

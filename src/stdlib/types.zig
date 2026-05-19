@@ -895,9 +895,21 @@ fn property_exists(ctx: *NativeContext, args: []const Value) RuntimeError!Value 
 fn native_is_callable(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len == 0) return .{ .bool = false };
     const val = args[0];
+    // PHP's 3rd by-ref param receives the resolved callable name on success
+    // (or its string form). populated regardless of return value so caller
+    // code can inspect failed resolution attempts too
+    const fillName = struct {
+        fn run(c: *NativeContext, a: []const Value, name_str: []const u8) void {
+            if (a.len < 3) return;
+            const owned = c.allocator.dupe(u8, name_str) catch return;
+            c.vm.strings.append(c.allocator, owned) catch {};
+            c.setCallerVar(2, a.len, .{ .string = owned });
+        }
+    }.run;
     if (val == .string) {
         const raw = val.string;
         const name = if (raw.len > 0 and raw[0] == '\\') raw[1..] else raw;
+        fillName(ctx, args, name);
         if (ctx.vm.native_fns.contains(name)) return .{ .bool = true };
         if (ctx.vm.functions.contains(name)) return .{ .bool = true };
         // Class::method string form
