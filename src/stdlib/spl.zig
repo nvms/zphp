@@ -812,8 +812,10 @@ fn stackKey(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
     const cursor = Value.toInt(obj.get("__cursor"));
     const len = arr.length();
     if (cursor < 0 or cursor >= len) return .null;
-    // key is distance from top
-    return .{ .int = len - 1 - cursor };
+    // key is the underlying array index (the cursor itself). PHP's LIFO
+    // iteration starts with the top element's original push position (len-1)
+    // and counts down to 0 as the cursor decreases
+    return .{ .int = cursor };
 }
 
 fn stackNext(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
