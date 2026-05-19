@@ -187,6 +187,7 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try dtz_def.methods.put(a, "getOffset", .{ .name = "getOffset", .arity = 1 });
     try dtz_def.methods.put(a, "__toString", .{ .name = "__toString", .arity = 0 });
     try dtz_def.methods.put(a, "listIdentifiers", .{ .name = "listIdentifiers", .arity = 2, .is_static = true });
+    try dtz_def.methods.put(a, "listAbbreviations", .{ .name = "listAbbreviations", .arity = 0, .is_static = true });
     try dtz_def.methods.put(a, "getLocation", .{ .name = "getLocation", .arity = 0 });
     try dtz_def.methods.put(a, "getTransitions", .{ .name = "getTransitions", .arity = 2 });
     try vm.classes.put(a, "DateTimeZone", dtz_def);
@@ -196,6 +197,7 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try vm.native_fns.put(a, "DateTimeZone::getOffset", dtzGetOffset);
     try vm.native_fns.put(a, "DateTimeZone::__toString", dtzGetName);
     try vm.native_fns.put(a, "DateTimeZone::listIdentifiers", dtzListIdentifiers);
+    try vm.native_fns.put(a, "DateTimeZone::listAbbreviations", dtzListAbbreviations);
     try vm.native_fns.put(a, "DateTimeZone::getLocation", dtzGetLocation);
     try vm.native_fns.put(a, "DateTimeZone::getTransitions", dtzGetTransitions);
 
@@ -1784,19 +1786,32 @@ fn dtzConstruct(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     const obj = getThis(ctx) orelse return .null;
     if (args.len >= 1 and args[0] == .string) {
         const name = args[0].string;
-        // accept fixed-offset forms (+HH, +HH:MM, UTC, GMT) or known zones
-        const valid = blk: {
-            if (parseTimezoneOffset(name) != null) break :blk true;
-            if (lookupTimezone(name) != null) break :blk true;
-            break :blk false;
-        };
-        if (!valid) {
-            const msg = try std.fmt.allocPrint(ctx.allocator, "DateTimeZone::__construct(): Unknown or bad timezone ({s})", .{name});
-            try ctx.strings.append(ctx.allocator, msg);
-            try ctx.vm.setPendingException("DateInvalidTimeZoneException", msg);
-            return error.RuntimeError;
+        // accept fixed-offset forms (+HH, +HH:MM, UTC, GMT) or known zones.
+        // PHP normalizes fixed-offset input to '+HH:MM' / '-HH:MM' (e.g.
+        // 'GMT+5' -> '+05:00'). zone names + 'UTC' / 'GMT' alone pass through
+        var stored: []const u8 = name;
+        var is_named_passthrough = false;
+        if (std.mem.eql(u8, name, "UTC") or std.mem.eql(u8, name, "GMT")) {
+            is_named_passthrough = true;
         }
-        try obj.set(ctx.allocator, "timezone", .{ .string = name });
+        if (lookupTimezone(name) != null) is_named_passthrough = true;
+        if (!is_named_passthrough) {
+            if (parseTimezoneOffset(name)) |off| {
+                const sign: u8 = if (off < 0) '-' else '+';
+                const abs: u32 = @intCast(if (off < 0) -off else off);
+                const hh = abs / 3600;
+                const mm = (abs % 3600) / 60;
+                const n = try std.fmt.allocPrint(ctx.allocator, "{c}{d:0>2}:{d:0>2}", .{ sign, hh, mm });
+                try ctx.strings.append(ctx.allocator, n);
+                stored = n;
+            } else {
+                const msg = try std.fmt.allocPrint(ctx.allocator, "DateTimeZone::__construct(): Unknown or bad timezone ({s})", .{name});
+                try ctx.strings.append(ctx.allocator, msg);
+                try ctx.vm.setPendingException("DateInvalidTimeZoneException", msg);
+                return error.RuntimeError;
+            }
+        }
+        try obj.set(ctx.allocator, "timezone", .{ .string = stored });
     }
     return .null;
 }
@@ -3131,17 +3146,27 @@ fn tzAbbrevAt(tz: TzEntry, utc_ts: i64) []const u8 {
 }
 
 fn parseTimezoneOffset(s: []const u8) ?i64 {
-    // numeric: +0000, -0500, +05:30
-    if (s.len >= 5 and (s[0] == '+' or s[0] == '-')) {
+    // signed offset: +H, +HH, +HHMM, +H:MM, +HH:MM (and minus variants)
+    if (s.len >= 2 and (s[0] == '+' or s[0] == '-')) {
         const sign: i64 = if (s[0] == '-') -1 else 1;
-        if (s.len >= 6 and s[3] == ':') {
-            const h = std.fmt.parseInt(i64, s[1..3], 10) catch return null;
-            const m = std.fmt.parseInt(i64, s[4..6], 10) catch return null;
+        const rest = s[1..];
+        if (std.mem.indexOf(u8, rest, ":")) |colon| {
+            const h = std.fmt.parseInt(i64, rest[0..colon], 10) catch return null;
+            const m = std.fmt.parseInt(i64, rest[colon + 1 ..], 10) catch return null;
             return sign * (h * 3600 + m * 60);
         }
-        const h = std.fmt.parseInt(i64, s[1..3], 10) catch return null;
-        const m = std.fmt.parseInt(i64, s[3..5], 10) catch return null;
-        return sign * (h * 3600 + m * 60);
+        if (rest.len == 4) {
+            const h = std.fmt.parseInt(i64, rest[0..2], 10) catch return null;
+            const m = std.fmt.parseInt(i64, rest[2..4], 10) catch return null;
+            return sign * (h * 3600 + m * 60);
+        }
+        const h = std.fmt.parseInt(i64, rest, 10) catch return null;
+        return sign * h * 3600;
+    }
+    // 'GMT+N', 'GMT-N', 'GMT+HH:MM' - PHP accepts these as offset names
+    // (UTC+N is NOT accepted; bare UTC is a named zone)
+    if (s.len > 3 and std.mem.eql(u8, s[0..3], "GMT") and (s[3] == '+' or s[3] == '-')) {
+        return parseTimezoneOffset(s[3..]);
     }
     // named: look up in table
     if (lookupTimezone(s)) |tz| {
@@ -3161,7 +3186,8 @@ fn parseTimezoneOffset(s: []const u8) ?i64 {
         .{ .name = "pdt", .offset = -7 * 3600 },
     };
     for (abbrevs) |z| {
-        if (s.len >= z.name.len and eqlLower(s[0..z.name.len], z.name)) return z.offset;
+        // exact match only - prefix matching wrongly accepted 'UTC+9' as 'UTC'
+        if (s.len == z.name.len and eqlLower(s, z.name)) return z.offset;
     }
     return null;
 }
@@ -3370,6 +3396,22 @@ fn native_timezone_offset_get(_: *NativeContext, args: []const Value) RuntimeErr
 
 fn native_timezone_open(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len < 1 or args[0] != .string) return .{ .bool = false };
+    const name = args[0].string;
+    // validate against the same rules as DateTimeZone::__construct: accept
+    // fixed-offset forms (+HH, +HH:MM, UTC, GMT) and known IANA zones. on
+    // failure, PHP emits a Warning and returns false (rather than throwing
+    // like the constructor does)
+    const valid = blk: {
+        if (parseTimezoneOffset(name) != null) break :blk true;
+        if (lookupTimezone(name) != null) break :blk true;
+        break :blk false;
+    };
+    if (!valid) {
+        const msg = std.fmt.allocPrint(ctx.allocator, "timezone_open(): Unknown or bad timezone ({s})", .{name}) catch return .{ .bool = false };
+        ctx.vm.strings.append(ctx.allocator, msg) catch {};
+        ctx.vm.emitWarning(msg);
+        return .{ .bool = false };
+    }
     const obj = try ctx.createObject("DateTimeZone");
     try obj.set(ctx.allocator, "timezone", args[0]);
     return .{ .object = obj };
