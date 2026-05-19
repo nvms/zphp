@@ -615,11 +615,16 @@ fn native_strnatcasecmp(_: *NativeContext, args: []const Value) RuntimeError!Val
     return .{ .int = natCompare(a, b, true) };
 }
 
-fn native_strncasecmp(_: *NativeContext, args: []const Value) RuntimeError!Value {
+fn native_strncasecmp(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len < 3) return .{ .int = 0 };
     const a = if (args[0] == .string) args[0].string else "";
     const b = if (args[1] == .string) args[1].string else "";
-    const n: usize = @intCast(@max(0, Value.toInt(args[2])));
+    const n_raw = Value.toInt(args[2]);
+    if (n_raw < 0) {
+        try ctx.vm.setPendingException("ValueError", "strncasecmp(): Argument #3 ($length) must be greater than or equal to 0");
+        return error.RuntimeError;
+    }
+    const n: usize = @intCast(n_raw);
     const sa = a[0..@min(n, a.len)];
     const sb = b[0..@min(n, b.len)];
     const min_len = @min(sa.len, sb.len);
@@ -632,11 +637,16 @@ fn native_strncasecmp(_: *NativeContext, args: []const Value) RuntimeError!Value
     return .{ .int = 0 };
 }
 
-fn native_strncmp(_: *NativeContext, args: []const Value) RuntimeError!Value {
+fn native_strncmp(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len < 3) return .{ .int = 0 };
     const a = if (args[0] == .string) args[0].string else "";
     const b = if (args[1] == .string) args[1].string else "";
-    const n: usize = @intCast(@max(0, Value.toInt(args[2])));
+    const n_raw = Value.toInt(args[2]);
+    if (n_raw < 0) {
+        try ctx.vm.setPendingException("ValueError", "strncmp(): Argument #3 ($length) must be greater than or equal to 0");
+        return error.RuntimeError;
+    }
+    const n: usize = @intCast(n_raw);
     const sa = a[0..@min(n, a.len)];
     const sb = b[0..@min(n, b.len)];
     return .{ .int = switch (std.mem.order(u8, sa, sb)) {
