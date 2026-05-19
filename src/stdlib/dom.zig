@@ -29,11 +29,76 @@ fn ensureGlobalInit() void {
         // suppress libxml2's default stderr output for parse errors;
         // PHP also defaults to silent unless libxml_use_internal_errors(true)
         c.xmlSetGenericErrorFunc(null, silentErrorHandler);
+        // structured handler captures detailed error info per call when
+        // libxml_internal_errors_enabled is on; otherwise it's a noop
+        c.xmlSetStructuredErrorFunc(null, structuredErrorHandler);
         global_init_done = true;
     }
 }
 
 fn silentErrorHandler(_: ?*anyopaque, _: [*c]const u8, ...) callconv(.c) void {}
+
+const CapturedError = struct {
+    level: i32,
+    code: i32,
+    line: i32,
+    column: i32,
+    message: []u8,
+    file: ?[]u8,
+};
+
+var captured_errors: std.ArrayListUnmanaged(CapturedError) = .{};
+// allocator for the captured-error buffers - shared global since libxml's
+// callback fires from C with no zphp context. uses page_allocator which is
+// always-available and doesn't depend on the per-script arena being live
+var capture_allocator: std.mem.Allocator = std.heap.page_allocator;
+
+fn structuredErrorHandler(_: ?*anyopaque, err_ptr: [*c]c.xmlError) callconv(.c) void {
+    if (!libxml_internal_errors_enabled) return;
+    if (err_ptr == null) return;
+    const err = err_ptr.*;
+    var msg_len: usize = 0;
+    if (err.message != null) {
+        while (err.message[msg_len] != 0) msg_len += 1;
+        // strip trailing newline that libxml always appends
+        if (msg_len > 0 and err.message[msg_len - 1] == '\n') msg_len -= 1;
+    }
+    const msg_buf = capture_allocator.alloc(u8, msg_len) catch return;
+    if (msg_len > 0) @memcpy(msg_buf, err.message[0..msg_len]);
+    var file_buf: ?[]u8 = null;
+    if (err.file != null) {
+        var fl: usize = 0;
+        while (err.file[fl] != 0) fl += 1;
+        if (fl > 0) {
+            const b = capture_allocator.alloc(u8, fl) catch {
+                captured_errors.append(capture_allocator, .{
+                    .level = @intCast(err.level),
+                    .code = @intCast(err.code),
+                    .line = @intCast(err.line),
+                    .column = 0,
+                    .message = msg_buf,
+                    .file = null,
+                }) catch return;
+                return;
+            };
+            @memcpy(b, err.file[0..fl]);
+            file_buf = b;
+        }
+    }
+    captured_errors.append(capture_allocator, .{
+        .level = @intCast(err.level),
+        .code = @intCast(err.code),
+        .line = @intCast(err.line),
+        .column = 0,
+        .message = msg_buf,
+        .file = file_buf,
+    }) catch return;
+}
+
+fn freeCapturedError(e: *const CapturedError) void {
+    capture_allocator.free(e.message);
+    if (e.file) |f| capture_allocator.free(f);
+}
 
 // ---------------- pointer storage on PhpObject ----------------
 // every wrapper stores its underlying xmlNodePtr as the "__node" property.
@@ -1386,6 +1451,13 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try registerNamedNodeMapClass(vm, a);
     try registerXPathClass(vm, a);
     try registerConstants(vm, a);
+
+    // LibXMLError plain-data class - properties only, no methods. PHP's libxml
+    // populates it as the element type returned by libxml_get_errors() /
+    // libxml_get_last_error(). LIBXML_ERR_WARNING/ERROR/FATAL constants live
+    // alongside it
+    const le_def = ClassDef{ .name = "LibXMLError" };
+    try vm.classes.put(a, "LibXMLError", le_def);
 }
 
 fn registerDocClass(vm: *VM, a: Allocator) !void {
@@ -1764,16 +1836,44 @@ fn libxmlUseInternalErrors(_: *NativeContext, args: []const Value) RuntimeError!
 }
 
 fn libxmlClearErrors(_: *NativeContext, _: []const Value) RuntimeError!Value {
+    for (captured_errors.items) |*e| freeCapturedError(e);
+    captured_errors.clearRetainingCapacity();
     return .null;
+}
+
+fn buildLibXMLError(ctx: *NativeContext, e: CapturedError) RuntimeError!Value {
+    const obj = try ctx.createObject("LibXMLError");
+    try obj.set(ctx.allocator, "level", .{ .int = @intCast(e.level) });
+    try obj.set(ctx.allocator, "code", .{ .int = @intCast(e.code) });
+    try obj.set(ctx.allocator, "column", .{ .int = @intCast(e.column) });
+    // libxml appends a trailing space + period to most messages but PHP
+    // strips just the trailing newline (already done in handler). also copy
+    // the buffer into ctx allocator space so it shares the script lifetime
+    const msg_copy = try ctx.allocator.dupe(u8, e.message);
+    try ctx.vm.strings.append(ctx.allocator, msg_copy);
+    try obj.set(ctx.allocator, "message", .{ .string = msg_copy });
+    if (e.file) |f| {
+        const fc = try ctx.allocator.dupe(u8, f);
+        try ctx.vm.strings.append(ctx.allocator, fc);
+        try obj.set(ctx.allocator, "file", .{ .string = fc });
+    } else {
+        try obj.set(ctx.allocator, "file", .{ .string = "" });
+    }
+    try obj.set(ctx.allocator, "line", .{ .int = @intCast(e.line) });
+    return .{ .object = obj };
 }
 
 fn libxmlGetErrors(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
     const arr = try ctx.createArray();
+    for (captured_errors.items) |e| {
+        try arr.append(ctx.allocator, try buildLibXMLError(ctx, e));
+    }
     return .{ .array = arr };
 }
 
-fn libxmlGetLastError(_: *NativeContext, _: []const Value) RuntimeError!Value {
-    return .{ .bool = false };
+fn libxmlGetLastError(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    if (captured_errors.items.len == 0) return .{ .bool = false };
+    return try buildLibXMLError(ctx, captured_errors.items[captured_errors.items.len - 1]);
 }
 
 fn libxmlDisableEntityLoader(_: *NativeContext, args: []const Value) RuntimeError!Value {
