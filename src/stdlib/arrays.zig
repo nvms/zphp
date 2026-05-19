@@ -1301,23 +1301,24 @@ fn array_walk(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     const callback = args[1];
     const has_userdata = args.len >= 3;
 
-    // snapshot keys so callback mutations to the array don't corrupt iteration
-    const initial_len = arr.entries.items.len;
-    var keys = try ctx.allocator.alloc(PhpArray.Key, initial_len);
-    defer ctx.allocator.free(keys);
-    for (arr.entries.items[0..initial_len], 0..) |entry, i| keys[i] = entry.key;
-
-    for (keys) |key| {
-        const cur_idx = findEntryIndex(arr, key) orelse continue;
+    // PHP's array_walk iterates by position (not snapshotted), so callbacks
+    // that append to the array also have those new elements visited. track
+    // by index and re-read len each step so growth is observed and removals
+    // are skipped. when the callback removes the current entry the key
+    // lookup re-locates by-key on writeback to apply to the original element
+    var i: usize = 0;
+    while (i < arr.entries.items.len) : (i += 1) {
+        const key = arr.entries.items[i].key;
         const key_val: Value = switch (key) {
             .int => |k| .{ .int = k },
             .string => |s| .{ .string = s },
         };
-        var call_args = [3]Value{ arr.entries.items[cur_idx].value, key_val, if (has_userdata) args[2] else .null };
+        var call_args = [3]Value{ arr.entries.items[i].value, key_val, if (has_userdata) args[2] else .null };
         const slice: []Value = if (has_userdata) call_args[0..3] else call_args[0..2];
         _ = try ctx.invokeCallableRef(callback, slice);
-        // entry may have been removed during the call
-        if (findEntryIndex(arr, key)) |i| arr.entries.items[i].value = call_args[0];
+        // re-locate the original entry by key in case the callback reordered
+        // or removed entries before it
+        if (findEntryIndex(arr, key)) |k_idx| arr.entries.items[k_idx].value = call_args[0];
     }
     return .{ .bool = true };
 }
