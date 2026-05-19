@@ -93,6 +93,7 @@ pub fn register(vm: *VM, a: Allocator) !void {
         .{ "PDOException", "RuntimeException" },
         .{ "JsonException", "Exception" },
         .{ "TypeError", "Error" },
+        .{ "ArgumentCountError", "TypeError" },
         .{ "ArithmeticError", "Error" },
         .{ "DivisionByZeroError", "ArithmeticError" },
         .{ "AssertionError", "Error" },

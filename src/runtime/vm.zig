@@ -2397,7 +2397,7 @@ pub const VM = struct {
                                     for (func.params, 0..) |p, pi| {
                                         if (std.mem.eql(u8, p[1..], entry.key.string) or std.mem.eql(u8, p, entry.key.string)) {
                                             if (assigned[pi]) {
-                                                const msg = try std.fmt.allocPrint(self.allocator, "Named argument ${s} overwrites previous argument", .{entry.key.string});
+                                                const msg = try std.fmt.allocPrint(self.allocator, "Named parameter ${s} overwrites previous argument", .{entry.key.string});
                                                 try self.strings.append(self.allocator, msg);
                                                 if (try self.throwBuiltinException("Error", msg)) { ok = false; break; }
                                                 return error.RuntimeError;
@@ -11335,7 +11335,29 @@ pub const VM = struct {
         } else if (self.functions.get(name)) |func| {
             const ac: usize = arg_count;
             if (ac < func.required_params) {
-                const msg = std.fmt.allocPrint(self.allocator, "Too few arguments to function {s}(), {d} passed, {d} required", .{ name, ac, func.required_params }) catch "Too few arguments";
+                // PHP's full message includes the caller location and the
+                // expected-count modifier (exactly/at-least when there are
+                // optional params)
+                var caller_file: []const u8 = self.file_path;
+                var caller_line: u32 = 0;
+                if (self.frame_count >= 1) {
+                    const caller = &self.frames[self.frame_count - 1];
+                    if (caller.script_path.len > 0) caller_file = caller.script_path
+                    else if (caller.func) |cf| if (cf.file_path.len > 0) { caller_file = cf.file_path; };
+                    const cip: usize = if (caller.ip > 0) caller.ip - 1 else 0;
+                    var caller_src: []const u8 = self.source;
+                    var loaded: []const u8 = "";
+                    if (!std.mem.eql(u8, caller_file, self.file_path)) {
+                        if (std.fs.cwd().readFileAlloc(self.allocator, caller_file, 8 * 1024 * 1024)) |c| {
+                            loaded = c;
+                            caller_src = c;
+                        } else |_| {}
+                    }
+                    defer if (loaded.len > 0) self.allocator.free(loaded);
+                    if (caller.chunk.getSourceLocation(cip, caller_src)) |loc| caller_line = loc.line;
+                }
+                const modifier: []const u8 = if (func.required_params == func.arity) "exactly" else "at least";
+                const msg = std.fmt.allocPrint(self.allocator, "Too few arguments to function {s}(), {d} passed in {s} on line {d} and {s} {d} expected", .{ name, ac, caller_file, caller_line, modifier, func.required_params }) catch "Too few arguments";
                 try self.strings.append(self.allocator, msg);
                 if (try self.throwBuiltinException("ArgumentCountError", msg)) return;
                 self.setErrorMsg("Fatal error: Uncaught ArgumentCountError: {s}\n", .{msg});
