@@ -75,7 +75,7 @@ fn parseIni(ctx: *NativeContext, input: []const u8, process_sections: bool, mode
             const raw_key = trimSpaces(line[0..eq_pos]);
             const raw_val = trimSpaces(if (eq_pos + 1 < line.len) line[eq_pos + 1 ..] else "");
 
-            const value = processValue(raw_val, mode);
+            const value = processValue(ctx, raw_val, mode);
             const target = if (process_sections and current_section != null) current_section.? else result;
 
             if (isArrayKey(raw_key)) {
@@ -89,7 +89,7 @@ fn parseIni(ctx: *NativeContext, input: []const u8, process_sections: bool, mode
     return .{ .array = result };
 }
 
-fn processValue(raw: []const u8, mode: ScannerMode) Value {
+fn processValue(ctx: *NativeContext, raw: []const u8, mode: ScannerMode) Value {
     if (raw.len == 0) return .{ .string = "" };
 
     // strip quotes
@@ -107,6 +107,23 @@ fn processValue(raw: []const u8, mode: ScannerMode) Value {
 
     if (mode == .raw) return .{ .string = val };
 
+    // normal + typed modes: substitute bare PHP constants (PHP_INT_MAX,
+    // user-defined via define(), etc.) - identifier-shaped values match
+    // against vm.php_constants then vm.user_constants
+    if (looksLikeIdentifier(val)) {
+        if (ctx.vm.php_constants.get(val)) |cv| {
+            if (mode == .typed) return cv;
+            // normal mode: coerce to string representation
+            return constToString(ctx, cv);
+        }
+        if (ctx.vm.user_constants.contains(val)) {
+            if (ctx.vm.php_constants.get(val)) |cv| {
+                if (mode == .typed) return cv;
+                return constToString(ctx, cv);
+            }
+        }
+    }
+
     if (mode == .typed) {
         if (isBoolTrue(val)) return .{ .bool = true };
         if (isBoolFalse(val)) return .{ .bool = false };
@@ -120,6 +137,36 @@ fn processValue(raw: []const u8, mode: ScannerMode) Value {
     if (isBoolTrue(val)) return .{ .string = "1" };
     if (isBoolFalse(val)) return .{ .string = "" };
     return .{ .string = val };
+}
+
+fn looksLikeIdentifier(s: []const u8) bool {
+    if (s.len == 0) return false;
+    const c = s[0];
+    if (!((c >= 'A' and c <= 'Z') or (c >= 'a' and c <= 'z') or c == '_')) return false;
+    for (s[1..]) |ch| {
+        const ok = (ch >= 'A' and ch <= 'Z') or (ch >= 'a' and ch <= 'z') or (ch >= '0' and ch <= '9') or ch == '_';
+        if (!ok) return false;
+    }
+    return true;
+}
+
+fn constToString(ctx: *NativeContext, v: Value) Value {
+    switch (v) {
+        .string => return v,
+        .int => |i| {
+            const s = std.fmt.allocPrint(ctx.allocator, "{d}", .{i}) catch return .{ .string = "" };
+            ctx.strings.append(ctx.allocator, s) catch {};
+            return .{ .string = s };
+        },
+        .float => |f| {
+            const s = std.fmt.allocPrint(ctx.allocator, "{d}", .{f}) catch return .{ .string = "" };
+            ctx.strings.append(ctx.allocator, s) catch {};
+            return .{ .string = s };
+        },
+        .bool => |b| return .{ .string = if (b) "1" else "" },
+        .null => return .{ .string = "" },
+        else => return .{ .string = "" },
+    }
 }
 
 fn isBoolTrue(s: []const u8) bool {
