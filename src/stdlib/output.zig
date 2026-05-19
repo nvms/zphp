@@ -463,6 +463,7 @@ fn var_export(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
 }
 
 fn varExportString(a: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8), s: []const u8) !void {
+    // fast path: no nulls -> single quoted literal
     var has_null = false;
     for (s) |c| {
         if (c == 0) { has_null = true; break; }
@@ -470,46 +471,33 @@ fn varExportString(a: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8), s: []
     if (!has_null) {
         try out.append(a, '\'');
         for (s) |c| {
-            if (c == '\'') {
-                try out.appendSlice(a, "\\'");
-            } else if (c == '\\') {
-                try out.appendSlice(a, "\\\\");
-            } else {
-                try out.append(a, c);
-            }
+            if (c == '\'') try out.appendSlice(a, "\\'")
+            else if (c == '\\') try out.appendSlice(a, "\\\\")
+            else try out.append(a, c);
         }
         try out.append(a, '\'');
         return;
     }
-    var first = true;
+    // PHP splits on \0 and emits each segment as a single-quoted chunk,
+    // joined by ` . "\0" . `. empty segments still emit '', so a string of
+    // just "\0" renders as '' . "\0" . ''
     var i: usize = 0;
-    while (i < s.len) {
+    var first_chunk = true;
+    while (true) {
         var j = i;
         while (j < s.len and s[j] != 0) : (j += 1) {}
-        if (j > i) {
-            if (!first) try out.appendSlice(a, " . ");
-            first = false;
-            try out.append(a, '\'');
-            for (s[i..j]) |c| {
-                if (c == '\'') {
-                    try out.appendSlice(a, "\\'");
-                } else if (c == '\\') {
-                    try out.appendSlice(a, "\\\\");
-                } else {
-                    try out.append(a, c);
-                }
-            }
-            try out.append(a, '\'');
+        if (!first_chunk) try out.appendSlice(a, " . \"\\0\" . ");
+        first_chunk = false;
+        try out.append(a, '\'');
+        for (s[i..j]) |c| {
+            if (c == '\'') try out.appendSlice(a, "\\'")
+            else if (c == '\\') try out.appendSlice(a, "\\\\")
+            else try out.append(a, c);
         }
-        if (j < s.len) {
-            if (!first) try out.appendSlice(a, " . ");
-            first = false;
-            try out.appendSlice(a, "\"\\0\"");
-            j += 1;
-        }
-        i = j;
+        try out.append(a, '\'');
+        if (j >= s.len) break;
+        i = j + 1;
     }
-    if (first) try out.appendSlice(a, "''");
 }
 
 fn varExportValue(a: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8), val: Value, depth: usize, ctx: *NativeContext) !void {
