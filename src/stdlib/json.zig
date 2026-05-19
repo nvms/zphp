@@ -6,6 +6,7 @@ const NativeContext = vm_mod.NativeContext;
 const RuntimeError = error{ RuntimeError, OutOfMemory };
 
 const PhpObject = @import("../runtime/value.zig").PhpObject;
+const isResourceObject = @import("types.zig").isResourceObject;
 const JSON_HEX_TAG: i64 = 1;
 const JSON_HEX_AMP: i64 = 2;
 const JSON_HEX_APOS: i64 = 4;
@@ -320,6 +321,20 @@ fn encodeValue(buf: *std.ArrayListUnmanaged(u8), a: std.mem.Allocator, val: Valu
             }
         },
         .object => |obj| {
+            // PHP treats resources (fopen handles, curl handles, etc.) as
+            // unsupported in json_encode: returns false + sets last_error to
+            // 'Type is not supported' (and JsonException with THROW_ON_ERROR).
+            // zphp represents resources as objects with specific class names
+            // (FileHandle, __stream, __curl, __file); detect and reject them
+            if (isResourceObject(obj.class_name)) {
+                if ((flags & 0x200) != 0) { // JSON_PARTIAL_OUTPUT_ON_ERROR
+                    try buf.appendSlice(a, "null");
+                    return;
+                }
+                last_error = 8;
+                last_error_msg = "Type is not supported";
+                return error.RuntimeError;
+            }
             if (vm) |v| {
                 if (v.classes.get(obj.class_name)) |cd| {
                     if (cd.is_enum) {

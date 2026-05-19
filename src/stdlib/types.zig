@@ -3095,7 +3095,7 @@ fn native_get_resource_type(_: *NativeContext, args: []const Value) RuntimeError
     return .{ .bool = false };
 }
 
-fn isResourceObject(name: []const u8) bool {
+pub fn isResourceObject(name: []const u8) bool {
     return std.mem.eql(u8, name, "__stream") or
         std.mem.eql(u8, name, "__file") or
         std.mem.eql(u8, name, "__curl") or
