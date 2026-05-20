@@ -15,7 +15,6 @@ pub const entries = .{
     .{ "pow", native_pow },
     .{ "sqrt", native_sqrt },
     .{ "log", native_log },
-    .{ "log2", native_log2 },
     .{ "log10", native_log10 },
     .{ "log1p", native_log1p },
     .{ "expm1", native_expm1 },
@@ -287,11 +286,6 @@ fn native_log(_: *NativeContext, args: []const Value) RuntimeError!Value {
         return .{ .float = @log(v) / @log(base) };
     }
     return .{ .float = @log(v) };
-}
-
-fn native_log2(_: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len == 0) return .{ .float = 0.0 };
-    return .{ .float = std.math.log2(Value.toFloat(args[0])) };
 }
 
 fn native_log10(_: *NativeContext, args: []const Value) RuntimeError!Value {
