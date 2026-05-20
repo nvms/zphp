@@ -9,15 +9,19 @@ if ! command -v php &>/dev/null; then
     exit 1
 fi
 
-# fetch the latest WordPress release if not already present
+# fetch a pinned WordPress release if not already present. the harness pins
+# the version (rather than tracking 'latest') so CI is reproducible - an
+# upstream WordPress release can otherwise turn CI red with no zphp change.
+# bump WP_VERSION deliberately when validating against a newer WordPress.
+WP_VERSION="6.9.4"
 if [ ! -f "$APP_DIR/wp-load.php" ]; then
-    echo "downloading WordPress..."
+    echo "downloading WordPress $WP_VERSION..."
     mkdir -p "$APP_DIR"
     cd "$APP_DIR"
     if command -v curl &>/dev/null; then
-        curl -sSL https://wordpress.org/latest.tar.gz -o /tmp/wp.tar.gz
+        curl -sSL "https://wordpress.org/wordpress-${WP_VERSION}.tar.gz" -o /tmp/wp.tar.gz
     elif command -v wget &>/dev/null; then
-        wget -q https://wordpress.org/latest.tar.gz -O /tmp/wp.tar.gz
+        wget -q "https://wordpress.org/wordpress-${WP_VERSION}.tar.gz" -O /tmp/wp.tar.gz
     else
         echo "need curl or wget to download wordpress"
         exit 1
