@@ -213,6 +213,15 @@ fn getStmtPtr(obj: *PhpObject) ?*sqlite.Stmt {
     return getOpaquePtr(sqlite.Stmt, obj, "__stmt_ptr");
 }
 
+// build the SQLSTATE-prefixed message PHP's PDO uses for sqlite errors:
+// "SQLSTATE[HY000]: General error: <sqlite_errcode> <sqlite_errmsg>"
+fn pdoSqlMsg(ctx: *NativeContext, db: *sqlite.Db, raw: []const u8) ![]const u8 {
+    const code = sqlite.sqlite3_errcode(db);
+    const m = try std.fmt.allocPrint(ctx.allocator, "SQLSTATE[HY000]: General error: {d} {s}", .{ code, raw });
+    try ctx.strings.append(ctx.allocator, m);
+    return m;
+}
+
 pub fn throwPdo(ctx: *NativeContext, msg: []const u8) RuntimeError!Value {
     // honor ATTR_ERRMODE: silent (0) returns false, warning (1) returns false,
     // exception (2) throws PDOException. default in PHP 8 is exception, but for
@@ -635,8 +644,8 @@ fn pdoExec(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     var errmsg: ?[*:0]u8 = null;
     const rc = sqlite.sqlite3_exec(db, sql_z, null, null, @ptrCast(&errmsg));
     if (rc != sqlite.OK) {
-        const msg = if (errmsg) |e| std.mem.span(e) else "SQL execution error";
-        const result = try throwPdo(ctx, msg);
+        const raw = if (errmsg) |e| std.mem.span(e) else "SQL execution error";
+        const result = try throwPdo(ctx, try pdoSqlMsg(ctx, db, raw));
         if (result == .bool and !result.bool) return .{ .bool = false };
         return result;
     }
@@ -656,7 +665,7 @@ fn pdoQuery(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     const rc = sqlite.sqlite3_prepare_v2(db, sql_z, -1, &stmt_ptr, null);
     if (rc != sqlite.OK or stmt_ptr == null) {
         const msg = std.mem.span(sqlite.sqlite3_errmsg(db));
-        return throwPdo(ctx, msg);
+        return throwPdo(ctx, try pdoSqlMsg(ctx, db, msg));
     }
 
     const stmt_obj = try ctx.createObject("PDOStatement");
@@ -684,7 +693,7 @@ fn pdoPrepare(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     const rc = sqlite.sqlite3_prepare_v2(db, sql_z, -1, &stmt_ptr, null);
     if (rc != sqlite.OK or stmt_ptr == null) {
         const msg = std.mem.span(sqlite.sqlite3_errmsg(db));
-        return throwPdo(ctx, msg);
+        return throwPdo(ctx, try pdoSqlMsg(ctx, db, msg));
     }
 
     const stmt_obj = try ctx.createObject("PDOStatement");
@@ -840,7 +849,7 @@ fn stmtExecute(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
         if (db_val == .int and db_val.int != 0) {
             const db: *sqlite.Db = @ptrFromInt(@as(usize, @intCast(db_val.int)));
             const msg = std.mem.span(sqlite.sqlite3_errmsg(db));
-            return throwPdo(ctx, msg);
+            return throwPdo(ctx, try pdoSqlMsg(ctx, db, msg));
         }
         return .{ .bool = false };
     }
