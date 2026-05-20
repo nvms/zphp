@@ -291,7 +291,17 @@ fn writeStackTrace(buf: *Writer, alloc: std.mem.Allocator, vm: *const VM) void {
         } else {
             writeFmt(buf, alloc, "{s}: ", .{top_display});
         }
-        writeFmt(buf, alloc, "{s}(", .{nname});
+        // instance-method natives render 'Class->method'; static / plain
+        // functions keep the stored 'Class::method' / 'func' form
+        if (vm.pending_native_is_instance) {
+            if (std.mem.indexOf(u8, nname, "::")) |sep| {
+                writeFmt(buf, alloc, "{s}->{s}(", .{ nname[0..sep], nname[sep + 2 ..] });
+            } else {
+                writeFmt(buf, alloc, "{s}(", .{nname});
+            }
+        } else {
+            writeFmt(buf, alloc, "{s}(", .{nname});
+        }
         for (vm.pending_native_args, 0..) |a, ai| {
             if (ai > 0) write(buf, alloc, ", ");
             writeArgValue(buf, alloc, a);

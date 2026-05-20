@@ -440,6 +440,9 @@ pub const VM = struct {
     pending_native_name: ?[]const u8 = null,
     pending_native_args: []const Value = &.{},
     pending_native_args_buf: [16]Value = @splat(.null),
+    // true when pending_native_name is a 'Class::method' reached as an
+    // instance method - the trace renders it with '->' instead of '::'
+    pending_native_is_instance: bool = false,
     // args slice for invocations driven from native code (callByName-style).
     // executeFunction consumes this to seed fga_buf so func_get_args inside
     // the called function sees the real args, not stale data from whatever
@@ -5911,6 +5914,17 @@ pub const VM = struct {
                                 // of surfacing as 'internal RuntimeError'
                                 const result = native(&ctx, args_buf[0..ac]) catch |native_err| {
                                     if (self.frame_count < saved_fc) continue;
+                                    // pop the temp $this frame so it doesn't
+                                    // leak into the stack trace as a bogus
+                                    // '{main}' entry
+                                    self.frame_count -= 1;
+                                    self.deinitFrameSlot(self.frame_count);
+                                    // uncaught native throw - record the method
+                                    // name so the stack trace shows it at #0
+                                    if (self.pending_exception != null) {
+                                        self.pending_native_name = mc_entry.full_name;
+                                        self.pending_native_is_instance = true;
+                                    }
                                     return native_err;
                                 };
                                 if (self.frame_count >= saved_fc) {
@@ -6003,7 +6017,7 @@ pub const VM = struct {
         if (self.frame_count > self.frame_high_water) self.frame_high_water = self.frame_count;
                         const saved_fc = self.frame_count;
 
-                        var ctx = self.makeContext(null);
+                        var ctx = self.makeContext(full_name);
                         const result = native(&ctx, args_buf[0..ac]) catch {
                             if (self.frame_count >= saved_fc) {
                                 self.frame_count -= 1;
@@ -6012,6 +6026,8 @@ pub const VM = struct {
                             if (self.pending_exception) |exc| {
                                 self.pending_exception = null;
                                 if (self.handler_count > self.handler_floor) {
+                                    // exception caught - clear native-trace state
+                                    self.pending_native_name = null;
                                     const handler = self.exception_handlers[self.handler_count - 1];
                                     self.handler_count -= 1;
                                     while (self.frame_count > handler.frame_count) {
@@ -6023,6 +6039,10 @@ pub const VM = struct {
                                     self.currentFrame().ip = handler.catch_ip;
                                     continue;
                                 }
+                                // uncaught - record the native method so the
+                                // stack trace shows 'Class->method()' at #0
+                                self.pending_native_name = full_name;
+                                self.pending_native_is_instance = true;
                                 self.pending_exception = exc;
                             } else {
                                 continue;
@@ -6216,7 +6236,7 @@ pub const VM = struct {
                     self.frame_count += 1;
         if (self.frame_count > self.frame_high_water) self.frame_high_water = self.frame_count;
                         const saved_fc = self.frame_count;
-                        var ctx = self.makeContext(null);
+                        var ctx = self.makeContext(full_name);
                         const result = native(&ctx, args_buf[0..ac]) catch {
                             if (self.frame_count >= saved_fc) {
                                 self.frame_count -= 1;
@@ -6225,6 +6245,8 @@ pub const VM = struct {
                             if (self.pending_exception) |exc| {
                                 self.pending_exception = null;
                                 if (self.handler_count > self.handler_floor) {
+                                    // exception caught - clear native-trace state
+                                    self.pending_native_name = null;
                                     const handler = self.exception_handlers[self.handler_count - 1];
                                     self.handler_count -= 1;
                                     while (self.frame_count > handler.frame_count) {
@@ -6236,6 +6258,10 @@ pub const VM = struct {
                                     self.currentFrame().ip = handler.catch_ip;
                                     continue;
                                 }
+                                // uncaught - record the native method so the
+                                // stack trace shows 'Class->method()' at #0
+                                self.pending_native_name = full_name;
+                                self.pending_native_is_instance = true;
                                 self.pending_exception = exc;
                             } else {
                                 continue;
@@ -6354,7 +6380,7 @@ pub const VM = struct {
                     self.frame_count += 1;
         if (self.frame_count > self.frame_high_water) self.frame_high_water = self.frame_count;
                         const saved_fc = self.frame_count;
-                        var ctx = self.makeContext(null);
+                        var ctx = self.makeContext(full_name);
                         const result = native(&ctx, args_buf[0..ac]) catch {
                             if (self.frame_count >= saved_fc) {
                                 self.frame_count -= 1;
@@ -6363,6 +6389,8 @@ pub const VM = struct {
                             if (self.pending_exception) |exc| {
                                 self.pending_exception = null;
                                 if (self.handler_count > self.handler_floor) {
+                                    // exception caught - clear native-trace state
+                                    self.pending_native_name = null;
                                     const handler = self.exception_handlers[self.handler_count - 1];
                                     self.handler_count -= 1;
                                     while (self.frame_count > handler.frame_count) {
@@ -6374,6 +6402,10 @@ pub const VM = struct {
                                     self.currentFrame().ip = handler.catch_ip;
                                     continue;
                                 }
+                                // uncaught - record the native method so the
+                                // stack trace shows 'Class->method()' at #0
+                                self.pending_native_name = full_name;
+                                self.pending_native_is_instance = true;
                                 self.pending_exception = exc;
                             } else {
                                 continue;
@@ -6511,7 +6543,7 @@ pub const VM = struct {
                     self.frame_count += 1;
         if (self.frame_count > self.frame_high_water) self.frame_high_water = self.frame_count;
                         const saved_fc = self.frame_count;
-                        var ctx = self.makeContext(null);
+                        var ctx = self.makeContext(full_name);
                         const result = native(&ctx, args_buf[0..ac]) catch {
                             if (self.frame_count >= saved_fc) {
                                 self.frame_count -= 1;
@@ -6520,6 +6552,8 @@ pub const VM = struct {
                             if (self.pending_exception) |exc| {
                                 self.pending_exception = null;
                                 if (self.handler_count > self.handler_floor) {
+                                    // exception caught - clear native-trace state
+                                    self.pending_native_name = null;
                                     const handler = self.exception_handlers[self.handler_count - 1];
                                     self.handler_count -= 1;
                                     while (self.frame_count > handler.frame_count) {
@@ -6531,6 +6565,10 @@ pub const VM = struct {
                                     self.currentFrame().ip = handler.catch_ip;
                                     continue;
                                 }
+                                // uncaught - record the native method so the
+                                // stack trace shows 'Class->method()' at #0
+                                self.pending_native_name = full_name;
+                                self.pending_native_is_instance = true;
                                 self.pending_exception = exc;
                             } else {
                                 continue;
@@ -11389,6 +11427,7 @@ pub const VM = struct {
                     // capture the native's name + args so writeStackTrace
                     // can emit '#0 file(line): name(args)' synthetic frame
                     self.pending_native_name = name;
+                    self.pending_native_is_instance = false;
                     const argc_cap: usize = @min(ac, self.pending_native_args_buf.len);
                     for (0..argc_cap) |i| self.pending_native_args_buf[i] = args[i];
                     self.pending_native_args = self.pending_native_args_buf[0..argc_cap];
