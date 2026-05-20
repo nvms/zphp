@@ -766,6 +766,28 @@ pub const Compiler = struct {
     // const expression evaluation
     // ==================================================================
 
+    // stringify a folded constant scalar for compile-time concat. returns null
+    // for values that can't be folded here (arrays, deferred-constant /
+    // deferred-new sentinel strings, float - whose display format is resolved
+    // at runtime)
+    fn constScalarToStr(self: *Compiler, v: Value) ?[]const u8 {
+        return switch (v) {
+            .string => |s| blk: {
+                // reject sentinel-encoded deferred values (\x00CC.. / \x00NW..)
+                if (s.len >= 3 and s[0] == 0) break :blk null;
+                break :blk s;
+            },
+            .int => |i| blk: {
+                const buf = std.fmt.allocPrint(self.allocator, "{d}", .{i}) catch break :blk null;
+                self.string_allocs.append(self.allocator, buf) catch break :blk null;
+                break :blk buf;
+            },
+            .bool => |b| if (b) "1" else "",
+            .null => "",
+            else => null,
+        };
+    }
+
     pub fn evalConstExpr(self: *Compiler, idx: u32) Value {
         const n = self.ast.nodes[idx];
         return switch (n.tag) {
@@ -792,6 +814,7 @@ pub const Compiler = struct {
             .true_literal => .{ .bool = true },
             .false_literal => .{ .bool = false },
             .null_literal => .null,
+            .grouped_expr => self.evalConstExpr(n.data.lhs),
             .prefix_op => blk: {
                 const tok = self.ast.tokens[n.main_token];
                 if (tok.tag == .minus) {
@@ -823,10 +846,62 @@ pub const Compiler = struct {
                         .plus => Value{ .int = lhs.int +% rhs.int },
                         .minus => Value{ .int = lhs.int -% rhs.int },
                         .star => Value{ .int = lhs.int *% rhs.int },
+                        .lt_lt => if (rhs.int >= 0 and rhs.int < 64) Value{ .int = lhs.int << @intCast(rhs.int) } else Value.null,
+                        .gt_gt => if (rhs.int >= 0 and rhs.int < 64) Value{ .int = lhs.int >> @intCast(rhs.int) } else Value.null,
+                        .percent => if (rhs.int != 0) Value{ .int = @rem(lhs.int, rhs.int) } else Value.null,
+                        .star_star => blk2: {
+                            if (rhs.int < 0) break :blk2 Value.null;
+                            var acc: i64 = 1;
+                            var e: i64 = 0;
+                            while (e < rhs.int) : (e += 1) acc *%= lhs.int;
+                            break :blk2 Value{ .int = acc };
+                        },
+                        .lt => Value{ .bool = lhs.int < rhs.int },
+                        .gt => Value{ .bool = lhs.int > rhs.int },
+                        .lt_equal => Value{ .bool = lhs.int <= rhs.int },
+                        .gt_equal => Value{ .bool = lhs.int >= rhs.int },
+                        .equal_equal => Value{ .bool = lhs.int == rhs.int },
+                        .equal_equal_equal => Value{ .bool = lhs.int == rhs.int },
+                        .bang_equal, .lt_gt => Value{ .bool = lhs.int != rhs.int },
+                        .bang_equal_equal => Value{ .bool = lhs.int != rhs.int },
+                        .spaceship => Value{ .int = if (lhs.int < rhs.int) @as(i64, -1) else if (lhs.int > rhs.int) @as(i64, 1) else @as(i64, 0) },
                         else => Value.null,
                     };
                 }
+                // string concat in a constant default: 'a' . 'b', and chains.
+                // fold when both operands are concrete scalars (int/string/
+                // bool/null). a deferred-constant sentinel can't be folded
+                // here - those stay null (rare in defaults)
+                if (tok.tag == .dot) {
+                    const ls = constScalarToStr(self, lhs) orelse break :blk .null;
+                    const rs = constScalarToStr(self, rhs) orelse break :blk .null;
+                    const joined = std.fmt.allocPrint(self.allocator, "{s}{s}", .{ ls, rs }) catch break :blk .null;
+                    self.string_allocs.append(self.allocator, joined) catch break :blk .null;
+                    break :blk .{ .string = joined };
+                }
                 break :blk .null;
+            },
+            .ternary => blk: {
+                // constant-expression ternary default: cond ? then : else.
+                // node layout: lhs = condition, extra_data[rhs] = then node
+                // (0 for short ternary $a ?: $b), extra_data[rhs+1] = else node
+                const cond = self.evalConstExpr(n.data.lhs);
+                if (n.data.rhs + 1 >= self.ast.extra_data.len) break :blk .null;
+                const then_node = self.ast.extra_data[n.data.rhs];
+                const else_node = self.ast.extra_data[n.data.rhs + 1];
+                const truthy = switch (cond) {
+                    .bool => |b| b,
+                    .int => |i| i != 0,
+                    .float => |f| f != 0,
+                    .string => |s| s.len != 0 and !std.mem.eql(u8, s, "0"),
+                    .null => false,
+                    else => break :blk .null,
+                };
+                if (truthy) {
+                    if (then_node == 0) break :blk cond;
+                    break :blk self.evalConstExpr(then_node);
+                }
+                break :blk self.evalConstExpr(else_node);
             },
             .array_literal => blk: {
                 const elems = self.ast.extraSlice(n.data.lhs);
