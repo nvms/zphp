@@ -1152,8 +1152,10 @@ pub fn compileClassDecl(self: *Compiler, node: Ast.Node) Error!void {
     for (members) |member_idx| {
         const member = self.ast.nodes[member_idx];
         if (member.tag == .static_class_property) {
+            // push null placeholder - the real default is set after class_decl
+            // (like constants) so a default referencing self::CONST resolves
             if (member.data.lhs != 0) {
-                try self.compileNode(member.data.lhs);
+                try self.emitOp(.op_null);
             }
         } else if (member.tag == .const_decl) {
             // push null placeholder - real values set after class_decl so self:: resolves
@@ -1560,6 +1562,22 @@ pub fn compileClassDecl(self: *Compiler, node: Ast.Node) Error!void {
             try self.emitOp(.set_static_prop);
             try self.emitU16(cname_idx);
             try self.emitU16(cprop_idx);
+            try self.emitOp(.pop);
+        }
+    }
+    // set static-property defaults after the constants block so a default
+    // expression like `public static $x = self::CONST` sees the class and
+    // its (already-set) constants
+    for (members) |member_idx| {
+        const member = self.ast.nodes[member_idx];
+        if (member.tag == .static_class_property and member.data.lhs != 0) {
+            try self.compileNode(member.data.lhs);
+            var sp_name = self.ast.tokenSlice(member.main_token);
+            if (sp_name.len > 0 and sp_name[0] == '$') sp_name = sp_name[1..];
+            const sp_idx = try self.addConstant(.{ .string = sp_name });
+            try self.emitOp(.set_static_prop);
+            try self.emitU16(cname_idx);
+            try self.emitU16(sp_idx);
             try self.emitOp(.pop);
         }
     }
