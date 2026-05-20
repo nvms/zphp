@@ -49,6 +49,7 @@ pub const entries = .{
     .{ "microtime", native_microtime },
     .{ "hrtime", native_hrtime },
     .{ "checkdate", native_checkdate },
+    .{ "cal_days_in_month", native_cal_days_in_month },
     .{ "getdate", native_getdate },
     .{ "gmdate", native_gmdate },
     .{ "date_default_timezone_set", native_tz_set },
@@ -2208,6 +2209,19 @@ fn native_strtotime(_: *NativeContext, args: []const Value) RuntimeError!Value {
         return .{ .int = ts };
     }
 
+    // ISO 8601 week date: YYYY-Www-D (e.g. 2024-W10-1) or YYYY-Www (Monday)
+    if (input.len >= 8 and input[4] == '-' and (input[5] == 'W' or input[5] == 'w')
+        and input[6] >= '0' and input[6] <= '9' and input[7] >= '0' and input[7] <= '9')
+    {
+        const year = std.fmt.parseInt(i64, input[0..4], 10) catch return Value{ .bool = false };
+        const week = std.fmt.parseInt(i64, input[6..8], 10) catch return Value{ .bool = false };
+        var dow: i64 = 1;
+        if (input.len >= 10 and input[8] == '-' and input[9] >= '1' and input[9] <= '7') {
+            dow = input[9] - '0';
+        }
+        return .{ .int = isoWeekDateToTimestamp(year, week, dow, 0, 0, 0) };
+    }
+
     // YYYY-MM-DD with optional time (space or T separator) and optional timezone
     if (input.len >= 10 and input[4] == '-' and input[7] == '-') {
         const year = std.fmt.parseInt(i64, input[0..4], 10) catch return Value{ .bool = false };
@@ -2258,6 +2272,22 @@ fn native_strtotime(_: *NativeContext, args: []const Value) RuntimeError!Value {
         return .{ .int = base_ts };
     }
 
+    // YYYY/MM/DD slash date (PHP accepts this alongside YYYY-MM-DD)
+    if (input.len >= 10 and input[4] == '/' and input[7] == '/') {
+        const year = std.fmt.parseInt(i64, input[0..4], 10) catch return Value{ .bool = false };
+        const month = std.fmt.parseInt(i64, input[5..7], 10) catch return Value{ .bool = false };
+        const day = std.fmt.parseInt(i64, input[8..10], 10) catch return Value{ .bool = false };
+        var hour: i64 = 0;
+        var min: i64 = 0;
+        var sec: i64 = 0;
+        if (input.len >= 19 and input[10] == ' ' and input[13] == ':' and input[16] == ':') {
+            hour = std.fmt.parseInt(i64, input[11..13], 10) catch 0;
+            min = std.fmt.parseInt(i64, input[14..16], 10) catch 0;
+            sec = std.fmt.parseInt(i64, input[17..19], 10) catch 0;
+        }
+        return .{ .int = dateToTimestamp(year, month, day, hour, min, sec) };
+    }
+
     // MM/DD/YYYY US date format with optional timezone
     if (input.len >= 10 and input[2] == '/' and input[5] == '/') {
         const month = std.fmt.parseInt(i64, input[0..2], 10) catch return Value{ .bool = false };
@@ -2304,7 +2334,44 @@ fn native_strtotime(_: *NativeContext, args: []const Value) RuntimeError!Value {
     // textual month dates: "January 15, 2025", "Jan 15, 2025", "Jan 15 2025", "15 Jan 2025"
     if (tryParseTextualDate(input)) |ts| return .{ .int = ts };
 
+    // bare time-of-day ("14:30", "2:30pm", "09:15:00") - PHP keeps base's
+    // calendar date and replaces the time
+    if (tryParseBareTime(input)) |tod| {
+        const dc = baseComponents(base);
+        return .{ .int = dateToTimestamp(dc.year, dc.month, dc.day, tod.hour, tod.min, tod.sec) };
+    }
+
     return parseRelativeTime(input, base);
+}
+
+// returns a TimeOfDay only when the whole input is a standalone time, i.e.
+// starts with HH:MM and has nothing left over besides am/pm and whitespace
+fn tryParseBareTime(input: []const u8) ?TimeOfDay {
+    var s = input;
+    while (s.len > 0 and s[0] == ' ') s = s[1..];
+    while (s.len > 0 and s[s.len - 1] == ' ') s = s[0 .. s.len - 1];
+    // must begin with 1-2 digits then a colon
+    var i: usize = 0;
+    while (i < s.len and s[i] >= '0' and s[i] <= '9') i += 1;
+    if (i == 0 or i > 2 or i >= s.len or s[i] != ':') return null;
+    // walk minutes (and optional seconds)
+    i += 1;
+    var d: usize = 0;
+    while (i < s.len and s[i] >= '0' and s[i] <= '9') : (i += 1) d += 1;
+    if (d == 0) return null;
+    if (i < s.len and s[i] == ':') {
+        i += 1;
+        d = 0;
+        while (i < s.len and s[i] >= '0' and s[i] <= '9') : (i += 1) d += 1;
+        if (d == 0) return null;
+    }
+    // only whitespace + an optional am/pm marker may follow
+    var rest = s[i..];
+    while (rest.len > 0 and rest[0] == ' ') rest = rest[1..];
+    if (rest.len != 0) {
+        if (!(rest.len == 2 and (eqlLower(rest, "am") or eqlLower(rest, "pm")))) return null;
+    }
+    return parseTimeOfDay(s);
 }
 
 fn tryParseTextualDate(input: []const u8) ?i64 {
@@ -2400,6 +2467,19 @@ fn native_checkdate(_: *NativeContext, args: []const Value) RuntimeError!Value {
         if (y % 4 == 0 and (y % 100 != 0 or y % 400 == 0)) max_day = 29;
     }
     return .{ .bool = day <= max_day };
+}
+
+fn native_cal_days_in_month(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    // cal_days_in_month($calendar, $month, $year). only CAL_GREGORIAN (0) is
+    // commonly used; zphp treats every calendar id as Gregorian
+    if (args.len < 3) return .{ .bool = false };
+    const month = Value.toInt(args[1]);
+    const year = Value.toInt(args[2]);
+    if (month < 1 or month > 12) {
+        try ctx.vm.setPendingException("ValueError", "Invalid date");
+        return error.RuntimeError;
+    }
+    return .{ .int = daysInMonth(month, year) };
 }
 
 fn buildDateParseResult(ctx: *NativeContext, year: ?i64, month: ?i64, day: ?i64, hour: ?i64, minute: ?i64, second: ?i64, fraction: f64, errors: []const []const u8) !Value {
@@ -2767,6 +2847,29 @@ pub fn parseRelativeTime(input: []const u8, base: i64) Value {
 
     // "next/last <weekday>" or "next/last month/year"
     if (tryParseNextLast(s, base)) |ts| return .{ .int = ts };
+
+    // "<weekday> this|next|last week" - the named weekday within the ISO
+    // week (Monday-anchored) of base, optionally shifted a week
+    if (parseWeekdayName(s)) |target_dow| {
+        const wname_len = weekdayNameLen(s) orelse 0;
+        if (wname_len > 0 and wname_len < s.len) {
+            var rest = s[wname_len..];
+            while (rest.len > 0 and rest[0] == ' ') rest = rest[1..];
+            var week_dir: ?i64 = null;
+            if (startsWithLower(rest, "this week")) week_dir = 0
+            else if (startsWithLower(rest, "next week")) week_dir = 1
+            else if (startsWithLower(rest, "last week")) week_dir = -1;
+            if (week_dir) |wd| {
+                const midnight = baseMidnight(base);
+                const epoch_secs: u64 = @intCast(if (midnight < 0) 0 else midnight);
+                const es = std.time.epoch.EpochSeconds{ .secs = epoch_secs };
+                const day_num: i64 = @intCast(es.getEpochDay().day);
+                const current_dow: i64 = @mod(day_num + 3, 7); // 0=Mon
+                const monday = midnight - current_dow * 86400 + wd * 7 * 86400;
+                return .{ .int = monday + @as(i64, target_dow) * 86400 };
+            }
+        }
+    }
 
     // weekday name alone ("Monday", "Thursday") - PHP returns TODAY at
     // midnight when the current weekday matches; otherwise the next occurrence
