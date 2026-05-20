@@ -287,6 +287,18 @@ fn applySetopt(ctx: *NativeContext, handle: *c.CURL, obj: *PhpObject, option: i6
         return .{ .bool = true };
     }
 
+    // CURLOPT_HTTPGET / CURLOPT_UPLOAD - plain long toggles
+    if (option == c.CURLOPT_HTTPGET or option == c.CURLOPT_UPLOAD) {
+        const v: c_long = switch (value) {
+            .int => @intCast(value.int),
+            .bool => if (value.bool) @as(c_long, 1) else 0,
+            else => return .{ .bool = false },
+        };
+        const opt: c_uint = if (option == c.CURLOPT_HTTPGET) c.CURLOPT_HTTPGET else c.CURLOPT_UPLOAD;
+        const code: c_uint = @intCast(c.curl_easy_setopt(handle, opt, v));
+        return .{ .bool = code == c.CURLE_OK };
+    }
+
     // PHP throws ValueError for unrecognized CURLOPT_* constants
     try ctx.vm.setPendingException("ValueError", "curl_setopt(): Argument #2 ($option) is not a valid cURL option");
     return error.RuntimeError;
@@ -1040,6 +1052,8 @@ pub fn register(vm: *VM, a: std.mem.Allocator) !void {
     try vm.php_constants.put(a, "CURLOPT_HEADER", .{ .int = c.CURLOPT_HEADER });
     try vm.php_constants.put(a, "CURLOPT_NOBODY", .{ .int = c.CURLOPT_NOBODY });
     try vm.php_constants.put(a, "CURLOPT_PUT", .{ .int = c.CURLOPT_PUT });
+    try vm.php_constants.put(a, "CURLOPT_HTTPGET", .{ .int = c.CURLOPT_HTTPGET });
+    try vm.php_constants.put(a, "CURLOPT_UPLOAD", .{ .int = c.CURLOPT_UPLOAD });
     try vm.php_constants.put(a, "CURLOPT_ENCODING", .{ .int = c.CURLOPT_ENCODING });
     try vm.php_constants.put(a, "CURLOPT_VERBOSE", .{ .int = c.CURLOPT_VERBOSE });
     try vm.php_constants.put(a, "CURLOPT_FAILONERROR", .{ .int = c.CURLOPT_FAILONERROR });
