@@ -306,6 +306,18 @@ fn native_pack(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     return .{ .string = result };
 }
 
+// emit PHP's 'not enough input values' warning and return false. PHP's
+// unpack reports the per-element byte size as 'need N values' and the bytes
+// still available as 'only M were provided'
+fn unpackShort(ctx: *NativeContext, code: u8, need: usize, have: usize) RuntimeError!Value {
+    // PHP pluralizes the trailing verb: '1 was provided' vs 'N were provided'
+    const verb: []const u8 = if (have == 1) "was" else "were";
+    const msg = std.fmt.allocPrint(ctx.allocator, "unpack(): Type {c}: not enough input values, need {d} values but only {d} {s} provided", .{ code, need, have, verb }) catch return .{ .bool = false };
+    try ctx.strings.append(ctx.allocator, msg);
+    ctx.vm.emitWarning(msg);
+    return .{ .bool = false };
+}
+
 fn native_unpack(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len < 2) return .{ .bool = false };
     const fmt = switch (args[0]) {
@@ -333,7 +345,7 @@ fn native_unpack(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
                     .star => if (data.len > offset) data.len - offset else 0,
                     .exact => |n| n,
                 };
-                if (offset + count > data.len) return .{ .bool = false };
+                if (offset + count > data.len) return try unpackShort(ctx, entry.code, count, if (data.len > offset) data.len - offset else 0);
                 var slice = data[offset .. offset + count];
                 offset += count;
 
@@ -357,7 +369,7 @@ fn native_unpack(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
                     .exact => |n| n,
                 };
                 const bytes_needed = (nibbles + 1) / 2;
-                if (offset + bytes_needed > data.len) return .{ .bool = false };
+                if (offset + bytes_needed > data.len) return try unpackShort(ctx, entry.code, bytes_needed, if (data.len > offset) data.len - offset else 0);
 
                 const hex_buf = try ctx.allocator.alloc(u8, nibbles);
                 try ctx.strings.append(ctx.allocator, hex_buf);
@@ -377,7 +389,7 @@ fn native_unpack(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
             },
             'c' => {
                 const repeat = resolveRepeat(entry.count, 1, data.len, offset);
-                if (offset + repeat > data.len) return .{ .bool = false };
+                if (offset + repeat > data.len) return try unpackShort(ctx, entry.code, 1, if (data.len > offset) data.len - offset else 0);
                 for (0..repeat) |i| {
                     const val: i8 = @bitCast(data[offset]);
                     offset += 1;
@@ -387,7 +399,7 @@ fn native_unpack(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
             },
             'C' => {
                 const repeat = resolveRepeat(entry.count, 1, data.len, offset);
-                if (offset + repeat > data.len) return .{ .bool = false };
+                if (offset + repeat > data.len) return try unpackShort(ctx, entry.code, 1, if (data.len > offset) data.len - offset else 0);
                 for (0..repeat) |i| {
                     const val = data[offset];
                     offset += 1;
@@ -397,7 +409,7 @@ fn native_unpack(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
             },
             's' => {
                 const repeat = resolveRepeat(entry.count, 2, data.len, offset);
-                if (offset + repeat * 2 > data.len) return .{ .bool = false };
+                if (offset + repeat * 2 > data.len) return try unpackShort(ctx, entry.code, 2, if (data.len > offset) data.len - offset else 0);
                 for (0..repeat) |i| {
                     const val: i16 = @bitCast(data[offset..][0..2].*);
                     offset += 2;
@@ -407,7 +419,7 @@ fn native_unpack(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
             },
             'S' => {
                 const repeat = resolveRepeat(entry.count, 2, data.len, offset);
-                if (offset + repeat * 2 > data.len) return .{ .bool = false };
+                if (offset + repeat * 2 > data.len) return try unpackShort(ctx, entry.code, 2, if (data.len > offset) data.len - offset else 0);
                 for (0..repeat) |i| {
                     const val: u16 = @bitCast(data[offset..][0..2].*);
                     offset += 2;
@@ -417,7 +429,7 @@ fn native_unpack(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
             },
             'n' => {
                 const repeat = resolveRepeat(entry.count, 2, data.len, offset);
-                if (offset + repeat * 2 > data.len) return .{ .bool = false };
+                if (offset + repeat * 2 > data.len) return try unpackShort(ctx, entry.code, 2, if (data.len > offset) data.len - offset else 0);
                 for (0..repeat) |i| {
                     const val = std.mem.bigToNative(u16, @bitCast(data[offset..][0..2].*));
                     offset += 2;
@@ -427,7 +439,7 @@ fn native_unpack(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
             },
             'v' => {
                 const repeat = resolveRepeat(entry.count, 2, data.len, offset);
-                if (offset + repeat * 2 > data.len) return .{ .bool = false };
+                if (offset + repeat * 2 > data.len) return try unpackShort(ctx, entry.code, 2, if (data.len > offset) data.len - offset else 0);
                 for (0..repeat) |i| {
                     const val = std.mem.littleToNative(u16, @bitCast(data[offset..][0..2].*));
                     offset += 2;
@@ -437,7 +449,7 @@ fn native_unpack(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
             },
             'l' => {
                 const repeat = resolveRepeat(entry.count, 4, data.len, offset);
-                if (offset + repeat * 4 > data.len) return .{ .bool = false };
+                if (offset + repeat * 4 > data.len) return try unpackShort(ctx, entry.code, 4, if (data.len > offset) data.len - offset else 0);
                 for (0..repeat) |i| {
                     const val: i32 = @bitCast(data[offset..][0..4].*);
                     offset += 4;
@@ -447,7 +459,7 @@ fn native_unpack(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
             },
             'L' => {
                 const repeat = resolveRepeat(entry.count, 4, data.len, offset);
-                if (offset + repeat * 4 > data.len) return .{ .bool = false };
+                if (offset + repeat * 4 > data.len) return try unpackShort(ctx, entry.code, 4, if (data.len > offset) data.len - offset else 0);
                 for (0..repeat) |i| {
                     const val: u32 = @bitCast(data[offset..][0..4].*);
                     offset += 4;
@@ -457,7 +469,7 @@ fn native_unpack(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
             },
             'N' => {
                 const repeat = resolveRepeat(entry.count, 4, data.len, offset);
-                if (offset + repeat * 4 > data.len) return .{ .bool = false };
+                if (offset + repeat * 4 > data.len) return try unpackShort(ctx, entry.code, 4, if (data.len > offset) data.len - offset else 0);
                 for (0..repeat) |i| {
                     const val = std.mem.bigToNative(u32, @bitCast(data[offset..][0..4].*));
                     offset += 4;
@@ -467,7 +479,7 @@ fn native_unpack(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
             },
             'V' => {
                 const repeat = resolveRepeat(entry.count, 4, data.len, offset);
-                if (offset + repeat * 4 > data.len) return .{ .bool = false };
+                if (offset + repeat * 4 > data.len) return try unpackShort(ctx, entry.code, 4, if (data.len > offset) data.len - offset else 0);
                 for (0..repeat) |i| {
                     const val = std.mem.littleToNative(u32, @bitCast(data[offset..][0..4].*));
                     offset += 4;
@@ -478,7 +490,7 @@ fn native_unpack(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
             'i' => {
                 const sz = @sizeOf(c_int);
                 const repeat = resolveRepeat(entry.count, sz, data.len, offset);
-                if (offset + repeat * sz > data.len) return .{ .bool = false };
+                if (offset + repeat * sz > data.len) return try unpackShort(ctx, entry.code, sz, if (data.len > offset) data.len - offset else 0);
                 for (0..repeat) |i| {
                     var bytes: [@sizeOf(c_int)]u8 = undefined;
                     @memcpy(&bytes, data[offset .. offset + sz]);
@@ -491,7 +503,7 @@ fn native_unpack(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
             'I' => {
                 const sz = @sizeOf(c_uint);
                 const repeat = resolveRepeat(entry.count, sz, data.len, offset);
-                if (offset + repeat * sz > data.len) return .{ .bool = false };
+                if (offset + repeat * sz > data.len) return try unpackShort(ctx, entry.code, sz, if (data.len > offset) data.len - offset else 0);
                 for (0..repeat) |i| {
                     var bytes: [@sizeOf(c_uint)]u8 = undefined;
                     @memcpy(&bytes, data[offset .. offset + sz]);
@@ -503,7 +515,7 @@ fn native_unpack(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
             },
             'q' => {
                 const repeat = resolveRepeat(entry.count, 8, data.len, offset);
-                if (offset + repeat * 8 > data.len) return .{ .bool = false };
+                if (offset + repeat * 8 > data.len) return try unpackShort(ctx, entry.code, 8, if (data.len > offset) data.len - offset else 0);
                 for (0..repeat) |i| {
                     const val: i64 = @bitCast(data[offset..][0..8].*);
                     offset += 8;
@@ -513,7 +525,7 @@ fn native_unpack(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
             },
             'Q' => {
                 const repeat = resolveRepeat(entry.count, 8, data.len, offset);
-                if (offset + repeat * 8 > data.len) return .{ .bool = false };
+                if (offset + repeat * 8 > data.len) return try unpackShort(ctx, entry.code, 8, if (data.len > offset) data.len - offset else 0);
                 for (0..repeat) |i| {
                     const val: u64 = @bitCast(data[offset..][0..8].*);
                     offset += 8;
@@ -524,7 +536,7 @@ fn native_unpack(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
             },
             'J' => {
                 const repeat = resolveRepeat(entry.count, 8, data.len, offset);
-                if (offset + repeat * 8 > data.len) return .{ .bool = false };
+                if (offset + repeat * 8 > data.len) return try unpackShort(ctx, entry.code, 8, if (data.len > offset) data.len - offset else 0);
                 for (0..repeat) |i| {
                     const val = std.mem.bigToNative(u64, @bitCast(data[offset..][0..8].*));
                     offset += 8;
@@ -535,7 +547,7 @@ fn native_unpack(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
             },
             'P' => {
                 const repeat = resolveRepeat(entry.count, 8, data.len, offset);
-                if (offset + repeat * 8 > data.len) return .{ .bool = false };
+                if (offset + repeat * 8 > data.len) return try unpackShort(ctx, entry.code, 8, if (data.len > offset) data.len - offset else 0);
                 for (0..repeat) |i| {
                     const val = std.mem.littleToNative(u64, @bitCast(data[offset..][0..8].*));
                     offset += 8;
@@ -546,7 +558,7 @@ fn native_unpack(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
             },
             'f', 'g', 'G' => {
                 const repeat = resolveRepeat(entry.count, 4, data.len, offset);
-                if (offset + repeat * 4 > data.len) return .{ .bool = false };
+                if (offset + repeat * 4 > data.len) return try unpackShort(ctx, entry.code, 4, if (data.len > offset) data.len - offset else 0);
                 for (0..repeat) |i| {
                     var bits: u32 = @bitCast(data[offset..][0..4].*);
                     offset += 4;
@@ -562,7 +574,7 @@ fn native_unpack(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
             },
             'd', 'e', 'E' => {
                 const repeat = resolveRepeat(entry.count, 8, data.len, offset);
-                if (offset + repeat * 8 > data.len) return .{ .bool = false };
+                if (offset + repeat * 8 > data.len) return try unpackShort(ctx, entry.code, 8, if (data.len > offset) data.len - offset else 0);
                 for (0..repeat) |i| {
                     var bits: u64 = @bitCast(data[offset..][0..8].*);
                     offset += 8;
