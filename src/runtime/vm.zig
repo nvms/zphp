@@ -3582,10 +3582,23 @@ pub const VM = struct {
                 .unset_var => {
                     const idx = self.readU16();
                     const name = self.currentChunk().constants.items[idx].string;
-                    if (self.currentFrame().vars.get(name)) |existing| {
+                    const uframe = self.currentFrame();
+                    if (uframe.vars.get(name)) |existing| {
                         if (existing == .generator) self.closeGenerator(existing.generator, self.frame_count) catch {};
                     }
-                    _ = self.currentFrame().vars.remove(name);
+                    _ = uframe.vars.remove(name);
+                    // a slot-backed variable also lives in frame.locals; remove
+                    // from vars alone left the old value readable (so isset()
+                    // still reported it set). reset the slot and drop any ref
+                    // binding so the name reads as undefined afterward
+                    _ = uframe.ref_slots.remove(name);
+                    const u_sn = if (uframe.func) |f| f.slot_names else self.global_slot_names;
+                    for (u_sn, 0..) |sn, si| {
+                        if (sn.len == name.len and std.mem.eql(u8, sn, name)) {
+                            if (si < uframe.locals.len) uframe.locals[si] = .null;
+                            break;
+                        }
+                    }
                 },
                 .unset_prop => {
                     const name_idx = self.readU16();
