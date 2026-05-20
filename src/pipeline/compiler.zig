@@ -509,8 +509,8 @@ pub const Compiler = struct {
 
     fn compileInteger(self: *Compiler, node: Ast.Node) Error!void {
         const lexeme = self.ast.tokenSlice(node.main_token);
-        const val = parsePhpInt(lexeme);
-        const idx = try self.addConstant(.{ .int = val });
+        // an integer literal that overflows i64 becomes a float (PHP semantics)
+        const idx = try self.addConstant(parsePhpIntLiteral(lexeme));
         try self.emitConstant(idx);
     }
 
@@ -791,10 +791,7 @@ pub const Compiler = struct {
     pub fn evalConstExpr(self: *Compiler, idx: u32) Value {
         const n = self.ast.nodes[idx];
         return switch (n.tag) {
-            .integer_literal => blk: {
-                const text = self.ast.tokenSlice(n.main_token);
-                break :blk .{ .int = parsePhpInt(text) };
-            },
+            .integer_literal => parsePhpIntLiteral(self.ast.tokenSlice(n.main_token)),
             .float_literal => blk: {
                 const text = self.ast.tokenSlice(n.main_token);
                 break :blk .{ .float = std.fmt.parseFloat(f64, text) catch 0.0 };
@@ -1260,8 +1257,18 @@ pub const Compiler = struct {
     // ==================================================================
 
     pub fn parsePhpInt(s: []const u8) i64 {
-        if (s.len == 0) return 0;
-        var buf: [64]u8 = undefined;
+        return switch (parsePhpIntLiteral(s)) {
+            .int => |i| i,
+            .float => |f| @intFromFloat(f),
+            else => 0,
+        };
+    }
+
+    // parse an integer literal, promoting to float when it overflows i64 -
+    // PHP's behavior for 9223372036854775808, 0xFFFFFFFFFFFFFFFFF, etc.
+    pub fn parsePhpIntLiteral(s: []const u8) Value {
+        if (s.len == 0) return .{ .int = 0 };
+        var buf: [128]u8 = undefined;
         var len: usize = 0;
         for (s) |c| {
             if (c != '_' and len < buf.len) {
@@ -1272,14 +1279,47 @@ pub const Compiler = struct {
         const clean = buf[0..len];
         if (clean.len > 2 and clean[0] == '0') {
             switch (clean[1]) {
-                'x', 'X' => return std.fmt.parseInt(i64, clean[2..], 16) catch 0,
-                'b', 'B' => return std.fmt.parseInt(i64, clean[2..], 2) catch 0,
-                'o', 'O' => return std.fmt.parseInt(i64, clean[2..], 8) catch 0,
-                '0'...'7' => return std.fmt.parseInt(i64, clean[1..], 8) catch 0,
+                'x', 'X' => return parseRadixLiteral(clean[2..], 16),
+                'b', 'B' => return parseRadixLiteral(clean[2..], 2),
+                'o', 'O' => return parseRadixLiteral(clean[2..], 8),
+                '0'...'7' => return parseRadixLiteral(clean[1..], 8),
                 else => {},
             }
         }
-        return std.fmt.parseInt(i64, clean, 10) catch 0;
+        if (std.fmt.parseInt(i64, clean, 10)) |v| {
+            return .{ .int = v };
+        } else |_| {
+            // decimal literal too large for i64 -> float
+            return .{ .float = std.fmt.parseFloat(f64, clean) catch 0.0 };
+        }
+    }
+
+    fn parseRadixLiteral(digits: []const u8, radix: u8) Value {
+        if (std.fmt.parseInt(i64, digits, radix)) |v| {
+            return .{ .int = v };
+        } else |_| {}
+        // overflowing non-decimal literal -> float. accumulate in u128 (exact
+        // for everything up to ~3.4e38) then convert to f64 once, so the
+        // rounding matches PHP's parse-then-cast instead of accumulating
+        // error digit by digit in f64
+        var acc: u128 = 0;
+        const r: u128 = radix;
+        for (digits) |d| {
+            const dv: ?u128 = switch (d) {
+                '0'...'9' => d - '0',
+                'a'...'f' => d - 'a' + 10,
+                'A'...'F' => d - 'A' + 10,
+                else => null,
+            };
+            if (dv) |v| {
+                const m = @mulWithOverflow(acc, r);
+                if (m[1] != 0) return .{ .float = std.fmt.parseFloat(f64, digits) catch 0.0 };
+                const a = @addWithOverflow(m[0], v);
+                if (a[1] != 0) return .{ .float = std.fmt.parseFloat(f64, digits) catch 0.0 };
+                acc = a[0];
+            } else return .{ .int = 0 };
+        }
+        return .{ .float = @floatFromInt(acc) };
     }
 
     fn parsePhpFloat(s: []const u8) f64 {
