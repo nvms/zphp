@@ -998,7 +998,9 @@ fn native_settype(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
         }
         const arr = try ctx.allocator.create(PhpArray);
         arr.* = .{};
-        try arr.append(ctx.allocator, val);
+        // null becomes an empty array (matches (array) cast); any other
+        // scalar becomes a single-element array [value]
+        if (val != .null) try arr.append(ctx.allocator, val);
         try ctx.arrays.append(ctx.allocator, arr);
         return .{ .array = arr };
     }
