@@ -1147,29 +1147,45 @@ fn preg_split(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     defer pcre2.pcre2_match_data_free_8(match_data);
 
     var result = try ctx.createArray();
-    var offset: usize = 0;
+    // prev_end: source position where the next piece begins (end of last
+    // match). search: where to look for the next match. they diverge only
+    // around zero-width matches, where search advances a char past the match
+    // but the piece still starts at prev_end so each delimiter char becomes
+    // its own following piece (this is how '//' splits into characters)
+    var prev_end: usize = 0;
+    var search: usize = 0;
     var splits: i64 = 1;
+    const is_utf = (info.flags & pcre2.UTF) != 0;
 
-    while (offset <= subject.len) {
+    while (search <= subject.len) {
         if (limit > 0 and splits >= limit) break;
 
-        const rc = pcre2.pcre2_match_8(code, subject.ptr, subject.len, offset, 0, match_data, null);
+        const rc = pcre2.pcre2_match_8(code, subject.ptr, subject.len, search, 0, match_data, null);
         if (rc < 0) break;
 
         const ovector = pcre2.pcre2_get_ovector_pointer_8(match_data);
         const match_start = ovector[0];
         const match_end = ovector[1];
+        const zero_width = match_end == match_start;
 
-        const piece = try ctx.createString(subject[offset..match_start]);
-        // for zero-width matches the "piece before delim" duplicates the
-        // single-char emit below; skip the empty piece except at start/end
-        const is_zero_width = match_end == offset;
-        const skip_empty_piece = is_zero_width and offset > 0 and offset < subject.len;
-        if ((!no_empty or piece.len > 0) and !skip_empty_piece) {
+        // a zero-width match exactly at prev_end (other than at string start)
+        // would emit an empty piece in place - skip it and advance the search
+        if (zero_width and match_start == prev_end and search > 0) {
+            var step: usize = 1;
+            if (is_utf and search < subject.len) {
+                step = utf8SeqLen(subject[search]);
+                if (search + step > subject.len) step = 1;
+            }
+            search += step;
+            continue;
+        }
+
+        const piece = try ctx.createString(subject[prev_end..match_start]);
+        if (!no_empty or piece.len > 0) {
             if (offset_capture) {
                 var pair = try ctx.createArray();
                 try pair.append(ctx.allocator, .{ .string = piece });
-                try pair.append(ctx.allocator, .{ .int = @intCast(offset) });
+                try pair.append(ctx.allocator, .{ .int = @intCast(prev_end) });
                 try result.append(ctx.allocator, .{ .array = pair });
             } else {
                 try result.append(ctx.allocator, .{ .string = piece });
@@ -1207,44 +1223,30 @@ fn preg_split(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
             }
         }
 
-        if (match_end == offset) {
-            // zero-width match (empty pattern //). under the 'u' modifier the
-            // subject is UTF-8 so split at codepoint boundaries, not bytes
-            var char_len: usize = 1;
-            if (offset < subject.len and (info.flags & pcre2.UTF) != 0) {
-                char_len = utf8SeqLen(subject[offset]);
-                if (offset + char_len > subject.len) char_len = 1;
+        prev_end = match_end;
+        if (zero_width) {
+            // advance the search past one char so we make progress; the
+            // skipped char stays in subject and becomes the next piece
+            var step: usize = 1;
+            if (is_utf and match_end < subject.len) {
+                step = utf8SeqLen(subject[match_end]);
+                if (match_end + step > subject.len) step = 1;
             }
-            if (offset < subject.len) {
-                const single = try ctx.createString(subject[offset .. offset + char_len]);
-                if (!no_empty or single.len > 0) {
-                    if (offset_capture) {
-                        var pair = try ctx.createArray();
-                        try pair.append(ctx.allocator, .{ .string = single });
-                        try pair.append(ctx.allocator, .{ .int = @intCast(offset) });
-                        try result.append(ctx.allocator, .{ .array = pair });
-                    } else {
-                        try result.append(ctx.allocator, .{ .string = single });
-                    }
-                }
-            }
-            offset += char_len;
+            search = match_end + step;
         } else {
-            offset = match_end;
+            search = match_end;
         }
     }
 
-    if (offset <= subject.len) {
-        const tail = try ctx.createString(subject[offset..]);
-        if (!no_empty or tail.len > 0) {
-            if (offset_capture) {
-                var pair = try ctx.createArray();
-                try pair.append(ctx.allocator, .{ .string = tail });
-                try pair.append(ctx.allocator, .{ .int = @intCast(offset) });
-                try result.append(ctx.allocator, .{ .array = pair });
-            } else {
-                try result.append(ctx.allocator, .{ .string = tail });
-            }
+    const tail = try ctx.createString(subject[prev_end..]);
+    if (!no_empty or tail.len > 0) {
+        if (offset_capture) {
+            var pair = try ctx.createArray();
+            try pair.append(ctx.allocator, .{ .string = tail });
+            try pair.append(ctx.allocator, .{ .int = @intCast(prev_end) });
+            try result.append(ctx.allocator, .{ .array = pair });
+        } else {
+            try result.append(ctx.allocator, .{ .string = tail });
         }
     }
 
