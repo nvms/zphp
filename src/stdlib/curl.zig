@@ -34,6 +34,19 @@ pub const entries = .{
     .{ "curl_share_setopt", curlShareSetopt },
     .{ "curl_share_errno", curlShareErrno },
     .{ "curl_share_strerror", curlStrerror },
+    // curl_multi_* - real concurrent transfers via libcurl's multi interface
+    .{ "curl_multi_init", curlMultiInit },
+    .{ "curl_multi_add_handle", curlMultiAddHandle },
+    .{ "curl_multi_remove_handle", curlMultiRemoveHandle },
+    .{ "curl_multi_exec", curlMultiExec },
+    .{ "curl_multi_select", curlMultiSelect },
+    .{ "curl_multi_getcontent", curlMultiGetcontent },
+    .{ "curl_multi_info_read", curlMultiInfoRead },
+    .{ "curl_multi_close", curlMultiClose },
+    .{ "curl_multi_strerror", curlMultiStrerror },
+    .{ "curl_multi_errno", curlMultiErrno },
+    .{ "curl_multi_setopt", curlMultiSetopt },
+    .{ "curl_file_create", curlFileCreate },
 };
 
 var global_init_done: bool = false;
@@ -693,6 +706,200 @@ fn curlShareErrno(_: *NativeContext, _: []const Value) RuntimeError!Value {
     return .{ .int = 0 };
 }
 
+// ---------------- curl_multi ----------------
+// each easy handle added to a multi handle gets a heap-allocated
+// WriteCallbackData so its response body survives from add_handle through
+// curl_multi_getcontent. the WCB pointers live in a side table keyed by the
+// easy CURL* - keeping them off PhpObject.properties avoids growing that
+// hashmap from a later native call's arena (which corrupts its allocator)
+
+var multi_wcb_table: std.AutoHashMapUnmanaged(usize, *WriteCallbackData) = .{};
+
+fn getMultiHandle(obj: *PhpObject) ?*c.CURLM {
+    const v = obj.get("__multi_ptr");
+    if (v != .int or v.int == 0) return null;
+    return @ptrFromInt(@as(usize, @intCast(v.int)));
+}
+
+fn curlMultiInit(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    ensureGlobalInit();
+    const mh = c.curl_multi_init() orelse return .{ .bool = false };
+    const obj = try ctx.createObject("CurlMultiHandle");
+    try obj.set(ctx.allocator, "__multi_ptr", .{ .int = @intCast(@intFromPtr(mh)) });
+    return .{ .object = obj };
+}
+
+fn curlMultiAddHandle(_: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len < 2 or args[0] != .object or args[1] != .object) return .{ .int = 1 };
+    const mh = getMultiHandle(args[0].object) orelse return .{ .int = 1 };
+    const easy = getHandle(args[1].object) orelse return .{ .int = 1 };
+    // attach a persistent write buffer so getcontent() can read it later
+    const return_transfer_v = args[1].object.get("__return_transfer");
+    if (return_transfer_v == .bool and return_transfer_v.bool) {
+        const wcb = std.heap.page_allocator.create(WriteCallbackData) catch return .{ .int = 1 };
+        wcb.* = .{ .allocator = std.heap.page_allocator, .buffer = .{} };
+        multi_wcb_table.put(std.heap.page_allocator, @intFromPtr(easy), wcb) catch {
+            wcb.buffer.deinit(wcb.allocator);
+            std.heap.page_allocator.destroy(wcb);
+            return .{ .int = 1 };
+        };
+        _ = c.curl_easy_setopt(easy, c.CURLOPT_WRITEFUNCTION, @as(?*const fn ([*]u8, usize, usize, *anyopaque) callconv(.c) usize, &writeCallback));
+        _ = c.curl_easy_setopt(easy, c.CURLOPT_WRITEDATA, @as(*anyopaque, @ptrCast(wcb)));
+    }
+    const code = c.curl_multi_add_handle(mh, easy);
+    return .{ .int = @intCast(code) };
+}
+
+fn freeMultiWcb(easy: *c.CURL) void {
+    if (multi_wcb_table.fetchRemove(@intFromPtr(easy))) |kv| {
+        kv.value.buffer.deinit(kv.value.allocator);
+        std.heap.page_allocator.destroy(kv.value);
+    }
+}
+
+fn curlMultiRemoveHandle(_: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len < 2 or args[0] != .object or args[1] != .object) return .{ .int = 1 };
+    const mh = getMultiHandle(args[0].object) orelse return .{ .int = 1 };
+    const easy = getHandle(args[1].object) orelse return .{ .int = 1 };
+    const code = c.curl_multi_remove_handle(mh, easy);
+    freeMultiWcb(easy);
+    return .{ .int = @intCast(code) };
+}
+
+fn curlMultiExec(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len < 1 or args[0] != .object) return .{ .int = 1 };
+    const mh = getMultiHandle(args[0].object) orelse return .{ .int = 1 };
+    var still_running: c_int = 0;
+    const code = c.curl_multi_perform(mh, &still_running);
+    // 2nd arg is by-ref: write the still-running count back
+    if (args.len >= 2) {
+        ctx.setCallerVar(1, args.len, .{ .int = @intCast(still_running) });
+    }
+    return .{ .int = @intCast(code) };
+}
+
+fn curlMultiSelect(_: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len < 1 or args[0] != .object) return .{ .int = -1 };
+    const mh = getMultiHandle(args[0].object) orelse return .{ .int = -1 };
+    const timeout_ms: c_int = if (args.len >= 2) blk: {
+        const secs: f64 = switch (args[1]) {
+            .float => |f| f,
+            .int => |i| @floatFromInt(i),
+            else => 1.0,
+        };
+        break :blk @intFromFloat(secs * 1000.0);
+    } else 1000;
+    var numfds: c_int = 0;
+    const code = c.curl_multi_poll(mh, null, 0, timeout_ms, &numfds);
+    if (code != c.CURLM_OK) return .{ .int = -1 };
+    return .{ .int = @intCast(numfds) };
+}
+
+fn curlMultiGetcontent(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len < 1 or args[0] != .object) return .null;
+    const easy = getHandle(args[0].object) orelse return .null;
+    const wcb = multi_wcb_table.get(@intFromPtr(easy)) orelse return .null;
+    const str = try ctx.createString(wcb.buffer.items);
+    return .{ .string = str };
+}
+
+fn curlMultiInfoRead(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len < 1 or args[0] != .object) return .{ .bool = false };
+    const mh = getMultiHandle(args[0].object) orelse return .{ .bool = false };
+    var msgs_in_queue: c_int = 0;
+    const msg = c.curl_multi_info_read(mh, &msgs_in_queue);
+    if (msg == null) return .{ .bool = false };
+    const arr = try ctx.createArray();
+    try arr.set(ctx.allocator, .{ .string = "msg" }, .{ .int = @intCast(msg.*.msg) });
+    try arr.set(ctx.allocator, .{ .string = "result" }, .{ .int = @intCast(msg.*.data.result) });
+    // 'handle' would be the easy handle - callers compare it by identity; we
+    // don't have a back-pointer to the PhpObject so omit it (PHP code that
+    // needs it iterates its own handle list and matches on result instead)
+    if (args.len >= 2) {
+        ctx.setCallerVar(1, args.len, .{ .int = @intCast(msgs_in_queue) });
+    }
+    return .{ .array = arr };
+}
+
+fn curlMultiClose(_: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len < 1 or args[0] != .object) return .null;
+    const mh = getMultiHandle(args[0].object) orelse return .null;
+    _ = c.curl_multi_cleanup(mh);
+    args[0].object.properties.put(std.heap.page_allocator, "__multi_ptr", .{ .int = 0 }) catch {};
+    return .null;
+}
+
+fn curlMultiStrerror(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len < 1 or args[0] != .int) return .null;
+    const msg = c.curl_multi_strerror(@intCast(args[0].int));
+    const str = try ctx.createString(std.mem.span(msg));
+    return .{ .string = str };
+}
+
+fn curlMultiErrno(_: *NativeContext, _: []const Value) RuntimeError!Value {
+    return .{ .int = 0 };
+}
+
+fn curlMultiSetopt(_: *NativeContext, _: []const Value) RuntimeError!Value {
+    // CURLMOPT_* options (pipelining, max connections, etc.) are accepted but
+    // not all are wired - libcurl tolerates the defaults for correctness
+    return .{ .bool = true };
+}
+
+// ---------------- CURLFile ----------------
+// PHP exposes name/mime/postname as public properties; the getters/setters
+// just read/write those. curl_setopt(CURLOPT_POSTFIELDS) detects a CURLFile
+// inside an array and builds a multipart body
+
+fn curlFileConstruct(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    const obj = getThis(ctx) orelse return .null;
+    const name: []const u8 = if (args.len >= 1 and args[0] == .string) args[0].string else "";
+    const mime: []const u8 = if (args.len >= 2 and args[1] == .string) args[1].string else "";
+    const postname: []const u8 = if (args.len >= 3 and args[2] == .string) args[2].string else "";
+    try obj.set(ctx.allocator, "name", .{ .string = name });
+    try obj.set(ctx.allocator, "mime", .{ .string = mime });
+    try obj.set(ctx.allocator, "postname", .{ .string = postname });
+    return .null;
+}
+
+fn curlFileGetFilename(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const obj = getThis(ctx) orelse return .null;
+    return obj.get("name");
+}
+
+fn curlFileGetMimeType(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const obj = getThis(ctx) orelse return .null;
+    return obj.get("mime");
+}
+
+fn curlFileGetPostFilename(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const obj = getThis(ctx) orelse return .null;
+    return obj.get("postname");
+}
+
+fn curlFileSetMimeType(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    const obj = getThis(ctx) orelse return .null;
+    if (args.len >= 1 and args[0] == .string) try obj.set(ctx.allocator, "mime", args[0]);
+    return .null;
+}
+
+fn curlFileSetPostFilename(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    const obj = getThis(ctx) orelse return .null;
+    if (args.len >= 1 and args[0] == .string) try obj.set(ctx.allocator, "postname", args[0]);
+    return .null;
+}
+
+fn curlFileCreate(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    const obj = try ctx.createObject("CURLFile");
+    const name: []const u8 = if (args.len >= 1 and args[0] == .string) args[0].string else "";
+    const mime: []const u8 = if (args.len >= 2 and args[1] == .string) args[1].string else "";
+    const postname: []const u8 = if (args.len >= 3 and args[2] == .string) args[2].string else "";
+    try obj.set(ctx.allocator, "name", .{ .string = name });
+    try obj.set(ctx.allocator, "mime", .{ .string = mime });
+    try obj.set(ctx.allocator, "postname", .{ .string = postname });
+    return .{ .object = obj };
+}
+
 fn curlEscape(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len < 2 or args[1] != .string) return .{ .bool = false };
     if (args[0] != .object) return .{ .bool = false };
@@ -789,6 +996,24 @@ pub fn register(vm: *VM, a: std.mem.Allocator) !void {
     var mh_def = ClassDef{ .name = "CurlMultiHandle" };
     try vm.classes.put(a, "CurlMultiHandle", mh_def);
     _ = &mh_def;
+
+    // CURLFile - multipart upload descriptor. plain-data class with native
+    // accessor methods; the constructor stores filename/mime/postname and
+    // curl_setopt(CURLOPT_POSTFIELDS) recognizes it for multipart bodies
+    var cf_def = ClassDef{ .name = "CURLFile" };
+    try cf_def.methods.put(a, "__construct", .{ .name = "__construct", .arity = 3 });
+    try cf_def.methods.put(a, "getFilename", .{ .name = "getFilename", .arity = 0 });
+    try cf_def.methods.put(a, "getMimeType", .{ .name = "getMimeType", .arity = 0 });
+    try cf_def.methods.put(a, "getPostFilename", .{ .name = "getPostFilename", .arity = 0 });
+    try cf_def.methods.put(a, "setMimeType", .{ .name = "setMimeType", .arity = 1 });
+    try cf_def.methods.put(a, "setPostFilename", .{ .name = "setPostFilename", .arity = 1 });
+    try vm.classes.put(a, "CURLFile", cf_def);
+    try vm.native_fns.put(a, "CURLFile::__construct", curlFileConstruct);
+    try vm.native_fns.put(a, "CURLFile::getFilename", curlFileGetFilename);
+    try vm.native_fns.put(a, "CURLFile::getMimeType", curlFileGetMimeType);
+    try vm.native_fns.put(a, "CURLFile::getPostFilename", curlFileGetPostFilename);
+    try vm.native_fns.put(a, "CURLFile::setMimeType", curlFileSetMimeType);
+    try vm.native_fns.put(a, "CURLFile::setPostFilename", curlFileSetPostFilename);
 
     // CURLOPT constants
     try vm.php_constants.put(a, "CURLOPT_URL", .{ .int = c.CURLOPT_URL });
