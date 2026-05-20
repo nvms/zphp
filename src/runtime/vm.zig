@@ -11709,7 +11709,11 @@ pub const VM = struct {
         // call_user_func('\App\f') and call_user_func('App\f') are equivalent
         const name = if (raw_name.len > 0 and raw_name[0] == '\\') raw_name[1..] else raw_name;
         if (self.native_fns.get(name)) |native| {
-            var ctx = self.makeContext(null);
+            // pass the resolved name as call_name so natives that key off it
+            // (enum cases/from/tryFrom read the 'Class::method' prefix, rand vs
+            // mt_rand distinguish by name) work when dispatched indirectly via
+            // call_user_func / first-class-callable / array callable
+            var ctx = self.makeContext(name);
             return native(&ctx, args);
         } else if (self.functions.get(name)) |func| {
             if (args.len < func.required_params) return error.RuntimeError;
