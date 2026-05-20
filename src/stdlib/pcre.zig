@@ -1122,6 +1122,14 @@ fn preg_replace_callback_array(ctx: *NativeContext, args: []const Value) Runtime
     return current;
 }
 
+fn utf8SeqLen(lead: u8) usize {
+    if (lead < 0x80) return 1;
+    if (lead >= 0xF0) return 4;
+    if (lead >= 0xE0) return 3;
+    if (lead >= 0xC0) return 2;
+    return 1; // continuation byte / invalid - treat as single byte
+}
+
 fn preg_split(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len < 2 or args[0] != .string or args[1] != .string) return .null;
     const info = parsePattern(args[0].string) orelse return Value.null;
@@ -1200,8 +1208,15 @@ fn preg_split(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
         }
 
         if (match_end == offset) {
+            // zero-width match (empty pattern //). under the 'u' modifier the
+            // subject is UTF-8 so split at codepoint boundaries, not bytes
+            var char_len: usize = 1;
+            if (offset < subject.len and (info.flags & pcre2.UTF) != 0) {
+                char_len = utf8SeqLen(subject[offset]);
+                if (offset + char_len > subject.len) char_len = 1;
+            }
             if (offset < subject.len) {
-                const single = try ctx.createString(subject[offset .. offset + 1]);
+                const single = try ctx.createString(subject[offset .. offset + char_len]);
                 if (!no_empty or single.len > 0) {
                     if (offset_capture) {
                         var pair = try ctx.createArray();
@@ -1213,7 +1228,7 @@ fn preg_split(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
                     }
                 }
             }
-            offset += 1;
+            offset += char_len;
         } else {
             offset = match_end;
         }
