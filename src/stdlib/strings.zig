@@ -651,11 +651,14 @@ fn native_strncmp(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     const n: usize = @intCast(n_raw);
     const sa = a[0..@min(n, a.len)];
     const sb = b[0..@min(n, b.len)];
-    return .{ .int = switch (std.mem.order(u8, sa, sb)) {
-        .lt => -1,
-        .eq => 0,
-        .gt => 1,
-    } };
+    // PHP returns the byte difference of the first differing position (not
+    // just the sign), matching strcmp
+    const min_len = @min(sa.len, sb.len);
+    for (0..min_len) |i| {
+        if (sa[i] != sb[i]) return .{ .int = @as(i64, sa[i]) - @as(i64, sb[i]) };
+    }
+    if (sa.len != sb.len) return .{ .int = @as(i64, @intCast(sa.len)) - @as(i64, @intCast(sb.len)) };
+    return .{ .int = 0 };
 }
 
 fn native_ord(_: *NativeContext, args: []const Value) RuntimeError!Value {
