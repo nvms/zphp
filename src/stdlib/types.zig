@@ -119,6 +119,7 @@ pub const entries = .{
     .{ "restore_include_path", native_noop_null },
     .{ "trigger_error", native_trigger_error },
     .{ "user_error", native_trigger_error },
+    .{ "error_log", native_error_log },
     .{ "__zphp_match_unhandled_msg", native_match_unhandled_msg },
     .{ "class_alias", native_class_alias },
     .{ "assert", native_assert },
@@ -2028,6 +2029,39 @@ fn native_match_unhandled_msg(ctx: *NativeContext, args: []const Value) RuntimeE
     const owned = try buf.toOwnedSlice(ctx.allocator);
     try ctx.strings.append(ctx.allocator, owned);
     return .{ .string = owned };
+}
+
+fn native_error_log(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len == 0 or args[0] != .string) return .{ .bool = false };
+    const message = args[0].string;
+    const msg_type: i64 = if (args.len >= 2) Value.toInt(args[1]) else 0;
+    switch (msg_type) {
+        3 => {
+            // append to the file named by arg #3
+            if (args.len < 3 or args[2] != .string) return .{ .bool = false };
+            const path = args[2].string;
+            const f = std.fs.cwd().createFile(path, .{ .truncate = false }) catch return .{ .bool = false };
+            defer f.close();
+            f.seekFromEnd(0) catch {};
+            f.writeAll(message) catch return .{ .bool = false };
+            return .{ .bool = true };
+        },
+        else => {
+            // type 0 (system logger) / 4 (SAPI) - PHP's CLI SAPI writes to
+            // stderr with a trailing newline. flush buffered stdout first so
+            // the merged stream order matches PHP's unbuffered CLI stdout
+            const vm = ctx.vm;
+            if (vm.output.items.len > 0) {
+                const stdout_file = std.fs.File{ .handle = 1 };
+                _ = stdout_file.write(vm.output.items) catch {};
+                vm.output.clearRetainingCapacity();
+            }
+            const stderr_file = std.fs.File{ .handle = 2 };
+            stderr_file.writeAll(message) catch return .{ .bool = false };
+            stderr_file.writeAll("\n") catch {};
+            return .{ .bool = true };
+        },
+    }
 }
 
 fn native_trigger_error(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
