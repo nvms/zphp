@@ -93,7 +93,7 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try dt_def.methods.put(a, "sub", .{ .name = "sub", .arity = 1 });
     try dt_def.methods.put(a, "diff", .{ .name = "diff", .arity = 1 });
     try dt_def.methods.put(a, "setDate", .{ .name = "setDate", .arity = 3 });
-    try dt_def.methods.put(a, "setTime", .{ .name = "setTime", .arity = 2 });
+    try dt_def.methods.put(a, "setTime", .{ .name = "setTime", .arity = 4 });
     try dt_def.methods.put(a, "setISODate", .{ .name = "setISODate", .arity = 2 });
     try dt_def.methods.put(a, "createFromTimestamp", .{ .name = "createFromTimestamp", .arity = 1, .is_static = true });
     try dt_def.methods.put(a, "createFromFormat", .{ .name = "createFromFormat", .arity = 2, .is_static = true });
@@ -257,8 +257,63 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try vm.native_fns.put(a, "DatePeriodIterator::valid", dpiValid);
 }
 
+// parse a "YYYY-MM-DD" or "YYYY-MM-DDTHH:MM:SS" (optional trailing Z) date
+// string to a unix timestamp interpreted as UTC. used by the ISO 8601
+// DatePeriod string form
+fn parseIsoDateToTs(s: []const u8) ?i64 {
+    if (s.len < 10 or s[4] != '-' or s[7] != '-') return null;
+    const year = std.fmt.parseInt(i64, s[0..4], 10) catch return null;
+    const month = std.fmt.parseInt(i64, s[5..7], 10) catch return null;
+    const day = std.fmt.parseInt(i64, s[8..10], 10) catch return null;
+    var hour: i64 = 0;
+    var min: i64 = 0;
+    var sec: i64 = 0;
+    if (s.len >= 19 and (s[10] == 'T' or s[10] == ' ') and s[13] == ':' and s[16] == ':') {
+        hour = std.fmt.parseInt(i64, s[11..13], 10) catch 0;
+        min = std.fmt.parseInt(i64, s[14..16], 10) catch 0;
+        sec = std.fmt.parseInt(i64, s[17..19], 10) catch 0;
+    }
+    return dateToTimestamp(year, month, day, hour, min, sec);
+}
+
 fn dpConstruct(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     const obj = getThis(ctx) orelse return .null;
+
+    // ISO 8601 recurring-interval string form: "R<n>/<start>/<interval>"
+    // e.g. new DatePeriod('R3/2024-01-01T00:00:00Z/P1D'). PHP's string
+    // constructor only accepts the R-prefixed recurring form; the bare
+    // start/interval/end string is a DateMalformedPeriodStringException there
+    if (args.len >= 1 and args[0] == .string) {
+        const spec = args[0].string;
+        var it = std.mem.splitScalar(u8, spec, '/');
+        const p0 = it.next() orelse return .null;
+        const p1 = it.next() orelse return .null;
+        const p2 = it.next() orelse return .null;
+        if (p0.len < 2 or (p0[0] != 'R' and p0[0] != 'r')) return .null;
+        const recurrences = std.fmt.parseInt(i64, p0[1..], 10) catch 0;
+        const start_ts = parseIsoDateToTs(p1) orelse return .null;
+        const start_obj = try ctx.createObject("DateTime");
+        try start_obj.set(ctx.allocator, "timestamp", .{ .int = start_ts });
+        try obj.set(ctx.allocator, "__start", .{ .object = start_obj });
+
+        const dur = parseIsoDuration(p2);
+        const di_obj = try ctx.createObject("DateInterval");
+        try di_obj.set(ctx.allocator, "y", .{ .int = dur.y });
+        try di_obj.set(ctx.allocator, "m", .{ .int = dur.m });
+        try di_obj.set(ctx.allocator, "d", .{ .int = dur.d });
+        try di_obj.set(ctx.allocator, "h", .{ .int = dur.h });
+        try di_obj.set(ctx.allocator, "i", .{ .int = dur.mi });
+        try di_obj.set(ctx.allocator, "s", .{ .int = dur.s });
+        try di_obj.set(ctx.allocator, "f", .{ .float = dur.f });
+        try di_obj.set(ctx.allocator, "invert", .{ .int = 0 });
+        try di_obj.set(ctx.allocator, "days", .{ .bool = false });
+        try obj.set(ctx.allocator, "__interval", .{ .object = di_obj });
+
+        try obj.set(ctx.allocator, "__recurrences", .{ .int = recurrences });
+        if (args.len >= 2 and args[1] == .int) try obj.set(ctx.allocator, "__options", args[1]);
+        return .null;
+    }
+
     if (args.len < 3) return .null;
     if (args[0] != .object or args[1] != .object) return .null;
     try obj.set(ctx.allocator, "__start", args[0]);
@@ -1050,6 +1105,10 @@ fn dtSetTime(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     const sec: i64 = if (args.len >= 3) Value.toInt(args[2]) else 0;
     const new_ts = dateToTimestamp(@intCast(year_day.year), month_day.month.numeric(), month_day.day_index + 1, Value.toInt(args[0]), Value.toInt(args[1]), sec);
     try obj.set(ctx.allocator, "timestamp", .{ .int = new_ts });
+    // 4th arg is microseconds (PHP 7.1+); the 'u'/'v' format specifiers read
+    // __microseconds. setTime with <4 args resets the sub-second part to 0
+    const micros: i64 = if (args.len >= 4) Value.toInt(args[3]) else 0;
+    try obj.set(ctx.allocator, "__microseconds", .{ .int = micros });
     return .{ .object = obj };
 }
 
