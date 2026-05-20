@@ -11373,9 +11373,49 @@ pub const VM = struct {
             if (val == .object and self.typeStrAllowsString(type_str) and self.hasMethod(val.object.class_name, "__toString")) {
                 const s = try self.objectToString(val.object);
                 self.stack[self.sp - ac + i] = .{ .string = s };
+            } else {
+                // the value passed the type check but PHP's non-strict mode
+                // also COERCES it to the declared scalar type (int 5 -> a
+                // float param becomes float(5), int -> bool param becomes
+                // bool, etc). only for a single scalar declared type
+                const caller_strict = blk: {
+                    if (self.frame_count >= 2) {
+                        const caller = &self.frames[self.frame_count - 2];
+                        if (caller.func) |cf| break :blk cf.strict_types;
+                    }
+                    break :blk self.script_strict_types;
+                };
+                if (!caller_strict) {
+                    if (try self.coerceToDeclaredScalar(val, type_str)) |coerced| {
+                        self.stack[self.sp - ac + i] = coerced;
+                    }
+                }
             }
         }
         return false;
+    }
+
+    // when a value already satisfies a single scalar declared type but isn't
+    // exactly that type, return the coerced value (PHP non-strict semantics).
+    // returns null when no coercion applies - union/class/nullable-null/
+    // already-exact-type values are left untouched
+    fn coerceToDeclaredScalar(self: *VM, val: Value, type_str: []const u8) RuntimeError!?Value {
+        var t = type_str;
+        if (t.len > 0 and t[0] == '?') t = t[1..];
+        // single type only - skip unions and intersections
+        for (t) |c| if (c == '|' or c == '&' or c == '(' or c == ')') return null;
+        if (val == .null) return null;
+        const is_int = std.mem.eql(u8, t, "int") or std.mem.eql(u8, t, "integer");
+        const is_float = std.mem.eql(u8, t, "float") or std.mem.eql(u8, t, "double");
+        const is_bool = std.mem.eql(u8, t, "bool") or std.mem.eql(u8, t, "boolean");
+        const is_string = std.mem.eql(u8, t, "string");
+        if (!is_int and !is_float and !is_bool and !is_string) return null;
+        // already exactly the declared type - nothing to do
+        if (is_int and val == .int) return null;
+        if (is_float and val == .float) return null;
+        if (is_bool and val == .bool) return null;
+        if (is_string and val == .string) return null;
+        return try self.tryWeakCoerceSingle(val, t);
     }
 
     noinline fn checkReturnType(self: *VM, val: *Value) RuntimeError!bool {
@@ -11385,6 +11425,16 @@ pub const VM = struct {
         const ti = g_type_info.get(func_name) orelse return false;
         if (ti.return_type.len == 0) return false;
         if (!self.checkTypeMatch(val.*, ti.return_type)) {
+            // non-strict mode coerces the return value into the declared type
+            // (a numeric string returned from a `: int` function, etc.) before
+            // giving up with a TypeError - same as the parameter path
+            const fn_strict = if (frame.func) |f| f.strict_types else self.script_strict_types;
+            if (!fn_strict) {
+                if (try self.tryWeakCoerce(val.*, ti.return_type)) |coerced| {
+                    val.* = coerced;
+                    return false;
+                }
+            }
             const msg = std.fmt.allocPrint(self.allocator, "{s}(): Return value must be of type {s}, {s} returned", .{ func_name, ti.return_type, valueTypeName(val.*) }) catch return error.RuntimeError;
             try self.strings.append(self.allocator, msg);
             self.error_msg = msg;
@@ -11396,6 +11446,15 @@ pub const VM = struct {
         if (val.* == .object and self.typeStrAllowsString(ti.return_type) and self.hasMethod(val.object.class_name, "__toString")) {
             const s = try self.objectToString(val.object);
             val.* = .{ .string = s };
+        } else {
+            // non-strict return coercion: `function f(): int { return "100"; }`
+            // returns int(100). gated on the function's own strict_types
+            const fn_strict = if (frame.func) |f| f.strict_types else self.script_strict_types;
+            if (!fn_strict) {
+                if (try self.coerceToDeclaredScalar(val.*, ti.return_type)) |coerced| {
+                    val.* = coerced;
+                }
+            }
         }
         return false;
     }

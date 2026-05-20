@@ -373,6 +373,8 @@ pub fn encodeNewDefaultSentinel(allocator: std.mem.Allocator, nd: *const NewDefa
     return buf;
 }
 
+pub const ReturnTypeKind = enum { none, int, float, bool, string, other };
+
 pub const ObjFunction = struct {
     name: []const u8,
     arity: u8,
@@ -389,6 +391,12 @@ pub const ObjFunction = struct {
     local_count: u16 = 0,
     slot_names: []const []const u8 = &.{},
     strict_types: bool = false,
+    // declared return type kind. fastLoop's return_val uses this to decide
+    // whether to bail to runLoop for type-check + non-strict coercion: for a
+    // plain scalar kind it bails only when the return value's tag doesn't
+    // already match (so a `: int` function returning an int stays fast);
+    // `other` (nullable/union/class) always bails; `none` never bails
+    return_type_kind: ReturnTypeKind = .none,
     file_path: []const u8 = "",
     start_line: u32 = 0,
     end_line: u32 = 0,

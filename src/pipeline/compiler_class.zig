@@ -618,6 +618,17 @@ fn extractReturnType(self: *Compiler, extra_base: u32, param_count: u32) Error![
     return buildTypeString(self, ret_start, ret_end);
 }
 
+// classify a declared return type for fastLoop's return_val fast/slow split
+fn returnTypeKind(t: []const u8) @import("bytecode.zig").ReturnTypeKind {
+    if (t.len == 0) return .none;
+    if (std.mem.eql(u8, t, "int")) return .int;
+    if (std.mem.eql(u8, t, "float")) return .float;
+    if (std.mem.eql(u8, t, "bool")) return .bool;
+    if (std.mem.eql(u8, t, "string")) return .string;
+    // nullable / union / intersection / class / void etc. - always bail
+    return .other;
+}
+
 pub fn compileFunction(self: *Compiler, node: Ast.Node) Error!void {
     const name_tok = node.main_token;
     const raw_name = self.ast.tokenSlice(name_tok);
@@ -734,6 +745,9 @@ pub fn compileFunction(self: *Compiler, node: Ast.Node) Error!void {
     const return_type = try extractReturnType(self, node.data.lhs, @intCast(param_nodes.len));
     if (param_types.len > 0 or return_type.len > 0) {
         try self.type_hints.append(self.allocator, .{ .name = name, .param_types = param_types, .return_type = return_type });
+    }
+    if (return_type.len > 0 and self.functions.items.len > 0) {
+        self.functions.items[self.functions.items.len - 1].return_type_kind = returnTypeKind(return_type);
     }
 
     // function-level attributes
@@ -2528,6 +2542,9 @@ fn compileClassMethodBody(self: *Compiler, class_name: []const u8, member: Ast.N
     if (param_types.len > 0 or return_type.len > 0) {
         try self.type_hints.append(self.allocator, .{ .name = full_name, .param_types = param_types, .return_type = return_type });
     }
+    if (return_type.len > 0 and self.functions.items.len > 0) {
+        self.functions.items[self.functions.items.len - 1].return_type_kind = returnTypeKind(return_type);
+    }
 
     for (sub.functions.items) |f| try self.functions.append(self.allocator, f);
     sub.functions.deinit(self.allocator);
@@ -2706,6 +2723,9 @@ fn compileInterfaceMethodStub(self: *Compiler, owner_name: []const u8, member: A
     const return_type = try extractReturnType(self, member.data.lhs, @intCast(param_nodes.len));
     if (param_types.len > 0 or return_type.len > 0) {
         try self.type_hints.append(self.allocator, .{ .name = full_name, .param_types = param_types, .return_type = return_type });
+    }
+    if (return_type.len > 0 and self.functions.items.len > 0) {
+        self.functions.items[self.functions.items.len - 1].return_type_kind = returnTypeKind(return_type);
     }
 }
 

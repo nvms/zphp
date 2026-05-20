@@ -798,7 +798,20 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
             },
             .return_val => {
                 const result = self.stack[sp - 1];
-                if (frame.vars.count() > 0 or frame.ref_slots.count() > 0) {
+                // a declared return type needs runLoop's checkReturnType to
+                // validate + non-strict-coerce. for a plain scalar return type
+                // bail ONLY when the value's tag doesn't already match (so a
+                // `: int` function returning an int stays on the fast path);
+                // nullable/union/class return types always bail
+                const ret_bail = if (frame.func) |f| switch (f.return_type_kind) {
+                    .none => false,
+                    .int => result != .int,
+                    .float => result != .float,
+                    .bool => result != .bool,
+                    .string => result != .string,
+                    .other => true,
+                } else false;
+                if (frame.vars.count() > 0 or frame.ref_slots.count() > 0 or ret_bail) {
                     frame.ip = ip - 1;
                     self.sp = sp;
                     return;
