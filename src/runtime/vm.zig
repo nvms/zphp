@@ -675,6 +675,13 @@ pub const VM = struct {
         // getFileName reports the *declaring* file rather than vm.file_path
         // (which only tracks the top-level script)
         script_path: []const u8 = "",
+        // slot layout for this frame's slot-backed locals. only meaningful for
+        // global-scope frames (func == null): the top script and require-include
+        // frames. lets `global $x` scan every global-scope frame on the stack -
+        // a file required at global scope IS the global scope, so a var it set
+        // at top level must be visible to `global` even before the require
+        // returns. function frames leave this empty (they use func.slot_names)
+        slot_names: []const []const u8 = &.{},
     };
 
     pub fn init(allocator: Allocator) RuntimeError!VM {
@@ -1706,7 +1713,7 @@ pub const VM = struct {
         self.source = result.source;
         self.file_path = result.file_path;
         self.script_strict_types = result.strict_types;
-        self.frames[0] = .{ .chunk = &result.chunk, .ip = 0, .vars = vars, .locals = locals };
+        self.frames[0] = .{ .chunk = &result.chunk, .ip = 0, .vars = vars, .locals = locals, .slot_names = result.slot_names };
         self.frame_count = 1;
         self.obj_id_base = self.objects.items.len;
         // reset the per-allocation id counter so user-visible '#N' starts at 1
@@ -4333,13 +4340,29 @@ pub const VM = struct {
                     var cell = self.globals_cells.get(name);
                     if (cell == null) {
                         const initial: Value = blk: {
-                            if (self.frames[0].ref_slots.get(name)) |c| break :blk c.*;
-                            for (self.top_slot_names, 0..) |sn, i| {
-                                if (std.mem.eql(u8, sn, name) and i < self.frames[0].locals.len) {
-                                    const v = self.frames[0].locals[i];
+                            // a file required at global scope IS the global
+                            // scope, so scan every global-scope frame on the
+                            // stack (func == null: the top script + nested
+                            // require-include frames), innermost first. this
+                            // lets `global $x` see a var a still-executing
+                            // required file set at its top level
+                            var fi: usize = self.frame_count;
+                            while (fi > 0) {
+                                fi -= 1;
+                                const gf = &self.frames[fi];
+                                if (gf.func != null) continue;
+                                if (gf.ref_slots.get(name)) |c| break :blk c.*;
+                                for (gf.slot_names, 0..) |sn, i| {
+                                    if (std.mem.eql(u8, sn, name) and i < gf.locals.len) {
+                                        const v = gf.locals[i];
+                                        if (v != .null) break :blk v;
+                                    }
+                                }
+                                if (gf.vars.get(name)) |v| {
                                     if (v != .null) break :blk v;
                                 }
                             }
+                            if (self.frames[0].ref_slots.get(name)) |c| break :blk c.*;
                             if (self.frames[0].vars.get(name)) |v| break :blk v;
                             if (self.php_constants.get(name)) |v| break :blk v;
                             break :blk .null;
@@ -4471,6 +4494,7 @@ pub const VM = struct {
                                     .vars = inherited_vars,
                                     .locals = req_locals,
                                     .script_path = r.file_path,
+                                    .slot_names = r.slot_names,
                                 };
                                 self.frames[self.frame_count].entry_sp = self.sp;
                                 self.frame_count += 1;

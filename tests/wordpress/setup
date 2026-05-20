@@ -13,7 +13,7 @@ fi
 # the version (rather than tracking 'latest') so CI is reproducible - an
 # upstream WordPress release can otherwise turn CI red with no zphp change.
 # bump WP_VERSION deliberately when validating against a newer WordPress.
-WP_VERSION="6.9.4"
+WP_VERSION="7.0"
 if [ ! -f "$APP_DIR/wp-load.php" ]; then
     echo "downloading WordPress $WP_VERSION..."
     mkdir -p "$APP_DIR"
