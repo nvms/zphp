@@ -553,6 +553,24 @@ fn dtConstruct(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
             } else if (lookupTimezone(tz_name)) |tz| {
                 ts -= @as(i64, tzOffsetForWall(tz, ts));
             }
+        } else if (s.len >= 10 and s[2] == '-' and s[5] == '-' and
+            std.ascii.isDigit(s[0]) and std.ascii.isDigit(s[1]) and
+            std.ascii.isDigit(s[6]) and std.ascii.isDigit(s[9]))
+        {
+            // DD-MM-YYYY (dashes are day-first; YYYY-MM-DD is handled above)
+            const day = std.fmt.parseInt(i64, s[0..2], 10) catch 1;
+            const month = std.fmt.parseInt(i64, s[3..5], 10) catch 1;
+            const year = std.fmt.parseInt(i64, s[6..10], 10) catch 1970;
+            var hour: i64 = 0;
+            var min: i64 = 0;
+            var sec: i64 = 0;
+            if (s.len >= 19 and (s[10] == ' ' or s[10] == 'T') and s[13] == ':' and s[16] == ':') {
+                hour = std.fmt.parseInt(i64, s[11..13], 10) catch 0;
+                min = std.fmt.parseInt(i64, s[14..16], 10) catch 0;
+                sec = std.fmt.parseInt(i64, s[17..19], 10) catch 0;
+            }
+            ts = dateToTimestamp(year, month, day, hour, min, sec);
+            if (lookupTimezone(tz_name)) |tz| ts -= @as(i64, tzOffsetForWall(tz, ts));
         } else {
             const result = parseRelativeTime(s, ts);
             if (result == .int) {
@@ -2312,6 +2330,28 @@ fn native_strtotime(_: *NativeContext, args: []const Value) RuntimeError!Value {
 
     // DD.MM.YYYY EU date format
     if (input.len >= 10 and input[2] == '.' and input[5] == '.') {
+        const day = std.fmt.parseInt(i64, input[0..2], 10) catch null;
+        const month = std.fmt.parseInt(i64, input[3..5], 10) catch null;
+        const year = std.fmt.parseInt(i64, input[6..10], 10) catch null;
+        if (day != null and month != null and year != null) {
+            var hour: i64 = 0;
+            var min: i64 = 0;
+            var sec: i64 = 0;
+            if (input.len >= 19 and input[10] == ' ' and input[13] == ':' and input[16] == ':') {
+                hour = std.fmt.parseInt(i64, input[11..13], 10) catch 0;
+                min = std.fmt.parseInt(i64, input[14..16], 10) catch 0;
+                sec = std.fmt.parseInt(i64, input[17..19], 10) catch 0;
+            }
+            return .{ .int = dateToTimestamp(year.?, month.?, day.?, hour, min, sec) };
+        }
+    }
+
+    // DD-MM-YYYY EU date format (dashes are day-first, unlike YYYY-MM-DD which
+    // has a 4-digit leading year; a 2-digit leading part disambiguates)
+    if (input.len >= 10 and input[2] == '-' and input[5] == '-' and
+        std.ascii.isDigit(input[0]) and std.ascii.isDigit(input[1]) and
+        std.ascii.isDigit(input[6]) and std.ascii.isDigit(input[9]))
+    {
         const day = std.fmt.parseInt(i64, input[0..2], 10) catch null;
         const month = std.fmt.parseInt(i64, input[3..5], 10) catch null;
         const year = std.fmt.parseInt(i64, input[6..10], 10) catch null;
