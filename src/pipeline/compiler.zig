@@ -675,6 +675,8 @@ pub const Compiler = struct {
                         try self.emitOp(.set_prop);
                         try self.emitU16(prop_idx);
                         try self.emitOp(.pop);
+                    } else if (inner_target.tag == .array_access or inner_target.tag == .array_push_target) {
+                        try self.compileDestructureArraySlot(inner_target);
                     } else {
                         const name = self.ast.tokenSlice(inner_target.main_token);
                         try self.emitSetVar(name);
@@ -702,6 +704,8 @@ pub const Compiler = struct {
                     try self.emitOp(.set_prop);
                     try self.emitU16(prop_idx);
                     try self.emitOp(.pop);
+                } else if (slot_node.tag == .array_access or slot_node.tag == .array_push_target) {
+                    try self.compileDestructureArraySlot(slot_node);
                 } else {
                     const name = self.ast.tokenSlice(slot_node.main_token);
                     try self.emitSetVar(name);
@@ -743,6 +747,8 @@ pub const Compiler = struct {
                     try self.emitOp(.set_prop);
                     try self.emitU16(prop_idx);
                     try self.emitOp(.pop);
+                } else if (val_node.tag == .array_access or val_node.tag == .array_push_target) {
+                    try self.compileDestructureArraySlot(val_node);
                 } else {
                     const name = self.ast.tokenSlice(val_node.main_token);
                     try self.emitSetVar(name);
@@ -750,6 +756,22 @@ pub const Compiler = struct {
                 }
             }
         }
+    }
+
+    // writes the value on top of the stack into an array-access destructure
+    // target ($arr[$key]). stack: [source, value] -> [source]
+    fn compileDestructureArraySlot(self: *Compiler, slot_node: Ast.Node) Error!void {
+        try compiler_expr.compileVivifyChain(self, slot_node.data.lhs);
+        try self.emitOp(.swap);
+        if (slot_node.tag == .array_push_target) {
+            try self.emitOp(.array_push);
+            try self.emitOp(.pop);
+            return;
+        }
+        try self.compileNode(slot_node.data.rhs);
+        try self.emitOp(.swap);
+        try self.emitOp(.array_set);
+        try self.emitOp(.pop);
     }
 
     const RefSlotKey = union(enum) { index: i64, key_node: u32 };
