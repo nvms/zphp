@@ -188,13 +188,16 @@ fn native_min(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
         }
         var result = arr.entries.items[0].value;
         for (arr.entries.items[1..]) |e| {
+            // PHP's array-form min replaces on strict < so a tie keeps the
+            // FIRST element (the variadic form below keeps the last)
             if (Value.lessThan(e.value, result)) result = e.value;
         }
         return result;
     }
     var result = args[0];
     for (args[1..]) |a| {
-        if (Value.lessThan(a, result)) result = a;
+        // PHP's variadic min replaces on <= so a tie keeps the later argument
+        if (!Value.lessThan(result, a)) result = a;
     }
     return result;
 }
