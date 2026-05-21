@@ -7631,6 +7631,45 @@ pub const VM = struct {
         self.deadline_tick_counter = 0;
     }
 
+    // capture the current user call stack as an exception __trace array. one
+    // entry per active user frame (top-down), each carrying the function name
+    // and the call site's line/file - so an exception thrown by a native
+    // function still reports the user functions that led to it
+    fn buildExceptionTrace(self: *VM) !*PhpArray {
+        const arr = try self.allocator.create(PhpArray);
+        arr.* = .{};
+        try self.arrays.append(self.allocator, arr);
+        if (self.frame_count >= 1) {
+            var i: usize = self.frame_count - 1;
+            while (true) : (i -= 1) {
+                const frame = self.frames[i];
+                if (frame.func) |f| {
+                    if (f.name.len > 0 and !std.mem.endsWith(u8, f.name, "::__construct")) {
+                        const entry = try self.allocator.create(PhpArray);
+                        entry.* = .{};
+                        try self.arrays.append(self.allocator, entry);
+                        try entry.set(self.allocator, .{ .string = "function" }, .{ .string = f.name });
+                        if (i > 0) {
+                            const caller = self.frames[i - 1];
+                            const cip = if (caller.ip > 0) caller.ip - 1 else 0;
+                            if (caller.chunk.getSourceLocation(cip, self.source)) |loc| {
+                                try entry.set(self.allocator, .{ .string = "line" }, .{ .int = @as(i64, @intCast(loc.line)) });
+                                try entry.set(self.allocator, .{ .string = "file" }, .{ .string = self.file_path });
+                            }
+                        }
+                        const args_arr = try self.allocator.create(PhpArray);
+                        args_arr.* = .{};
+                        try self.arrays.append(self.allocator, args_arr);
+                        try entry.set(self.allocator, .{ .string = "args" }, .{ .array = args_arr });
+                        try arr.append(self.allocator, .{ .array = entry });
+                    }
+                }
+                if (i == 0) break;
+            }
+        }
+        return arr;
+    }
+
     pub fn setPendingException(self: *VM, class_name: []const u8, message: []const u8) !void {
         const obj = try self.allocator.create(PhpObject);
         self.next_object_id += 1;
@@ -7644,6 +7683,7 @@ pub const VM = struct {
         else
             0;
         try obj.set(self.allocator, "line", .{ .int = line });
+        try obj.set(self.allocator, "__trace", .{ .array = try self.buildExceptionTrace() });
         try self.objects.append(self.allocator, obj);
         self.pending_exception = .{ .object = obj };
     }
@@ -7879,6 +7919,7 @@ pub const VM = struct {
         else
             0;
         try obj.set(self.allocator, "line", .{ .int = line });
+        try obj.set(self.allocator, "__trace", .{ .array = try self.buildExceptionTrace() });
         try self.objects.append(self.allocator, obj);
 
         if (self.handler_count <= self.handler_floor) {
