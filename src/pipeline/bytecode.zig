@@ -227,6 +227,11 @@ pub const OpCode = enum(u8) {
     // end of the enum so existing opcode numbers are untouched
     get_class_const,
 
+    // set an instance property's default value on a registered class - u16
+    // class name, u16 property name. peeks the value (leaves it on the stack).
+    // emitted after class_decl so a `self::CONST` default resolves
+    set_prop_default,
+
     pub fn width(self: OpCode) usize {
         return switch (self) {
             .constant, .get_var, .set_var, .jump, .jump_back, .jump_if_false, .jump_if_true,
@@ -240,7 +245,7 @@ pub const OpCode = enum(u8) {
             .array_set_local, .array_set_local_ref,
             => 3,
             .call, .call_spread, .new_obj, .method_call, .method_call_spread, .static_call_dyn_method, .make_var_ref, .make_var_prop_ref => 4,
-            .get_static_prop, .get_class_const, .set_static_prop, .get_static, .set_static,
+            .get_static_prop, .get_class_const, .set_prop_default, .set_static_prop, .get_static, .set_static,
             .static_call_spread, .add_local_to_local, .sub_local_to_local, .mul_local_to_local,
             => 5,
             .static_call => 6,

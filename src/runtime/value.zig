@@ -300,7 +300,7 @@ pub const PhpObject = struct {
     class_name: []const u8,
     properties: std.StringArrayHashMapUnmanaged(Value) = .{},
     slots: ?[]Value = null,
-    slot_layout: ?*const SlotLayout = null,
+    slot_layout: ?*SlotLayout = null,
     // tracks which named properties have been explicitly unset by user code.
     // a slot can hold a default value of `.null` AND be considered "present"
     // (no __get triggered), so we need a side-channel to distinguish "unset"
@@ -318,7 +318,9 @@ pub const PhpObject = struct {
 
     pub const SlotLayout = struct {
         names: []const []const u8,
-        defaults: []const Value,
+        // mutable: set_prop_default patches an instance-property default after
+        // class_decl (when a `self::CONST` default finally resolves)
+        defaults: []Value,
     };
 
     pub fn deinit(self: *PhpObject, allocator: std.mem.Allocator) void {

@@ -7613,6 +7613,36 @@ pub const VM = struct {
                     }
                 },
 
+                .set_prop_default => {
+                    // install an instance property's real default on the now-
+                    // registered class. emitted after class_decl so a default
+                    // expression like `self::CONST` resolves
+                    const class_idx = self.readU16();
+                    const prop_idx = self.readU16();
+                    const class_name = self.currentChunk().constants.items[class_idx].string;
+                    const prop_name = self.currentChunk().constants.items[prop_idx].string;
+                    const val = try self.copyValue(self.peek());
+                    if (self.classes.getPtr(class_name)) |cls| {
+                        for (cls.properties.items) |*p| {
+                            if (std.mem.eql(u8, p.name, prop_name)) {
+                                p.default = val;
+                                p.has_default = true;
+                                break;
+                            }
+                        }
+                        // the slot layout snapshots prop defaults at class_decl
+                        // time (still null placeholders here) - keep it in sync
+                        if (cls.slot_layout) |layout| {
+                            for (layout.names, 0..) |n, i| {
+                                if (std.mem.eql(u8, n, prop_name)) {
+                                    layout.defaults[i] = val;
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                },
+
                 .set_static_prop_dyn => {
                     // stack: class name, property name, value (top)
                     const rhs_val = self.pop();

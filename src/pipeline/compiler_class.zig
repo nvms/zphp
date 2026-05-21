@@ -1130,7 +1130,10 @@ pub fn compileClassDecl(self: *Compiler, node: Ast.Node) Error!void {
         const member = self.ast.nodes[member_idx];
         if (member.tag == .class_property) {
             if (member.data.lhs != 0) {
-                try self.compileNode(member.data.lhs);
+                // push a null placeholder - the real default is installed
+                // after class_decl via set_prop_default, so a default like
+                // `self::CONST` resolves against the now-registered class
+                try self.emitOp(.op_null);
             }
         } else if (member.tag == .class_property_hooks) {
             const default_idx = self.ast.extra_data[member.data.lhs];
@@ -1592,6 +1595,22 @@ pub fn compileClassDecl(self: *Compiler, node: Ast.Node) Error!void {
             try self.emitOp(.set_static_prop);
             try self.emitU16(cname_idx);
             try self.emitU16(sp_idx);
+            try self.emitOp(.pop);
+        }
+    }
+    // set instance-property defaults after class_decl + constants so a default
+    // expression like `public int $x = self::CONST` resolves against the
+    // now-registered class (the prelude pushed null placeholders)
+    for (members) |member_idx| {
+        const member = self.ast.nodes[member_idx];
+        if (member.tag == .class_property and member.data.lhs != 0) {
+            try self.compileNode(member.data.lhs);
+            var p_name = self.ast.tokenSlice(member.main_token);
+            if (p_name.len > 0 and p_name[0] == '$') p_name = p_name[1..];
+            const p_idx = try self.addConstant(.{ .string = p_name });
+            try self.emitOp(.set_prop_default);
+            try self.emitU16(cname_idx);
+            try self.emitU16(p_idx);
             try self.emitOp(.pop);
         }
     }
