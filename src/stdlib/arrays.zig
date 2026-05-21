@@ -1678,7 +1678,12 @@ fn native_uksort(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
 }
 
 fn array_replace(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len == 0 or args[0] != .array) return .null;
+    // unlike array_merge, array_replace requires at least one argument
+    if (args.len == 0) {
+        try ctx.vm.setPendingException("ArgumentCountError", "array_replace() expects at least 1 argument, 0 given");
+        return error.RuntimeError;
+    }
+    if (args[0] != .array) return .null;
     var result = try ctx.createArray();
     for (args[0].array.entries.items) |entry| {
         try result.set(ctx.allocator, entry.key, entry.value);
@@ -1926,7 +1931,8 @@ fn deepMerge(ctx: *NativeContext, a: *PhpArray, b: *PhpArray) RuntimeError!*PhpA
 }
 
 fn array_merge_recursive(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len == 0) return .null;
+    // PHP allows array_merge_recursive() with no arguments, returning []
+    if (args.len == 0) return .{ .array = try ctx.createArray() };
     if (args[0] != .array) return .null;
     var result = args[0].array;
     for (args[1..]) |arg| {
