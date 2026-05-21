@@ -3123,14 +3123,18 @@ fn parseNumericRelative(input: []const u8, base: i64) Value {
     return .{ .int = result };
 }
 
-const UnitKind = enum { second, minute, hour, day, week, month, year };
+const UnitKind = enum { second, minute, hour, day, week, fortnight, weekday, month, year };
 const UnitResult = struct { kind: UnitKind, consumed: usize };
 
 fn parseUnit(s: []const u8) ?UnitResult {
+    // "weekday" and "fortnight" must precede "week" - "weekday" starts with
+    // "week", so a "week" match first would leave a stray "day"
     const units = [_]struct { prefix: []const u8, kind: UnitKind }{
         .{ .prefix = "second", .kind = .second },
         .{ .prefix = "minute", .kind = .minute },
         .{ .prefix = "hour", .kind = .hour },
+        .{ .prefix = "weekday", .kind = .weekday },
+        .{ .prefix = "fortnight", .kind = .fortnight },
         .{ .prefix = "day", .kind = .day },
         .{ .prefix = "week", .kind = .week },
         .{ .prefix = "month", .kind = .month },
@@ -3153,6 +3157,21 @@ fn applyUnit(base: i64, delta: i64, kind: UnitKind) i64 {
         .hour => base + delta * 3600,
         .day => base + delta * 86400,
         .week => base + delta * 604800,
+        .fortnight => base + delta * 1209600,
+        .weekday => blk: {
+            // advance |delta| business days, skipping Saturday and Sunday
+            if (delta == 0) break :blk base;
+            const step: i64 = if (delta > 0) 86400 else -86400;
+            var remaining: i64 = if (delta > 0) delta else -delta;
+            var ts = base;
+            while (remaining > 0) {
+                ts += step;
+                // dow: 0=Thu epoch -> compute weekday; 0=Sun..6=Sat
+                const dow = @mod(@divFloor(ts, 86400) + 4, 7);
+                if (dow != 0 and dow != 6) remaining -= 1;
+            }
+            break :blk ts;
+        },
         .month, .year => blk: {
             const comps = baseComponents(base);
             var year = comps.year;
