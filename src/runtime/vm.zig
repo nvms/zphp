@@ -5564,18 +5564,26 @@ pub const VM = struct {
                                 return error.RuntimeError;
                             }
                             if (vr.is_readonly) {
-                                // PHP readonly: the property is initialized exactly
-                                // once. once it holds a value, every later write is
-                                // rejected - including writes from the declaring
-                                // class itself (e.g. $this->prop++ in a method).
+                                // PHP readonly: the property can be initialized exactly
+                                // once, from within the declaring class's scope. a child
+                                // class's methods cannot write the parent's readonly
+                                // property (the child must redeclare it to get its own
+                                // init slot - which zphp doesn't model separately, so
+                                // we enforce the declaring-class rule strictly)
                                 const existing = obj.get(prop_name);
                                 if (existing != .null) {
-                                    const msg = try std.fmt.allocPrint(self.allocator, "Cannot modify readonly property {s}::${s}", .{
-                                        vr.defining_class, prop_name,
-                                    });
-                                    try self.strings.append(self.allocator, msg);
-                                    if (try self.throwBuiltinException("Error", msg)) continue;
-                                    return error.RuntimeError;
+                                    const scope_is_decl = blk: {
+                                        const scope = self.currentDefiningClass() orelse break :blk false;
+                                        break :blk std.mem.eql(u8, scope, vr.defining_class);
+                                    };
+                                    if (!scope_is_decl) {
+                                        const msg = try std.fmt.allocPrint(self.allocator, "Cannot modify readonly property {s}::${s}", .{
+                                            vr.defining_class, prop_name,
+                                        });
+                                        try self.strings.append(self.allocator, msg);
+                                        if (try self.throwBuiltinException("Error", msg)) continue;
+                                        return error.RuntimeError;
+                                    }
                                 }
                             }
                             try obj.set(self.allocator, prop_name, val);
