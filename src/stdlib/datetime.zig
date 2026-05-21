@@ -2870,6 +2870,30 @@ pub fn parseRelativeTime(input: []const u8, base: i64) Value {
     // "now"
     if (eqlLower(s, "now")) return .{ .int = base };
 
+    // compound "midnight"/"noon" + a date expression. PHP applies tokens
+    // left to right: a leading midnight/noon sets the time-of-day on the
+    // base before the rest is parsed; a trailing one overrides it after.
+    if (startsWithLower(s, "midnight ") or startsWithLower(s, "noon ")) {
+        const is_noon = (s[0] == 'n' or s[0] == 'N');
+        var rest = s[(if (is_noon) @as(usize, 5) else 9)..];
+        while (rest.len > 0 and rest[0] == ' ') rest = rest[1..];
+        if (rest.len > 0) {
+            const adj = baseMidnight(base) + (if (is_noon) @as(i64, 43200) else 0);
+            return parseRelativeTime(rest, adj);
+        }
+    }
+    if (endsWithLower(s, " midnight") or endsWithLower(s, " noon")) {
+        const is_noon = endsWithLower(s, " noon");
+        var rest = s[0 .. s.len - (if (is_noon) @as(usize, 5) else 9)];
+        while (rest.len > 0 and rest[rest.len - 1] == ' ') rest = rest[0 .. rest.len - 1];
+        if (rest.len > 0) {
+            const inner = parseRelativeTime(rest, base);
+            if (inner == .int) {
+                return .{ .int = baseMidnight(inner.int) + (if (is_noon) @as(i64, 43200) else 0) };
+            }
+        }
+    }
+
     // RFC 2822 / 7231 - "Mon, 15 Jan 2024 10:30:00 GMT"
     if (tryParseRfc2822(s)) |ts| return .{ .int = ts };
 
@@ -3360,6 +3384,11 @@ fn eqlLower(a: []const u8, lower_b: []const u8) bool {
 fn startsWithLower(s: []const u8, lower_prefix: []const u8) bool {
     if (s.len < lower_prefix.len) return false;
     return eqlLower(s[0..lower_prefix.len], lower_prefix);
+}
+
+fn endsWithLower(s: []const u8, lower_suffix: []const u8) bool {
+    if (s.len < lower_suffix.len) return false;
+    return eqlLower(s[s.len - lower_suffix.len ..], lower_suffix);
 }
 
 fn daysInMonth(month: i64, year: i64) i64 {
