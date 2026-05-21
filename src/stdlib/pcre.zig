@@ -32,6 +32,9 @@ const pcre2 = struct {
     const UCP: u32 = 0x00020000;
     const ANCHORED: u32 = 0x80000000;
     const UNGREEDY: u32 = 0x00040000;
+    const DOLLAR_ENDONLY: u32 = 0x00000010;
+    const DUPNAMES: u32 = 0x00000040;
+    const NO_AUTO_CAPTURE: u32 = 0x00002000;
 
     const SUBSTITUTE_GLOBAL: u32 = 0x00000100;
     const SUBSTITUTE_OVERFLOW_LENGTH: u32 = 0x00001000;
@@ -157,8 +160,15 @@ fn parsePattern(raw: []const u8) ?PatternInfo {
             'u' => flags |= pcre2.UTF | pcre2.UCP,
             'A' => flags |= pcre2.ANCHORED,
             'U' => flags |= pcre2.UNGREEDY,
-            'e' => return null,
-            else => {},
+            'D' => flags |= pcre2.DOLLAR_ENDONLY,
+            'J' => flags |= pcre2.DUPNAMES,
+            'n' => flags |= pcre2.NO_AUTO_CAPTURE,
+            // 'S' (study) and 'X' (PCRE_EXTRA) are accepted by PHP but have no
+            // PCRE2 equivalent - treat as no-ops rather than rejecting
+            'S', 'X' => {},
+            // 'e' was removed in PHP 7; any other letter is an unknown
+            // modifier. PHP fails the whole call and returns false/null
+            else => return null,
         }
     }
     return .{ .pattern = pattern, .flags = flags };
@@ -1131,8 +1141,11 @@ fn utf8SeqLen(lead: u8) usize {
 }
 
 fn preg_split(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len < 2 or args[0] != .string or args[1] != .string) return .null;
-    const info = parsePattern(args[0].string) orelse return Value.null;
+    if (args.len < 2 or args[0] != .string or args[1] != .string) return .{ .bool = false };
+    const info = parsePattern(args[0].string) orelse {
+        setPregError(1);
+        return Value{ .bool = false };
+    };
     const subject = args[1].string;
     const limit: i64 = if (args.len >= 3 and args[2] != .null) Value.toInt(args[2]) else -1;
     const flags: i64 = if (args.len >= 4) Value.toInt(args[3]) else 0;
@@ -1276,8 +1289,11 @@ fn preg_quote(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
 }
 
 fn preg_grep(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len < 2 or args[0] != .string or args[1] != .array) return .null;
-    const info = parsePattern(args[0].string) orelse return Value.null;
+    if (args.len < 2 or args[0] != .string or args[1] != .array) return .{ .bool = false };
+    const info = parsePattern(args[0].string) orelse {
+        setPregError(1);
+        return Value{ .bool = false };
+    };
     const input = args[1].array;
     const invert = args.len >= 3 and Value.toInt(args[2]) == 1;
 
