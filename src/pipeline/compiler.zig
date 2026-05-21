@@ -546,6 +546,16 @@ pub const Compiler = struct {
             return;
         }
         if (std.mem.eql(u8, name, "__CLASS__")) {
+            // inside a trait the compile-time class is the trait name, but PHP
+            // resolves __CLASS__ to the using class - defer to runtime self::class
+            if (self.in_trait) {
+                const class_idx = try self.addConstant(.{ .string = "self" });
+                const prop_idx = try self.addConstant(.{ .string = "class" });
+                try self.emitOp(.get_static_prop);
+                try self.emitU16(class_idx);
+                try self.emitU16(prop_idx);
+                return;
+            }
             const idx = try self.addConstant(.{ .string = self.current_class });
             try self.emitConstant(idx);
             return;
