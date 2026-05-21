@@ -623,10 +623,15 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                     const gp_entry = &ic.prop[gp_idx];
                     if (gp_entry.key == gp_ip and gp_entry.chunk_key == @intFromPtr(frame.chunk) and gp_entry.class_ptr == @intFromPtr(gp_obj.class_name.ptr) and gp_entry.slot_index != 0xFFFF) {
                         if (gp_obj.slots) |s| {
-                            self.stack[sp - 1] = s[gp_entry.slot_index];
-                            const _next_gp = code[ip];
-                            ip += 1;
-                            continue :dispatch @as(OpCode, @enumFromInt(_next_gp));
+                            const gp_v = s[gp_entry.slot_index];
+                            // a null slot may be an uninitialized typed property
+                            // - bail so runLoop runs the type check
+                            if (gp_v != .null) {
+                                self.stack[sp - 1] = gp_v;
+                                const _next_gp = code[ip];
+                                ip += 1;
+                                continue :dispatch @as(OpCode, @enumFromInt(_next_gp));
+                            }
                         }
                     }
                 }

@@ -5420,12 +5420,18 @@ pub const VM = struct {
                                 if (gp_entry.slot_index != 0xFFFF) {
                                     if (obj.slots) |s| {
                                         const ic_val = s[gp_entry.slot_index];
-                                        self.push(ic_val);
-                                        continue;
+                                        // a null slot may be an uninitialized
+                                        // typed property - fall to the slow path
+                                        // for the type check
+                                        if (ic_val != .null) {
+                                            self.push(ic_val);
+                                            continue;
+                                        }
                                     }
+                                } else {
+                                    self.push(obj.get(prop_name));
+                                    continue;
                                 }
-                                self.push(obj.get(prop_name));
-                                continue;
                             }
                         }
 
@@ -5461,6 +5467,16 @@ pub const VM = struct {
                                 if (try self.throwBuiltinException("Error", msg)) continue;
                                 return error.RuntimeError;
                             }
+                            // a non-nullable typed property holding null was
+                            // never written - PHP's uninitialized state, fatal
+                            // to read (such a type rejects null on write, so
+                            // null can only mean uninitialized)
+                            if (val == .null and self.typedPropForbidsNull(vr.type_str)) {
+                                const msg = try std.fmt.allocPrint(self.allocator, "Typed property {s}::${s} must not be accessed before initialization", .{ vr.defining_class, prop_name });
+                                try self.strings.append(self.allocator, msg);
+                                if (try self.throwBuiltinException("Error", msg)) continue;
+                                return error.RuntimeError;
+                            }
                             if (self.ic) |ic| {
                                 if (vr.visibility == .public) {
                                     const gp_idx = InlineCache.propIndex(@intFromPtr(self.currentChunk()), gp_ip);
@@ -5472,6 +5488,65 @@ pub const VM = struct {
                         } else if (self.hasMethod(obj.class_name, "__get")) {
                             const result = try self.callMagicGet(obj, prop_name);
                             self.push(result);
+                        } else {
+                            // a declared typed property with no value present
+                            // (never written, or explicitly unset) is in PHP's
+                            // uninitialized state - reading it is fatal
+                            const uvr = self.findPropertyVisibility(obj.class_name, prop_name);
+                            if (uvr.type_str.len > 0) {
+                                const msg = try std.fmt.allocPrint(self.allocator, "Typed property {s}::${s} must not be accessed before initialization", .{ uvr.defining_class, prop_name });
+                                try self.strings.append(self.allocator, msg);
+                                if (try self.throwBuiltinException("Error", msg)) continue;
+                                return error.RuntimeError;
+                            }
+                            self.push(.null);
+                        }
+                    } else {
+                        self.push(.null);
+                    }
+                },
+
+                .get_prop_coalesce => {
+                    // non-throwing property read for `??` / `??=`. an
+                    // uninitialized typed property reads as a null slot value,
+                    // which `??` then routes to the RHS - no error
+                    const name_idx = self.readU16();
+                    const prop_name = self.currentChunk().constants.items[name_idx].string;
+                    const obj_val = self.pop();
+                    if (obj_val == .object) {
+                        const obj = obj_val.object;
+                        if (obj.lazy_initializer != .null) try self.triggerLazyInit(obj);
+                        if (self.hasPropHook(obj.class_name, prop_name, .get) and !self.inPropHook(obj, prop_name)) {
+                            const hook_result = self.callPropHook(obj, prop_name, .get, .null) catch {
+                                if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
+                                return error.RuntimeError;
+                            };
+                            if (hook_result) |hv| {
+                                self.push(hv);
+                                continue;
+                            }
+                        }
+                        const val = obj.get(prop_name);
+                        const is_present = !obj.isUnset(prop_name) and
+                            (val != .null or obj.properties.contains(prop_name) or
+                             (obj.slots != null and obj.getSlotIndex(prop_name) != null));
+                        if (is_present) {
+                            // an inaccessible property reads via `??` as
+                            // "not set" - route to __get or null, never the
+                            // raw value (a parent's private prop must not leak
+                            // to a subclass scope)
+                            const cvr = self.findPropertyVisibility(obj.class_name, prop_name);
+                            if (!self.checkVisibility(cvr.defining_class, cvr.visibility)) {
+                                if (self.hasMethod(obj.class_name, "__get")) {
+                                    self.push(try self.callMagicGet(obj, prop_name));
+                                } else {
+                                    self.push(.null);
+                                }
+                            } else {
+                                self.push(val);
+                            }
+                        } else if (self.hasMethod(obj.class_name, "__get")) {
+                            self.push(try self.callMagicGet(obj, prop_name));
                         } else {
                             self.push(.null);
                         }
@@ -11805,6 +11880,19 @@ pub const VM = struct {
         var s = type_str;
         if (s.len > 0 and s[0] == '?') s = s[1..];
         return std.mem.eql(u8, s, "string");
+    }
+
+    // true when a declared property type cannot legitimately hold null. typed-
+    // property write coercion rejects null for such a type, so a null slot
+    // value can only mean the property is still uninitialized. union types are
+    // treated conservatively (skipped) - they might admit null
+    fn typedPropForbidsNull(_: *VM, type_str: []const u8) bool {
+        if (type_str.len == 0) return false; // untyped
+        if (type_str[0] == '?') return false; // ?T
+        if (std.mem.indexOfScalar(u8, type_str, '|') != null) return false; // union
+        if (std.mem.eql(u8, type_str, "mixed")) return false;
+        if (std.mem.eql(u8, type_str, "null")) return false;
+        return true;
     }
 
     // enforce a typed property's declared type on write. mirrors checkParamTypes:

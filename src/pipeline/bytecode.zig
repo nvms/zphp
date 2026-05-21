@@ -232,10 +232,15 @@ pub const OpCode = enum(u8) {
     // emitted after class_decl so a `self::CONST` default resolves
     set_prop_default,
 
+    // non-throwing property read for `??` / `??=` - u16 property name. reads
+    // the value or null (never errors on an uninitialized typed property),
+    // matching isset-semantics
+    get_prop_coalesce,
+
     pub fn width(self: OpCode) usize {
         return switch (self) {
             .constant, .get_var, .set_var, .jump, .jump_back, .jump_if_false, .jump_if_true,
-            .jump_if_not_null, .push_handler, .get_prop, .set_prop, .get_local, .set_local,
+            .jump_if_not_null, .push_handler, .get_prop, .get_prop_coalesce, .set_prop, .get_local, .set_local,
             .get_global, .concat_assign, .unset_var, .unset_prop, .isset_prop,
             .closure_bind, .closure_bind_ref, .define_const,
             .iter_check, .inc_local, .dec_local,
@@ -271,7 +276,7 @@ pub const OpCode = enum(u8) {
             .ensure_array_local, .ensure_array_var,
             => 1,
             // pop object, push property value (net 0: pop obj, push val)
-            .get_prop,
+            .get_prop, .get_prop_coalesce,
             => 0,
             // binary ops: pop 2, push 1
             .array_get, .array_get_coalesce, .array_get_vivify,

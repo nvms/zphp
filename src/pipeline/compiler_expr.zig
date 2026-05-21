@@ -199,7 +199,8 @@ pub fn compileAssign(self: *Compiler, node: Ast.Node) Error!void {
         if (op_tag == .question_question_equal) {
             try self.compileNode(target.data.lhs);
             try self.emitOp(.dup);
-            try self.emitOp(.get_prop);
+            // isset-semantics: an uninitialized typed property must not throw
+            try self.emitOp(.get_prop_coalesce);
             try self.emitU16(name_idx);
             const skip_jump = try self.emitJump(.jump_if_not_null);
             try self.emitOp(.pop);
@@ -590,6 +591,16 @@ fn compileCoalesceFetch(self: *Compiler, node_idx: u32) Error!void {
         try compileCoalesceFetch(self, n.data.lhs);
         try self.compileNode(n.data.rhs);
         try self.emitOp(.array_get_coalesce);
+        return;
+    }
+    // a static-name property read under `??` uses isset-semantics: an
+    // uninitialized typed property must read as null, not throw. recurse so a
+    // chain `$a->b->c ?? x` is non-throwing all the way down
+    if (n.tag == .property_access and !self.isDynamicProp(n)) {
+        try compileCoalesceFetch(self, n.data.lhs);
+        const name_idx = try self.addConstant(.{ .string = self.propName(n) });
+        try self.emitOp(.get_prop_coalesce);
+        try self.emitU16(name_idx);
         return;
     }
     try self.compileNode(node_idx);
