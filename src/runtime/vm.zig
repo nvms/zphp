@@ -7277,6 +7277,41 @@ pub const VM = struct {
                     }
                 },
 
+                .get_class_const => {
+                    // Class::CONST read. an undefined constant on a class that
+                    // genuinely exists is a fatal Error in PHP, not a silent
+                    // null (class constants and enum cases live in the same
+                    // static_props table getStaticProp reads)
+                    const class_idx = self.readU16();
+                    const const_idx = self.readU16();
+                    var class_name = self.currentChunk().constants.items[class_idx].string;
+                    const const_name = self.currentChunk().constants.items[const_idx].string;
+                    class_name = self.resolveStaticClassName(class_name);
+                    if (self.getStaticProp(class_name, const_name)) |val| {
+                        self.push(val);
+                    } else {
+                        if (!self.classes.contains(class_name) and !self.interfaces.contains(class_name)) {
+                            try self.tryAutoload(class_name);
+                        }
+                        if (self.getStaticProp(class_name, const_name)) |val| {
+                            self.push(val);
+                        } else if (self.classes.contains(class_name) or self.interfaces.contains(class_name)) {
+                            // the class exists but has no such constant - a real
+                            // typo / undefined-constant error
+                            const msg = try std.fmt.allocPrint(self.allocator, "Undefined constant {s}::{s}", .{ class_name, const_name });
+                            try self.strings.append(self.allocator, msg);
+                            if (try self.throwBuiltinException("Error", msg)) continue;
+                            return error.RuntimeError;
+                        } else {
+                            // class not registered: a self::CONST property/const
+                            // default evaluated before the class is declared, or
+                            // a genuinely missing class. fall back to null like
+                            // get_static_prop rather than false-positive throw
+                            self.push(.null);
+                        }
+                    }
+                },
+
                 .get_static_prop_dyn_name => {
                     const class_idx = self.readU16();
                     const class_name = self.resolveStaticClassName(self.currentChunk().constants.items[class_idx].string);

@@ -306,6 +306,57 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try pdo_def.static_props.put(a, "PARAM_NULL", .{ .int = 0 });
     try pdo_def.static_props.put(a, "PARAM_INT", .{ .int = 1 });
     try pdo_def.static_props.put(a, "PARAM_STR", .{ .int = 2 });
+    try pdo_def.static_props.put(a, "PARAM_STMT", .{ .int = 4 });
+    try pdo_def.static_props.put(a, "PARAM_INPUT_OUTPUT", .{ .int = 2147483648 });
+    try pdo_def.static_props.put(a, "PARAM_STR_CHAR", .{ .int = 536870912 });
+    try pdo_def.static_props.put(a, "PARAM_STR_NATL", .{ .int = 1073741824 });
+    // remaining standard PDO::ATTR_* attributes (zphp routes all drivers
+    // through one PDO class; frameworks reference the whole family). values
+    // match php-src ext/pdo
+    try pdo_def.static_props.put(a, "ATTR_PREFETCH", .{ .int = 1 });
+    try pdo_def.static_props.put(a, "ATTR_TIMEOUT", .{ .int = 2 });
+    try pdo_def.static_props.put(a, "ATTR_SERVER_INFO", .{ .int = 6 });
+    try pdo_def.static_props.put(a, "ATTR_CONNECTION_STATUS", .{ .int = 7 });
+    try pdo_def.static_props.put(a, "ATTR_CURSOR_NAME", .{ .int = 9 });
+    try pdo_def.static_props.put(a, "ATTR_CURSOR", .{ .int = 10 });
+    try pdo_def.static_props.put(a, "ATTR_ORACLE_NULLS", .{ .int = 11 });
+    try pdo_def.static_props.put(a, "ATTR_STATEMENT_CLASS", .{ .int = 13 });
+    try pdo_def.static_props.put(a, "ATTR_FETCH_TABLE_NAMES", .{ .int = 14 });
+    try pdo_def.static_props.put(a, "ATTR_FETCH_CATALOG_NAMES", .{ .int = 15 });
+    try pdo_def.static_props.put(a, "ATTR_STRINGIFY_FETCHES", .{ .int = 17 });
+    try pdo_def.static_props.put(a, "ATTR_MAX_COLUMN_LEN", .{ .int = 18 });
+    try pdo_def.static_props.put(a, "ATTR_DEFAULT_STR_PARAM", .{ .int = 21 });
+    try pdo_def.static_props.put(a, "CURSOR_FWDONLY", .{ .int = 0 });
+    try pdo_def.static_props.put(a, "CURSOR_SCROLL", .{ .int = 1 });
+    try pdo_def.static_props.put(a, "NULL_NATURAL", .{ .int = 0 });
+    try pdo_def.static_props.put(a, "NULL_EMPTY_STRING", .{ .int = 1 });
+    try pdo_def.static_props.put(a, "NULL_TO_STRING", .{ .int = 2 });
+    try pdo_def.static_props.put(a, "FETCH_ORI_NEXT", .{ .int = 0 });
+    try pdo_def.static_props.put(a, "FETCH_ORI_PRIOR", .{ .int = 1 });
+    try pdo_def.static_props.put(a, "FETCH_ORI_FIRST", .{ .int = 2 });
+    try pdo_def.static_props.put(a, "FETCH_ORI_LAST", .{ .int = 3 });
+    try pdo_def.static_props.put(a, "FETCH_ORI_ABS", .{ .int = 4 });
+    try pdo_def.static_props.put(a, "FETCH_ORI_REL", .{ .int = 5 });
+    // pdo_mysql driver-specific attributes. zphp's PDO dispatches through one
+    // class regardless of driver, so register the full family - frameworks
+    // reference them in connection config (e.g. Laravel's mysql options) even
+    // when a different driver is active. values match PHP 8.x pdo_mysql
+    try pdo_def.static_props.put(a, "MYSQL_ATTR_USE_BUFFERED_QUERY", .{ .int = 1000 });
+    try pdo_def.static_props.put(a, "MYSQL_ATTR_LOCAL_INFILE", .{ .int = 1001 });
+    try pdo_def.static_props.put(a, "MYSQL_ATTR_INIT_COMMAND", .{ .int = 1002 });
+    try pdo_def.static_props.put(a, "MYSQL_ATTR_COMPRESS", .{ .int = 1003 });
+    try pdo_def.static_props.put(a, "MYSQL_ATTR_DIRECT_QUERY", .{ .int = 20 });
+    try pdo_def.static_props.put(a, "MYSQL_ATTR_FOUND_ROWS", .{ .int = 1004 });
+    try pdo_def.static_props.put(a, "MYSQL_ATTR_IGNORE_SPACE", .{ .int = 1005 });
+    try pdo_def.static_props.put(a, "MYSQL_ATTR_SSL_KEY", .{ .int = 1006 });
+    try pdo_def.static_props.put(a, "MYSQL_ATTR_SSL_CERT", .{ .int = 1007 });
+    try pdo_def.static_props.put(a, "MYSQL_ATTR_SSL_CA", .{ .int = 1008 });
+    try pdo_def.static_props.put(a, "MYSQL_ATTR_SSL_CAPATH", .{ .int = 1009 });
+    try pdo_def.static_props.put(a, "MYSQL_ATTR_SSL_CIPHER", .{ .int = 1010 });
+    try pdo_def.static_props.put(a, "MYSQL_ATTR_SERVER_PUBLIC_KEY", .{ .int = 1011 });
+    try pdo_def.static_props.put(a, "MYSQL_ATTR_MULTI_STATEMENTS", .{ .int = 1012 });
+    try pdo_def.static_props.put(a, "MYSQL_ATTR_SSL_VERIFY_SERVER_CERT", .{ .int = 1013 });
+    try pdo_def.static_props.put(a, "MYSQL_ATTR_LOCAL_INFILE_DIRECTORY", .{ .int = 1014 });
 
     try vm.classes.put(a, "PDO", pdo_def);
 

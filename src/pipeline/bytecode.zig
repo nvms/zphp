@@ -222,6 +222,11 @@ pub const OpCode = enum(u8) {
     // on the base object). pops [val, i, prop_name, base_obj]
     prop_set_chain,
 
+    // Class::CONST read - u16 class name, u16 constant name. throws a fatal
+    // Error on a miss (unlike get_static_prop which nulls). appended at the
+    // end of the enum so existing opcode numbers are untouched
+    get_class_const,
+
     pub fn width(self: OpCode) usize {
         return switch (self) {
             .constant, .get_var, .set_var, .jump, .jump_back, .jump_if_false, .jump_if_true,
@@ -235,7 +240,7 @@ pub const OpCode = enum(u8) {
             .array_set_local, .array_set_local_ref,
             => 3,
             .call, .call_spread, .new_obj, .method_call, .method_call_spread, .static_call_dyn_method, .make_var_ref, .make_var_prop_ref => 4,
-            .get_static_prop, .set_static_prop, .get_static, .set_static,
+            .get_static_prop, .get_class_const, .set_static_prop, .get_static, .set_static,
             .static_call_spread, .add_local_to_local, .sub_local_to_local, .mul_local_to_local,
             => 5,
             .static_call => 6,
@@ -257,7 +262,7 @@ pub const OpCode = enum(u8) {
             // push a value
             .constant, .op_null, .op_true, .op_false, .dup, .get_var, .get_local,
             .get_global, .get_static,
-            .get_static_prop, .array_new, .clone_obj, .isset_prop, .isset_index,
+            .get_static_prop, .get_class_const, .array_new, .clone_obj, .isset_prop, .isset_index,
             .ensure_array_local, .ensure_array_var,
             => 1,
             // pop object, push property value (net 0: pop obj, push val)

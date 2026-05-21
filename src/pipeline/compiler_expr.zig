@@ -1263,11 +1263,18 @@ pub fn compileStaticPropAccess(self: *Compiler, node: Ast.Node) Error!void {
     }
 
     const class_name = try resolveNodeClassName(self, class_node);
-    var prop_name = self.ast.tokenSlice(node.main_token);
-    if (prop_name.len > 0 and prop_name[0] == '$') prop_name = prop_name[1..];
+    const raw = self.ast.tokenSlice(node.main_token);
+    const is_static_prop = raw.len > 0 and raw[0] == '$';
+    const prop_name = if (is_static_prop) raw[1..] else raw;
     const class_idx = try self.addConstant(.{ .string = class_name });
     const prop_idx = try self.addConstant(.{ .string = prop_name });
-    try self.emitOp(.get_static_prop);
+    // a bare-identifier member (not $prop, not ::class) is a class constant or
+    // enum case - get_class_const throws Error on a miss instead of nulling
+    if (!is_static_prop and !std.mem.eql(u8, prop_name, "class")) {
+        try self.emitOp(.get_class_const);
+    } else {
+        try self.emitOp(.get_static_prop);
+    }
     try self.emitU16(class_idx);
     try self.emitU16(prop_idx);
 }
