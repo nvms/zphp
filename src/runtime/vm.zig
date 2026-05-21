@@ -2432,10 +2432,15 @@ pub const VM = struct {
                             var assigned: [16]bool = .{false} ** 16;
                             var pos: usize = 0;
                             var ok = true;
+                            // a variadic function's last param is the catch-all -
+                            // named args never bind to it directly, they fall in
+                            // as keyed entries (see named_extras below)
+                            const match_limit: usize = if (func.is_variadic and func.arity > 0) func.arity - 1 else func.params.len;
+                            var named_extras: ?*PhpArray = null;
                             for (arr.entries.items) |entry| {
                                 if (entry.key == .string) {
                                     var found = false;
-                                    for (func.params, 0..) |p, pi| {
+                                    for (func.params[0..match_limit], 0..) |p, pi| {
                                         if (std.mem.eql(u8, p[1..], entry.key.string) or std.mem.eql(u8, p, entry.key.string)) {
                                             if (assigned[pi]) {
                                                 const msg = try std.fmt.allocPrint(self.allocator, "Named parameter ${s} overwrites previous argument", .{entry.key.string});
@@ -2452,6 +2457,44 @@ pub const VM = struct {
                                     }
                                     if (!ok) break;
                                     if (!found) {
+                                        if (func.is_variadic) {
+                                            // a named arg that matches no fixed
+                                            // param falls into the variadic,
+                                            // keyed by name (PHP 8.1). it is
+                                            // still type-checked against the
+                                            // variadic element type
+                                            var ev = entry.value;
+                                            const vtype: []const u8 = blk: {
+                                                const ti = g_type_info.get(name) orelse break :blk "";
+                                                const vi = func.arity - 1;
+                                                if (vi < ti.param_types.len) break :blk ti.param_types[vi];
+                                                break :blk "";
+                                            };
+                                            if (vtype.len > 0 and !self.checkTypeMatch(ev, vtype)) {
+                                                const fstrict = if (self.frame_count >= 1) (if (self.currentFrame().func) |cf| cf.strict_types else self.script_strict_types) else self.script_strict_types;
+                                                var coerced = false;
+                                                if (!fstrict) {
+                                                    if (try self.tryWeakCoerce(ev, vtype)) |c| {
+                                                        ev = c;
+                                                        coerced = true;
+                                                    }
+                                                }
+                                                if (!coerced) {
+                                                    const msg = try std.fmt.allocPrint(self.allocator, "{s}(): Argument ${s} must be of type {s}, {s} given", .{ name, entry.key.string, vtype, valueTypeName(ev) });
+                                                    try self.strings.append(self.allocator, msg);
+                                                    if (try self.throwBuiltinException("TypeError", msg)) { ok = false; break; }
+                                                    return error.RuntimeError;
+                                                }
+                                            }
+                                            if (named_extras == null) {
+                                                const ne = try self.allocator.create(PhpArray);
+                                                ne.* = .{};
+                                                try self.arrays.append(self.allocator, ne);
+                                                named_extras = ne;
+                                            }
+                                            try named_extras.?.set(self.allocator, entry.key, ev);
+                                            continue;
+                                        }
                                         const msg = try std.fmt.allocPrint(self.allocator, "Unknown named parameter ${s}", .{entry.key.string});
                                         try self.strings.append(self.allocator, msg);
                                         if (try self.throwBuiltinException("Error", msg)) { ok = false; break; }
@@ -2476,7 +2519,7 @@ pub const VM = struct {
                                 }
                             }
                             for (0..count) |i| self.push(resolved[i]);
-                            try self.callNamedFunction(name, @intCast(count));
+                            try self.callNamedFunctionV(name, @intCast(count), named_extras);
                         } else if (@import("../stdlib/native_params.zig").map.get(name)) |params| {
                             var resolved: [16]Value = .{.null} ** 16;
                             var pos: usize = 0;
@@ -11857,6 +11900,13 @@ pub const VM = struct {
     }
 
     fn callNamedFunction(self: *VM, raw_name: []const u8, arg_count: u8) RuntimeError!void {
+        return self.callNamedFunctionV(raw_name, arg_count, null);
+    }
+
+    // named_extras: PHP 8.1 lets named arguments that match no declared
+    // parameter fall into a variadic param keyed by their name. when set, its
+    // entries are merged into the variadic rest array
+    fn callNamedFunctionV(self: *VM, raw_name: []const u8, arg_count: u8, named_extras: ?*PhpArray) RuntimeError!void {
         // PHP normalizes leading-backslash on function callable strings
         const name = if (raw_name.len > 0 and raw_name[0] == '\\') raw_name[1..] else raw_name;
         if (self.dbg_profile_enabled) {
@@ -11944,6 +11994,13 @@ pub const VM = struct {
                 if (ac > fixed) {
                     for (fixed..ac) |i| {
                         try rest_arr.append(self.allocator, try self.copyValue(self.stack[self.sp - ac + i]));
+                    }
+                }
+                // named arguments matching no fixed parameter land in the
+                // variadic, keyed by name (PHP 8.1)
+                if (named_extras) |extras| {
+                    for (extras.entries.items) |entry| {
+                        try rest_arr.set(self.allocator, entry.key, try self.copyValue(entry.value));
                     }
                 }
                 try self.arrays.append(self.allocator, rest_arr);
