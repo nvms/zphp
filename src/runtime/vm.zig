@@ -9127,7 +9127,9 @@ pub const VM = struct {
         if (self.trait_static_props.get(trait_name)) |sprops| {
             for (sprops) |sp| {
                 if (!def.static_props.contains(sp.name)) {
-                    try def.static_props.put(self.allocator, sp.name, sp.value);
+                    // each using class gets its own copy of the trait's static
+                    // property - deep-clone so array values are not shared
+                    try def.static_props.put(self.allocator, sp.name, try self.copyValue(sp.value));
                 }
             }
         }
