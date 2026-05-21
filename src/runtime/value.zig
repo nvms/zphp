@@ -663,6 +663,14 @@ pub const Value = union(enum) {
         if (a == .string and b == .null) {
             return switch (std.mem.order(u8, a.string, "")) { .lt => -1, .eq => 0, .gt => 1 };
         }
+        // PHP: when either operand is bool or null (and it isn't the
+        // null-vs-string case handled above), convert both to bool and
+        // compare - FALSE < TRUE. so `null < -1` is true (false < true)
+        if (a == .bool or a == .null or b == .bool or b == .null) {
+            const ab: i64 = if (a.isTruthy()) 1 else 0;
+            const bb: i64 = if (b.isTruthy()) 1 else 0;
+            return if (ab < bb) -1 else if (ab > bb) 1 else 0;
+        }
         const af = toFloat(a);
         const bf = toFloat(b);
         if (af < bf) return -1;
