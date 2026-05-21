@@ -2856,11 +2856,19 @@ fn native_filter_var(_ctx: *NativeContext, args: []const Value) RuntimeError!Val
         257 => { // FILTER_VALIDATE_INT
             const allow_octal = (eff_flags & 1) != 0; // FILTER_FLAG_ALLOW_OCTAL
             const allow_hex = (eff_flags & 2) != 0; // FILTER_FLAG_ALLOW_HEX
+            var str_buf = std.ArrayListUnmanaged(u8){};
+            defer str_buf.deinit(_ctx.allocator);
             const n: i64 = blk: {
                 if (value == .int) break :blk value.int;
-                if (value == .bool) return fail_default;
-                if (value == .float) return fail_default;
-                const s = if (value == .string) value.string else return fail_default;
+                // PHP stringifies a non-string scalar then applies the string
+                // filter: true->"1"->1, false->""->fail, 3.0->"3"->3, 3.7->fail
+                const s: []const u8 = if (value == .string) value.string else sblk: {
+                    if (value == .bool or value == .float) {
+                        value.format(&str_buf, _ctx.allocator) catch return fail_default;
+                        break :sblk str_buf.items;
+                    }
+                    return fail_default;
+                };
                 const trimmed = std.mem.trim(u8, s, " \t\n\r");
                 if (trimmed.len == 0) return fail_default;
                 // optional sign
@@ -2871,6 +2879,11 @@ fn native_filter_var(_ctx: *NativeContext, args: []const Value) RuntimeError!Val
                 // hex with ALLOW_HEX
                 if (allow_hex and rest.len > 2 and rest[0] == '0' and (rest[1] == 'x' or rest[1] == 'X')) {
                     const v = std.fmt.parseInt(i64, rest[2..], 16) catch return fail_default;
+                    break :blk sign * v;
+                }
+                // octal with ALLOW_OCTAL, "0o" prefix
+                if (allow_octal and rest.len > 2 and rest[0] == '0' and (rest[1] == 'o' or rest[1] == 'O')) {
+                    const v = std.fmt.parseInt(i64, rest[2..], 8) catch return fail_default;
                     break :blk sign * v;
                 }
                 // octal with ALLOW_OCTAL ("0" prefix)
