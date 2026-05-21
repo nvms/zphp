@@ -361,6 +361,36 @@ pub const NewDefault = struct {
     args: []Value,
 };
 
+// a compound constant-expression default that can't be folded at compile time
+// (e.g. `self::A | self::B`) - the operands are stored as Values (possibly
+// themselves deferred sentinels) and the op is applied at call time
+pub const DeferredExpr = struct {
+    op: Op,
+    lhs: Value,
+    rhs: Value,
+    pub const Op = enum(u8) { bor, band, bxor, add, sub, mul, div, mod, shl, shr, pow, concat, neg };
+};
+
+pub const DEFERRED_EXPR_PREFIX = "\x00DX\x00";
+
+pub fn isDeferredExprSentinel(s: []const u8) bool {
+    return s.len == DEFERRED_EXPR_PREFIX.len + 8 and std.mem.startsWith(u8, s, DEFERRED_EXPR_PREFIX);
+}
+
+pub fn deferredExprPtr(s: []const u8) ?*DeferredExpr {
+    if (!isDeferredExprSentinel(s)) return null;
+    const bytes = s[DEFERRED_EXPR_PREFIX.len..][0..8];
+    const ptr_int = std.mem.readInt(u64, bytes, .little);
+    return @ptrFromInt(ptr_int);
+}
+
+pub fn encodeDeferredExprSentinel(allocator: std.mem.Allocator, de: *const DeferredExpr) ![]u8 {
+    var buf = try allocator.alloc(u8, DEFERRED_EXPR_PREFIX.len + 8);
+    @memcpy(buf[0..DEFERRED_EXPR_PREFIX.len], DEFERRED_EXPR_PREFIX);
+    std.mem.writeInt(u64, buf[DEFERRED_EXPR_PREFIX.len..][0..8], @intFromPtr(de), .little);
+    return buf;
+}
+
 pub const NEW_DEFAULT_PREFIX = "\x00NW\x00";
 
 pub fn isNewDefaultSentinel(s: []const u8) bool {

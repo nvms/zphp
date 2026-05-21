@@ -11167,8 +11167,55 @@ pub const VM = struct {
             if (bytecode.newDefaultPtr(s)) |nd| {
                 return self.instantiateForDefault(nd);
             }
+            // deferred compound const-expression default: "\x00DX\x00<8 byte ptr>"
+            if (bytecode.deferredExprPtr(s)) |de| {
+                return self.resolveDeferredExpr(de);
+            }
         }
         return val;
+    }
+
+    fn resolveDeferredExpr(self: *VM, de: *const bytecode.DeferredExpr) RuntimeError!Value {
+        const lhs = try self.resolveDefault(de.lhs);
+        if (de.op == .neg) {
+            return switch (lhs) {
+                .int => |v| Value{ .int = -%v },
+                .float => |v| Value{ .float = -v },
+                else => Value{ .int = -%Value.toInt(lhs) },
+            };
+        }
+        const rhs = try self.resolveDefault(de.rhs);
+        return switch (de.op) {
+            .bor => Value{ .int = Value.toInt(lhs) | Value.toInt(rhs) },
+            .band => Value{ .int = Value.toInt(lhs) & Value.toInt(rhs) },
+            .bxor => Value{ .int = Value.toInt(lhs) ^ Value.toInt(rhs) },
+            .shl => blk: {
+                const sh = Value.toInt(rhs);
+                if (sh < 0 or sh >= 64) break :blk Value{ .int = 0 };
+                break :blk Value{ .int = Value.toInt(lhs) << @intCast(sh) };
+            },
+            .shr => blk: {
+                const sh = Value.toInt(rhs);
+                if (sh < 0 or sh >= 64) break :blk Value{ .int = 0 };
+                break :blk Value{ .int = Value.toInt(lhs) >> @intCast(sh) };
+            },
+            .add => Value.add(lhs, rhs),
+            .sub => Value.subtract(lhs, rhs),
+            .mul => Value.multiply(lhs, rhs),
+            .div => Value.divide(lhs, rhs),
+            .mod => Value.modulo(lhs, rhs),
+            .pow => Value.power(lhs, rhs),
+            .concat => blk: {
+                const ls = (try self.coerceToStringValue(lhs)).string;
+                const rs = (try self.coerceToStringValue(rhs)).string;
+                const joined = try self.allocator.alloc(u8, ls.len + rs.len);
+                @memcpy(joined[0..ls.len], ls);
+                @memcpy(joined[ls.len..], rs);
+                try self.strings.append(self.allocator, joined);
+                break :blk Value{ .string = joined };
+            },
+            .neg => unreachable,
+        };
     }
 
     fn instantiateForDefault(self: *VM, nd: *const bytecode.NewDefault) RuntimeError!Value {

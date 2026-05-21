@@ -40,6 +40,7 @@ pub const CompileResult = struct {
     type_hints: std.ArrayListUnmanaged(TypeHint) = .{},
     function_attrs: std.ArrayListUnmanaged(FunctionAttrEntry) = .{},
     new_defaults: std.ArrayListUnmanaged(*bytecode.NewDefault) = .{},
+    deferred_exprs: std.ArrayListUnmanaged(*bytecode.DeferredExpr) = .{},
     source: []const u8 = "",
     file_path: []const u8 = "",
     strict_types: bool = false,
@@ -70,6 +71,10 @@ pub const CompileResult = struct {
             self.allocator.destroy(nd);
         }
         self.new_defaults.deinit(self.allocator);
+        // operands are tracked elsewhere (string_allocs / nested in this same
+        // list), so only the structs themselves need freeing
+        for (self.deferred_exprs.items) |de| self.allocator.destroy(de);
+        self.deferred_exprs.deinit(self.allocator);
         if (self.slot_names.len > 0) self.allocator.free(self.slot_names);
     }
 };
@@ -143,7 +148,7 @@ pub fn compileWithPath(ast: *const Ast, allocator: Allocator, file_path: []const
     global_closure_counter = c.closure_count;
     const strict = detectStrictTypes(ast.source);
     for (c.functions.items) |*f| f.strict_types = strict;
-    return .{ .chunk = c.chunk, .functions = c.functions, .string_allocs = c.string_allocs, .allocator = allocator, .local_count = local_count, .slot_names = slot_names, .type_hints = c.type_hints, .function_attrs = c.function_attrs, .new_defaults = c.new_defaults, .source = ast.source, .file_path = file_path, .strict_types = strict };
+    return .{ .chunk = c.chunk, .functions = c.functions, .string_allocs = c.string_allocs, .allocator = allocator, .local_count = local_count, .slot_names = slot_names, .type_hints = c.type_hints, .function_attrs = c.function_attrs, .new_defaults = c.new_defaults, .deferred_exprs = c.deferred_exprs, .source = ast.source, .file_path = file_path, .strict_types = strict };
 }
 
 fn detectStrictTypes(src: []const u8) bool {
@@ -206,6 +211,7 @@ pub const Compiler = struct {
     type_hints: std.ArrayListUnmanaged(TypeHint) = .{},
     function_attrs: std.ArrayListUnmanaged(FunctionAttrEntry) = .{},
     new_defaults: std.ArrayListUnmanaged(*bytecode.NewDefault) = .{},
+    deferred_exprs: std.ArrayListUnmanaged(*bytecode.DeferredExpr) = .{},
     current_source_offset: u32 = 0,
     current_class: []const u8 = "",
     current_parent: []const u8 = "",
@@ -820,6 +826,21 @@ pub const Compiler = struct {
         };
     }
 
+    // a compound const-expression default that can't be folded now (an operand
+    // is a deferred constant sentinel) - heap a DeferredExpr and return its
+    // sentinel; resolveDefault applies the op at call time
+    fn makeDeferredExpr(self: *Compiler, op: bytecode.DeferredExpr.Op, lhs: Value, rhs: Value) Value {
+        const de = self.allocator.create(bytecode.DeferredExpr) catch return Value.null;
+        de.* = .{ .op = op, .lhs = lhs, .rhs = rhs };
+        self.deferred_exprs.append(self.allocator, de) catch {
+            self.allocator.destroy(de);
+            return Value.null;
+        };
+        const sentinel = bytecode.encodeDeferredExprSentinel(self.allocator, de) catch return Value.null;
+        self.string_allocs.append(self.allocator, sentinel) catch return Value.null;
+        return .{ .string = sentinel };
+    }
+
     pub fn evalConstExpr(self: *Compiler, idx: u32) Value {
         const n = self.ast.nodes[idx];
         return switch (n.tag) {
@@ -835,10 +856,26 @@ pub const Compiler = struct {
                     break :blk .{ .string = body };
                 }
                 const raw = self.ast.tokenSlice(n.main_token);
-                if (raw.len >= 2) {
-                    break :blk .{ .string = raw[1 .. raw.len - 1] };
+                if (raw.len < 2) break :blk .{ .string = raw };
+                const quote = raw[0];
+                const inner = raw[1 .. raw.len - 1];
+                // process escape sequences the same way the regular string
+                // compile path does - a bare quote-strip leaves '\\' / '\n'
+                // literal, which is wrong (surfaces in constant-expression
+                // defaults like `self::NS . '\\Default'`)
+                if (quote == '\'') {
+                    if (compiler_strings.processSingleQuoteEscapes(self.allocator, inner) catch null) |p| {
+                        self.string_allocs.append(self.allocator, p) catch break :blk .{ .string = inner };
+                        break :blk .{ .string = p };
+                    }
+                    break :blk .{ .string = inner };
                 }
-                break :blk .{ .string = raw };
+                if (std.mem.indexOfScalar(u8, inner, '\\') != null) {
+                    const p = compiler_strings.processEscapes(self.allocator, inner) catch break :blk .{ .string = inner };
+                    self.string_allocs.append(self.allocator, p) catch break :blk .{ .string = inner };
+                    break :blk .{ .string = p };
+                }
+                break :blk .{ .string = inner };
             },
             .true_literal => .{ .bool = true },
             .false_literal => .{ .bool = false },
@@ -851,6 +888,8 @@ pub const Compiler = struct {
                     switch (inner) {
                         .int => |v| break :blk Value{ .int = -v },
                         .float => |v| break :blk Value{ .float = -v },
+                        // -CONST where CONST is a deferred constant sentinel
+                        .string => break :blk self.makeDeferredExpr(.neg, inner, Value.null),
                         else => {},
                     }
                 }
@@ -858,6 +897,9 @@ pub const Compiler = struct {
                     const inner = self.evalConstExpr(n.data.lhs);
                     switch (inner) {
                         .int, .float => break :blk inner,
+                        // +CONST is numeric identity for an already-numeric
+                        // constant - resolve to the constant value itself
+                        .string => break :blk inner,
                         else => {},
                     }
                 }
@@ -898,16 +940,35 @@ pub const Compiler = struct {
                     };
                 }
                 // string concat in a constant default: 'a' . 'b', and chains.
-                // fold when both operands are concrete scalars (int/string/
-                // bool/null). a deferred-constant sentinel can't be folded
-                // here - those stay null (rare in defaults)
+                // fold when both operands are concrete scalars; otherwise defer
+                // (an operand is a constant sentinel resolved at call time)
                 if (tok.tag == .dot) {
-                    const ls = constScalarToStr(self, lhs) orelse break :blk .null;
-                    const rs = constScalarToStr(self, rhs) orelse break :blk .null;
-                    const joined = std.fmt.allocPrint(self.allocator, "{s}{s}", .{ ls, rs }) catch break :blk .null;
-                    self.string_allocs.append(self.allocator, joined) catch break :blk .null;
-                    break :blk .{ .string = joined };
+                    if (constScalarToStr(self, lhs)) |ls| {
+                        if (constScalarToStr(self, rhs)) |rs| {
+                            const joined = std.fmt.allocPrint(self.allocator, "{s}{s}", .{ ls, rs }) catch break :blk .null;
+                            self.string_allocs.append(self.allocator, joined) catch break :blk .null;
+                            break :blk .{ .string = joined };
+                        }
+                    }
+                    break :blk self.makeDeferredExpr(.concat, lhs, rhs);
                 }
+                // a compound arithmetic/bitwise expression that didn't fold -
+                // an operand is a deferred constant. defer the whole op
+                const dop: ?bytecode.DeferredExpr.Op = switch (tok.tag) {
+                    .pipe => .bor,
+                    .amp => .band,
+                    .caret => .bxor,
+                    .plus => .add,
+                    .minus => .sub,
+                    .star => .mul,
+                    .slash => .div,
+                    .percent => .mod,
+                    .lt_lt => .shl,
+                    .gt_gt => .shr,
+                    .star_star => .pow,
+                    else => null,
+                };
+                if (dop) |o| break :blk self.makeDeferredExpr(o, lhs, rhs);
                 break :blk .null;
             },
             .ternary => blk: {
