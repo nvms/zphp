@@ -623,6 +623,10 @@ pub const VM = struct {
             chunk_key: usize = 0,
             class_ptr: usize = 0,
             slot_index: u16 = 0xFFFF,
+            // non-empty when the cached property is typed - the fast path must
+            // then run the declared-type check/coercion before the slot write
+            prop_type: []const u8 = "",
+            decl_class: []const u8 = "",
         };
 
         const MethodIC = struct {
@@ -5476,7 +5480,7 @@ pub const VM = struct {
                     const sp_ip = self.currentFrame().ip;
                     const name_idx = self.readU16();
                     const prop_name = self.currentChunk().constants.items[name_idx].string;
-                    const val = try self.copyValue(self.pop());
+                    var val = try self.copyValue(self.pop());
                     const obj_val = self.pop();
                     if (obj_val == .object) {
                         const obj = obj_val.object;
@@ -5528,6 +5532,11 @@ pub const VM = struct {
                             const sp_entry = &ic.prop[sp_idx];
                             if (sp_entry.key == sp_ip and sp_entry.chunk_key == @intFromPtr(self.currentChunk()) and sp_entry.slot_index != 0xFFFF and sp_entry.class_ptr == @intFromPtr(obj.class_name.ptr)) {
                                 if (obj.slots) |s| {
+                                    // typed property: enforce/coerce before the
+                                    // slot write (IC stores the declared type)
+                                    if (sp_entry.prop_type.len > 0) {
+                                        if (try self.checkPropertyType(&val, sp_entry.prop_type, sp_entry.decl_class, prop_name)) continue;
+                                    }
                                     // a write resurrects a previously-unset
                                     // property; without this, init()'s prior
                                     // unset() leaves the slot looking absent
@@ -5606,13 +5615,20 @@ pub const VM = struct {
                                     }
                                 }
                             }
+                            // typed property: coerce/enforce the declared type
+                            // before storing (matches PHP weak/strict mode)
+                            if (vr.type_str.len > 0) {
+                                if (try self.checkPropertyType(&val, vr.type_str, vr.defining_class, prop_name)) continue;
+                            }
                             try obj.set(self.allocator, prop_name, val);
-                            // populate IC for slot-indexed writes
+                            // populate IC for slot-indexed writes. typed
+                            // properties are cached too - the fast path runs
+                            // checkPropertyType when prop_type is set
                             if (self.ic) |ic| {
                                 if (vr.visibility == .public and vr.set_visibility == .public) {
                                     const sp_idx = InlineCache.propIndex(@intFromPtr(self.currentChunk()), sp_ip);
                                     const si = if (obj.slot_layout != null) obj.getSlotIndex(prop_name) orelse @as(u16, 0xFFFF) else @as(u16, 0xFFFF);
-                                    ic.prop[sp_idx] = .{ .key = sp_ip, .chunk_key = @intFromPtr(self.currentChunk()), .class_ptr = @intFromPtr(obj.class_name.ptr), .slot_index = si };
+                                    ic.prop[sp_idx] = .{ .key = sp_ip, .chunk_key = @intFromPtr(self.currentChunk()), .class_ptr = @intFromPtr(obj.class_name.ptr), .slot_index = si, .prop_type = vr.type_str, .decl_class = vr.defining_class };
                                 }
                             }
                         }
@@ -10499,7 +10515,7 @@ pub const VM = struct {
         return self.isInstanceOf(caller_class, target_class) or self.isInstanceOf(target_class, caller_class);
     }
 
-    pub const VisResult = struct { visibility: ClassDef.Visibility, defining_class: []const u8, is_readonly: bool = false, set_visibility: ClassDef.Visibility = .public };
+    pub const VisResult = struct { visibility: ClassDef.Visibility, defining_class: []const u8, is_readonly: bool = false, set_visibility: ClassDef.Visibility = .public, type_str: []const u8 = "" };
 
     pub fn findPropertyVisibility(self: *VM, class_name: []const u8, prop_name: []const u8) VisResult {
         // PHP rule for private properties: each declaring class gets its own
@@ -10515,7 +10531,7 @@ pub const VM = struct {
             if (self.classes.get(sc)) |scls| {
                 for (scls.properties.items) |prop| {
                     if (std.mem.eql(u8, prop.name, prop_name) and prop.visibility == .private) {
-                        return .{ .visibility = prop.visibility, .defining_class = sc, .is_readonly = prop.is_readonly, .set_visibility = prop.set_visibility };
+                        return .{ .visibility = prop.visibility, .defining_class = sc, .is_readonly = prop.is_readonly, .set_visibility = prop.set_visibility, .type_str = prop.type_str };
                     }
                 }
             }
@@ -10524,7 +10540,7 @@ pub const VM = struct {
         while (current) |cn| {
             if (self.classes.get(cn)) |cls| {
                 for (cls.properties.items) |prop| {
-                    if (std.mem.eql(u8, prop.name, prop_name)) return .{ .visibility = prop.visibility, .defining_class = cn, .is_readonly = prop.is_readonly, .set_visibility = prop.set_visibility };
+                    if (std.mem.eql(u8, prop.name, prop_name)) return .{ .visibility = prop.visibility, .defining_class = cn, .is_readonly = prop.is_readonly, .set_visibility = prop.set_visibility, .type_str = prop.type_str };
                 }
                 current = cls.parent;
             } else break;
@@ -11716,6 +11732,72 @@ pub const VM = struct {
         var s = type_str;
         if (s.len > 0 and s[0] == '?') s = s[1..];
         return std.mem.eql(u8, s, "string");
+    }
+
+    // enforce a typed property's declared type on write. mirrors checkParamTypes:
+    // non-strict weak-coerces a compatible scalar, strict rejects a mismatch.
+    // returns true if a TypeError was thrown+dispatched (caller should continue)
+    noinline fn checkPropertyType(self: *VM, val: *Value, type_str: []const u8, class_name: []const u8, prop_name: []const u8) RuntimeError!bool {
+        if (type_str.len == 0) return false;
+        // fast path: the value's tag already exactly matches a simple scalar
+        // declared type - no coercion, no checkTypeMatch parse needed
+        switch (val.*) {
+            .int => if (std.mem.eql(u8, type_str, "int")) return false,
+            .float => if (std.mem.eql(u8, type_str, "float")) return false,
+            .string => if (std.mem.eql(u8, type_str, "string")) return false,
+            .bool => if (std.mem.eql(u8, type_str, "bool")) return false,
+            else => {},
+        }
+        // the assigning file's strict_types determines the mode
+        const strict = blk: {
+            if (self.frame_count >= 1) {
+                if (self.frames[self.frame_count - 1].func) |f| break :blk f.strict_types;
+            }
+            break :blk self.script_strict_types;
+        };
+        if (!self.checkTypeMatch(val.*, type_str)) {
+            if (!strict) {
+                if (try self.tryWeakCoerce(val.*, type_str)) |coerced| {
+                    val.* = coerced;
+                    return false;
+                }
+            }
+            // zphp's first-class callables (`f(...)`, Closure::fromCallable)
+            // yield a callable string/array rather than a real Closure object.
+            // accept them for a Closure-typed property so framework code that
+            // stores `f(...)` in a `\Closure` property works - consistent with
+            // how zphp invokes those values everywhere else
+            {
+                var t = type_str;
+                if (t.len > 0 and t[0] == '?') t = t[1..];
+                if (t.len > 0 and t[0] == '\\') t = t[1..];
+                if (std.mem.eql(u8, t, "Closure") and self.isValueCallable(val.*)) return false;
+            }
+            const msg = std.fmt.allocPrint(self.allocator, "Cannot assign {s} to property {s}::${s} of type {s}", .{ valueTypeName(val.*), class_name, prop_name, type_str }) catch return error.RuntimeError;
+            try self.strings.append(self.allocator, msg);
+            self.error_msg = msg;
+            if (try self.throwBuiltinException("TypeError", msg)) return true;
+            return error.RuntimeError;
+        }
+        // value satisfies the type; non-strict still coerces it to the exact
+        // declared scalar (a numeric string into an int property, etc.)
+        if (val.* == .object and self.typeStrAllowsString(type_str) and self.hasMethod(val.object.class_name, "__toString")) {
+            const s = try self.objectToString(val.object);
+            val.* = .{ .string = s };
+        } else if (val.* == .int and blk: {
+            var t = type_str;
+            if (t.len > 0 and t[0] == '?') t = t[1..];
+            break :blk std.mem.eql(u8, t, "float");
+        }) {
+            // int -> float widening is the one coercion strict_types allows
+            const fv: f64 = @floatFromInt(val.int);
+            val.* = .{ .float = fv };
+        } else if (!strict) {
+            if (try self.coerceToDeclaredScalar(val.*, type_str)) |coerced| {
+                val.* = coerced;
+            }
+        }
+        return false;
     }
 
     fn isAncestor(self: *VM, ancestor: []const u8, descendant: []const u8) bool {

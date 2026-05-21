@@ -643,7 +643,20 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                     const sp_obj = sp_obj_val.object;
                     const sp_idx = InlineCache.propIndex(@intFromPtr(frame.chunk), sp_ip);
                     const sp_entry = &ic.prop[sp_idx];
-                    if (sp_entry.key == sp_ip and sp_entry.chunk_key == @intFromPtr(frame.chunk) and sp_entry.class_ptr == @intFromPtr(sp_obj.class_name.ptr) and sp_entry.slot_index != 0xFFFF) {
+                    // typed properties (prop_type set) need a declared-type
+                    // check. when the value's tag already exactly matches a
+                    // simple scalar type the write needs no coercion and can
+                    // happen inline; anything else bails to runLoop's set_prop
+                    // which runs full checkPropertyType (coercion / TypeError)
+                    const sp_typed_ok = sp_entry.prop_type.len == 0 or switch (sp_val) {
+                        .int => std.mem.eql(u8, sp_entry.prop_type, "int"),
+                        .float => std.mem.eql(u8, sp_entry.prop_type, "float"),
+                        .string => std.mem.eql(u8, sp_entry.prop_type, "string"),
+                        .bool => std.mem.eql(u8, sp_entry.prop_type, "bool"),
+                        .array => std.mem.eql(u8, sp_entry.prop_type, "array"),
+                        else => false,
+                    };
+                    if (sp_typed_ok and sp_entry.key == sp_ip and sp_entry.chunk_key == @intFromPtr(frame.chunk) and sp_entry.class_ptr == @intFromPtr(sp_obj.class_name.ptr) and sp_entry.slot_index != 0xFFFF) {
                         if (sp_obj.slots) |s| {
                             const copied = if (sp_val == .array) try self.copyValue(sp_val) else sp_val;
                             // resurrect on write - mirrors runLoop set_prop
