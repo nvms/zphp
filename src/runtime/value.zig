@@ -711,20 +711,30 @@ pub const Value = union(enum) {
         return 0;
     }
 
+    // float -> int the way PHP's zend_dval_to_lval does it: NaN/Inf become 0,
+    // in-range finite floats truncate toward zero, and out-of-range floats wrap
+    // modulo 2^64 rather than saturating. matches PHP for huge casts like
+    // (int)9.5e18 == -8946744073709551616
+    pub fn dvalToLval(d: f64) i64 {
+        if (std.math.isNan(d) or std.math.isInf(d)) return 0;
+        // 2^63 as a double; any |d| below this fits an i64 directly
+        if (d >= -9.2233720368547758e18 and d < 9.2233720368547758e18) {
+            return @intFromFloat(@trunc(d));
+        }
+        const two_pow_64: f64 = 18446744073709551616.0;
+        var dmod = @rem(d, two_pow_64);
+        if (dmod < 0) dmod = @ceil(dmod) + two_pow_64;
+        if (dmod >= two_pow_64) dmod -= two_pow_64;
+        const u: u64 = @intFromFloat(dmod);
+        return @bitCast(u);
+    }
+
     pub fn toInt(v: Value) i64 {
         return switch (v) {
             .null => 0,
             .bool => |b| if (b) @as(i64, 1) else 0,
             .int => |i| i,
-            .float => |f| blk: {
-                // PHP returns 0 for NaN and Inf casts (with a warning we
-                // don't emit). out-of-range finite floats saturate at
-                // PHP_INT_MIN (matching PHP's negative-overflow result)
-                if (std.math.isNan(f) or std.math.isInf(f)) break :blk 0;
-                if (f >= @as(f64, @floatFromInt(std.math.maxInt(i64)))) break :blk std.math.minInt(i64);
-                if (f <= @as(f64, @floatFromInt(std.math.minInt(i64)))) break :blk std.math.minInt(i64);
-                break :blk @as(i64, @intFromFloat(f));
-            },
+            .float => |f| dvalToLval(f),
             .string => |s| parseLeadingInt(s),
             .array => |arr| if (arr.entries.items.len > 0) @as(i64, 1) else 0,
             .object, .generator, .fiber => 1,
@@ -820,7 +830,7 @@ pub const Value = union(enum) {
             .int => |i| .{ .int = i },
             .string => |s| .{ .string = s },
             .bool => |b| .{ .int = if (b) 1 else 0 },
-            .float => |f| .{ .int = @intFromFloat(f) },
+            .float => |f| .{ .int = dvalToLval(f) },
             .null => .{ .string = "" },
             .array, .object, .generator, .fiber => .{ .int = 0 },
         };
