@@ -32,3 +32,15 @@ var_dump(preg_match('/abc/X', 'abc'));         // 1
 // known modifiers still work in combination
 var_dump(preg_match('/^ABC$/im', "x\nabc\ny")); // 1
 var_dump(preg_match('/a . b/x', 'a.b'));         // 1 (x ignores whitespace)
+
+// leading whitespace before the delimiter is skipped (PHP does this), so an
+// indented multi-line regex literal parses with its real delimiter/modifier
+$indented = '
+    /
+        ^ \d+ $
+    /x';
+var_dump(preg_match($indented, '12345'));        // 1
+var_dump(preg_match("  /abc/i", 'ABC'));         // 1
+var_dump(preg_match("\n\t#xyz#", 'xyz'));        // 1
+echo preg_match_all('
+    / \w+ /x', 'one two three', $mw), "\n";       // 3

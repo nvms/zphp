@@ -130,7 +130,13 @@ const PatternInfo = struct {
     flags: u32,
 };
 
-fn parsePattern(raw: []const u8) ?PatternInfo {
+fn parsePattern(raw_in: []const u8) ?PatternInfo {
+    // PHP skips leading whitespace before reading the delimiter, so an
+    // indented multi-line regex literal (e.g. Symfony's HeaderUtils::split)
+    // still parses with its real delimiter
+    var ws: usize = 0;
+    while (ws < raw_in.len and std.ascii.isWhitespace(raw_in[ws])) ws += 1;
+    const raw = raw_in[ws..];
     if (raw.len < 2) return null;
     const delim = raw[0];
     if (delim == '\\' or std.ascii.isAlphanumeric(delim)) return null;
