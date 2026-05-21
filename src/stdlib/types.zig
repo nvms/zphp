@@ -2742,6 +2742,33 @@ fn native_filter_var_array(ctx: *NativeContext, args: []const Value) RuntimeErro
     return .{ .array = result };
 }
 
+// validates the integer part of a thousands-separated number: an optional
+// sign, then \d{1,3}(,\d{3})* - and no ',' anywhere after the decimal point
+fn validThousandGrouping(s: []const u8) bool {
+    var i: usize = 0;
+    if (i < s.len and (s[i] == '+' or s[i] == '-')) i += 1;
+    var int_end = i;
+    while (int_end < s.len and s[int_end] != '.' and s[int_end] != 'e' and s[int_end] != 'E') int_end += 1;
+    const int_part = s[i..int_end];
+    if (int_part.len == 0) return false;
+    var first = true;
+    var it = std.mem.splitScalar(u8, int_part, ',');
+    while (it.next()) |group| {
+        if (group.len == 0) return false;
+        for (group) |c| if (!std.ascii.isDigit(c)) return false;
+        if (first) {
+            if (group.len > 3) return false;
+            first = false;
+        } else {
+            if (group.len != 3) return false;
+        }
+    }
+    if (int_end < s.len) {
+        for (s[int_end..]) |c| if (c == ',') return false;
+    }
+    return true;
+}
+
 fn native_filter_var(_ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len < 1) return .{ .bool = false };
     const value = args[0];
@@ -2868,7 +2895,21 @@ fn native_filter_var(_ctx: *NativeContext, args: []const Value) RuntimeError!Val
         259 => { // FILTER_VALIDATE_FLOAT
             if (value == .float or value == .int) return value;
             const s = if (value == .string) value.string else return .{ .bool = false };
-            const f = std.fmt.parseFloat(f64, std.mem.trim(u8, s, " ")) catch return .{ .bool = false };
+            const trimmed = std.mem.trim(u8, s, " ");
+            var parse_src: []const u8 = trimmed;
+            var cleaned = std.ArrayListUnmanaged(u8){};
+            defer cleaned.deinit(_ctx.allocator);
+            if (std.mem.indexOfScalar(u8, trimmed, ',') != null) {
+                // a ',' is only valid with FILTER_FLAG_ALLOW_THOUSAND, and only
+                // as a \d{1,3}(,\d{3})* grouping in the integer part
+                if ((eff_flags & 8192) == 0) return .{ .bool = false };
+                if (!validThousandGrouping(trimmed)) return .{ .bool = false };
+                for (trimmed) |c| {
+                    if (c != ',') cleaned.append(_ctx.allocator, c) catch return .{ .bool = false };
+                }
+                parse_src = cleaned.items;
+            }
+            const f = std.fmt.parseFloat(f64, parse_src) catch return .{ .bool = false };
             return .{ .float = f };
         },
         258 => { // FILTER_VALIDATE_BOOLEAN
