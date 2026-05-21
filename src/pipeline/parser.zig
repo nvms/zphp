@@ -2711,6 +2711,37 @@ const Parser = struct {
             return self.addNode(.{ .tag = .static_prop_access, .main_token = var_tok, .data = .{ .lhs = class_node } });
         }
 
+        // dynamic static property: Class::$$var and Class::${expr} - the
+        // property name comes from an inner expression. produces the same
+        // node shape as Class::{expr} (main_token 0, rhs = name expression)
+        if (self.peek() == .dollar) {
+            _ = self.advance(); // $
+            const name_expr = if (self.peek() == .l_brace) blk: {
+                _ = self.advance(); // {
+                const e = try self.parseExpression();
+                _ = try self.expect(.r_brace);
+                break :blk e;
+            } else try self.parsePrimaryExpr();
+            if (self.peek() == .l_paren) {
+                _ = self.advance(); // (
+                var args = std.ArrayListUnmanaged(u32){};
+                defer args.deinit(self.allocator);
+                try args.append(self.allocator, name_expr);
+                if (self.peek() != .r_paren) {
+                    try args.append(self.allocator, try self.parseCallArg());
+                    while (self.peek() == .comma) {
+                        _ = self.advance();
+                        if (self.peek() == .r_paren) break;
+                        try args.append(self.allocator, try self.parseCallArg());
+                    }
+                }
+                _ = try self.expect(.r_paren);
+                const extra = try self.addExtraList(args.items);
+                return self.addNode(.{ .tag = .dynamic_static_call, .main_token = 0, .data = .{ .lhs = class_node, .rhs = extra } });
+            }
+            return self.addNode(.{ .tag = .static_prop_access, .main_token = 0, .data = .{ .lhs = class_node, .rhs = name_expr } });
+        }
+
         // ::class is a special class name resolution constant
         if (self.peek() == .kw_class) {
             const class_tok = self.advance();

@@ -231,6 +231,21 @@ pub fn compileAssign(self: *Compiler, node: Ast.Node) Error!void {
 
     if (target.tag == .static_prop_access) {
         const class_node = self.ast.nodes[target.data.lhs];
+        // dynamic property name: Class::${expr} = v, Class::$$var = v
+        if (target.main_token == 0 and target.data.rhs != 0 and op_tag == .equal) {
+            if (class_node.tag == .identifier or class_node.tag == .qualified_name) {
+                const cn = try resolveNodeClassName(self, class_node);
+                const ci = try self.addConstant(.{ .string = cn });
+                try self.emitOp(.constant);
+                try self.emitU16(ci);
+            } else {
+                try self.compileNode(target.data.lhs);
+            }
+            try self.compileNode(target.data.rhs);
+            try self.compileNode(node.data.rhs);
+            try self.emitOp(.set_static_prop_dyn);
+            return;
+        }
         const class_name = self.ast.tokenSlice(class_node.main_token);
         var prop_name = self.ast.tokenSlice(target.main_token);
         if (prop_name.len > 0 and prop_name[0] == '$') prop_name = prop_name[1..];
@@ -1210,9 +1225,16 @@ pub fn compileDynamicStaticCall(self: *Compiler, node: Ast.Node) Error!void {
 pub fn compileStaticPropAccess(self: *Compiler, node: Ast.Node) Error!void {
     const class_node = self.ast.nodes[node.data.lhs];
 
-    // Class::{expr} - dynamic constant/property name. parser sets main_token=0
-    // and stores the name expression in node.data.rhs
+    // Class::{expr} / Class::$$var / Class::${expr} - dynamic property name.
+    // parser sets main_token=0 and stores the name expression in node.data.rhs
     if (node.main_token == 0 and node.data.rhs != 0) {
+        // dynamic class expression too ($cls::${expr}) - both names runtime
+        if (class_node.tag != .identifier and class_node.tag != .qualified_name) {
+            try self.compileNode(node.data.lhs);
+            try self.compileNode(node.data.rhs);
+            try self.emitOp(.get_static_prop_dyn_both);
+            return;
+        }
         const class_name = try resolveNodeClassName(self, class_node);
         const class_idx = try self.addConstant(.{ .string = class_name });
         try self.compileNode(node.data.rhs);

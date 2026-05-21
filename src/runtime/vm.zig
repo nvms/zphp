@@ -7259,7 +7259,7 @@ pub const VM = struct {
 
                 .get_static_prop_dyn_name => {
                     const class_idx = self.readU16();
-                    const class_name = self.currentChunk().constants.items[class_idx].string;
+                    const class_name = self.resolveStaticClassName(self.currentChunk().constants.items[class_idx].string);
                     const name_val = self.pop();
                     const prop_name: []const u8 = if (name_val == .string) name_val.string else "";
                     if (prop_name.len == 0) {
@@ -7270,6 +7270,34 @@ pub const VM = struct {
                         self.push(.{ .string = class_name });
                     } else if (self.getStaticProp(class_name, prop_name)) |val| {
                         self.push(val);
+                    } else {
+                        if (!self.classes.contains(class_name) and !self.interfaces.contains(class_name)) {
+                            try self.tryAutoload(class_name);
+                        }
+                        if (self.getStaticProp(class_name, prop_name)) |val| {
+                            self.push(val);
+                        } else {
+                            self.push(.null);
+                        }
+                    }
+                },
+
+                .get_static_prop_dyn_both => {
+                    // both class and property names come from the stack:
+                    // class pushed first, then property name on top
+                    const name_val = self.pop();
+                    const class_val = self.pop();
+                    const prop_name: []const u8 = if (name_val == .string) name_val.string else "";
+                    const raw_class: []const u8 = switch (class_val) {
+                        .string => |s| s,
+                        .object => |o| o.class_name,
+                        else => "",
+                    };
+                    const class_name = self.resolveStaticClassName(raw_class);
+                    if (class_name.len == 0 or prop_name.len == 0) {
+                        self.push(.null);
+                    } else if (std.mem.eql(u8, prop_name, "class")) {
+                        self.push(.{ .string = class_name });
                     } else {
                         if (!self.classes.contains(class_name) and !self.interfaces.contains(class_name)) {
                             try self.tryAutoload(class_name);
@@ -7512,6 +7540,45 @@ pub const VM = struct {
                     if (target) |cls| {
                         try cls.static_props.put(self.allocator, prop_name, val);
                     }
+                },
+
+                .set_static_prop_dyn => {
+                    // stack: class name, property name, value (top)
+                    const rhs_val = self.pop();
+                    const name_v = self.pop();
+                    const class_v = self.pop();
+                    const prop_name: []const u8 = if (name_v == .string) name_v.string else "";
+                    var class_name: []const u8 = switch (class_v) {
+                        .string => |s| s,
+                        .object => |o| o.class_name,
+                        else => "",
+                    };
+                    class_name = self.resolveStaticClassName(class_name);
+                    if (class_name.len > 0 and prop_name.len > 0) {
+                        const stored = try self.copyValue(rhs_val);
+                        var target: ?*ClassDef = null;
+                        if (self.classes.getPtr(class_name)) |cls| {
+                            if (cls.static_props.contains(prop_name)) {
+                                target = cls;
+                            } else {
+                                var parent: ?[]const u8 = cls.parent;
+                                while (parent) |p| {
+                                    if (self.classes.getPtr(p)) |pcls| {
+                                        if (pcls.static_props.contains(prop_name)) {
+                                            target = pcls;
+                                            break;
+                                        }
+                                        parent = pcls.parent;
+                                    } else break;
+                                }
+                                if (target == null) target = cls;
+                            }
+                        }
+                        if (target) |cls| {
+                            try cls.static_props.put(self.allocator, prop_name, stored);
+                        }
+                    }
+                    self.push(rhs_val);
                 },
             }
         }

@@ -117,6 +117,8 @@ pub const OpCode = enum(u8) {
     set_static_prop, // u16: class name, u16: property name
     get_static_prop_dynamic, // u16: property name (class name on stack)
     get_static_prop_dyn_name, // u16: class name constant (property name string on stack)
+    get_static_prop_dyn_both, // no operand: class name then property name on stack
+    set_static_prop_dyn, // no operand: class name, property name, value on stack
 
     // scope
     get_global, // u16: var name constant (copy from frame 0)
