@@ -295,8 +295,26 @@ fn emitInterpolationExpr(self: *Compiler, expr: []const u8) (Allocator.Error || 
             const key_str = expr[j + 1 .. bracket_end];
             try emitArrayKeyAccess(self, key_str);
             j = bracket_end + 1;
+        } else if (expr[j] == '(') {
+            // variable function call inside interpolation: {$fn('arg')}
+            const paren_end = findMatchingParen(expr, j) orelse break;
+            const args_str = expr[j + 1 .. paren_end];
+            const arg_count = try emitInterpArgs(self, args_str);
+            try self.emitOp(.call_indirect);
+            try self.emitByte(arg_count);
+            j = paren_end + 1;
         } else if (j + 1 < expr.len and expr[j] == '-' and expr[j + 1] == '>') {
             j += 2;
+            // dynamic property name: {$obj->$var}
+            if (j < expr.len and expr[j] == '$') {
+                var k = j + 1;
+                while (k < expr.len and isVarChar(expr[k])) k += 1;
+                if (k == j + 1) break;
+                try self.emitGetVar(expr[j..k]);
+                try self.emitOp(.get_prop_dynamic);
+                j = k;
+                continue;
+            }
             var k = j;
             while (k < expr.len and isVarChar(expr[k])) k += 1;
             if (k == j) break;
