@@ -866,7 +866,19 @@ fn property_exists(ctx: *NativeContext, args: []const Value) RuntimeError!Value 
     if (args[0] == .object) {
         const obj = args[0].object;
         if (obj.getSlotIndex(prop_name) != null) return .{ .bool = true };
-        return .{ .bool = obj.properties.contains(prop_name) };
+        if (obj.properties.contains(prop_name)) return .{ .bool = true };
+        // a static property (or a declared instance property not yet
+        // materialized) of the object's class or an ancestor also counts
+        var current: ?[]const u8 = obj.class_name;
+        while (current) |name| {
+            const cls = ctx.vm.classes.get(name) orelse break;
+            if (cls.static_props.contains(prop_name)) return .{ .bool = true };
+            for (cls.properties.items) |p| {
+                if (std.mem.eql(u8, p.name, prop_name)) return .{ .bool = true };
+            }
+            current = cls.parent;
+        }
+        return .{ .bool = false };
     }
     if (args[0] == .string) {
         const raw = args[0].string;
