@@ -1692,16 +1692,28 @@ fn formatScientific(buf: *std.ArrayListUnmanaged(u8), a: std.mem.Allocator, val:
         return;
     }
     if (val == 0) {
-        try buf.appendSlice(a, "0.");
-        for (0..prec) |_| try buf.append(a, '0');
+        try buf.append(a, '0');
+        if (prec > 0) {
+            try buf.append(a, '.');
+            for (0..prec) |_| try buf.append(a, '0');
+        }
         try buf.append(a, e_char);
         try buf.appendSlice(a, "+0");
         return;
     }
     const is_neg = val < 0;
     const abs_val = @abs(val);
-    const exp_val: i32 = @intFromFloat(@floor(std.math.log10(abs_val)));
-    const mantissa = abs_val / std.math.pow(f64, 10.0, @as(f64, @floatFromInt(exp_val)));
+    var exp_val: i32 = @intFromFloat(@floor(std.math.log10(abs_val)));
+    var mantissa = abs_val / std.math.pow(f64, 10.0, @as(f64, @floatFromInt(exp_val)));
+    // when the mantissa rounded to `prec` decimals carries up to 10 (e.g.
+    // 9.9999 at precision 0) shift it back below 10 and bump the exponent.
+    // only used to detect the carry - formatFixedFloat still does the
+    // authoritative rounding on the unrounded value
+    const scale = std.math.pow(f64, 10.0, @as(f64, @floatFromInt(prec)));
+    if (@round(mantissa * scale) / scale >= 10.0) {
+        mantissa /= 10.0;
+        exp_val += 1;
+    }
 
     if (is_neg) try buf.append(a, '-');
     try formatFixedFloat(buf, a, mantissa, prec);
