@@ -922,6 +922,9 @@ fn native_is_callable(ctx: *NativeContext, args: []const Value) RuntimeError!Val
         return .{ .bool = false };
     }
     if (val == .object) {
+        var buf: [256]u8 = undefined;
+        const full = std.fmt.bufPrint(&buf, "{s}::__invoke", .{val.object.class_name}) catch "";
+        fillName(ctx, args, full);
         return .{ .bool = ctx.vm.hasMethod(val.object.class_name, "__invoke") };
     }
     if (val == .array) {
@@ -938,6 +941,11 @@ fn native_is_callable(ctx: *NativeContext, args: []const Value) RuntimeError!Val
         else
             return .{ .bool = false };
         const class_name = if (raw_class.len > 0 and raw_class[0] == '\\') raw_class[1..] else raw_class;
+        {
+            var name_buf: [256]u8 = undefined;
+            const resolved = std.fmt.bufPrint(&name_buf, "{s}::{s}", .{ class_name, method }) catch "";
+            fillName(ctx, args, resolved);
+        }
         if (ctx.vm.classes.get(class_name)) |cdef| {
             if (cdef.methods.get(method)) |mi| {
                 if (mi.visibility != .public) return .{ .bool = false };
