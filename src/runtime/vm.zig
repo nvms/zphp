@@ -8367,6 +8367,18 @@ pub const VM = struct {
         const class_modifiers = self.readByte();
         const name_idx = self.readU16();
         const class_name = self.currentChunk().constants.items[name_idx].string;
+        // PHP reserves the type keywords as class names
+        {
+            const reserved = [_][]const u8{ "int", "float", "bool", "string", "true", "false", "null", "void", "iterable", "object", "mixed", "never", "self", "parent" };
+            for (reserved) |r| {
+                if (std.ascii.eqlIgnoreCase(class_name, r)) {
+                    const msg = try std.fmt.allocPrint(self.allocator, "Cannot use \"{s}\" as a class name as it is reserved", .{class_name});
+                    try self.strings.append(self.allocator, msg);
+                    self.error_msg = msg;
+                    return error.RuntimeError;
+                }
+            }
+        }
         const start_line = self.readU32();
         const end_line = self.readU32();
         const doc_idx = self.readU16();
