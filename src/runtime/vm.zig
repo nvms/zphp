@@ -10994,7 +10994,16 @@ pub const VM = struct {
             arr.* = .{};
             try self.arrays.append(self.allocator, arr);
             for (val.array.entries.items) |entry| {
-                try arr.set(self.allocator, entry.key, entry.value);
+                // entries may themselves be deferred sentinels (constant refs,
+                // class constants, nested arrays) - resolve key and value
+                var key = entry.key;
+                if (key == .string and key.string.len > 4 and
+                    key.string[0] == 0 and key.string[1] == 'C' and
+                    key.string[2] == 'C' and key.string[3] == 0)
+                {
+                    key = Value.toArrayKey(try self.resolveDefault(.{ .string = key.string }));
+                }
+                try arr.set(self.allocator, key, try self.resolveDefault(entry.value));
             }
             return .{ .array = arr };
         }
