@@ -649,7 +649,10 @@ pub fn compileCall(self: *Compiler, node: Ast.Node) Error!void {
         // don't warn; the result is "not truthy" rather than "isset"
         if (args.len == 1) {
             const arg = self.ast.nodes[args[0]];
-            if (arg.tag == .array_access) {
+            // an array element or static-name property read uses isset-
+            // semantics here: an undefined key or an uninitialized typed
+            // property must not warn/throw, just count as empty
+            if (arg.tag == .array_access or (arg.tag == .property_access and !self.isDynamicProp(arg))) {
                 try compileCoalesceFetch(self, args[0]);
                 try self.emitOp(.cast_bool);
                 try self.emitOp(.not);
