@@ -515,7 +515,17 @@ fn native_file_get_contents(ctx: *NativeContext, args: []const Value) RuntimeErr
 fn native_file_put_contents(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len < 2 or args[0] != .string) return .{ .bool = false };
     const path = args[0].string;
-    const data = if (args[1] == .string) args[1].string else blk: {
+    const data = if (args[1] == .string) args[1].string else if (args[1] == .array) blk: {
+        // PHP writes an array argument as its elements concatenated, like
+        // implode('', $array) - each element coerced to string
+        var buf = std.ArrayListUnmanaged(u8){};
+        for (args[1].array.entries.items) |entry| {
+            try entry.value.format(&buf, ctx.allocator);
+        }
+        const s = try buf.toOwnedSlice(ctx.allocator);
+        try ctx.strings.append(ctx.allocator, s);
+        break :blk s;
+    } else blk: {
         var buf = std.ArrayListUnmanaged(u8){};
         try args[1].format(&buf, ctx.allocator);
         const s = try buf.toOwnedSlice(ctx.allocator);
