@@ -2202,6 +2202,12 @@ pub const VM = struct {
                         self.push(.{ .int = Value.toInt(a) ^ Value.toInt(b) });
                     }
                 },
+                .logical_xor => {
+                    // the `xor` keyword operator: boolify both sides, yield a bool
+                    const b = self.pop();
+                    const a = self.pop();
+                    self.push(.{ .bool = a.isTruthy() != b.isTruthy() });
+                },
                 .bit_not => {
                     const v = self.pop();
                     self.push(.{ .int = ~Value.toInt(v) });

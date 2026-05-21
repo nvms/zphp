@@ -401,7 +401,7 @@ pub fn compileBinaryOp(self: *Compiler, node: Ast.Node) Error!void {
         .lt_lt => .shift_left,
         .gt_gt => .shift_right,
         .lt_gt => .not_equal,
-        .kw_xor => .bit_xor,
+        .kw_xor => .logical_xor,
         else => unreachable,
     });
 }
