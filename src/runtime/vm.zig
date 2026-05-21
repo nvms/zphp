@@ -1963,11 +1963,23 @@ pub const VM = struct {
                             self.push(val);
                             break :blk;
                         }
-                        self.push(.null);
+                        // an undefined bare constant is a fatal Error in PHP 8,
+                        // not a silent null
+                        const msg = try std.fmt.allocPrint(self.allocator, "Undefined constant \"{s}\"", .{name});
+                        try self.strings.append(self.allocator, msg);
+                        if (try self.throwBuiltinException("Error", msg)) continue;
+                        return error.RuntimeError;
                     } else if (name.len > 2 and name[0] == '$' and name[1] == '_') {
                         self.push(self.request_vars.get(name) orelse .null);
                     } else if (self.request_vars.get(name)) |rv| {
                         self.push(rv);
+                    } else if (name.len > 0 and name[0] != '$') {
+                        // bare identifier that resolved to neither a variable
+                        // nor a constant - undefined constant, fatal in PHP 8
+                        const msg = try std.fmt.allocPrint(self.allocator, "Undefined constant \"{s}\"", .{name});
+                        try self.strings.append(self.allocator, msg);
+                        if (try self.throwBuiltinException("Error", msg)) continue;
+                        return error.RuntimeError;
                     } else {
                         self.push(.null);
                     }
