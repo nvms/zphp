@@ -1198,26 +1198,37 @@ fn native_get_class_methods(ctx: *NativeContext, args: []const Value) RuntimeErr
     // visibility: caller in same class sees all; subclass sees public+protected;
     // outside sees only public. ancestor private methods don't appear regardless.
     const caller = ctx.vm.currentDefiningClass();
-    var arr = try ctx.createArray();
+    const arr = try ctx.createArray();
     var seen = std.StringHashMapUnmanaged(void){};
     defer seen.deinit(ctx.allocator);
     var current: ?[]const u8 = class_name;
     var depth: usize = 0;
     while (current) |cn| {
         if (ctx.vm.classes.get(cn)) |cls| {
-            var iter = cls.methods.iterator();
-            while (iter.next()) |entry| {
-                const info = entry.value_ptr.*;
-                if (depth > 0 and info.visibility == .private) continue;
-                const visible = switch (info.visibility) {
-                    .public => true,
-                    .protected => caller != null and isInClassChain(ctx.vm, caller.?, class_name),
-                    .private => caller != null and std.mem.eql(u8, caller.?, cn),
-                };
-                if (!visible) continue;
-                if (!seen.contains(entry.key_ptr.*)) {
-                    try seen.put(ctx.allocator, entry.key_ptr.*, {});
-                    try arr.append(ctx.allocator, .{ .string = entry.key_ptr.* });
+            const emit = struct {
+                fn run(c: *NativeContext, a: *@import("../runtime/value.zig").PhpArray, s: *std.StringHashMapUnmanaged(void), name: []const u8, info: anytype, d: usize, cnn: []const u8, clsn: []const u8, callr: ?[]const u8) !void {
+                    if (d > 0 and info.visibility == .private) return;
+                    const visible = switch (info.visibility) {
+                        .public => true,
+                        .protected => callr != null and isInClassChain(c.vm, callr.?, clsn),
+                        .private => callr != null and std.mem.eql(u8, callr.?, cnn),
+                    };
+                    if (!visible) return;
+                    if (s.contains(name)) return;
+                    try s.put(c.allocator, name, {});
+                    try a.append(c.allocator, .{ .string = name });
+                }
+            }.run;
+            // declaration order when available, hash order as fallback
+            if (cls.method_order.items.len > 0) {
+                for (cls.method_order.items) |mname| {
+                    const info = cls.methods.get(mname) orelse continue;
+                    try emit(ctx, arr, &seen, mname, info, depth, cn, class_name, caller);
+                }
+            } else {
+                var iter = cls.methods.iterator();
+                while (iter.next()) |entry| {
+                    try emit(ctx, arr, &seen, entry.key_ptr.*, entry.value_ptr.*, depth, cn, class_name, caller);
                 }
             }
             current = cls.parent;
