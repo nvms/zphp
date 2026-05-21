@@ -185,7 +185,14 @@ fn buildAndAttachTrace(ctx: *NativeContext, obj: *@import("../runtime/value.zig"
                     const entry = try ctx.vm.allocator.create(PhpArray);
                     entry.* = .{};
                     try ctx.vm.arrays.append(ctx.vm.allocator, entry);
-                    try entry.set(ctx.vm.allocator, .{ .string = "function" }, .{ .string = f.name });
+                    const type_str: []const u8 = if (f.is_static) "::" else "->";
+                    if (std.mem.indexOf(u8, f.name, "::")) |sep| {
+                        try entry.set(ctx.vm.allocator, .{ .string = "function" }, .{ .string = f.name[sep + 2 ..] });
+                        try entry.set(ctx.vm.allocator, .{ .string = "class" }, .{ .string = f.name[0..sep] });
+                        try entry.set(ctx.vm.allocator, .{ .string = "type" }, .{ .string = type_str });
+                    } else {
+                        try entry.set(ctx.vm.allocator, .{ .string = "function" }, .{ .string = f.name });
+                    }
                     if (i > 0) {
                         const caller = ctx.vm.frames[i - 1];
                         const ip = if (caller.ip > 0) caller.ip - 1 else 0;
@@ -285,10 +292,14 @@ fn exceptionGetTraceAsString(ctx: *NativeContext, _: []const Value) RuntimeError
             const fn_v = e.get(.{ .string = "function" });
             const line_v = e.get(.{ .string = "line" });
             const file_v = e.get(.{ .string = "file" });
+            const class_v = e.get(.{ .string = "class" });
+            const type_v = e.get(.{ .string = "type" });
             const fn_s = if (fn_v == .string) fn_v.string else "?";
+            const class_s = if (class_v == .string) class_v.string else "";
+            const type_s = if (type_v == .string) type_v.string else "";
             const file_s = if (file_v == .string) file_v.string else "";
             const line_n: i64 = if (line_v == .int) line_v.int else 0;
-            try buf.writer(ctx.allocator).print("#{d} {s}({d}): {s}()\n", .{ i, file_s, line_n, fn_s });
+            try buf.writer(ctx.allocator).print("#{d} {s}({d}): {s}{s}{s}()\n", .{ i, file_s, line_n, class_s, type_s, fn_s });
         }
         const n = t.array.entries.items.len;
         try buf.writer(ctx.allocator).print("#{d} {{main}}", .{n});

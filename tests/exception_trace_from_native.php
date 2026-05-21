@@ -37,6 +37,34 @@ try {
     echo $e->getTraceAsString(), "\n";
 }
 
+echo "--- thrown from an instance method ---\n";
+class Worker {
+    public function process(): int { return strlen([]); }
+}
+function callWorker() {
+    return (new Worker)->process();
+}
+try {
+    callWorker();
+} catch (\TypeError $e) {
+    echo $e->getTraceAsString(), "\n";
+    foreach ($e->getTrace() as $i => $f) {
+        echo "#$i function=", $f['function'],
+             " class=", $f['class'] ?? '-',
+             " type=", $f['type'] ?? '-', "\n";
+    }
+}
+
+echo "--- user throw from an instance method ---\n";
+class Validator {
+    public function check(): void { throw new \DomainException('invalid'); }
+}
+try {
+    (new Validator)->check();
+} catch (\DomainException $e) {
+    echo $e->getTraceAsString(), "\n";
+}
+
 echo "--- a user throw still works ---\n";
 function userThrowInner() { throw new \RuntimeException('boom'); }
 function userThrowOuter() { userThrowInner(); }

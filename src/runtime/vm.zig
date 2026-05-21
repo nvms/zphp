@@ -7648,7 +7648,14 @@ pub const VM = struct {
                         const entry = try self.allocator.create(PhpArray);
                         entry.* = .{};
                         try self.arrays.append(self.allocator, entry);
-                        try entry.set(self.allocator, .{ .string = "function" }, .{ .string = f.name });
+                        const type_str: []const u8 = if (f.is_static) "::" else "->";
+                        if (std.mem.indexOf(u8, f.name, "::")) |sep| {
+                            try entry.set(self.allocator, .{ .string = "function" }, .{ .string = f.name[sep + 2 ..] });
+                            try entry.set(self.allocator, .{ .string = "class" }, .{ .string = f.name[0..sep] });
+                            try entry.set(self.allocator, .{ .string = "type" }, .{ .string = type_str });
+                        } else {
+                            try entry.set(self.allocator, .{ .string = "function" }, .{ .string = f.name });
+                        }
                         if (i > 0) {
                             const caller = self.frames[i - 1];
                             const cip = if (caller.ip > 0) caller.ip - 1 else 0;
