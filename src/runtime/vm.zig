@@ -396,6 +396,12 @@ pub const VM = struct {
     arrays: std.ArrayListUnmanaged(*PhpArray) = .{},
     objects: std.ArrayListUnmanaged(*PhpObject) = .{},
     next_object_id: u32 = 0,
+    // object refcounting (Stage 1): objects whose refcount has hit 0 and are
+    // awaiting __destruct. drained at statement boundaries / run end so the
+    // destructor never runs while the just-released handle is still in use
+    pending_destruct: std.ArrayListUnmanaged(*PhpObject) = .{},
+    destruct_cursor: usize = 0,
+    draining_destructors: bool = false,
     // pointer to the $GLOBALS PhpArray for the current run, used so writes
     // to $GLOBALS[key] = val also propagate to the top frame's variable
     // table (matching PHP's superglobal semantics)
@@ -1566,6 +1572,7 @@ pub const VM = struct {
         self.error_handler_stack.deinit(self.allocator);
         self.arrays.deinit(self.allocator);
         self.objects.deinit(self.allocator);
+        self.pending_destruct.deinit(self.allocator);
         self.generators.deinit(self.allocator);
         self.fibers.deinit(self.allocator);
         self.ref_cells.deinit(self.allocator);
@@ -1726,6 +1733,8 @@ pub const VM = struct {
         // matching PHP. internal stdlib-init objects keep the ids they already
         // got (some of those are case singletons we hold references to)
         self.next_object_id = 0;
+        // run any destructors still queued at script end, on success or error
+        defer self.drainPendingDestruct();
         try self.run();
     }
 
@@ -1921,7 +1930,12 @@ pub const VM = struct {
                 .op_null => self.push(.null),
                 .op_true => self.push(.{ .bool = true }),
                 .op_false => self.push(.{ .bool = false }),
-                .pop => _ = self.pop(),
+                .pop => {
+                    // a discarded expression-statement result - a statement
+                    // boundary, so run any destructors queued by this statement
+                    _ = self.pop();
+                    if (self.pending_destruct.items.len > 0) self.drainPendingDestruct();
+                },
                 .dup => self.push(self.stack[self.sp - 1]),
                 .swap => {
                     const tmp = self.stack[self.sp - 1];
@@ -12807,7 +12821,11 @@ pub const VM = struct {
 
     fn pop(self: *VM) Value {
         self.sp -= 1;
-        return self.stack[self.sp];
+        const v = self.stack[self.sp];
+        // the stack slot held a reference; dropping it releases (deferred -
+        // the returned handle stays valid for the caller until the next drain)
+        self.releaseValue(v);
+        return v;
     }
 
     fn peek(self: *const VM) Value {
@@ -12823,20 +12841,44 @@ pub const VM = struct {
         obj.refcount +%= 1;
     }
 
-    // an object reference was dropped. at zero the object is unreachable -
-    // run __destruct exactly once. memory stays arena-owned (reclaimed at
-    // request end); the refcount only governs destructor timing
+    // an object reference was dropped. at zero the object is unreachable, but
+    // __destruct is NOT run inline: the just-dropped handle is usually still
+    // live in the caller's hands (pop() returns the value it released, an
+    // overwrite still has the old value in a local). the object is queued and
+    // drainPendingDestruct runs the destructor at the next safe point. if the
+    // object is retained again before the drain it is rescued - the drain
+    // re-checks refcount, so a transient dip to 0 never mis-fires __destruct
     pub fn objRelease(self: *VM, obj: *PhpObject) void {
         if (obj.refcount == 0) return;
         obj.refcount -= 1;
         if (obj.refcount != 0 or obj.destructed) return;
-        obj.destructed = true;
-        if (self.hasMethod(obj.class_name, "__destruct")) {
-            _ = self.callMethod(obj, "__destruct", &.{}) catch {
-                // a throwing destructor must not corrupt the drop site it was
-                // called from - swallow (Stage 1; revisit for full fidelity)
-                self.pending_exception = null;
-            };
+        self.pending_destruct.append(self.allocator, obj) catch {};
+    }
+
+    // run __destruct for every queued object still at refcount 0. called at
+    // statement boundaries and at run end. reentrancy-guarded: a destructor
+    // runs a nested runLoop whose own drains are absorbed into this outer
+    // pass, which keeps consuming as destructors queue further objects
+    pub fn drainPendingDestruct(self: *VM) void {
+        if (self.draining_destructors) return;
+        self.draining_destructors = true;
+        defer {
+            self.draining_destructors = false;
+            self.pending_destruct.clearRetainingCapacity();
+            self.destruct_cursor = 0;
+        }
+        while (self.destruct_cursor < self.pending_destruct.items.len) {
+            const obj = self.pending_destruct.items[self.destruct_cursor];
+            self.destruct_cursor += 1;
+            if (obj.refcount != 0 or obj.destructed) continue;
+            obj.destructed = true;
+            if (self.hasMethod(obj.class_name, "__destruct")) {
+                _ = self.callMethod(obj, "__destruct", &.{}) catch {
+                    // a throwing destructor must not corrupt the drop site it
+                    // was called from - swallow (Stage 1; revisit for fidelity)
+                    self.pending_exception = null;
+                };
+            }
         }
     }
 
