@@ -2683,13 +2683,26 @@ pub const VM = struct {
                 },
                 .return_val => {
                     var result = self.pop();
+                    // the popped return value is in transit: off the operand
+                    // stack, not yet re-anchored in the caller. checkReturnType
+                    // can autoload the return-type class (runs PHP -> a
+                    // statement-boundary drain), and popFrame releases the
+                    // callee's frame vars. either can drop result to refcount 0
+                    // and a drain would destruct it mid-flight. pin it across
+                    // the whole sequence; push re-anchors, then unpin
+                    const ret_pin: ?*PhpObject = if (result == .object) result.object else null;
+                    if (ret_pin) |p| p.refcount +%= 1;
                     if (g_type_info.count() > 0) {
-                        if (try self.checkReturnType(&result)) continue;
+                        if (try self.checkReturnType(&result)) {
+                            if (ret_pin) |p| self.objRelease(p);
+                            continue;
+                        }
                     }
                     const saved_entry_sp = self.currentFrame().entry_sp;
                     try self.popFrame();
                     if (saved_entry_sp > 0) self.sp = saved_entry_sp;
                     self.push(result);
+                    if (ret_pin) |p| self.objRelease(p);
                     if (self.frame_count <= base_frame) return;
                 },
                 .return_void => {
@@ -13028,7 +13041,6 @@ pub const VM = struct {
 
     // an object handle was copied into a new reference
     pub fn objRetain(obj: *PhpObject) void {
-        if (std.mem.eql(u8, obj.class_name, "Illuminate\\View\\View")) std.debug.print("RET {x} {d}\n", .{@intFromPtr(obj), obj.refcount});
         obj.refcount +%= 1;
     }
 
@@ -13048,7 +13060,6 @@ pub const VM = struct {
     // object is retained again before the drain it is rescued - the drain
     // re-checks refcount, so a transient dip to 0 never mis-fires __destruct
     pub fn objRelease(self: *VM, obj: *PhpObject) void {
-        if (std.mem.eql(u8, obj.class_name, "Illuminate\\View\\View")) std.debug.print("REL {x} {d}\n", .{@intFromPtr(obj), obj.refcount});
         if (obj.refcount == 0) return;
         obj.refcount -= 1;
         if (obj.refcount != 0 or obj.destructed) return;
