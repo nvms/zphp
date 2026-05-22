@@ -7069,9 +7069,13 @@ pub const VM = struct {
                         return error.RuntimeError;
                     };
 
-                    // if we have $this, pass it through to the called method
+                    // PHP forwards $this into a Class::method() call only when
+                    // the target is a non-static method (a scoped instance
+                    // call). a static target gets no $this - forwarding the
+                    // caller's $this corrupts late-static-binding inside it
+                    const sc_target_is_static = if (self.functions.get(full_name)) |scf| scf.is_static else false;
                     if (this_val) |tv| {
-                        if (tv == .object) {
+                        if (tv == .object and !sc_target_is_static) {
                             if (self.functions.get(full_name)) |func| {
                                 if (func.is_generator) {
                                     try self.callStaticFunction(full_name, arg_count, effective_called);

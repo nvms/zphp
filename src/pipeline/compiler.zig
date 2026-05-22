@@ -208,6 +208,11 @@ pub const Compiler = struct {
     trait_properties: std.StringHashMapUnmanaged([]const u32) = .{},
     local_slots: std.StringHashMapUnmanaged(u16) = .{},
     next_slot: u16 = 0,
+    // set on an arrow-function sub-compiler: points at the enclosing
+    // compiler. an arrow captures a parent variable lazily - the first time
+    // its body references one - so only the variables the body actually uses
+    // are captured (PHP semantics), not the whole enclosing scope
+    arrow_parent: ?*Compiler = null,
     type_hints: std.ArrayListUnmanaged(TypeHint) = .{},
     function_attrs: std.ArrayListUnmanaged(FunctionAttrEntry) = .{},
     new_defaults: std.ArrayListUnmanaged(*bytecode.NewDefault) = .{},
@@ -1232,8 +1237,37 @@ pub const Compiler = struct {
     // variable emit helpers
     // ==================================================================
 
+    // for an arrow sub-compiler: is `name` bound in some enclosing scope, so
+    // the arrow may capture it? walks the arrow_parent chain and forces every
+    // intermediate arrow to register a slot so the capture chains through
+    // (handles `fn() => fn() => $x`)
+    fn resolveArrowCapture(self: *Compiler, name: []const u8) bool {
+        const parent = self.arrow_parent orelse return false;
+        if (parent.local_slots.contains(name)) return true;
+        if (parent.arrow_parent != null and resolveArrowCapture(parent, name)) {
+            _ = parent.getOrCreateSlot(name);
+            return true;
+        }
+        return false;
+    }
+
+    // resolve `name` to a local slot, lazily capturing it into an arrow
+    // function when it is a variable used from the enclosing scope. returns
+    // null when the name is not (and cannot become) a captured local
+    pub fn arrowCaptureSlot(self: *Compiler, name: []const u8) ?u16 {
+        if (self.arrow_parent == null) return null;
+        if (name.len == 0 or name[0] != '$') return null;
+        if (!self.resolveArrowCapture(name)) return null;
+        return self.getOrCreateSlot(name);
+    }
+
     pub fn emitGetVar(self: *Compiler, name: []const u8) Error!void {
         if (self.local_slots.get(name)) |slot| {
+            try self.emitOp(.get_local);
+            try self.emitU16(slot);
+            return;
+        }
+        if (self.arrowCaptureSlot(name)) |slot| {
             try self.emitOp(.get_local);
             try self.emitU16(slot);
             return;

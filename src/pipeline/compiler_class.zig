@@ -878,14 +878,12 @@ pub fn compileClosure(self: *Compiler, node: Ast.Node) Error!void {
     }
     _ = sub.getOrCreateSlot("$this");
 
-    // arrow functions: pre-register parent scope variables so they compile as
-    // get_local instead of get_var, enabling locals-only execution path
-    if (is_arrow) {
-        var parent_it = self.local_slots.iterator();
-        while (parent_it.next()) |entry| {
-            _ = sub.getOrCreateSlot(entry.key_ptr.*);
-        }
-    }
+    // arrow functions implicitly capture by value - but only the variables
+    // the body actually uses. point the sub-compiler at this scope so a
+    // parent variable is captured lazily on first reference (see
+    // arrowCaptureSlot); capturing the whole scope would extend the lifetime
+    // of unused objects and fire their __destruct late
+    if (is_arrow) sub.arrow_parent = self;
 
     try sub.compileNode(body_node);
     for (sub.pending_gotos.items) |pg| {
@@ -985,7 +983,9 @@ pub fn compileClosure(self: *Compiler, node: Ast.Node) Error!void {
         try self.emitU16(var_idx);
     }
 
-    // arrow functions: emit closure_bind for all captured outer-scope variables
+    // arrow functions: bind the outer-scope variables the body captured. a
+    // sub slot is a capture only when the name also exists in this (the
+    // enclosing) scope - the arrow's own params and locals are not captures
     if (is_arrow) {
         for (slot_names) |sn| {
             var is_param = false;
@@ -994,6 +994,7 @@ pub fn compileClosure(self: *Compiler, node: Ast.Node) Error!void {
             }
             if (is_param) continue;
             if (std.mem.eql(u8, sn, "$this")) continue;
+            if (self.local_slots.get(sn) == null) continue;
             const sn_idx = try self.addConstant(.{ .string = sn });
             try self.emitOp(.closure_bind);
             try self.emitU16(sn_idx);

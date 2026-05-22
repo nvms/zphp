@@ -121,6 +121,8 @@ pub fn compileAssign(self: *Compiler, node: Ast.Node) Error!void {
                 var slot_opt: ?u16 = null;
                 if (self.local_slots.get(var_name)) |s| {
                     slot_opt = s;
+                } else if (self.arrowCaptureSlot(var_name)) |s| {
+                    slot_opt = s;
                 } else if (!self.inFunctionScope() and var_name.len > 0 and var_name[0] == '$') {
                     slot_opt = self.getOrCreateSlot(var_name);
                 }
@@ -986,6 +988,11 @@ pub fn compileVivifyChain(self: *Compiler, node_idx: u32) Error!void {
 
 fn emitEnsureArray(self: *Compiler, name: []const u8) Error!void {
     if (self.local_slots.get(name)) |slot| {
+        try self.emitOp(.ensure_array_local);
+        try self.emitU16(slot);
+        return;
+    }
+    if (self.arrowCaptureSlot(name)) |slot| {
         try self.emitOp(.ensure_array_local);
         try self.emitU16(slot);
         return;
