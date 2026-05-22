@@ -382,6 +382,12 @@ pub const PhpObject = struct {
     }
 
     pub fn set(self: *PhpObject, allocator: std.mem.Allocator, name: []const u8, value: Value) !void {
+        // an object stored as a property is a new reference (Stage 1) - this
+        // is the universal property-store choke point, so native code calling
+        // obj.set retains too. the overwritten old value is not released here
+        // (no VM access); the set_prop opcode does overwrite-release, native
+        // overwrites leak (rare). object teardown releases all property objects
+        if (value == .object) value.object.retain();
         // a write resurrects a previously-unset property
         self.clearUnset(name);
         if (self.slots) |s| {

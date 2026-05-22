@@ -2406,7 +2406,7 @@ pub const VM = struct {
                     } else if (name_val == .object) {
                         var args_buf: [16]Value = undefined;
                         for (0..ac) |i| args_buf[i] = self.stack[self.sp - ac + i];
-                        self.sp -= ac + 1;
+                        self.dropN(ac + 1);
                         const result = try self.callMethod(name_val.object, "__invoke", args_buf[0..ac]);
                         self.push(result);
                     } else if (name_val == .array) {
@@ -2424,7 +2424,7 @@ pub const VM = struct {
                         const method = method_val.string;
                         var args_buf: [16]Value = undefined;
                         for (0..ac) |i| args_buf[i] = self.stack[self.sp - ac + i];
-                        self.sp -= ac + 1;
+                        self.dropN(ac + 1);
                         var ctx = self.makeContext(null);
                         const result = if (target == .object)
                             try ctx.vm.callMethod(target.object, method, args_buf[0..ac])
@@ -4368,6 +4368,12 @@ pub const VM = struct {
                     else
                         .null;
                     const cap_pos: u32 = @intCast(self.captures.items.len);
+                    // a by-value capture holds a reference (Stage 1): the
+                    // closure outlives the scope that created it, so the
+                    // captured object must stay alive. captures persist in
+                    // self.captures until request end - this retain is
+                    // consumed by the end-of-request reset / shutdown sweep
+                    retainValue(val);
                     try self.captures.append(self.allocator, .{
                         .closure_name = closure_name,
                         .var_name = var_name,
@@ -5121,12 +5127,12 @@ pub const VM = struct {
                     if (std.mem.eql(u8, class_name, "Fiber")) {
                         const ac: usize = arg_count;
                         if (ac < 1) {
-                            self.sp -= ac;
+                            self.dropN(ac);
                             if (try self.throwBuiltinException("Error", "Fiber::__construct() expects a callable")) continue;
                             return error.RuntimeError;
                         }
                         const callable = self.stack[self.sp - ac];
-                        self.sp -= ac;
+                        self.dropN(ac);
                         const fiber = try self.allocator.create(Fiber);
                         fiber.* = .{ .callable = callable };
                         try self.fibers.append(self.allocator, fiber);
@@ -5140,7 +5146,7 @@ pub const VM = struct {
                     }
                     if (self.interfaces.contains(class_name)) {
                         const ac_drop: usize = arg_count;
-                        self.sp -= ac_drop;
+                        self.dropN(ac_drop);
                         const msg = try std.fmt.allocPrint(self.allocator, "Cannot instantiate interface {s}", .{class_name});
                         try self.strings.append(self.allocator, msg);
                         if (try self.throwBuiltinException("Error", msg)) continue;
@@ -5148,7 +5154,7 @@ pub const VM = struct {
                     }
                     if (!self.classes.contains(class_name)) {
                         const ac_drop: usize = arg_count;
-                        self.sp -= ac_drop;
+                        self.dropN(ac_drop);
                         const msg = try std.fmt.allocPrint(self.allocator, "Class \"{s}\" not found", .{class_name});
                         try self.strings.append(self.allocator, msg);
                         if (try self.throwBuiltinException("Error", msg)) continue;
@@ -5157,7 +5163,7 @@ pub const VM = struct {
                     if (self.classes.get(class_name)) |cls_ref| {
                         if (cls_ref.is_abstract) {
                             const ac_drop: usize = arg_count;
-                            self.sp -= ac_drop;
+                            self.dropN(ac_drop);
                             const msg = try std.fmt.allocPrint(self.allocator, "Cannot instantiate abstract class {s}", .{class_name});
                             try self.strings.append(self.allocator, msg);
                             if (try self.throwBuiltinException("Error", msg)) continue;
@@ -5181,7 +5187,7 @@ pub const VM = struct {
                         // visibility check on the ctor itself (see other 'new' site)
                         const mvr = self.findMethodVisibility(class_name, "__construct");
                         if (!self.checkVisibility(mvr.defining_class, mvr.visibility)) {
-                            self.sp -= ac;
+                            self.dropN(ac);
                             const suffix = self.visScopeSuffix();
                             const msg = try std.fmt.allocPrint(self.allocator, "Call to {s} {s}::__construct(){s}", .{ @tagName(mvr.visibility), mvr.defining_class, suffix });
                             try self.strings.append(self.allocator, msg);
@@ -5192,7 +5198,7 @@ pub const VM = struct {
                             // native constructor
                             var args_buf: [16]Value = undefined;
                             for (0..ac) |i| args_buf[i] = self.stack[self.sp - ac + i];
-                            self.sp -= ac;
+                            self.dropN(ac);
 
                             var tmp_vars: std.StringHashMapUnmanaged(Value) = .{};
                             try tmp_vars.put(self.allocator, "$this", .{ .object = obj });
@@ -5235,7 +5241,7 @@ pub const VM = struct {
                             self.deinitFrameSlot(self.frame_count);
                         } else if (self.functions.get(cn)) |func| {
                             if (ac < func.required_params) {
-                                self.sp -= ac;
+                                self.dropN(ac);
                                 const msg = try self.formatTooFewArgs(cn, ac, func);
                                 if (try self.throwBuiltinException("ArgumentCountError", msg)) continue;
                                 self.setErrorMsg("Fatal error: Uncaught ArgumentCountError: {s}\n", .{msg});
@@ -5281,7 +5287,7 @@ pub const VM = struct {
                                         if (i < func.defaults.len) ctor_locals[i + 1] = try self.resolveDefault(func.defaults[i]);
                                     }
                                 }
-                                self.sp -= ac;
+                                self.dropN(ac);
                                 self.frames[self.frame_count] = .{ .chunk = &func.chunk, .ip = 0, .vars = .{}, .locals = ctor_locals, .func = func };
                                 self.frames[self.frame_count].entry_sp = self.sp;
                     self.frame_count += 1; self.retainFrameObjects(self.frame_count - 1);
@@ -5324,7 +5330,7 @@ pub const VM = struct {
                                         try new_vars.put(self.allocator, func.params[i], try self.transferArg(self.stack[self.sp - ac + i]));
                                     }
                                 }
-                                self.sp -= ac;
+                                self.dropN(ac);
                                 if (!func.is_variadic and ac < func.arity) for (ac..func.arity) |i| {
                                     const default = if (i < func.defaults.len) try self.resolveDefault(func.defaults[i]) else Value.null;
                                     try new_vars.put(self.allocator, func.params[i], default);
@@ -5343,10 +5349,10 @@ pub const VM = struct {
                                 _ = self.pop();
                             }
                         } else {
-                            self.sp -= ac;
+                            self.dropN(ac);
                         }
                     } else {
-                        self.sp -= ac;
+                        self.dropN(ac);
                     }
 
                     self.push(.{ .object = obj });
@@ -5375,7 +5381,7 @@ pub const VM = struct {
                     const class_name = if (raw_class_name.len > 0 and raw_class_name[0] == '\\') raw_class_name[1..] else raw_class_name;
                     if (!self.classes.contains(class_name)) try self.tryAutoload(class_name);
                     if (!self.classes.contains(class_name)) {
-                        self.sp -= ac + 1;
+                        self.dropN(ac + 1);
                         const msg = try std.fmt.allocPrint(self.allocator, "Class \"{s}\" not found", .{class_name});
                         try self.strings.append(self.allocator, msg);
                         if (try self.throwBuiltinException("Error", msg)) continue;
@@ -5397,7 +5403,7 @@ pub const VM = struct {
                         // patterns. method_call already checks; this is the new path
                         const mvr = self.findMethodVisibility(class_name, "__construct");
                         if (!self.checkVisibility(mvr.defining_class, mvr.visibility)) {
-                            self.sp -= ac + 1;
+                            self.dropN(ac + 1);
                             const suffix = self.visScopeSuffix();
                             const msg = try std.fmt.allocPrint(self.allocator, "Call to {s} {s}::__construct(){s}", .{ @tagName(mvr.visibility), mvr.defining_class, suffix });
                             try self.strings.append(self.allocator, msg);
@@ -5407,7 +5413,7 @@ pub const VM = struct {
                         if (self.native_fns.get(cn)) |native| {
                             var args_buf: [16]Value = undefined;
                             for (0..ac) |i| args_buf[i] = self.stack[self.sp - ac + i];
-                            self.sp -= ac + 1;
+                            self.dropN(ac + 1);
                             var tmp_vars: std.StringHashMapUnmanaged(Value) = .{};
                             try tmp_vars.put(self.allocator, "$this", .{ .object = obj });
                             self.frames[self.frame_count] = .{ .chunk = self.currentChunk(), .ip = self.currentFrame().ip, .vars = tmp_vars };
@@ -5446,7 +5452,7 @@ pub const VM = struct {
                             for (0..@min(ac, func.arity)) |i| {
                                 try new_vars.put(self.allocator, func.params[i], try self.transferArg(self.stack[self.sp - ac + i]));
                             }
-                            self.sp -= ac + 1;
+                            self.dropN(ac + 1);
                             for (@min(ac, func.arity)..func.arity) |i| {
                                 const default = if (i < func.defaults.len) try self.resolveDefault(func.defaults[i]) else Value.null;
                                 try new_vars.put(self.allocator, func.params[i], default);
@@ -5464,10 +5470,10 @@ pub const VM = struct {
                             }
                             _ = self.pop();
                         } else {
-                            self.sp -= ac + 1;
+                            self.dropN(ac + 1);
                         }
                     } else {
-                        self.sp -= ac + 1;
+                        self.dropN(ac + 1);
                     }
                     self.push(.{ .object = obj });
                 },
@@ -5684,7 +5690,10 @@ pub const VM = struct {
                     const sp_ip = self.currentFrame().ip;
                     const name_idx = self.readU16();
                     const prop_name = self.currentChunk().constants.items[name_idx].string;
-                    var val = try self.copyValue(self.pop());
+                    // transferArg: clone an array, leave an object raw - the
+                    // property store retains the object exactly once (obj.set
+                    // on the slow path, retainValue on the IC path)
+                    var val = try self.transferArg(self.pop());
                     const obj_val = self.pop();
                     if (obj_val == .object) {
                         const obj = obj_val.object;
@@ -5746,9 +5755,11 @@ pub const VM = struct {
                                     // unset() leaves the slot looking absent
                                     // to get_prop even after we write to it
                                     obj.clearUnset(prop_name);
-                                    // overwrite-release: drop the object the
-                                    // property slot previously held (Stage 1)
+                                    // the IC path writes the slot directly
+                                    // (bypassing obj.set), so retain here;
+                                    // release the overwritten old value
                                     const sp_ic_old = s[sp_entry.slot_index];
+                                    retainValue(val);
                                     s[sp_entry.slot_index] = val;
                                     self.releaseValue(sp_ic_old);
                                     self.push(val);
@@ -5864,8 +5875,8 @@ pub const VM = struct {
                     // generator method dispatch
                     if (obj_val == .generator) {
                         const gen = obj_val.generator;
-                        self.sp -= ac;
-                        self.sp -= 1; // pop generator
+                        self.dropN(ac);
+                        self.dropN(1); // pop generator
                         if (std.mem.eql(u8, method_name, "current")) {
                             // auto-start if not yet started
                             if (gen.state == .created) {
@@ -5971,8 +5982,8 @@ pub const VM = struct {
                         // save args before popping
                         var args_buf: [16]Value = undefined;
                         for (0..ac) |i| args_buf[i] = self.stack[self.sp - ac + i];
-                        self.sp -= ac;
-                        self.sp -= 1;
+                        self.dropN(ac);
+                        self.dropN(1);
 
                         if (std.mem.eql(u8, method_name, "start")) {
                             if (fiber.state != .created) {
@@ -6086,7 +6097,7 @@ pub const VM = struct {
                         if (std.mem.eql(u8, method_name, "__invoke")) {
                             var call_args: [16]Value = undefined;
                             for (0..ac) |i| call_args[i] = self.stack[self.sp - ac + i];
-                            self.sp -= ac + 1;
+                            self.dropN(ac + 1);
                             const result = try self.callByName(closure_name, call_args[0..ac]);
                             self.push(result);
                             continue;
@@ -6105,7 +6116,7 @@ pub const VM = struct {
                                 }
                                 break :blk .preserve;
                             };
-                            self.sp -= ac + 1;
+                            self.dropN(ac + 1);
                             const result = try self.cloneClosureWithThis(closure_name, new_this, bt_scope);
                             self.push(result);
                             continue;
@@ -6115,7 +6126,7 @@ pub const VM = struct {
                             var call_args: [16]Value = undefined;
                             const extra = if (ac > 1) ac - 1 else 0;
                             for (0..extra) |i| call_args[i] = self.stack[self.sp - ac + 1 + i];
-                            self.sp -= ac + 1;
+                            self.dropN(ac + 1);
                             const bound = try self.cloneClosureWithThis(closure_name, new_this, call_scope);
                             if (bound == .string) {
                                 const result = try self.callByName(bound.string, call_args[0..extra]);
@@ -6125,7 +6136,7 @@ pub const VM = struct {
                             }
                             continue;
                         } else {
-                            self.sp -= ac + 1;
+                            self.dropN(ac + 1);
                             const msg = try std.fmt.allocPrint(self.allocator, "Call to undefined method Closure::{s}()", .{method_name});
                             try self.strings.append(self.allocator, msg);
                             if (try self.throwBuiltinException("Error", msg)) continue;
@@ -6134,7 +6145,7 @@ pub const VM = struct {
                     }
 
                     if (obj_val != .object) {
-                        self.sp -= ac + 1;
+                        self.dropN(ac + 1);
                         const msg = try std.fmt.allocPrint(self.allocator, "Call to a member function {s}() on {s}", .{ method_name, valueTypeName(obj_val) });
                         try self.strings.append(self.allocator, msg);
                         if (try self.throwBuiltinException("Error", msg)) continue;
@@ -6171,7 +6182,7 @@ pub const VM = struct {
                                         if (i < func.defaults.len) mc_locals[i + 1] = try self.resolveDefault(func.defaults[i]);
                                     }
                                     self.saveFrameArgs(arg_count);
-                                    self.sp -= ac + 1;
+                                    self.dropN(ac + 1);
                                     self.frames[self.frame_count] = .{ .chunk = &func.chunk, .ip = 0, .vars = .{}, .locals = mc_locals, .func = func };
                                     self.setFrameArgCount(arg_count);
                                     self.frames[self.frame_count].entry_sp = self.sp;
@@ -6184,7 +6195,7 @@ pub const VM = struct {
                                 var args_buf: [16]Value = undefined;
                                 for (0..ac) |i| args_buf[i] = self.stack[self.sp - ac + i];
                                 self.saveFrameArgs(arg_count);
-                                self.sp -= ac + 1;
+                                self.dropN(ac + 1);
                                 var tmp_vars: std.StringHashMapUnmanaged(Value) = .{};
                                 try tmp_vars.put(self.allocator, "$this", .{ .object = obj });
                                 self.frames[self.frame_count] = .{ .chunk = self.currentChunk(), .ip = self.currentFrame().ip, .vars = tmp_vars };
@@ -6236,7 +6247,7 @@ pub const VM = struct {
                             @tagName(mvr.visibility), mvr.defining_class, method_name, suffix,
                         });
                         try self.strings.append(self.allocator, msg);
-                        self.sp -= ac + 1;
+                        self.dropN(ac + 1);
                         if (try self.throwBuiltinException("Error", msg)) continue;
                         return error.RuntimeError;
                     }
@@ -6262,7 +6273,7 @@ pub const VM = struct {
                                 args_arr.* = .{};
                                 try self.arrays.append(self.allocator, args_arr);
                                 for (0..ac) |i| try args_arr.append(self.allocator, self.stack[self.sp - ac + i]);
-                                self.sp -= ac + 1;
+                                self.dropN(ac + 1);
                                 const result = self.callMethod(obj, "__call", &.{ .{ .string = method_name }, .{ .array = args_arr } }) catch |err| {
                                     self.removeCallGuard(obj_id, method_name);
                                     if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
@@ -6273,7 +6284,7 @@ pub const VM = struct {
                                 continue;
                             }
                         }
-                        self.sp -= ac + 1;
+                        self.dropN(ac + 1);
                         const msg = std.fmt.allocPrint(self.allocator, "Call to undefined method {s}::{s}()", .{ obj.class_name, method_name }) catch "Call to undefined method";
                         try self.strings.append(self.allocator, msg);
                         if (try self.throwBuiltinException("Error", msg)) continue;
@@ -6293,8 +6304,8 @@ pub const VM = struct {
                         var args_buf: [16]Value = undefined;
                         for (0..ac) |i| args_buf[i] = self.stack[self.sp - ac + i];
                         self.saveFrameArgs(arg_count);
-                        self.sp -= ac;
-                        self.sp -= 1;
+                        self.dropN(ac);
+                        self.dropN(1);
 
                         // push a temporary frame so native can read $this
                         var tmp_vars: std.StringHashMapUnmanaged(Value) = .{};
@@ -6349,7 +6360,7 @@ pub const VM = struct {
                         }
                     } else if (self.functions.get(full_name)) |func| {
                         if (ac < func.required_params) {
-                            self.sp -= ac + 1;
+                            self.dropN(ac + 1);
                             const msg = try self.formatTooFewArgs(full_name, ac, func);
                             if (try self.throwBuiltinException("ArgumentCountError", msg)) continue;
                             self.setErrorMsg("Fatal error: Uncaught ArgumentCountError: {s}\n", .{msg});
@@ -6405,8 +6416,8 @@ pub const VM = struct {
                             }
                         }
                         self.saveFrameArgs(arg_count);
-                        self.sp -= ac;
-                        self.sp -= 1;
+                        self.dropN(ac);
+                        self.dropN(1);
                         if (func.is_generator) {
                             method_refs.deinit(self.allocator);
                             method_array_bindings.deinit(self.allocator);
@@ -6423,7 +6434,7 @@ pub const VM = struct {
         if (self.frame_count > self.frame_high_water) self.frame_high_water = self.frame_count;
                         }
                     } else {
-                        self.sp -= ac + 1;
+                        self.dropN(ac + 1);
                         const msg = std.fmt.allocPrint(self.allocator, "Call to undefined method {s}::{s}()", .{ obj.class_name, method_name }) catch "Call to undefined method";
                         try self.strings.append(self.allocator, msg);
                         if (try self.throwBuiltinException("Error", msg)) continue;
@@ -6494,7 +6505,7 @@ pub const VM = struct {
                     }
                     const obj_val = self.stack[self.sp - ac - 1];
                     if (obj_val != .object) {
-                        self.sp -= ac + 1;
+                        self.dropN(ac + 1);
                         const msg = try std.fmt.allocPrint(self.allocator, "Call to a member function {s}() on {s}", .{ method_name, valueTypeName(obj_val) });
                         try self.strings.append(self.allocator, msg);
                         if (try self.throwBuiltinException("Error", msg)) continue;
@@ -6503,7 +6514,7 @@ pub const VM = struct {
                     const obj = obj_val.object;
                     const mvr = self.findMethodVisibility(obj.class_name, method_name);
                     if (!self.checkVisibility(mvr.defining_class, mvr.visibility)) {
-                        self.sp -= ac + 1;
+                        self.dropN(ac + 1);
                         const suffix = self.visScopeSuffix();
                         const msg = std.fmt.allocPrint(self.allocator, "Call to {s} method {s}::{s}(){s}", .{ @tagName(mvr.visibility), mvr.defining_class, method_name, suffix }) catch null;
                         self.error_msg = msg;
@@ -6515,8 +6526,8 @@ pub const VM = struct {
                         var args_buf: [16]Value = undefined;
                         for (0..ac) |i| args_buf[i] = self.stack[self.sp - ac + i];
                         self.saveFrameArgs(mcs_ac_u8);
-                        self.sp -= ac;
-                        self.sp -= 1;
+                        self.dropN(ac);
+                        self.dropN(1);
                         var tmp_vars: std.StringHashMapUnmanaged(Value) = .{};
                         try tmp_vars.put(self.allocator, "$this", .{ .object = obj });
                         self.frames[self.frame_count] = .{ .chunk = self.currentChunk(), .ip = self.currentFrame().ip, .vars = tmp_vars };
@@ -6588,15 +6599,15 @@ pub const VM = struct {
                             }
                         }
                         self.saveFrameArgs(mcs_ac_u8);
-                        self.sp -= ac;
-                        self.sp -= 1;
+                        self.dropN(ac);
+                        self.dropN(1);
                         self.frames[self.frame_count] = .{ .chunk = &func.chunk, .ip = 0, .vars = new_vars, .locals = try self.allocLocals(func, &new_vars), .func = func };
                         self.setFrameArgCount(mcs_ac_u8);
                         self.frames[self.frame_count].entry_sp = self.sp;
                     self.frame_count += 1; self.retainFrameObjects(self.frame_count - 1);
         if (self.frame_count > self.frame_high_water) self.frame_high_water = self.frame_count;
                     } else {
-                        self.sp -= ac + 1;
+                        self.dropN(ac + 1);
                         const msg = std.fmt.allocPrint(self.allocator, "Call to undefined method {s}::{s}()", .{ obj.class_name, method_name }) catch "Call to undefined method";
                         try self.strings.append(self.allocator, msg);
                         if (try self.throwBuiltinException("Error", msg)) continue;
@@ -6612,14 +6623,14 @@ pub const VM = struct {
                     const method_name_val = self.stack[self.sp - ac - 1];
                     const obj_val = self.stack[self.sp - ac - 2];
                     if (method_name_val != .string) {
-                        self.sp -= ac + 2;
+                        self.dropN(ac + 2);
                         const msg = std.fmt.allocPrint(self.allocator, "Fatal error: Uncaught TypeError: Method name must be a string", .{}) catch null;
                         self.error_msg = msg;
                         return error.RuntimeError;
                     }
                     const method_name = method_name_val.string;
                     if (obj_val != .object) {
-                        self.sp -= ac + 2;
+                        self.dropN(ac + 2);
                         const msg = try std.fmt.allocPrint(self.allocator, "Call to a member function {s}() on {s}", .{ method_name, valueTypeName(obj_val) });
                         try self.strings.append(self.allocator, msg);
                         if (try self.throwBuiltinException("Error", msg)) continue;
@@ -6639,8 +6650,8 @@ pub const VM = struct {
                             args_arr.* = .{};
                             try self.arrays.append(self.allocator, args_arr);
                             for (0..ac) |ai| try args_arr.append(self.allocator, self.stack[self.sp - ac + ai]);
-                            self.sp -= ac;
-                            self.sp -= 1;
+                            self.dropN(ac);
+                            self.dropN(1);
                             const result = self.callMethod(obj, "__call", &.{ .{ .string = method_name }, .{ .array = args_arr } }) catch {
                                 if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
                                 return error.RuntimeError;
@@ -6648,7 +6659,7 @@ pub const VM = struct {
                             self.push(result);
                             continue;
                         }
-                        self.sp -= ac + 1;
+                        self.dropN(ac + 1);
                         const msg = std.fmt.allocPrint(self.allocator, "Call to undefined method {s}::{s}()", .{ obj.class_name, method_name }) catch "Call to undefined method";
                         try self.strings.append(self.allocator, msg);
                         if (try self.throwBuiltinException("Error", msg)) continue;
@@ -6659,8 +6670,8 @@ pub const VM = struct {
                         var args_buf: [16]Value = undefined;
                         for (0..ac) |ai| args_buf[ai] = self.stack[self.sp - ac + ai];
                         self.saveFrameArgs(arg_count);
-                        self.sp -= ac;
-                        self.sp -= 1;
+                        self.dropN(ac);
+                        self.dropN(1);
                         var tmp_vars: std.StringHashMapUnmanaged(Value) = .{};
                         try tmp_vars.put(self.allocator, "$this", .{ .object = obj });
                         self.frames[self.frame_count] = .{ .chunk = self.currentChunk(), .ip = self.currentFrame().ip, .vars = tmp_vars };
@@ -6734,15 +6745,15 @@ pub const VM = struct {
                             }
                         }
                         self.saveFrameArgs(arg_count);
-                        self.sp -= ac;
-                        self.sp -= 1;
+                        self.dropN(ac);
+                        self.dropN(1);
                         self.frames[self.frame_count] = .{ .chunk = &func.chunk, .ip = 0, .vars = new_vars, .locals = try self.allocLocals(func, &new_vars), .func = func };
                         self.setFrameArgCount(arg_count);
                         self.frames[self.frame_count].entry_sp = self.sp;
                     self.frame_count += 1; self.retainFrameObjects(self.frame_count - 1);
         if (self.frame_count > self.frame_high_water) self.frame_high_water = self.frame_count;
                     } else {
-                        self.sp -= ac + 1;
+                        self.dropN(ac + 1);
                         const msg = std.fmt.allocPrint(self.allocator, "Call to undefined method {s}::{s}()", .{ obj.class_name, method_name }) catch "Call to undefined method";
                         try self.strings.append(self.allocator, msg);
                         if (try self.throwBuiltinException("Error", msg)) continue;
@@ -6798,8 +6809,8 @@ pub const VM = struct {
                                 call_args_arr.* = .{};
                                 try self.arrays.append(self.allocator, call_args_arr);
                                 for (0..ac) |ai| try call_args_arr.append(self.allocator, self.stack[self.sp - ac + ai]);
-                                self.sp -= ac;
-                                self.sp -= 1;
+                                self.dropN(ac);
+                                self.dropN(1);
                                 const result = self.callMethod(obj, "__call", &.{ .{ .string = method_name }, .{ .array = call_args_arr } }) catch |err| {
                                     self.removeCallGuard(obj_id, method_name);
                                     if (err == error.RuntimeError and self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
@@ -6810,7 +6821,7 @@ pub const VM = struct {
                                 continue;
                             }
                         }
-                        self.sp -= ac + 1;
+                        self.dropN(ac + 1);
                         const msg = std.fmt.allocPrint(self.allocator, "Call to undefined method {s}::{s}()", .{ obj.class_name, method_name }) catch "Call to undefined method";
                         try self.strings.append(self.allocator, msg);
                         if (try self.throwBuiltinException("Error", msg)) continue;
@@ -6822,8 +6833,8 @@ pub const VM = struct {
                         var args_buf: [16]Value = undefined;
                         for (0..ac) |ai| args_buf[ai] = self.stack[self.sp - ac + ai];
                         self.saveFrameArgs(mcds_ac_u8);
-                        self.sp -= ac;
-                        self.sp -= 1;
+                        self.dropN(ac);
+                        self.dropN(1);
                         var tmp_vars: std.StringHashMapUnmanaged(Value) = .{};
                         try tmp_vars.put(self.allocator, "$this", .{ .object = obj });
                         self.frames[self.frame_count] = .{ .chunk = self.currentChunk(), .ip = self.currentFrame().ip, .vars = tmp_vars };
@@ -6897,15 +6908,15 @@ pub const VM = struct {
                             }
                         }
                         self.saveFrameArgs(mcds_ac_u8);
-                        self.sp -= ac;
-                        self.sp -= 1;
+                        self.dropN(ac);
+                        self.dropN(1);
                         self.frames[self.frame_count] = .{ .chunk = &func.chunk, .ip = 0, .vars = new_vars, .locals = try self.allocLocals(func, &new_vars), .func = func };
                         self.setFrameArgCount(mcds_ac_u8);
                         self.frames[self.frame_count].entry_sp = self.sp;
                     self.frame_count += 1; self.retainFrameObjects(self.frame_count - 1);
         if (self.frame_count > self.frame_high_water) self.frame_high_water = self.frame_count;
                     } else {
-                        self.sp -= ac + 1;
+                        self.dropN(ac + 1);
                         const msg = std.fmt.allocPrint(self.allocator, "Call to undefined method {s}::{s}()", .{ obj.class_name, method_name }) catch "Call to undefined method";
                         try self.strings.append(self.allocator, msg);
                         if (try self.throwBuiltinException("Error", msg)) continue;
@@ -6925,7 +6936,7 @@ pub const VM = struct {
                         const ac: usize = arg_count;
                         const suspend_val = if (ac > 0) blk: {
                             const v = self.stack[self.sp - 1];
-                            self.sp -= ac;
+                            self.dropN(ac);
                             break :blk v;
                         } else .null;
 
@@ -6995,7 +7006,7 @@ pub const VM = struct {
                             args_arr.* = .{};
                             try self.arrays.append(self.allocator, args_arr);
                             for (0..ac) |i| try args_arr.append(self.allocator, self.stack[self.sp - ac + i]);
-                            self.sp -= ac;
+                            self.dropN(ac);
                             const cs_name = try self.resolveMethod(class_name, "__callStatic");
                             self.push(.{ .string = method_name });
                             self.push(.{ .array = args_arr });
@@ -7043,7 +7054,7 @@ pub const VM = struct {
                                     }
                                 }
                                 if (self.frame_count >= 2047) {
-                                    self.sp -= ac;
+                                    self.dropN(ac);
                                     new_vars.deinit(self.allocator);
                                     const msg = std.fmt.allocPrint(self.allocator, "Fatal error: maximum call stack depth exceeded in {s}::{s}()", .{ class_name, method_name }) catch "Fatal error: maximum call stack depth exceeded";
                                     try self.strings.append(self.allocator, msg);
@@ -7052,7 +7063,7 @@ pub const VM = struct {
                                     return error.RuntimeError;
                                 }
                                 self.saveFrameArgs(arg_count);
-                                self.sp -= ac;
+                                self.dropN(ac);
                                 try self.fillDefaults(&new_vars, func, ac);
                                 self.frames[self.frame_count] = .{ .chunk = &func.chunk, .ip = 0, .vars = new_vars, .locals = try self.allocLocals(func, &new_vars), .func = func, .called_class = effective_called };
                                 self.setFrameArgCount(arg_count);
@@ -7065,7 +7076,7 @@ pub const VM = struct {
                                 var args_buf: [16]Value = undefined;
                                 for (0..ac) |i| args_buf[i] = self.stack[self.sp - ac + i];
                                 self.saveFrameArgs(arg_count);
-                                self.sp -= ac;
+                                self.dropN(ac);
                                 var tmp_vars: std.StringHashMapUnmanaged(Value) = .{};
                                 try tmp_vars.put(self.allocator, "$this", tv);
                                 self.frames[self.frame_count] = .{ .chunk = self.currentChunk(), .ip = self.currentFrame().ip, .vars = tmp_vars, .called_class = effective_called };
@@ -7241,7 +7252,7 @@ pub const VM = struct {
                                 }
                                 const scs_ac: u8 = @intCast(@min(resolved_ac, 255));
                                 self.saveFrameArgs(scs_ac);
-                                self.sp -= resolved_ac;
+                                self.dropN(resolved_ac);
                                 self.frames[self.frame_count] = .{ .chunk = &func.chunk, .ip = 0, .vars = new_vars, .locals = try self.allocLocals(func, &new_vars), .func = func, .called_class = effective_called };
                                 self.setFrameArgCount(scs_ac);
                                 self.frames[self.frame_count].entry_sp = self.sp;
@@ -7273,7 +7284,7 @@ pub const VM = struct {
                     else if (class_val == .object)
                         class_val.object.class_name
                     else {
-                        self.sp -= ac + 1;
+                        self.dropN(ac + 1);
                         const msg = try std.fmt.allocPrint(self.allocator, "{s}::method() requires a class name string", .{method_name});
                         try self.strings.append(self.allocator, msg);
                         if (try self.throwBuiltinException("Error", msg)) continue;
@@ -7290,7 +7301,7 @@ pub const VM = struct {
                             args_arr.* = .{};
                             try self.arrays.append(self.allocator, args_arr);
                             for (0..ac) |i| try args_arr.append(self.allocator, self.stack[self.sp - ac + i]);
-                            self.sp -= ac + 1; // +1 for class name on stack
+                            self.dropN(ac + 1); // +1 for class name on stack
                             const cs_name = try self.resolveMethod(class_name, "__callStatic");
                             self.push(.{ .string = method_name });
                             self.push(.{ .array = args_arr });
@@ -7353,7 +7364,7 @@ pub const VM = struct {
                             args_arr.* = .{};
                             try self.arrays.append(self.allocator, args_arr);
                             for (0..ac) |i| try args_arr.append(self.allocator, self.stack[self.sp - ac + i]);
-                            self.sp -= ac + 1;
+                            self.dropN(ac + 1);
                             const cs_name = try self.resolveMethod(class_name, "__callStatic");
                             self.push(.{ .string = method_name });
                             self.push(.{ .array = args_arr });
@@ -7418,7 +7429,7 @@ pub const VM = struct {
                             args_arr.* = .{};
                             try self.arrays.append(self.allocator, args_arr);
                             for (0..ac) |i| try args_arr.append(self.allocator, self.stack[self.sp - ac + i]);
-                            self.sp -= ac + 2;
+                            self.dropN(ac + 2);
                             const cs_name = try self.resolveMethod(class_name, "__callStatic");
                             self.push(.{ .string = method_name });
                             self.push(.{ .array = args_arr });
@@ -9584,9 +9595,12 @@ pub const VM = struct {
                     new_cap.ref_cell = null;
                     has_this = true;
                 }
+                // the copied closure holds its own reference (Stage 1)
+                if (new_cap.ref_cell == null) retainValue(new_cap.value);
                 try self.captures.append(self.allocator, new_cap);
             }
             if (!has_this and new_this != .null) {
+                retainValue(new_this);
                 try self.captures.append(self.allocator, .{
                     .closure_name = new_name,
                     .var_name = "$this",
@@ -9608,6 +9622,7 @@ pub const VM = struct {
         } else {
             const new_start: u32 = @intCast(self.captures.items.len);
             if (new_this != .null) {
+                retainValue(new_this);
                 try self.captures.append(self.allocator, .{
                     .closure_name = new_name,
                     .var_name = "$this",
@@ -9710,7 +9725,7 @@ pub const VM = struct {
                     try new_vars.put(self.allocator, func.params[i], try self.transferArg(self.stack[self.sp - ac + i]));
                 }
                 self.saveFrameArgs(arg_count);
-                self.sp -= ac;
+                self.dropN(ac);
                 try self.fillDefaults(&new_vars, func, bind_count);
                 const inherit_cc = self.closureScopeByName(name) orelse self.currentFrame().called_class;
                 self.frames[self.frame_count] = .{ .chunk = &func.chunk, .ip = 0, .vars = new_vars, .locals = try self.allocLocals(func, &new_vars), .func = func, .ref_slots = closure_refs, .called_class = inherit_cc, .call_name = name };
@@ -9745,7 +9760,7 @@ pub const VM = struct {
             if (i < func.defaults.len) locals[i] = try self.resolveDefault(func.defaults[i]);
         }
         self.saveFrameArgs(arg_count);
-        self.sp -= ac;
+        self.dropN(ac);
 
         // bind captures directly to locals using slot_names
         for (self.captures.items) |cap| {
@@ -9794,7 +9809,7 @@ pub const VM = struct {
             if (i < func.defaults.len) locals[i] = try self.resolveDefault(func.defaults[i]);
         }
         self.saveFrameArgs(arg_count);
-        self.sp -= ac;
+        self.dropN(ac);
         self.frames[self.frame_count] = .{ .chunk = &func.chunk, .ip = 0, .vars = .{}, .locals = locals, .func = func, .called_class = self.currentFrame().called_class };
         self.frames[self.frame_count].entry_sp = self.sp;
         self.setFrameArgCount(arg_count);
@@ -11926,7 +11941,7 @@ pub const VM = struct {
                         continue;
                     }
                 }
-                self.sp -= ac;
+                self.dropN(ac);
                 const param_name = if (func) |f| (if (i < f.params.len) f.params[i] else "") else "";
                 // PHP suffixes the message with the call site: ", called in
                 // <file> on line N". the caller frame is frame_count-2 because
@@ -12185,7 +12200,7 @@ pub const VM = struct {
             var args: [64]Value = undefined;
             const ac: usize = arg_count;
             for (0..ac) |i| args[i] = self.stack[self.sp - ac + i];
-            self.sp -= ac;
+            self.dropN(ac);
             const pre_handler_count = self.handler_count;
             var ctx = self.makeContext(name);
             const result = native(&ctx, args[0..ac]) catch {
@@ -12282,7 +12297,7 @@ pub const VM = struct {
                 }
             }
             self.saveFrameArgs(arg_count);
-            self.sp -= ac;
+            self.dropN(ac);
             if (!func.is_variadic) {
                 try self.fillDefaults(&new_vars, func, @min(ac, func.arity));
             }
@@ -12980,6 +12995,18 @@ pub const VM = struct {
         // the returned handle stays valid for the caller until the next drain)
         self.releaseValue(v);
         return v;
+    }
+
+    // drop the top n operand-stack slots, releasing each (Stage 1). used by
+    // call cleanup to release the receiver + arguments the caller pushed -
+    // the callee retained its own copies via retainFrameObjects, so the
+    // caller's stack copies must be released here
+    pub fn dropN(self: *VM, n: usize) void {
+        var k: usize = 0;
+        while (k < n) : (k += 1) {
+            self.sp -= 1;
+            self.releaseValue(self.stack[self.sp]);
+        }
     }
 
     fn peek(self: *const VM) Value {

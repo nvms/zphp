@@ -628,7 +628,7 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                 for (ci_bind..ci_func.arity) |i| {
                     if (i < ci_func.defaults.len) ci_locals[i] = try self.resolveDefault(ci_func.defaults[i]);
                 }
-                sp -= ci_acn;
+                self.sp = sp; self.dropN(ci_acn); sp = self.sp;
                 if (ci_cap_range) |cr| {
                     const caps = self.captures.items[cr.start .. cr.start + cr.len];
                     for (caps) |cap| {
@@ -774,7 +774,7 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                             for (@min(mc_ac, mc_func.arity)..mc_func.arity) |i| {
                                 if (i < mc_func.defaults.len) mc_locals[i + 1] = try self.resolveDefault(mc_func.defaults[i]);
                             }
-                            sp -= mc_ac + 1;
+                            self.sp = sp; self.dropN(mc_ac + 1); sp = self.sp;
                             frame.ip = ip;
                             ic.sp_save[self.frame_count - 1] = sp;
                             self.sp = sp;
@@ -854,7 +854,7 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                 for (bind_count..func.arity) |i| {
                     if (i < func.defaults.len) new_locals[i] = try self.resolveDefault(func.defaults[i]);
                 }
-                sp -= ac;
+                self.sp = sp; self.dropN(ac); sp = self.sp;
 
                 frame.ip = ip;
                 ic.sp_save[self.frame_count - 1] = sp;
