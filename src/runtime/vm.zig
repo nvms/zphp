@@ -6423,7 +6423,7 @@ pub const VM = struct {
                             method_array_bindings.deinit(self.allocator);
                             method_object_bindings.deinit(self.allocator);
                             const gen = try self.allocator.create(Generator);
-                            gen.* = .{ .func = func, .vars = new_vars };
+                            gen.* = .{ .func = func, .vars = new_vars }; retainVarsObjects(&gen.vars);
                             try self.generators.append(self.allocator, gen);
                             self.push(.{ .generator = gen });
                         } else {
@@ -9923,6 +9923,15 @@ pub const VM = struct {
     // sites refcount-free is what eliminates the over-release hole class.
     // generator frames are skipped (their vars are owned by the Generator,
     // and deinitFrameSlot likewise skips releaseFrameObjects for them).
+    // a generator owns its vars (they outlive each resume; retainFrameObjects
+    // skips generator frames) - so the generator itself holds those object
+    // references. retain them when the generator is created; the end-of-
+    // request shutdown sweep destructs whatever is still live (Stage 1)
+    fn retainVarsObjects(vars: *std.StringHashMapUnmanaged(Value)) void {
+        var it = vars.valueIterator();
+        while (it.next()) |v| retainValue(v.*);
+    }
+
     pub fn retainFrameObjects(self: *VM, idx: usize) void {
         const frame = &self.frames[idx];
         if (frame.generator != null) return;
@@ -12313,7 +12322,7 @@ pub const VM = struct {
                 callee_array_bindings.deinit(self.allocator);
                 callee_object_bindings.deinit(self.allocator);
                 const gen = try self.allocator.create(Generator);
-                gen.* = .{ .func = func, .vars = new_vars, .ref_slots = callee_refs };
+                gen.* = .{ .func = func, .vars = new_vars, .ref_slots = callee_refs }; retainVarsObjects(&gen.vars);
                 try self.generators.append(self.allocator, gen);
                 self.push(.{ .generator = gen });
             } else {
@@ -12442,7 +12451,7 @@ pub const VM = struct {
             try self.bindArgs(&new_vars, func, trimmed);
             if (func.is_generator) {
                 const gen = try self.allocator.create(Generator);
-                gen.* = .{ .func = func, .vars = new_vars };
+                gen.* = .{ .func = func, .vars = new_vars }; retainVarsObjects(&gen.vars);
                 try self.generators.append(self.allocator, gen);
                 return .{ .generator = gen };
             }
@@ -13019,6 +13028,7 @@ pub const VM = struct {
 
     // an object handle was copied into a new reference
     pub fn objRetain(obj: *PhpObject) void {
+        if (std.mem.eql(u8, obj.class_name, "Illuminate\\View\\View")) std.debug.print("RET {x} {d}\n", .{@intFromPtr(obj), obj.refcount});
         obj.refcount +%= 1;
     }
 
@@ -13038,6 +13048,7 @@ pub const VM = struct {
     // object is retained again before the drain it is rescued - the drain
     // re-checks refcount, so a transient dip to 0 never mis-fires __destruct
     pub fn objRelease(self: *VM, obj: *PhpObject) void {
+        if (std.mem.eql(u8, obj.class_name, "Illuminate\\View\\View")) std.debug.print("REL {x} {d}\n", .{@intFromPtr(obj), obj.refcount});
         if (obj.refcount == 0) return;
         obj.refcount -= 1;
         if (obj.refcount != 0 or obj.destructed) return;
