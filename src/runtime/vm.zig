@@ -3918,7 +3918,9 @@ pub const VM = struct {
                     const slot = self.readU16();
                     const frame = self.currentFrame();
                     const peeked = self.peek();
-                    const val = if (peeked == .array) try self.copyValue(peeked) else peeked;
+                    // copyValue clones arrays and retains objects (Stage 1) -
+                    // the local slot is a durable holder and needs its own ref
+                    const val = try self.copyValue(peeked);
                     if (slot < frame.locals.len) {
                         frame.locals[slot] = val;
                     }
@@ -9785,6 +9787,24 @@ pub const VM = struct {
         return .{};
     }
 
+    // release the object references a frame's variables hold (Stage 1). every
+    // named variable lives in frame.vars (set_var and set_local both mirror
+    // there), so releasing vars covers each named var exactly once; the slot-
+    // backed locals array mirrors those same vars, so named local slots are
+    // skipped here to avoid a double-release. unnamed local slots (compiler
+    // temporaries) are not mirrored into vars, so release those from locals.
+    // function frames carry their slot names on func.slot_names; global-scope
+    // frames carry them on frame.slot_names
+    fn releaseFrameObjects(self: *VM, idx: usize) void {
+        var it = self.frames[idx].vars.valueIterator();
+        while (it.next()) |v| self.releaseValue(v.*);
+        const snames = if (self.frames[idx].func) |f| f.slot_names else self.frames[idx].slot_names;
+        for (self.frames[idx].locals, 0..) |lv, i| {
+            if (i < snames.len and snames[i].len > 0) continue;
+            self.releaseValue(lv);
+        }
+    }
+
     pub fn releaseFrameVars(self: *VM, hm: *std.StringHashMapUnmanaged(Value)) void {
         // cap the pool: hashmaps that grew very large should be freed rather
         // than held forever. typical frame.vars has 1-5 entries; anything
@@ -9866,6 +9886,10 @@ pub const VM = struct {
         // the Generator and will be freed during freeHeapItems. freeing it
         // here too causes a double-free during VM cleanup
         if (self.frames[idx].generator == null) {
+            // release the frame's object references before the var storage is
+            // pooled/freed - this is what makes function-scope objects and
+            // constructor objects fire __destruct at frame exit (Stage 1)
+            self.releaseFrameObjects(idx);
             self.releaseFrameVars(&self.frames[idx].vars);
         }
         if (self.frames[idx].locals.len > 0) {
