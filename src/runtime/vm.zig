@@ -1868,7 +1868,7 @@ pub const VM = struct {
             .script_path = heap_result.file_path,
         };
         self.frames[self.frame_count].entry_sp = self.sp;
-        self.frame_count += 1;
+        self.frame_count += 1; self.retainFrameObjects(self.frame_count - 1);
         if (self.frame_count > self.frame_high_water) self.frame_high_water = self.frame_count;
 
         const sp_before_eval = self.sp;
@@ -4173,7 +4173,7 @@ pub const VM = struct {
                         }
                         var it = src.properties.iterator();
                         while (it.next()) |entry| {
-                            try copy.properties.put(self.allocator, entry.key_ptr.*, try self.copyValue(entry.value_ptr.*));
+                            try copy.properties.put(self.allocator, entry.key_ptr.*, try self.transferArg(entry.value_ptr.*));
                         }
                         try self.objects.append(self.allocator, copy);
                         if (self.hasMethod(src.class_name, "__clone")) {
@@ -4663,7 +4663,7 @@ pub const VM = struct {
                                     .slot_names = r.slot_names,
                                 };
                                 self.frames[self.frame_count].entry_sp = self.sp;
-                                self.frame_count += 1;
+                                self.frame_count += 1; self.retainFrameObjects(self.frame_count - 1);
         if (self.frame_count > self.frame_high_water) self.frame_high_water = self.frame_count;
                                 const saved_merge_depth = self.require_merge_depth;
                                 self.require_merge_depth = self.frame_count;
@@ -5198,7 +5198,7 @@ pub const VM = struct {
                             try tmp_vars.put(self.allocator, "$this", .{ .object = obj });
                             self.frames[self.frame_count] = .{ .chunk = self.currentChunk(), .ip = self.currentFrame().ip, .vars = tmp_vars };
                             self.frames[self.frame_count].entry_sp = self.sp;
-                    self.frame_count += 1;
+                    self.frame_count += 1; self.retainFrameObjects(self.frame_count - 1);
         if (self.frame_count > self.frame_high_water) self.frame_high_water = self.frame_count;
 
                             const saved_fc = self.frame_count;
@@ -5234,11 +5234,6 @@ pub const VM = struct {
                             self.frame_count -= 1;
                             self.deinitFrameSlot(self.frame_count);
                         } else if (self.functions.get(cn)) |func| {
-                            // anchor the object across construction (Stage 1):
-                            // the user ctor frame's teardown releases $this,
-                            // and this retain is what that release consumes,
-                            // keeping the object alive while the ctor runs
-                            objRetain(obj);
                             if (ac < func.required_params) {
                                 self.sp -= ac;
                                 const msg = try self.formatTooFewArgs(cn, ac, func);
@@ -5289,7 +5284,7 @@ pub const VM = struct {
                                 self.sp -= ac;
                                 self.frames[self.frame_count] = .{ .chunk = &func.chunk, .ip = 0, .vars = .{}, .locals = ctor_locals, .func = func };
                                 self.frames[self.frame_count].entry_sp = self.sp;
-                    self.frame_count += 1;
+                    self.frame_count += 1; self.retainFrameObjects(self.frame_count - 1);
         if (self.frame_count > self.frame_high_water) self.frame_high_water = self.frame_count;
                                 self.exception_dispatched = false;
                                 try self.fastLoop();
@@ -5336,7 +5331,7 @@ pub const VM = struct {
                                 };
                                 self.frames[self.frame_count] = .{ .chunk = &func.chunk, .ip = 0, .vars = new_vars, .locals = try self.allocLocals(func, &new_vars), .func = func };
                                 self.frames[self.frame_count].entry_sp = self.sp;
-                    self.frame_count += 1;
+                    self.frame_count += 1; self.retainFrameObjects(self.frame_count - 1);
         if (self.frame_count > self.frame_high_water) self.frame_high_water = self.frame_count;
                                 self.exception_dispatched = false;
                                 const ctor_base = self.frame_count - 1;
@@ -5417,7 +5412,7 @@ pub const VM = struct {
                             try tmp_vars.put(self.allocator, "$this", .{ .object = obj });
                             self.frames[self.frame_count] = .{ .chunk = self.currentChunk(), .ip = self.currentFrame().ip, .vars = tmp_vars };
                             self.frames[self.frame_count].entry_sp = self.sp;
-                    self.frame_count += 1;
+                    self.frame_count += 1; self.retainFrameObjects(self.frame_count - 1);
         if (self.frame_count > self.frame_high_water) self.frame_high_water = self.frame_count;
                             var ctx = self.makeContext(null);
                             _ = native(&ctx, args_buf[0..ac]) catch {
@@ -5446,9 +5441,6 @@ pub const VM = struct {
                             self.frame_count -= 1;
                             self.deinitFrameSlot(self.frame_count);
                         } else if (self.functions.get(cn)) |func| {
-                            // anchor across construction (Stage 1) - consumed
-                            // by the ctor frame teardown's $this release
-                            objRetain(obj);
                             var new_vars = self.acquireFrameVars();
                             try new_vars.put(self.allocator, "$this", .{ .object = obj });
                             for (0..@min(ac, func.arity)) |i| {
@@ -5461,7 +5453,7 @@ pub const VM = struct {
                             }
                             self.frames[self.frame_count] = .{ .chunk = &func.chunk, .ip = 0, .vars = new_vars, .locals = try self.allocLocals(func, &new_vars), .func = func };
                             self.frames[self.frame_count].entry_sp = self.sp;
-                    self.frame_count += 1;
+                    self.frame_count += 1; self.retainFrameObjects(self.frame_count - 1);
         if (self.frame_count > self.frame_high_water) self.frame_high_water = self.frame_count;
                             self.exception_dispatched = false;
                             const ctor_base = self.frame_count - 1;
@@ -6183,7 +6175,7 @@ pub const VM = struct {
                                     self.frames[self.frame_count] = .{ .chunk = &func.chunk, .ip = 0, .vars = .{}, .locals = mc_locals, .func = func };
                                     self.setFrameArgCount(arg_count);
                                     self.frames[self.frame_count].entry_sp = self.sp;
-                    self.frame_count += 1;
+                    self.frame_count += 1; self.retainFrameObjects(self.frame_count - 1);
         if (self.frame_count > self.frame_high_water) self.frame_high_water = self.frame_count;
                                     try self.fastLoop();
                                     continue;
@@ -6198,7 +6190,7 @@ pub const VM = struct {
                                 self.frames[self.frame_count] = .{ .chunk = self.currentChunk(), .ip = self.currentFrame().ip, .vars = tmp_vars };
                                 self.setFrameArgCount(arg_count);
                                 self.frames[self.frame_count].entry_sp = self.sp;
-                    self.frame_count += 1;
+                    self.frame_count += 1; self.retainFrameObjects(self.frame_count - 1);
         if (self.frame_count > self.frame_high_water) self.frame_high_water = self.frame_count;
                                 const saved_fc = self.frame_count;
                                 var ctx = self.makeContext(null);
@@ -6310,7 +6302,7 @@ pub const VM = struct {
                         self.frames[self.frame_count] = .{ .chunk = self.currentChunk(), .ip = self.currentFrame().ip, .vars = tmp_vars };
                         self.setFrameArgCount(arg_count);
                         self.frames[self.frame_count].entry_sp = self.sp;
-                    self.frame_count += 1;
+                    self.frame_count += 1; self.retainFrameObjects(self.frame_count - 1);
         if (self.frame_count > self.frame_high_water) self.frame_high_water = self.frame_count;
                         const saved_fc = self.frame_count;
 
@@ -6427,7 +6419,7 @@ pub const VM = struct {
                             self.frames[self.frame_count] = .{ .chunk = &func.chunk, .ip = 0, .vars = new_vars, .locals = try self.allocLocals(func, &new_vars), .func = func, .ref_slots = method_refs, .ref_array_bindings = method_array_bindings, .ref_object_bindings = method_object_bindings };
                             self.setFrameArgCount(arg_count);
                             self.frames[self.frame_count].entry_sp = self.sp;
-                    self.frame_count += 1;
+                    self.frame_count += 1; self.retainFrameObjects(self.frame_count - 1);
         if (self.frame_count > self.frame_high_water) self.frame_high_water = self.frame_count;
                         }
                     } else {
@@ -6530,7 +6522,7 @@ pub const VM = struct {
                         self.frames[self.frame_count] = .{ .chunk = self.currentChunk(), .ip = self.currentFrame().ip, .vars = tmp_vars };
                         self.setFrameArgCount(mcs_ac_u8);
                         self.frames[self.frame_count].entry_sp = self.sp;
-                    self.frame_count += 1;
+                    self.frame_count += 1; self.retainFrameObjects(self.frame_count - 1);
         if (self.frame_count > self.frame_high_water) self.frame_high_water = self.frame_count;
                         const saved_fc = self.frame_count;
                         var ctx = self.makeContext(full_name);
@@ -6601,7 +6593,7 @@ pub const VM = struct {
                         self.frames[self.frame_count] = .{ .chunk = &func.chunk, .ip = 0, .vars = new_vars, .locals = try self.allocLocals(func, &new_vars), .func = func };
                         self.setFrameArgCount(mcs_ac_u8);
                         self.frames[self.frame_count].entry_sp = self.sp;
-                    self.frame_count += 1;
+                    self.frame_count += 1; self.retainFrameObjects(self.frame_count - 1);
         if (self.frame_count > self.frame_high_water) self.frame_high_water = self.frame_count;
                     } else {
                         self.sp -= ac + 1;
@@ -6674,7 +6666,7 @@ pub const VM = struct {
                         self.frames[self.frame_count] = .{ .chunk = self.currentChunk(), .ip = self.currentFrame().ip, .vars = tmp_vars };
                         self.setFrameArgCount(arg_count);
                         self.frames[self.frame_count].entry_sp = self.sp;
-                    self.frame_count += 1;
+                    self.frame_count += 1; self.retainFrameObjects(self.frame_count - 1);
         if (self.frame_count > self.frame_high_water) self.frame_high_water = self.frame_count;
                         const saved_fc = self.frame_count;
                         var ctx = self.makeContext(full_name);
@@ -6747,7 +6739,7 @@ pub const VM = struct {
                         self.frames[self.frame_count] = .{ .chunk = &func.chunk, .ip = 0, .vars = new_vars, .locals = try self.allocLocals(func, &new_vars), .func = func };
                         self.setFrameArgCount(arg_count);
                         self.frames[self.frame_count].entry_sp = self.sp;
-                    self.frame_count += 1;
+                    self.frame_count += 1; self.retainFrameObjects(self.frame_count - 1);
         if (self.frame_count > self.frame_high_water) self.frame_high_water = self.frame_count;
                     } else {
                         self.sp -= ac + 1;
@@ -6837,7 +6829,7 @@ pub const VM = struct {
                         self.frames[self.frame_count] = .{ .chunk = self.currentChunk(), .ip = self.currentFrame().ip, .vars = tmp_vars };
                         self.setFrameArgCount(mcds_ac_u8);
                         self.frames[self.frame_count].entry_sp = self.sp;
-                    self.frame_count += 1;
+                    self.frame_count += 1; self.retainFrameObjects(self.frame_count - 1);
         if (self.frame_count > self.frame_high_water) self.frame_high_water = self.frame_count;
                         const saved_fc = self.frame_count;
                         var ctx = self.makeContext(full_name);
@@ -6910,7 +6902,7 @@ pub const VM = struct {
                         self.frames[self.frame_count] = .{ .chunk = &func.chunk, .ip = 0, .vars = new_vars, .locals = try self.allocLocals(func, &new_vars), .func = func };
                         self.setFrameArgCount(mcds_ac_u8);
                         self.frames[self.frame_count].entry_sp = self.sp;
-                    self.frame_count += 1;
+                    self.frame_count += 1; self.retainFrameObjects(self.frame_count - 1);
         if (self.frame_count > self.frame_high_water) self.frame_high_water = self.frame_count;
                     } else {
                         self.sp -= ac + 1;
@@ -7026,8 +7018,6 @@ pub const VM = struct {
                                 } else {
                                 const ac: usize = arg_count;
                                 var new_vars = self.acquireFrameVars();
-                                // retain the forwarded $this for the callee frame (Stage 1)
-                                retainValue(tv);
                                 try new_vars.put(self.allocator, "$this", tv);
                                 if (func.is_variadic) {
                                     const fixed: usize = func.arity - 1;
@@ -7067,7 +7057,7 @@ pub const VM = struct {
                                 self.frames[self.frame_count] = .{ .chunk = &func.chunk, .ip = 0, .vars = new_vars, .locals = try self.allocLocals(func, &new_vars), .func = func, .called_class = effective_called };
                                 self.setFrameArgCount(arg_count);
                                 self.frames[self.frame_count].entry_sp = self.sp;
-                    self.frame_count += 1;
+                    self.frame_count += 1; self.retainFrameObjects(self.frame_count - 1);
         if (self.frame_count > self.frame_high_water) self.frame_high_water = self.frame_count;
                                 }
                             } else if (self.native_fns.get(full_name)) |native| {
@@ -7077,14 +7067,12 @@ pub const VM = struct {
                                 self.saveFrameArgs(arg_count);
                                 self.sp -= ac;
                                 var tmp_vars: std.StringHashMapUnmanaged(Value) = .{};
-                                // retain the forwarded $this for the callee frame (Stage 1)
-                                retainValue(tv);
                                 try tmp_vars.put(self.allocator, "$this", tv);
                                 self.frames[self.frame_count] = .{ .chunk = self.currentChunk(), .ip = self.currentFrame().ip, .vars = tmp_vars, .called_class = effective_called };
                                 self.setFrameArgCount(arg_count);
                                 const sc_saved_fc = self.frame_count;
                                 self.frames[self.frame_count].entry_sp = self.sp;
-                    self.frame_count += 1;
+                    self.frame_count += 1; self.retainFrameObjects(self.frame_count - 1);
         if (self.frame_count > self.frame_high_water) self.frame_high_water = self.frame_count;
                                 var ctx = self.makeContext(full_name);
                                 const result = native(&ctx, args_buf[0..ac]) catch {
@@ -7232,8 +7220,6 @@ pub const VM = struct {
                                     try self.callStaticFunction(full_name, @intCast(resolved_ac), effective_called);
                                 } else {
                                 var new_vars = self.acquireFrameVars();
-                                // retain the forwarded $this for the callee frame (Stage 1)
-                                retainValue(tv);
                                 try new_vars.put(self.allocator, "$this", tv);
                                 if (func.is_variadic) {
                                     const fixed: usize = func.arity - 1;
@@ -7259,7 +7245,7 @@ pub const VM = struct {
                                 self.frames[self.frame_count] = .{ .chunk = &func.chunk, .ip = 0, .vars = new_vars, .locals = try self.allocLocals(func, &new_vars), .func = func, .called_class = effective_called };
                                 self.setFrameArgCount(scs_ac);
                                 self.frames[self.frame_count].entry_sp = self.sp;
-                    self.frame_count += 1;
+                    self.frame_count += 1; self.retainFrameObjects(self.frame_count - 1);
         if (self.frame_count > self.frame_high_water) self.frame_high_water = self.frame_count;
                                 }
                             } else {
@@ -8445,7 +8431,7 @@ pub const VM = struct {
             .ref_slots = gen.ref_slots,
         };
         gen.ref_slots = .{};
-        self.frame_count += 1;
+        self.frame_count += 1; self.retainFrameObjects(self.frame_count - 1);
         if (self.frame_count > self.frame_high_water) self.frame_high_water = self.frame_count;
 
         self.restoreGeneratorHandlers(gen);
@@ -8654,13 +8640,10 @@ pub const VM = struct {
         };
         if (self.functions.get(method_name)) |func| {
             var new_vars = self.acquireFrameVars();
-            // retain $this for the __toString frame (Stage 1) - balances the
-            // frame teardown's $this release
-            objRetain(obj);
             try new_vars.put(self.allocator, "$this", .{ .object = obj });
             self.frames[self.frame_count] = .{ .chunk = &func.chunk, .ip = 0, .vars = new_vars, .locals = try self.allocLocals(func, &new_vars), .func = func };
             self.frames[self.frame_count].entry_sp = self.sp;
-            self.frame_count += 1;
+            self.frame_count += 1; self.retainFrameObjects(self.frame_count - 1);
         if (self.frame_count > self.frame_high_water) self.frame_high_water = self.frame_count;
             try self.runLoop(self.frame_count - 1);
             const result = self.pop();
@@ -9733,7 +9716,7 @@ pub const VM = struct {
                 self.frames[self.frame_count] = .{ .chunk = &func.chunk, .ip = 0, .vars = new_vars, .locals = try self.allocLocals(func, &new_vars), .func = func, .ref_slots = closure_refs, .called_class = inherit_cc, .call_name = name };
                 self.frames[self.frame_count].entry_sp = self.sp;
                 self.setFrameArgCount(arg_count);
-                self.frame_count += 1;
+                self.frame_count += 1; self.retainFrameObjects(self.frame_count - 1);
         if (self.frame_count > self.frame_high_water) self.frame_high_water = self.frame_count;
                 return;
             }
@@ -9771,7 +9754,7 @@ pub const VM = struct {
             {
                 for (func.slot_names, 0..) |sn, si| {
                     if (sn.len == cap.var_name.len and std.mem.eql(u8, sn, cap.var_name)) {
-                        locals[si] = try self.copyValue(cap.value);
+                        locals[si] = try self.transferArg(cap.value);
                         break;
                     }
                 }
@@ -9781,7 +9764,7 @@ pub const VM = struct {
         self.frames[self.frame_count] = .{ .chunk = &func.chunk, .ip = 0, .vars = .{}, .locals = locals, .func = func, .called_class = self.closureScopeByName(name) orelse self.currentFrame().called_class, .call_name = name };
         self.frames[self.frame_count].entry_sp = self.sp;
         self.setFrameArgCount(arg_count);
-        self.frame_count += 1;
+        self.frame_count += 1; self.retainFrameObjects(self.frame_count - 1);
         if (self.frame_count > self.frame_high_water) self.frame_high_water = self.frame_count;
         try self.fastLoop();
     }
@@ -9815,7 +9798,7 @@ pub const VM = struct {
         self.frames[self.frame_count] = .{ .chunk = &func.chunk, .ip = 0, .vars = .{}, .locals = locals, .func = func, .called_class = self.currentFrame().called_class };
         self.frames[self.frame_count].entry_sp = self.sp;
         self.setFrameArgCount(arg_count);
-        self.frame_count += 1;
+        self.frame_count += 1; self.retainFrameObjects(self.frame_count - 1);
         if (self.frame_count > self.frame_high_water) self.frame_high_water = self.frame_count;
         try self.fastLoop();
     }
@@ -9854,7 +9837,7 @@ pub const VM = struct {
 
         const bind_count = @min(args.len, func.arity);
         for (0..bind_count) |i| {
-            locals[i] = try self.copyValue(args[i]);
+            locals[i] = try self.transferArg(args[i]);
         }
         for (bind_count..func.arity) |i| {
             if (i < func.defaults.len) locals[i] = try self.resolveDefault(func.defaults[i]);
@@ -9867,7 +9850,7 @@ pub const VM = struct {
         self.consumePendingArgCount();
         self.saveFrameArgsSlice(args);
         self.pending_call_name = null;
-        self.frame_count += 1;
+        self.frame_count += 1; self.retainFrameObjects(self.frame_count - 1);
         if (self.frame_count > self.frame_high_water) self.frame_high_water = self.frame_count;
         self.runUntilFrame(base_frame) catch |err| {
             self.handler_count = base_handler;
@@ -9913,6 +9896,30 @@ pub const VM = struct {
         for (frame.locals, 0..) |lv, i| {
             if (vars_populated and i < snames.len and snames[i].len > 0) continue;
             self.releaseValue(lv);
+        }
+    }
+
+    // EXACT mirror of releaseFrameObjects (Stage 1). called once per frame
+    // right after the frame is pushed and populated. every object a frame
+    // holds - $this, parameters, closure captures, seeded locals - is bound
+    // RAW at the call sites (no per-site refcount logic); this one pass
+    // retains them all, and releaseFrameObjects at teardown releases them all.
+    // the two are the only frame-refcount choke points - making the bind
+    // sites refcount-free is what eliminates the over-release hole class.
+    // generator frames are skipped (their vars are owned by the Generator,
+    // and deinitFrameSlot likewise skips releaseFrameObjects for them).
+    pub fn retainFrameObjects(self: *VM, idx: usize) void {
+        const frame = &self.frames[idx];
+        if (frame.generator != null) return;
+        const snames = if (frame.func) |f| f.slot_names else frame.slot_names;
+        const vars_populated = frame.vars.count() > 0;
+        if (vars_populated) {
+            var it = frame.vars.valueIterator();
+            while (it.next()) |v| retainValue(v.*);
+        }
+        for (frame.locals, 0..) |lv, i| {
+            if (vars_populated and i < snames.len and snames[i].len > 0) continue;
+            retainValue(lv);
         }
     }
 
@@ -11396,7 +11403,7 @@ pub const VM = struct {
                 if (cap.ref_cell) |cell| {
                     if (ref_slots) |rs| try rs.put(self.allocator, cap.var_name, cell);
                 } else {
-                    try vars.put(self.allocator, cap.var_name, try self.copyValue(cap.value));
+                    try vars.put(self.allocator, cap.var_name, try self.transferArg(cap.value));
                 }
             }
         }
@@ -11410,7 +11417,7 @@ pub const VM = struct {
                     var it = parent.vars.iterator();
                     while (it.next()) |entry| {
                         if (!vars.contains(entry.key_ptr.*)) {
-                            try vars.put(self.allocator, entry.key_ptr.*, try self.copyValue(entry.value_ptr.*));
+                            try vars.put(self.allocator, entry.key_ptr.*, try self.transferArg(entry.value_ptr.*));
                         }
                     }
                 }
@@ -11434,19 +11441,19 @@ pub const VM = struct {
             const fixed: usize = func.arity - 1;
             const bind_fixed = @min(args.len, fixed);
             for (0..bind_fixed) |i| {
-                try vars.put(self.allocator, func.params[i], try self.copyValue(args[i]));
+                try vars.put(self.allocator, func.params[i], try self.transferArg(args[i]));
             }
             const rest = try self.allocator.create(PhpArray);
             rest.* = .{};
             for (fixed..args.len) |i| {
-                try rest.append(self.allocator, try self.copyValue(args[i]));
+                try rest.append(self.allocator, try self.transferArg(args[i]));
             }
             try self.arrays.append(self.allocator, rest);
             try vars.put(self.allocator, func.params[fixed], .{ .array = rest });
             return;
         }
         for (0..args.len) |i| {
-            try vars.put(self.allocator, func.params[i], try self.copyValue(args[i]));
+            try vars.put(self.allocator, func.params[i], try self.transferArg(args[i]));
         }
         try self.fillDefaults(vars, func, args.len);
     }
@@ -11612,7 +11619,7 @@ pub const VM = struct {
         self.consumePendingArgCount();
         if (self.pending_invoke_args) |pia| self.saveFrameArgsSlice(pia);
         self.pending_call_name = null;
-        self.frame_count += 1;
+        self.frame_count += 1; self.retainFrameObjects(self.frame_count - 1);
         if (self.frame_count > self.frame_high_water) self.frame_high_water = self.frame_count;
         self.runUntilFrame(base_frame) catch |err| {
             self.handler_count = base_handler;
@@ -11638,7 +11645,7 @@ pub const VM = struct {
         self.consumePendingArgCount();
         if (self.pending_invoke_args) |pia| self.saveFrameArgsSlice(pia);
         self.pending_call_name = null;
-        self.frame_count += 1;
+        self.frame_count += 1; self.retainFrameObjects(self.frame_count - 1);
         if (self.frame_count > self.frame_high_water) self.frame_high_water = self.frame_count;
         self.runUntilFrame(base_frame) catch |err| {
             self.handler_count = base_handler;
@@ -12257,7 +12264,7 @@ pub const VM = struct {
                 // variadic, keyed by name (PHP 8.1)
                 if (named_extras) |extras| {
                     for (extras.entries.items) |entry| {
-                        try rest_arr.set(self.allocator, entry.key, try self.copyValue(entry.value));
+                        try rest_arr.set(self.allocator, entry.key, try self.transferArg(entry.value));
                     }
                 }
                 try self.arrays.append(self.allocator, rest_arr);
@@ -12313,7 +12320,7 @@ pub const VM = struct {
                 self.frames[self.frame_count] = .{ .chunk = &func.chunk, .ip = 0, .vars = new_vars, .locals = try self.allocLocals(func, &new_vars), .func = func, .ref_slots = callee_refs, .ref_array_bindings = callee_array_bindings, .ref_object_bindings = callee_object_bindings, .called_class = inherit_cc, .call_name = name };
                 self.frames[self.frame_count].entry_sp = self.sp;
                 self.setFrameArgCount(arg_count);
-                self.frame_count += 1;
+                self.frame_count += 1; self.retainFrameObjects(self.frame_count - 1);
         if (self.frame_count > self.frame_high_water) self.frame_high_water = self.frame_count;
             }
         } else {
@@ -12393,14 +12400,9 @@ pub const VM = struct {
         }
         if (self.native_fns.get(full_name)) |native| {
             var tmp_vars: std.StringHashMapUnmanaged(Value) = .{};
-            // retain $this for the callee frame (Stage 1): the receiver is
-            // passed as a pointer, not via the operand stack, so there is no
-            // push-retain to transfer - the frame teardown's $this release
-            // (deinitFrameSlot -> releaseFrameObjects) must be balanced here
-            objRetain(obj);
             try tmp_vars.put(self.allocator, "$this", .{ .object = obj });
             self.frames[self.frame_count] = .{ .chunk = self.currentChunk(), .ip = self.currentFrame().ip, .vars = tmp_vars };
-            self.frame_count += 1;
+            self.frame_count += 1; self.retainFrameObjects(self.frame_count - 1);
         if (self.frame_count > self.frame_high_water) self.frame_high_water = self.frame_count;
             const saved_fc = self.frame_count;
             var ctx = self.makeContext(null);
@@ -12419,9 +12421,6 @@ pub const VM = struct {
         } else if (self.functions.get(full_name)) |func| {
             if (args.len < func.required_params) return error.RuntimeError;
             var new_vars = self.acquireFrameVars();
-            // retain $this for the callee frame (Stage 1) - balances the
-            // frame teardown's $this release
-            objRetain(obj);
             try new_vars.put(self.allocator, "$this", .{ .object = obj });
             try self.bindClosures(&new_vars, null, full_name);
             const trimmed = if (func.is_variadic) args else args[0..@min(args.len, func.arity)];
@@ -12592,7 +12591,7 @@ pub const VM = struct {
 
         const bind_count = @min(args.len, func.arity);
         for (0..bind_count) |i| {
-            locals[i] = try self.copyValue(args[i]);
+            locals[i] = try self.transferArg(args[i]);
         }
         for (bind_count..func.arity) |i| {
             if (i < func.defaults.len) locals[i] = try self.resolveDefault(func.defaults[i]);
@@ -12603,7 +12602,7 @@ pub const VM = struct {
             for (caps) |cap| {
                 for (func.slot_names, 0..) |sn, si| {
                     if (sn.len == cap.var_name.len and std.mem.eql(u8, sn, cap.var_name)) {
-                        locals[si] = try self.copyValue(cap.value);
+                        locals[si] = try self.transferArg(cap.value);
                         break;
                     }
                 }
@@ -12616,7 +12615,7 @@ pub const VM = struct {
         self.frames[self.frame_count].entry_sp = self.sp;
         self.consumePendingArgCount();
         self.saveFrameArgsSlice(args);
-        self.frame_count += 1;
+        self.frame_count += 1; self.retainFrameObjects(self.frame_count - 1);
         if (self.frame_count > self.frame_high_water) self.frame_high_water = self.frame_count;
         self.fastLoop() catch |err| {
             self.handler_count = base_handler;
@@ -12648,15 +12647,13 @@ pub const VM = struct {
             }
             const bind_count = @min(args.len, func.arity);
             var new_vars = self.acquireFrameVars();
-            // retain $this for the callee frame (Stage 1) - balances teardown
-            objRetain(obj);
             try new_vars.put(self.allocator, "$this", .{ .object = obj });
             var ref_slots: std.StringHashMapUnmanaged(*Value) = .{};
             try self.bindClosures(&new_vars, &ref_slots, full_name);
 
             var cells: [16]?*Value = .{null} ** 16;
             for (0..bind_count) |i| {
-                try new_vars.put(self.allocator, func.params[i], try self.copyValue(args[i]));
+                try new_vars.put(self.allocator, func.params[i], try self.transferArg(args[i]));
                 if (i < func.ref_params.len and func.ref_params[i] and i < 16) {
                     const cell = try self.allocator.create(Value);
                     cell.* = args[i];
@@ -12690,7 +12687,7 @@ pub const VM = struct {
 
             var cells: [16]?*Value = .{null} ** 16;
             for (0..bind_count) |i| {
-                try new_vars.put(self.allocator, func.params[i], try self.copyValue(args[i]));
+                try new_vars.put(self.allocator, func.params[i], try self.transferArg(args[i]));
                 if (i < func.ref_params.len and func.ref_params[i] and i < 16) {
                     const cell = try self.allocator.create(Value);
                     cell.* = args[i];
