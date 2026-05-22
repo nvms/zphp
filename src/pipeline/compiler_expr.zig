@@ -792,7 +792,14 @@ pub fn compileCall(self: *Compiler, node: Ast.Node) Error!void {
         self.current_source_offset = call_offset;
         const parts = self.ast.extraSlice(callee.data.lhs);
         const fqn = try self.buildQualifiedString(parts);
-        const name = if (fqn.len > 0 and fqn[0] == '\\') fqn[1..] else fqn;
+        const stripped = if (fqn.len > 0 and fqn[0] == '\\') fqn[1..] else fqn;
+        // `namespace\fn()` resolves the function relative to the current
+        // namespace (rhs == 2 marks the relative-namespace operator)
+        const name = if (callee.data.rhs == 2 and self.namespace.len > 0) blk: {
+            const q = std.fmt.allocPrint(self.allocator, "{s}\\{s}", .{ self.namespace, stripped }) catch return error.CompileError;
+            self.string_allocs.append(self.allocator, q) catch return error.CompileError;
+            break :blk q;
+        } else stripped;
         const idx = try self.addConstant(.{ .string = name });
         try self.emitOp(.call);
         try self.emitU16(idx);
@@ -1305,6 +1312,13 @@ pub fn resolveNodeClassName(self: *Compiler, class_node: Ast.Node) ![]const u8 {
         const parts = self.ast.extraSlice(class_node.data.lhs);
         const name = try self.buildQualifiedString(parts);
         if (class_node.data.rhs == 1) return name;
+        if (class_node.data.rhs == 2) {
+            // `namespace\X` - relative to the current namespace, no alias lookup
+            if (self.namespace.len == 0) return name;
+            const qualified = std.fmt.allocPrint(self.allocator, "{s}\\{s}", .{ self.namespace, name }) catch return name;
+            self.string_allocs.append(self.allocator, qualified) catch return name;
+            return qualified;
+        }
         // check if the first segment is a use alias
         if (std.mem.indexOf(u8, name, "\\")) |sep| {
             const first_segment = name[0..sep];
@@ -1322,11 +1336,13 @@ pub fn resolveNodeClassName(self: *Compiler, class_node: Ast.Node) ![]const u8 {
     return self.resolveClassName(self.ast.tokenSlice(class_node.main_token));
 }
 
-pub fn resolveQualifiedNewName(self: *Compiler, node: Ast.Node) !struct { name: []const u8, is_absolute: bool } {
+pub fn resolveQualifiedNewName(self: *Compiler, node: Ast.Node) !struct { name: []const u8, is_absolute: bool, ns_relative: bool } {
     const first = self.ast.tokenSlice(node.main_token);
-    const rhs_raw = node.data.rhs & ~(@as(u32, 1) << 31);
+    // rhs: bit 31 = absolute, bit 30 = `namespace\` relative, rest = extra index
+    const rhs_raw = node.data.rhs & ~((@as(u32, 1) << 31) | (@as(u32, 1) << 30));
     const is_absolute = (node.data.rhs & (1 << 31)) != 0;
-    if (rhs_raw == 0) return .{ .name = first, .is_absolute = is_absolute };
+    const ns_relative = (node.data.rhs & (1 << 30)) != 0;
+    if (rhs_raw == 0) return .{ .name = first, .is_absolute = is_absolute, .ns_relative = ns_relative };
     const parts = self.ast.extraSlice(rhs_raw);
     var buf = std.ArrayListUnmanaged(u8){};
     try buf.appendSlice(self.allocator, first);
@@ -1336,7 +1352,7 @@ pub fn resolveQualifiedNewName(self: *Compiler, node: Ast.Node) !struct { name: 
     }
     const owned = try buf.toOwnedSlice(self.allocator);
     try self.string_allocs.append(self.allocator, owned);
-    return .{ .name = owned, .is_absolute = is_absolute };
+    return .{ .name = owned, .is_absolute = is_absolute, .ns_relative = ns_relative };
 }
 
 pub fn compileNewExpr(self: *Compiler, node: Ast.Node) Error!void {
@@ -1344,7 +1360,13 @@ pub fn compileNewExpr(self: *Compiler, node: Ast.Node) Error!void {
     const raw_name = resolved.name;
     const class_name = if (resolved.is_absolute)
         raw_name
-    else if (std.mem.indexOf(u8, raw_name, "\\")) |sep| blk: {
+    else if (resolved.ns_relative) blk: {
+        // `new namespace\Cls` - prepend the current namespace, no alias lookup
+        if (self.namespace.len == 0) break :blk raw_name;
+        const qualified = std.fmt.allocPrint(self.allocator, "{s}\\{s}", .{ self.namespace, raw_name }) catch return error.CompileError;
+        self.string_allocs.append(self.allocator, qualified) catch return error.CompileError;
+        break :blk qualified;
+    } else if (std.mem.indexOf(u8, raw_name, "\\")) |sep| blk: {
         // check if the first segment is a use alias
         const first_segment = raw_name[0..sep];
         if (self.use_aliases.get(first_segment)) |alias_fqn| {

@@ -1093,7 +1093,14 @@ const Parser = struct {
             return self.addNode(.{ .tag = .new_expr_dynamic, .main_token = new_tok, .data = .{ .lhs = class_expr, .rhs = extra } });
         }
 
-        const is_absolute = self.peek() == .backslash;
+        // `new namespace\Cls` - class name relative to the current namespace
+        var ns_relative = false;
+        if (self.peek() == .kw_namespace and self.peekAt(1) == .backslash) {
+            _ = self.advance(); // namespace
+            _ = self.advance(); // backslash
+            ns_relative = true;
+        }
+        const is_absolute = !ns_relative and self.peek() == .backslash;
         if (is_absolute) _ = self.advance();
         const name_tok = if (self.peek() == .kw_self or self.peek() == .kw_static or self.peek() == .kw_parent)
             self.advance()
@@ -1167,6 +1174,7 @@ const Parser = struct {
         else
             @as(u32, 0);
         if (is_absolute) name_extra |= (1 << 31);
+        if (ns_relative) name_extra |= (1 << 30);
         return self.addNode(.{ .tag = .new_expr, .main_token = name_tok, .data = .{ .lhs = extra, .rhs = name_extra } });
     }
 
@@ -2041,8 +2049,18 @@ const Parser = struct {
     // parse a qualified name like App\Models\User or just User
     // returns an identifier node for simple names, qualified_name node for multi-part
     // data.rhs = 1 means absolute (had leading \)
+    // qualified_name data.rhs: 0 = plain (alias + namespace resolution),
+    // 1 = absolute (leading backslash), 2 = `namespace\` relative operator
     fn parseQualifiedName(self: *Parser) Error!u32 {
-        const has_leading = self.peek() == .backslash;
+        // `namespace\X` resolves X relative to the current namespace and skips
+        // use-alias lookup (PHP's relative-namespace operator)
+        var ns_relative = false;
+        if (self.peek() == .kw_namespace and self.peekAt(1) == .backslash) {
+            _ = self.advance(); // namespace
+            _ = self.advance(); // backslash
+            ns_relative = true;
+        }
+        const has_leading = !ns_relative and self.peek() == .backslash;
         if (has_leading) _ = self.advance();
 
         const first_tok = if (self.peek() == .identifier or isSemiReserved(self.peek()))
@@ -2050,12 +2068,13 @@ const Parser = struct {
         else
             try self.expect(.identifier);
         if (self.peek() != .backslash) {
-            if (has_leading) {
+            if (has_leading or ns_relative) {
                 var parts = std.ArrayListUnmanaged(u32){};
                 defer parts.deinit(self.allocator);
                 try parts.append(self.allocator, first_tok);
                 const extra = try self.addExtraList(parts.items);
-                return self.addNode(.{ .tag = .qualified_name, .main_token = first_tok, .data = .{ .lhs = extra, .rhs = 1 } });
+                const marker: u32 = if (ns_relative) 2 else 1;
+                return self.addNode(.{ .tag = .qualified_name, .main_token = first_tok, .data = .{ .lhs = extra, .rhs = marker } });
             }
             return self.addNode(.{ .tag = .identifier, .main_token = first_tok, .data = .{} });
         }
@@ -2073,7 +2092,8 @@ const Parser = struct {
             try parts.append(self.allocator, seg);
         }
         const extra = try self.addExtraList(parts.items);
-        return self.addNode(.{ .tag = .qualified_name, .main_token = first_tok, .data = .{ .lhs = extra, .rhs = if (has_leading) 1 else 0 } });
+        const marker: u32 = if (ns_relative) 2 else if (has_leading) 1 else 0;
+        return self.addNode(.{ .tag = .qualified_name, .main_token = first_tok, .data = .{ .lhs = extra, .rhs = marker } });
     }
 
     fn isTypeName(self: *Parser) bool {
@@ -2381,6 +2401,10 @@ const Parser = struct {
                 if (self.peekAt(1) == .kw_false) { _ = self.advance(); break :blk self.addLiteral(.false_literal); }
                 if (self.peekAt(1) == .kw_null) { _ = self.advance(); break :blk self.addLiteral(.null_literal); }
                 break :blk self.parseQualifiedName();
+            },
+            .kw_namespace => if (self.peekAt(1) == .backslash) self.parseQualifiedName() else blk: {
+                try self.addError(.expected_expression);
+                break :blk error.ParseError;
             },
             .kw_isset, .kw_empty, .kw_unset, .kw_eval, .kw_exit, .kw_die => self.addLiteral(.identifier),
             .kw_list => self.parseListDestructure(),

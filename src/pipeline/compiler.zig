@@ -507,7 +507,13 @@ pub const Compiler = struct {
                 const parts = self.ast.extraSlice(node.data.lhs);
                 const fqn = try self.buildQualifiedString(parts);
                 // strip leading backslash for root-namespace constant lookup
-                const name = if (fqn.len > 0 and fqn[0] == '\\') fqn[1..] else fqn;
+                const stripped = if (fqn.len > 0 and fqn[0] == '\\') fqn[1..] else fqn;
+                // `namespace\CONST` resolves relative to the current namespace
+                const name = if (node.data.rhs == 2 and self.namespace.len > 0) blk: {
+                    const q = std.fmt.allocPrint(self.allocator, "{s}\\{s}", .{ self.namespace, stripped }) catch return error.CompileError;
+                    self.string_allocs.append(self.allocator, q) catch return error.CompileError;
+                    break :blk q;
+                } else stripped;
                 try self.emitGetVar(name);
             },
             .root => {},
