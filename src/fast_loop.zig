@@ -711,7 +711,10 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                     };
                     if (sp_typed_ok and sp_entry.key == sp_ip and sp_entry.chunk_key == @intFromPtr(frame.chunk) and sp_entry.class_ptr == @intFromPtr(sp_obj.class_name.ptr) and sp_entry.slot_index != 0xFFFF) {
                         if (sp_obj.slots) |s| {
-                            const copied = if (sp_val == .array) try self.copyValue(sp_val) else sp_val;
+                            // copyValue: clone an array, retain an object for
+                            // the property slot - mirrors runLoop set_prop so a
+                            // property is a consistent durable holder (Stage 1)
+                            const copied = try self.copyValue(sp_val);
                             // resurrect on write - mirrors runLoop set_prop
                             const sp_name_idx: u16 = (@as(u16, code[sp_ip]) << 8) | code[sp_ip + 1];
                             const sp_prop_name = consts[sp_name_idx].string;
