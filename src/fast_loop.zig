@@ -47,6 +47,9 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                 }
                 const slot = (@as(u16, code[ip]) << 8) | code[ip + 1];
                 ip += 2;
+                // an object pushed onto the operand stack takes a reference
+                // (Stage 1) - stay on the fast path, just retain
+                VM.retainValue(locals[slot]);
                 self.stack[sp] = locals[slot];
                 sp += 1;
                 const _next = code[ip];
@@ -65,14 +68,22 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                 const slot = (@as(u16, code[ip]) << 8) | code[ip + 1];
                 ip += 2;
                 const val = self.stack[sp - 1];
-                if (val == .array) {
+                // the slot is a durable holder (Stage 1): retain the new value,
+                // release the object the slot previously held
+                const sl_old = locals[slot];
+                if (val == .object) {
+                    VM.objRetain(val.object);
+                    locals[slot] = val;
+                } else if (val == .array) {
                     locals[slot] = try self.copyValue(val);
                 } else {
                     locals[slot] = val;
                 }
+                self.releaseValue(sl_old);
                 if (code[ip] == @intFromEnum(OpCode.pop)) {
                     ip += 1;
                     sp -= 1;
+                    self.releaseValue(val);
                 }
                 const _next = code[ip];
                 ip += 1;
@@ -319,11 +330,16 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
             },
             .pop => {
                 sp -= 1;
+                // a discarded operand-stack object releases its reference
+                // (Stage 1; deferred destruct drains at a runLoop pop)
+                self.releaseValue(self.stack[sp]);
                 const _next = code[ip];
                 ip += 1;
                 continue :dispatch @as(OpCode, @enumFromInt(_next));
             },
             .dup => {
+                // a duplicated object is a new operand-stack reference (Stage 1)
+                VM.retainValue(self.stack[sp - 1]);
                 self.stack[sp] = self.stack[sp - 1];
                 sp += 1;
                 const _next = code[ip];
@@ -353,6 +369,11 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
             },
             .cast_int => {
                 const v = self.stack[sp - 1];
+                if (v == .object) {
+                    frame.ip = ip - 1;
+                    self.sp = sp;
+                    return;
+                }
                 self.stack[sp - 1] = .{ .int = Value.toInt(v) };
                 const _next = code[ip];
                 ip += 1;
@@ -363,7 +384,11 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                 const ag_arr = self.stack[sp - 2];
                 sp -= 2;
                 if (ag_arr == .array) {
-                    self.stack[sp] = ag_arr.array.get(Value.toArrayKey(ag_key));
+                    const ag_elem = ag_arr.array.get(Value.toArrayKey(ag_key));
+                    // an object element pushed onto the operand stack takes a
+                    // reference (Stage 1)
+                    VM.retainValue(ag_elem);
+                    self.stack[sp] = ag_elem;
                     sp += 1;
                     const _next = code[ip];
                     ip += 1;
@@ -480,6 +505,13 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                 const as_val = self.stack[sp - 1];
                 const as_key = self.stack[sp - 2];
                 const as_arr = self.stack[sp - 3];
+                // an object stored into an array element - bail to runLoop's
+                // array_set so the element holder refcounts it (Stage 1)
+                if (as_val == .object) {
+                    frame.ip = ip - 1;
+                    self.sp = sp;
+                    return;
+                }
                 if (as_arr == .array) {
                     as_arr.array.set(self.allocator, Value.toArrayKey(as_key), as_val) catch {
                         frame.ip = ip - 1;
@@ -499,6 +531,11 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
             .array_push => {
                 const ap_val = self.stack[sp - 1];
                 const ap_arr = self.stack[sp - 2];
+                if (ap_val == .object) {
+                    frame.ip = ip - 1;
+                    self.sp = sp;
+                    return;
+                }
                 if (ap_arr == .array) {
                     ap_arr.array.append(self.allocator, ap_val) catch {
                         frame.ip = ip - 1;
@@ -518,6 +555,11 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                 const ase_val = self.stack[sp - 1];
                 const ase_key = self.stack[sp - 2];
                 const ase_arr = self.stack[sp - 3];
+                if (ase_val == .object) {
+                    frame.ip = ip - 1;
+                    self.sp = sp;
+                    return;
+                }
                 if (ase_arr == .array) {
                     ase_arr.array.set(self.allocator, Value.toArrayKey(ase_key), ase_val) catch {
                         frame.ip = ip - 1;
@@ -627,7 +669,13 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                             // a null slot may be an uninitialized typed property
                             // - bail so runLoop runs the type check
                             if (gp_v != .null) {
+                                // the receiver slot is replaced by the property
+                                // value: retain the new occupant, release the
+                                // receiver it overwrites (Stage 1)
+                                const gp_recv = self.stack[sp - 1];
+                                VM.retainValue(gp_v);
                                 self.stack[sp - 1] = gp_v;
+                                self.releaseValue(gp_recv);
                                 const _next_gp = code[ip];
                                 ip += 1;
                                 continue :dispatch @as(OpCode, @enumFromInt(_next_gp));
@@ -670,6 +718,10 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                             sp_obj.clearUnset(sp_prop_name);
                             s[sp_entry.slot_index] = copied;
                             sp -= 1;
+                            // the receiver slot is overwritten by the result -
+                            // release the consumed receiver (Stage 1). the
+                            // stored value keeps its retain as the result slot
+                            self.releaseValue(self.stack[sp - 1]);
                             self.stack[sp - 1] = copied;
                             const _next_sp = code[ip];
                             ip += 1;
@@ -834,7 +886,14 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                     self.sp = sp;
                     return;
                 }
-                if (locals.len > 0) self.freeLocals(locals);
+                if (locals.len > 0) {
+                    // move model (Stage 1): release $this and the parameter
+                    // locals - this consumes the operand-stack retains the
+                    // call site transferred in. the return value keeps its
+                    // own stack retain so releasing its aliasing local is safe
+                    for (locals) |lv| self.releaseValue(lv);
+                    self.freeLocals(locals);
+                }
                 self.frame_count -= 1;
 
                 if (self.frame_count < entry_fc) {
@@ -855,7 +914,11 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                     self.sp = sp;
                     return;
                 }
-                if (locals.len > 0) self.freeLocals(locals);
+                if (locals.len > 0) {
+                    // move model (Stage 1): release $this and parameter locals
+                    for (locals) |lv| self.releaseValue(lv);
+                    self.freeLocals(locals);
+                }
                 self.frame_count -= 1;
 
                 if (self.frame_count < entry_fc) {

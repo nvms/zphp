@@ -5178,6 +5178,11 @@ pub const VM = struct {
                             self.frame_count -= 1;
                             self.deinitFrameSlot(self.frame_count);
                         } else if (self.functions.get(cn)) |func| {
+                            // anchor the object across construction (Stage 1):
+                            // the user ctor frame's teardown releases $this,
+                            // and this retain is what that release consumes,
+                            // keeping the object alive while the ctor runs
+                            objRetain(obj);
                             if (ac < func.required_params) {
                                 self.sp -= ac;
                                 const msg = try self.formatTooFewArgs(cn, ac, func);
@@ -5203,7 +5208,7 @@ pub const VM = struct {
                                 if (func.is_variadic) {
                                     const fixed: usize = func.arity - 1;
                                     for (0..@min(ac, fixed)) |i| {
-                                        ctor_locals[i + 1] = try self.copyValue(self.stack[self.sp - ac + i]);
+                                        ctor_locals[i + 1] = try self.transferArg(self.stack[self.sp - ac + i]);
                                     }
                                     for (@min(ac, fixed)..fixed) |i| {
                                         if (i < func.defaults.len) ctor_locals[i + 1] = try self.resolveDefault(func.defaults[i]);
@@ -5213,13 +5218,13 @@ pub const VM = struct {
                                     try self.arrays.append(self.allocator, rest_arr);
                                     if (ac > fixed) {
                                         for (fixed..ac) |i| {
-                                            try rest_arr.append(self.allocator, try self.copyValue(self.stack[self.sp - ac + i]));
+                                            try rest_arr.append(self.allocator, try self.transferArg(self.stack[self.sp - ac + i]));
                                         }
                                     }
                                     ctor_locals[fixed + 1] = .{ .array = rest_arr };
                                 } else {
                                     for (0..@min(ac, func.arity)) |i| {
-                                        ctor_locals[i + 1] = try self.copyValue(self.stack[self.sp - ac + i]);
+                                        ctor_locals[i + 1] = try self.transferArg(self.stack[self.sp - ac + i]);
                                     }
                                     for (@min(ac, func.arity)..func.arity) |i| {
                                         if (i < func.defaults.len) ctor_locals[i + 1] = try self.resolveDefault(func.defaults[i]);
@@ -5248,7 +5253,7 @@ pub const VM = struct {
                                 if (func.is_variadic) {
                                     const fixed: usize = func.arity - 1;
                                     for (0..@min(ac, fixed)) |i| {
-                                        try new_vars.put(self.allocator, func.params[i], try self.copyValue(self.stack[self.sp - ac + i]));
+                                        try new_vars.put(self.allocator, func.params[i], try self.transferArg(self.stack[self.sp - ac + i]));
                                     }
                                     for (@min(ac, fixed)..fixed) |i| {
                                         if (i < func.defaults.len) try new_vars.put(self.allocator, func.params[i], try self.resolveDefault(func.defaults[i]));
@@ -5258,14 +5263,14 @@ pub const VM = struct {
                                     try self.arrays.append(self.allocator, rest_arr);
                                     if (ac > fixed) {
                                         for (fixed..ac) |i| {
-                                            try rest_arr.append(self.allocator, try self.copyValue(self.stack[self.sp - ac + i]));
+                                            try rest_arr.append(self.allocator, try self.transferArg(self.stack[self.sp - ac + i]));
                                         }
                                     }
                                     try new_vars.put(self.allocator, func.params[func.arity - 1], .{ .array = rest_arr });
                                 } else {
                                     const copy_count = @min(ac, func.params.len);
                                     for (0..copy_count) |i| {
-                                        try new_vars.put(self.allocator, func.params[i], try self.copyValue(self.stack[self.sp - ac + i]));
+                                        try new_vars.put(self.allocator, func.params[i], try self.transferArg(self.stack[self.sp - ac + i]));
                                     }
                                 }
                                 self.sp -= ac;
@@ -5385,10 +5390,13 @@ pub const VM = struct {
                             self.frame_count -= 1;
                             self.deinitFrameSlot(self.frame_count);
                         } else if (self.functions.get(cn)) |func| {
+                            // anchor across construction (Stage 1) - consumed
+                            // by the ctor frame teardown's $this release
+                            objRetain(obj);
                             var new_vars = self.acquireFrameVars();
                             try new_vars.put(self.allocator, "$this", .{ .object = obj });
                             for (0..@min(ac, func.arity)) |i| {
-                                try new_vars.put(self.allocator, func.params[i], try self.copyValue(self.stack[self.sp - ac + i]));
+                                try new_vars.put(self.allocator, func.params[i], try self.transferArg(self.stack[self.sp - ac + i]));
                             }
                             self.sp -= ac + 1;
                             for (@min(ac, func.arity)..func.arity) |i| {
@@ -6101,7 +6109,7 @@ pub const VM = struct {
                                     };
                                     mc_locals[0] = .{ .object = obj };
                                     for (0..@min(ac, func.arity)) |i| {
-                                        mc_locals[i + 1] = try self.copyValue(self.stack[self.sp - ac + i]);
+                                        mc_locals[i + 1] = try self.transferArg(self.stack[self.sp - ac + i]);
                                     }
                                     for (@min(ac, func.arity)..func.arity) |i| {
                                         if (i < func.defaults.len) mc_locals[i + 1] = try self.resolveDefault(func.defaults[i]);
@@ -6308,7 +6316,7 @@ pub const VM = struct {
                         if (func.is_variadic) {
                             const fixed: usize = func.arity - 1;
                             for (0..@min(ac, fixed)) |i| {
-                                try new_vars.put(self.allocator, func.params[i], try self.copyValue(self.stack[self.sp - ac + i]));
+                                try new_vars.put(self.allocator, func.params[i], try self.transferArg(self.stack[self.sp - ac + i]));
                             }
                             for (@min(ac, fixed)..fixed) |i| {
                                 if (i < func.defaults.len) try new_vars.put(self.allocator, func.params[i], try self.resolveDefault(func.defaults[i]));
@@ -6316,11 +6324,11 @@ pub const VM = struct {
                             const rest_arr = try self.allocator.create(PhpArray);
                             rest_arr.* = .{};
                             try self.arrays.append(self.allocator, rest_arr);
-                            if (ac > fixed) for (fixed..ac) |i| try rest_arr.append(self.allocator, try self.copyValue(self.stack[self.sp - ac + i]));
+                            if (ac > fixed) for (fixed..ac) |i| try rest_arr.append(self.allocator, try self.transferArg(self.stack[self.sp - ac + i]));
                             try new_vars.put(self.allocator, func.params[fixed], .{ .array = rest_arr });
                         } else {
                             for (0..@min(ac, func.arity)) |i| {
-                                try new_vars.put(self.allocator, func.params[i], try self.copyValue(self.stack[self.sp - ac + i]));
+                                try new_vars.put(self.allocator, func.params[i], try self.transferArg(self.stack[self.sp - ac + i]));
                             }
                             try self.fillDefaults(&new_vars, func, ac);
                         }
@@ -6505,7 +6513,7 @@ pub const VM = struct {
                         if (func.is_variadic) {
                             const fixed: usize = func.arity - 1;
                             for (0..@min(ac, fixed)) |i| {
-                                try new_vars.put(self.allocator, func.params[i], try self.copyValue(self.stack[self.sp - ac + i]));
+                                try new_vars.put(self.allocator, func.params[i], try self.transferArg(self.stack[self.sp - ac + i]));
                             }
                             for (@min(ac, fixed)..fixed) |i| {
                                 if (i < func.defaults.len) try new_vars.put(self.allocator, func.params[i], try self.resolveDefault(func.defaults[i]));
@@ -6513,11 +6521,11 @@ pub const VM = struct {
                             const rest_arr = try self.allocator.create(PhpArray);
                             rest_arr.* = .{};
                             try self.arrays.append(self.allocator, rest_arr);
-                            if (ac > fixed) for (fixed..ac) |i| try rest_arr.append(self.allocator, try self.copyValue(self.stack[self.sp - ac + i]));
+                            if (ac > fixed) for (fixed..ac) |i| try rest_arr.append(self.allocator, try self.transferArg(self.stack[self.sp - ac + i]));
                             try new_vars.put(self.allocator, func.params[fixed], .{ .array = rest_arr });
                         } else {
                             for (0..@min(ac, func.arity)) |i| {
-                                try new_vars.put(self.allocator, func.params[i], try self.copyValue(self.stack[self.sp - ac + i]));
+                                try new_vars.put(self.allocator, func.params[i], try self.transferArg(self.stack[self.sp - ac + i]));
                             }
                             for (ac..func.arity) |i| {
                                 if (i < func.defaults.len) try new_vars.put(self.allocator, func.params[i], try self.resolveDefault(func.defaults[i]));
@@ -6649,7 +6657,7 @@ pub const VM = struct {
                         if (func.is_variadic) {
                             const fixed: usize = func.arity - 1;
                             for (0..@min(ac, fixed)) |ai| {
-                                try new_vars.put(self.allocator, func.params[ai], try self.copyValue(self.stack[self.sp - ac + ai]));
+                                try new_vars.put(self.allocator, func.params[ai], try self.transferArg(self.stack[self.sp - ac + ai]));
                             }
                             for (@min(ac, fixed)..fixed) |ai| {
                                 if (ai < func.defaults.len) try new_vars.put(self.allocator, func.params[ai], try self.resolveDefault(func.defaults[ai]));
@@ -6657,11 +6665,11 @@ pub const VM = struct {
                             const rest_arr = try self.allocator.create(PhpArray);
                             rest_arr.* = .{};
                             try self.arrays.append(self.allocator, rest_arr);
-                            if (ac > fixed) for (fixed..ac) |ai| try rest_arr.append(self.allocator, try self.copyValue(self.stack[self.sp - ac + ai]));
+                            if (ac > fixed) for (fixed..ac) |ai| try rest_arr.append(self.allocator, try self.transferArg(self.stack[self.sp - ac + ai]));
                             try new_vars.put(self.allocator, func.params[fixed], .{ .array = rest_arr });
                         } else {
                             for (0..@min(ac, func.arity)) |ai| {
-                                try new_vars.put(self.allocator, func.params[ai], try self.copyValue(self.stack[self.sp - ac + ai]));
+                                try new_vars.put(self.allocator, func.params[ai], try self.transferArg(self.stack[self.sp - ac + ai]));
                             }
                             if (ac < func.arity) {
                                 for (ac..func.arity) |ai| {
@@ -6812,7 +6820,7 @@ pub const VM = struct {
                         if (func.is_variadic) {
                             const fixed: usize = func.arity - 1;
                             for (0..@min(ac, fixed)) |ai| {
-                                try new_vars.put(self.allocator, func.params[ai], try self.copyValue(self.stack[self.sp - ac + ai]));
+                                try new_vars.put(self.allocator, func.params[ai], try self.transferArg(self.stack[self.sp - ac + ai]));
                             }
                             for (@min(ac, fixed)..fixed) |ai| {
                                 if (ai < func.defaults.len) try new_vars.put(self.allocator, func.params[ai], try self.resolveDefault(func.defaults[ai]));
@@ -6820,11 +6828,11 @@ pub const VM = struct {
                             const rest_arr = try self.allocator.create(PhpArray);
                             rest_arr.* = .{};
                             try self.arrays.append(self.allocator, rest_arr);
-                            if (ac > fixed) for (fixed..ac) |ai| try rest_arr.append(self.allocator, try self.copyValue(self.stack[self.sp - ac + ai]));
+                            if (ac > fixed) for (fixed..ac) |ai| try rest_arr.append(self.allocator, try self.transferArg(self.stack[self.sp - ac + ai]));
                             try new_vars.put(self.allocator, func.params[fixed], .{ .array = rest_arr });
                         } else {
                             for (0..@min(ac, func.arity)) |ai| {
-                                try new_vars.put(self.allocator, func.params[ai], try self.copyValue(self.stack[self.sp - ac + ai]));
+                                try new_vars.put(self.allocator, func.params[ai], try self.transferArg(self.stack[self.sp - ac + ai]));
                             }
                             if (ac < func.arity) {
                                 for (ac..func.arity) |ai| {
@@ -6966,7 +6974,7 @@ pub const VM = struct {
                                     rest_arr.* = .{};
                                     if (ac > fixed) {
                                         for (fixed..ac) |i| {
-                                            try rest_arr.append(self.allocator, try self.copyValue(self.stack[self.sp - ac + i]));
+                                            try rest_arr.append(self.allocator, try self.transferArg(self.stack[self.sp - ac + i]));
                                         }
                                     }
                                     try self.arrays.append(self.allocator, rest_arr);
@@ -7160,7 +7168,7 @@ pub const VM = struct {
                                 if (func.is_variadic) {
                                     const fixed: usize = func.arity - 1;
                                     for (0..@min(resolved_ac, fixed)) |i| {
-                                        try new_vars.put(self.allocator, func.params[i], try self.copyValue(self.stack[self.sp - resolved_ac + i]));
+                                        try new_vars.put(self.allocator, func.params[i], try self.transferArg(self.stack[self.sp - resolved_ac + i]));
                                     }
                                     const rest_arr = try self.allocator.create(PhpArray);
                                     rest_arr.* = .{};
@@ -7169,7 +7177,7 @@ pub const VM = struct {
                                     try new_vars.put(self.allocator, func.params[fixed], .{ .array = rest_arr });
                                 } else {
                                     for (0..@min(resolved_ac, func.arity)) |i| {
-                                        try new_vars.put(self.allocator, func.params[i], try self.copyValue(self.stack[self.sp - resolved_ac + i]));
+                                        try new_vars.put(self.allocator, func.params[i], try self.transferArg(self.stack[self.sp - resolved_ac + i]));
                                     }
                                     for (resolved_ac..func.arity) |i| {
                                         if (i < func.defaults.len) try new_vars.put(self.allocator, func.params[i], try self.resolveDefault(func.defaults[i]));
@@ -9639,7 +9647,7 @@ pub const VM = struct {
                 try self.bindClosures(&new_vars, &closure_refs, name);
                 const bind_count = @min(ac, func.arity);
                 for (0..bind_count) |i| {
-                    try new_vars.put(self.allocator, func.params[i], try self.copyValue(self.stack[self.sp - ac + i]));
+                    try new_vars.put(self.allocator, func.params[i], try self.transferArg(self.stack[self.sp - ac + i]));
                 }
                 self.saveFrameArgs(arg_count);
                 self.sp -= ac;
@@ -9671,7 +9679,7 @@ pub const VM = struct {
         // bind args to param slots
         const bind_count = @min(ac, func.arity);
         for (0..bind_count) |i| {
-            locals[i] = try self.copyValue(self.stack[self.sp - ac + i]);
+            locals[i] = try self.transferArg(self.stack[self.sp - ac + i]);
         }
         for (bind_count..func.arity) |i| {
             if (i < func.defaults.len) locals[i] = try self.resolveDefault(func.defaults[i]);
@@ -9720,7 +9728,7 @@ pub const VM = struct {
 
         const bind_count = @min(ac, func.arity);
         for (0..bind_count) |i| {
-            locals[i] = try self.copyValue(self.stack[self.sp - ac + i]);
+            locals[i] = try self.transferArg(self.stack[self.sp - ac + i]);
         }
         for (bind_count..func.arity) |i| {
             if (i < func.defaults.len) locals[i] = try self.resolveDefault(func.defaults[i]);
@@ -9808,20 +9816,25 @@ pub const VM = struct {
         return frame.ref_slots.contains(snames[slot]);
     }
 
-    // release the object references a frame's variables hold (Stage 1). every
-    // named variable lives in frame.vars (set_var and set_local both mirror
-    // there), so releasing vars covers each named var exactly once; the slot-
-    // backed locals array mirrors those same vars, so named local slots are
-    // skipped here to avoid a double-release. unnamed local slots (compiler
-    // temporaries) are not mirrored into vars, so release those from locals.
-    // function frames carry their slot names on func.slot_names; global-scope
-    // frames carry them on frame.slot_names
+    // release every object reference a frame holds (Stage 1), INCLUDING $this
+    // and parameters. under the move model the call site transfers the
+    // operand-stack retain of the receiver/args into the callee bindings, and
+    // this teardown release is what consumes them. when `vars` is populated it
+    // is the authoritative store and the named `locals` slots merely mirror it
+    // (release via vars, skip the mirror to avoid a double-release). when
+    // `vars` is empty (locals_only fast frames) `locals` is the sole storage,
+    // so release named slots from there. unnamed local slots (compiler
+    // temporaries) are released from `locals` either way
     fn releaseFrameObjects(self: *VM, idx: usize) void {
-        var it = self.frames[idx].vars.valueIterator();
-        while (it.next()) |v| self.releaseValue(v.*);
-        const snames = if (self.frames[idx].func) |f| f.slot_names else self.frames[idx].slot_names;
-        for (self.frames[idx].locals, 0..) |lv, i| {
-            if (i < snames.len and snames[i].len > 0) continue;
+        const frame = &self.frames[idx];
+        const snames = if (frame.func) |f| f.slot_names else frame.slot_names;
+        const vars_populated = frame.vars.count() > 0;
+        if (vars_populated) {
+            var it = frame.vars.valueIterator();
+            while (it.next()) |v| self.releaseValue(v.*);
+        }
+        for (frame.locals, 0..) |lv, i| {
+            if (vars_populated and i < snames.len and snames[i].len > 0) continue;
             self.releaseValue(lv);
         }
     }
@@ -11282,6 +11295,18 @@ pub const VM = struct {
         return .{ .array = try self.cloneArray(val.array) };
     }
 
+    // transfer an operand-stack value into a callee binding ($this, a
+    // parameter, a variadic rest element) under the Stage 1 move model:
+    // arrays are cloned (PHP value semantics), but an object is MOVED - the
+    // caller's operand-stack retain transfers into the binding, so NO new
+    // retain is taken here. the matching release is the callee frame teardown
+    // (releaseFrameObjects / fast_loop return). this is copyValue minus the
+    // object retain - it keeps call cleanup able to raw-drop the stack slots
+    pub fn transferArg(self: *VM, val: Value) RuntimeError!Value {
+        if (val != .array) return val;
+        return .{ .array = try self.cloneArray(val.array) };
+    }
+
     pub fn makeContext(self: *VM, call_name: ?[]const u8) NativeContext {
         return .{ .allocator = self.allocator, .arrays = &self.arrays, .strings = &self.strings, .vm = self, .call_name = call_name };
     }
@@ -12139,7 +12164,7 @@ pub const VM = struct {
             if (func.is_variadic) {
                 const fixed: usize = func.arity - 1;
                 for (0..@min(ac, fixed)) |i| {
-                    try new_vars.put(self.allocator, func.params[i], try self.copyValue(self.stack[self.sp - ac + i]));
+                    try new_vars.put(self.allocator, func.params[i], try self.transferArg(self.stack[self.sp - ac + i]));
                 }
                 for (@min(ac, fixed)..fixed) |i| {
                     if (i < func.defaults.len) try new_vars.put(self.allocator, func.params[i], try self.resolveDefault(func.defaults[i]));
@@ -12148,7 +12173,7 @@ pub const VM = struct {
                 rest_arr.* = .{};
                 if (ac > fixed) {
                     for (fixed..ac) |i| {
-                        try rest_arr.append(self.allocator, try self.copyValue(self.stack[self.sp - ac + i]));
+                        try rest_arr.append(self.allocator, try self.transferArg(self.stack[self.sp - ac + i]));
                     }
                 }
                 // named arguments matching no fixed parameter land in the
@@ -12168,7 +12193,7 @@ pub const VM = struct {
                     // surface back. copyValue would deep-clone the array and
                     // sever the ref relationship
                     const is_ref = i < func.ref_params.len and func.ref_params[i];
-                    const slot_val = if (is_ref) self.stack[self.sp - ac + i] else try self.copyValue(self.stack[self.sp - ac + i]);
+                    const slot_val = if (is_ref) self.stack[self.sp - ac + i] else try self.transferArg(self.stack[self.sp - ac + i]);
                     try new_vars.put(self.allocator, func.params[i], slot_val);
                 }
             }
