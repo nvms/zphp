@@ -1733,9 +1733,33 @@ pub const VM = struct {
         // matching PHP. internal stdlib-init objects keep the ids they already
         // got (some of those are case singletons we hold references to)
         self.next_object_id = 0;
-        // run any destructors still queued at script end, on success or error
-        defer self.drainPendingDestruct();
+        // at script end run every still-live object's __destruct (PHP's
+        // shutdown guarantee), then drain - on success or error
+        defer self.runShutdownDestructors();
         try self.run();
+    }
+
+    // PHP guarantees every object still alive at request end has its
+    // __destruct run during shutdown. refcounting fires most destructors at
+    // the right time during the run; this sweep catches whatever is still
+    // live (globals, refcount-inflated leftovers). walk newest-first; mark
+    // destructed before calling so a destructor that touches the object does
+    // not re-enter; drain afterwards so cascades fire
+    pub fn runShutdownDestructors(self: *VM) void {
+        var i: usize = self.objects.items.len;
+        while (i > 0) {
+            i -= 1;
+            const obj = self.objects.items[i];
+            if (obj.destructed) continue;
+            if (self.pendingExceptionIs(obj)) continue;
+            obj.destructed = true;
+            if (self.hasMethod(obj.class_name, "__destruct")) {
+                _ = self.callMethod(obj, "__destruct", &.{}) catch {
+                    self.pending_exception = null;
+                };
+            }
+        }
+        self.drainPendingDestruct();
     }
 
     // tracked allocPrint into self.error_msg. the underlying string is
@@ -3671,8 +3695,13 @@ pub const VM = struct {
                     const idx = self.readU16();
                     const name = self.currentChunk().constants.items[idx].string;
                     const uframe = self.currentFrame();
+                    const u_is_ref = uframe.ref_slots.contains(name);
                     if (uframe.vars.get(name)) |existing| {
                         if (existing == .generator) self.closeGenerator(existing.generator, self.frame_count) catch {};
+                        // release the object the variable held (Stage 1).
+                        // skip ref-bound vars - the value lives in a shared
+                        // cell, released through the ref machinery later
+                        if (!u_is_ref) self.releaseValue(existing);
                     }
                     _ = uframe.vars.remove(name);
                     // a slot-backed variable also lives in frame.locals; remove
@@ -3687,6 +3716,19 @@ pub const VM = struct {
                             break;
                         }
                     }
+                    // a global-scope variable is mirrored into the $GLOBALS
+                    // array (a separate refcounted holder) and the global cell
+                    // by setLocalGlobal - mirror the removal so the object's
+                    // last reference is dropped now, not at the shutdown sweep
+                    if (!u_is_ref and uframe.func == null and name.len > 1 and name[0] == '$') {
+                        if (self.globals_array) |ga| {
+                            const gkey = PhpArray.Key{ .string = name[1..] };
+                            self.releaseValue(ga.get(gkey));
+                            ga.remove(gkey);
+                        }
+                        if (self.globals_cells.get(name)) |cell| cell.* = .null;
+                    }
+                    if (self.pending_destruct.items.len > 0) self.drainPendingDestruct();
                 },
                 .unset_prop => {
                     const name_idx = self.readU16();
@@ -3711,14 +3753,19 @@ pub const VM = struct {
                             // pattern). slot value remains its default; only
                             // the unset_slots set decides "present"
                             try obj.markUnset(self.allocator, prop_name);
+                            // release the object the property held (Stage 1)
                             if (obj.slots) |s| {
                                 if (obj.getSlotIndex(prop_name)) |idx| {
+                                    self.releaseValue(s[idx]);
                                     s[idx] = .null;
                                 }
                             }
-                            _ = obj.properties.orderedRemove(prop_name);
+                            if (obj.properties.fetchOrderedRemove(prop_name)) |kv| {
+                                self.releaseValue(kv.value);
+                            }
                         }
                     }
+                    if (self.pending_destruct.items.len > 0) self.drainPendingDestruct();
                 },
                 .unset_prop_dynamic => {
                     const name_val = self.pop();
@@ -3737,14 +3784,19 @@ pub const VM = struct {
                             _ = self.callMethod(obj, "__unset", &.{.{ .string = prop_name }}) catch {};
                         } else {
                             try obj.markUnset(self.allocator, prop_name);
+                            // release the object the property held (Stage 1)
                             if (obj.slots) |s| {
                                 if (obj.getSlotIndex(prop_name)) |idx| {
+                                    self.releaseValue(s[idx]);
                                     s[idx] = .null;
                                 }
                             }
-                            _ = obj.properties.orderedRemove(prop_name);
+                            if (obj.properties.fetchOrderedRemove(prop_name)) |kv| {
+                                self.releaseValue(kv.value);
+                            }
                         }
                     }
+                    if (self.pending_destruct.items.len > 0) self.drainPendingDestruct();
                 },
                 .unset_array_elem => {
                     const key = self.pop();
@@ -3754,7 +3806,11 @@ pub const VM = struct {
                             if (try self.throwOffsetKeyType(key, .unset)) continue;
                             return error.RuntimeError;
                         }
-                        arr_val.array.remove(Value.toArrayKey(key));
+                        const u_ak = Value.toArrayKey(key);
+                        // release the object the removed element held (Stage 1)
+                        self.releaseValue(arr_val.array.get(u_ak));
+                        arr_val.array.remove(u_ak);
+                        if (self.pending_destruct.items.len > 0) self.drainPendingDestruct();
                     } else if (arr_val == .object) {
                         if (self.hasMethod(arr_val.object.class_name, "offsetUnset")) {
                             _ = self.callMethod(arr_val.object, "offsetUnset", &.{key}) catch {
@@ -6970,6 +7026,8 @@ pub const VM = struct {
                                 } else {
                                 const ac: usize = arg_count;
                                 var new_vars = self.acquireFrameVars();
+                                // retain the forwarded $this for the callee frame (Stage 1)
+                                retainValue(tv);
                                 try new_vars.put(self.allocator, "$this", tv);
                                 if (func.is_variadic) {
                                     const fixed: usize = func.arity - 1;
@@ -7019,6 +7077,8 @@ pub const VM = struct {
                                 self.saveFrameArgs(arg_count);
                                 self.sp -= ac;
                                 var tmp_vars: std.StringHashMapUnmanaged(Value) = .{};
+                                // retain the forwarded $this for the callee frame (Stage 1)
+                                retainValue(tv);
                                 try tmp_vars.put(self.allocator, "$this", tv);
                                 self.frames[self.frame_count] = .{ .chunk = self.currentChunk(), .ip = self.currentFrame().ip, .vars = tmp_vars, .called_class = effective_called };
                                 self.setFrameArgCount(arg_count);
@@ -7172,6 +7232,8 @@ pub const VM = struct {
                                     try self.callStaticFunction(full_name, @intCast(resolved_ac), effective_called);
                                 } else {
                                 var new_vars = self.acquireFrameVars();
+                                // retain the forwarded $this for the callee frame (Stage 1)
+                                retainValue(tv);
                                 try new_vars.put(self.allocator, "$this", tv);
                                 if (func.is_variadic) {
                                     const fixed: usize = func.arity - 1;
@@ -8588,6 +8650,9 @@ pub const VM = struct {
         };
         if (self.functions.get(method_name)) |func| {
             var new_vars = self.acquireFrameVars();
+            // retain $this for the __toString frame (Stage 1) - balances the
+            // frame teardown's $this release
+            objRetain(obj);
             try new_vars.put(self.allocator, "$this", .{ .object = obj });
             self.frames[self.frame_count] = .{ .chunk = &func.chunk, .ip = 0, .vars = new_vars, .locals = try self.allocLocals(func, &new_vars), .func = func };
             self.frames[self.frame_count].entry_sp = self.sp;
@@ -12324,6 +12389,11 @@ pub const VM = struct {
         }
         if (self.native_fns.get(full_name)) |native| {
             var tmp_vars: std.StringHashMapUnmanaged(Value) = .{};
+            // retain $this for the callee frame (Stage 1): the receiver is
+            // passed as a pointer, not via the operand stack, so there is no
+            // push-retain to transfer - the frame teardown's $this release
+            // (deinitFrameSlot -> releaseFrameObjects) must be balanced here
+            objRetain(obj);
             try tmp_vars.put(self.allocator, "$this", .{ .object = obj });
             self.frames[self.frame_count] = .{ .chunk = self.currentChunk(), .ip = self.currentFrame().ip, .vars = tmp_vars };
             self.frame_count += 1;
@@ -12345,6 +12415,9 @@ pub const VM = struct {
         } else if (self.functions.get(full_name)) |func| {
             if (args.len < func.required_params) return error.RuntimeError;
             var new_vars = self.acquireFrameVars();
+            // retain $this for the callee frame (Stage 1) - balances the
+            // frame teardown's $this release
+            objRetain(obj);
             try new_vars.put(self.allocator, "$this", .{ .object = obj });
             try self.bindClosures(&new_vars, null, full_name);
             const trimmed = if (func.is_variadic) args else args[0..@min(args.len, func.arity)];
@@ -12571,6 +12644,8 @@ pub const VM = struct {
             }
             const bind_count = @min(args.len, func.arity);
             var new_vars = self.acquireFrameVars();
+            // retain $this for the callee frame (Stage 1) - balances teardown
+            objRetain(obj);
             try new_vars.put(self.allocator, "$this", .{ .object = obj });
             var ref_slots: std.StringHashMapUnmanaged(*Value) = .{};
             try self.bindClosures(&new_vars, &ref_slots, full_name);
@@ -12919,6 +12994,14 @@ pub const VM = struct {
         obj.refcount +%= 1;
     }
 
+    // is this object the exception currently propagating through the VM?
+    fn pendingExceptionIs(self: *const VM, obj: *PhpObject) bool {
+        if (self.pending_exception) |pe| {
+            return pe == .object and pe.object == obj;
+        }
+        return false;
+    }
+
     // an object reference was dropped. at zero the object is unreachable, but
     // __destruct is NOT run inline: the just-dropped handle is usually still
     // live in the caller's hands (pop() returns the value it released, an
@@ -12949,6 +13032,10 @@ pub const VM = struct {
             const obj = self.pending_destruct.items[self.destruct_cursor];
             self.destruct_cursor += 1;
             if (obj.refcount != 0 or obj.destructed) continue;
+            // the in-flight exception is a VM-level root: while it propagates
+            // it lives in self.pending_exception, not on the stack or in a
+            // var, so refcounting cannot see it - never destruct it here
+            if (self.pendingExceptionIs(obj)) continue;
             obj.destructed = true;
             if (self.hasMethod(obj.class_name, "__destruct")) {
                 _ = self.callMethod(obj, "__destruct", &.{}) catch {
@@ -12956,6 +13043,32 @@ pub const VM = struct {
                     // was called from - swallow (Stage 1; revisit for fidelity)
                     self.pending_exception = null;
                 };
+            }
+            // collapse the object tree (Stage 1): release the objects this
+            // object's property slots held. children whose last reference was
+            // this object reach refcount 0 and the loop below cascades into
+            // them. runs after __destruct (PHP tears properties down after)
+            self.releaseObjectProperties(obj);
+        }
+    }
+
+    // release the object references an object's properties hold and clear the
+    // slots, so a destructed object's children become unreachable (Stage 1).
+    // clearing prevents any later sweep from double-releasing
+    fn releaseObjectProperties(self: *VM, obj: *PhpObject) void {
+        if (obj.slots) |s| {
+            for (s) |*v| {
+                if (v.* == .object) {
+                    self.objRelease(v.object);
+                    v.* = .null;
+                }
+            }
+        }
+        var it = obj.properties.iterator();
+        while (it.next()) |e| {
+            if (e.value_ptr.* == .object) {
+                self.objRelease(e.value_ptr.object);
+                e.value_ptr.* = .null;
             }
         }
     }
