@@ -2012,7 +2012,12 @@ pub const VM = struct {
                         cell.* = val;
                         try self.propagateCellWrite(cell, val);
                     } else {
-                        try self.currentFrame().vars.put(self.allocator, name, val);
+                        const svf = self.currentFrame();
+                        // overwrite-release: drop the object the variable held
+                        // before this store (Stage 1) - this destructs the old
+                        // object on reassignment
+                        if (svf.vars.get(name)) |old| self.releaseValue(old);
+                        try svf.vars.put(self.allocator, name, val);
                     }
                     const sv_sn = if (self.currentFrame().func) |func| func.slot_names else self.global_slot_names;
                     for (sv_sn, 0..) |sn, si| {
@@ -3922,6 +3927,13 @@ pub const VM = struct {
                     // the local slot is a durable holder and needs its own ref
                     const val = try self.copyValue(peeked);
                     if (slot < frame.locals.len) {
+                        // overwrite-release: drop the object the slot held,
+                        // unless ref-bound (a shared cell - handled by
+                        // ref-cell refcounting later) (Stage 1)
+                        const old_lv = frame.locals[slot];
+                        if (old_lv == .object and !self.slotIsRefBound(frame, slot)) {
+                            self.objRelease(old_lv.object);
+                        }
                         frame.locals[slot] = val;
                     }
                     if (frame.func) |func| {
@@ -9785,6 +9797,15 @@ pub const VM = struct {
     pub fn acquireFrameVars(self: *VM) std.StringHashMapUnmanaged(Value) {
         if (self.vars_pool.pop()) |hm| return hm;
         return .{};
+    }
+
+    // is the local slot bound to a reference cell? a ref-bound slot writes
+    // through a shared cell, so overwrite-release must not run on it
+    fn slotIsRefBound(self: *VM, frame: *CallFrame, slot: u16) bool {
+        if (frame.ref_slots.count() == 0) return false;
+        const snames = if (frame.func) |f| f.slot_names else self.global_slot_names;
+        if (slot >= snames.len or snames[slot].len == 0) return false;
+        return frame.ref_slots.contains(snames[slot]);
     }
 
     // release the object references a frame's variables hold (Stage 1). every
