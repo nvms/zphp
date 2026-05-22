@@ -315,12 +315,14 @@ pub const PhpObject = struct {
     magic_get_active: std.StringHashMapUnmanaged(void) = .{},
     lazy_initializer: Value = .null,
     id: u32 = 0,
-    // object refcounting (Stage 1). counts live references to this object -
-    // born at 1 for the operand-stack temporary right after `new`. when it
-    // reaches 0 the object is unreachable and __destruct runs. memory itself
-    // stays arena-owned and is reclaimed in bulk at request end; the refcount
-    // only governs destructor timing.
-    refcount: u32 = 1,
+    // object refcounting (Stage 1). counts live references to this object,
+    // including operand-stack slots. born at 0: the `new` opcode pushes the
+    // result and `push` retains it to 1. every push retains, every pop/drop
+    // releases, copyValue retains durable copies. when the count reaches 0 the
+    // object is unreachable and __destruct runs. memory itself stays
+    // arena-owned and is reclaimed in bulk at request end; the refcount only
+    // governs destructor timing.
+    refcount: u32 = 0,
     // set once __destruct has run, so it never runs twice (refcount-zero path
     // and the end-of-request safety sweep must not double-fire it)
     destructed: bool = false,

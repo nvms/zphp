@@ -11211,6 +11211,12 @@ pub const VM = struct {
     }
 
     pub fn copyValue(self: *VM, val: Value) RuntimeError!Value {
+        // an object handle copied is a new reference - refcount it (Stage 1).
+        // arrays are value types (deep-cloned); scalars need nothing
+        if (val == .object) {
+            objRetain(val.object);
+            return val;
+        }
         if (val != .array) return val;
         return .{ .array = try self.cloneArray(val.array) };
     }
@@ -12791,6 +12797,8 @@ pub const VM = struct {
     }
 
     fn push(self: *VM, value: Value) void {
+        // every object on the operand stack holds a reference (Stage 1)
+        if (value == .object) objRetain(value.object);
         self.stack[self.sp] = value;
         self.sp += 1;
     }
