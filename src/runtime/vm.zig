@@ -8548,6 +8548,10 @@ pub const VM = struct {
                 // back so $GLOBALS[$key] picks up the new value
                 if (self.globals_array) |ga| {
                     if (name.len > 1 and name[0] == '$') {
+                        // the $GLOBALS element is a separate refcounted holder
+                        // (PhpArray.set retains) - release the overwritten old
+                        // one so a reassigned global destructs now (Stage 1)
+                        self.releaseValue(ga.get(.{ .string = name[1..] }));
                         try ga.set(self.allocator, .{ .string = name[1..] }, val);
                     }
                 }
