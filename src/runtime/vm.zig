@@ -5490,6 +5490,7 @@ pub const VM = struct {
                                 self.frame_count -= 1;
                                 self.deinitFrameSlot(self.frame_count);
                                 if (self.pending_exception) |exc| {
+                                    if (!isFrameOutNative(cn)) self.prependNativeFrameToTrace(exc, cn, args_buf[0..ac]) catch {};
                                     self.pending_exception = null;
                                     if (self.handler_count > self.handler_floor) {
                                         const handler = self.exception_handlers[self.handler_count - 1];
@@ -6293,7 +6294,8 @@ pub const VM = struct {
                                     self.deinitFrameSlot(self.frame_count);
                                     // uncaught native throw - record the method
                                     // name so the stack trace shows it at #0
-                                    if (self.pending_exception != null) {
+                                    if (self.pending_exception) |exc| {
+                                        if (!isFrameOutNative(mc_entry.full_name)) self.prependNativeFrameToTrace(exc, mc_entry.full_name, args_buf[0..ac]) catch {};
                                         self.pending_native_name = mc_entry.full_name;
                                         self.pending_native_is_instance = true;
                                     }
@@ -6396,6 +6398,7 @@ pub const VM = struct {
                                 self.deinitFrameSlot(self.frame_count);
                             }
                             if (self.pending_exception) |exc| {
+                                if (!isFrameOutNative(full_name)) self.prependNativeFrameToTrace(exc, full_name, args_buf[0..ac]) catch {};
                                 self.pending_exception = null;
                                 if (self.handler_count > self.handler_floor) {
                                     // exception caught - clear native-trace state
@@ -6615,6 +6618,7 @@ pub const VM = struct {
                                 self.deinitFrameSlot(self.frame_count);
                             }
                             if (self.pending_exception) |exc| {
+                                if (!isFrameOutNative(full_name)) self.prependNativeFrameToTrace(exc, full_name, args_buf[0..ac]) catch {};
                                 self.pending_exception = null;
                                 if (self.handler_count > self.handler_floor) {
                                     // exception caught - clear native-trace state
@@ -6759,6 +6763,7 @@ pub const VM = struct {
                                 self.deinitFrameSlot(self.frame_count);
                             }
                             if (self.pending_exception) |exc| {
+                                if (!isFrameOutNative(full_name)) self.prependNativeFrameToTrace(exc, full_name, args_buf[0..ac]) catch {};
                                 self.pending_exception = null;
                                 if (self.handler_count > self.handler_floor) {
                                     // exception caught - clear native-trace state
@@ -6922,6 +6927,7 @@ pub const VM = struct {
                                 self.deinitFrameSlot(self.frame_count);
                             }
                             if (self.pending_exception) |exc| {
+                                if (!isFrameOutNative(full_name)) self.prependNativeFrameToTrace(exc, full_name, args_buf[0..ac]) catch {};
                                 self.pending_exception = null;
                                 if (self.handler_count > self.handler_floor) {
                                     // exception caught - clear native-trace state
@@ -7168,6 +7174,7 @@ pub const VM = struct {
                                         self.deinitFrameSlot(self.frame_count);
                                     }
                                     if (self.pending_exception) |exc| {
+                                        if (!isFrameOutNative(full_name)) self.prependNativeFrameToTrace(exc, full_name, args_buf[0..ac]) catch {};
                                         self.pending_exception = null;
                                         if (self.handler_count > self.handler_floor) {
                                             const handler = self.exception_handlers[self.handler_count - 1];
@@ -12617,6 +12624,9 @@ pub const VM = struct {
             // the caller resume from the dispatched handler frame
             const result = self.invokeNative(native, &ctx, args) catch |native_err| {
                 if (self.frame_count < saved_fc) return .null;
+                if (self.pending_exception) |exc| {
+                    if (!isFrameOutNative(full_name)) self.prependNativeFrameToTrace(exc, full_name, args) catch {};
+                }
                 return native_err;
             };
             if (self.frame_count >= saved_fc) {
@@ -12732,7 +12742,12 @@ pub const VM = struct {
             // mt_rand distinguish by name) work when dispatched indirectly via
             // call_user_func / first-class-callable / array callable
             var ctx = self.makeContext(name);
-            return self.invokeNative(native, &ctx, args);
+            return self.invokeNative(native, &ctx, args) catch |native_err| {
+                if (self.pending_exception) |exc| {
+                    if (!isFrameOutNative(name)) self.prependNativeFrameToTrace(exc, name, args) catch {};
+                }
+                return native_err;
+            };
         } else if (self.functions.get(name)) |func| {
             if (args.len < func.required_params) return error.RuntimeError;
             if (self.ic) |ic| ic.pending_arg_count = @intCast(@min(args.len, 255));
