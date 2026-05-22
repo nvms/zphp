@@ -682,6 +682,7 @@ pub fn compileFunction(self: *Compiler, node: Ast.Node) Error!void {
         .namespace = self.namespace,
         .use_aliases = self.use_aliases,
         .use_fn_aliases = self.use_fn_aliases,
+        .use_const_aliases = self.use_const_aliases,
         .current_function = name,
     };
     errdefer {
@@ -847,6 +848,7 @@ pub fn compileClosure(self: *Compiler, node: Ast.Node) Error!void {
         .namespace = self.namespace,
         .use_aliases = self.use_aliases,
         .use_fn_aliases = self.use_fn_aliases,
+        .use_const_aliases = self.use_const_aliases,
         .current_class = self.current_class,
         .current_parent = self.current_parent,
         .current_function = "{closure}",
@@ -2474,6 +2476,7 @@ fn compileClassMethodBody(self: *Compiler, class_name: []const u8, member: Ast.N
         .namespace = self.namespace,
         .use_aliases = self.use_aliases,
         .use_fn_aliases = self.use_fn_aliases,
+        .use_const_aliases = self.use_const_aliases,
         .current_class = class_name,
         .current_function = method_name,
         .in_trait = self.in_trait,
@@ -2612,6 +2615,7 @@ fn compilePropertyHook(self: *Compiler, class_name: []const u8, prop_name: []con
         .namespace = self.namespace,
         .use_aliases = self.use_aliases,
         .use_fn_aliases = self.use_fn_aliases,
+        .use_const_aliases = self.use_const_aliases,
         .current_class = class_name,
         .current_function = full_name,
     };
