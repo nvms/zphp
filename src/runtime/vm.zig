@@ -8144,6 +8144,48 @@ pub const VM = struct {
         return arr;
     }
 
+    // when a native (e.g. array_map, iterator_apply) calls a user callback
+    // that throws, splice the native into the exception's __trace to match
+    // PHP. PHP's getTrace() puts the throwing user callback at #0 attributed
+    // as `[internal function]` (no file/line), then the native at #1 with
+    // the user call-site file/line and the native's args - the native was
+    // the bridge between the call site and the throw. zphp builds the trace
+    // from user frames only at throw time, so the catching native must
+    // patch it: strip file/line from the innermost user entry and insert a
+    // new entry for the native carrying that file/line + the native's args
+    fn prependNativeFrameToTrace(self: *VM, exc: Value, name: []const u8, native_args: []const Value) !void {
+        if (exc != .object) return;
+        const obj = exc.object;
+        const trace_v = obj.get("__trace");
+        if (trace_v != .array) return;
+        const old_trace = trace_v.array;
+        if (old_trace.entries.items.len == 0) return;
+        if (old_trace.entries.items[0].value != .array) return;
+        const closure_entry = old_trace.entries.items[0].value.array;
+        const file_v = closure_entry.get(.{ .string = "file" });
+        const line_v = closure_entry.get(.{ .string = "line" });
+        closure_entry.remove(.{ .string = "file" });
+        closure_entry.remove(.{ .string = "line" });
+        const native_entry = try self.allocator.create(PhpArray);
+        native_entry.* = .{};
+        try self.arrays.append(self.allocator, native_entry);
+        try native_entry.set(self.allocator, .{ .string = "function" }, .{ .string = name });
+        if (file_v != .null) try native_entry.set(self.allocator, .{ .string = "file" }, file_v);
+        if (line_v != .null) try native_entry.set(self.allocator, .{ .string = "line" }, line_v);
+        const args_arr = try self.allocator.create(PhpArray);
+        args_arr.* = .{};
+        try self.arrays.append(self.allocator, args_arr);
+        for (native_args) |a| try args_arr.append(self.allocator, a);
+        try native_entry.set(self.allocator, .{ .string = "args" }, .{ .array = args_arr });
+        const new_trace = try self.allocator.create(PhpArray);
+        new_trace.* = .{};
+        try self.arrays.append(self.allocator, new_trace);
+        try new_trace.append(self.allocator, .{ .array = closure_entry });
+        try new_trace.append(self.allocator, .{ .array = native_entry });
+        for (old_trace.entries.items[1..]) |e| try new_trace.append(self.allocator, e.value);
+        try obj.set(self.allocator, "__trace", .{ .array = new_trace });
+    }
+
     pub fn setPendingException(self: *VM, class_name: []const u8, message: []const u8) !void {
         const obj = try self.allocator.create(PhpObject);
         self.next_object_id += 1;
@@ -12359,6 +12401,7 @@ pub const VM = struct {
                         const argc_cap: usize = @min(ac, self.pending_native_args_buf.len);
                         for (0..argc_cap) |i| self.pending_native_args_buf[i] = args[i];
                         self.pending_native_args = self.pending_native_args_buf[0..argc_cap];
+                        try self.prependNativeFrameToTrace(exc, name, args[0..ac]);
                     }
                     self.pending_exception = null;
                     if (self.handler_count > self.handler_floor) {

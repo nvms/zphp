@@ -343,7 +343,14 @@ fn exceptionGetTraceAsString(ctx: *NativeContext, _: []const Value) RuntimeError
             const type_s = if (type_v == .string) type_v.string else "";
             const file_s = if (file_v == .string) file_v.string else "";
             const line_n: i64 = if (line_v == .int) line_v.int else 0;
-            try buf.writer(ctx.allocator).print("#{d} {s}({d}): {s}{s}{s}(", .{ i, file_s, line_n, class_s, type_s, fn_s });
+            // a frame with no file/line was called from an internal function
+            // (a native dispatched the user callback) - PHP renders these as
+            // `[internal function]` instead of the synthesized `(0)` location
+            if (file_s.len == 0 and line_n == 0) {
+                try buf.writer(ctx.allocator).print("#{d} [internal function]: {s}{s}{s}(", .{ i, class_s, type_s, fn_s });
+            } else {
+                try buf.writer(ctx.allocator).print("#{d} {s}({d}): {s}{s}{s}(", .{ i, file_s, line_n, class_s, type_s, fn_s });
+            }
             const args_v = e.get(.{ .string = "args" });
             if (args_v == .array) {
                 for (args_v.array.entries.items, 0..) |arg_entry, ai| {
