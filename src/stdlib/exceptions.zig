@@ -171,6 +171,20 @@ fn exceptionConstruct(ctx: *NativeContext, args: []const Value) RuntimeError!Val
     return .null;
 }
 
+// read a still-live frame's bound parameter value by name, checking the
+// dynamic vars map first and then the indexed locals (locals-only frames
+// keep parameters in the locals array rather than vars)
+fn frameParamValue(frame: anytype, func: anytype, param_name: []const u8) Value {
+    if (frame.vars.get(param_name)) |v| return v;
+    for (func.slot_names, 0..) |sn, si| {
+        if (std.mem.eql(u8, sn, param_name)) {
+            if (si < frame.locals.len) return frame.locals[si];
+            return .null;
+        }
+    }
+    return .null;
+}
+
 fn buildAndAttachTrace(ctx: *NativeContext, obj: *@import("../runtime/value.zig").PhpObject) RuntimeError!void {
     const PhpArray = @import("../runtime/value.zig").PhpArray;
     const arr = try ctx.vm.allocator.create(PhpArray);
@@ -204,6 +218,12 @@ fn buildAndAttachTrace(ctx: *NativeContext, obj: *@import("../runtime/value.zig"
                     const args_arr = try ctx.vm.allocator.create(PhpArray);
                     args_arr.* = .{};
                     try ctx.vm.arrays.append(ctx.vm.allocator, args_arr);
+                    // snapshot the frame's call arguments by reading its bound
+                    // parameters - the frame is still live while the exception
+                    // is being constructed, so its params hold the call values
+                    for (f.params) |pname| {
+                        try args_arr.append(ctx.vm.allocator, frameParamValue(&frame, f, pname));
+                    }
                     try entry.set(ctx.vm.allocator, .{ .string = "args" }, .{ .array = args_arr });
                     try arr.append(ctx.vm.allocator, .{ .array = entry });
                 }
@@ -279,6 +299,30 @@ fn exceptionGetTrace(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
     return .{ .array = arr };
 }
 
+// render a single call argument the way PHP's exception trace does: quoted
+// and truncated strings, Array / Object(Class) placeholders, scalars raw.
+// kept in step with error_format.writeArgValue so getTraceAsString and the
+// uncaught-error printer format arguments identically
+fn formatTraceArg(buf: *std.ArrayListUnmanaged(u8), alloc: std.mem.Allocator, v: Value) RuntimeError!void {
+    const w = buf.writer(alloc);
+    switch (v) {
+        .null => try buf.appendSlice(alloc, "NULL"),
+        .bool => |b| try buf.appendSlice(alloc, if (b) "true" else "false"),
+        .int => |n| try w.print("{d}", .{n}),
+        .float => |f| try w.print("{d}", .{f}),
+        .string => |s| {
+            if (s.len <= 15) {
+                try w.print("'{s}'", .{s});
+            } else {
+                try w.print("'{s}...'", .{s[0..15]});
+            }
+        },
+        .array => try buf.appendSlice(alloc, "Array"),
+        .object => |o| try w.print("Object({s})", .{o.class_name}),
+        else => try buf.appendSlice(alloc, "?"),
+    }
+}
+
 fn exceptionGetTraceAsString(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
     const this_val = ctx.vm.currentFrame().vars.get("$this") orelse return .{ .string = "" };
     if (this_val != .object) return .{ .string = "" };
@@ -299,7 +343,15 @@ fn exceptionGetTraceAsString(ctx: *NativeContext, _: []const Value) RuntimeError
             const type_s = if (type_v == .string) type_v.string else "";
             const file_s = if (file_v == .string) file_v.string else "";
             const line_n: i64 = if (line_v == .int) line_v.int else 0;
-            try buf.writer(ctx.allocator).print("#{d} {s}({d}): {s}{s}{s}()\n", .{ i, file_s, line_n, class_s, type_s, fn_s });
+            try buf.writer(ctx.allocator).print("#{d} {s}({d}): {s}{s}{s}(", .{ i, file_s, line_n, class_s, type_s, fn_s });
+            const args_v = e.get(.{ .string = "args" });
+            if (args_v == .array) {
+                for (args_v.array.entries.items, 0..) |arg_entry, ai| {
+                    if (ai > 0) try buf.appendSlice(ctx.allocator, ", ");
+                    try formatTraceArg(&buf, ctx.allocator, arg_entry.value);
+                }
+            }
+            try buf.appendSlice(ctx.allocator, ")\n");
         }
         const n = t.array.entries.items.len;
         try buf.writer(ctx.allocator).print("#{d} {{main}}", .{n});

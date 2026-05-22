@@ -12227,6 +12227,14 @@ pub const VM = struct {
         return false;
     }
 
+    // natives PHP opcode-compiles (strlen, count, sizeof) - PHP never frames
+    // these into an exception stack trace, so neither should zphp
+    fn isFrameOutNative(name: []const u8) bool {
+        return std.mem.eql(u8, name, "strlen") or
+            std.mem.eql(u8, name, "count") or
+            std.mem.eql(u8, name, "sizeof");
+    }
+
     fn callStaticFunction(self: *VM, name: []const u8, arg_count: u8, class_name: []const u8) RuntimeError!void {
         const fc_before = self.frame_count;
         const prev_cc = self.currentFrame().called_class;
@@ -12267,13 +12275,17 @@ pub const VM = struct {
             var ctx = self.makeContext(name);
             const result = native(&ctx, args[0..ac]) catch {
                 if (self.pending_exception) |exc| {
-                    // capture the native's name + args so writeStackTrace
-                    // can emit '#0 file(line): name(args)' synthetic frame
-                    self.pending_native_name = name;
-                    self.pending_native_is_instance = false;
-                    const argc_cap: usize = @min(ac, self.pending_native_args_buf.len);
-                    for (0..argc_cap) |i| self.pending_native_args_buf[i] = args[i];
-                    self.pending_native_args = self.pending_native_args_buf[0..argc_cap];
+                    // capture the native's name + args so writeStackTrace can
+                    // emit a '#0 file(line): name(args)' synthetic frame - but
+                    // not for the natives PHP opcode-compiles (strlen / count /
+                    // sizeof), which PHP never frames into a trace
+                    if (!isFrameOutNative(name)) {
+                        self.pending_native_name = name;
+                        self.pending_native_is_instance = false;
+                        const argc_cap: usize = @min(ac, self.pending_native_args_buf.len);
+                        for (0..argc_cap) |i| self.pending_native_args_buf[i] = args[i];
+                        self.pending_native_args = self.pending_native_args_buf[0..argc_cap];
+                    }
                     self.pending_exception = null;
                     if (self.handler_count > self.handler_floor) {
                         // exception caught: clear the native-trace state so
