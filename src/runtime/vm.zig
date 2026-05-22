@@ -5698,7 +5698,11 @@ pub const VM = struct {
                                     // unset() leaves the slot looking absent
                                     // to get_prop even after we write to it
                                     obj.clearUnset(prop_name);
+                                    // overwrite-release: drop the object the
+                                    // property slot previously held (Stage 1)
+                                    const sp_ic_old = s[sp_entry.slot_index];
                                     s[sp_entry.slot_index] = val;
+                                    self.releaseValue(sp_ic_old);
                                     self.push(val);
                                     continue;
                                 }
@@ -5776,7 +5780,11 @@ pub const VM = struct {
                             if (vr.type_str.len > 0) {
                                 if (try self.checkPropertyType(&val, vr.type_str, vr.defining_class, prop_name)) continue;
                             }
+                            // overwrite-release: drop the object the property
+                            // previously held before the new value lands (Stage 1)
+                            const sp_old_prop = obj.get(prop_name);
                             try obj.set(self.allocator, prop_name, val);
+                            self.releaseValue(sp_old_prop);
                             // populate IC for slot-indexed writes. typed
                             // properties are cached too - the fast path runs
                             // checkPropertyType when prop_type is set

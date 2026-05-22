@@ -719,7 +719,10 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                             const sp_name_idx: u16 = (@as(u16, code[sp_ip]) << 8) | code[sp_ip + 1];
                             const sp_prop_name = consts[sp_name_idx].string;
                             sp_obj.clearUnset(sp_prop_name);
+                            // overwrite-release: drop the object the slot held
+                            const sp_old_prop = s[sp_entry.slot_index];
                             s[sp_entry.slot_index] = copied;
+                            self.releaseValue(sp_old_prop);
                             sp -= 1;
                             // the receiver slot is overwritten by the result -
                             // release the consumed receiver (Stage 1). the
