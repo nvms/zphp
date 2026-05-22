@@ -12804,5 +12804,39 @@ pub const VM = struct {
         return self.stack[self.sp - 1];
     }
 
+    // ===================================================================
+    // object refcounting (Stage 1) - see .handoff/refcounting.md
+    // ===================================================================
+
+    // an object handle was copied into a new reference
+    pub fn objRetain(obj: *PhpObject) void {
+        obj.refcount +%= 1;
+    }
+
+    // an object reference was dropped. at zero the object is unreachable -
+    // run __destruct exactly once. memory stays arena-owned (reclaimed at
+    // request end); the refcount only governs destructor timing
+    pub fn objRelease(self: *VM, obj: *PhpObject) void {
+        if (obj.refcount == 0) return;
+        obj.refcount -= 1;
+        if (obj.refcount != 0 or obj.destructed) return;
+        obj.destructed = true;
+        if (self.hasMethod(obj.class_name, "__destruct")) {
+            _ = self.callMethod(obj, "__destruct", &.{}) catch {
+                // a throwing destructor must not corrupt the drop site it was
+                // called from - swallow (Stage 1; revisit for full fidelity)
+                self.pending_exception = null;
+            };
+        }
+    }
+
+    // retain/release a Value - a no-op for non-object values
+    pub inline fn retainValue(v: Value) void {
+        if (v == .object) objRetain(v.object);
+    }
+
+    pub inline fn releaseValue(self: *VM, v: Value) void {
+        if (v == .object) self.objRelease(v.object);
+    }
 };
 
