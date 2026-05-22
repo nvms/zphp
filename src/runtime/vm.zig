@@ -3365,6 +3365,8 @@ pub const VM = struct {
                                 }
                                 break :unwrap;
                             };
+                            // inner takes the stack slot - it holds a reference (Stage 1)
+                            retainValue(inner);
                             self.stack[self.sp - 1] = inner;
                             iterable = inner;
                             unwrap_steps += 1;
