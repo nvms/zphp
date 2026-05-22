@@ -4737,6 +4737,14 @@ pub const VM = struct {
                                 const include_frame_idx = return_frame;
                                 const include_frame = &self.frames[include_frame_idx];
                                 const include_slot_names = r.slot_names;
+                                // the merge transfers each top-level var from the
+                                // include frame to the caller. ownership moves: the
+                                // caller retains its new copy, and the deinitFrameSlot
+                                // below releases the include frame's hold. without the
+                                // retain the caller would hold an uncounted object
+                                // reference and a later drain would destruct it
+                                // (WordPress's $wpdb dies the instant boot's require
+                                // unwinds back to the top-level script)
                                 // 1) merge slot-backed locals
                                 for (include_slot_names, 0..) |name, si| {
                                     if (name.len == 0) continue;
@@ -4749,26 +4757,47 @@ pub const VM = struct {
                                         if (std.mem.eql(u8, csn, name)) { caller_slot = ci; break; }
                                     }
                                     if (caller_slot) |cs| {
-                                        if (cs < caller.locals.len) caller.locals[cs] = v;
+                                        if (cs < caller.locals.len) {
+                                            retainValue(v);
+                                            self.releaseValue(caller.locals[cs]);
+                                            caller.locals[cs] = v;
+                                        }
                                     } else {
-                                        try caller.vars.put(self.allocator, name, v);
+                                        retainValue(v);
+                                        if (try caller.vars.fetchPut(self.allocator, name, v)) |old| {
+                                            self.releaseValue(old.value);
+                                        }
                                     }
                                 }
-                                // 2) merge dynamically-stored vars
+                                // 2) merge dynamically-stored vars (skip names already
+                                // handled by the slot-backed pass above)
                                 var iter_vars = include_frame.vars.iterator();
                                 while (iter_vars.next()) |entry| {
                                     const name = entry.key_ptr.*;
                                     if (name.len == 0) continue;
                                     // skip framework-internal keys (start with __)
                                     if (name.len >= 3 and name[0] == '$' and name[1] == '_' and name[2] == '_') continue;
+                                    var is_slot_backed = false;
+                                    for (include_slot_names) |isn| {
+                                        if (isn.len > 0 and std.mem.eql(u8, isn, name)) { is_slot_backed = true; break; }
+                                    }
+                                    if (is_slot_backed) continue;
+                                    const v = entry.value_ptr.*;
                                     var caller_slot: ?usize = null;
                                     for (caller_sn, 0..) |csn, ci| {
                                         if (std.mem.eql(u8, csn, name)) { caller_slot = ci; break; }
                                     }
                                     if (caller_slot) |cs| {
-                                        if (cs < caller.locals.len) caller.locals[cs] = entry.value_ptr.*;
+                                        if (cs < caller.locals.len) {
+                                            retainValue(v);
+                                            self.releaseValue(caller.locals[cs]);
+                                            caller.locals[cs] = v;
+                                        }
                                     } else {
-                                        try caller.vars.put(self.allocator, name, entry.value_ptr.*);
+                                        retainValue(v);
+                                        if (try caller.vars.fetchPut(self.allocator, name, v)) |old| {
+                                            self.releaseValue(old.value);
+                                        }
                                     }
                                 }
                                 while (self.frame_count > return_frame) {
