@@ -309,14 +309,14 @@ fn initCliServerVars(vm: *VM, a: std.mem.Allocator) !void {
     inline for (entries) |e| {
         try arr.set(a, .{ .string = e[0] }, .{ .string = e[1] });
     }
-    try vm.request_vars.put(a, "$_SERVER", .{ .array = arr });
+    try vm.putRequestVar("$_SERVER", .{ .array = arr });
 
     const superglobal_names = [_][]const u8{ "$_GET", "$_POST", "$_REQUEST", "$_COOKIE", "$_FILES" };
     inline for (superglobal_names) |sg_name| {
         const sg_arr = try a.create(PhpArray);
         sg_arr.* = .{};
         try vm.arrays.append(a, sg_arr);
-        try vm.request_vars.put(a, sg_name, .{ .array = sg_arr });
+        try vm.putRequestVar(sg_name, .{ .array = sg_arr });
     }
     try env.populateEnvSuperglobal(vm, a, null);
 }
@@ -331,8 +331,8 @@ fn initArgv(vm: *VM, a: std.mem.Allocator, script_path: []const u8, script_args:
         try argv_arr.append(a, .{ .string = arg });
     }
 
-    try vm.request_vars.put(a, "$argv", .{ .array = argv_arr });
-    try vm.request_vars.put(a, "$argc", .{ .int = @intCast(1 + script_args.len) });
+    try vm.putRequestVar("$argv", .{ .array = argv_arr });
+    try vm.putRequestVar("$argc", .{ .int = @intCast(1 + script_args.len) });
 
     // also update $_SERVER['argv'] and $_SERVER['argc'], plus the script-
     // path keys that CLI PHP populates for the running file

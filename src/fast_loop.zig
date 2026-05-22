@@ -48,8 +48,8 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                 const slot = (@as(u16, code[ip]) << 8) | code[ip + 1];
                 ip += 2;
                 // an object pushed onto the operand stack takes a reference
-                // (Stage 1) - stay on the fast path, just retain
-                VM.retainValue(locals[slot]);
+                // (Stage 1); arrays are not stack-owned (refcounting Stage 2)
+                VM.stackRetain(locals[slot]);
                 self.stack[sp] = locals[slot];
                 sp += 1;
                 const _next = code[ip];
@@ -83,7 +83,7 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                 if (code[ip] == @intFromEnum(OpCode.pop)) {
                     ip += 1;
                     sp -= 1;
-                    self.releaseValue(val);
+                    self.stackRelease(val);
                 }
                 const _next = code[ip];
                 ip += 1;
@@ -331,15 +331,15 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
             .pop => {
                 sp -= 1;
                 // a discarded operand-stack object releases its reference
-                // (Stage 1; deferred destruct drains at a runLoop pop)
-                self.releaseValue(self.stack[sp]);
+                // (Stage 1; arrays are not stack-owned - refcounting Stage 2)
+                self.stackRelease(self.stack[sp]);
                 const _next = code[ip];
                 ip += 1;
                 continue :dispatch @as(OpCode, @enumFromInt(_next));
             },
             .dup => {
                 // a duplicated object is a new operand-stack reference (Stage 1)
-                VM.retainValue(self.stack[sp - 1]);
+                VM.stackRetain(self.stack[sp - 1]);
                 self.stack[sp] = self.stack[sp - 1];
                 sp += 1;
                 const _next = code[ip];
@@ -386,8 +386,8 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                 if (ag_arr == .array) {
                     const ag_elem = ag_arr.array.get(Value.toArrayKey(ag_key));
                     // an object element pushed onto the operand stack takes a
-                    // reference (Stage 1)
-                    VM.retainValue(ag_elem);
+                    // reference (Stage 1); arrays are not stack-owned
+                    VM.stackRetain(ag_elem);
                     self.stack[sp] = ag_elem;
                     sp += 1;
                     const _next = code[ip];
@@ -673,9 +673,9 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                                 // value: retain the new occupant, release the
                                 // receiver it overwrites (Stage 1)
                                 const gp_recv = self.stack[sp - 1];
-                                VM.retainValue(gp_v);
+                                VM.stackRetain(gp_v);
                                 self.stack[sp - 1] = gp_v;
-                                self.releaseValue(gp_recv);
+                                self.stackRelease(gp_recv);
                                 const _next_gp = code[ip];
                                 ip += 1;
                                 continue :dispatch @as(OpCode, @enumFromInt(_next_gp));
@@ -724,10 +724,15 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                             s[sp_entry.slot_index] = copied;
                             self.releaseValue(sp_old_prop);
                             sp -= 1;
-                            // the receiver slot is overwritten by the result -
-                            // release the consumed receiver (Stage 1). the
-                            // stored value keeps its retain as the result slot
-                            self.releaseValue(self.stack[sp - 1]);
+                            // copyValue gave the property slot its reference.
+                            // release the consumed input value + receiver from
+                            // the operand stack, and re-anchor `copied` in the
+                            // result slot. stack ops are objects-only - an
+                            // array is owned by the property slot, not the
+                            // stack (refcounting Stage 2)
+                            self.stackRelease(self.stack[sp]);
+                            self.stackRelease(self.stack[sp - 1]);
+                            VM.stackRetain(copied);
                             self.stack[sp - 1] = copied;
                             const _next_sp = code[ip];
                             ip += 1;
@@ -892,11 +897,16 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                     self.sp = sp;
                     return;
                 }
+                // pin an array result across local teardown: the operand
+                // stack does not own arrays, so releasing a local that
+                // aliases the return value (`return $arr`) would free it.
+                // mirrors runLoop return_val's ret_arr_pin (refcounting Stage 2)
+                const ret_arr_pin = if (result == .array) result.array else null;
+                if (ret_arr_pin) |a| VM.arrayRetain(a);
                 if (locals.len > 0) {
                     // move model (Stage 1): release $this and the parameter
                     // locals - this consumes the operand-stack retains the
-                    // call site transferred in. the return value keeps its
-                    // own stack retain so releasing its aliasing local is safe
+                    // call site transferred in
                     for (locals) |lv| self.releaseValue(lv);
                     self.freeLocals(locals);
                 }
@@ -905,6 +915,7 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                 if (self.frame_count < entry_fc) {
                     self.stack[sp - 1] = result;
                     self.sp = sp;
+                    if (ret_arr_pin) |a| VM.arrayUnpin(a);
                     return;
                 }
 
@@ -912,6 +923,7 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                 self.stack[sp] = result;
                 sp += 1;
                 self.sp = sp;
+                if (ret_arr_pin) |a| VM.arrayUnpin(a);
                 continue :reenter;
             },
             .return_void => {

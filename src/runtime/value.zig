@@ -6,6 +6,12 @@ pub const PhpArray = struct {
     next_int_key: i64 = 0,
     has_int_keys: bool = false,
     cursor: usize = 0,
+    // refcounting Stage 2 (array-element release): counts every live
+    // reference to this array. born at 0. at 0 the array is unreachable and
+    // its object elements are released so their __destruct fires promptly.
+    // elements_released guards against double-release / cyclic arrays
+    refcount: u32 = 0,
+    elements_released: bool = false,
 
     pub const Entry = struct {
         key: Key,
@@ -57,9 +63,18 @@ pub const PhpArray = struct {
         self.string_index.deinit(allocator);
     }
 
+    // increment the refcount (Stage 2). a method on PhpArray so value.zig
+    // can refcount array elements without importing the VM
+    pub fn retain(self: *PhpArray) void {
+        self.refcount +%= 1;
+    }
+
     pub fn append(self: *PhpArray, allocator: std.mem.Allocator, value: Value) !void {
-        // an object stored as an array element is a new reference (Stage 1)
+        // an object or array stored as an element is a new reference. this is
+        // a store choke point - the value must arrive un-retained (callers
+        // pass transferArg'd or raw values, never copyValue'd ones)
         if (value == .object) value.object.retain();
+        if (value == .array) value.array.retain();
         const k = if (self.has_int_keys) self.next_int_key else 0;
         if (self.has_int_keys and k == std.math.maxInt(i64)) {
             for (self.entries.items) |entry| {
@@ -72,10 +87,12 @@ pub const PhpArray = struct {
     }
 
     pub fn set(self: *PhpArray, allocator: std.mem.Allocator, raw_key: Key, value: Value) !void {
-        // an object stored as an array element is a new reference (Stage 1).
-        // the overwritten old element is not released here (no VM access) -
-        // that leaks until the array-element release side is wired
+        // an object or array stored as an element is a new reference. this is
+        // a store choke point - the value must arrive un-retained (callers
+        // pass transferArg'd or raw values, never copyValue'd ones). the
+        // overwritten old element is not released here (no VM access)
         if (value == .object) value.object.retain();
+        if (value == .array) value.array.retain();
         const key = normalizeKey(raw_key);
         if (key == .int) {
             const idx = key.int;
@@ -382,12 +399,14 @@ pub const PhpObject = struct {
     }
 
     pub fn set(self: *PhpObject, allocator: std.mem.Allocator, name: []const u8, value: Value) !void {
-        // an object stored as a property is a new reference (Stage 1) - this
+        // an object or array stored as a property is a new reference - this
         // is the universal property-store choke point, so native code calling
-        // obj.set retains too. the overwritten old value is not released here
-        // (no VM access); the set_prop opcode does overwrite-release, native
-        // overwrites leak (rare). object teardown releases all property objects
+        // obj.set retains too. callers pass transferArg'd or raw values (never
+        // copyValue'd ones). the overwritten old value is not released here
+        // (no VM access); set_prop does overwrite-release, native overwrites
+        // leak (rare). object teardown releases all property objects/arrays
         if (value == .object) value.object.retain();
+        if (value == .array) value.array.retain();
         // a write resurrects a previously-unset property
         self.clearUnset(name);
         if (self.slots) |s| {

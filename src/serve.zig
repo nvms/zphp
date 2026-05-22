@@ -1121,13 +1121,13 @@ fn populateSuperglobals(vm: *VM, req: *const Request, conn: std.net.Server.Conne
     try vm.strings.append(a, addr_owned);
     try server_arr.set(a, .{ .string = "REMOTE_ADDR" }, .{ .string = addr_owned });
 
-    try vm.request_vars.put(a, "$_SERVER", .{ .array = server_arr });
+    try vm.putRequestVar("$_SERVER", .{ .array = server_arr });
 
     const get_arr = try a.create(PhpArray);
     get_arr.* = .{};
     try vm.arrays.append(a, get_arr);
     parseQueryString(a, vm, get_arr, req.query_string) catch {};
-    try vm.request_vars.put(a, "$_GET", .{ .array = get_arr });
+    try vm.putRequestVar("$_GET", .{ .array = get_arr });
 
     const post_arr = try a.create(PhpArray);
     post_arr.* = .{};
@@ -1146,21 +1146,21 @@ fn populateSuperglobals(vm: *VM, req: *const Request, conn: std.net.Server.Conne
             }
         }
     }
-    try vm.request_vars.put(a, "$_POST", .{ .array = post_arr });
-    try vm.request_vars.put(a, "$_FILES", .{ .array = files_arr });
+    try vm.putRequestVar("$_POST", .{ .array = post_arr });
+    try vm.putRequestVar("$_FILES", .{ .array = files_arr });
 
     const request_arr = try a.create(PhpArray);
     request_arr.* = .{};
     try vm.arrays.append(a, request_arr);
     for (get_arr.entries.items) |entry| try request_arr.set(a, entry.key, entry.value);
     for (post_arr.entries.items) |entry| try request_arr.set(a, entry.key, entry.value);
-    try vm.request_vars.put(a, "$_REQUEST", .{ .array = request_arr });
+    try vm.putRequestVar("$_REQUEST", .{ .array = request_arr });
 
     const cookie_arr = try a.create(PhpArray);
     cookie_arr.* = .{};
     try vm.arrays.append(a, cookie_arr);
     if (req.getHeader("Cookie")) |cookies| parseCookies(a, vm, cookie_arr, cookies) catch {};
-    try vm.request_vars.put(a, "$_COOKIE", .{ .array = cookie_arr });
+    try vm.putRequestVar("$_COOKIE", .{ .array = cookie_arr });
 
     try env.populateEnvSuperglobal(vm, a, env_snapshot);
 
@@ -1168,7 +1168,7 @@ fn populateSuperglobals(vm: *VM, req: *const Request, conn: std.net.Server.Conne
     if (req.body.len > 0) {
         const body_copy = try a.dupe(u8, req.body);
         try vm.strings.append(a, body_copy);
-        try vm.request_vars.put(a, "__raw_body", .{ .string = body_copy });
+        try vm.putRequestVar("__raw_body", .{ .string = body_copy });
     }
 }
 

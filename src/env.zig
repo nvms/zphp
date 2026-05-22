@@ -121,7 +121,7 @@ pub const EnvSnapshot = struct {
 
 pub fn populateEnvSuperglobal(vm: *VM, a: std.mem.Allocator, snapshot: ?*const EnvSnapshot) !void {
     if (snapshot) |snap| {
-        try vm.request_vars.put(a, "$_ENV", .{ .array = snap.env_arr });
+        try vm.putRequestVar("$_ENV", .{ .array = snap.env_arr });
         return;
     }
 
@@ -130,7 +130,7 @@ pub fn populateEnvSuperglobal(vm: *VM, a: std.mem.Allocator, snapshot: ?*const E
     try vm.arrays.append(a, env_arr);
 
     const env_map = std.process.getEnvMap(a) catch {
-        try vm.request_vars.put(a, "$_ENV", .{ .array = env_arr });
+        try vm.putRequestVar("$_ENV", .{ .array = env_arr });
         return;
     };
     defer @constCast(&env_map).deinit();
@@ -143,5 +143,5 @@ pub fn populateEnvSuperglobal(vm: *VM, a: std.mem.Allocator, snapshot: ?*const E
         try env_arr.set(a, .{ .string = key_owned }, .{ .string = val_owned });
     }
 
-    try vm.request_vars.put(a, "$_ENV", .{ .array = env_arr });
+    try vm.putRequestVar("$_ENV", .{ .array = env_arr });
 }

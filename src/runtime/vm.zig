@@ -402,6 +402,10 @@ pub const VM = struct {
     pending_destruct: std.ArrayListUnmanaged(*PhpObject) = .{},
     destruct_cursor: usize = 0,
     draining_destructors: bool = false,
+    // refcounting Stage 2: arrays whose refcount reached 0, awaiting element
+    // release. drained alongside pending_destruct at statement boundaries
+    pending_array_release: std.ArrayListUnmanaged(*PhpArray) = .{},
+    array_release_cursor: usize = 0,
     // pointer to the $GLOBALS PhpArray for the current run, used so writes
     // to $GLOBALS[key] = val also propagate to the top frame's variable
     // table (matching PHP's superglobal semantics)
@@ -1573,6 +1577,7 @@ pub const VM = struct {
         self.arrays.deinit(self.allocator);
         self.objects.deinit(self.allocator);
         self.pending_destruct.deinit(self.allocator);
+        self.pending_array_release.deinit(self.allocator);
         self.generators.deinit(self.allocator);
         self.fibers.deinit(self.allocator);
         self.ref_cells.deinit(self.allocator);
@@ -1707,9 +1712,17 @@ pub const VM = struct {
             try self.arrays.append(self.allocator, globals_arr);
             try vars.put(self.allocator, "$GLOBALS", .{ .array = globals_arr });
             self.globals_array = globals_arr;
+            // self.globals_array is a durable VM-wide root - it must hold a
+            // refcount, or once every frame that has $GLOBALS in its vars
+            // exits, the array drops to 0 and is freed while still live
+            // (refcounting Stage 2)
+            arrayRetain(globals_arr);
         } else {
             const gv = vars.get("$GLOBALS").?;
-            if (gv == .array) self.globals_array = gv.array;
+            if (gv == .array) {
+                self.globals_array = gv.array;
+                arrayRetain(gv.array);
+            }
         }
         var locals: []Value = &.{};
         if (result.local_count > 0) {
@@ -2692,9 +2705,16 @@ pub const VM = struct {
                     // the whole sequence; push re-anchors, then unpin
                     const ret_pin: ?*PhpObject = if (result == .object) result.object else null;
                     if (ret_pin) |p| p.refcount +%= 1;
+                    // an array result is in transit too: popFrame's
+                    // releaseFrameObjects drops the callee var that held it,
+                    // and the operand stack does not own arrays - so pin the
+                    // array across popFrame, release after push re-anchors it
+                    const ret_arr_pin: ?*PhpArray = if (result == .array) result.array else null;
+                    if (ret_arr_pin) |a| arrayRetain(a);
                     if (g_type_info.count() > 0) {
                         if (try self.checkReturnType(&result)) {
                             if (ret_pin) |p| self.objRelease(p);
+                            if (ret_arr_pin) |a| arrayUnpin(a);
                             continue;
                         }
                     }
@@ -2703,6 +2723,7 @@ pub const VM = struct {
                     if (saved_entry_sp > 0) self.sp = saved_entry_sp;
                     self.push(result);
                     if (ret_pin) |p| self.objRelease(p);
+                    if (ret_arr_pin) |a| arrayUnpin(a);
                     if (self.frame_count <= base_frame) return;
                 },
                 .return_void => {
@@ -3337,7 +3358,7 @@ pub const VM = struct {
                     if (frame.ref_slots.get(name)) |cell| {
                         cell.* = new_val;
                     } else if (from_request) {
-                        try self.request_vars.put(self.allocator, name, new_val);
+                        try self.putRequestVar(name, new_val);
                     } else {
                         try frame.vars.put(self.allocator, name, new_val);
                     }
@@ -4934,7 +4955,9 @@ pub const VM = struct {
                             const cname_idx = self.readU16();
                             const cname = self.currentChunk().constants.items[cname_idx].string;
                             const cval = self.stack[self.sp - ci];
-                            try def.static_props.put(self.allocator, cname, cval);
+                            // copyValue: the constant value is owned by the
+                            // ClassDef and must be refcounted
+                            try def.static_props.put(self.allocator, cname, try self.copyValue(cval));
                             try def.constant_names.put(self.allocator, cname, {});
                         }
                         self.sp -= const_count;
@@ -5251,7 +5274,7 @@ pub const VM = struct {
 
                             const saved_fc = self.frame_count;
                             var ctx = self.makeContext(null);
-                            _ = native(&ctx, args_buf[0..ac]) catch {
+                            _ = self.invokeNative(native, &ctx, args_buf[0..ac]) catch {
                                 // clean up temp frame if throwBuiltinException didn't already unwind past it
                                 if (self.frame_count >= saved_fc) {
                                     self.frame_count -= 1;
@@ -5463,7 +5486,7 @@ pub const VM = struct {
                     self.frame_count += 1; self.retainFrameObjects(self.frame_count - 1);
         if (self.frame_count > self.frame_high_water) self.frame_high_water = self.frame_count;
                             var ctx = self.makeContext(null);
-                            _ = native(&ctx, args_buf[0..ac]) catch {
+                            _ = self.invokeNative(native, &ctx, args_buf[0..ac]) catch {
                                 self.frame_count -= 1;
                                 self.deinitFrameSlot(self.frame_count);
                                 if (self.pending_exception) |exc| {
@@ -6261,7 +6284,7 @@ pub const VM = struct {
                                 // case and treat as a benign control-flow
                                 // signal so the catch handler runs instead
                                 // of surfacing as 'internal RuntimeError'
-                                const result = native(&ctx, args_buf[0..ac]) catch |native_err| {
+                                const result = self.invokeNative(native, &ctx, args_buf[0..ac]) catch |native_err| {
                                     if (self.frame_count < saved_fc) continue;
                                     // pop the temp $this frame so it doesn't
                                     // leak into the stack trace as a bogus
@@ -6367,7 +6390,7 @@ pub const VM = struct {
                         const saved_fc = self.frame_count;
 
                         var ctx = self.makeContext(full_name);
-                        const result = native(&ctx, args_buf[0..ac]) catch {
+                        const result = self.invokeNative(native, &ctx, args_buf[0..ac]) catch {
                             if (self.frame_count >= saved_fc) {
                                 self.frame_count -= 1;
                                 self.deinitFrameSlot(self.frame_count);
@@ -6586,7 +6609,7 @@ pub const VM = struct {
         if (self.frame_count > self.frame_high_water) self.frame_high_water = self.frame_count;
                         const saved_fc = self.frame_count;
                         var ctx = self.makeContext(full_name);
-                        const result = native(&ctx, args_buf[0..ac]) catch {
+                        const result = self.invokeNative(native, &ctx, args_buf[0..ac]) catch {
                             if (self.frame_count >= saved_fc) {
                                 self.frame_count -= 1;
                                 self.deinitFrameSlot(self.frame_count);
@@ -6730,7 +6753,7 @@ pub const VM = struct {
         if (self.frame_count > self.frame_high_water) self.frame_high_water = self.frame_count;
                         const saved_fc = self.frame_count;
                         var ctx = self.makeContext(full_name);
-                        const result = native(&ctx, args_buf[0..ac]) catch {
+                        const result = self.invokeNative(native, &ctx, args_buf[0..ac]) catch {
                             if (self.frame_count >= saved_fc) {
                                 self.frame_count -= 1;
                                 self.deinitFrameSlot(self.frame_count);
@@ -6893,7 +6916,7 @@ pub const VM = struct {
         if (self.frame_count > self.frame_high_water) self.frame_high_water = self.frame_count;
                         const saved_fc = self.frame_count;
                         var ctx = self.makeContext(full_name);
-                        const result = native(&ctx, args_buf[0..ac]) catch {
+                        const result = self.invokeNative(native, &ctx, args_buf[0..ac]) catch {
                             if (self.frame_count >= saved_fc) {
                                 self.frame_count -= 1;
                                 self.deinitFrameSlot(self.frame_count);
@@ -7139,7 +7162,7 @@ pub const VM = struct {
                     self.frame_count += 1; self.retainFrameObjects(self.frame_count - 1);
         if (self.frame_count > self.frame_high_water) self.frame_high_water = self.frame_count;
                                 var ctx = self.makeContext(full_name);
-                                const result = native(&ctx, args_buf[0..ac]) catch {
+                                const result = self.invokeNative(native, &ctx, args_buf[0..ac]) catch {
                                     if (self.frame_count > sc_saved_fc) {
                                         self.frame_count -= 1;
                                         self.deinitFrameSlot(self.frame_count);
@@ -8729,7 +8752,7 @@ pub const VM = struct {
                 }
             }
             var ctx = self.makeContext(null);
-            const result = native(&ctx, &.{}) catch return "Object";
+            const result = self.invokeNative(native, &ctx, &.{}) catch return "Object";
             if (result == .string) return result.string;
             var buf = std.ArrayListUnmanaged(u8){};
             result.format(&buf, self.allocator) catch return "Object";
@@ -8862,7 +8885,10 @@ pub const VM = struct {
                 sj += 1;
                 break :blk v;
             } else Value{ .null = {} };
-            try def.static_props.put(self.allocator, sprop_names[pi], default_val);
+            // copyValue: an array/object default is owned by the ClassDef -
+            // it must be refcounted (else an array default sits at refcount 0
+            // and the first get_static_prop+push+pop releases it)
+            try def.static_props.put(self.allocator, sprop_names[pi], try self.copyValue(default_val));
             if (sprop_type[pi].len > 0) try def.static_prop_types.put(self.allocator, sprop_names[pi], sprop_type[pi]);
             const vis_byte = sprop_visibility[pi] & 0x03;
             if (vis_byte != 0) {
@@ -9530,7 +9556,8 @@ pub const VM = struct {
         if (self.trait_constants.get(trait_name)) |consts| {
             for (consts) |c| {
                 if (!def.static_props.contains(c.name)) {
-                    try def.static_props.put(self.allocator, c.name, c.value);
+                    // each using class gets its own refcounted copy
+                    try def.static_props.put(self.allocator, c.name, try self.copyValue(c.value));
                     try def.constant_names.put(self.allocator, c.name, {});
                 }
             }
@@ -10586,10 +10613,15 @@ pub const VM = struct {
                 .simple => |caller_var| {
                     if (self.currentFrame().ref_slots.get(caller_var)) |existing_cell| {
                         existing_cell.* = new_vars.get(func.params[ri]) orelse .null;
+                        if (existing_cell.* == .array) arrayRetain(existing_cell.*.array);
                         try refs.put(self.allocator, func.params[ri], existing_cell);
                     } else {
                         const cell = try self.allocator.create(Value);
                         cell.* = new_vars.get(func.params[ri]) orelse .null;
+                        // the ref cell is a durable holder - retain its array value, or the
+                        // callee param slot's release at frame teardown frees the array the
+                        // cell (and the caller's ref binding) still points at (Stage 2)
+                        if (cell.* == .array) arrayRetain(cell.*.array);
                         try self.ref_cells.append(self.allocator, cell);
                         try self.currentFrame().ref_slots.put(self.allocator, caller_var, cell);
                         try refs.put(self.allocator, func.params[ri], cell);
@@ -10600,6 +10632,10 @@ pub const VM = struct {
                     if (arr_val == .array) {
                         const cell = try self.allocator.create(Value);
                         cell.* = new_vars.get(func.params[ri]) orelse .null;
+                        // the ref cell is a durable holder - retain its array value, or the
+                        // callee param slot's release at frame teardown frees the array the
+                        // cell (and the caller's ref binding) still points at (Stage 2)
+                        if (cell.* == .array) arrayRetain(cell.*.array);
                         try self.ref_cells.append(self.allocator, cell);
                         try refs.put(self.allocator, func.params[ri], cell);
                         try array_bindings.append(self.allocator, .{
@@ -10614,6 +10650,10 @@ pub const VM = struct {
                     if (obj_val == .object) {
                         const cell = try self.allocator.create(Value);
                         cell.* = new_vars.get(func.params[ri]) orelse .null;
+                        // the ref cell is a durable holder - retain its array value, or the
+                        // callee param slot's release at frame teardown frees the array the
+                        // cell (and the caller's ref binding) still points at (Stage 2)
+                        if (cell.* == .array) arrayRetain(cell.*.array);
                         try self.ref_cells.append(self.allocator, cell);
                         try refs.put(self.allocator, func.params[ri], cell);
                         try object_bindings.append(self.allocator, .{
@@ -10627,6 +10667,10 @@ pub const VM = struct {
                     if (self.resolveChainedProp(cp)) |target| {
                         const cell = try self.allocator.create(Value);
                         cell.* = new_vars.get(func.params[ri]) orelse .null;
+                        // the ref cell is a durable holder - retain its array value, or the
+                        // callee param slot's release at frame teardown frees the array the
+                        // cell (and the caller's ref binding) still points at (Stage 2)
+                        if (cell.* == .array) arrayRetain(cell.*.array);
                         try self.ref_cells.append(self.allocator, cell);
                         try refs.put(self.allocator, func.params[ri], cell);
                         try object_bindings.append(self.allocator, .{
@@ -10643,6 +10687,10 @@ pub const VM = struct {
                         if (prop_val == .array) {
                             const cell = try self.allocator.create(Value);
                             cell.* = new_vars.get(func.params[ri]) orelse .null;
+                            // the ref cell is a durable holder - retain its array value, or the
+                            // callee param slot's release at frame teardown frees the array the
+                            // cell (and the caller's ref binding) still points at (Stage 2)
+                            if (cell.* == .array) arrayRetain(cell.*.array);
                             try self.ref_cells.append(self.allocator, cell);
                             try refs.put(self.allocator, func.params[ri], cell);
                             try array_bindings.append(self.allocator, .{
@@ -11411,6 +11459,9 @@ pub const VM = struct {
         copy.entries.ensureTotalCapacity(self.allocator, src.entries.items.len) catch return error.RuntimeError;
         for (src.entries.items, 0..) |entry, i| {
             copy.entries.appendAssumeCapacity(entry);
+            // the clone is a new array referencing this object element - a new
+            // reference, so retain it (refcounting Stage 2)
+            if (entry.value == .object) objRetain(entry.value.object);
             if (entry.key == .string) {
                 copy.string_index.put(self.allocator, entry.key.string, i) catch return error.RuntimeError;
             }
@@ -11430,13 +11481,16 @@ pub const VM = struct {
         visited.put(self.allocator, src, copy) catch return error.RuntimeError;
         copy.entries.ensureTotalCapacity(self.allocator, src.entries.items.len) catch return error.RuntimeError;
         for (src.entries.items, 0..) |entry, i| {
-            copy.entries.appendAssumeCapacity(.{
-                .key = entry.key,
-                .value = if (entry.value == .array)
-                    Value{ .array = try self.cloneArrayInner(entry.value.array, visited) }
-                else
-                    entry.value,
-            });
+            const cloned_value: Value = if (entry.value == .array) blk: {
+                // a nested array is itself deep-cloned; the parent clone holds
+                // the nested clone as one reference - retain it
+                const nested = try self.cloneArrayInner(entry.value.array, visited);
+                arrayRetain(nested);
+                break :blk Value{ .array = nested };
+            } else entry.value;
+            // a copied object element is a new reference from the clone
+            if (cloned_value == .object) objRetain(cloned_value.object);
+            copy.entries.appendAssumeCapacity(.{ .key = entry.key, .value = cloned_value });
             if (entry.key == .string) {
                 copy.string_index.put(self.allocator, entry.key.string, i) catch return error.RuntimeError;
             }
@@ -11447,13 +11501,17 @@ pub const VM = struct {
 
     pub fn copyValue(self: *VM, val: Value) RuntimeError!Value {
         // an object handle copied is a new reference - refcount it (Stage 1).
-        // arrays are value types (deep-cloned); scalars need nothing
+        // an array is deep-cloned (PHP value semantics); the fresh clone is
+        // born at refcount 0, so retain it here - the caller owns this copy,
+        // exactly as it owns the +1 on a copied object. scalars need nothing
         if (val == .object) {
             objRetain(val.object);
             return val;
         }
         if (val != .array) return val;
-        return .{ .array = try self.cloneArray(val.array) };
+        const clone = try self.cloneArray(val.array);
+        arrayRetain(clone);
+        return .{ .array = clone };
     }
 
     // transfer an operand-stack value into a callee binding ($this, a
@@ -11470,6 +11528,22 @@ pub const VM = struct {
 
     pub fn makeContext(self: *VM, call_name: ?[]const u8) NativeContext {
         return .{ .allocator = self.allocator, .arrays = &self.arrays, .strings = &self.strings, .vm = self, .call_name = call_name };
+    }
+
+    // invoke a native, keeping its OBJECT arguments retained for the
+    // duration of the call. the call-site dispatch copies the args into a
+    // buffer and dropN's them off the operand stack BEFORE running the
+    // native, so a temporary object arg (e.g. `iterator_apply(new
+    // ArrayIterator(...), ...)`) sits at refcount 0 while the native runs;
+    // a native that invokes a user callback then triggers a drain that
+    // destructs the still-needed argument. objects only: the operand stack
+    // does not own arrays and a refcount-0 array arg is never queued, so it
+    // cannot be freed mid-native - retaining arrays here would instead
+    // QUEUE them (releaseValue queues at 0) and free live data (Stage 2)
+    fn invokeNative(self: *VM, native: NativeFn, ctx: *NativeContext, native_args: []const Value) RuntimeError!Value {
+        for (native_args) |a| stackRetain(a);
+        defer for (native_args) |a| self.stackRelease(a);
+        return native(ctx, native_args);
     }
 
     pub fn bindClosures(self: *VM, vars: *std.StringHashMapUnmanaged(Value), ref_slots: ?*std.StringHashMapUnmanaged(*Value), name: []const u8) !void {
@@ -12273,7 +12347,7 @@ pub const VM = struct {
             self.dropN(ac);
             const pre_handler_count = self.handler_count;
             var ctx = self.makeContext(name);
-            const result = native(&ctx, args[0..ac]) catch {
+            const result = self.invokeNative(native, &ctx, args[0..ac]) catch {
                 if (self.pending_exception) |exc| {
                     // capture the native's name + args so writeStackTrace can
                     // emit a '#0 file(line): name(args)' synthetic frame - but
@@ -12498,7 +12572,7 @@ pub const VM = struct {
             // throwBuiltinException can dispatch in-place and the native
             // returns error.RuntimeError to unwind. detect that and let
             // the caller resume from the dispatched handler frame
-            const result = native(&ctx, args) catch |native_err| {
+            const result = self.invokeNative(native, &ctx, args) catch |native_err| {
                 if (self.frame_count < saved_fc) return .null;
                 return native_err;
             };
@@ -12615,7 +12689,7 @@ pub const VM = struct {
             // mt_rand distinguish by name) work when dispatched indirectly via
             // call_user_func / first-class-callable / array callable
             var ctx = self.makeContext(name);
-            return native(&ctx, args);
+            return self.invokeNative(native, &ctx, args);
         } else if (self.functions.get(name)) |func| {
             if (args.len < func.required_params) return error.RuntimeError;
             if (self.ic) |ic| ic.pending_arg_count = @intCast(@min(args.len, 255));
@@ -13056,8 +13130,13 @@ pub const VM = struct {
     }
 
     fn push(self: *VM, value: Value) void {
-        // every object on the operand stack holds a reference (Stage 1)
-        if (value == .object) objRetain(value.object);
+        // operand-stack slots refcount objects (Stage 1) but NOT arrays.
+        // an array is a value type with exactly one durable owner; the stack
+        // holds a transient borrow, not ownership. counting transient
+        // push/pop would let an array whose container has not (yet) retained
+        // it cycle 0->1->0 and be freed while still live. arrays are freed
+        // only when their durable container releases them (refcounting Stage 2)
+        stackRetain(value);
         self.stack[self.sp] = value;
         self.sp += 1;
     }
@@ -13065,21 +13144,19 @@ pub const VM = struct {
     fn pop(self: *VM) Value {
         self.sp -= 1;
         const v = self.stack[self.sp];
-        // the stack slot held a reference; dropping it releases (deferred -
-        // the returned handle stays valid for the caller until the next drain)
-        self.releaseValue(v);
+        self.stackRelease(v);
         return v;
     }
 
-    // drop the top n operand-stack slots, releasing each (Stage 1). used by
-    // call cleanup to release the receiver + arguments the caller pushed -
-    // the callee retained its own copies via retainFrameObjects, so the
-    // caller's stack copies must be released here
+    // drop the top n operand-stack slots, releasing each. used by call
+    // cleanup to release the receiver + arguments the caller pushed - the
+    // callee retained its own copies via retainFrameObjects, so the caller's
+    // stack copies must be released here (objects only - see push)
     pub fn dropN(self: *VM, n: usize) void {
         var k: usize = 0;
         while (k < n) : (k += 1) {
             self.sp -= 1;
-            self.releaseValue(self.stack[self.sp]);
+            self.stackRelease(self.stack[self.sp]);
         }
     }
 
@@ -13129,29 +13206,107 @@ pub const VM = struct {
             self.draining_destructors = false;
             self.pending_destruct.clearRetainingCapacity();
             self.destruct_cursor = 0;
+            self.pending_array_release.clearRetainingCapacity();
+            self.array_release_cursor = 0;
         }
-        while (self.destruct_cursor < self.pending_destruct.items.len) {
-            const obj = self.pending_destruct.items[self.destruct_cursor];
-            self.destruct_cursor += 1;
-            if (obj.refcount != 0 or obj.destructed) continue;
-            // the in-flight exception is a VM-level root: while it propagates
-            // it lives in self.pending_exception, not on the stack or in a
-            // var, so refcounting cannot see it - never destruct it here
-            if (self.pendingExceptionIs(obj)) continue;
-            obj.destructed = true;
-            if (self.hasMethod(obj.class_name, "__destruct")) {
-                _ = self.callMethod(obj, "__destruct", &.{}) catch {
-                    // a throwing destructor must not corrupt the drop site it
-                    // was called from - swallow (Stage 1; revisit for fidelity)
-                    self.pending_exception = null;
-                };
+        // the two queues feed each other - a destructed object releases its
+        // array-valued properties, and a released array releases its object
+        // elements - so consume both until neither has unprocessed items
+        while (self.destruct_cursor < self.pending_destruct.items.len or
+            self.array_release_cursor < self.pending_array_release.items.len)
+        {
+            while (self.destruct_cursor < self.pending_destruct.items.len) {
+                const obj = self.pending_destruct.items[self.destruct_cursor];
+                self.destruct_cursor += 1;
+                if (obj.refcount != 0 or obj.destructed) continue;
+                // the in-flight exception is a VM-level root: while it
+                // propagates it lives in self.pending_exception, not on the
+                // stack or in a var, so refcounting cannot see it - never
+                // destruct it here
+                if (self.pendingExceptionIs(obj)) continue;
+                // a `global $x` cell (globals_cells) is a VM-level root the
+                // refcount cannot see - the cell holds its value via a raw
+                // cell.* write with no retain. an object reachable from a
+                // global is alive for the whole request; never destruct it
+                if (self.valueInGlobalsCell(.{ .object = obj })) continue;
+                obj.destructed = true;
+                if (self.hasMethod(obj.class_name, "__destruct")) {
+                    _ = self.callMethod(obj, "__destruct", &.{}) catch {
+                        // a throwing destructor must not corrupt the drop site
+                        // it was called from - swallow (revisit for fidelity)
+                        self.pending_exception = null;
+                    };
+                }
+                // collapse the object tree: release the objects this object's
+                // property slots held. runs after __destruct (PHP tears
+                // properties down after)
+                self.releaseObjectProperties(obj);
             }
-            // collapse the object tree (Stage 1): release the objects this
-            // object's property slots held. children whose last reference was
-            // this object reach refcount 0 and the loop below cascades into
-            // them. runs after __destruct (PHP tears properties down after)
-            self.releaseObjectProperties(obj);
+            while (self.array_release_cursor < self.pending_array_release.items.len) {
+                const arr = self.pending_array_release.items[self.array_release_cursor];
+                self.array_release_cursor += 1;
+                if (arr.refcount != 0 or arr.elements_released) continue;
+                // a global `global $x` cell is a root the refcount cannot
+                // see (raw cell.* write, no retain) - never free an array
+                // reachable from one
+                if (self.valueInGlobalsCell(.{ .array = arr })) continue;
+                // mark before walking so a cyclic array (a self-reference
+                // reachable through unserialize R:N) is not re-queued
+                arr.elements_released = true;
+                self.releaseArrayElements(arr);
+            }
         }
+    }
+
+    // is this object/array reachable from a `global $x` cell? globals_cells
+    // entries hold their value via a raw cell.* write with no retain, so the
+    // refcount does not see them - the drain must check explicitly before
+    // destructing/freeing (refcounting Stage 2; mirrors arrayOnStack /
+    // pendingExceptionIs - roots refcounting cannot see)
+    fn valueInGlobalsCell(self: *const VM, v: Value) bool {
+        var it = self.globals_cells.valueIterator();
+        while (it.next()) |cell_ptr| {
+            const cv = cell_ptr.*.*;
+            switch (v) {
+                .object => |o| if (cv == .object and cv.object == o) return true,
+                .array => |a| if (cv == .array and cv.array == a) return true,
+                else => {},
+            }
+        }
+        return false;
+    }
+
+    // release the values an unreachable array holds and clear the entries, so
+    // object elements reach refcount 0 and get __destruct'd, and nested
+    // arrays cascade. clearing prevents any later walk from double-releasing
+    fn releaseArrayElements(self: *VM, arr: *PhpArray) void {
+        for (arr.entries.items) |*e| {
+            self.releaseValue(e.value);
+            e.value = .null;
+        }
+    }
+
+    // a new reference to an array was created
+    pub fn arrayRetain(arr: *PhpArray) void {
+        arr.refcount +%= 1;
+    }
+
+    // undo a transient pin (return_val / fast_loop return). plain decrement,
+    // never queues: a pinned array dropping back to 0 is a live stack temp
+    // (the operand stack does not own arrays), not unreachable garbage -
+    // queuing it would free a return value before the caller clones it
+    pub fn arrayUnpin(arr: *PhpArray) void {
+        if (arr.refcount > 0) arr.refcount -= 1;
+    }
+
+    // an array reference was dropped. at 0 the array is unreachable; queue it
+    // so releaseArrayElements runs at the next drain (a transient dip to 0 on
+    // the operand stack is rescued - the drain re-checks refcount)
+    pub fn arrayRelease(self: *VM, arr: *PhpArray) void {
+        if (arr.refcount == 0) return;
+        arr.refcount -= 1;
+        if (arr.refcount != 0 or arr.elements_released) return;
+        self.pending_array_release.append(self.allocator, arr) catch {};
     }
 
     // release the object references an object's properties hold and clear the
@@ -13160,28 +13315,59 @@ pub const VM = struct {
     fn releaseObjectProperties(self: *VM, obj: *PhpObject) void {
         if (obj.slots) |s| {
             for (s) |*v| {
-                if (v.* == .object) {
-                    self.objRelease(v.object);
+                if (v.* == .object or v.* == .array) {
+                    self.releaseValue(v.*);
                     v.* = .null;
                 }
             }
         }
         var it = obj.properties.iterator();
         while (it.next()) |e| {
-            if (e.value_ptr.* == .object) {
-                self.objRelease(e.value_ptr.object);
+            if (e.value_ptr.* == .object or e.value_ptr.* == .array) {
+                self.releaseValue(e.value_ptr.*);
                 e.value_ptr.* = .null;
             }
         }
     }
 
-    // retain/release a Value - a no-op for non-object values
+    // retain/release a Value - a no-op for scalars. objects and arrays are
+    // both refcounted (arrays: refcounting Stage 2)
     pub inline fn retainValue(v: Value) void {
-        if (v == .object) objRetain(v.object);
+        switch (v) {
+            .object => objRetain(v.object),
+            .array => arrayRetain(v.array),
+            else => {},
+        }
     }
 
     pub inline fn releaseValue(self: *VM, v: Value) void {
+        switch (v) {
+            .object => self.objRelease(v.object),
+            .array => self.arrayRelease(v.array),
+            else => {},
+        }
+    }
+
+    // retain/release for an OPERAND-STACK slot: objects only. arrays are not
+    // owned by the stack (see push) - a stack borrow must not move an array's
+    // refcount, or a live array whose container is at baseline 0 would be
+    // freed by a transient push/pop. durable containers use retainValue /
+    // releaseValue; the operand stack uses these
+    pub inline fn stackRetain(v: Value) void {
+        if (v == .object) objRetain(v.object);
+    }
+
+    pub inline fn stackRelease(self: *VM, v: Value) void {
         if (v == .object) self.objRelease(v.object);
+    }
+
+    // store a superglobal ($_SERVER, $_ENV, ...) into request_vars. that map
+    // is a durable container - it must refcount its array values, or a
+    // superglobal sits at refcount 0 and the first read (push/pop) frees it
+    pub fn putRequestVar(self: *VM, name: []const u8, value: Value) !void {
+        retainValue(value);
+        const old = try self.request_vars.fetchPut(self.allocator, name, value);
+        if (old) |kv| self.releaseValue(kv.value);
     }
 };
 
