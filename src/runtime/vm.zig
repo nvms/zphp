@@ -5707,6 +5707,13 @@ pub const VM = struct {
                     // property store retains the object exactly once (obj.set
                     // on the slow path, retainValue on the IC path)
                     var val = try self.transferArg(self.pop());
+                    // pin val across the property store. checkPropertyType can
+                    // autoload the declared type, __set and property hooks run
+                    // PHP - any nested execution drains pending destructors and
+                    // would destruct val mid-store while its refcount sits at 0
+                    const sp_val_pin: ?*PhpObject = if (val == .object) val.object else null;
+                    if (sp_val_pin) |p| p.refcount +%= 1;
+                    defer if (sp_val_pin) |p| self.objRelease(p);
                     const obj_val = self.pop();
                     if (obj_val == .object) {
                         const obj = obj_val.object;
