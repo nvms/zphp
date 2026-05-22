@@ -58,6 +58,8 @@ pub const PhpArray = struct {
     }
 
     pub fn append(self: *PhpArray, allocator: std.mem.Allocator, value: Value) !void {
+        // an object stored as an array element is a new reference (Stage 1)
+        if (value == .object) value.object.retain();
         const k = if (self.has_int_keys) self.next_int_key else 0;
         if (self.has_int_keys and k == std.math.maxInt(i64)) {
             for (self.entries.items) |entry| {
@@ -70,6 +72,10 @@ pub const PhpArray = struct {
     }
 
     pub fn set(self: *PhpArray, allocator: std.mem.Allocator, raw_key: Key, value: Value) !void {
+        // an object stored as an array element is a new reference (Stage 1).
+        // the overwritten old element is not released here (no VM access) -
+        // that leaks until the array-element release side is wired
+        if (value == .object) value.object.retain();
         const key = normalizeKey(raw_key);
         if (key == .int) {
             const idx = key.int;
@@ -340,6 +346,12 @@ pub const PhpObject = struct {
         self.magic_set_active.deinit(allocator);
         self.magic_get_active.deinit(allocator);
         if (self.slots) |s| allocator.free(s);
+    }
+
+    // increment the refcount (Stage 1). a method on PhpObject so value.zig
+    // (PhpArray) can refcount object elements without importing the VM
+    pub fn retain(self: *PhpObject) void {
+        self.refcount +%= 1;
     }
 
     pub fn isUnset(self: *const PhpObject, name: []const u8) bool {
