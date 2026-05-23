@@ -406,6 +406,15 @@ pub const VM = struct {
     // release. drained alongside pending_destruct at statement boundaries
     pending_array_release: std.ArrayListUnmanaged(*PhpArray) = .{},
     array_release_cursor: usize = 0,
+    // Stage 2 finer generator/fiber lifetime: gen/fiber handles dropped to
+    // refcount 0 are queued for closeGenerator + releaseGeneratorVars /
+    // cleanupFiberFrames at the next drain. queueing (not inline close) lets
+    // a transient drop-then-re-retain through a pop-then-store pattern
+    // survive - the drain re-checks refcount before closing
+    pending_gen_release: std.ArrayListUnmanaged(*@import("value.zig").Generator) = .{},
+    gen_release_cursor: usize = 0,
+    pending_fiber_release: std.ArrayListUnmanaged(*@import("value.zig").Fiber) = .{},
+    fiber_release_cursor: usize = 0,
     // registered WeakMap instances. each WeakMap's wmConstruct appends self
     // here; on object destruct we walk this list to remove entries whose key
     // is the just-destructed object (weak semantics)
@@ -1585,6 +1594,8 @@ pub const VM = struct {
         self.objects.deinit(self.allocator);
         self.pending_destruct.deinit(self.allocator);
         self.pending_array_release.deinit(self.allocator);
+        self.pending_gen_release.deinit(self.allocator);
+        self.pending_fiber_release.deinit(self.allocator);
         self.weakmaps.deinit(self.allocator);
         self.generators.deinit(self.allocator);
         self.fibers.deinit(self.allocator);
@@ -1660,6 +1671,8 @@ pub const VM = struct {
         self.generators.clearRetainingCapacity();
         self.fibers.clearRetainingCapacity();
         self.ref_cells.clearRetainingCapacity();
+        self.pending_gen_release.clearRetainingCapacity();
+        self.pending_fiber_release.clearRetainingCapacity();
         self.weakmaps.clearRetainingCapacity();
         self.captures.clearRetainingCapacity();
         self.capture_index.clearRetainingCapacity();
@@ -3859,7 +3872,17 @@ pub const VM = struct {
                         }
                         if (self.globals_cells.get(name)) |cell| cell.* = .null;
                     }
-                    if (self.pending_destruct.items.len > 0) self.drainPendingDestruct();
+                    // widen gate at unset: an unset of a gen/fiber is the
+                    // user's explicit close intent, drain those queues too so
+                    // the closeGenerator / cleanupFiberFrames timing matches
+                    // PHP (the inline-narrow gate elsewhere stays object-
+                    // focused to avoid the recursive-yield-from regression)
+                    if (self.pending_destruct.items.len > 0 or
+                        self.pending_gen_release.items.len > 0 or
+                        self.pending_fiber_release.items.len > 0)
+                    {
+                        self.drainPendingDestruct();
+                    }
                 },
                 .unset_prop => {
                     const name_idx = self.readU16();
@@ -4119,8 +4142,18 @@ pub const VM = struct {
                         // unless ref-bound (a shared cell - handled by
                         // ref-cell refcounting later) (Stage 1)
                         const old_lv = frame.locals[slot];
-                        if (old_lv == .object and !self.slotIsRefBound(frame, slot)) {
-                            self.objRelease(old_lv.object);
+                        if (!self.slotIsRefBound(frame, slot)) {
+                            // Stage 2: also handles .generator and .fiber via
+                            // releaseValue. arrays in locals aren't retained
+                            // by the slot in Option B, so releaseValue's
+                            // .array branch would over-release; gate on
+                            // object/gen/fiber only
+                            switch (old_lv) {
+                                .object => self.objRelease(old_lv.object),
+                                .generator => self.genRelease(old_lv.generator),
+                                .fiber => self.fiberRelease(old_lv.fiber),
+                                else => {},
+                            }
                         }
                         frame.locals[slot] = val;
                     }
@@ -7922,6 +7955,12 @@ pub const VM = struct {
                         }
 
                         if (inner.state == .suspended) {
+                            // delegate.gen holds a real ref to the inner gen
+                            // across the yield-from window. without this
+                            // retain the pop() above is the only handle and
+                            // the inner gets queued for close at the next
+                            // drain, dying before the second yield (Stage 2)
+                            genRetain(inner);
                             outer_gen.delegate = .{ .gen = inner };
                             outer_gen.current_value = inner.current_value;
                             outer_gen.current_key = inner.current_key;
@@ -8434,6 +8473,16 @@ pub const VM = struct {
     // can drop the resources now. idempotent - clears the map so a later call
     // from the same completion path is a no-op
     pub fn releaseGeneratorVars(self: *VM, gen: *@import("value.zig").Generator) void {
+        // release the inner gen the outer was delegating to (yield from path)
+        if (gen.delegate) |delegate| {
+            switch (delegate) {
+                .gen => |inner| {
+                    self.genRelease(inner);
+                    gen.delegate = null;
+                },
+                else => {},
+            }
+        }
         var vit = gen.vars.valueIterator();
         while (vit.next()) |v| self.releaseValue(v.*);
         gen.vars.clearRetainingCapacity();
@@ -8700,6 +8749,7 @@ pub const VM = struct {
                     // inner exhausted - clear delegate and resume outer with return value
                     const ret_val = inner.return_value;
                     gen.delegate = null;
+                    self.genRelease(inner);
                     return self.resumeGeneratorWithValue(gen, ret_val);
                 },
                 .array => |*arr_state| {
@@ -11788,11 +11838,21 @@ pub const VM = struct {
 
     pub fn copyValue(self: *VM, val: Value) RuntimeError!Value {
         // an object handle copied is a new reference - refcount it (Stage 1).
-        // an array is deep-cloned (PHP value semantics); the fresh clone is
-        // born at refcount 0, so retain it here - the caller owns this copy,
-        // exactly as it owns the +1 on a copied object. scalars need nothing
+        // generator/fiber handles are also refcounted (Stage 2 finer
+        // lifetime). arrays are deep-cloned (PHP value semantics); the fresh
+        // clone is born at refcount 0, so retain it here - the caller owns
+        // this copy, exactly as it owns the +1 on a copied object/gen/fiber.
+        // scalars need nothing
         if (val == .object) {
             objRetain(val.object);
+            return val;
+        }
+        if (val == .generator) {
+            genRetain(val.generator);
+            return val;
+        }
+        if (val == .fiber) {
+            fiberRetain(val.fiber);
             return val;
         }
         if (val != .array) return val;
@@ -13507,12 +13567,19 @@ pub const VM = struct {
             self.destruct_cursor = 0;
             self.pending_array_release.clearRetainingCapacity();
             self.array_release_cursor = 0;
+            self.pending_gen_release.clearRetainingCapacity();
+            self.gen_release_cursor = 0;
+            self.pending_fiber_release.clearRetainingCapacity();
+            self.fiber_release_cursor = 0;
         }
-        // the two queues feed each other - a destructed object releases its
-        // array-valued properties, and a released array releases its object
-        // elements - so consume both until neither has unprocessed items
+        // the queues feed each other - a destructed object releases its
+        // array-valued properties; a released array releases its object
+        // elements; a closed generator releases its locals (more queues).
+        // consume all four until none has unprocessed items
         while (self.destruct_cursor < self.pending_destruct.items.len or
-            self.array_release_cursor < self.pending_array_release.items.len)
+            self.array_release_cursor < self.pending_array_release.items.len or
+            self.gen_release_cursor < self.pending_gen_release.items.len or
+            self.fiber_release_cursor < self.pending_fiber_release.items.len)
         {
             while (self.destruct_cursor < self.pending_destruct.items.len) {
                 const obj = self.pending_destruct.items[self.destruct_cursor];
@@ -13558,6 +13625,22 @@ pub const VM = struct {
                 // reachable through unserialize R:N) is not re-queued
                 arr.elements_released = true;
                 self.releaseArrayElements(arr);
+            }
+            while (self.gen_release_cursor < self.pending_gen_release.items.len) {
+                const gen = self.pending_gen_release.items[self.gen_release_cursor];
+                self.gen_release_cursor += 1;
+                // rescued if re-retained between queue and drain
+                if (gen.refcount != 0) continue;
+                // closeGenerator early-returns on .completed; releaseGeneratorVars
+                // is idempotent. closing a suspended gen may queue more work
+                self.closeGenerator(gen, self.frame_count) catch {};
+                self.releaseGeneratorVars(gen);
+            }
+            while (self.fiber_release_cursor < self.pending_fiber_release.items.len) {
+                const fiber = self.pending_fiber_release.items[self.fiber_release_cursor];
+                self.fiber_release_cursor += 1;
+                if (fiber.refcount != 0) continue;
+                self.cleanupFiberFrames(fiber);
             }
         }
     }
@@ -13657,17 +13740,23 @@ pub const VM = struct {
     fn releaseObjectProperties(self: *VM, obj: *PhpObject) void {
         if (obj.slots) |s| {
             for (s) |*v| {
-                if (v.* == .object or v.* == .array) {
-                    self.releaseValue(v.*);
-                    v.* = .null;
+                switch (v.*) {
+                    .object, .array, .generator, .fiber => {
+                        self.releaseValue(v.*);
+                        v.* = .null;
+                    },
+                    else => {},
                 }
             }
         }
         var it = obj.properties.iterator();
         while (it.next()) |e| {
-            if (e.value_ptr.* == .object or e.value_ptr.* == .array) {
-                self.releaseValue(e.value_ptr.*);
-                e.value_ptr.* = .null;
+            switch (e.value_ptr.*) {
+                .object, .array, .generator, .fiber => {
+                    self.releaseValue(e.value_ptr.*);
+                    e.value_ptr.* = .null;
+                },
+                else => {},
             }
         }
     }
@@ -13678,6 +13767,8 @@ pub const VM = struct {
         switch (v) {
             .object => objRetain(v.object),
             .array => arrayRetain(v.array),
+            .generator => genRetain(v.generator),
+            .fiber => fiberRetain(v.fiber),
             else => {},
         }
     }
@@ -13686,8 +13777,38 @@ pub const VM = struct {
         switch (v) {
             .object => self.objRelease(v.object),
             .array => self.arrayRelease(v.array),
+            .generator => self.genRelease(v.generator),
+            .fiber => self.fiberRelease(v.fiber),
             else => {},
         }
+    }
+
+    pub fn genRetain(gen: *@import("value.zig").Generator) void {
+        gen.refcount +%= 1;
+    }
+
+    // Stage 2 finer generator lifetime: queue at refcount=0 instead of
+    // closing inline. transient pop-then-store patterns (yield_from popping
+    // an inner gen off the stack before storing into delegate.gen) hit
+    // refcount=0 briefly; if we closed inline the inner gen would die before
+    // the delegate retain registers. the drain re-checks refcount so a rescue
+    // re-retain leaves the queued entry as a no-op
+    pub fn genRelease(self: *VM, gen: *@import("value.zig").Generator) void {
+        if (gen.refcount == 0) return;
+        gen.refcount -= 1;
+        if (gen.refcount != 0) return;
+        self.pending_gen_release.append(self.allocator, gen) catch {};
+    }
+
+    pub fn fiberRetain(fiber: *@import("value.zig").Fiber) void {
+        fiber.refcount +%= 1;
+    }
+
+    pub fn fiberRelease(self: *VM, fiber: *@import("value.zig").Fiber) void {
+        if (fiber.refcount == 0) return;
+        fiber.refcount -= 1;
+        if (fiber.refcount != 0) return;
+        self.pending_fiber_release.append(self.allocator, fiber) catch {};
     }
 
     // retain/release for an OPERAND-STACK slot: objects only. arrays are not
@@ -13696,11 +13817,21 @@ pub const VM = struct {
     // freed by a transient push/pop. durable containers use retainValue /
     // releaseValue; the operand stack uses these
     pub inline fn stackRetain(v: Value) void {
-        if (v == .object) objRetain(v.object);
+        switch (v) {
+            .object => objRetain(v.object),
+            .generator => genRetain(v.generator),
+            .fiber => fiberRetain(v.fiber),
+            else => {},
+        }
     }
 
     pub inline fn stackRelease(self: *VM, v: Value) void {
-        if (v == .object) self.objRelease(v.object);
+        switch (v) {
+            .object => self.objRelease(v.object),
+            .generator => self.genRelease(v.generator),
+            .fiber => self.fiberRelease(v.fiber),
+            else => {},
+        }
     }
 
     // store a superglobal ($_SERVER, $_ENV, ...) into request_vars. that map

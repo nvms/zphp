@@ -75,6 +75,8 @@ pub const PhpArray = struct {
         // pass transferArg'd or raw values, never copyValue'd ones)
         if (value == .object) value.object.retain();
         if (value == .array) value.array.retain();
+        if (value == .generator) value.generator.retain();
+        if (value == .fiber) value.fiber.retain();
         const k = if (self.has_int_keys) self.next_int_key else 0;
         if (self.has_int_keys and k == std.math.maxInt(i64)) {
             for (self.entries.items) |entry| {
@@ -93,6 +95,8 @@ pub const PhpArray = struct {
         // overwritten old element is not released here (no VM access)
         if (value == .object) value.object.retain();
         if (value == .array) value.array.retain();
+        if (value == .generator) value.generator.retain();
+        if (value == .fiber) value.fiber.retain();
         const key = normalizeKey(raw_key);
         if (key == .int) {
             const idx = key.int;
@@ -240,6 +244,10 @@ pub const StaticPropRefBinding = struct {
 };
 
 pub const Generator = struct {
+    // refcount Stage 2: every live Value handle bumps this. 0 means
+    // unreachable; the VM runs closeGenerator + releases gen.vars at that
+    // point. starts at 0; new_gen op + push retain to 1
+    refcount: u32 = 0,
     state: State = .created,
     func: *const ObjFunction,
     ip: usize = 0,
@@ -276,9 +284,17 @@ pub const Generator = struct {
         self.stack.deinit(allocator);
         self.ref_slots.deinit(allocator);
     }
+
+    pub fn retain(self: *Generator) void {
+        self.refcount +%= 1;
+    }
 };
 
 pub const Fiber = struct {
+    // refcount Stage 2: every live Value handle bumps this. 0 means
+    // unreachable; the VM runs cleanupFiberFrames + drops saved state at
+    // that point. starts at 0; new_fiber + push retain to 1
+    refcount: u32 = 0,
     state: State = .created,
     callable: Value = .null,
 
@@ -324,6 +340,10 @@ pub const Fiber = struct {
         self.saved_frames.deinit(allocator);
         self.saved_stack.deinit(allocator);
         self.saved_handlers.deinit(allocator);
+    }
+
+    pub fn retain(self: *Fiber) void {
+        self.refcount +%= 1;
     }
 };
 
@@ -415,6 +435,8 @@ pub const PhpObject = struct {
         // leak (rare). object teardown releases all property objects/arrays
         if (value == .object) value.object.retain();
         if (value == .array) value.array.retain();
+        if (value == .generator) value.generator.retain();
+        if (value == .fiber) value.fiber.retain();
         // a write resurrects a previously-unset property
         self.clearUnset(name);
         if (self.slots) |s| {
