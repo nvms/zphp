@@ -3103,7 +3103,17 @@ pub const VM = struct {
                             if (try self.throwOffsetKeyType(key, .access)) continue;
                             return error.RuntimeError;
                         }
-                        try arr_val.array.set(self.allocator, Value.toArrayKey(key), val);
+                        const norm_key = Value.toArrayKey(key);
+                        // Stage 2 element-overwrite release: if this set replaces
+                        // an existing entry, the array loses its retain on the
+                        // displaced value. PhpArray.set has no VM access so the
+                        // wrapper here handles it - read the old value first,
+                        // then release after the set retains the new one
+                        const old_val = arr_val.array.get(norm_key);
+                        try arr_val.array.set(self.allocator, norm_key, val);
+                        if (old_val == .object or old_val == .array) {
+                            self.releaseValue(old_val);
+                        }
                         if (self.globals_array) |ga| {
                             if (arr_val.array == ga and key == .string) {
                                 try self.mirrorGlobalsWrite(key.string, val);
@@ -3246,7 +3256,13 @@ pub const VM = struct {
                             if (try self.throwOffsetKeyType(key, .access)) continue;
                             return error.RuntimeError;
                         }
-                        try cur.array.set(self.allocator, Value.toArrayKey(key), val);
+                        const norm_key = Value.toArrayKey(key);
+                        // Stage 2 element-overwrite release - see array_set above
+                        const old_val = cur.array.get(norm_key);
+                        try cur.array.set(self.allocator, norm_key, val);
+                        if (old_val == .object or old_val == .array) {
+                            self.releaseValue(old_val);
+                        }
                         if (self.globals_array) |ga| {
                             if (cur.array == ga and key == .string) {
                                 try self.mirrorGlobalsWrite(key.string, val);
