@@ -679,6 +679,7 @@ pub const VM = struct {
         ref_slots: std.StringHashMapUnmanaged(*Value) = .{},
         ref_array_bindings: std.ArrayListUnmanaged(ArrayRefBinding) = .{},
         ref_object_bindings: std.ArrayListUnmanaged(ObjectRefBinding) = .{},
+        ref_static_bindings: std.ArrayListUnmanaged(@import("value.zig").StaticPropRefBinding) = .{},
         called_class: ?[]const u8 = null,
         // name the function was looked up by - distinguishes closure instances
         // (which all share the same ObjFunction) for per-instance static state.
@@ -1517,9 +1518,11 @@ pub const VM = struct {
                 self.frames[i].ref_slots.deinit(self.allocator);
                 self.frames[i].ref_array_bindings.deinit(self.allocator);
                 self.frames[i].ref_object_bindings.deinit(self.allocator);
+                self.frames[i].ref_static_bindings.deinit(self.allocator);
                 self.frames[i].ref_slots = .{};
                 self.frames[i].ref_array_bindings = .{};
                 self.frames[i].ref_object_bindings = .{};
+                self.frames[i].ref_static_bindings = .{};
             }
         }
     }
@@ -3723,6 +3726,22 @@ pub const VM = struct {
                         try frame.ref_slots.put(self.allocator, dst_name, cell);
                         try frame.ref_object_bindings.append(self.allocator, .{ .cell = cell, .object = obj_ptr, .prop_name = prop_name });
                     }
+                },
+
+                .make_var_static_prop_ref => {
+                    const dst_idx = self.readU16();
+                    const class_idx = self.readU16();
+                    const prop_idx = self.readU16();
+                    const dst_name = self.currentChunk().constants.items[dst_idx].string;
+                    const class_name = self.currentChunk().constants.items[class_idx].string;
+                    const prop_name = self.currentChunk().constants.items[prop_idx].string;
+                    const frame = self.currentFrame();
+                    _ = frame.ref_slots.remove(dst_name);
+                    const cell = try self.allocator.create(Value);
+                    cell.* = self.getStaticProp(class_name, prop_name) orelse .null;
+                    try self.ref_cells.append(self.allocator, cell);
+                    try frame.ref_slots.put(self.allocator, dst_name, cell);
+                    try frame.ref_static_bindings.append(self.allocator, .{ .cell = cell, .class_name = class_name, .prop_name = prop_name });
                 },
 
                 .unset_var => {
@@ -9866,9 +9885,11 @@ pub const VM = struct {
         f.ref_slots.deinit(self.allocator);
         f.ref_array_bindings.deinit(self.allocator);
         f.ref_object_bindings.deinit(self.allocator);
+        f.ref_static_bindings.deinit(self.allocator);
         f.ref_slots = .{};
         f.ref_array_bindings = .{};
         f.ref_object_bindings = .{};
+        f.ref_static_bindings = .{};
     }
 
     fn saveGeneratorHandlers(self: *VM, gen: *Generator) void {
@@ -10217,6 +10238,7 @@ pub const VM = struct {
         self.frames[idx].ref_slots.deinit(self.allocator);
         self.frames[idx].ref_array_bindings.deinit(self.allocator);
         self.frames[idx].ref_object_bindings.deinit(self.allocator);
+        self.frames[idx].ref_static_bindings.deinit(self.allocator);
         // when the frame belongs to a generator, its vars hashmap is owned by
         // the Generator and will be freed during freeHeapItems. freeing it
         // here too causes a double-free during VM cleanup
@@ -10234,6 +10256,7 @@ pub const VM = struct {
         self.frames[idx].ref_slots = .{};
         self.frames[idx].ref_array_bindings = .{};
         self.frames[idx].ref_object_bindings = .{};
+        self.frames[idx].ref_static_bindings = .{};
         self.frames[idx].vars = .{};
     }
 
@@ -10255,6 +10278,7 @@ pub const VM = struct {
             f.ref_slots.deinit(self.allocator);
             f.ref_array_bindings.deinit(self.allocator);
             f.ref_object_bindings.deinit(self.allocator);
+            f.ref_static_bindings.deinit(self.allocator);
             if (f.locals.len > 0) self.freeLocals(f.locals);
         }
         fiber.saved_frames.clearRetainingCapacity();
@@ -10278,6 +10302,11 @@ pub const VM = struct {
                     try binding.object.set(self.allocator, binding.prop_name, val);
                 }
             }
+            for (self.frames[fi].ref_static_bindings.items) |binding| {
+                if (binding.cell == cell) {
+                    try self.writeStaticProp(binding.class_name, binding.prop_name, val);
+                }
+            }
         }
     }
 
@@ -10287,6 +10316,29 @@ pub const VM = struct {
         }
         for (self.currentFrame().ref_object_bindings.items) |binding| {
             try binding.object.set(self.allocator, binding.prop_name, binding.cell.*);
+        }
+        for (self.currentFrame().ref_static_bindings.items) |binding| {
+            try self.writeStaticProp(binding.class_name, binding.prop_name, binding.cell.*);
+        }
+    }
+
+    fn writeStaticProp(self: *VM, class_name: []const u8, prop_name: []const u8, val: Value) !void {
+        if (self.classes.getPtr(class_name)) |cls| {
+            if (cls.static_props.contains(prop_name)) {
+                try cls.static_props.put(self.allocator, prop_name, val);
+                return;
+            }
+            var parent: ?[]const u8 = cls.parent;
+            while (parent) |p| {
+                if (self.classes.getPtr(p)) |pcls| {
+                    if (pcls.static_props.contains(prop_name)) {
+                        try pcls.static_props.put(self.allocator, prop_name, val);
+                        return;
+                    }
+                    parent = pcls.parent;
+                } else break;
+            }
+            try cls.static_props.put(self.allocator, prop_name, val);
         }
     }
 
@@ -13023,6 +13075,7 @@ pub const VM = struct {
                 self.frames[self.frame_count].ref_slots.deinit(self.allocator);
                 self.frames[self.frame_count].ref_array_bindings.deinit(self.allocator);
                 self.frames[self.frame_count].ref_object_bindings.deinit(self.allocator);
+                self.frames[self.frame_count].ref_static_bindings.deinit(self.allocator);
                 self.frames[self.frame_count].vars.deinit(self.allocator);
                 if (self.frames[self.frame_count].locals.len > 0) {
                     self.freeLocals(self.frames[self.frame_count].locals);
@@ -13070,6 +13123,7 @@ pub const VM = struct {
             frame.ref_slots = .{};
             frame.ref_array_bindings = .{};
             frame.ref_object_bindings = .{};
+            frame.ref_static_bindings = .{};
             frame.locals = &.{};
         }
         self.frame_count = base_frame;
@@ -13112,6 +13166,7 @@ pub const VM = struct {
             frame.ref_slots = .{};
             frame.ref_array_bindings = .{};
             frame.ref_object_bindings = .{};
+            frame.ref_static_bindings = .{};
             frame.locals = &.{};
         }
         self.frame_count = base_frame + fiber.saved_frames.items.len;

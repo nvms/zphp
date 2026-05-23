@@ -233,6 +233,12 @@ pub const ObjectRefBinding = struct {
     prop_name: []const u8,
 };
 
+pub const StaticPropRefBinding = struct {
+    cell: *Value,
+    class_name: []const u8,
+    prop_name: []const u8,
+};
+
 pub const Generator = struct {
     state: State = .created,
     func: *const ObjFunction,
@@ -296,6 +302,7 @@ pub const Fiber = struct {
         ref_slots: std.StringHashMapUnmanaged(*Value),
         ref_array_bindings: std.ArrayListUnmanaged(ArrayRefBinding) = .{},
         ref_object_bindings: std.ArrayListUnmanaged(ObjectRefBinding) = .{},
+        ref_static_bindings: std.ArrayListUnmanaged(StaticPropRefBinding) = .{},
     };
 
     pub const SavedHandler = struct {
@@ -311,6 +318,7 @@ pub const Fiber = struct {
             f.ref_slots.deinit(allocator);
             f.ref_array_bindings.deinit(allocator);
             f.ref_object_bindings.deinit(allocator);
+            f.ref_static_bindings.deinit(allocator);
             if (f.locals.len > 0) allocator.free(f.locals);
         }
         self.saved_frames.deinit(allocator);

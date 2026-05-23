@@ -189,6 +189,12 @@ pub const OpCode = enum(u8) {
     // cell in ref_slots[dst]
     make_var_prop_ref, // u16: dst name const, u16: prop name const
 
+    // `$dst = &Cls::$p` — reads class_name and prop_name from constants,
+    // creates a cell seeded from the static prop's current value, registers a
+    // writeback so subsequent assignments to $dst propagate to Cls::$p,
+    // installs the cell in ref_slots[dst]
+    make_var_static_prop_ref, // u16: dst name const, u16: class name const, u16: prop name const
+
     // remove a name from ref_slots so a subsequent normal assignment doesn't
     // write through an existing ref-binding. emitted before the value-write
     // path for `=&` shapes we don't yet bind explicitly
@@ -253,6 +259,7 @@ pub const OpCode = enum(u8) {
             .get_static_prop, .get_class_const, .set_prop_default, .set_static_prop, .get_static, .set_static,
             .static_call_spread, .add_local_to_local, .sub_local_to_local, .mul_local_to_local,
             => 5,
+            .make_var_static_prop_ref => 7,
             .static_call => 6,
             .less_local_local_jif => 7,
             .require, .call_indirect, .call_indirect_spread, .method_call_dynamic, .static_call_dyn_both => 2,

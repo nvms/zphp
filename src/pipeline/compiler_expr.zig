@@ -69,8 +69,27 @@ pub fn compileAssign(self: *Compiler, node: Ast.Node) Error!void {
                 try self.emitOp(.op_null);
                 return;
             }
+            if (inner.tag == .static_prop_access) {
+                const class_node = self.ast.nodes[inner.data.lhs];
+                const class_name = resolveNodeClassName(self, class_node) catch {
+                    try self.emitOp(.break_var_ref);
+                    try self.emitU16(dst_idx);
+                    try self.compileNode(rhs_node.data.lhs);
+                    return;
+                };
+                var prop_name = self.ast.tokenSlice(inner.main_token);
+                if (prop_name.len > 0 and prop_name[0] == '$') prop_name = prop_name[1..];
+                const class_idx = try self.addConstant(.{ .string = class_name });
+                const prop_idx = try self.addConstant(.{ .string = prop_name });
+                try self.emitOp(.make_var_static_prop_ref);
+                try self.emitU16(dst_idx);
+                try self.emitU16(class_idx);
+                try self.emitU16(prop_idx);
+                try self.emitOp(.op_null);
+                return;
+            }
             // fallback for shapes we don't yet bind explicitly (dynamic property,
-            // static property, chained ref-assign)
+            // chained ref-assign)
             try self.emitOp(.break_var_ref);
             try self.emitU16(dst_idx);
         }
