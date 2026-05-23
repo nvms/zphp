@@ -359,6 +359,17 @@ pub fn compileAssign(self: *Compiler, node: Ast.Node) Error!void {
 
     if (target.tag == .variable or target.tag == .identifier) {
         const name = self.ast.tokenSlice(target.main_token);
+        // Stage 2 literal-array orphan fix: `$var = [literal]` knows the rhs
+        // is a fresh array with no other holder - emit set_local_transfer to
+        // skip the runtime copyValue clone. only safe for plain assignment
+        // (no compound ops) and only when rhs is array_literal (not a native
+        // return or property access where nested arrays might be shared)
+        if (op_tag == .equal and self.ast.nodes[node.data.rhs].tag == .array_literal and self.inFunctionScope()) {
+            const slot = self.getOrCreateSlot(name);
+            try self.emitOp(.set_local_transfer);
+            try self.emitU16(slot);
+            return;
+        }
         try self.emitSetVar(name);
     }
 }

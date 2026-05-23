@@ -3872,14 +3872,15 @@ pub const VM = struct {
                         }
                         if (self.globals_cells.get(name)) |cell| cell.* = .null;
                     }
-                    // widen gate at unset: an unset of a gen/fiber is the
-                    // user's explicit close intent, drain those queues too so
-                    // the closeGenerator / cleanupFiberFrames timing matches
-                    // PHP (the inline-narrow gate elsewhere stays object-
-                    // focused to avoid the recursive-yield-from regression)
+                    // widen gate at unset: explicit-close intent drains every
+                    // queue so __destruct timing matches PHP. inline-narrow
+                    // gate elsewhere stays object-focused to avoid the
+                    // recursive-yield-from regression (drain widening at
+                    // every .pop closes inner generators mid-handoff)
                     if (self.pending_destruct.items.len > 0 or
                         self.pending_gen_release.items.len > 0 or
-                        self.pending_fiber_release.items.len > 0)
+                        self.pending_fiber_release.items.len > 0 or
+                        self.pending_array_release.items.len > 0)
                     {
                         self.drainPendingDestruct();
                     }
@@ -4128,6 +4129,49 @@ pub const VM = struct {
                             }
                         }
                         self.push(self.getLocalGlobal(slot, frame));
+                    }
+                },
+                .set_local_transfer => {
+                    // emitted only when rhs is a known-fresh array literal -
+                    // skip copyValue's deep clone since nothing else holds
+                    // the literal. transfers ownership into the local: the
+                    // arrayRetain bumps refcount to 1, .pop's stackRelease
+                    // is a no-op for arrays (Option B), local owns the array
+                    const slot = self.readU16();
+                    const frame = self.currentFrame();
+                    const peeked = self.peek();
+                    var val = peeked;
+                    if (val == .array) {
+                        arrayRetain(val.array);
+                    } else {
+                        val = try self.copyValue(peeked);
+                    }
+                    if (slot < frame.locals.len) {
+                        const old_lv = frame.locals[slot];
+                        if (!self.slotIsRefBound(frame, slot)) {
+                            switch (old_lv) {
+                                .object => self.objRelease(old_lv.object),
+                                .array => self.arrayRelease(old_lv.array),
+                                .generator => self.genRelease(old_lv.generator),
+                                .fiber => self.fiberRelease(old_lv.fiber),
+                                else => {},
+                            }
+                        }
+                        frame.locals[slot] = val;
+                    }
+                    if (frame.func) |func| {
+                        if (slot < func.slot_names.len) {
+                            const name = func.slot_names[slot];
+                            if (name.len > 0) {
+                                if (frame.ref_slots.get(name)) |cell| {
+                                    cell.* = val;
+                                    try self.propagateCellWrite(cell, val);
+                                }
+                                try frame.vars.put(self.allocator, name, val);
+                            }
+                        }
+                    } else {
+                        try self.setLocalGlobal(slot, val, frame);
                     }
                 },
                 .set_local => {
@@ -9154,6 +9198,10 @@ pub const VM = struct {
                 dj += 1;
                 break :blk v;
             } else Value{ .null = {} };
+            // the class def is a durable holder of this default - retain so
+            // arrays / objects in defaults are properly refcounted (copyValue
+            // in initObjectProperties relies on refcount > 0 to clone)
+            retainValue(default_val);
             try def.properties.append(self.allocator, .{
                 .name = prop_names[pi],
                 .default = default_val,
@@ -11837,12 +11885,16 @@ pub const VM = struct {
     }
 
     pub fn copyValue(self: *VM, val: Value) RuntimeError!Value {
-        // an object handle copied is a new reference - refcount it (Stage 1).
-        // generator/fiber handles are also refcounted (Stage 2 finer
-        // lifetime). arrays are deep-cloned (PHP value semantics); the fresh
-        // clone is born at refcount 0, so retain it here - the caller owns
-        // this copy, exactly as it owns the +1 on a copied object/gen/fiber.
-        // scalars need nothing
+        // object/gen/fiber handles are copied with retain. arrays are
+        // deep-cloned for PHP value-semantics isolation. zphp lacks COW so
+        // the deep clone is what gives natives like ArrayObject::getArrayCopy
+        // (a shallow PHP-side copy whose nested arrays are shared with the
+        // source) effective deep-isolation through assignment. a previous
+        // attempt to skip the clone when val.array.refcount==0 (the literal-
+        // array orphan fix) broke that isolation - reverted. the correct
+        // path is compile-time fusion: a set_local that immediately follows
+        // an array_literal build is known fresh and can transfer without a
+        // runtime check
         if (val == .object) {
             objRetain(val.object);
             return val;

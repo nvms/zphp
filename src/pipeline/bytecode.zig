@@ -209,6 +209,13 @@ pub const OpCode = enum(u8) {
     // local variable slots (indexed access, no hash lookup)
     get_local, // u16: slot index - push locals[slot]
     set_local, // u16: slot index - peek value, store in locals[slot]
+    // set_local for a known-fresh array literal source: skips copyValue's
+    // clone, transferring the literal directly into the local. avoids the
+    // literal-array orphan path where the deep-cloned local-owned array
+    // leaves the literal at refcount 0 with phantom element retains. only
+    // emitted when the compiler can prove no other holder sees the literal
+    // (compileAssign: target is plain variable + op is = + rhs is array_literal)
+    set_local_transfer, // u16: slot index
 
     // superinstructions - fused opcode sequences for hot loops
     inc_local, // u16: slot index - locals[slot] += 1, no stack effect
@@ -252,7 +259,7 @@ pub const OpCode = enum(u8) {
     pub fn width(self: OpCode) usize {
         return switch (self) {
             .constant, .get_var, .set_var, .jump, .jump_back, .jump_if_false, .jump_if_true,
-            .jump_if_not_null, .push_handler, .get_prop, .get_prop_coalesce, .set_prop, .get_local, .set_local,
+            .jump_if_not_null, .push_handler, .get_prop, .get_prop_coalesce, .set_prop, .get_local, .set_local, .set_local_transfer,
             .get_global, .concat_assign, .unset_var, .unset_prop, .isset_prop,
             .closure_bind, .closure_bind_ref, .define_const,
             .iter_check, .inc_local, .dec_local,
