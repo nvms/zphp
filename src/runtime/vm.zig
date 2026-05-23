@@ -10381,6 +10381,20 @@ pub const VM = struct {
 
     fn cleanupFiberFrames(self: *VM, fiber: *Fiber) void {
         for (fiber.saved_frames.items) |*f| {
+            // Stage 2 finer fiber lifetime: release every value the saved
+            // frame holds before freeing the metadata. mirrors
+            // releaseFrameObjects but operates on Fiber.SavedFrame (which
+            // shares the same shape as CallFrame for vars/locals/slot_names)
+            const snames = if (f.func) |fn_| fn_.slot_names else &[_][]const u8{};
+            const vars_populated = f.vars.count() > 0;
+            if (vars_populated) {
+                var vit = f.vars.valueIterator();
+                while (vit.next()) |v| self.releaseValue(v.*);
+            }
+            for (f.locals, 0..) |lv, i| {
+                if (vars_populated and i < snames.len and snames[i].len > 0) continue;
+                self.releaseValue(lv);
+            }
             f.vars.deinit(self.allocator);
             f.ref_slots.deinit(self.allocator);
             f.ref_array_bindings.deinit(self.allocator);
@@ -10389,6 +10403,7 @@ pub const VM = struct {
             if (f.locals.len > 0) self.freeLocals(f.locals);
         }
         fiber.saved_frames.clearRetainingCapacity();
+        if (self.pending_destruct.items.len > 0) self.drainPendingDestruct();
     }
 
     fn propagateCellWrite(self: *VM, cell: *Value, val: Value) !void {
