@@ -3728,6 +3728,31 @@ pub const VM = struct {
                     }
                 },
 
+                .make_var_prop_ref_dyn => {
+                    const dst_idx = self.readU16();
+                    const dst_name = self.currentChunk().constants.items[dst_idx].string;
+                    const name_val = self.pop();
+                    const obj_val = self.pop();
+                    const frame = self.currentFrame();
+                    _ = frame.ref_slots.remove(dst_name);
+                    if (obj_val != .object) {
+                        const c = try self.allocator.create(Value);
+                        c.* = .null;
+                        try self.ref_cells.append(self.allocator, c);
+                        try frame.ref_slots.put(self.allocator, dst_name, c);
+                    } else {
+                        const obj_ptr = obj_val.object;
+                        const prop_str = (try self.coerceToStringValue(name_val)).string;
+                        // dupe so the binding's prop_name outlives the temporary
+                        const prop_owned = try self.allocator.dupe(u8, prop_str);
+                        try self.strings.append(self.allocator, prop_owned);
+                        const cell = try self.allocator.create(Value);
+                        cell.* = obj_ptr.get(prop_owned);
+                        try self.ref_cells.append(self.allocator, cell);
+                        try frame.ref_slots.put(self.allocator, dst_name, cell);
+                        try frame.ref_object_bindings.append(self.allocator, .{ .cell = cell, .object = obj_ptr, .prop_name = prop_owned });
+                    }
+                },
                 .make_var_static_prop_ref => {
                     const dst_idx = self.readU16();
                     const class_idx = self.readU16();

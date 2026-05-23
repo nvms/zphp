@@ -189,6 +189,12 @@ pub const OpCode = enum(u8) {
     // cell in ref_slots[dst]
     make_var_prop_ref, // u16: dst name const, u16: prop name const
 
+    // `$dst = &$obj->$name` — pops [object, prop_name_string], creates a cell
+    // holding the (uncopied) prop value, registers a writeback so subsequent
+    // assignments to $dst propagate to obj->{prop_name_string}, installs the
+    // cell in ref_slots[dst]
+    make_var_prop_ref_dyn, // u16: dst name const
+
     // `$dst = &Cls::$p` — reads class_name and prop_name from constants,
     // creates a cell seeded from the static prop's current value, registers a
     // writeback so subsequent assignments to $dst propagate to Cls::$p,
@@ -253,6 +259,7 @@ pub const OpCode = enum(u8) {
             .get_static_prop_dynamic,
             .ensure_array_local, .ensure_array_var,
             .make_var_array_elem_ref, .break_var_ref,
+            .make_var_prop_ref_dyn,
             .array_set_local, .array_set_local_ref,
             => 3,
             .call, .call_spread, .new_obj, .method_call, .method_call_spread, .static_call_dyn_method, .make_var_ref, .make_var_prop_ref => 4,

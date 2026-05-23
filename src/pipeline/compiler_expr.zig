@@ -69,6 +69,14 @@ pub fn compileAssign(self: *Compiler, node: Ast.Node) Error!void {
                 try self.emitOp(.op_null);
                 return;
             }
+            if (inner.tag == .property_access and self.isDynamicProp(inner)) {
+                try self.compileNode(inner.data.lhs); // push object
+                try self.compileNode(inner.data.rhs); // push prop name (variable value)
+                try self.emitOp(.make_var_prop_ref_dyn);
+                try self.emitU16(dst_idx);
+                try self.emitOp(.op_null);
+                return;
+            }
             if (inner.tag == .static_prop_access) {
                 const class_node = self.ast.nodes[inner.data.lhs];
                 const class_name = resolveNodeClassName(self, class_node) catch {
