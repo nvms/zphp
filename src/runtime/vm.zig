@@ -8105,6 +8105,19 @@ pub const VM = struct {
         self.deadline_tick_counter = 0;
     }
 
+    // resolve the source file the given frame is currently executing in -
+    // for function frames the function's declared file, for top-level /
+    // require-include frames the per-frame script_path, falling back to the
+    // VM-wide file_path. (Without this, traces through require'd files all
+    // report the entry script's path instead of the actual file per frame.)
+    pub fn frameFile(self: *const VM, frame_idx: usize) []const u8 {
+        if (frame_idx >= self.frame_count) return self.file_path;
+        const frame = self.frames[frame_idx];
+        if (frame.func) |f| if (f.file_path.len > 0) return f.file_path;
+        if (frame.script_path.len > 0) return frame.script_path;
+        return self.file_path;
+    }
+
     // capture the current user call stack as an exception __trace array. one
     // entry per active user frame (top-down), each carrying the function name
     // and the call site's line/file - so an exception thrown by a native
@@ -8135,7 +8148,7 @@ pub const VM = struct {
                             const cip = if (caller.ip > 0) caller.ip - 1 else 0;
                             if (caller.chunk.getSourceLocation(cip, self.source)) |loc| {
                                 try entry.set(self.allocator, .{ .string = "line" }, .{ .int = @as(i64, @intCast(loc.line)) });
-                                try entry.set(self.allocator, .{ .string = "file" }, .{ .string = self.file_path });
+                                try entry.set(self.allocator, .{ .string = "file" }, .{ .string = self.frameFile(i - 1) });
                             }
                         }
                         const args_arr = try self.allocator.create(PhpArray);
@@ -8199,7 +8212,8 @@ pub const VM = struct {
         obj.* = .{ .class_name = class_name, .id = self.next_object_id };
         try obj.set(self.allocator, "message", .{ .string = message });
         try obj.set(self.allocator, "code", .{ .int = 0 });
-        try obj.set(self.allocator, "file", .{ .string = self.file_path });
+        const exc_file = if (self.frame_count > 0) self.frameFile(self.frame_count - 1) else self.file_path;
+        try obj.set(self.allocator, "file", .{ .string = exc_file });
         const ip = if (self.frame_count > 0) self.currentFrame().ip else 0;
         const line: i64 = if (self.frame_count > 0)
             if (self.currentChunk().getSourceLocation(if (ip > 0) ip - 1 else 0, self.source)) |loc| @intCast(loc.line) else 0
@@ -8368,7 +8382,7 @@ pub const VM = struct {
             if (self.currentChunk().getSourceLocation(if (ip > 0) ip - 1 else 0, self.source)) |loc| @intCast(loc.line) else 0
         else
             0;
-        const file = self.file_path;
+        const file = if (self.frame_count > 0) self.frameFile(self.frame_count - 1) else self.file_path;
         if (self.error_silenced_depth != 0 or (self.error_reporting_level & 2) == 0) return;
         if (self.output.items.len > 0) {
             const stdout_file = std.fs.File{ .handle = 1 };
@@ -9647,7 +9661,7 @@ pub const VM = struct {
             if (self.currentChunk().getSourceLocation(if (ip > 0) ip - 1 else 0, self.source)) |loc| @intCast(loc.line) else 0
         else
             0;
-        const file = self.file_path;
+        const file = if (self.frame_count > 0) self.frameFile(self.frame_count - 1) else self.file_path;
         if (self.error_silenced_depth != 0 or (self.error_reporting_level & 2) == 0) return;
         if (self.output.items.len > 0) {
             const stdout_file = std.fs.File{ .handle = 1 };

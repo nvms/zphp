@@ -159,7 +159,12 @@ fn exceptionConstruct(ctx: *NativeContext, args: []const Value) RuntimeError!Val
     if (args.len >= 1) try obj.set(ctx.allocator, "message", args[0]);
     if (args.len >= 2) try obj.set(ctx.allocator, "code", args[1]);
     if (args.len >= 3) try obj.set(ctx.allocator, "previous", args[2]);
-    try obj.set(ctx.allocator, "file", .{ .string = ctx.vm.file_path });
+    // the exception's `file` is where `new Exception(...)` was called - the
+    // caller of __construct. use that frame's actual file (a function's
+    // declaring file, or the script_path for top-level/require frames)
+    // instead of the VM-wide entry script
+    const exc_file = if (ctx.vm.frame_count > 1) ctx.vm.frameFile(ctx.vm.frame_count - 2) else ctx.vm.file_path;
+    try obj.set(ctx.allocator, "file", .{ .string = exc_file });
     if (ctx.vm.frame_count > 1) {
         const caller = ctx.vm.frames[ctx.vm.frame_count - 2];
         const ip = if (caller.ip > 0) caller.ip - 1 else 0;
@@ -212,7 +217,7 @@ fn buildAndAttachTrace(ctx: *NativeContext, obj: *@import("../runtime/value.zig"
                         const ip = if (caller.ip > 0) caller.ip - 1 else 0;
                         if (caller.chunk.getSourceLocation(ip, ctx.vm.source)) |loc| {
                             try entry.set(ctx.vm.allocator, .{ .string = "line" }, .{ .int = @as(i64, @intCast(loc.line)) });
-                            try entry.set(ctx.vm.allocator, .{ .string = "file" }, .{ .string = ctx.vm.file_path });
+                            try entry.set(ctx.vm.allocator, .{ .string = "file" }, .{ .string = ctx.vm.frameFile(i - 1) });
                         }
                     }
                     const args_arr = try ctx.vm.allocator.create(PhpArray);
