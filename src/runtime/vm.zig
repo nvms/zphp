@@ -2780,7 +2780,13 @@ pub const VM = struct {
                             if (try self.throwOffsetKeyType(key, .access)) continue;
                             return error.RuntimeError;
                         }
-                        try arr_val.array.set(self.allocator, Value.toArrayKey(key), val);
+                        // Stage 2 element-overwrite release - see array_set
+                        const norm_key = Value.toArrayKey(key);
+                        const old_val = arr_val.array.get(norm_key);
+                        try arr_val.array.set(self.allocator, norm_key, val);
+                        if (old_val == .object or old_val == .array) {
+                            self.releaseValue(old_val);
+                        }
                     } else if (arr_val == .object and self.hasMethod(arr_val.object.class_name, "offsetSet")) {
                         _ = self.callMethod(arr_val.object, "offsetSet", &.{ key, val }) catch {
                             if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
@@ -2955,7 +2961,12 @@ pub const VM = struct {
                         continue;
                     }
                     if (existing == .array) {
+                        // Stage 2 element-overwrite release on the inner write
+                        const inner_old = existing.array.get(ik);
                         try existing.array.set(self.allocator, ik, v);
+                        if (inner_old == .object or inner_old == .array) {
+                            self.releaseValue(inner_old);
+                        }
                         self.push(v);
                         continue;
                     }
@@ -3045,7 +3056,12 @@ pub const VM = struct {
                         continue;
                     }
                     if (existing == .array) {
+                        // Stage 2 element-overwrite release on the inner write
+                        const inner_old = existing.array.get(ik);
                         try existing.array.set(self.allocator, ik, v);
+                        if (inner_old == .object or inner_old == .array) {
+                            self.releaseValue(inner_old);
+                        }
                         self.push(v);
                         continue;
                     }

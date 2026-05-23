@@ -32,4 +32,14 @@ echo "before D->E\n";
 $arr2[5] = new T('E');
 echo "before E->scalar\n";
 $arr2[5] = 0;
+echo "after int chain\n";
+
+echo "== nested chain overwrite ==\n";
+$arr3 = makeArr();
+$arr3['outer'] = [];
+$arr3['outer']['inner'] = new T('F');
+echo "before nested overwrite\n";
+$arr3['outer']['inner'] = new T('G');
+echo "after nested overwrite\n";
+$arr3['outer']['inner'] = 0;
 echo "done\n";
