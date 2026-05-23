@@ -9,6 +9,11 @@ pub const PhpArray = struct {
     // refcounting Stage 2 (array-element release): counts every live
     // reference to this array. born at 0. at 0 the array is unreachable and
     // its object elements are released so their __destruct fires promptly.
+    // transient scratch field for the cycle collector's trial-decrement
+    // pass. only valid while the collector holds the GC lock; otherwise its
+    // value is meaningless. signed so the trial decrement can go negative
+    // briefly without underflowing
+    scratch_rc: i32 = 0,
     // elements_released guards against double-release / cyclic arrays
     refcount: u32 = 0,
     elements_released: bool = false,
@@ -374,6 +379,8 @@ pub const PhpObject = struct {
     // arena-owned and is reclaimed in bulk at request end; the refcount only
     // governs destructor timing.
     refcount: u32 = 0,
+    // transient scratch field for the cycle collector's trial-decrement pass
+    scratch_rc: i32 = 0,
     // set once __destruct has run, so it never runs twice (refcount-zero path
     // and the end-of-request safety sweep must not double-fire it)
     destructed: bool = false,

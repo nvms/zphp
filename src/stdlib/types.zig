@@ -103,7 +103,7 @@ pub const entries = .{
     .{ "gc_enabled", native_noop_true },
     .{ "gc_disable", native_noop_null },
     .{ "gc_enable", native_noop_null },
-    .{ "gc_collect_cycles", native_noop_zero },
+    .{ "gc_collect_cycles", native_gc_collect_cycles },
     .{ "set_error_handler", native_set_error_handler },
     .{ "set_exception_handler", native_set_exception_handler },
     .{ "restore_error_handler", native_restore_error_handler },
@@ -1854,6 +1854,11 @@ fn native_noop_null(_: *NativeContext, _: []const Value) RuntimeError!Value {
 
 fn native_noop_zero(_: *NativeContext, _: []const Value) RuntimeError!Value {
     return .{ .int = 0 };
+}
+
+fn native_gc_collect_cycles(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const collected = ctx.vm.collectCycles();
+    return .{ .int = @intCast(collected) };
 }
 
 fn native_noop_false(_: *NativeContext, _: []const Value) RuntimeError!Value {

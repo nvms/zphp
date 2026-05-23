@@ -419,6 +419,10 @@ pub const VM = struct {
     // here; on object destruct we walk this list to remove entries whose key
     // is the just-destructed object (weak semantics)
     weakmaps: std.ArrayListUnmanaged(*PhpObject) = .{},
+    // cycle collector candidate roots: objects whose refcount decremented
+    // without hitting 0. when gc_collect_cycles fires we trial-decrement
+    // the reachable subgraph to find truly-unreachable cycles
+    cycle_candidates: std.ArrayListUnmanaged(*PhpObject) = .{},
     // pointer to the $GLOBALS PhpArray for the current run, used so writes
     // to $GLOBALS[key] = val also propagate to the top frame's variable
     // table (matching PHP's superglobal semantics)
@@ -1597,6 +1601,7 @@ pub const VM = struct {
         self.pending_gen_release.deinit(self.allocator);
         self.pending_fiber_release.deinit(self.allocator);
         self.weakmaps.deinit(self.allocator);
+        self.cycle_candidates.deinit(self.allocator);
         self.generators.deinit(self.allocator);
         self.fibers.deinit(self.allocator);
         self.ref_cells.deinit(self.allocator);
@@ -1674,6 +1679,7 @@ pub const VM = struct {
         self.pending_gen_release.clearRetainingCapacity();
         self.pending_fiber_release.clearRetainingCapacity();
         self.weakmaps.clearRetainingCapacity();
+        self.cycle_candidates.clearRetainingCapacity();
         self.captures.clearRetainingCapacity();
         self.capture_index.clearRetainingCapacity();
         self.ob_stack.clearRetainingCapacity();
@@ -13602,7 +13608,17 @@ pub const VM = struct {
     pub fn objRelease(self: *VM, obj: *PhpObject) void {
         if (obj.refcount == 0) return;
         obj.refcount -= 1;
-        if (obj.refcount != 0 or obj.destructed) return;
+        if (obj.refcount != 0) {
+            // refcount went down but not to 0: object might be part of an
+            // unreachable cycle (a -> b -> a where both still see each other).
+            // queue as a cycle-collector candidate. dedupe is handled inside
+            // collectCycles via the visited map - cheap to append duplicates
+            if (!obj.destructed) {
+                self.cycle_candidates.append(self.allocator, obj) catch {};
+            }
+            return;
+        }
+        if (obj.destructed) return;
         self.pending_destruct.append(self.allocator, obj) catch {};
     }
 
@@ -13695,6 +13711,175 @@ pub const VM = struct {
                 self.cleanupFiberFrames(fiber);
             }
         }
+    }
+
+    // cycle collector: PHP-style trial-decrement to find unreachable object
+    // cycles (a->b->a where neither is reachable from any var but both pin
+    // each other via refcount). returns the number of objects collected.
+    //
+    // algorithm:
+    // 1. BFS from each candidate root through .object / .array refs, building
+    //    a visited set. on first visit init scratch_rc = refcount
+    // 2. for every visited node, walk its child refs. each (parent->child)
+    //    edge decrements child.scratch_rc (counts internal refs)
+    // 3. any visited node with scratch_rc > 0 still has external refs - it
+    //    AND everything reachable from it is alive; restore them
+    // 4. remaining nodes (scratch_rc == 0) are unreachable cycles - destruct
+    //    + free
+    pub fn collectCycles(self: *VM) usize {
+        if (self.draining_destructors) return 0;
+        if (self.cycle_candidates.items.len == 0) return 0;
+        // drain any pending normal destructs first so the candidate set
+        // doesn't include objects that are about to be released anyway
+        self.drainPendingDestruct();
+
+        var visited_objs = std.AutoArrayHashMapUnmanaged(*PhpObject, void){};
+        defer visited_objs.deinit(self.allocator);
+        var visited_arrs = std.AutoArrayHashMapUnmanaged(*PhpArray, void){};
+        defer visited_arrs.deinit(self.allocator);
+
+        // pass 1: BFS from candidates, init scratch_rc on first visit
+        for (self.cycle_candidates.items) |c| {
+            if (c.destructed) continue;
+            self.cycleVisit(c, &visited_objs, &visited_arrs);
+        }
+
+        // pass 2: walk every visited node, decrement child scratch_rc for
+        // each internal edge
+        var oi = visited_objs.iterator();
+        while (oi.next()) |kv| self.cycleDecrementChildren(kv.key_ptr.*, &visited_objs, &visited_arrs);
+        var ai = visited_arrs.iterator();
+        while (ai.next()) |kv| self.cycleDecrementChildrenArr(kv.key_ptr.*, &visited_objs, &visited_arrs);
+
+        // pass 3: nodes with scratch_rc > 0 have external refs - mark alive
+        // and propagate aliveness through their subgraph. simplest: walk
+        // again from alive roots, re-incrementing scratch_rc to original
+        var changed = true;
+        while (changed) {
+            changed = false;
+            var it = visited_objs.iterator();
+            while (it.next()) |kv| {
+                const obj = kv.key_ptr.*;
+                if (obj.scratch_rc > 0) {
+                    if (self.cycleMarkAlive(obj, &visited_objs, &visited_arrs)) changed = true;
+                }
+            }
+            var ait = visited_arrs.iterator();
+            while (ait.next()) |kv| {
+                const arr = kv.key_ptr.*;
+                if (arr.scratch_rc > 0) {
+                    if (self.cycleMarkAliveArr(arr, &visited_objs, &visited_arrs)) changed = true;
+                }
+            }
+        }
+
+        // pass 4: collect the unreachable ones. queue them for normal
+        // destruct pipeline so __destruct runs and properties release cleanly
+        var collected: usize = 0;
+        var coll_it = visited_objs.iterator();
+        while (coll_it.next()) |kv| {
+            const obj = kv.key_ptr.*;
+            if (obj.scratch_rc == 0 and !obj.destructed) {
+                // force refcount to 0 so the destruct drain processes it
+                // (the cycle's internal refs keep refcount > 0 otherwise)
+                obj.refcount = 0;
+                self.pending_destruct.append(self.allocator, obj) catch {};
+                collected += 1;
+            }
+        }
+        var ca_it = visited_arrs.iterator();
+        while (ca_it.next()) |kv| {
+            const arr = kv.key_ptr.*;
+            if (arr.scratch_rc == 0 and !arr.elements_released) {
+                arr.refcount = 0;
+                self.pending_array_release.append(self.allocator, arr) catch {};
+                collected += 1;
+            }
+        }
+        self.cycle_candidates.clearRetainingCapacity();
+        self.drainPendingDestruct();
+        return collected;
+    }
+
+    fn cycleVisit(self: *VM, obj: *PhpObject, vo: anytype, va: anytype) void {
+        if (vo.contains(obj)) return;
+        vo.put(self.allocator, obj, {}) catch return;
+        obj.scratch_rc = @intCast(obj.refcount);
+        if (obj.slots) |s| {
+            for (s) |v| self.cycleVisitChild(v, vo, va);
+        }
+        var pit = obj.properties.iterator();
+        while (pit.next()) |e| self.cycleVisitChild(e.value_ptr.*, vo, va);
+    }
+
+    fn cycleVisitArr(self: *VM, arr: *PhpArray, vo: anytype, va: anytype) void {
+        if (va.contains(arr)) return;
+        va.put(self.allocator, arr, {}) catch return;
+        arr.scratch_rc = @intCast(arr.refcount);
+        for (arr.entries.items) |e| self.cycleVisitChild(e.value, vo, va);
+    }
+
+    fn cycleVisitChild(self: *VM, v: Value, vo: anytype, va: anytype) void {
+        switch (v) {
+            .object => |o| self.cycleVisit(o, vo, va),
+            .array => |a| self.cycleVisitArr(a, vo, va),
+            else => {},
+        }
+    }
+
+    fn cycleDecrementChildren(self: *VM, obj: *PhpObject, vo: anytype, va: anytype) void {
+        if (obj.slots) |s| {
+            for (s) |v| self.cycleDecChild(v, vo, va);
+        }
+        var pit = obj.properties.iterator();
+        while (pit.next()) |e| self.cycleDecChild(e.value_ptr.*, vo, va);
+    }
+
+    fn cycleDecrementChildrenArr(self: *VM, arr: *PhpArray, vo: anytype, va: anytype) void {
+        for (arr.entries.items) |e| self.cycleDecChild(e.value, vo, va);
+    }
+
+    fn cycleDecChild(_: *VM, v: Value, vo: anytype, va: anytype) void {
+        switch (v) {
+            .object => |o| if (vo.contains(o)) { o.scratch_rc -= 1; },
+            .array => |a| if (va.contains(a)) { a.scratch_rc -= 1; },
+            else => {},
+        }
+    }
+
+    fn cycleMarkAlive(self: *VM, obj: *PhpObject, vo: anytype, va: anytype) bool {
+        var changed = false;
+        if (obj.slots) |s| {
+            for (s) |v| if (self.cycleMarkAliveChild(v, vo, va)) { changed = true; };
+        }
+        var pit = obj.properties.iterator();
+        while (pit.next()) |e| if (self.cycleMarkAliveChild(e.value_ptr.*, vo, va)) { changed = true; };
+        return changed;
+    }
+
+    fn cycleMarkAliveArr(self: *VM, arr: *PhpArray, vo: anytype, va: anytype) bool {
+        var changed = false;
+        for (arr.entries.items) |e| if (self.cycleMarkAliveChild(e.value, vo, va)) { changed = true; };
+        return changed;
+    }
+
+    fn cycleMarkAliveChild(_: *VM, v: Value, vo: anytype, va: anytype) bool {
+        switch (v) {
+            .object => |o| {
+                if (vo.contains(o) and o.scratch_rc == 0) {
+                    o.scratch_rc = 1;
+                    return true;
+                }
+            },
+            .array => |a| {
+                if (va.contains(a) and a.scratch_rc == 0) {
+                    a.scratch_rc = 1;
+                    return true;
+                }
+            },
+            else => {},
+        }
+        return false;
     }
 
     // WeakMap weak semantics: when an object becomes unreachable, walk all
