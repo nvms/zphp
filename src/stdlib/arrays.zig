@@ -101,7 +101,7 @@ fn array_push(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     return .{ .int = arr.length() };
 }
 
-fn array_pop(_: *NativeContext, args: []const Value) RuntimeError!Value {
+fn array_pop(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len == 0 or args[0] != .array) return .null;
     const arr = args[0].array;
     if (arr.entries.items.len == 0) return .null;
@@ -113,6 +113,11 @@ fn array_pop(_: *NativeContext, args: []const Value) RuntimeError!Value {
         if (e.key == .int and e.key.int > max_int) max_int = e.key.int;
     }
     arr.next_int_key = max_int + 1;
+    // the array no longer references this value - drop the array's retain.
+    // the caller's stack push will retain again, rescuing the destruct if the
+    // result is kept; if the result is discarded the refcount returns to 0
+    // and __destruct fires at the next drain (Stage 2 element-overwrite release)
+    ctx.vm.releaseValue(entry.value);
     return entry.value;
 }
 
@@ -133,6 +138,8 @@ fn array_shift(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
         }
     }
     try arr.rebuildStringIndex(ctx.allocator);
+    // drop the array's retain on the shifted element (Stage 2)
+    ctx.vm.releaseValue(first.value);
     return first.value;
 }
 
@@ -879,6 +886,9 @@ fn array_splice(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     var removed_int_idx: i64 = 0;
     for (0..length) |_| {
         const entry = arr.entries.orderedRemove(uoffset);
+        // arr loses its retain on the removed value; removed.set retains
+        // again - net 0 for objects/arrays (Stage 2 element-overwrite release)
+        ctx.vm.releaseValue(entry.value);
         switch (entry.key) {
             .string => try removed.set(ctx.allocator, entry.key, entry.value),
             .int => {
