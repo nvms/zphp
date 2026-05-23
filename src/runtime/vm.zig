@@ -3164,7 +3164,12 @@ pub const VM = struct {
                         const ak = Value.toArrayKey(key);
                         if (arr_val.array.contains(ak)) {
                             const cloned = if (val == .array) try self.copyValue(val) else val;
+                            // Stage 2 element-overwrite release - see array_set
+                            const old_val = arr_val.array.get(ak);
                             try arr_val.array.set(self.allocator, ak, cloned);
+                            if (old_val == .object or old_val == .array) {
+                                self.releaseValue(old_val);
+                            }
                         }
                     }
                 },
@@ -5823,7 +5828,10 @@ pub const VM = struct {
                             _ = self.callMethod(obj, "__set", &.{ .{ .string = prop_name }, new_val }) catch {};
                             _ = obj.magic_set_active.remove(prop_name);
                         } else {
+                            // Stage 2 overwrite-release for dynamic prop set
+                            const dp_old = obj.get(prop_name);
                             try obj.set(self.allocator, prop_name, new_val);
+                            self.releaseValue(dp_old);
                         }
                     }
                     self.push(new_val);
@@ -7992,7 +8000,10 @@ pub const VM = struct {
                         }
                     }
                     if (target) |cls| {
+                        // Stage 2 overwrite-release for static prop set
+                        const ssp_old = cls.static_props.get(prop_name) orelse Value.null;
                         try cls.static_props.put(self.allocator, prop_name, val);
+                        self.releaseValue(ssp_old);
                     }
                 },
 
