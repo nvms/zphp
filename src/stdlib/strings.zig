@@ -117,6 +117,15 @@ pub const entries = .{
     .{ "mb_rtrim", native_mb_rtrim },
     .{ "mb_ucfirst", native_mb_ucfirst },
     .{ "mb_lcfirst", native_mb_lcfirst },
+    .{ "mb_strrichr", native_mb_strrichr },
+    .{ "mb_scrub", native_mb_scrub },
+    .{ "mb_http_input", native_mb_http_input },
+    .{ "mb_http_output", native_mb_http_output },
+    .{ "mb_language", native_mb_language },
+    .{ "mb_preferred_mime_name", native_mb_preferred_mime_name },
+    .{ "mb_detect_order", native_mb_detect_order },
+    .{ "mb_get_info", native_mb_get_info },
+    .{ "mb_parse_str", native_mb_parse_str },
     .{ "strip_tags", native_strip_tags },
     .{ "http_build_query", native_http_build_query },
     .{ "htmlentities", native_htmlentities },
@@ -6325,4 +6334,177 @@ fn native_strpbrk(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
         }
     }
     return .{ .bool = false };
+}
+
+// case-insensitive last-occurrence variant of mb_strstr - mirrors mb_strrchr
+// but folds case on both sides. only the first character of $needle is used
+fn native_mb_strrichr(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len < 2 or args[0] != .string or args[1] != .string) return .{ .bool = false };
+    const haystack = args[0].string;
+    const needle = args[1].string;
+    if (needle.len == 0) return .{ .bool = false };
+    const before: bool = if (args.len >= 3) Value.isTruthy(args[2]) else false;
+    const n_first = lowerCpUtf8(needle, 0);
+    var last: ?usize = null;
+    var i: usize = 0;
+    while (i < haystack.len) {
+        const h = lowerCpUtf8(haystack, i);
+        if (h.cp == n_first.cp) last = i;
+        i += h.len;
+    }
+    if (last) |pos| {
+        const slice = if (before) haystack[0..pos] else haystack[pos..];
+        return .{ .string = try ctx.createString(slice) };
+    }
+    return .{ .bool = false };
+}
+
+// replace invalid UTF-8 byte sequences with the substitute character. PHP's
+// default substitute is `?` (0x3F) - one `?` per invalid byte, not per
+// invalid sequence
+fn native_mb_scrub(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len == 0 or args[0] != .string) return .{ .string = "" };
+    const s = args[0].string;
+    var buf = std.ArrayListUnmanaged(u8){};
+    defer buf.deinit(ctx.allocator);
+    var i: usize = 0;
+    while (i < s.len) {
+        const b = s[i];
+        if (b < 0x80) {
+            try buf.append(ctx.allocator, b);
+            i += 1;
+            continue;
+        }
+        const len = std.unicode.utf8ByteSequenceLength(b) catch {
+            try buf.append(ctx.allocator, '?');
+            i += 1;
+            continue;
+        };
+        if (i + len > s.len) {
+            try buf.append(ctx.allocator, '?');
+            i += 1;
+            continue;
+        }
+        _ = std.unicode.utf8Decode(s[i .. i + len]) catch {
+            try buf.append(ctx.allocator, '?');
+            i += 1;
+            continue;
+        };
+        try buf.appendSlice(ctx.allocator, s[i .. i + len]);
+        i += len;
+    }
+    const out = try ctx.allocator.dupe(u8, buf.items);
+    try ctx.vm.strings.append(ctx.allocator, out);
+    return .{ .string = out };
+}
+
+// CLI always returns false (no HTTP input encoding context). when called with
+// a setter arg, PHP returns true on success
+fn native_mb_http_input(_: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len >= 1) return .{ .bool = false };
+    return .{ .bool = false };
+}
+
+// default HTTP output encoding. setter returns true; getter returns "UTF-8"
+fn native_mb_http_output(_: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len >= 1 and args[0] == .string) return .{ .bool = true };
+    return .{ .string = "UTF-8" };
+}
+
+// default language. setter accepts neutral/uni/japanese/english/german/etc.
+// we don't differentiate behavior - getter always returns "neutral"
+fn native_mb_language(_: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len >= 1 and args[0] == .string) return .{ .bool = true };
+    return .{ .string = "neutral" };
+}
+
+// map an internal encoding name to its MIME charset label
+fn native_mb_preferred_mime_name(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len == 0 or args[0] != .string) return .{ .bool = false };
+    const enc = args[0].string;
+    var lo: [32]u8 = undefined;
+    const cap = @min(enc.len, lo.len);
+    for (enc[0..cap], 0..) |c, i| lo[i] = std.ascii.toLower(c);
+    const l = lo[0..cap];
+    if (std.mem.eql(u8, l, "utf-8") or std.mem.eql(u8, l, "utf8")) return .{ .string = "UTF-8" };
+    if (std.mem.eql(u8, l, "ascii") or std.mem.eql(u8, l, "us-ascii")) return .{ .string = "US-ASCII" };
+    if (std.mem.eql(u8, l, "iso-8859-1") or std.mem.eql(u8, l, "iso8859-1") or std.mem.eql(u8, l, "latin1")) return .{ .string = "ISO-8859-1" };
+    if (std.mem.eql(u8, l, "iso-8859-15")) return .{ .string = "ISO-8859-15" };
+    if (std.mem.eql(u8, l, "sjis") or std.mem.eql(u8, l, "shift_jis") or std.mem.eql(u8, l, "shift-jis")) return .{ .string = "Shift_JIS" };
+    if (std.mem.eql(u8, l, "euc-jp") or std.mem.eql(u8, l, "eucjp")) return .{ .string = "EUC-JP" };
+    if (std.mem.eql(u8, l, "iso-2022-jp")) return .{ .string = "ISO-2022-JP" };
+    if (std.mem.eql(u8, l, "utf-16")) return .{ .string = "UTF-16" };
+    if (std.mem.eql(u8, l, "utf-16be")) return .{ .string = "UTF-16BE" };
+    if (std.mem.eql(u8, l, "utf-16le")) return .{ .string = "UTF-16LE" };
+    if (std.mem.eql(u8, l, "utf-32")) return .{ .string = "UTF-32" };
+    const msg = try std.fmt.allocPrint(ctx.allocator, "mb_preferred_mime_name(): Argument #1 ($encoding) must be a valid encoding, \"{s}\" given", .{enc});
+    try ctx.vm.strings.append(ctx.allocator, msg);
+    try ctx.vm.setPendingException("ValueError", msg);
+    return error.RuntimeError;
+}
+
+// detection order. getter returns ['ASCII', 'UTF-8']; setter (array or
+// comma-separated string) returns true
+fn native_mb_detect_order(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len >= 1) {
+        if (args[0] == .string or args[0] == .array) return .{ .bool = true };
+        return .{ .bool = false };
+    }
+    var arr = try ctx.createArray();
+    try arr.append(ctx.allocator, .{ .string = "ASCII" });
+    try arr.append(ctx.allocator, .{ .string = "UTF-8" });
+    return .{ .array = arr };
+}
+
+// PHP returns either the full info array, a specific key's value, or false
+// for an unknown key
+fn native_mb_get_info(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    const key: ?[]const u8 = if (args.len >= 1 and args[0] == .string) args[0].string else null;
+    if (key) |k| {
+        if (std.mem.eql(u8, k, "internal_encoding")) return .{ .string = "UTF-8" };
+        if (std.mem.eql(u8, k, "http_input")) return .{ .string = "UTF-8" };
+        if (std.mem.eql(u8, k, "http_output")) return .{ .string = "UTF-8" };
+        if (std.mem.eql(u8, k, "http_output_conv_mimetypes")) return .{ .string = "^(text/|application/xhtml\\+xml)" };
+        if (std.mem.eql(u8, k, "mail_charset")) return .{ .string = "UTF-8" };
+        if (std.mem.eql(u8, k, "mail_header_encoding")) return .{ .string = "BASE64" };
+        if (std.mem.eql(u8, k, "mail_body_encoding")) return .{ .string = "BASE64" };
+        if (std.mem.eql(u8, k, "illegal_chars")) return .{ .int = 0 };
+        if (std.mem.eql(u8, k, "encoding_translation")) return .{ .string = "Off" };
+        if (std.mem.eql(u8, k, "language")) return .{ .string = "neutral" };
+        if (std.mem.eql(u8, k, "detect_order")) {
+            var arr = try ctx.createArray();
+            try arr.append(ctx.allocator, .{ .string = "ASCII" });
+            try arr.append(ctx.allocator, .{ .string = "UTF-8" });
+            return .{ .array = arr };
+        }
+        if (std.mem.eql(u8, k, "substitute_character")) return .{ .int = 63 };
+        if (std.mem.eql(u8, k, "strict_detection")) return .{ .string = "Off" };
+        if (std.mem.eql(u8, k, "all")) {} // fall through to full array
+        else {
+            ctx.vm.emitWarning("mb_get_info(): argument #1 ($type) must be a valid type");
+            return .{ .bool = false };
+        }
+    }
+    var arr = try ctx.createArray();
+    try arr.set(ctx.allocator, .{ .string = "internal_encoding" }, .{ .string = "UTF-8" });
+    try arr.set(ctx.allocator, .{ .string = "http_output" }, .{ .string = "UTF-8" });
+    try arr.set(ctx.allocator, .{ .string = "http_output_conv_mimetypes" }, .{ .string = "^(text/|application/xhtml\\+xml)" });
+    try arr.set(ctx.allocator, .{ .string = "mail_charset" }, .{ .string = "UTF-8" });
+    try arr.set(ctx.allocator, .{ .string = "mail_header_encoding" }, .{ .string = "BASE64" });
+    try arr.set(ctx.allocator, .{ .string = "mail_body_encoding" }, .{ .string = "BASE64" });
+    try arr.set(ctx.allocator, .{ .string = "illegal_chars" }, .{ .int = 0 });
+    try arr.set(ctx.allocator, .{ .string = "encoding_translation" }, .{ .string = "Off" });
+    try arr.set(ctx.allocator, .{ .string = "language" }, .{ .string = "neutral" });
+    var order = try ctx.createArray();
+    try order.append(ctx.allocator, .{ .string = "ASCII" });
+    try order.append(ctx.allocator, .{ .string = "UTF-8" });
+    try arr.set(ctx.allocator, .{ .string = "detect_order" }, .{ .array = order });
+    try arr.set(ctx.allocator, .{ .string = "substitute_character" }, .{ .int = 63 });
+    try arr.set(ctx.allocator, .{ .string = "strict_detection" }, .{ .string = "Off" });
+    return .{ .array = arr };
+}
+
+// for UTF-8 input mb_parse_str is byte-identical to parse_str; delegate
+fn native_mb_parse_str(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    return native_parse_str(ctx, args);
 }
