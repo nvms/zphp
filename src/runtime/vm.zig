@@ -2114,12 +2114,18 @@ pub const VM = struct {
                         const dollar_name = varVarName(raw_name, &buf);
                         if (self.currentFrame().ref_slots.get(dollar_name)) |cell| {
                             cell.* = val;
+                            try self.propagateCellWrite(cell, val);
                         } else {
                             const sn = if (self.currentFrame().func) |func| func.slot_names else self.global_slot_names;
                             var found_slot = false;
                             for (sn, 0..) |s, si| {
                                 if (std.mem.eql(u8, s, dollar_name)) {
-                                    if (si < self.currentFrame().locals.len) self.currentFrame().locals[si] = val;
+                                    if (si < self.currentFrame().locals.len) {
+                                        // Stage 2 overwrite-release on the slot
+                                        const old_lv = self.currentFrame().locals[si];
+                                        if (old_lv == .object) self.objRelease(old_lv.object);
+                                        self.currentFrame().locals[si] = val;
+                                    }
                                     found_slot = true;
                                     break;
                                 }
@@ -2127,6 +2133,10 @@ pub const VM = struct {
                             if (!found_slot) {
                                 const stable_key = try std.fmt.allocPrint(self.allocator, "${s}", .{raw_name});
                                 try self.strings.append(self.allocator, stable_key);
+                                // Stage 2 overwrite-release on the vars map
+                                if (self.currentFrame().vars.get(stable_key)) |old| {
+                                    if (old == .object) self.objRelease(old.object);
+                                }
                                 try self.currentFrame().vars.put(self.allocator, stable_key, val);
                             }
                         }
