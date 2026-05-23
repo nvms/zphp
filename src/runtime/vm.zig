@@ -8110,6 +8110,17 @@ pub const VM = struct {
     // require-include frames the per-frame script_path, falling back to the
     // VM-wide file_path. (Without this, traces through require'd files all
     // report the entry script's path instead of the actual file per frame.)
+    // return the function's display name for traces / __FUNCTION__-style
+    // output. closures (internal name `__closure_N`) become PHP's
+    // `{closure:file:line}` form so user code that reads $trace[N]['function']
+    // sees the same shape as native PHP. allocates if substitution happens
+    pub fn funcDisplayName(self: *VM, f: *const ObjFunction) ![]const u8 {
+        if (!std.mem.startsWith(u8, f.name, "__closure_")) return f.name;
+        const s = try std.fmt.allocPrint(self.allocator, "{{closure:{s}:{d}}}", .{ f.file_path, f.start_line });
+        try self.strings.append(self.allocator, s);
+        return s;
+    }
+
     pub fn frameFile(self: *const VM, frame_idx: usize) []const u8 {
         if (frame_idx >= self.frame_count) return self.file_path;
         const frame = self.frames[frame_idx];
@@ -8179,7 +8190,7 @@ pub const VM = struct {
                             try entry.set(self.allocator, .{ .string = "class" }, .{ .string = f.name[0..sep] });
                             try entry.set(self.allocator, .{ .string = "type" }, .{ .string = type_str });
                         } else {
-                            try entry.set(self.allocator, .{ .string = "function" }, .{ .string = f.name });
+                            try entry.set(self.allocator, .{ .string = "function" }, .{ .string = try self.funcDisplayName(f) });
                         }
                         if (i > 0) {
                             const caller = self.frames[i - 1];

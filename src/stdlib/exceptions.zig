@@ -210,7 +210,7 @@ fn buildAndAttachTrace(ctx: *NativeContext, obj: *@import("../runtime/value.zig"
                         try entry.set(ctx.vm.allocator, .{ .string = "class" }, .{ .string = f.name[0..sep] });
                         try entry.set(ctx.vm.allocator, .{ .string = "type" }, .{ .string = type_str });
                     } else {
-                        try entry.set(ctx.vm.allocator, .{ .string = "function" }, .{ .string = f.name });
+                        try entry.set(ctx.vm.allocator, .{ .string = "function" }, .{ .string = try ctx.vm.funcDisplayName(f) });
                     }
                     if (i > 0) {
                         const caller = ctx.vm.frames[i - 1];
@@ -317,7 +317,12 @@ fn formatTraceArg(buf: *std.ArrayListUnmanaged(u8), alloc: std.mem.Allocator, v:
         .int => |n| try w.print("{d}", .{n}),
         .float => |f| try w.print("{d}", .{f}),
         .string => |s| {
-            if (s.len <= 15) {
+            // a closure passed as a callable is represented in zphp as its
+            // synthetic name (`__closure_N` / `__closure_N_M`); PHP renders
+            // it as `Object(Closure)` in trace args
+            if (std.mem.startsWith(u8, s, "__closure_")) {
+                try buf.appendSlice(alloc, "Object(Closure)");
+            } else if (s.len <= 15) {
                 try w.print("'{s}'", .{s});
             } else {
                 try w.print("'{s}...'", .{s[0..15]});
