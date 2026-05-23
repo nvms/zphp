@@ -8118,6 +8118,44 @@ pub const VM = struct {
         return self.file_path;
     }
 
+    // if frame_idx is a require'd file's top-level frame, append a synthesized
+    // trace entry for the bridging require/include call - PHP shows these
+    // as `#N caller.php(L): require` in the backtrace. detected by looking
+    // at the requirer's (frame_idx-1) ip: when the required file is mid-
+    // execution it sits just past the 2-byte `require` opcode (op + variant).
+    // skipped silently if the shape does not match (defensive)
+    pub fn tryAppendRequireFrame(self: *VM, arr: *PhpArray, frame_idx: usize) !void {
+        if (frame_idx == 0 or frame_idx >= self.frame_count) return;
+        const frame = self.frames[frame_idx];
+        if (frame.func != null) return;
+        if (frame.script_path.len == 0) return;
+        const requirer = self.frames[frame_idx - 1];
+        if (requirer.ip < 2) return;
+        const op_byte = requirer.chunk.code.items[requirer.ip - 2];
+        if (op_byte != @intFromEnum(OpCode.require)) return;
+        const variant = requirer.chunk.code.items[requirer.ip - 1];
+        const fn_name: []const u8 = switch (variant) {
+            1 => "require_once",
+            2 => "include",
+            3 => "include_once",
+            else => "require",
+        };
+        const entry = try self.allocator.create(PhpArray);
+        entry.* = .{};
+        try self.arrays.append(self.allocator, entry);
+        try entry.set(self.allocator, .{ .string = "function" }, .{ .string = fn_name });
+        try entry.set(self.allocator, .{ .string = "file" }, .{ .string = self.frameFile(frame_idx - 1) });
+        if (requirer.chunk.getSourceLocation(requirer.ip - 2, self.source)) |loc| {
+            try entry.set(self.allocator, .{ .string = "line" }, .{ .int = @as(i64, @intCast(loc.line)) });
+        }
+        const args_arr = try self.allocator.create(PhpArray);
+        args_arr.* = .{};
+        try self.arrays.append(self.allocator, args_arr);
+        try args_arr.append(self.allocator, .{ .string = frame.script_path });
+        try entry.set(self.allocator, .{ .string = "args" }, .{ .array = args_arr });
+        try arr.append(self.allocator, .{ .array = entry });
+    }
+
     // capture the current user call stack as an exception __trace array. one
     // entry per active user frame (top-down), each carrying the function name
     // and the call site's line/file - so an exception thrown by a native
@@ -8158,6 +8196,7 @@ pub const VM = struct {
                         try arr.append(self.allocator, .{ .array = entry });
                     }
                 }
+                try self.tryAppendRequireFrame(arr, i);
                 if (i == 0) break;
             }
         }

@@ -233,6 +233,7 @@ fn buildAndAttachTrace(ctx: *NativeContext, obj: *@import("../runtime/value.zig"
                     try arr.append(ctx.vm.allocator, .{ .array = entry });
                 }
             }
+            try ctx.vm.tryAppendRequireFrame(arr, i);
             if (i == 0) break;
         }
     }
