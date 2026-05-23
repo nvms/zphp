@@ -4012,6 +4012,7 @@ pub const VM = struct {
                     const result_val = Value{ .string = result_str };
                     if (is_ref) |cell| {
                         cell.* = result_val;
+                        try self.propagateCellWrite(cell, result_val);
                     }
                     try self.currentFrame().vars.put(self.allocator, name, result_val);
                     if (ca_slot != 0xFFFF and ca_slot < self.currentFrame().locals.len) {
