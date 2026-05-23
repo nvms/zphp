@@ -9490,7 +9490,7 @@ pub const VM = struct {
                     } else {
                         names[ai] = null;
                     }
-                    args[ai] = self.resolveAttrConstant(self.readAttrValue());
+                    args[ai] = try self.resolveDefault(self.resolveAttrConstant(self.readAttrValue()));
                 }
                 attrs[i] = .{ .name = name, .args = args, .arg_names = names };
             } else {

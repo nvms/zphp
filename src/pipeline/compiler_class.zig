@@ -40,15 +40,15 @@ fn isTypeToken(tag: Token.Tag) bool {
     };
 }
 
-fn parseAttrArgValue(tokens: []const Token, source: []const u8, pos: *usize, allocator: Allocator) Value {
-    var lhs = parseAttrArgAtom(tokens, source, pos, allocator);
+fn parseAttrArgValue(self: *Compiler, tokens: []const Token, source: []const u8, pos: *usize, allocator: Allocator) Value {
+    var lhs = parseAttrArgAtom(self, tokens, source, pos, allocator);
     // chain bitwise OR / AND / XOR (left-associative, no precedence between them
     // since attribute args are simple flag expressions)
     while (pos.* < tokens.len) {
         const t = tokens[pos.*].tag;
         if (t != .pipe and t != .amp and t != .caret) break;
         pos.* += 1;
-        const rhs = parseAttrArgAtom(tokens, source, pos, allocator);
+        const rhs = parseAttrArgAtom(self, tokens, source, pos, allocator);
         const li = resolveAttrFlag(lhs);
         const ri = resolveAttrFlag(rhs);
         if (li) |lv| if (ri) |rv| {
@@ -60,9 +60,33 @@ fn parseAttrArgValue(tokens: []const Token, source: []const u8, pos: *usize, all
             } };
             continue;
         };
-        // can't fold, keep lhs as-is
+        // one or both sides reference user-defined constants we can't fold
+        // at compile time - emit a DeferredExpr sentinel so the op is applied
+        // when the attribute is materialized
+        const op: @import("bytecode.zig").DeferredExpr.Op = switch (t) {
+            .pipe => .bor,
+            .amp => .band,
+            .caret => .bxor,
+            else => unreachable,
+        };
+        const lhs_norm: Value = if (resolveAttrFlag(lhs)) |v| .{ .int = v } else lhs;
+        const rhs_norm: Value = if (resolveAttrFlag(rhs)) |v| .{ .int = v } else rhs;
+        lhs = makeAttrDeferredOp(self, op, lhs_norm, rhs_norm) orelse lhs;
     }
     return lhs;
+}
+
+fn makeAttrDeferredOp(self: *Compiler, op: @import("bytecode.zig").DeferredExpr.Op, lhs: Value, rhs: Value) ?Value {
+    const bytecode = @import("bytecode.zig");
+    const de = self.allocator.create(bytecode.DeferredExpr) catch return null;
+    de.* = .{ .op = op, .lhs = lhs, .rhs = rhs };
+    self.deferred_exprs.append(self.allocator, de) catch {
+        self.allocator.destroy(de);
+        return null;
+    };
+    const sentinel = bytecode.encodeDeferredExprSentinel(self.allocator, de) catch return null;
+    self.string_allocs.append(self.allocator, sentinel) catch return null;
+    return .{ .string = sentinel };
 }
 
 fn resolveAttrFlag(v: Value) ?i64 {
@@ -86,7 +110,7 @@ fn resolveAttrFlag(v: Value) ?i64 {
     return null;
 }
 
-fn parseAttrArgAtom(tokens: []const Token, source: []const u8, pos: *usize, allocator: Allocator) Value {
+fn parseAttrArgAtom(self: *Compiler, tokens: []const Token, source: []const u8, pos: *usize, allocator: Allocator) Value {
     if (pos.* >= tokens.len) return .null;
     const tag = tokens[pos.*].tag;
     switch (tag) {
@@ -141,11 +165,17 @@ fn parseAttrArgAtom(tokens: []const Token, source: []const u8, pos: *usize, allo
                 return .{ .string = source[start..end] };
             }
             pos.* += 1;
-            return .{ .string = text };
+            // bare identifier: a user-defined constant. emit a deferred class
+            // constant sentinel so resolveDefault can fold it at attribute load
+            // time (otherwise a bare `FLAG_A` string fed into a DeferredExpr
+            // would coerce to 0 via toInt instead of resolving the constant)
+            const sentinel = std.fmt.allocPrint(allocator, "\x00CC\x00\x00{s}", .{text}) catch return .{ .string = text };
+            self.string_allocs.append(allocator, sentinel) catch return .{ .string = text };
+            return .{ .string = sentinel };
         },
         .minus => {
             pos.* += 1;
-            const inner = parseAttrArgValue(tokens, source, pos, allocator);
+            const inner = parseAttrArgValue(self, tokens, source, pos, allocator);
             return switch (inner) {
                 .int => |v| .{ .int = -v },
                 .float => |v| .{ .float = -v },
@@ -157,10 +187,10 @@ fn parseAttrArgAtom(tokens: []const Token, source: []const u8, pos: *usize, allo
             const arr = allocator.create(PhpArray) catch return .null;
             arr.* = .{};
             while (pos.* < tokens.len and tokens[pos.*].tag != .r_bracket) {
-                const val = parseAttrArgValue(tokens, source, pos, allocator);
+                const val = parseAttrArgValue(self, tokens, source, pos, allocator);
                 if (pos.* < tokens.len and tokens[pos.*].tag == .fat_arrow) {
                     pos.* += 1;
-                    const map_val = parseAttrArgValue(tokens, source, pos, allocator);
+                    const map_val = parseAttrArgValue(self, tokens, source, pos, allocator);
                     const key: PhpArray.Key = switch (val) {
                         .string => |s| .{ .string = s },
                         .int => |i| .{ .int = i },
@@ -261,7 +291,7 @@ fn extractAttributes(self: *Compiler, main_token: u32) []const ParsedAttr {
                         arg_name = self.ast.tokens[inner].lexeme(self.ast.source);
                         inner += 2;
                     }
-                    const val = parseAttrArgValue(self.ast.tokens, self.ast.source, &inner, self.allocator);
+                    const val = parseAttrArgValue(self, self.ast.tokens, self.ast.source, &inner, self.allocator);
                     args.append(self.allocator, val) catch break;
                     arg_names.append(self.allocator, arg_name) catch break;
                     if (inner < rb_pos and self.ast.tokens[inner].tag == .comma) inner += 1;
