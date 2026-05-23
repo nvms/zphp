@@ -7985,6 +7985,9 @@ pub const VM = struct {
                     self.currentFrame().ref_slots = .{};
                     self.saveFrameLocalsToGenerator(gen);
                     self.frame_count -= 1;
+                    // generator can no longer be resumed - drop its locals now
+                    // rather than at end-of-request (Stage 2 finer lifetime)
+                    self.releaseGeneratorVars(gen);
                     return;
                 },
 
@@ -8421,6 +8424,24 @@ pub const VM = struct {
                 _ = self.dispatchPendingException(base_frame);
             }
         }
+        self.releaseGeneratorVars(gen);
+    }
+
+    // release the generator's persistent locals (Stage 2 finer generator
+    // lifetime). before this, a generator's vars were retained on init via
+    // retainVarsObjects and only released at end-of-request; explicit close
+    // (unset of $gen, foreach-break) OR natural completion (yield-then-return)
+    // can drop the resources now. idempotent - clears the map so a later call
+    // from the same completion path is a no-op
+    pub fn releaseGeneratorVars(self: *VM, gen: *@import("value.zig").Generator) void {
+        var vit = gen.vars.valueIterator();
+        while (vit.next()) |v| self.releaseValue(v.*);
+        gen.vars.clearRetainingCapacity();
+        // PHP fires the destructors at the generator-completion boundary, not
+        // at the next statement; drain now so end-of-foreach + reassign order
+        // matches. safe to call inline - drainPendingDestruct is reentrancy-
+        // guarded
+        if (self.pending_destruct.items.len > 0) self.drainPendingDestruct();
     }
 
     /// PHP 8 rejects non-numeric strings, arrays (except for +), and objects
@@ -8791,6 +8812,7 @@ pub const VM = struct {
         self.handler_floor = prev_floor;
         if (gen.state == .running) {
             gen.state = .completed;
+            self.releaseGeneratorVars(gen);
         }
         self.sp = saved_sp;
     }
