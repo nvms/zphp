@@ -406,6 +406,10 @@ pub const VM = struct {
     // release. drained alongside pending_destruct at statement boundaries
     pending_array_release: std.ArrayListUnmanaged(*PhpArray) = .{},
     array_release_cursor: usize = 0,
+    // registered WeakMap instances. each WeakMap's wmConstruct appends self
+    // here; on object destruct we walk this list to remove entries whose key
+    // is the just-destructed object (weak semantics)
+    weakmaps: std.ArrayListUnmanaged(*PhpObject) = .{},
     // pointer to the $GLOBALS PhpArray for the current run, used so writes
     // to $GLOBALS[key] = val also propagate to the top frame's variable
     // table (matching PHP's superglobal semantics)
@@ -1581,6 +1585,7 @@ pub const VM = struct {
         self.objects.deinit(self.allocator);
         self.pending_destruct.deinit(self.allocator);
         self.pending_array_release.deinit(self.allocator);
+        self.weakmaps.deinit(self.allocator);
         self.generators.deinit(self.allocator);
         self.fibers.deinit(self.allocator);
         self.ref_cells.deinit(self.allocator);
@@ -1655,6 +1660,7 @@ pub const VM = struct {
         self.generators.clearRetainingCapacity();
         self.fibers.clearRetainingCapacity();
         self.ref_cells.clearRetainingCapacity();
+        self.weakmaps.clearRetainingCapacity();
         self.captures.clearRetainingCapacity();
         self.capture_index.clearRetainingCapacity();
         self.ob_stack.clearRetainingCapacity();
@@ -13493,6 +13499,11 @@ pub const VM = struct {
                         self.pending_exception = null;
                     };
                 }
+                // PHP's WeakMap drops entries whose key object is unreachable.
+                // walk registered WeakMaps and remove entries keyed by this
+                // now-destructed object so iteration / count / offsetGet see
+                // the entry as gone (Stage 2)
+                self.weakmapsOnObjectDestruct(obj);
                 // collapse the object tree: release the objects this object's
                 // property slots held. runs after __destruct (PHP tears
                 // properties down after)
@@ -13510,6 +13521,44 @@ pub const VM = struct {
                 // reachable through unserialize R:N) is not re-queued
                 arr.elements_released = true;
                 self.releaseArrayElements(arr);
+            }
+        }
+    }
+
+    // WeakMap weak semantics: when an object becomes unreachable, walk all
+    // registered WeakMap instances and drop entries keyed by that object. the
+    // key pointer in __data is the (untyped) integer of obj's address; __keys
+    // mirrors the same set of object handles for iteration. both get pruned.
+    // also prunes the weakmaps registry of any destructed WeakMap instances
+    // (a one-shot scan keeps the list small without per-WM lifecycle hooks)
+    fn weakmapsOnObjectDestruct(self: *VM, dead_obj: *PhpObject) void {
+        const target_int: i64 = @intCast(@intFromPtr(dead_obj));
+        var i: usize = 0;
+        while (i < self.weakmaps.items.len) {
+            const wm = self.weakmaps.items[i];
+            if (wm.destructed) {
+                _ = self.weakmaps.swapRemove(i);
+                continue;
+            }
+            i += 1;
+            if (wm == dead_obj) continue;
+            const data_v = wm.get("__data");
+            if (data_v == .array) {
+                const arr = data_v.array;
+                arr.remove(.{ .int = target_int });
+            }
+            const keys_v = wm.get("__keys");
+            if (keys_v == .array) {
+                const karr = keys_v.array;
+                var j: usize = 0;
+                while (j < karr.entries.items.len) {
+                    const e = karr.entries.items[j];
+                    if (e.value == .object and e.value.object == dead_obj) {
+                        _ = karr.entries.orderedRemove(j);
+                        continue;
+                    }
+                    j += 1;
+                }
             }
         }
     }

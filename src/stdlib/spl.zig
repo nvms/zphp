@@ -1307,6 +1307,8 @@ fn wmConstruct(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
         try ctx.vm.arrays.append(ctx.allocator, keys);
         try obj.set(ctx.allocator, "__keys", .{ .array = keys });
     }
+    // register for weak-key cleanup on object destruct
+    try ctx.vm.weakmaps.append(ctx.allocator, obj);
     return .null;
 }
 
@@ -1340,7 +1342,14 @@ fn wmOffsetSet(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     try arr.set(ctx.allocator, .{ .int = key }, args[1]);
     if (is_new and args[0] == .object) {
         const keys_v = obj.get("__keys");
-        if (keys_v == .array) try keys_v.array.append(ctx.allocator, args[0]);
+        if (keys_v == .array) {
+            try keys_v.array.append(ctx.allocator, args[0]);
+            // PhpArray.append retained the key object; undo it so the WeakMap
+            // does not pin its keys (PHP's WeakMap is weak). the vm-level
+            // weakmaps registry + weakmapsOnObjectDestruct hook removes the
+            // stale __keys / __data entry when the key reaches refcount 0
+            ctx.vm.objRelease(args[0].object);
+        }
     }
     return .null;
 }
