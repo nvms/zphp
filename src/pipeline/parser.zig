@@ -940,7 +940,8 @@ const Parser = struct {
 
     fn parseFunctionDecl(self: *Parser) Error!u32 {
         _ = self.advance();
-        if (self.peek() == .amp) _ = self.advance();
+        const returns_ref = self.peek() == .amp;
+        if (returns_ref) _ = self.advance();
         const name_tok = try self.expectFunctionName();
         _ = try self.expect(.l_paren);
 
@@ -970,7 +971,11 @@ const Parser = struct {
         self.found_yield = prev_yield;
 
         const extra = try self.addExtraListWithReturnType(params.items, ret_range);
-        const rhs = body | (if (is_gen) @as(u32, 1) << 31 else 0);
+        // body fits in low bits; high bits encode flags: bit 31 = is_generator,
+        // bit 30 = returns_ref. body indices are well below 2^30 in practice
+        const rhs = body |
+            (if (is_gen) @as(u32, 1) << 31 else 0) |
+            (if (returns_ref) @as(u32, 1) << 30 else 0);
         return self.addNode(.{ .tag = .function_decl, .main_token = name_tok, .data = .{ .lhs = extra, .rhs = rhs } });
     }
 
@@ -1825,7 +1830,8 @@ const Parser = struct {
 
     fn parseClassMethod(self: *Parser) Error!u32 {
         _ = self.advance(); // function
-        if (self.peek() == .amp) _ = self.advance();
+        const returns_ref = self.peek() == .amp;
+        if (returns_ref) _ = self.advance();
         const name_tok = try self.expectFunctionName();
         _ = try self.expect(.l_paren);
 
@@ -1855,8 +1861,11 @@ const Parser = struct {
         self.found_yield = prev_yield;
 
         const extra = try self.addExtraListWithReturnType(params.items, ret_range);
-        // bits 30-31 reserved for visibility (set by class/enum parser), bit 29 = generator
-        const rhs = body | (if (is_gen) @as(u32, 1) << 29 else 0);
+        // bits 0-26: body index, bit 27: returns_ref, bit 28: is_final
+        // (set by class parser), bit 29: generator, bits 30-31: visibility
+        const rhs = body |
+            (if (is_gen) @as(u32, 1) << 29 else 0) |
+            (if (returns_ref) @as(u32, 1) << 27 else 0);
         return self.addNode(.{ .tag = .class_method, .main_token = name_tok, .data = .{ .lhs = extra, .rhs = rhs } });
     }
 

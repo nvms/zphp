@@ -96,6 +96,17 @@ pub fn compileAssign(self: *Compiler, node: Ast.Node) Error!void {
                 try self.emitOp(.op_null);
                 return;
             }
+            if (inner.tag == .call or inner.tag == .method_call) {
+                // `$dst = &foo(...)` or `$dst = &$obj->method(...)` - the
+                // callee may be a ref-returning function. emit the call as a
+                // value (return_ref also pushes the value), then bind_ref_
+                // from_return picks up vm.last_return_ref if set. degrades
+                // to a value copy if the callee wasn't ref-returning
+                try self.compileNode(rhs_node.data.lhs);
+                try self.emitOp(.bind_ref_from_return);
+                try self.emitU16(dst_idx);
+                return;
+            }
             // fallback for shapes we don't yet bind explicitly (dynamic property,
             // chained ref-assign)
             try self.emitOp(.break_var_ref);

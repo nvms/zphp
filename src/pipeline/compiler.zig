@@ -198,6 +198,7 @@ pub const Compiler = struct {
     loop_foreach_close: [32]bool = [_]bool{false} ** 32,
     closure_count: u32 = 0,
     is_generator: bool = false,
+    returns_ref: bool = false,
     namespace: []const u8 = "",
     use_aliases: std.StringHashMapUnmanaged([]const u8) = .{},
     use_fn_aliases: std.StringHashMapUnmanaged([]const u8) = .{},
@@ -292,7 +293,14 @@ pub const Compiler = struct {
                             try self.emitOp(if (self.loop_foreach_close[fei]) .iter_end_close else .iter_end);
                         }
                     }
-                    if (node.data.lhs != 0) {
+                    // ref-returning function: route refable return shapes
+                    // (`return $arr[$k]`, `return $obj->prop`, `return $var`)
+                    // through make_var_*_ref + return_ref so the caller can
+                    // bind to the same storage. unrefable expressions fall
+                    // through to plain return_val
+                    const ref_return_emitted = self.returns_ref and node.data.lhs != 0 and
+                        try self.tryCompileRefReturn(node.data.lhs);
+                    if (!ref_return_emitted and node.data.lhs != 0) {
                         try self.compileNode(node.data.lhs);
                     }
                     // emit finally blocks (innermost first) before returning;
@@ -308,7 +316,9 @@ pub const Compiler = struct {
                         try self.compileNode(self.finally_nodes[fd]);
                     }
                     self.finally_depth = saved_fd;
-                    if (node.data.lhs != 0) {
+                    if (ref_return_emitted) {
+                        // tryCompileRefReturn already emitted return_ref
+                    } else if (node.data.lhs != 0) {
                         try self.emitOp(.return_val);
                     } else {
                         try self.emitOp(.return_void);
@@ -1301,6 +1311,47 @@ pub const Compiler = struct {
         const idx = try self.addConstant(.{ .string = name });
         try self.emitOp(.set_var);
         try self.emitU16(idx);
+    }
+
+    // ref-return helper: if the return expression is a shape that can yield
+    // a reference (array elem, prop access, plain variable), emit a
+    // make_var_*_ref into a synthetic `__ret_ref` name, then return_ref.
+    // returns true if it handled the return (caller does not need to emit
+    // return_val), false to fall back to the regular value-return path
+    pub fn tryCompileRefReturn(self: *Compiler, expr_idx: u32) Error!bool {
+        const expr = self.ast.nodes[expr_idx];
+        const ret_name = "$__ret_ref";
+        const ret_name_idx = try self.addConstant(.{ .string = ret_name });
+        if (expr.tag == .array_access) {
+            try self.compileNode(expr.data.lhs); // base
+            try self.compileNode(expr.data.rhs); // key
+            try self.emitOp(.make_var_array_elem_ref);
+            try self.emitU16(ret_name_idx);
+            try self.emitOp(.return_ref);
+            try self.emitU16(ret_name_idx);
+            return true;
+        }
+        if (expr.tag == .property_access and !self.isDynamicProp(expr)) {
+            try self.compileNode(expr.data.lhs); // object
+            const prop_idx = try self.addConstant(.{ .string = self.propName(expr) });
+            try self.emitOp(.make_var_prop_ref);
+            try self.emitU16(ret_name_idx);
+            try self.emitU16(prop_idx);
+            try self.emitOp(.return_ref);
+            try self.emitU16(ret_name_idx);
+            return true;
+        }
+        if (expr.tag == .variable) {
+            const src_name = self.ast.tokenSlice(expr.main_token);
+            const src_idx = try self.addConstant(.{ .string = src_name });
+            try self.emitOp(.make_var_ref);
+            try self.emitU16(ret_name_idx);
+            try self.emitU16(src_idx);
+            try self.emitOp(.return_ref);
+            try self.emitU16(ret_name_idx);
+            return true;
+        }
+        return false;
     }
 
     // superinstruction: $local_dst op= $local_src as a statement (no stack effect)

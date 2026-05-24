@@ -195,6 +195,19 @@ pub const OpCode = enum(u8) {
     // cell in ref_slots[dst]
     make_var_prop_ref_dyn, // u16: dst name const
 
+    // `return $r;` inside a `&function`-declared function: reads the cell
+    // ref_slots[name] (set up by a preceding make_var_*_ref), stashes it in
+    // vm.last_return_ref so the caller's `$x = &fn(...)` can bind to the
+    // same storage, pushes cell.* as the return value, and falls through to
+    // the normal return_val path
+    return_ref, // u16: ref name const
+
+    // emitted after a `$x = &fn(...)` call when fn is known to return by
+    // reference - takes vm.last_return_ref (set by return_ref) and binds it
+    // into ref_slots[dst]. silently degrades to a value copy if the call
+    // didn't actually leave a return ref (the callee skipped return_ref)
+    bind_ref_from_return, // u16: dst name const
+
     // `$dst = &Cls::$p` — reads class_name and prop_name from constants,
     // creates a cell seeded from the static prop's current value, registers a
     // writeback so subsequent assignments to $dst propagate to Cls::$p,
@@ -267,6 +280,7 @@ pub const OpCode = enum(u8) {
             .ensure_array_local, .ensure_array_var,
             .make_var_array_elem_ref, .break_var_ref,
             .make_var_prop_ref_dyn,
+            .return_ref, .bind_ref_from_return,
             .array_set_local, .array_set_local_ref,
             => 3,
             .call, .call_spread, .new_obj, .method_call, .method_call_spread, .static_call_dyn_method, .make_var_ref, .make_var_prop_ref => 4,
@@ -452,6 +466,11 @@ pub const ObjFunction = struct {
     is_generator: bool = false,
     is_arrow: bool = false,
     is_static: bool = false,
+    // `&function foo() { ... }` - return is a reference, not a copy. when
+    // such a function is called via `$r = &foo(...)`, the caller's $r binds
+    // to the storage the function returned a ref to. the return-expression
+    // compile path emits the cell-setup so the call site can capture it
+    returns_ref: bool = false,
     locals_only: bool = false,
     params: []const []const u8,
     defaults: []const Value = &.{},

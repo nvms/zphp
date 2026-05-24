@@ -695,6 +695,7 @@ pub fn compileFunction(self: *Compiler, node: Ast.Node) Error!void {
     @memcpy(defaults_owned, defaults.items);
 
     const gen = (node.data.rhs & (1 << 31)) != 0;
+    const returns_ref = (node.data.rhs & (1 << 30)) != 0;
 
     var sub = Compiler{
         .ast = self.ast,
@@ -707,6 +708,7 @@ pub fn compileFunction(self: *Compiler, node: Ast.Node) Error!void {
         .break_jumps = .{},
         .continue_jumps = .{},
         .is_generator = gen,
+        .returns_ref = returns_ref,
         .closure_count = self.closure_count,
         .file_path = self.file_path,
         .namespace = self.namespace,
@@ -731,7 +733,7 @@ pub fn compileFunction(self: *Compiler, node: Ast.Node) Error!void {
         _ = sub.getOrCreateSlot(param_names[i]);
     }
 
-    const body_idx = node.data.rhs & 0x7FFFFFFF;
+    const body_idx = node.data.rhs & 0x3FFFFFFF;
     try sub.compileNode(body_idx);
     for (sub.pending_gotos.items) |pg| {
         if (sub.labels.get(pg.label)) |target| {
@@ -759,6 +761,7 @@ pub fn compileFunction(self: *Compiler, node: Ast.Node) Error!void {
         .required_params = required,
         .is_variadic = is_variadic,
         .is_generator = gen,
+        .returns_ref = returns_ref,
         .locals_only = lo,
         .params = param_names[0..param_nodes.len],
         .defaults = defaults_owned,
@@ -873,6 +876,7 @@ pub fn compileClosure(self: *Compiler, node: Ast.Node) Error!void {
         .break_jumps = .{},
         .continue_jumps = .{},
         .is_generator = gen,
+        .returns_ref = false,
         .closure_count = self.closure_count,
         .file_path = self.file_path,
         .namespace = self.namespace,
@@ -961,6 +965,7 @@ pub fn compileClosure(self: *Compiler, node: Ast.Node) Error!void {
         .chunk = sub.chunk,
         .is_arrow = is_arrow,
         .is_generator = gen,
+        .returns_ref = false,
         .is_variadic = is_variadic,
         .is_static = is_static_closure,
         .locals_only = closure_lo,
@@ -2487,8 +2492,9 @@ fn compileClassMethodBody(self: *Compiler, class_name: []const u8, member: Ast.N
     const defaults_owned = try self.allocator.alloc(Value, defaults.items.len);
     @memcpy(defaults_owned, defaults.items);
 
-    // bit 29 = generator flag (bits 30-31 = visibility)
+    // bit 29 = generator, bit 28 = is_final, bit 27 = returns_ref
     const method_gen = (member.data.rhs & (1 << 29)) != 0;
+    const method_returns_ref = (member.data.rhs & (1 << 27)) != 0;
 
     var sub = Compiler{
         .ast = self.ast,
@@ -2501,6 +2507,7 @@ fn compileClassMethodBody(self: *Compiler, class_name: []const u8, member: Ast.N
         .break_jumps = .{},
         .continue_jumps = .{},
         .is_generator = method_gen,
+        .returns_ref = method_returns_ref,
         .closure_count = self.closure_count,
         .file_path = self.file_path,
         .namespace = self.namespace,
@@ -2549,8 +2556,9 @@ fn compileClassMethodBody(self: *Compiler, class_name: []const u8, member: Ast.N
         }
     }
 
-    // mask out visibility (bits 30-31), generator flag (bit 29), is_final (bit 28)
-    const body_idx = member.data.rhs & 0x0FFFFFFF;
+    // mask out visibility (bits 30-31), generator (bit 29), is_final (bit 28),
+    // returns_ref (bit 27)
+    const body_idx = member.data.rhs & 0x07FFFFFF;
     try sub.compileNode(body_idx);
     for (sub.pending_gotos.items) |pg| {
         if (sub.labels.get(pg.label)) |target| {
@@ -2576,6 +2584,7 @@ fn compileClassMethodBody(self: *Compiler, class_name: []const u8, member: Ast.N
         .required_params = required,
         .is_variadic = is_variadic,
         .is_generator = method_gen,
+        .returns_ref = method_returns_ref,
         .is_static = member.tag == .static_class_method,
         .locals_only = method_lo,
         .params = param_names[0..param_nodes.len],

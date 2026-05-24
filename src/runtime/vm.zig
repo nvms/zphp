@@ -425,6 +425,15 @@ pub const VM = struct {
     // without hitting 0. when gc_collect_cycles fires we trial-decrement
     // the reachable subgraph to find truly-unreachable cycles
     cycle_candidates: std.ArrayListUnmanaged(*PhpObject) = .{},
+    // ref-returning function call mechanism: a `&function` sets these on
+    // return_ref - the cell it's returning a reference to + the bindings
+    // that propagate writes through the cell back to underlying storage
+    // (array elem / object prop / static prop). caller's bind_ref_from_return
+    // consumes + clears them
+    last_return_ref: ?*Value = null,
+    last_return_ref_array_bindings: std.ArrayListUnmanaged(ArrayRefBinding) = .{},
+    last_return_ref_object_bindings: std.ArrayListUnmanaged(ObjectRefBinding) = .{},
+    last_return_ref_static_bindings: std.ArrayListUnmanaged(@import("value.zig").StaticPropRefBinding) = .{},
     // pointer to the $GLOBALS PhpArray for the current run, used so writes
     // to $GLOBALS[key] = val also propagate to the top frame's variable
     // table (matching PHP's superglobal semantics)
@@ -1604,6 +1613,9 @@ pub const VM = struct {
         self.pending_fiber_release.deinit(self.allocator);
         self.weakmaps.deinit(self.allocator);
         self.cycle_candidates.deinit(self.allocator);
+        self.last_return_ref_array_bindings.deinit(self.allocator);
+        self.last_return_ref_object_bindings.deinit(self.allocator);
+        self.last_return_ref_static_bindings.deinit(self.allocator);
         self.generators.deinit(self.allocator);
         self.fibers.deinit(self.allocator);
         self.ref_cells.deinit(self.allocator);
@@ -2734,6 +2746,52 @@ pub const VM = struct {
                         return error.RuntimeError;
                     }
                 },
+                .return_ref => {
+                    // ref-returning function: take the cell that was just
+                    // bound into ref_slots[name] by a preceding make_var_*_ref
+                    // and stash for the caller. push cell.* as the return
+                    // value, then run the same frame-teardown as return_val.
+                    // also transfer the cell's writeback bindings - the
+                    // callee frame is about to be deinit'd, so the bindings
+                    // (ref_array_bindings / ref_object_bindings / ref_static_
+                    // bindings entries matching this cell) need to migrate
+                    // to vm-level holding for the caller to inherit
+                    const rr_name_idx = self.readU16();
+                    const ref_name = self.currentChunk().constants.items[rr_name_idx].string;
+                    self.last_return_ref_array_bindings.clearRetainingCapacity();
+                    self.last_return_ref_object_bindings.clearRetainingCapacity();
+                    self.last_return_ref_static_bindings.clearRetainingCapacity();
+                    if (self.currentFrame().ref_slots.get(ref_name)) |cell| {
+                        self.last_return_ref = cell;
+                        const cf_rr = self.currentFrame();
+                        for (cf_rr.ref_array_bindings.items) |b| if (b.cell == cell) self.last_return_ref_array_bindings.append(self.allocator, b) catch {};
+                        for (cf_rr.ref_object_bindings.items) |b| if (b.cell == cell) self.last_return_ref_object_bindings.append(self.allocator, b) catch {};
+                        for (cf_rr.ref_static_bindings.items) |b| if (b.cell == cell) self.last_return_ref_static_bindings.append(self.allocator, b) catch {};
+                        self.push(cell.*);
+                    } else {
+                        self.last_return_ref = null;
+                        self.push(.null);
+                    }
+                    var rr_result = self.pop();
+                    const rr_ret_pin: ?*PhpObject = if (rr_result == .object) rr_result.object else null;
+                    if (rr_ret_pin) |p| p.refcount +%= 1;
+                    const rr_ret_arr_pin: ?*PhpArray = if (rr_result == .array) rr_result.array else null;
+                    if (rr_ret_arr_pin) |a| arrayRetain(a);
+                    if (g_type_info.count() > 0) {
+                        if (try self.checkReturnType(&rr_result)) {
+                            if (rr_ret_pin) |p| self.objRelease(p);
+                            if (rr_ret_arr_pin) |a| arrayUnpin(a);
+                            continue;
+                        }
+                    }
+                    const rr_saved_entry_sp = self.currentFrame().entry_sp;
+                    try self.popFrame();
+                    if (rr_saved_entry_sp > 0) self.sp = rr_saved_entry_sp;
+                    self.push(rr_result);
+                    if (rr_ret_pin) |p| self.objRelease(p);
+                    if (rr_ret_arr_pin) |a| arrayUnpin(a);
+                    if (self.frame_count <= base_frame) return;
+                },
                 .return_val => {
                     var result = self.pop();
                     // the popped return value is in transit: off the operand
@@ -3825,6 +3883,46 @@ pub const VM = struct {
                         try self.ref_cells.append(self.allocator, cell);
                         try frame.ref_slots.put(self.allocator, dst_name, cell);
                         try frame.ref_object_bindings.append(self.allocator, .{ .cell = cell, .object = obj_ptr, .prop_name = prop_owned });
+                    }
+                },
+                .bind_ref_from_return => {
+                    const dst_idx = self.readU16();
+                    const dst_name = self.currentChunk().constants.items[dst_idx].string;
+                    const frame = self.currentFrame();
+                    _ = frame.ref_slots.remove(dst_name);
+                    if (self.last_return_ref) |cell| {
+                        try frame.ref_slots.put(self.allocator, dst_name, cell);
+                        // inherit the writeback bindings from the callee so a
+                        // subsequent write through $dst propagates back to the
+                        // array elem / prop the function returned a ref to
+                        for (self.last_return_ref_array_bindings.items) |b| try frame.ref_array_bindings.append(self.allocator, b);
+                        for (self.last_return_ref_object_bindings.items) |b| try frame.ref_object_bindings.append(self.allocator, b);
+                        for (self.last_return_ref_static_bindings.items) |b| try frame.ref_static_bindings.append(self.allocator, b);
+                        self.last_return_ref_array_bindings.clearRetainingCapacity();
+                        self.last_return_ref_object_bindings.clearRetainingCapacity();
+                        self.last_return_ref_static_bindings.clearRetainingCapacity();
+                        try frame.vars.put(self.allocator, dst_name, cell.*);
+                        if (frame.func) |func| {
+                            for (func.slot_names, 0..) |sn, si| {
+                                if (std.mem.eql(u8, sn, dst_name)) {
+                                    if (si < frame.locals.len) frame.locals[si] = cell.*;
+                                    break;
+                                }
+                            }
+                        }
+                        self.last_return_ref = null;
+                    } else {
+                        // callee didn't return a ref - degrade to value copy
+                        const val = self.peek();
+                        try frame.vars.put(self.allocator, dst_name, val);
+                    }
+                    // statement-level trailing .pop expects exactly one
+                    // value on the stack from the assignment expression
+                    _ = self.pop();
+                    if (self.currentFrame().ref_slots.get(dst_name)) |c| {
+                        self.push(c.*);
+                    } else {
+                        self.push(.null);
                     }
                 },
                 .make_var_static_prop_ref => {
