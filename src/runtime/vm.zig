@@ -395,6 +395,12 @@ pub const VM = struct {
     native_fns: std.StringHashMapUnmanaged(NativeFn) = .{},
     output: std.ArrayListUnmanaged(u8) = .{},
     strings: std.ArrayListUnmanaged([]const u8) = .{},
+    // persistent_strings are heap-allocated keys whose lifetime must outlive
+    // a serve-mode reset. anything stored as a key in native_fns (or any
+    // other table that survives reset) must be allocated here, NOT in
+    // self.strings (which is cleared at reset and would leave dangling
+    // pointers behind in the surviving tables)
+    persistent_strings: std.ArrayListUnmanaged([]const u8) = .{},
     arrays: std.ArrayListUnmanaged(*PhpArray) = .{},
     objects: std.ArrayListUnmanaged(*PhpObject) = .{},
     next_object_id: u32 = 0,
@@ -1597,6 +1603,8 @@ pub const VM = struct {
         self.native_fns.deinit(self.allocator);
         self.output.deinit(self.allocator);
         self.strings.deinit(self.allocator);
+        for (self.persistent_strings.items) |s| self.allocator.free(s);
+        self.persistent_strings.deinit(self.allocator);
         self.captures.deinit(self.allocator);
         self.capture_index.deinit(self.allocator);
         self.php_constants.deinit(self.allocator);
@@ -1731,6 +1739,17 @@ pub const VM = struct {
         self.magic_call_guard.clearRetainingCapacity();
         if (self.serve_mode) {
             self.functions.clearRetainingCapacity();
+            // chunk_to_func_names indexes per-chunk name lists - many entries
+            // are closure instance names (`__closure_N_inst_M`, `__closure_bound_N`)
+            // allocated into self.strings and freed by the clearRetainingCapacity
+            // above. the chunk pointers themselves stay valid (cached compile
+            // results persist across requests) so request 2's registerFunction
+            // will rebuild the index. but if we leave the old entries in place
+            // the indexFunctionByChunk dedup walk std.mem.eql's against dangling
+            // slices and segfaults
+            var ctfn_it = self.chunk_to_func_names.iterator();
+            while (ctfn_it.next()) |e| e.value_ptr.*.deinit(self.allocator);
+            self.chunk_to_func_names.clearRetainingCapacity();
             self.php_constants.clearRetainingCapacity();
             initConstants(&self.php_constants, self.allocator) catch {};
             // freeClassState above cleared the class table. re-seed it with
@@ -9890,17 +9909,23 @@ pub const VM = struct {
     }
 
     fn registerEnumMethods(self: *VM, enum_name: []const u8, backed_type_byte: u8) !void {
+        // idempotent: serve-mode reset re-runs registerStdlibClasses to re-seed
+        // the class table (which freeClassState cleared), but native_fns
+        // survives reset - so don't re-register methods that are already there
+        var probe: [128]u8 = undefined;
+        const probe_key = std.fmt.bufPrint(&probe, "{s}::cases", .{enum_name}) catch return;
+        if (self.native_fns.contains(probe_key)) return;
         const cases_name = try std.fmt.allocPrint(self.allocator, "{s}::cases", .{enum_name});
-        try self.strings.append(self.allocator, cases_name);
+        try self.persistent_strings.append(self.allocator, cases_name);
         try self.native_fns.put(self.allocator, cases_name, enums.enumCases);
 
         if (backed_type_byte != 0) {
             const from_name = try std.fmt.allocPrint(self.allocator, "{s}::from", .{enum_name});
-            try self.strings.append(self.allocator, from_name);
+            try self.persistent_strings.append(self.allocator, from_name);
             try self.native_fns.put(self.allocator, from_name, enums.enumFrom);
 
             const try_from_name = try std.fmt.allocPrint(self.allocator, "{s}::tryFrom", .{enum_name});
-            try self.strings.append(self.allocator, try_from_name);
+            try self.persistent_strings.append(self.allocator, try_from_name);
             try self.native_fns.put(self.allocator, try_from_name, enums.enumTryFrom);
         }
     }
