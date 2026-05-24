@@ -208,6 +208,22 @@ fn native_header(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
         }
     }
 
+    // PHP treats `header("HTTP/1.1 301 ...")` as a status-code set, not a real
+    // header. parse the numeric code out and update response_code. the header
+    // string stays in response_headers so headers_list() can introspect it
+    // (matching PHP's observable behavior), but writeResponse will skip emitting
+    // any HTTP/ line on the wire - the wire status comes from response_code
+    if (std.mem.startsWith(u8, hdr, "HTTP/")) {
+        // expect "HTTP/x.y CODE message"
+        var it = std.mem.tokenizeScalar(u8, hdr, ' ');
+        _ = it.next(); // HTTP/x.y
+        if (it.next()) |code_str| {
+            if (std.fmt.parseInt(i64, code_str, 10)) |parsed| {
+                ctx.vm.response_code = parsed;
+            } else |_| {}
+        }
+    }
+
     if (args.len >= 3 and args[2] == .int) {
         ctx.vm.response_code = args[2].int;
     }

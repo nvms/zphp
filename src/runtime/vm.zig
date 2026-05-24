@@ -1712,6 +1712,7 @@ pub const VM = struct {
         self.pending_fiber_release.clearRetainingCapacity();
         self.fiber_release_cursor = 0;
         self.weakmaps.clearRetainingCapacity();
+        self.shutdown_callbacks.clearRetainingCapacity();
         self.cycle_candidates.clearRetainingCapacity();
         self.captures.clearRetainingCapacity();
         self.capture_index.clearRetainingCapacity();

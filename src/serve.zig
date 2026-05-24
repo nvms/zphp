@@ -816,6 +816,13 @@ fn processHttpRead(w: *Worker, c: *Connection) void {
         }
     };
 
+    // run user-registered shutdown callbacks before sending the response.
+    // PHP calls these after script return regardless of how the script ended
+    // (normal fall-off, exit(), or fatal). CLI mode runs them from main.zig;
+    // serve mode never did, which meant WP / Laravel / Symfony shutdown hooks
+    // (session save, cache flush, profiler stop, etc.) silently never fired
+    w.vm.runShutdownCallbacks() catch {};
+
     // persist session data if session was started
     var session_ctx = w.vm.makeContext(null);
     @import("stdlib/session.zig").finalizeSession(&session_ctx);
@@ -1524,7 +1531,15 @@ fn writeResponse(conn: *Connection, code: i64, content_type: []const u8, extra_h
         for (hdrs.entries.items) |entry| {
             if (entry.value == .string) {
                 const hdr = entry.value.string;
+                // Content-Type is already in the base headers above
                 if (std.mem.startsWith(u8, hdr, "Content-Type:") or std.mem.startsWith(u8, hdr, "content-type:")) continue;
+                // header("HTTP/1.1 N ...") is PHP's way to set the status code,
+                // NOT a real header. PHP keeps it in headers_list (so user code
+                // can introspect) but does not emit it on the wire - the wire
+                // status line comes from the response code, period. emitting
+                // an HTTP/1.1 line mid-response confuses every HTTP parser
+                // (curl truncates the rest of the headers at that point)
+                if (std.mem.startsWith(u8, hdr, "HTTP/")) continue;
                 if (std.mem.indexOfScalar(u8, hdr, '\r') != null or std.mem.indexOfScalar(u8, hdr, '\n') != null) continue;
                 if (pos + hdr.len + 2 < hdr_buf.len) {
                     @memcpy(hdr_buf[pos .. pos + hdr.len], hdr);
