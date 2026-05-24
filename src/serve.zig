@@ -781,7 +781,7 @@ fn processHttpRead(w: *Worker, c: *Connection) void {
         .stream = c.stream,
         .address = std.net.Address{ .in = .{ .sa = .{ .port = 0, .addr = c.addr_bytes, .zero = [_]u8{0} ** 8 } } },
     };
-    populateSuperglobals(&w.vm, &req, mock_conn, w.port, if (w.env_snapshot) |*s| s else null) catch {
+    populateSuperglobals(&w.vm, &req, mock_conn, w.port, if (w.env_snapshot) |*s| s else null, w.result.file_path) catch {
         c.state = .closing;
         return;
     };
@@ -896,7 +896,7 @@ fn handleH2Request(w: *Worker, conn: *Connection, session: *h2.H2Session, stream
         .stream = conn.stream,
         .address = std.net.Address{ .in = .{ .sa = .{ .port = 0, .addr = conn.addr_bytes, .zero = [_]u8{0} ** 8 } } },
     };
-    populateSuperglobals(&w.vm, &req, mock_conn, w.port, if (w.env_snapshot) |*s| s else null) catch {
+    populateSuperglobals(&w.vm, &req, mock_conn, w.port, if (w.env_snapshot) |*s| s else null, w.result.file_path) catch {
         session.submitResponse(stream_id, 500, "text/plain", "Internal Server Error");
         stream.resetRequest(w.allocator);
         return;
@@ -1095,7 +1095,7 @@ fn parseRequest(raw: []const u8) Request {
     return req;
 }
 
-fn populateSuperglobals(vm: *VM, req: *const Request, conn: std.net.Server.Connection, port: u16, env_snapshot: ?*const env.EnvSnapshot) !void {
+fn populateSuperglobals(vm: *VM, req: *const Request, conn: std.net.Server.Connection, port: u16, env_snapshot: ?*const env.EnvSnapshot, entry_path: []const u8) !void {
     const a = vm.allocator;
     const server_arr = try a.create(PhpArray);
     server_arr.* = .{};
@@ -1108,8 +1108,27 @@ fn populateSuperglobals(vm: *VM, req: *const Request, conn: std.net.Server.Conne
     var port_buf: [8]u8 = undefined;
     const port_str = std.fmt.bufPrint(&port_buf, "{d}", .{port}) catch "8080";
     try server_arr.set(a, .{ .string = "SERVER_PORT" }, .{ .string = port_str });
-    try server_arr.set(a, .{ .string = "SCRIPT_NAME" }, .{ .string = req.path });
-    try server_arr.set(a, .{ .string = "PHP_SELF" }, .{ .string = req.path });
+    // PHP-FPM behind apache/nginx with mod_rewrite (the conventional deploy
+    // shape) sets SCRIPT_NAME to the front controller (e.g. /index.php) for
+    // EVERY request, regardless of the URL the user hit. WordPress, Laravel,
+    // Symfony all read this and would otherwise treat the URL itself as the
+    // script - WP in particular runs its canonical_url logic and 301-redirects
+    // when SCRIPT_NAME equals REQUEST_URI but doesn't end in index.php, which
+    // bricks every request behind a Location-less redirect. match the deploy
+    // shape: SCRIPT_NAME = /<basename of entry script>, SCRIPT_FILENAME = full
+    // entry path, PHP_SELF = SCRIPT_NAME + PATH_INFO (which for rewritten URLs
+    // is the request path - that's what apache writes too)
+    const entry_base = std.fs.path.basename(entry_path);
+    const script_name = try std.fmt.allocPrint(a, "/{s}", .{entry_base});
+    try vm.strings.append(a, script_name);
+    try server_arr.set(a, .{ .string = "SCRIPT_NAME" }, .{ .string = script_name });
+    try server_arr.set(a, .{ .string = "SCRIPT_FILENAME" }, .{ .string = entry_path });
+    const doc_root_owned = try a.dupe(u8, std.fs.path.dirname(entry_path) orelse ".");
+    try vm.strings.append(a, doc_root_owned);
+    try server_arr.set(a, .{ .string = "DOCUMENT_ROOT" }, .{ .string = doc_root_owned });
+    const php_self = try std.fmt.allocPrint(a, "{s}{s}", .{ script_name, req.path });
+    try vm.strings.append(a, php_self);
+    try server_arr.set(a, .{ .string = "PHP_SELF" }, .{ .string = php_self });
     try server_arr.set(a, .{ .string = "PATH_INFO" }, .{ .string = req.path });
     // SCRIPT_FILENAME + DOCUMENT_ROOT + GATEWAY_INTERFACE + SERVER_SOFTWARE -
     // WordPress / Symfony / Laravel all read these during request setup
