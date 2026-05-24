@@ -1102,7 +1102,15 @@ fn populateSuperglobals(vm: *VM, req: *const Request, conn: std.net.Server.Conne
     const port_str = std.fmt.bufPrint(&port_buf, "{d}", .{port}) catch "8080";
     try server_arr.set(a, .{ .string = "SERVER_PORT" }, .{ .string = port_str });
     try server_arr.set(a, .{ .string = "SCRIPT_NAME" }, .{ .string = req.path });
+    try server_arr.set(a, .{ .string = "PHP_SELF" }, .{ .string = req.path });
     try server_arr.set(a, .{ .string = "PATH_INFO" }, .{ .string = req.path });
+    // SCRIPT_FILENAME + DOCUMENT_ROOT + GATEWAY_INTERFACE + SERVER_SOFTWARE -
+    // WordPress / Symfony / Laravel all read these during request setup
+    try server_arr.set(a, .{ .string = "SERVER_SOFTWARE" }, .{ .string = "zphp" });
+    try server_arr.set(a, .{ .string = "GATEWAY_INTERFACE" }, .{ .string = "CGI/1.1" });
+    try server_arr.set(a, .{ .string = "SERVER_NAME" }, .{ .string = "localhost" });
+    try server_arr.set(a, .{ .string = "HTTPS" }, .{ .string = "" });
+    try server_arr.set(a, .{ .string = "REQUEST_SCHEME" }, .{ .string = "http" });
 
     if (req.getHeader("Host")) |host| try server_arr.set(a, .{ .string = "HTTP_HOST" }, .{ .string = host });
     if (req.getHeader("User-Agent")) |ua| try server_arr.set(a, .{ .string = "HTTP_USER_AGENT" }, .{ .string = ua });

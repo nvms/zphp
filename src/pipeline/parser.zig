@@ -2415,7 +2415,19 @@ const Parser = struct {
                 try self.addError(.expected_expression);
                 break :blk error.ParseError;
             },
-            .kw_isset, .kw_empty, .kw_unset, .kw_eval, .kw_exit, .kw_die => self.addLiteral(.identifier),
+            .kw_isset, .kw_empty, .kw_unset, .kw_eval => self.addLiteral(.identifier),
+            // exit / die are language constructs that work with OR without
+            // parens (`exit;`, `exit(0);`, `die("msg");`). emit an identifier
+            // node first; if the next token isn't `(`, wrap in a synthetic
+            // 0-arg call so the runtime dispatches to native exit/die rather
+            // than trying to resolve `exit` as a bare constant
+            .kw_exit, .kw_die => blk: {
+                const ident = try self.addLiteral(.identifier);
+                if (self.peek() == .l_paren) break :blk ident;
+                const extra = try self.addExtra(&[_]u32{0});
+                const main_tok = self.nodes.items[ident].main_token;
+                break :blk self.addNode(.{ .tag = .call, .main_token = main_tok, .data = .{ .lhs = ident, .rhs = extra } });
+            },
             .kw_list => self.parseListDestructure(),
             .kw_match => if (self.isMatchExpr()) self.parseMatchExpr() else self.addLiteral(.identifier),
             .kw_function => self.parseClosureExpr(),
