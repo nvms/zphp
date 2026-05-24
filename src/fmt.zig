@@ -739,7 +739,8 @@ const Formatter = struct {
         self.formatParamList(node.data.lhs);
         self.write(")");
         self.emitReturnType(node.data.lhs);
-        self.formatBlockInline(node.data.rhs & 0x7FFFFFFF);
+        // bits 0-29: body index; bit 30: returns_ref; bit 31: is_generator
+        self.formatBlockInline(node.data.rhs & 0x3FFFFFFF);
     }
 
     fn emitReturnType(self: *Formatter, param_extra_idx: u32) void {
@@ -1109,7 +1110,9 @@ const Formatter = struct {
 
     fn formatClassMethod(self: *Formatter, node: Ast.Node) void {
         const visibility = (node.data.rhs >> 30) & 0x3;
-        const body_idx = node.data.rhs & 0x1FFFFFFF;
+        // bits 0-26: body index; bit 27: returns_ref; bit 28: is_final;
+        // bit 29: generator; bits 30-31: visibility
+        const body_idx = node.data.rhs & 0x07FFFFFF;
         // scan backward for modifiers the parser may have consumed silently (e.g. final)
         const mods = self.scanTokenModifiers(node.main_token);
         if (mods.is_final) self.write("final ");
