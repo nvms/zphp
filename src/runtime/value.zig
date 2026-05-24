@@ -390,6 +390,13 @@ pub const PhpObject = struct {
         // mutable: set_prop_default patches an instance-property default after
         // class_decl (when a `self::CONST` default finally resolves)
         defaults: []Value,
+        // PHP keeps each declaring class's private property in its own
+        // storage slot - parent's `private $foo` and child's `private $foo`
+        // are NOT the same slot. these parallel arrays let getSlotIndex
+        // distinguish: for is_private[i]==true entries, match (name AND
+        // declaring_classes[i]==scope). public/protected slots ignore scope
+        declaring_classes: []const []const u8,
+        is_private: []const bool,
     };
 
     pub fn deinit(self: *PhpObject, allocator: std.mem.Allocator) void {
@@ -419,16 +426,45 @@ pub const PhpObject = struct {
     }
 
     pub fn getSlotIndex(self: *const PhpObject, name: []const u8) ?u16 {
+        return self.getSlotIndexForScope(name, null);
+    }
+
+    // private props from different declaring classes are separate slots.
+    // pass scope = the class doing the access (e.g. the current method's
+    // class) so the right private slot is picked. scope == null falls back
+    // to the FIRST matching slot (legacy callers, public access from
+    // outside, native code without scope context)
+    pub fn getSlotIndexForScope(self: *const PhpObject, name: []const u8, scope: ?[]const u8) ?u16 {
         const layout = self.slot_layout orelse return null;
+        // first pass: exact match with scope-restricted privates
         for (layout.names, 0..) |n, i| {
-            if (n.ptr == name.ptr or std.mem.eql(u8, n, name)) return @intCast(i);
+            if (!(n.ptr == name.ptr or std.mem.eql(u8, n, name))) continue;
+            if (layout.is_private[i]) {
+                if (scope) |sc| {
+                    if (std.mem.eql(u8, sc, layout.declaring_classes[i])) return @intCast(i);
+                }
+                continue; // private slot but scope doesn't match - skip
+            }
+            return @intCast(i);
+        }
+        // second pass: scope didn't match any private, fall back to first
+        // matching private (e.g. natives, reflection-like access from
+        // outside a class hierarchy)
+        if (scope == null) {
+            for (layout.names, 0..) |n, i| {
+                if (n.ptr == name.ptr or std.mem.eql(u8, n, name)) return @intCast(i);
+            }
         }
         return null;
     }
 
     pub fn get(self: *const PhpObject, name: []const u8) Value {
+        return self.getForScope(name, null);
+    }
+
+    pub fn getForScope(self: *const PhpObject, name: []const u8, scope: ?[]const u8) Value {
         if (self.slots) |s| {
-            if (self.getSlotIndex(name)) |idx| return s[idx];
+            if (self.getSlotIndexForScope(name, scope)) |idx| return s[idx];
         }
         return self.properties.get(name) orelse .null;
     }
@@ -448,6 +484,23 @@ pub const PhpObject = struct {
         self.clearUnset(name);
         if (self.slots) |s| {
             if (self.getSlotIndex(name)) |idx| {
+                s[idx] = value;
+                return;
+            }
+        }
+        try self.properties.put(allocator, name, value);
+    }
+
+    // scope-aware variant for the set_prop opcode path where we know the
+    // declaring class (private slots are picked correctly)
+    pub fn setForScope(self: *PhpObject, allocator: std.mem.Allocator, name: []const u8, value: Value, scope: ?[]const u8) !void {
+        if (value == .object) value.object.retain();
+        if (value == .array) value.array.retain();
+        if (value == .generator) value.generator.retain();
+        if (value == .fiber) value.fiber.retain();
+        self.clearUnset(name);
+        if (self.slots) |s| {
+            if (self.getSlotIndexForScope(name, scope)) |idx| {
                 s[idx] = value;
                 return;
             }

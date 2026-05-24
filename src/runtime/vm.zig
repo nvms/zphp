@@ -360,6 +360,8 @@ pub const ClassDef = struct {
         if (self.slot_layout) |layout| {
             allocator.free(layout.names);
             allocator.free(layout.defaults);
+            allocator.free(layout.declaring_classes);
+            allocator.free(layout.is_private);
             allocator.destroy(layout);
         }
     }
@@ -5774,14 +5776,18 @@ pub const VM = struct {
                             }
                         }
 
-                        const val = obj.get(prop_name);
-                        // if the property was explicitly unset, treat it as
-                        // absent so __get fires
+                        // resolve visibility before reading the slot - private
+                        // props are in scope-distinct slots (PHP's per-class
+                        // private storage), and obj.get's name-only lookup
+                        // would pick the wrong one in deep hierarchies
+                        const gp_vr = self.findPropertyVisibility(obj.class_name, prop_name);
+                        const gp_scope: ?[]const u8 = if (gp_vr.visibility == .private) gp_vr.defining_class else null;
+                        const val = obj.getForScope(prop_name, gp_scope);
+                        const slot_present_gp = if (obj.slots != null) obj.getSlotIndexForScope(prop_name, gp_scope) != null else false;
                         const is_present = !obj.isUnset(prop_name) and
-                            (val != .null or obj.properties.contains(prop_name) or
-                             (obj.slots != null and obj.getSlotIndex(prop_name) != null));
+                            (val != .null or obj.properties.contains(prop_name) or slot_present_gp);
                         if (is_present) {
-                            const vr = self.findPropertyVisibility(obj.class_name, prop_name);
+                            const vr = gp_vr;
                             if (!self.checkVisibility(vr.defining_class, vr.visibility)) {
                                 if (self.hasMethod(obj.class_name, "__get")) {
                                     const result = try self.callMagicGet(obj, prop_name);
@@ -6068,27 +6074,16 @@ pub const VM = struct {
                                 if (try self.throwBuiltinException("Error", msg)) continue;
                                 return error.RuntimeError;
                             }
+                            const sp_scope: ?[]const u8 = if (vr.visibility == .private) vr.defining_class else null;
                             if (vr.is_readonly) {
-                                // PHP readonly: the property can be initialized exactly
-                                // once, from within the declaring class's scope. a child
-                                // class's methods cannot write the parent's readonly
-                                // property (the child must redeclare it to get its own
-                                // init slot - which zphp doesn't model separately, so
-                                // we enforce the declaring-class rule strictly)
-                                const existing = obj.get(prop_name);
+                                const existing = obj.getForScope(prop_name, sp_scope);
                                 if (existing != .null) {
-                                    const scope_is_decl = blk: {
-                                        const scope = self.currentDefiningClass() orelse break :blk false;
-                                        break :blk std.mem.eql(u8, scope, vr.defining_class);
-                                    };
-                                    if (!scope_is_decl) {
-                                        const msg = try std.fmt.allocPrint(self.allocator, "Cannot modify readonly property {s}::${s}", .{
-                                            vr.defining_class, prop_name,
-                                        });
-                                        try self.strings.append(self.allocator, msg);
-                                        if (try self.throwBuiltinException("Error", msg)) continue;
-                                        return error.RuntimeError;
-                                    }
+                                    const msg = try std.fmt.allocPrint(self.allocator, "Cannot modify readonly property {s}::${s}", .{
+                                        vr.defining_class, prop_name,
+                                    });
+                                    try self.strings.append(self.allocator, msg);
+                                    if (try self.throwBuiltinException("Error", msg)) continue;
+                                    return error.RuntimeError;
                                 }
                             }
                             // typed property: coerce/enforce the declared type
@@ -6098,8 +6093,8 @@ pub const VM = struct {
                             }
                             // overwrite-release: drop the object the property
                             // previously held before the new value lands (Stage 1)
-                            const sp_old_prop = obj.get(prop_name);
-                            try obj.set(self.allocator, prop_name, val);
+                            const sp_old_prop = obj.getForScope(prop_name, sp_scope);
+                            try obj.setForScope(self.allocator, prop_name, val, sp_scope);
                             self.releaseValue(sp_old_prop);
                             // populate IC for slot-indexed writes. typed
                             // properties are cached too - the fast path runs
@@ -8133,10 +8128,14 @@ pub const VM = struct {
                             }
                         }
                         // the slot layout snapshots prop defaults at class_decl
-                        // time (still null placeholders here) - keep it in sync
+                        // time (still null placeholders here) - keep it in sync.
+                        // with per-class private slots, there can be multiple
+                        // entries with the same name from different declaring
+                        // classes - match on (name AND declaring_class) so the
+                        // correct one is patched
                         if (cls.slot_layout) |layout| {
                             for (layout.names, 0..) |n, i| {
-                                if (std.mem.eql(u8, n, prop_name)) {
+                                if (std.mem.eql(u8, n, prop_name) and std.mem.eql(u8, layout.declaring_classes[i], class_name)) {
                                     layout.defaults[i] = val;
                                     break;
                                 }
@@ -11342,13 +11341,13 @@ pub const VM = struct {
     pub fn findPropertyVisibility(self: *VM, class_name: []const u8, prop_name: []const u8) VisResult {
         // PHP rule for private properties: each declaring class gets its own
         // slot. When `$this->prop` is read from inside a method of class S,
-        // S's own private declaration of `prop` (if any) is preferred over
-        // any descendant's, because they're separate slots. Use the current
-        // execution scope (the running method's class) to pick the right one
-        const scope = if (self.frame_count > 0)
-            self.frames[self.frame_count - 1].called_class orelse self.currentDefiningClass()
-        else
-            null;
+        // S's own private declaration of `prop` (if any) is preferred. the
+        // scope is the METHOD's declaring class (currentDefiningClass), NOT
+        // the dynamic called_class - parent::__construct() running on a
+        // child object must see the parent's privates, not the child's.
+        // we only consult scope when looking for a private prop - the
+        // non-private hierarchy walk below is independent of scope
+        const scope = self.currentDefiningClass();
         if (scope) |sc| {
             if (self.classes.get(sc)) |scls| {
                 for (scls.properties.items) |prop| {
@@ -11741,13 +11740,19 @@ pub const VM = struct {
     }
 
     fn buildSlotLayout(self: *VM, def: *const ClassDef) RuntimeError!?*PhpObject.SlotLayout {
-        // collect all properties walking parent chain (parent first). mature
-        // codebases routinely have >64 props in deep hierarchies, so use a
-        // growable list instead of a fixed stack buffer
+        // collect all properties walking parent chain (parent first). private
+        // slots from each declaring class get their OWN entry (PHP keeps
+        // parent's `private $foo` and child's `private $foo` separate); only
+        // public/protected slots merge by name so a child override patches
+        // the parent's default
         var all_names: std.ArrayListUnmanaged([]const u8) = .{};
         var all_defaults: std.ArrayListUnmanaged(Value) = .{};
+        var all_decl: std.ArrayListUnmanaged([]const u8) = .{};
+        var all_priv: std.ArrayListUnmanaged(bool) = .{};
         defer all_names.deinit(self.allocator);
         defer all_defaults.deinit(self.allocator);
+        defer all_decl.deinit(self.allocator);
+        defer all_priv.deinit(self.allocator);
 
         var walk_name = def.parent;
         while (walk_name) |pname| {
@@ -11756,6 +11761,8 @@ pub const VM = struct {
                 for (0..pl.names.len) |i| {
                     try all_names.append(self.allocator, pl.names[i]);
                     try all_defaults.append(self.allocator, pl.defaults[i]);
+                    try all_decl.append(self.allocator, pl.declaring_classes[i]);
+                    try all_priv.append(self.allocator, pl.is_private[i]);
                 }
                 break;
             }
@@ -11763,17 +11770,27 @@ pub const VM = struct {
         }
 
         for (def.properties.items) |prop| {
+            const is_priv = prop.visibility == .private;
             var found = false;
-            for (all_names.items, 0..) |n, i| {
-                if (std.mem.eql(u8, n, prop.name)) {
-                    all_defaults.items[i] = prop.default;
-                    found = true;
-                    break;
+            if (!is_priv) {
+                // public/protected: merge with same-name parent slot (override the default)
+                for (all_names.items, 0..) |n, i| {
+                    if (all_priv.items[i]) continue;
+                    if (std.mem.eql(u8, n, prop.name)) {
+                        all_defaults.items[i] = prop.default;
+                        // a public/protected child overrides any visibility:
+                        // record the child as the new declaring class
+                        all_decl.items[i] = def.name;
+                        found = true;
+                        break;
+                    }
                 }
             }
             if (!found) {
                 try all_names.append(self.allocator, prop.name);
                 try all_defaults.append(self.allocator, prop.default);
+                try all_decl.append(self.allocator, def.name);
+                try all_priv.append(self.allocator, is_priv);
             }
         }
 
@@ -11782,9 +11799,13 @@ pub const VM = struct {
         const layout = self.allocator.create(PhpObject.SlotLayout) catch return error.RuntimeError;
         const names = self.allocator.alloc([]const u8, all_names.items.len) catch return error.RuntimeError;
         const defaults = self.allocator.alloc(Value, all_defaults.items.len) catch return error.RuntimeError;
+        const decl = self.allocator.alloc([]const u8, all_decl.items.len) catch return error.RuntimeError;
+        const priv = self.allocator.alloc(bool, all_priv.items.len) catch return error.RuntimeError;
         @memcpy(names, all_names.items);
         @memcpy(defaults, all_defaults.items);
-        layout.* = .{ .names = names, .defaults = defaults };
+        @memcpy(decl, all_decl.items);
+        @memcpy(priv, all_priv.items);
+        layout.* = .{ .names = names, .defaults = defaults, .declaring_classes = decl, .is_private = priv };
         return layout;
     }
 
