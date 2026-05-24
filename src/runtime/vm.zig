@@ -1964,6 +1964,11 @@ pub const VM = struct {
                     return;
                 }
             }
+            // exit() / die() unwinds with error.RuntimeError + exit_requested
+            // set - that's an orderly script exit, not an internal error.
+            // surface the err but don't decorate with a fake "Fatal error"
+            // diagnostic that callers print to users
+            if (self.exit_requested) return err;
             // surface the Zig error in error_msg so callers (e.g. require's
             // catch block) don't replace it with a generic "Failed opening"
             // message. captures the current function name and IP so the user

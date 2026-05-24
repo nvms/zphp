@@ -787,26 +787,33 @@ fn processHttpRead(w: *Worker, c: *Connection) void {
     };
 
     w.vm.interpret(w.result) catch |interp_err| {
-        // include diagnostics so the harness can see WHY a 500 fired
-        var err_buf: [4096]u8 = undefined;
-        const exc_class: ?[]const u8 = if (w.vm.pending_exception) |ex|
-            if (ex == .object) ex.object.class_name else null
-        else
-            null;
-        const exc_msg: ?[]const u8 = if (w.vm.pending_exception) |ex|
-            if (ex == .object) (if (ex.object.get("message") == .string) ex.object.get("message").string else null) else null
-        else
-            null;
-        const body: []const u8 = std.fmt.bufPrint(&err_buf, "500 Internal Server Error\nzig_err={s}\nerror_msg={s}\nexception={s}: {s}\n", .{
-            @errorName(interp_err),
-            w.vm.error_msg orelse "(none)",
-            exc_class orelse "(none)",
-            exc_msg orelse "(none)",
-        }) catch "500 Internal Server Error";
-        writeResponse(c, 500, "text/plain", null, body, c.keep_alive, false, w.allocator) catch {};
-        shiftBuffer(c, consumed);
-        if (!c.keep_alive) c.state = .closing;
-        return;
+        // exit() / die() is an orderly script exit, not a 500. flush
+        // whatever was buffered + any headers/status the script set and
+        // return like a normal response
+        if (w.vm.exit_requested) {
+            // fall through to the normal response-write path below
+        } else {
+            // include diagnostics so the harness can see WHY a 500 fired
+            var err_buf: [4096]u8 = undefined;
+            const exc_class: ?[]const u8 = if (w.vm.pending_exception) |ex|
+                if (ex == .object) ex.object.class_name else null
+            else
+                null;
+            const exc_msg: ?[]const u8 = if (w.vm.pending_exception) |ex|
+                if (ex == .object) (if (ex.object.get("message") == .string) ex.object.get("message").string else null) else null
+            else
+                null;
+            const body: []const u8 = std.fmt.bufPrint(&err_buf, "500 Internal Server Error\nzig_err={s}\nerror_msg={s}\nexception={s}: {s}\n", .{
+                @errorName(interp_err),
+                w.vm.error_msg orelse "(none)",
+                exc_class orelse "(none)",
+                exc_msg orelse "(none)",
+            }) catch "500 Internal Server Error";
+            writeResponse(c, 500, "text/plain", null, body, c.keep_alive, false, w.allocator) catch {};
+            shiftBuffer(c, consumed);
+            if (!c.keep_alive) c.state = .closing;
+            return;
+        }
     };
 
     // persist session data if session was started
