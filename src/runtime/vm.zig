@@ -1690,8 +1690,19 @@ pub const VM = struct {
         self.generators.clearRetainingCapacity();
         self.fibers.clearRetainingCapacity();
         self.ref_cells.clearRetainingCapacity();
+        // pending_destruct / pending_array_release hold *PhpObject / *PhpArray
+        // pointers that freeHeapItems above just freed - they MUST be cleared
+        // before the next request runs or drainPendingDestruct will walk
+        // dangling pointers (the cursors also need resetting, otherwise
+        // even a re-cleared list would skip-via-cursor and re-add then walk)
+        self.pending_destruct.clearRetainingCapacity();
+        self.destruct_cursor = 0;
+        self.pending_array_release.clearRetainingCapacity();
+        self.array_release_cursor = 0;
         self.pending_gen_release.clearRetainingCapacity();
+        self.gen_release_cursor = 0;
         self.pending_fiber_release.clearRetainingCapacity();
+        self.fiber_release_cursor = 0;
         self.weakmaps.clearRetainingCapacity();
         self.cycle_candidates.clearRetainingCapacity();
         self.captures.clearRetainingCapacity();
