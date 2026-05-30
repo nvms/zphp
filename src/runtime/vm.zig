@@ -853,12 +853,12 @@ pub const VM = struct {
         try c.put(a, "PHP_INT_SIZE", .{ .int = 8 });
         try c.put(a, "PHP_MAJOR_VERSION", .{ .int = 8 });
         try c.put(a, "PHP_MINOR_VERSION", .{ .int = 4 });
-        try c.put(a, "PHP_RELEASE_VERSION", .{ .int = 0 });
+        try c.put(a, "PHP_RELEASE_VERSION", .{ .int = 1 });
         try c.put(a, "PHP_SESSION_DISABLED", .{ .int = 0 });
         try c.put(a, "PHP_SESSION_NONE", .{ .int = 1 });
         try c.put(a, "PHP_SESSION_ACTIVE", .{ .int = 2 });
-        try c.put(a, "PHP_VERSION", .{ .string = "8.4.0" });
-        try c.put(a, "PHP_VERSION_ID", .{ .int = 80400 });
+        try c.put(a, "PHP_VERSION", .{ .string = "8.4.1" });
+        try c.put(a, "PHP_VERSION_ID", .{ .int = 80401 });
         try c.put(a, "PHP_SAPI", .{ .string = "cli" });
         try c.put(a, "PHP_OS", .{ .string = if (@import("builtin").os.tag == .macos) "Darwin" else "Linux" });
         try c.put(a, "DIRECTORY_SEPARATOR", .{ .string = "/" });

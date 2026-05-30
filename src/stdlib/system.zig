@@ -608,7 +608,7 @@ fn native_phpinfo(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     _ = args;
     // minimal output: enough for callers to verify the function exists. real
     // PHP prints a giant HTML/text dump of the environment
-    const out = try std.fmt.allocPrint(ctx.allocator, "PHP Version => 8.4.0\n", .{});
+    const out = try std.fmt.allocPrint(ctx.allocator, "PHP Version => 8.4.1\n", .{});
     try ctx.strings.append(ctx.allocator, out);
     try ctx.vm.output.appendSlice(ctx.allocator, out);
     return .{ .bool = true };

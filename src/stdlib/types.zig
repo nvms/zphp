@@ -1510,7 +1510,7 @@ fn native_php_sapi_name(_: *NativeContext, _: []const Value) RuntimeError!Value 
 }
 
 fn native_php_version(_: *NativeContext, _: []const Value) RuntimeError!Value {
-    return .{ .string = "8.4.0" };
+    return .{ .string = "8.4.1" };
 }
 
 fn native_getmypid(_: *NativeContext, _: []const Value) RuntimeError!Value {
