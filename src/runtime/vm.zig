@@ -273,6 +273,11 @@ pub const ClassDef = struct {
     is_abstract: bool = false,
     is_final: bool = false,
     is_readonly: bool = false,
+    // set when any property-hook method ($hook_get/$hook_set) is registered on
+    // this class. lets hasPropHook skip the per-access bufPrint + method lookup
+    // for the >99% of classes that declare no hooks (PHP 8.4 feature). does not
+    // account for inherited hooks - hasPropHook walks the parent chain
+    has_prop_hooks: bool = false,
     backed_type: enum(u8) { none = 0, int_type = 1, string_type = 2 } = .none,
     case_order: std.ArrayListUnmanaged([]const u8) = .{},
     slot_layout: ?*PhpObject.SlotLayout = null,
@@ -302,6 +307,9 @@ pub const ClassDef = struct {
         const existed = self.methods.contains(info.name);
         try self.methods.put(allocator, info.name, info);
         if (!existed) try self.method_order.append(allocator, info.name);
+        if (!self.has_prop_hooks and std.mem.indexOf(u8, info.name, "$hook_") != null) {
+            self.has_prop_hooks = true;
+        }
     }
 
     pub const PropertyDef = struct {
@@ -3579,9 +3587,27 @@ pub const VM = struct {
                         const copy = try self.allocator.create(PhpArray);
                         copy.* = .{};
                         try self.arrays.append(self.allocator, copy);
-                        for (src.entries.items) |entry| {
-                            try copy.set(self.allocator, entry.key, entry.value);
-                        }
+                        // shallow foreach snapshot. src's entries are already
+                        // normalized so the ordered (key,value) pairs copy
+                        // verbatim; per-element copy.set() instead re-ran
+                        // normalizeKey + an O(n) key scan + incremental entries
+                        // growth per element, which profiled at 83% of foreach
+                        // cost on the per-char lexer loops WP runs. iteration
+                        // (iter_check) walks entries by cursor and never looks
+                        // up by key, and the by-ref writeback targets the
+                        // re-evaluated original (not this copy), so string_index
+                        // is left unbuilt. element refs still get retained to
+                        // match PhpArray.set's store choke
+                        try copy.entries.appendSlice(self.allocator, src.entries.items);
+                        for (copy.entries.items) |entry| switch (entry.value) {
+                            .object => |o| o.retain(),
+                            .array => |a| a.retain(),
+                            .generator => |g| g.retain(),
+                            .fiber => |f| f.retain(),
+                            else => {},
+                        };
+                        copy.next_int_key = src.next_int_key;
+                        copy.has_int_keys = src.has_int_keys;
                         self.stack[self.sp - 1] = .{ .array = copy };
                         iterable = .{ .array = copy };
                     }
@@ -11771,6 +11797,23 @@ pub const VM = struct {
     }
 
     pub fn hasPropHook(self: *VM, class_name: []const u8, prop_name: []const u8, kind: enum { get, set }) bool {
+        // fast path: if no class in this hierarchy declares any property hook,
+        // the per-access bufPrint + hasMethod lookup is pure overhead. walking
+        // the (usually 1-3 deep) parent chain of bool checks is far cheaper and
+        // skips it for the overwhelming majority of classes. on hook-heavy
+        // workloads this short-circuit costs a couple hashmap gets before the
+        // existing cache + lookup runs
+        {
+            var current = class_name;
+            const has_any = while (true) {
+                if (self.classes.get(current)) |cls| {
+                    if (cls.has_prop_hooks) break true;
+                    if (cls.parent) |p| { current = p; continue; }
+                }
+                break false;
+            };
+            if (!has_any) return false;
+        }
         const kind_bit: u2 = switch (kind) { .get => 1, .set => 2 };
         const fn_count = self.functions.count() + self.native_fns.count();
         const cls_count = self.classes.count();
