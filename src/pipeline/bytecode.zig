@@ -328,7 +328,15 @@ pub const OpCode = enum(u8) {
             .equal, .not_equal, .identical, .not_identical,
             .less, .less_equal, .greater, .greater_equal, .spaceship,
             .instance_check,
+            // array-literal element builders: the array stays on the stack
+            // (peek), only the pushed operands are consumed. array_push and
+            // array_spread pop one operand; array_set_elem pops key+value.
+            // these were missing and defaulted to else=>0, which broke
+            // scanCallerArgSources' backward arg-boundary walk whenever an
+            // array literal appeared as a call argument
+            .array_push, .array_spread,
             => -1,
+            .array_set_elem => -2,
             // unary ops: pop 1, push 1
             .negate, .bit_not, .not, .cast_int, .cast_float, .cast_string,
             .cast_bool, .cast_array, .cast_object, .get_obj_class,

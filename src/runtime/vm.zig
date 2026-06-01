@@ -3368,16 +3368,18 @@ pub const VM = struct {
                 },
 
                 .array_set_local, .array_set_local_ref => {
-                    const is_ref = op == .array_set_local_ref;
+                    // ref-into-element ($arr[k] = &$v) stores a copy (documented
+                    // limitation), so both opcodes behave identically here
                     const slot = self.readU16();
                     const raw_val = self.pop();
                     const key = self.pop();
-                    // value-assign clones; ref-assign keeps the underlying
-                    // PhpArray shared. see array_set above for rationale
-                    const val = if (!is_ref and raw_val == .array)
-                        try self.copyValue(raw_val)
-                    else
-                        raw_val;
+                    // the value goes straight into set() which is a retaining
+                    // store choke point - it must arrive un-retained. under COW
+                    // sharing the element with the rhs (set's single retain) IS
+                    // the value-semantics isolation: the next in-place write
+                    // separates via cowSeparate. copyValue'ing here would double-
+                    // count the refcount and make cowSeparate split a sole owner
+                    const val = raw_val;
                     const frame = self.currentFrame();
 
                     var cur: Value = .null;
@@ -3470,11 +3472,8 @@ pub const VM = struct {
                             if (try self.throwOffsetKeyType(key, .access)) continue;
                             return error.RuntimeError;
                         }
-                        // COW: separate a shared array before writing the element -
-                        // UNLESS this variable is reference-bound (`&` alias, e.g.
-                        // `$r = &$arr[$k]`), where the write must mutate in place to
-                        // propagate through the alias. a reference is not a COW share
-                        const dst = if (ref_cell != null) cur.array else try self.cowSeparate(cur.array);
+                        // COW: separate a shared array before writing the element
+                        const dst = try self.cowSeparate(cur.array);
                         if (dst != cur.array) {
                             try self.storeLocalSlot(frame, slot, .{ .array = dst });
                             cur = .{ .array = dst };
@@ -3522,18 +3521,16 @@ pub const VM = struct {
                         }
                     }
                     var cur: Value = .null;
-                    var ea_from_ref = false;
                     if (frame.func) |func| {
+                        var from_ref = false;
                         if (slot < func.slot_names.len and func.slot_names[slot].len > 0) {
                             if (frame.ref_slots.get(func.slot_names[slot])) |cell| {
                                 cur = cell.*;
-                                ea_from_ref = true;
+                                from_ref = true;
                             }
                         }
-                        if (!ea_from_ref and slot < frame.locals.len) cur = frame.locals[slot];
+                        if (!from_ref and slot < frame.locals.len) cur = frame.locals[slot];
                     } else {
-                        const gn = if (slot < self.global_slot_names.len) self.global_slot_names[slot] else "";
-                        if (gn.len > 0 and frame.ref_slots.get(gn) != null) ea_from_ref = true;
                         cur = self.getLocalGlobal(slot, frame);
                     }
                     if (cur == .int or cur == .float or (cur == .bool and cur.bool)) {
@@ -3543,10 +3540,8 @@ pub const VM = struct {
                     if (cur != .null and !(cur == .bool and !cur.bool)) {
                         // COW: this array is about to be mutated in place (the
                         // pushed array feeds array_push / array_set / chain).
-                        // separate it from co-holders first - UNLESS the variable
-                        // is reference-bound (`&` alias), where the write must
-                        // propagate through the alias (mutate in place)
-                        if (cur == .array and !ea_from_ref) {
+                        // separate it from any co-holders first
+                        if (cur == .array) {
                             const sep = try self.cowSeparate(cur.array);
                             if (sep != cur.array) {
                                 try self.storeLocalSlot(frame, slot, .{ .array = sep });
@@ -9918,28 +9913,29 @@ pub const VM = struct {
     fn methodExistsInAncestors(self: *VM, class_name: []const u8, method_name: []const u8, def: *const ClassDef) bool {
         var buf: [256]u8 = undefined;
 
-        // check parent class chain (functions, native_fns, and method declarations)
+        // check parent class chain (functions, native_fns, and method declarations).
+        // an UNREGISTERED ancestor (parent class or interface) means the hierarchy
+        // isn't fully loaded yet - PHP resolves the whole chain before checking
+        // #[Override], but zphp can register a class before an implemented
+        // interface (e.g. Collection before Enumerable during autoload). in that
+        // window we cannot prove the method is absent, so we must be conservative
+        // and treat it as present - a missed real violation is far better than a
+        // false positive that aborts class loading
         var current: ?[]const u8 = def.parent;
         while (current) |parent| {
-            const full = std.fmt.bufPrint(&buf, "{s}::{s}", .{ parent, method_name }) catch break;
+            const full = std.fmt.bufPrint(&buf, "{s}::{s}", .{ parent, method_name }) catch return true;
             if (self.functions.contains(full) or self.native_fns.contains(full)) return true;
-            const pcls = self.classes.get(parent) orelse break;
+            const pcls = self.classes.get(parent) orelse return true;
             if (pcls.methods.contains(method_name)) return true;
-            current = pcls.parent;
-        }
-
-        // check interfaces (including parent interfaces)
-        for (def.interfaces.items) |iface_name| {
-            if (self.interfaceDeclaresMethod(iface_name, method_name)) return true;
-        }
-        // also check parent's interfaces
-        current = def.parent;
-        while (current) |parent| {
-            const pcls = self.classes.get(parent) orelse break;
             for (pcls.interfaces.items) |iface_name| {
                 if (self.interfaceDeclaresMethod(iface_name, method_name)) return true;
             }
             current = pcls.parent;
+        }
+
+        // check directly-implemented interfaces (and their parent interfaces)
+        for (def.interfaces.items) |iface_name| {
+            if (self.interfaceDeclaresMethod(iface_name, method_name)) return true;
         }
 
         _ = class_name;
@@ -9947,7 +9943,9 @@ pub const VM = struct {
     }
 
     fn interfaceDeclaresMethod(self: *VM, iface_name: []const u8, method_name: []const u8) bool {
-        const idef = self.interfaces.get(iface_name) orelse return false;
+        // unresolved interface: can't disprove the method exists - be conservative
+        // (see methodExistsInAncestors) so a load-order gap never false-positives
+        const idef = self.interfaces.get(iface_name) orelse return true;
         for (idef.methods.items) |m| {
             if (std.mem.eql(u8, m, method_name)) return true;
         }
@@ -10935,12 +10933,18 @@ pub const VM = struct {
             fi -= 1;
             for (self.frames[fi].ref_array_bindings.items) |binding| {
                 if (binding.cell == cell) {
+                    // retaining store - release the overwritten old value to
+                    // balance the retain (see writebackRefs)
+                    const old = binding.array.get(binding.key);
                     try binding.array.set(self.allocator, binding.key, val);
+                    self.releaseValue(old);
                 }
             }
             for (self.frames[fi].ref_object_bindings.items) |binding| {
                 if (binding.cell == cell) {
+                    const old = binding.object.get(binding.prop_name);
                     try binding.object.set(self.allocator, binding.prop_name, val);
+                    self.releaseValue(old);
                 }
             }
             for (self.frames[fi].ref_static_bindings.items) |binding| {
@@ -10952,11 +10956,21 @@ pub const VM = struct {
     }
 
     fn writebackRefs(self: *VM) !void {
+        // array/object .set are retaining store choke points that do NOT release
+        // the overwritten old value (no VM access there). capture+release it
+        // here, mirroring array_set_local. without this, writing the cell's
+        // current value back over an identical (or any) element re-retains
+        // without dropping the old hold - a +1 leak that later makes cowSeparate
+        // split a sole-owned referenced array
         for (self.currentFrame().ref_array_bindings.items) |binding| {
+            const old = binding.array.get(binding.key);
             try binding.array.set(self.allocator, binding.key, binding.cell.*);
+            self.releaseValue(old);
         }
         for (self.currentFrame().ref_object_bindings.items) |binding| {
+            const old = binding.object.get(binding.prop_name);
             try binding.object.set(self.allocator, binding.prop_name, binding.cell.*);
+            self.releaseValue(old);
         }
         for (self.currentFrame().ref_static_bindings.items) |binding| {
             try self.writeStaticProp(binding.class_name, binding.prop_name, binding.cell.*);
