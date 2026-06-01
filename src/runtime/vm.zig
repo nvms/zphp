@@ -11049,6 +11049,13 @@ pub const VM = struct {
         return frame.vars.get(var_name) orelse .null;
     }
 
+    fn isCallFamilyOp(op: OpCode) bool {
+        return switch (op) {
+            .call, .call_spread, .call_indirect, .call_indirect_spread, .new_obj, .method_call, .method_call_spread, .method_call_dynamic, .static_call, .static_call_spread, .static_call_dyn_method, .static_call_dyn_both => true,
+            else => false,
+        };
+    }
+
     fn scanCallerArgSources(self: *VM, ac: usize) [16]RefSource {
         var sources: [16]RefSource = .{.none} ** 16;
         if (ac == 0) return sources;
@@ -11062,17 +11069,22 @@ pub const VM = struct {
         // call_indirect / require / method_call_dynamic are 2; etc
         var call_pos: usize = 0;
         var found_call = false;
-        const candidates = [_]usize{ 4, 2, 1, 3 };
+        // static_call is 6-wide and static_call_spread is 5-wide; without these
+        // the by-ref args of a static method call (e.g. Arr::set($this->items,
+        // ...)) were never classified, so the writeback binding was never made.
+        // require the byte to be an actual call-family opcode so an operand byte
+        // that merely happens to match a non-call op of width w can't false-match
+        const candidates = [_]usize{ 4, 6, 2, 5, 1, 3 };
         for (candidates) |w| {
             if (ip < w) continue;
             const p = ip - w;
             const b = code[p];
-            const probe_w = OpCode.widthFromByte(b);
-            if (probe_w == w) {
-                call_pos = p;
-                found_call = true;
-                break;
-            }
+            if (OpCode.widthFromByte(b) != w) continue;
+            const op = std.meta.intToEnum(OpCode, b) catch continue;
+            if (!isCallFamilyOp(op)) continue;
+            call_pos = p;
+            found_call = true;
+            break;
         }
         if (!found_call) return sources;
 
@@ -11116,11 +11128,26 @@ pub const VM = struct {
             var bad_op = false;
             while (i > 0 and depth < 1) {
                 i -= 1;
-                const op: OpCode = std.meta.intToEnum(OpCode, code[instrs[i]]) catch {
+                const pos = instrs[i];
+                const op: OpCode = std.meta.intToEnum(OpCode, code[pos]) catch {
                     bad_op = true;
                     break;
                 };
-                depth += @as(i32, op.stackEffect());
+                // call-family opcodes have a VARIADIC stack effect (1-argc, or
+                // -argc for forms that also pop a receiver/callable) that a fixed
+                // stackEffect() can't express. read argc from the operand so the
+                // backward arg-boundary walk stays correct when an argument is a
+                // function/method call (e.g. Arr::set($x, $k, array_merge(...))).
+                // without this the by-ref lvalue arg is mis-delimited and loses
+                // its writeback binding
+                const eff: i32 = switch (op) {
+                    .call, .new_obj => if (pos + 3 < code.len) 1 - @as(i32, code[pos + 3]) else op.stackEffect(),
+                    .method_call => if (pos + 3 < code.len) -@as(i32, code[pos + 3]) else op.stackEffect(),
+                    .static_call => if (pos + 5 < code.len) 1 - @as(i32, code[pos + 5]) else op.stackEffect(),
+                    .call_indirect => if (pos + 1 < code.len) -@as(i32, code[pos + 1]) else op.stackEffect(),
+                    else => @as(i32, op.stackEffect()),
+                };
+                depth += eff;
             }
             if (bad_op or depth < 1) break;
 
