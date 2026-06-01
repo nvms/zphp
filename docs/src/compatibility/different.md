@@ -2,17 +2,16 @@
 
 zphp is not a drop-in replacement for every PHP program. There are places where behavior differs from PHP 8.4, either by design or as a current limitation. This page documents the ones you're most likely to notice.
 
-## Array copy semantics
+## Copy-on-assign vs copy-on-write
 
-Like PHP, zphp uses copy-on-write for arrays: assigning an array to a new variable shares the underlying data until one of them is modified, at which point the writer gets its own copy.
+PHP uses copy-on-write for arrays: assigning an array to a new variable shares the underlying data until one of them is modified. zphp uses copy-on-assign: the array is fully cloned at the point of assignment.
 
 ```php
 $a = [1, 2, 3];
-$b = $a;   // shared, no copy yet
-$b[] = 4;  // $b separates here; $a is untouched
+$b = $a;  // PHP: shared until modified. zphp: full copy now.
 ```
 
-The semantics are identical to PHP from your code's perspective - both produce independent copies, and the copy only happens when you actually modify one of them. This matters for performance: passing large arrays around without modifying them is cheap.
+In practice, this rarely matters. The semantics are identical from your code's perspective - both produce independent copies. The difference is when the copy happens, which can affect memory usage if you're assigning very large arrays without modifying them.
 
 ## Global variables
 
