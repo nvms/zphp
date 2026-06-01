@@ -1005,13 +1005,11 @@ fn aoGetArrayCopy(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
         try ctx.vm.arrays.append(ctx.allocator, empty);
         return .{ .array = empty };
     };
-    const copy = try ctx.allocator.create(PhpArray);
-    copy.* = .{};
-    try ctx.vm.arrays.append(ctx.allocator, copy);
-    for (arr.entries.items) |entry| {
-        try copy.set(ctx.allocator, entry.key, entry.value);
-    }
-    return .{ .array = copy };
+    // independent deep snapshot: ArrayObject mutates its internal array in place,
+    // and under COW a shallow copy would share nested arrays with it (a later
+    // $ao[k][..]=v would leak into this copy). a deep clone isolates the snapshot,
+    // matching PHP's copy-on-write independence
+    return .{ .array = try ctx.vm.cloneArray(arr) };
 }
 
 fn aoKsort(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
@@ -1262,13 +1260,9 @@ fn aiGetArrayCopy(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
         try ctx.vm.arrays.append(ctx.allocator, empty);
         return .{ .array = empty };
     };
-    const copy = try ctx.allocator.create(PhpArray);
-    copy.* = .{};
-    try ctx.vm.arrays.append(ctx.allocator, copy);
-    for (arr.entries.items) |entry| {
-        try copy.set(ctx.allocator, entry.key, entry.value);
-    }
-    return .{ .array = copy };
+    // independent deep snapshot (see aoGetArrayCopy) - avoids nested-array COW
+    // sharing with the iterator's mutable internal array
+    return .{ .array = try ctx.vm.cloneArray(arr) };
 }
 
 fn aiAppend(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
