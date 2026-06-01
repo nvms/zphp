@@ -3470,8 +3470,11 @@ pub const VM = struct {
                             if (try self.throwOffsetKeyType(key, .access)) continue;
                             return error.RuntimeError;
                         }
-                        // COW: separate a shared array before writing the element
-                        const dst = try self.cowSeparate(cur.array);
+                        // COW: separate a shared array before writing the element -
+                        // UNLESS this variable is reference-bound (`&` alias, e.g.
+                        // `$r = &$arr[$k]`), where the write must mutate in place to
+                        // propagate through the alias. a reference is not a COW share
+                        const dst = if (ref_cell != null) cur.array else try self.cowSeparate(cur.array);
                         if (dst != cur.array) {
                             try self.storeLocalSlot(frame, slot, .{ .array = dst });
                             cur = .{ .array = dst };
@@ -3519,16 +3522,18 @@ pub const VM = struct {
                         }
                     }
                     var cur: Value = .null;
+                    var ea_from_ref = false;
                     if (frame.func) |func| {
-                        var from_ref = false;
                         if (slot < func.slot_names.len and func.slot_names[slot].len > 0) {
                             if (frame.ref_slots.get(func.slot_names[slot])) |cell| {
                                 cur = cell.*;
-                                from_ref = true;
+                                ea_from_ref = true;
                             }
                         }
-                        if (!from_ref and slot < frame.locals.len) cur = frame.locals[slot];
+                        if (!ea_from_ref and slot < frame.locals.len) cur = frame.locals[slot];
                     } else {
+                        const gn = if (slot < self.global_slot_names.len) self.global_slot_names[slot] else "";
+                        if (gn.len > 0 and frame.ref_slots.get(gn) != null) ea_from_ref = true;
                         cur = self.getLocalGlobal(slot, frame);
                     }
                     if (cur == .int or cur == .float or (cur == .bool and cur.bool)) {
@@ -3538,8 +3543,10 @@ pub const VM = struct {
                     if (cur != .null and !(cur == .bool and !cur.bool)) {
                         // COW: this array is about to be mutated in place (the
                         // pushed array feeds array_push / array_set / chain).
-                        // separate it from any co-holders first
-                        if (cur == .array) {
+                        // separate it from co-holders first - UNLESS the variable
+                        // is reference-bound (`&` alias), where the write must
+                        // propagate through the alias (mutate in place)
+                        if (cur == .array and !ea_from_ref) {
                             const sep = try self.cowSeparate(cur.array);
                             if (sep != cur.array) {
                                 try self.storeLocalSlot(frame, slot, .{ .array = sep });
@@ -5494,7 +5501,7 @@ pub const VM = struct {
                             const cval = self.stack[self.sp - ci];
                             // copyValue: the constant value is owned by the
                             // ClassDef and must be refcounted
-                            try def.static_props.put(self.allocator, cname, try self.copyValue(cval));
+                            try def.static_props.put(self.allocator, cname, try self.copyDefault(cval));
                             try def.constant_names.put(self.allocator, cname, {});
                         }
                         self.sp -= const_count;
@@ -9633,7 +9640,7 @@ pub const VM = struct {
             // copyValue: an array/object default is owned by the ClassDef -
             // it must be refcounted (else an array default sits at refcount 0
             // and the first get_static_prop+push+pop releases it)
-            try def.static_props.put(self.allocator, sprop_names[pi], try self.copyValue(default_val));
+            try def.static_props.put(self.allocator, sprop_names[pi], try self.copyDefault(default_val));
             if (sprop_type[pi].len > 0) try def.static_prop_types.put(self.allocator, sprop_names[pi], sprop_type[pi]);
             const vis_byte = sprop_visibility[pi] & 0x03;
             if (vis_byte != 0) {
@@ -10299,7 +10306,7 @@ pub const VM = struct {
                 if (!def.static_props.contains(sp.name)) {
                     // each using class gets its own copy of the trait's static
                     // property - deep-clone so array values are not shared
-                    try def.static_props.put(self.allocator, sp.name, try self.copyValue(sp.value));
+                    try def.static_props.put(self.allocator, sp.name, try self.copyDefault(sp.value));
                 }
             }
         }
@@ -10308,7 +10315,7 @@ pub const VM = struct {
             for (consts) |c| {
                 if (!def.static_props.contains(c.name)) {
                     // each using class gets its own refcounted copy
-                    try def.static_props.put(self.allocator, c.name, try self.copyValue(c.value));
+                    try def.static_props.put(self.allocator, c.name, try self.copyDefault(c.value));
                     try def.constant_names.put(self.allocator, c.name, {});
                 }
             }
@@ -12240,7 +12247,7 @@ pub const VM = struct {
             if (cls.slot_layout) |layout| {
                 const slots = self.allocator.alloc(Value, layout.names.len) catch return error.RuntimeError;
                 for (layout.defaults, 0..) |def_val, i| {
-                    slots[i] = try self.copyValue(def_val);
+                    slots[i] = try self.copyDefault(def_val);
                 }
                 obj.slots = slots;
                 obj.slot_layout = layout;
@@ -12251,9 +12258,24 @@ pub const VM = struct {
                 try self.initObjectProperties(obj, parent);
             }
             for (cls.properties.items) |prop| {
-                try obj.set(self.allocator, prop.name, try self.copyValue(prop.default));
+                try obj.set(self.allocator, prop.name, try self.copyDefault(prop.default));
             }
         }
+    }
+
+    // copy a template value (a property/static default) into a fresh owner.
+    // a default array is a compile-time TEMPLATE held by the slot layout, whose
+    // reference is not part of the COW refcount - so it must be deep-cloned, not
+    // COW-shared. sharing it would let an instance's first-write separation
+    // decrement the template to refcount 0 and free it while the layout still
+    // points at it (use-after-free). other value kinds copy normally
+    fn copyDefault(self: *VM, val: Value) RuntimeError!Value {
+        if (val == .array) {
+            const c = try self.cloneArray(val.array);
+            arrayRetain(c);
+            return .{ .array = c };
+        }
+        return self.copyValue(val);
     }
 
     fn arrayUnion(self: *VM, a: *PhpArray, b: *PhpArray) RuntimeError!*PhpArray {
