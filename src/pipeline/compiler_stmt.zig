@@ -1,5 +1,4 @@
 const std = @import("std");
-const compiler_expr = @import("compiler_expr.zig");
 const Compiler = @import("compiler.zig").Compiler;
 const Ast = @import("ast.zig").Ast;
 const bytecode = @import("bytecode.zig");
@@ -231,16 +230,7 @@ pub fn compileForeach(self: *Compiler, node: Ast.Node) Error!void {
     }
     self.loop_depth += 1;
     self.foreach_depth += 1;
-    // COW: a by-ref foreach writes back into the iterable each iteration; if the
-    // iterable variable shares its array, separate it once up front (vivify-load
-    // rebinds the slot to an unshared array) so the writeback can't corrupt
-    // co-holders. value foreach iterates a snapshot and needs no separation
-    const iter_tag = self.ast.nodes[iter_n].tag;
-    if (val_by_ref and (iter_tag == .variable or iter_tag == .array_access)) {
-        try compiler_expr.compileVivifyChain(self, iter_n);
-    } else {
-        try self.compileNode(iter_n);
-    }
+    try self.compileNode(iter_n);
     try self.emitOp(.iter_begin);
 
     const loop_top = self.chunk.offset();

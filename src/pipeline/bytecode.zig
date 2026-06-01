@@ -88,9 +88,6 @@ pub const OpCode = enum(u8) {
     array_set_local_ref, // same as array_set_local but does NOT clone
     ensure_array_local, // u16: slot - read local, vivify null/false to array, error on scalar, push result
     ensure_array_var, // u16: name const - read var, vivify null/false to array, error on scalar, push result
-    ensure_array_prop, // u16: prop-name const - pop obj, read obj->prop, vivify null/false to array, COW-separate if shared and write back, push result (for $obj->prop[]=/[k] op= writes)
-    cow_separate_local, // u16: slot - if the local holds a shared array, separate it in place (write unshared copy back to slot). non-vivifying, non-throwing, pushes NOTHING. emitted before by-ref native args / unset bases
-    ensure_array_static_prop, // u16 class-name const, u16 prop-name const - read Class::$prop, vivify, COW-separate if shared + write back, push (for Class::$prop[]=/[k] op= writes)
 
     // exceptions
     throw,
@@ -280,7 +277,7 @@ pub const OpCode = enum(u8) {
             .closure_bind, .closure_bind_ref, .define_const,
             .iter_check, .inc_local, .dec_local,
             .get_static_prop_dynamic,
-            .ensure_array_local, .ensure_array_var, .ensure_array_prop, .cow_separate_local,
+            .ensure_array_local, .ensure_array_var,
             .make_var_array_elem_ref, .break_var_ref,
             .make_var_prop_ref_dyn,
             .return_ref, .bind_ref_from_return,
@@ -289,7 +286,6 @@ pub const OpCode = enum(u8) {
             .call, .call_spread, .new_obj, .method_call, .method_call_spread, .static_call_dyn_method, .make_var_ref, .make_var_prop_ref => 4,
             .get_static_prop, .get_class_const, .set_prop_default, .set_static_prop, .get_static, .set_static,
             .static_call_spread, .add_local_to_local, .sub_local_to_local, .mul_local_to_local,
-            .ensure_array_static_prop,
             => 5,
             .make_var_static_prop_ref => 7,
             .static_call => 6,
@@ -312,8 +308,7 @@ pub const OpCode = enum(u8) {
             .constant, .op_null, .op_true, .op_false, .dup, .get_var, .get_local,
             .get_global, .get_static,
             .get_static_prop, .get_class_const, .array_new, .clone_obj, .isset_prop, .isset_index,
-            .ensure_array_local, .ensure_array_var, .ensure_array_prop, .cow_separate_local,
-            .ensure_array_static_prop,
+            .ensure_array_local, .ensure_array_var,
             => 1,
             // pop object, push property value (net 0: pop obj, push val)
             .get_prop, .get_prop_coalesce,
