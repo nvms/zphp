@@ -1694,6 +1694,16 @@ pub const VM = struct {
         self.sp = 0;
         self.handler_count = 0;
         self.handler_floor = 0;
+        // pending_exception holds a *PhpObject into the arena freeHeapItems
+        // above just freed. leaving it set means the next request's native-call
+        // error path (which reads pending_exception before deciding it threw)
+        // dereferences a dangling exception object in prependNativeFrameToTrace
+        // -> intermittent segfault (the freed pages are sometimes still mapped).
+        // exception_handler_stack holds set_exception_handler callables (closures
+        // / array callables) that are likewise per-request and dangle after free
+        self.pending_exception = null;
+        self.exception_dispatched = false;
+        self.exception_handler_stack.clearRetainingCapacity();
         self.current_fiber = null;
         self.fiber_suspend_pending = false;
         self.fiber_suspend_value = .null;
