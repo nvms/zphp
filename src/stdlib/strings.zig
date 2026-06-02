@@ -63,6 +63,7 @@ pub const entries = .{
     .{ "mb_check_encoding", native_mb_check_encoding },
     .{ "mb_detect_encoding", native_mb_detect_encoding },
     .{ "mb_convert_encoding", native_mb_convert_encoding },
+    .{ "mb_convert_variables", native_mb_convert_variables },
     .{ "utf8_encode", native_utf8_encode },
     .{ "utf8_decode", native_utf8_decode },
     .{ "iconv", native_iconv },
@@ -2984,6 +2985,49 @@ fn native_utf8_decode(ctx: *NativeContext, args: []const Value) RuntimeError!Val
     const out = convertUtf8ToLatin1(ctx.allocator, args[0].string) catch return .{ .bool = false };
     try ctx.strings.append(ctx.allocator, out);
     return .{ .string = out };
+}
+
+fn convertVarEncoding(ctx: *NativeContext, val: Value, to: []const u8, from: []const u8) RuntimeError!Value {
+    return switch (val) {
+        .string => try native_mb_convert_encoding(ctx, &.{ val, .{ .string = to }, .{ .string = from } }),
+        .array => blk: {
+            const arr = try ctx.createArray();
+            for (val.array.entries.items) |e| {
+                try arr.set(ctx.allocator, e.key, try convertVarEncoding(ctx, e.value, to, from));
+            }
+            break :blk .{ .array = arr };
+        },
+        else => val,
+    };
+}
+
+// mb_convert_variables(string $to, array|string $from, mixed &$var, mixed &...$vars):
+// converts the encoding of each var IN PLACE (by reference, recursing into
+// arrays) and returns the source encoding. Symfony Console's splitStringByWidth
+// calls this on its line array - without it, error rendering throws and cascades
+fn native_mb_convert_variables(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len < 3 or args[0] != .string) return .{ .bool = false };
+    const to = args[0].string;
+    // $from may be a comma-separated candidate list or an array of candidates;
+    // take the first (detection among ASCII/UTF-8/Latin1 is near-identity anyway)
+    const from: []const u8 = blk: {
+        if (args[1] == .string) {
+            const s = args[1].string;
+            if (std.mem.indexOfScalar(u8, s, ',')) |c| break :blk std.mem.trim(u8, s[0..c], " ");
+            break :blk s;
+        }
+        if (args[1] == .array and args[1].array.entries.items.len > 0) {
+            const f = args[1].array.entries.items[0].value;
+            if (f == .string) break :blk f.string;
+        }
+        break :blk "UTF-8";
+    };
+    var i: usize = 2;
+    while (i < args.len) : (i += 1) {
+        const converted = try convertVarEncoding(ctx, args[i], to, from);
+        ctx.setCallerVar(i, args.len, converted);
+    }
+    return .{ .string = try ctx.createString(from) };
 }
 
 fn native_mb_convert_encoding(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
