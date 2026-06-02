@@ -143,9 +143,14 @@ pub fn compileAssign(self: *Compiler, node: Ast.Node) Error!void {
             return;
         }
         if (op_tag != .equal) {
+            // base1 (array_set target) vivify-loads + separates and rebinds the
+            // slot. base2 feeds the read-only array_get, so it must be a PLAIN
+            // load of the now-separated slot - a second separating load would
+            // (under COW, when the global $GLOBALS mirror inflates refcount)
+            // spuriously separate again and write through a different array
             try compileVivifyChain(self,target.data.lhs);
             try self.compileNode(target.data.rhs);
-            try compileVivifyChain(self,target.data.lhs);
+            try self.compileNode(target.data.lhs);
             try self.compileNode(target.data.rhs);
             try self.emitOp(.array_get);
             try self.compileNode(node.data.rhs);
@@ -492,7 +497,9 @@ pub fn compilePrefixOp(self: *Compiler, node: Ast.Node) Error!void {
             return;
         }
         if (target.tag == .array_access) {
-            try self.compileNode(target.data.lhs);
+            // COW: the base consumed by array_set (this first load) must be
+            // separated; the second load feeds the read-only array_get
+            try compileVivifyChain(self, target.data.lhs);
             try self.compileNode(target.data.rhs);
             try self.compileNode(target.data.lhs);
             try self.compileNode(target.data.rhs);
@@ -587,7 +594,9 @@ pub fn compilePostfixOp(self: *Compiler, node: Ast.Node) Error!void {
     }
 
     if (target.tag == .array_access) {
-        try self.compileNode(target.data.lhs);
+        // COW: vivify-load the base so a shared array is separated (and written
+        // back to its slot) before the in-place element inc/dec
+        try compileVivifyChain(self, target.data.lhs);
         try self.compileNode(target.data.rhs);
         try self.emitOp(if (op_tag == .plus_plus) .array_elem_inc else .array_elem_dec);
         return;
@@ -679,6 +688,54 @@ pub fn compileTernary(self: *Compiler, node: Ast.Node) Error!void {
         try self.compileNode(else_node);
         self.patchJump(end_jump);
     }
+}
+
+// natives that mutate their array argument in place (arg 0). under COW the
+// caller's variable may share that array, so the arg must be separated first.
+// the compiler emits a separating vivify-load (ensure_array_local) for arg 0
+// when the arg is a simple variable / array element, which writes the unshared
+// array back to the slot and pushes it - the native then mutates an unshared
+// array and the caller's variable reflects the result
+fn cowByRefArg0(name: []const u8) bool {
+    const names = [_][]const u8{
+        "sort", "rsort", "asort", "arsort", "ksort", "krsort", "natsort", "natcasesort",
+        "usort", "uasort", "uksort", "shuffle",
+        "array_push", "array_pop", "array_shift", "array_unshift", "array_splice",
+        "array_walk", "array_walk_recursive", "array_multisort",
+        "end", "reset", "next", "prev", "each",
+    };
+    for (names) |n| if (std.mem.eql(u8, n, name)) return true;
+    return false;
+}
+
+fn compileCallArg(self: *Compiler, fn_name: []const u8, pos: usize, arg_idx: u32) Error!void {
+    if (pos == 0 and cowByRefArg0(fn_name)) {
+        const arg = self.ast.nodes[arg_idx];
+        if (arg.tag == .variable) {
+            // separate-in-place if it holds a shared array, then load normally.
+            // non-throwing: a non-array arg passes through so the native raises
+            // its own "must be of type array" TypeError
+            const name = self.ast.tokenSlice(arg.main_token);
+            var slot_opt: ?u16 = null;
+            if (self.local_slots.get(name)) |s| {
+                slot_opt = s;
+            } else if (self.arrowCaptureSlot(name)) |s| {
+                slot_opt = s;
+            } else if (!self.inFunctionScope() and name.len > 0 and name[0] == '$') {
+                slot_opt = self.getOrCreateSlot(name);
+            }
+            if (slot_opt) |slot| {
+                try self.emitOp(.cow_separate_local);
+                try self.emitU16(slot);
+                try self.compileNode(arg_idx);
+                return;
+            }
+        } else if (arg.tag == .array_access) {
+            try compileVivifyChain(self, arg_idx);
+            return;
+        }
+    }
+    try self.compileNode(arg_idx);
 }
 
 pub fn compileCall(self: *Compiler, node: Ast.Node) Error!void {
@@ -827,10 +884,10 @@ pub fn compileCall(self: *Compiler, node: Ast.Node) Error!void {
         }
     } else if (callee.tag == .identifier) {
         const call_offset = self.current_source_offset;
-        for (args) |arg| try self.compileNode(arg);
-        self.current_source_offset = call_offset;
         const raw_name = self.ast.tokenSlice(callee.main_token);
         const name = self.resolveFunctionName(raw_name);
+        for (args, 0..) |arg, i| try compileCallArg(self, name, i, arg);
+        self.current_source_offset = call_offset;
         const idx = try self.addConstant(.{ .string = name });
         try self.emitOp(.call);
         try self.emitU16(idx);
@@ -952,6 +1009,25 @@ fn compileUnset(self: *Compiler, args: []const u32) Error!void {
                 try self.emitU16(prop_idx);
             }
         } else if (arg.tag == .array_access) {
+            // COW: removing an element mutates the array in place, so a base
+            // variable sharing its array must be separated first (non-vivifying
+            // - unset of a missing var must not create it)
+            const base = self.ast.nodes[arg.data.lhs];
+            if (base.tag == .variable) {
+                const bname = self.ast.tokenSlice(base.main_token);
+                var slot_opt: ?u16 = null;
+                if (self.local_slots.get(bname)) |s| {
+                    slot_opt = s;
+                } else if (self.arrowCaptureSlot(bname)) |s| {
+                    slot_opt = s;
+                } else if (!self.inFunctionScope() and bname.len > 0 and bname[0] == '$') {
+                    slot_opt = self.getOrCreateSlot(bname);
+                }
+                if (slot_opt) |slot| {
+                    try self.emitOp(.cow_separate_local);
+                    try self.emitU16(slot);
+                }
+            }
             // for `unset($a[k1][k2]...[kn])`, the intermediate reads should
             // use coalesce-safe semantics so missing keys don't warn
             try compileCoalesceFetch(self, arg.data.lhs);
@@ -1037,6 +1113,26 @@ pub fn compileVivifyChain(self: *Compiler, node_idx: u32) Error!void {
     } else if (node.tag == .variable or node.tag == .identifier) {
         const name = self.ast.tokenSlice(node.main_token);
         try emitEnsureArray(self, name);
+    } else if (node.tag == .property_access and !self.isDynamicProp(node)) {
+        // $obj->prop[]=x / $obj->prop[k] op= v: load the property array for
+        // in-place write with COW separation + write-back (ensure_array_prop)
+        try self.compileNode(node.data.lhs);
+        const prop_idx = try self.addConstant(.{ .string = self.propName(node) });
+        try self.emitOp(.ensure_array_prop);
+        try self.emitU16(prop_idx);
+    } else if (node.tag == .static_prop_access and self.ast.nodes[node.data.lhs].tag != .variable) {
+        // Class::$prop[]=x: load the static-prop array for in-place write with
+        // COW separation + write-back (ensure_array_static_prop). dynamic
+        // ($var::) class falls through to the plain load below
+        const class_node = self.ast.nodes[node.data.lhs];
+        const class_name = self.ast.tokenSlice(class_node.main_token);
+        var prop_name = self.ast.tokenSlice(node.main_token);
+        if (prop_name.len > 0 and prop_name[0] == '$') prop_name = prop_name[1..];
+        const class_idx = try self.addConstant(.{ .string = class_name });
+        const prop_idx = try self.addConstant(.{ .string = prop_name });
+        try self.emitOp(.ensure_array_static_prop);
+        try self.emitU16(class_idx);
+        try self.emitU16(prop_idx);
     } else {
         try self.compileNode(node_idx);
     }

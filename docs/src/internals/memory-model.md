@@ -21,16 +21,17 @@ Primitives (integers, floats, booleans, null) live on a fixed-size value stack a
 
 Strings, arrays, and objects are heap-allocated and tracked in per-type lists on the VM. When a request ends, the VM walks each list and frees everything. Values cannot leak across requests.
 
-## Copy-on-assign
+## Copy-on-write
 
-PHP uses copy-on-write for arrays: assigning an array to a new variable shares the underlying data until one side is modified. zphp clones the array at the point of assignment instead.
+Like PHP, zphp uses copy-on-write for arrays. Assigning an array to a new variable, passing it to a function, or returning it shares the underlying data; the copy is made lazily the first time one side modifies the array.
 
 ```php
 $a = [1, 2, 3, 4, 5];
-$b = $a;  // zphp: full clone here. PHP: shared until modified.
+$b = $a;   // shared, no copy
+$b[2] = 0; // $b separates here; $a still [1,2,3,4,5]
 ```
 
-The observable semantics are identical - both produce independent copies. The difference is when the copy happens. This can affect memory usage if you assign very large arrays without modifying the copy.
+The observable semantics are full value isolation - both ends behave as independent copies. Because the clone is deferred to the first write, reading or passing large arrays without modifying them costs nothing. Reference counting on the shared array decides when a write needs to separate; the request-boundary bulk free still reclaims everything at the end.
 
 ## Why no garbage collector
 

@@ -33,6 +33,8 @@ zphp beats PHP on the compute-heavy benchmarks that exercise stdlib and object d
 
 Fibonacci and loops are neck-and-neck with PHP - both runtimes are limited by call overhead and tight integer arithmetic, where PHP's JIT-less interpreter is already well-tuned. fastLoop is compiled as a separate object file (src/fast_loop.zig) so LLVM can optimize it independently of runLoop; without this the two functions compete for inlining decisions and regress unpredictably.
 
+Note: under the copy-on-write array model, the recursive-call benchmark (fibonacci) runs about 10-13% slower than under the old eager-clone model - the COW changes to the value-handling functions perturb the LLVM codegen of runLoop's call path, even though fibonacci itself touches no arrays. Loops, objects, arrays, and strings are unaffected or faster. This is an accepted tradeoff: eager cloning made array assignment O(n) and cost 84x on real applications (WordPress bootstrap 8.4s vs PHP 99ms, more than half of it in array clone); copy-on-write closes that to roughly 3x while costing one recursive-call microbenchmark a small constant factor.
+
 ### Optimization targets
 
 ## serve

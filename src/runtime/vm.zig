@@ -3040,7 +3040,19 @@ pub const VM = struct {
                         const existing = arr_val.array.get(arr_key);
                         if (existing != .null) {
                             if (existing == .array) {
-                                self.push(existing);
+                                // COW: this inner array is about to be mutated
+                                // (the vivify chain descends to write through it).
+                                // separate it from co-holders and store back into
+                                // the parent (already separated at the root). set
+                                // retains, so cancel the extra to keep one owner
+                                const inner = try self.cowSeparate(existing.array);
+                                if (inner != existing.array) {
+                                    try arr_val.array.set(self.allocator, arr_key, .{ .array = inner });
+                                    inner.refcount -= 1;
+                                    self.push(.{ .array = inner });
+                                } else {
+                                    self.push(existing);
+                                }
                             } else {
                                 const new_arr = try self.allocator.create(PhpArray);
                                 new_arr.* = .{};
@@ -3110,9 +3122,19 @@ pub const VM = struct {
                         continue;
                     }
                     if (existing == .array) {
+                        // COW: separate the (possibly shared) property array
+                        // before the inner write; store it back via obj.set
+                        // (retains - cancel the extra to keep one owner)
+                        var ea = existing;
+                        const inner = try self.cowSeparate(existing.array);
+                        if (inner != existing.array) {
+                            try obj.set(self.allocator, pname, .{ .array = inner });
+                            inner.refcount -= 1;
+                            ea = .{ .array = inner };
+                        }
                         // Stage 2 element-overwrite release on the inner write
-                        const inner_old = existing.array.get(ik);
-                        try existing.array.set(self.allocator, ik, v);
+                        const inner_old = ea.array.get(ik);
+                        try ea.array.set(self.allocator, ik, v);
                         if (inner_old == .object or inner_old == .array) {
                             self.releaseValue(inner_old);
                         }
@@ -3205,9 +3227,31 @@ pub const VM = struct {
                         continue;
                     }
                     if (existing == .array) {
+                        // COW: the inner array (held by base[outer]) may be
+                        // shared - separate before the in-place inner write and
+                        // store it back through base[outer]. set/offsetSet retain,
+                        // so cancel the extra to keep a single owner
+                        var ea = existing;
+                        const inner = try self.cowSeparate(existing.array);
+                        if (inner != existing.array) {
+                            if (base == .array) {
+                                try base.array.set(self.allocator, ok, .{ .array = inner });
+                                inner.refcount -= 1;
+                            } else if (base_is_array_access_obj) {
+                                _ = self.callMethod(base.object, "offsetSet", &.{ outer_key, .{ .array = inner } }) catch {
+                                    if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
+                                    return error.RuntimeError;
+                                };
+                                inner.refcount -= 1;
+                            } else if (outer_key == .string) {
+                                try base.object.set(self.allocator, outer_key.string, .{ .array = inner });
+                                inner.refcount -= 1;
+                            }
+                            ea = .{ .array = inner };
+                        }
                         // Stage 2 element-overwrite release on the inner write
-                        const inner_old = existing.array.get(ik);
-                        try existing.array.set(self.allocator, ik, v);
+                        const inner_old = ea.array.get(ik);
+                        try ea.array.set(self.allocator, ik, v);
                         if (inner_old == .object or inner_old == .array) {
                             self.releaseValue(inner_old);
                         }
@@ -3324,16 +3368,18 @@ pub const VM = struct {
                 },
 
                 .array_set_local, .array_set_local_ref => {
-                    const is_ref = op == .array_set_local_ref;
+                    // ref-into-element ($arr[k] = &$v) stores a copy (documented
+                    // limitation), so both opcodes behave identically here
                     const slot = self.readU16();
                     const raw_val = self.pop();
                     const key = self.pop();
-                    // value-assign clones; ref-assign keeps the underlying
-                    // PhpArray shared. see array_set above for rationale
-                    const val = if (!is_ref and raw_val == .array)
-                        try self.copyValue(raw_val)
-                    else
-                        raw_val;
+                    // the value goes straight into set() which is a retaining
+                    // store choke point - it must arrive un-retained. under COW
+                    // sharing the element with the rhs (set's single retain) IS
+                    // the value-semantics isolation: the next in-place write
+                    // separates via cowSeparate. copyValue'ing here would double-
+                    // count the refcount and make cowSeparate split a sole owner
+                    const val = raw_val;
                     const frame = self.currentFrame();
 
                     var cur: Value = .null;
@@ -3426,6 +3472,12 @@ pub const VM = struct {
                             if (try self.throwOffsetKeyType(key, .access)) continue;
                             return error.RuntimeError;
                         }
+                        // COW: separate a shared array before writing the element
+                        const dst = try self.cowSeparate(cur.array);
+                        if (dst != cur.array) {
+                            try self.storeLocalSlot(frame, slot, .{ .array = dst });
+                            cur = .{ .array = dst };
+                        }
                         const norm_key = Value.toArrayKey(key);
                         // Stage 2 element-overwrite release - see array_set above
                         const old_val = cur.array.get(norm_key);
@@ -3486,6 +3538,17 @@ pub const VM = struct {
                         return error.RuntimeError;
                     }
                     if (cur != .null and !(cur == .bool and !cur.bool)) {
+                        // COW: this array is about to be mutated in place (the
+                        // pushed array feeds array_push / array_set / chain).
+                        // separate it from any co-holders first
+                        if (cur == .array) {
+                            const sep = try self.cowSeparate(cur.array);
+                            if (sep != cur.array) {
+                                try self.storeLocalSlot(frame, slot, .{ .array = sep });
+                                self.push(.{ .array = sep });
+                                continue;
+                            }
+                        }
                         self.push(cur);
                         continue;
                     }
@@ -3537,6 +3600,29 @@ pub const VM = struct {
                         return error.RuntimeError;
                     }
                     if (cur != .null and !(cur == .bool and !cur.bool)) {
+                        // COW: separate before the in-place mutation that follows
+                        if (cur == .array) {
+                            const sep = try self.cowSeparate(cur.array);
+                            if (sep != cur.array) {
+                                const sv = Value{ .array = sep };
+                                if (frame.ref_slots.get(name)) |cell| {
+                                    cell.* = sv;
+                                } else if (from_request) {
+                                    try self.putRequestVar(name, sv);
+                                } else {
+                                    try frame.vars.put(self.allocator, name, sv);
+                                }
+                                const sn = if (frame.func) |func| func.slot_names else self.global_slot_names;
+                                for (sn, 0..) |s, si| {
+                                    if (std.mem.eql(u8, s, name)) {
+                                        if (si < frame.locals.len) frame.locals[si] = sv;
+                                        break;
+                                    }
+                                }
+                                self.push(sv);
+                                continue;
+                            }
+                        }
                         self.push(cur);
                         continue;
                     }
@@ -3559,6 +3645,102 @@ pub const VM = struct {
                         }
                     }
                     self.push(new_val);
+                },
+
+                .ensure_array_prop => {
+                    // load an object's property array for in-place write
+                    // ($obj->prop[]=x, $obj->prop[k] op= v). COW-separate it
+                    // from co-holders and write the unshared array back to the
+                    // property; vivify null/false to a fresh array
+                    const name_idx = self.readU16();
+                    const prop_name = self.currentChunk().constants.items[name_idx].string;
+                    const obj_val = self.pop();
+                    if (obj_val != .object) {
+                        self.push(.null);
+                        continue;
+                    }
+                    const eap_obj = obj_val.object;
+                    const cur = eap_obj.get(prop_name);
+                    if (cur == .int or cur == .float or (cur == .bool and cur.bool)) {
+                        if (try self.throwBuiltinException("Error", "Cannot use a scalar value as an array")) continue;
+                        return error.RuntimeError;
+                    }
+                    if (cur == .array) {
+                        const sep = try self.cowSeparate(cur.array);
+                        if (sep != cur.array) {
+                            try eap_obj.set(self.allocator, prop_name, .{ .array = sep });
+                            sep.refcount -= 1; // obj.set retains; cowSeparate already counted the prop slot
+                        }
+                        self.push(.{ .array = sep });
+                        continue;
+                    }
+                    const new_arr = try self.allocator.create(PhpArray);
+                    new_arr.* = .{};
+                    try self.arrays.append(self.allocator, new_arr);
+                    // obj.set retains -> refcount 1 (the property slot owns it)
+                    try eap_obj.set(self.allocator, prop_name, .{ .array = new_arr });
+                    self.push(.{ .array = new_arr });
+                },
+
+                .ensure_array_static_prop => {
+                    // load a static property array for in-place write
+                    // (Class::$prop[]=x, Class::$prop[k] op= v): COW-separate it
+                    // and write the unshared array back to the static slot
+                    const class_idx = self.readU16();
+                    const prop_idx = self.readU16();
+                    var class_name = self.currentChunk().constants.items[class_idx].string;
+                    const prop_name = self.currentChunk().constants.items[prop_idx].string;
+                    class_name = self.resolveStaticClassName(class_name);
+                    if (self.getStaticPropPtr(class_name, prop_name)) |slot| {
+                        const cur = slot.*;
+                        if (cur == .int or cur == .float or (cur == .bool and cur.bool)) {
+                            if (try self.throwBuiltinException("Error", "Cannot use a scalar value as an array")) continue;
+                            return error.RuntimeError;
+                        }
+                        if (cur == .array) {
+                            const sep = try self.cowSeparate(cur.array);
+                            // raw write to the static slot - cowSeparate already
+                            // counted the slot's reference (refcount 1)
+                            if (sep != cur.array) slot.* = .{ .array = sep };
+                            self.push(slot.*);
+                            continue;
+                        }
+                        const new_arr = try self.allocator.create(PhpArray);
+                        new_arr.* = .{};
+                        try self.arrays.append(self.allocator, new_arr);
+                        arrayRetain(new_arr); // the static slot owns it
+                        slot.* = .{ .array = new_arr };
+                        self.push(.{ .array = new_arr });
+                        continue;
+                    }
+                    self.push(.null);
+                },
+
+                .cow_separate_local => {
+                    // separate a shared array held by a local IN PLACE, with no
+                    // vivify and no scalar error - used before a by-ref native
+                    // arg / unset base so a non-array passes through unchanged
+                    // (letting the native throw its own TypeError) and pushes
+                    // nothing (the real load follows)
+                    const slot = self.readU16();
+                    const frame = self.currentFrame();
+                    var cur: Value = .null;
+                    if (frame.func) |func| {
+                        var from_ref = false;
+                        if (slot < func.slot_names.len and func.slot_names[slot].len > 0) {
+                            if (frame.ref_slots.get(func.slot_names[slot])) |cell| {
+                                cur = cell.*;
+                                from_ref = true;
+                            }
+                        }
+                        if (!from_ref and slot < frame.locals.len) cur = frame.locals[slot];
+                    } else {
+                        cur = self.getLocalGlobal(slot, frame);
+                    }
+                    if (cur == .array) {
+                        const sep = try self.cowSeparate(cur.array);
+                        if (sep != cur.array) try self.storeLocalSlot(frame, slot, .{ .array = sep });
+                    }
                 },
 
                 .array_elem_inc, .array_elem_dec => {
@@ -4045,7 +4227,11 @@ pub const VM = struct {
                     if (!u_is_ref and uframe.func == null and name.len > 1 and name[0] == '$') {
                         if (self.globals_array) |ga| {
                             const gkey = PhpArray.Key{ .string = name[1..] };
-                            self.releaseValue(ga.get(gkey));
+                            // the $GLOBALS mirror is non-owning (setLocalGlobal
+                            // cancels its retain), so don't release here - the
+                            // variable's own release above drops the reference.
+                            // just remove the stale mirror entry so the value
+                            // becomes unreachable and a cycle can be collected
                             ga.remove(gkey);
                         }
                         if (self.globals_cells.get(name)) |cell| cell.* = .null;
@@ -5310,7 +5496,7 @@ pub const VM = struct {
                             const cval = self.stack[self.sp - ci];
                             // copyValue: the constant value is owned by the
                             // ClassDef and must be refcounted
-                            try def.static_props.put(self.allocator, cname, try self.copyValue(cval));
+                            try def.static_props.put(self.allocator, cname, try self.copyDefault(cval));
                             try def.constant_names.put(self.allocator, cname, {});
                         }
                         self.sp -= const_count;
@@ -8436,6 +8622,22 @@ pub const VM = struct {
         return null;
     }
 
+    // like getStaticProp but returns a pointer to the storage slot (walking the
+    // inheritance chain) so the COW separation can write the unshared array back
+    pub fn getStaticPropPtr(self: *VM, class_name: []const u8, prop_name: []const u8) ?*Value {
+        var current: ?[]const u8 = class_name;
+        while (current) |cn| {
+            if (self.classes.getPtr(cn)) |cls| {
+                if (cls.static_props.getPtr(prop_name)) |p| return p;
+                for (cls.interfaces.items) |iface| {
+                    if (self.getStaticPropPtr(iface, prop_name)) |p| return p;
+                }
+                current = cls.parent;
+            } else break;
+        }
+        return null;
+    }
+
     // poll the execution deadline. backed by a tick counter so the actual
     // monotonic-clock read only happens once every ~4096 backwards jumps -
     // overhead under a percent of a tight loop but still well under a
@@ -9114,6 +9316,26 @@ pub const VM = struct {
         return .null;
     }
 
+    // store a value back into a local slot (function or global frame),
+    // mirroring set_local's destinations: the ref cell if bound, frame.vars by
+    // name, and the locals array. used by the COW separation sites to rebind a
+    // variable to its freshly-separated array
+    fn storeLocalSlot(self: *VM, frame: *CallFrame, slot: u16, val: Value) !void {
+        if (frame.func) |func| {
+            if (slot < func.slot_names.len) {
+                const name = func.slot_names[slot];
+                if (name.len > 0) {
+                    if (frame.ref_slots.get(name)) |cell| cell.* = val;
+                    try frame.vars.put(self.allocator, name, val);
+                }
+            }
+            if (slot < frame.locals.len) frame.locals[slot] = val;
+        } else {
+            if (slot < frame.locals.len) frame.locals[slot] = val;
+            try self.setLocalGlobal(slot, val, frame);
+        }
+    }
+
     fn setLocalGlobal(self: *VM, slot: u16, val: Value, frame: *CallFrame) !void {
         if (slot < self.global_slot_names.len) {
             const name = self.global_slot_names[slot];
@@ -9129,11 +9351,24 @@ pub const VM = struct {
                 // back so $GLOBALS[$key] picks up the new value
                 if (self.globals_array) |ga| {
                     if (name.len > 1 and name[0] == '$') {
-                        // the $GLOBALS element is a separate refcounted holder
-                        // (PhpArray.set retains) - release the overwritten old
-                        // one so a reassigned global destructs now (Stage 1)
-                        self.releaseValue(ga.get(.{ .string = name[1..] }));
+                        // $GLOBALS is a NON-OWNING live view: the same logical
+                        // variable is reachable via frame.vars AND this mirror,
+                        // so the mirror must NOT contribute to the array's COW
+                        // refcount (else every global-scope array write sees
+                        // refcount>1 and spuriously separates - which breaks
+                        // destruct timing + recursion-marker identity). set()
+                        // retains, so undo it; don't release the prior entry
+                        // (the variable-slot overwrite owns that release). the
+                        // cycle GC compensates by treating globals_array's own
+                        // entries as roots, not scanned references
                         try ga.set(self.allocator, .{ .string = name[1..] }, val);
+                        switch (val) {
+                            .object => |o| o.refcount -%= 1,
+                            .array => |a| a.refcount -%= 1,
+                            .generator => |g| g.refcount -%= 1,
+                            .fiber => |f| f.refcount -%= 1,
+                            else => {},
+                        }
                     }
                 }
                 // keep the shared global-cell (used by `global $name` inside
@@ -9400,7 +9635,7 @@ pub const VM = struct {
             // copyValue: an array/object default is owned by the ClassDef -
             // it must be refcounted (else an array default sits at refcount 0
             // and the first get_static_prop+push+pop releases it)
-            try def.static_props.put(self.allocator, sprop_names[pi], try self.copyValue(default_val));
+            try def.static_props.put(self.allocator, sprop_names[pi], try self.copyDefault(default_val));
             if (sprop_type[pi].len > 0) try def.static_prop_types.put(self.allocator, sprop_names[pi], sprop_type[pi]);
             const vis_byte = sprop_visibility[pi] & 0x03;
             if (vis_byte != 0) {
@@ -9678,28 +9913,29 @@ pub const VM = struct {
     fn methodExistsInAncestors(self: *VM, class_name: []const u8, method_name: []const u8, def: *const ClassDef) bool {
         var buf: [256]u8 = undefined;
 
-        // check parent class chain (functions, native_fns, and method declarations)
+        // check parent class chain (functions, native_fns, and method declarations).
+        // an UNREGISTERED ancestor (parent class or interface) means the hierarchy
+        // isn't fully loaded yet - PHP resolves the whole chain before checking
+        // #[Override], but zphp can register a class before an implemented
+        // interface (e.g. Collection before Enumerable during autoload). in that
+        // window we cannot prove the method is absent, so we must be conservative
+        // and treat it as present - a missed real violation is far better than a
+        // false positive that aborts class loading
         var current: ?[]const u8 = def.parent;
         while (current) |parent| {
-            const full = std.fmt.bufPrint(&buf, "{s}::{s}", .{ parent, method_name }) catch break;
+            const full = std.fmt.bufPrint(&buf, "{s}::{s}", .{ parent, method_name }) catch return true;
             if (self.functions.contains(full) or self.native_fns.contains(full)) return true;
-            const pcls = self.classes.get(parent) orelse break;
+            const pcls = self.classes.get(parent) orelse return true;
             if (pcls.methods.contains(method_name)) return true;
-            current = pcls.parent;
-        }
-
-        // check interfaces (including parent interfaces)
-        for (def.interfaces.items) |iface_name| {
-            if (self.interfaceDeclaresMethod(iface_name, method_name)) return true;
-        }
-        // also check parent's interfaces
-        current = def.parent;
-        while (current) |parent| {
-            const pcls = self.classes.get(parent) orelse break;
             for (pcls.interfaces.items) |iface_name| {
                 if (self.interfaceDeclaresMethod(iface_name, method_name)) return true;
             }
             current = pcls.parent;
+        }
+
+        // check directly-implemented interfaces (and their parent interfaces)
+        for (def.interfaces.items) |iface_name| {
+            if (self.interfaceDeclaresMethod(iface_name, method_name)) return true;
         }
 
         _ = class_name;
@@ -9707,7 +9943,9 @@ pub const VM = struct {
     }
 
     fn interfaceDeclaresMethod(self: *VM, iface_name: []const u8, method_name: []const u8) bool {
-        const idef = self.interfaces.get(iface_name) orelse return false;
+        // unresolved interface: can't disprove the method exists - be conservative
+        // (see methodExistsInAncestors) so a load-order gap never false-positives
+        const idef = self.interfaces.get(iface_name) orelse return true;
         for (idef.methods.items) |m| {
             if (std.mem.eql(u8, m, method_name)) return true;
         }
@@ -10066,7 +10304,7 @@ pub const VM = struct {
                 if (!def.static_props.contains(sp.name)) {
                     // each using class gets its own copy of the trait's static
                     // property - deep-clone so array values are not shared
-                    try def.static_props.put(self.allocator, sp.name, try self.copyValue(sp.value));
+                    try def.static_props.put(self.allocator, sp.name, try self.copyDefault(sp.value));
                 }
             }
         }
@@ -10075,7 +10313,7 @@ pub const VM = struct {
             for (consts) |c| {
                 if (!def.static_props.contains(c.name)) {
                     // each using class gets its own refcounted copy
-                    try def.static_props.put(self.allocator, c.name, try self.copyValue(c.value));
+                    try def.static_props.put(self.allocator, c.name, try self.copyDefault(c.value));
                     try def.constant_names.put(self.allocator, c.name, {});
                 }
             }
@@ -10695,12 +10933,18 @@ pub const VM = struct {
             fi -= 1;
             for (self.frames[fi].ref_array_bindings.items) |binding| {
                 if (binding.cell == cell) {
+                    // retaining store - release the overwritten old value to
+                    // balance the retain (see writebackRefs)
+                    const old = binding.array.get(binding.key);
                     try binding.array.set(self.allocator, binding.key, val);
+                    self.releaseValue(old);
                 }
             }
             for (self.frames[fi].ref_object_bindings.items) |binding| {
                 if (binding.cell == cell) {
+                    const old = binding.object.get(binding.prop_name);
                     try binding.object.set(self.allocator, binding.prop_name, val);
+                    self.releaseValue(old);
                 }
             }
             for (self.frames[fi].ref_static_bindings.items) |binding| {
@@ -10712,11 +10956,21 @@ pub const VM = struct {
     }
 
     fn writebackRefs(self: *VM) !void {
+        // array/object .set are retaining store choke points that do NOT release
+        // the overwritten old value (no VM access there). capture+release it
+        // here, mirroring array_set_local. without this, writing the cell's
+        // current value back over an identical (or any) element re-retains
+        // without dropping the old hold - a +1 leak that later makes cowSeparate
+        // split a sole-owned referenced array
         for (self.currentFrame().ref_array_bindings.items) |binding| {
+            const old = binding.array.get(binding.key);
             try binding.array.set(self.allocator, binding.key, binding.cell.*);
+            self.releaseValue(old);
         }
         for (self.currentFrame().ref_object_bindings.items) |binding| {
+            const old = binding.object.get(binding.prop_name);
             try binding.object.set(self.allocator, binding.prop_name, binding.cell.*);
+            self.releaseValue(old);
         }
         for (self.currentFrame().ref_static_bindings.items) |binding| {
             try self.writeStaticProp(binding.class_name, binding.prop_name, binding.cell.*);
@@ -10795,6 +11049,13 @@ pub const VM = struct {
         return frame.vars.get(var_name) orelse .null;
     }
 
+    fn isCallFamilyOp(op: OpCode) bool {
+        return switch (op) {
+            .call, .call_spread, .call_indirect, .call_indirect_spread, .new_obj, .method_call, .method_call_spread, .method_call_dynamic, .static_call, .static_call_spread, .static_call_dyn_method, .static_call_dyn_both => true,
+            else => false,
+        };
+    }
+
     fn scanCallerArgSources(self: *VM, ac: usize) [16]RefSource {
         var sources: [16]RefSource = .{.none} ** 16;
         if (ac == 0) return sources;
@@ -10808,17 +11069,22 @@ pub const VM = struct {
         // call_indirect / require / method_call_dynamic are 2; etc
         var call_pos: usize = 0;
         var found_call = false;
-        const candidates = [_]usize{ 4, 2, 1, 3 };
+        // static_call is 6-wide and static_call_spread is 5-wide; without these
+        // the by-ref args of a static method call (e.g. Arr::set($this->items,
+        // ...)) were never classified, so the writeback binding was never made.
+        // require the byte to be an actual call-family opcode so an operand byte
+        // that merely happens to match a non-call op of width w can't false-match
+        const candidates = [_]usize{ 4, 6, 2, 5, 1, 3 };
         for (candidates) |w| {
             if (ip < w) continue;
             const p = ip - w;
             const b = code[p];
-            const probe_w = OpCode.widthFromByte(b);
-            if (probe_w == w) {
-                call_pos = p;
-                found_call = true;
-                break;
-            }
+            if (OpCode.widthFromByte(b) != w) continue;
+            const op = std.meta.intToEnum(OpCode, b) catch continue;
+            if (!isCallFamilyOp(op)) continue;
+            call_pos = p;
+            found_call = true;
+            break;
         }
         if (!found_call) return sources;
 
@@ -10862,11 +11128,26 @@ pub const VM = struct {
             var bad_op = false;
             while (i > 0 and depth < 1) {
                 i -= 1;
-                const op: OpCode = std.meta.intToEnum(OpCode, code[instrs[i]]) catch {
+                const pos = instrs[i];
+                const op: OpCode = std.meta.intToEnum(OpCode, code[pos]) catch {
                     bad_op = true;
                     break;
                 };
-                depth += @as(i32, op.stackEffect());
+                // call-family opcodes have a VARIADIC stack effect (1-argc, or
+                // -argc for forms that also pop a receiver/callable) that a fixed
+                // stackEffect() can't express. read argc from the operand so the
+                // backward arg-boundary walk stays correct when an argument is a
+                // function/method call (e.g. Arr::set($x, $k, array_merge(...))).
+                // without this the by-ref lvalue arg is mis-delimited and loses
+                // its writeback binding
+                const eff: i32 = switch (op) {
+                    .call, .new_obj => if (pos + 3 < code.len) 1 - @as(i32, code[pos + 3]) else op.stackEffect(),
+                    .method_call => if (pos + 3 < code.len) -@as(i32, code[pos + 3]) else op.stackEffect(),
+                    .static_call => if (pos + 5 < code.len) 1 - @as(i32, code[pos + 5]) else op.stackEffect(),
+                    .call_indirect => if (pos + 1 < code.len) -@as(i32, code[pos + 1]) else op.stackEffect(),
+                    else => @as(i32, op.stackEffect()),
+                };
+                depth += eff;
             }
             if (bad_op or depth < 1) break;
 
@@ -12007,7 +12288,7 @@ pub const VM = struct {
             if (cls.slot_layout) |layout| {
                 const slots = self.allocator.alloc(Value, layout.names.len) catch return error.RuntimeError;
                 for (layout.defaults, 0..) |def_val, i| {
-                    slots[i] = try self.copyValue(def_val);
+                    slots[i] = try self.copyDefault(def_val);
                 }
                 obj.slots = slots;
                 obj.slot_layout = layout;
@@ -12018,9 +12299,24 @@ pub const VM = struct {
                 try self.initObjectProperties(obj, parent);
             }
             for (cls.properties.items) |prop| {
-                try obj.set(self.allocator, prop.name, try self.copyValue(prop.default));
+                try obj.set(self.allocator, prop.name, try self.copyDefault(prop.default));
             }
         }
+    }
+
+    // copy a template value (a property/static default) into a fresh owner.
+    // a default array is a compile-time TEMPLATE held by the slot layout, whose
+    // reference is not part of the COW refcount - so it must be deep-cloned, not
+    // COW-shared. sharing it would let an instance's first-write separation
+    // decrement the template to refcount 0 and free it while the layout still
+    // points at it (use-after-free). other value kinds copy normally
+    fn copyDefault(self: *VM, val: Value) RuntimeError!Value {
+        if (val == .array) {
+            const c = try self.cloneArray(val.array);
+            arrayRetain(c);
+            return .{ .array = c };
+        }
+        return self.copyValue(val);
     }
 
     fn arrayUnion(self: *VM, a: *PhpArray, b: *PhpArray) RuntimeError!*PhpArray {
@@ -12043,7 +12339,48 @@ pub const VM = struct {
         return result;
     }
 
-    fn cloneArray(self: *VM, src: *PhpArray) RuntimeError!*PhpArray {
+    // shallow copy-on-write clone: duplicates only the top-level entries list
+    // + string_index. nested arrays/objects are SHARED with the source (each
+    // element reference retained), so a deeper write separates again at that
+    // level. born at refcount 0 - cowSeparate sets it to the writer's 1
+    fn shallowCloneCow(self: *VM, src: *PhpArray) RuntimeError!*PhpArray {
+        const copy = self.allocator.create(PhpArray) catch return error.RuntimeError;
+        copy.* = .{ .next_int_key = src.next_int_key, .has_int_keys = src.has_int_keys, .cursor = src.cursor };
+        copy.entries.ensureTotalCapacity(self.allocator, src.entries.items.len) catch return error.RuntimeError;
+        for (src.entries.items, 0..) |entry, i| {
+            copy.entries.appendAssumeCapacity(entry);
+            retainValue(entry.value);
+            if (entry.key == .string) {
+                copy.string_index.put(self.allocator, entry.key.string, i) catch return error.RuntimeError;
+            }
+        }
+        self.arrays.append(self.allocator, copy) catch return error.RuntimeError;
+        return copy;
+    }
+
+    // copy-on-write separation. if `arr` is shared (refcount > 1), return an
+    // unshared shallow clone the caller can mutate in place; the caller MUST
+    // store the result back into the owning slot/property/element. the original
+    // loses the writer's reference (refcount-1, never reaches 0 here since it
+    // was > 1). sole owners pass through untouched - the common case, ~free.
+    // this is what makes copyValue/transferArg able to share arrays instead of
+    // deep-cloning: the clone is deferred to the first in-place write
+    fn cowSeparate(self: *VM, arr: *PhpArray) RuntimeError!*PhpArray {
+        // $GLOBALS is a live view of the global symbol table - it is a durable
+        // VM root (extra retain) AND held by frame.vars['$GLOBALS'], so its
+        // refcount is always >1. it must NEVER be separated: a write to
+        // $GLOBALS['x'] must land in the canonical array, not a private copy
+        if (self.globals_array) |ga| {
+            if (arr == ga) return arr;
+        }
+        if (arr.refcount <= 1) return arr;
+        const clone = try self.shallowCloneCow(arr);
+        arr.refcount -= 1;
+        clone.refcount = 1;
+        return clone;
+    }
+
+    pub fn cloneArray(self: *VM, src: *PhpArray) RuntimeError!*PhpArray {
         // shallow fast path: when the source has no nested arrays we can
         // copy without any cycle tracking. covers the overwhelming majority
         // of php arrays. cloneArrayDeep only runs when at least one entry
@@ -12105,16 +12442,12 @@ pub const VM = struct {
     }
 
     pub fn copyValue(self: *VM, val: Value) RuntimeError!Value {
-        // object/gen/fiber handles are copied with retain. arrays are
-        // deep-cloned for PHP value-semantics isolation. zphp lacks COW so
-        // the deep clone is what gives natives like ArrayObject::getArrayCopy
-        // (a shallow PHP-side copy whose nested arrays are shared with the
-        // source) effective deep-isolation through assignment. a previous
-        // attempt to skip the clone when val.array.refcount==0 (the literal-
-        // array orphan fix) broke that isolation - reverted. the correct
-        // path is compile-time fusion: a set_local that immediately follows
-        // an array_literal build is known fresh and can transfer without a
-        // runtime check
+        // object/gen/fiber handles copy with retain. arrays now use copy-on-
+        // write: share the underlying PhpArray (retain) and defer the actual
+        // copy to the first in-place mutation, which separates via cowSeparate
+        // at the lvalue site. self is unused on the share path but kept so this
+        // stays a *VM method (called as self.copyValue everywhere)
+        _ = self;
         if (val == .object) {
             objRetain(val.object);
             return val;
@@ -12128,9 +12461,10 @@ pub const VM = struct {
             return val;
         }
         if (val != .array) return val;
-        const clone = try self.cloneArray(val.array);
-        arrayRetain(clone);
-        return .{ .array = clone };
+        // COW: share the array (retain) instead of deep-cloning; the first
+        // in-place write through any lvalue site separates it (cowSeparate)
+        arrayRetain(val.array);
+        return val;
     }
 
     // transfer an operand-stack value into a callee binding ($this, a
@@ -13964,6 +14298,20 @@ pub const VM = struct {
         while (oi.next()) |kv| self.cycleDecrementChildren(kv.key_ptr.*, &visited_objs, &visited_arrs);
         var ai = visited_arrs.iterator();
         while (ai.next()) |kv| self.cycleDecrementChildrenArr(kv.key_ptr.*, &visited_objs, &visited_arrs);
+
+        // the $GLOBALS mirror is a NON-OWNING live view (setLocalGlobal undoes
+        // its retain), so a global var's refcount is short by one - the external
+        // reference from the $GLOBALS root. restore it here so global roots and
+        // their subgraphs count as externally-referenced and are never collected
+        if (self.globals_array) |ga| {
+            for (ga.entries.items) |entry| {
+                switch (entry.value) {
+                    .object => |o| if (visited_objs.contains(o)) { o.scratch_rc += 1; },
+                    .array => |a| if (visited_arrs.contains(a)) { a.scratch_rc += 1; },
+                    else => {},
+                }
+            }
+        }
 
         // pass 3: nodes with scratch_rc > 0 have external refs - mark alive
         // and propagate aliveness through their subgraph. simplest: walk
