@@ -11886,10 +11886,19 @@ pub const VM = struct {
         // non-private hierarchy walk below is independent of scope
         const scope = self.currentDefiningClass();
         if (scope) |sc| {
-            if (self.classes.get(sc)) |scls| {
-                for (scls.properties.items) |prop| {
-                    if (std.mem.eql(u8, prop.name, prop_name) and prop.visibility == .private) {
-                        return .{ .visibility = prop.visibility, .defining_class = sc, .is_readonly = prop.is_readonly, .set_visibility = prop.set_visibility, .type_str = prop.type_str };
+            // the scope's private prop only lives on this object if the object's
+            // class IS the scope or descends from it. without this guard, code
+            // running inside C::method() that reads $unrelated->p would wrongly
+            // pick up C's private $p (wrong type/visibility) for an object whose
+            // class has nothing to do with C - e.g. Command::__construct reading
+            // an AsCommand attribute's public ?string $help resolved to
+            // Command's private string $help and falsely threw "uninitialized"
+            if (self.isInstanceOf(class_name, sc)) {
+                if (self.classes.get(sc)) |scls| {
+                    for (scls.properties.items) |prop| {
+                        if (std.mem.eql(u8, prop.name, prop_name) and prop.visibility == .private) {
+                            return .{ .visibility = prop.visibility, .defining_class = sc, .is_readonly = prop.is_readonly, .set_visibility = prop.set_visibility, .type_str = prop.type_str };
+                        }
                     }
                 }
             }
