@@ -1602,19 +1602,16 @@ fn rcNewInstanceWithoutConstructor(ctx: *NativeContext, _: []const Value) Runtim
     const class_name = if (this.get("name") == .string) this.get("name").string else return .null;
 
     const obj = try ctx.vm.allocator.create(PhpObject);
-    obj.* = .{ .class_name = class_name };
+    ctx.vm.next_object_id += 1;
+    obj.* = .{ .class_name = class_name, .id = ctx.vm.next_object_id };
     try ctx.vm.objects.append(ctx.vm.allocator, obj);
 
-    var current: ?[]const u8 = class_name;
-    while (current) |name| {
-        const cls = ctx.vm.classes.get(name) orelse break;
-        for (cls.properties.items) |prop| {
-            if (obj.get(prop.name) == .null) {
-                try obj.set(ctx.vm.allocator, prop.name, prop.default);
-            }
-        }
-        current = cls.parent;
-    }
+    // mirror the `new` path: install slot layout + per-instance default copies
+    // (initObjectProperties deep-clones array/object defaults via copyDefault, so
+    // typed-array defaults like `public array $attr = []` aren't shared templates
+    // and aren't left null). the previous hand-rolled loop skipped the slot layout
+    // and stored the raw shared default, leaving non-scalar defaults wrong
+    try ctx.vm.initObjectProperties(obj, class_name);
     return .{ .object = obj };
 }
 

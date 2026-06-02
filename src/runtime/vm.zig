@@ -4919,6 +4919,10 @@ pub const VM = struct {
                                 for (layout.names, 0..) |name, i| {
                                     if (i < slots.len) {
                                         const vr = self.findPropertyVisibility(obj.class_name, name);
+                                        // PHP omits uninitialized typed properties and
+                                        // explicitly-unset properties from (array) casts
+                                        if (slots[i] == .null and vr.type_str.len > 0 and self.typedPropForbidsNull(vr.type_str)) continue;
+                                        if (obj.isUnset(name)) continue;
                                         const key_str: []const u8 = switch (vr.visibility) {
                                             .public => name,
                                             .protected => try std.fmt.allocPrint(self.allocator, "\x00*\x00{s}", .{name}),

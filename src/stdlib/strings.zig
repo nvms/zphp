@@ -5384,8 +5384,10 @@ fn native_strtr(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
 
     if (args[1] == .array) {
         const replacements = args[1].array;
+        // result is grown via realloc below; registering it for cleanup here
+        // would leave a stale (realloc-freed) pointer in ctx.strings and
+        // double-free at request end. register the final pointer after the loop
         var result = try ctx.allocator.alloc(u8, str.len * 4);
-        try ctx.strings.append(ctx.allocator, result);
         var out_len: usize = 0;
         var i: usize = 0;
         while (i < str.len) {
@@ -5432,6 +5434,7 @@ fn native_strtr(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
                 i += 1;
             }
         }
+        try ctx.strings.append(ctx.allocator, result);
         return .{ .string = result[0..out_len] };
     }
 
