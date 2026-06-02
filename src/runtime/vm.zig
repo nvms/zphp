@@ -412,6 +412,17 @@ pub const VM = struct {
     arrays: std.ArrayListUnmanaged(*PhpArray) = .{},
     objects: std.ArrayListUnmanaged(*PhpObject) = .{},
     next_object_id: u32 = 0,
+    // serve-mode builtin persistence: stdlib classes / native methods / their
+    // objects are immutable, registered once at init. reset() frees only the
+    // request-scoped heap (items beyond these high-water marks) and keeps the
+    // builtin classes (those in builtin_classes/_interfaces) instead of tearing
+    // down + re-registering all 22 stdlib modules every request
+    builtin_obj_hw: usize = 0,
+    builtin_arr_hw: usize = 0,
+    builtin_str_hw: usize = 0,
+    builtins_recorded: bool = false,
+    builtin_classes: std.StringHashMapUnmanaged(void) = .{},
+    builtin_interfaces: std.StringHashMapUnmanaged(void) = .{},
     // object refcounting (Stage 1): objects whose refcount has hit 0 and are
     // awaiting __destruct. drained at statement boundaries / run end so the
     // destructor never runs while the just-released handle is still in use
@@ -771,6 +782,17 @@ pub const VM = struct {
         const locals_buf = try allocator.alloc(Value, 8192);
         vm.ic.?.locals_buf = locals_buf.ptr;
         vm.ic.?.locals_cap = 8192;
+        // snapshot the builtin heap + class registration so serve-mode reset can
+        // keep it instead of rebuilding every request (registry native fns are
+        // never cleared; stdlib classes + their enum-case objects ARE the churn)
+        vm.builtin_obj_hw = vm.objects.items.len;
+        vm.builtin_arr_hw = vm.arrays.items.len;
+        vm.builtin_str_hw = vm.strings.items.len;
+        var ci = vm.classes.keyIterator();
+        while (ci.next()) |k| try vm.builtin_classes.put(allocator, k.*, {});
+        var ii = vm.interfaces.keyIterator();
+        while (ii.next()) |k| try vm.builtin_interfaces.put(allocator, k.*, {});
+        vm.builtins_recorded = true;
     }
 
     // stdlib class/interface/trait registration. callable both at VM init time
@@ -1478,7 +1500,13 @@ pub const VM = struct {
         try c.put(a, "T_INSTANCEOF", .{ .int = 449 });
     }
 
-    fn freeHeapItems(self: *VM) void {
+    // free_all=true frees the whole heap (deinit). free_all=false (serve-mode
+    // reset) keeps the immutable builtin prefix [0..builtin_*_hw] of each list so
+    // stdlib classes' enum-case objects survive and don't need re-creating
+    fn freeHeapItems(self: *VM, free_all: bool) void {
+        const str_start: usize = if (free_all) 0 else self.builtin_str_hw;
+        const arr_start: usize = if (free_all) 0 else self.builtin_arr_hw;
+        const obj_start: usize = if (free_all) 0 else self.builtin_obj_hw;
         // cleanup subsystem resources before freeing strings, because cleanup
         // reads class_name from each object and those names may live in self.strings
         // (e.g. when created by unserialize via ctx.createString)
@@ -1498,12 +1526,12 @@ pub const VM = struct {
         // clean up fiber frames before strings/arrays/objects since fiber frames
         // may reference values that get freed by those passes
         for (self.fibers.items) |f| self.cleanupFiberFrames(f);
-        for (self.strings.items) |s| self.allocator.free(s);
-        for (self.arrays.items) |a| {
+        for (self.strings.items[str_start..]) |s| self.allocator.free(s);
+        for (self.arrays.items[arr_start..]) |a| {
             a.deinit(self.allocator);
             self.allocator.destroy(a);
         }
-        for (self.objects.items) |o| {
+        for (self.objects.items[obj_start..]) |o| {
             o.deinit(self.allocator);
             self.allocator.destroy(o);
         }
@@ -1527,13 +1555,40 @@ pub const VM = struct {
         }
     }
 
+    // deinit + remove every entry whose key is NOT in the builtin set. keys are
+    // persistent (chunk constants or static literals) so this is safe after the
+    // request heap has been freed. value type must have deinit(allocator)
+    fn removeNonBuiltin(self: *VM, map: anytype, builtin: *const std.StringHashMapUnmanaged(void)) void {
+        var to_remove: std.ArrayListUnmanaged([]const u8) = .{};
+        defer to_remove.deinit(self.allocator);
+        var it = map.iterator();
+        while (it.next()) |e| {
+            if (!builtin.contains(e.key_ptr.*)) to_remove.append(self.allocator, e.key_ptr.*) catch {};
+        }
+        for (to_remove.items) |k| {
+            if (map.fetchRemove(k)) |kv| {
+                var v = kv.value;
+                v.deinit(self.allocator);
+            }
+        }
+    }
+
     fn freeClassState(self: *VM) void {
-        var class_iter = self.classes.valueIterator();
-        while (class_iter.next()) |c| c.deinit(self.allocator);
-        self.classes.clearRetainingCapacity();
-        var iface_iter = self.interfaces.valueIterator();
-        while (iface_iter.next()) |i| i.deinit(self.allocator);
-        self.interfaces.clearRetainingCapacity();
+        if (self.builtins_recorded) {
+            // keep the immutable builtin classes/interfaces registered at init;
+            // deinit + remove only the request-scoped (user) ones. names are chunk
+            // constants (persistent CompileResult) or static literals, so they're
+            // valid here even though freeHeapItems already ran
+            self.removeNonBuiltin(&self.classes, &self.builtin_classes);
+            self.removeNonBuiltin(&self.interfaces, &self.builtin_interfaces);
+        } else {
+            var class_iter = self.classes.valueIterator();
+            while (class_iter.next()) |c| c.deinit(self.allocator);
+            self.classes.clearRetainingCapacity();
+            var iface_iter = self.interfaces.valueIterator();
+            while (iface_iter.next()) |i| i.deinit(self.allocator);
+            self.interfaces.clearRetainingCapacity();
+        }
         self.traits.clearRetainingCapacity();
         var tu_iter = self.trait_uses.valueIterator();
         while (tu_iter.next()) |subs| self.allocator.free(subs.*);
@@ -1571,7 +1626,9 @@ pub const VM = struct {
 
     pub fn deinit(self: *VM) void {
         self.releaseFrames();
-        self.freeHeapItems();
+        self.freeHeapItems(true);
+        self.builtin_classes.deinit(self.allocator);
+        self.builtin_interfaces.deinit(self.allocator);
         if (self.ic) |ic_ptr| {
             ic_ptr.concat_buf.deinit(self.allocator);
             if (ic_ptr.locals_cap > 0) self.allocator.free(ic_ptr.locals_buf[0..ic_ptr.locals_cap]);
@@ -1688,7 +1745,8 @@ pub const VM = struct {
     pub fn reset(self: *VM) void {
         self.releaseFrames();
         self.frame_high_water = 0;
-        self.freeHeapItems();
+        // serve mode keeps the builtin heap + class registration across requests
+        self.freeHeapItems(!self.serve_mode);
         if (self.serve_mode) self.freeClassState();
         self.frame_count = 0;
         self.sp = 0;
@@ -1710,9 +1768,18 @@ pub const VM = struct {
         self.error_msg = null;
         self.exit_requested = false;
         self.output.clearRetainingCapacity();
-        self.strings.clearRetainingCapacity();
-        self.arrays.clearRetainingCapacity();
-        self.objects.clearRetainingCapacity();
+        // serve mode keeps the builtin heap prefix (freeHeapItems freed only the
+        // request items beyond the high-water marks); shrink the tracking lists
+        // back to those marks instead of clearing them entirely
+        if (self.serve_mode and self.builtins_recorded) {
+            self.strings.shrinkRetainingCapacity(self.builtin_str_hw);
+            self.arrays.shrinkRetainingCapacity(self.builtin_arr_hw);
+            self.objects.shrinkRetainingCapacity(self.builtin_obj_hw);
+        } else {
+            self.strings.clearRetainingCapacity();
+            self.arrays.clearRetainingCapacity();
+            self.objects.clearRetainingCapacity();
+        }
         self.generators.clearRetainingCapacity();
         self.fibers.clearRetainingCapacity();
         self.ref_cells.clearRetainingCapacity();
@@ -1771,10 +1838,12 @@ pub const VM = struct {
             self.chunk_to_func_names.clearRetainingCapacity();
             self.php_constants.clearRetainingCapacity();
             initConstants(&self.php_constants, self.allocator) catch {};
-            // freeClassState above cleared the class table. re-seed it with
-            // the stdlib classes so PDO, DateTime, SPL types etc. are visible
-            // to the next request
-            registerStdlibClasses(self, self.allocator) catch {};
+            // builtins persist across reset now (freeClassState kept them), so the
+            // stdlib classes + their native methods + enum objects DON'T need
+            // rebuilding every request - that re-registration was the dominant
+            // warm-request cost (native_fns put/grow/hash churn). only re-seed when
+            // builtins weren't snapshotted (shouldn't happen in serve mode)
+            if (!self.builtins_recorded) registerStdlibClasses(self, self.allocator) catch {};
             self.autoload_callbacks.clearRetainingCapacity();
             self.closure_instance_count = 0;
         } else {
