@@ -900,8 +900,6 @@ pub fn compileCall(self: *Compiler, node: Ast.Node) Error!void {
         try self.emitByte(@intCast(args.len));
     } else if (callee.tag == .qualified_name) {
         const call_offset = self.current_source_offset;
-        for (args) |arg| try self.compileNode(arg);
-        self.current_source_offset = call_offset;
         const parts = self.ast.extraSlice(callee.data.lhs);
         const fqn = try self.buildQualifiedString(parts);
         const stripped = if (fqn.len > 0 and fqn[0] == '\\') fqn[1..] else fqn;
@@ -912,6 +910,11 @@ pub fn compileCall(self: *Compiler, node: Ast.Node) Error!void {
             self.string_allocs.append(self.allocator, q) catch return error.CompileError;
             break :blk q;
         } else stripped;
+        // route through compileCallArg so an explicit-global by-ref native call
+        // (`\array_shift($x)`) still gets cow_separate_local - cowByRefArg0
+        // matches on the basename
+        for (args, 0..) |arg, i| try compileCallArg(self, name, i, arg);
+        self.current_source_offset = call_offset;
         const idx = try self.addConstant(.{ .string = name });
         try self.emitOp(.call);
         try self.emitU16(idx);

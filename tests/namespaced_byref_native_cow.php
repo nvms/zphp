@@ -64,3 +64,17 @@ $copy = $src;
 array_shift($copy);
 echo "src after local array_shift(copy): ";
 var_dump($src);
+
+// explicit-global (\-qualified) by-ref native calls inside a namespace must
+// ALSO separate - they take the qualified-name AST path
+$q1 = ['x', 'y', 'z'];
+$q2 = $q1;
+\array_shift($q2);
+echo "src after \\array_shift(copy): ";
+var_dump($q1);
+
+$s1 = ['c', 'a', 'b'];
+$s2 = $s1;
+\sort($s2);
+echo "src after \\sort(copy): ";
+var_dump($s1);
