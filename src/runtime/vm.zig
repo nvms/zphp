@@ -3951,6 +3951,13 @@ pub const VM = struct {
                                         if (i < slots.len) {
                                             const vr = self.findPropertyVisibility(obj.class_name, name);
                                             if (includeProp(self, scope_class, vr.visibility, vr.defining_class)) {
+                                                // PHP's foreach($obj) omits uninitialized typed
+                                                // properties (a .null slot whose type forbids null
+                                                // was never written) and explicitly-unset ones -
+                                                // accessing them would otherwise throw "before
+                                                // initialization" (e.g. Symfony VarDumper Stub)
+                                                if (slots[i] == .null and vr.type_str.len > 0 and self.typedPropForbidsNull(vr.type_str)) continue;
+                                                if (obj.isUnset(name)) continue;
                                                 try arr.set(self.allocator, .{ .string = name }, slots[i]);
                                             }
                                         }
