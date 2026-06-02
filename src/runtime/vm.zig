@@ -12410,6 +12410,11 @@ pub const VM = struct {
                 }
             }
             if (!found) {
+                // the result owns a new reference to b's value - retain it, else
+                // freeing result later over-releases an object/array still held
+                // by b (e.g. `$local += self::$staticCache` then unset $local
+                // would destruct the cache's shared objects)
+                retainValue(entry.value);
                 try result.entries.append(self.allocator, entry);
                 if (entry.key == .string) {
                     result.string_index.put(self.allocator, entry.key.string, result.entries.items.len - 1) catch return error.RuntimeError;
