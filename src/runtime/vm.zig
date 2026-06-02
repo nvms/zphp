@@ -12544,6 +12544,16 @@ pub const VM = struct {
     // (releaseFrameObjects / fast_loop return). this is copyValue minus the
     // object retain - it keeps call cleanup able to raw-drop the stack slots
     pub fn transferArg(self: *VM, val: Value) RuntimeError!Value {
+        // by-value array arg: deep clone. NOTE: COW-sharing here (arrayRetain
+        // instead of cloneArray) would eliminate the cloneArrayInner warm-request
+        // cost, but it exposes latent missing-cowSeparate in SPL/clone natives
+        // that mutate a stored by-value array in place (the clone masks them).
+        // PREREQUISITE before that optimization: audit + add cowSeparate to the
+        // natives behind these 9 compat tests - array_object_methods, clone_full,
+        // gen_yield_isset_obj, spl_fixed_array_foreach_clone_sparse,
+        // spl_heap_compare_extract, spl_obj_storage_offsetget_array_object_flags,
+        // spl_stack_offset_object_storage_array_object, spl4_clone_offset_misc,
+        // weakmap_weakref_spl_obj_storage_set. until then this stays a deep clone
         if (val != .array) return val;
         return .{ .array = try self.cloneArray(val.array) };
     }
