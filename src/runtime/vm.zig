@@ -497,6 +497,12 @@ pub const VM = struct {
     // pointer to the same value. lets writes propagate live to recursive calls
     globals_cells: std.StringHashMapUnmanaged(*Value) = .{},
     pending_call_name: ?[]const u8 = null,
+    // late-static-binding class for the next executeFunction frame. set by
+    // callMethod (the native-side method dispatch used by reflection
+    // newInstance, __toString, etc.) so static::class inside the called method
+    // resolves to the object's runtime class, not the method's defining class.
+    // consumed (and cleared) by the executeFunction* frame setup
+    pending_called_class: ?[]const u8 = null,
     // captures the most recent native function name + args when a native
     // throws an uncaught exception, so writeStackTrace can synthesize the
     // depth-0 frame ('#0 file(N): native_func(args)') that PHP includes
@@ -5972,7 +5978,7 @@ pub const VM = struct {
                                     }
                                 }
                                 self.dropN(ac);
-                                self.frames[self.frame_count] = .{ .chunk = &func.chunk, .ip = 0, .vars = .{}, .locals = ctor_locals, .func = func };
+                                self.frames[self.frame_count] = .{ .chunk = &func.chunk, .ip = 0, .vars = .{}, .locals = ctor_locals, .func = func, .called_class = class_name };
                                 self.frames[self.frame_count].entry_sp = self.sp;
                     self.frame_count += 1; self.retainFrameObjects(self.frame_count - 1);
         if (self.frame_count > self.frame_high_water) self.frame_high_water = self.frame_count;
@@ -6019,7 +6025,7 @@ pub const VM = struct {
                                     const default = if (i < func.defaults.len) try self.resolveDefault(func.defaults[i]) else Value.null;
                                     try new_vars.put(self.allocator, func.params[i], default);
                                 };
-                                self.frames[self.frame_count] = .{ .chunk = &func.chunk, .ip = 0, .vars = new_vars, .locals = try self.allocLocals(func, &new_vars), .func = func };
+                                self.frames[self.frame_count] = .{ .chunk = &func.chunk, .ip = 0, .vars = new_vars, .locals = try self.allocLocals(func, &new_vars), .func = func, .called_class = class_name };
                                 self.frames[self.frame_count].entry_sp = self.sp;
                     self.frame_count += 1; self.retainFrameObjects(self.frame_count - 1);
         if (self.frame_count > self.frame_high_water) self.frame_high_water = self.frame_count;
@@ -6142,7 +6148,7 @@ pub const VM = struct {
                                 const default = if (i < func.defaults.len) try self.resolveDefault(func.defaults[i]) else Value.null;
                                 try new_vars.put(self.allocator, func.params[i], default);
                             }
-                            self.frames[self.frame_count] = .{ .chunk = &func.chunk, .ip = 0, .vars = new_vars, .locals = try self.allocLocals(func, &new_vars), .func = func };
+                            self.frames[self.frame_count] = .{ .chunk = &func.chunk, .ip = 0, .vars = new_vars, .locals = try self.allocLocals(func, &new_vars), .func = func, .called_class = class_name };
                             self.frames[self.frame_count].entry_sp = self.sp;
                     self.frame_count += 1; self.retainFrameObjects(self.frame_count - 1);
         if (self.frame_count > self.frame_high_water) self.frame_high_water = self.frame_count;
@@ -12822,11 +12828,12 @@ pub const VM = struct {
         const base_handler = self.handler_count;
         const prev_floor = self.handler_floor;
         self.handler_floor = self.handler_count;
-        self.frames[self.frame_count] = .{ .chunk = &func.chunk, .ip = 0, .vars = vars, .locals = try self.allocLocals(func, &vars), .func = func, .call_name = self.pending_call_name };
+        self.frames[self.frame_count] = .{ .chunk = &func.chunk, .ip = 0, .vars = vars, .locals = try self.allocLocals(func, &vars), .func = func, .call_name = self.pending_call_name, .called_class = self.pending_called_class };
         self.frames[self.frame_count].entry_sp = self.sp;
         self.consumePendingArgCount();
         if (self.pending_invoke_args) |pia| self.saveFrameArgsSlice(pia);
         self.pending_call_name = null;
+        self.pending_called_class = null;
         self.frame_count += 1; self.retainFrameObjects(self.frame_count - 1);
         if (self.frame_count > self.frame_high_water) self.frame_high_water = self.frame_count;
         self.runUntilFrame(base_frame) catch |err| {
@@ -12848,11 +12855,12 @@ pub const VM = struct {
         const base_handler = self.handler_count;
         const prev_floor = self.handler_floor;
         self.handler_floor = self.handler_count;
-        self.frames[self.frame_count] = .{ .chunk = &func.chunk, .ip = 0, .vars = vars, .locals = try self.allocLocals(func, &vars), .func = func, .ref_slots = ref_slots, .call_name = self.pending_call_name };
+        self.frames[self.frame_count] = .{ .chunk = &func.chunk, .ip = 0, .vars = vars, .locals = try self.allocLocals(func, &vars), .func = func, .ref_slots = ref_slots, .call_name = self.pending_call_name, .called_class = self.pending_called_class };
         self.frames[self.frame_count].entry_sp = self.sp;
         self.consumePendingArgCount();
         if (self.pending_invoke_args) |pia| self.saveFrameArgsSlice(pia);
         self.pending_call_name = null;
+        self.pending_called_class = null;
         self.frame_count += 1; self.retainFrameObjects(self.frame_count - 1);
         if (self.frame_count > self.frame_high_water) self.frame_high_water = self.frame_count;
         self.runUntilFrame(base_frame) catch |err| {
@@ -13655,6 +13663,11 @@ pub const VM = struct {
                 try self.generators.append(self.allocator, gen);
                 return .{ .generator = gen };
             }
+            // LSB: static::class inside this method must resolve to the object's
+            // runtime class (e.g. reflection-instantiated SchedulePauseCommand
+            // running an inherited Command::__construct that reads its own
+            // #[AsCommand] via new ReflectionClass(static::class))
+            self.pending_called_class = obj.class_name;
             return self.executeFunction(func, new_vars);
         } else return error.RuntimeError;
     }

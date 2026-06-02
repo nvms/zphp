@@ -1051,13 +1051,13 @@ fn rcNewInstance(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
         }
     }
     const obj = try ctx.vm.allocator.create(PhpObject);
-    obj.* = .{ .class_name = class_name };
+    ctx.vm.next_object_id += 1;
+    obj.* = .{ .class_name = class_name, .id = ctx.vm.next_object_id };
     try ctx.vm.objects.append(ctx.vm.allocator, obj);
-    if (ctx.vm.classes.get(class_name)) |cls| {
-        for (cls.properties.items) |prop| {
-            try obj.set(ctx.vm.allocator, prop.name, prop.default);
-        }
-    }
+    // full slot layout + per-instance default copies (walks the parent chain,
+    // deep-clones array defaults) - the raw cls.properties loop skipped both,
+    // so inherited typed props read as uninitialized
+    try ctx.vm.initObjectProperties(obj, class_name);
     if (ctx.vm.hasMethod(class_name, "__construct")) {
         _ = try ctx.callMethod(obj, "__construct", args);
     }
@@ -1085,14 +1085,11 @@ fn rcNewInstanceArgs(ctx: *NativeContext, args: []const Value) RuntimeError!Valu
     }
 
     const obj = try ctx.vm.allocator.create(PhpObject);
-    obj.* = .{ .class_name = class_name };
+    ctx.vm.next_object_id += 1;
+    obj.* = .{ .class_name = class_name, .id = ctx.vm.next_object_id };
     try ctx.vm.objects.append(ctx.vm.allocator, obj);
 
-    if (ctx.vm.classes.get(class_name)) |cls| {
-        for (cls.properties.items) |prop| {
-            try obj.set(ctx.vm.allocator, prop.name, prop.default);
-        }
-    }
+    try ctx.vm.initObjectProperties(obj, class_name);
 
     if (ctx.vm.hasMethod(class_name, "__construct")) {
         _ = try ctx.callMethod(obj, "__construct", ctor_args[0..count]);
