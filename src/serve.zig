@@ -204,6 +204,18 @@ const Worker = struct {
     poll_fds: [MAX_CONNS + 1]posix.pollfd,
     conns: [MAX_CONNS + 1]?Connection,
     n_fds: usize,
+    // php-fpm dispatch: a request that maps to an existing .php file on disk
+    // (e.g. /wp-login.php, /wp-admin/index.php) executes THAT file directly
+    // instead of the front-controller entry. compiled bytecode is cached here
+    // per worker, keyed by absolute path, so each such script compiles once
+    script_cache: std.StringHashMapUnmanaged(*CompileResult),
+};
+
+// what to run for a request, and how to shape $_SERVER for it
+const Dispatch = struct {
+    result: *const CompileResult,
+    script_filename: []const u8, // absolute path of the script to execute
+    front_controller: bool, // true: SCRIPT_NAME = /<entry basename> (rewritten); false: SCRIPT_NAME = the request path
 };
 
 fn loadFile(path: []const u8, allocator: Allocator, _: *@import("runtime/vm.zig").VM) ?*CompileResult {
@@ -277,6 +289,7 @@ fn initWorker(allocator: Allocator, result: *const CompileResult, doc_root: []co
         .poll_fds = [_]posix.pollfd{.{ .fd = -1, .events = 0, .revents = 0 }} ** (MAX_CONNS + 1),
         .conns = [_]?Connection{null} ** (MAX_CONNS + 1),
         .n_fds = 1,
+        .script_cache = .{},
     };
 }
 
@@ -291,7 +304,64 @@ fn deinitWorker(w: *Worker) void {
     posix.close(w.wake_pipe[0]);
     posix.close(w.wake_pipe[1]);
     if (w.env_snapshot) |*s| @constCast(s).deinit();
+    // deinit the VM FIRST: a leftover frame from a direct-dispatched script that
+    // exit()'d (e.g. wp-login.php) still points at that script's slot_names, which
+    // live in its cached CompileResult. freeing the cache before vm.deinit() would
+    // make releaseFrameObjects read freed memory
     w.vm.deinit();
+    var it = w.script_cache.iterator();
+    while (it.next()) |e| {
+        w.allocator.free(e.key_ptr.*);
+        e.value_ptr.*.deinit();
+        w.allocator.destroy(e.value_ptr.*);
+    }
+    w.script_cache.deinit(w.allocator);
+}
+
+// decide what to execute for a request. php-fpm + nginx/apache execute any .php
+// file that exists under the document root directly (wp-login.php, wp-admin/*.php,
+// xmlrpc.php); only paths that DON'T resolve to a real file fall through to the
+// front-controller entry via rewrite rules. zphp serve used to run the entry for
+// every dynamic request, so direct scripts like wp-login.php got the front
+// controller's routing (WP then canonical-301'd them). match the standard model.
+fn resolveDispatch(w: *Worker, req: *const Request) Dispatch {
+    const fc = Dispatch{ .result = w.result, .script_filename = w.result.file_path, .front_controller = true };
+    const url_path = req.path;
+    if (url_path.len == 0 or std.mem.eql(u8, url_path, "/")) return fc;
+    // path traversal or non-php dynamic path -> front controller (safe default)
+    if (std.mem.indexOf(u8, url_path, "..") != null) return fc;
+    if (!std.mem.endsWith(u8, url_path, ".php")) return fc;
+    if (w.doc_root.len == 0) return fc;
+
+    const candidate = std.fmt.allocPrint(w.allocator, "{s}{s}", .{ w.doc_root, url_path }) catch return fc;
+    defer w.allocator.free(candidate);
+    const st = std.fs.cwd().statFile(candidate) catch return fc;
+    if (st.kind != .file) return fc;
+
+    // containment: the resolved real path must stay under the document root
+    const real = std.fs.cwd().realpathAlloc(w.allocator, candidate) catch return fc;
+    defer w.allocator.free(real);
+    if (!std.mem.startsWith(u8, real, w.doc_root)) return fc;
+    if (real.len <= w.doc_root.len or real[w.doc_root.len] != '/') return fc;
+    // the entry itself runs as the front controller (same $_SERVER shape)
+    if (std.mem.eql(u8, real, w.result.file_path)) return fc;
+
+    if (w.script_cache.get(real)) |cached| {
+        return .{ .result = cached, .script_filename = cached.file_path, .front_controller = false };
+    }
+    const compiled = loadFile(real, w.allocator, &w.vm) orelse return fc;
+    const key = w.allocator.dupe(u8, real) catch {
+        compiled.deinit();
+        w.allocator.destroy(compiled);
+        return fc;
+    };
+    w.script_cache.put(w.allocator, key, compiled) catch {
+        w.allocator.free(key);
+        compiled.deinit();
+        w.allocator.destroy(compiled);
+        return fc;
+    };
+    return .{ .result = compiled, .script_filename = compiled.file_path, .front_controller = false };
 }
 
 fn setNonBlocking(fd: posix.fd_t) void {
@@ -775,18 +845,20 @@ fn processHttpRead(w: *Worker, c: *Connection) void {
         return;
     }
 
-    // PHP execution
+    // PHP execution - php-fpm dispatch: an existing .php file runs directly,
+    // anything else routes to the front-controller entry
+    const dispatch = resolveDispatch(w, &req);
     w.vm.reset();
     const mock_conn = std.net.Server.Connection{
         .stream = c.stream,
         .address = std.net.Address{ .in = .{ .sa = .{ .port = 0, .addr = c.addr_bytes, .zero = [_]u8{0} ** 8 } } },
     };
-    populateSuperglobals(&w.vm, &req, mock_conn, w.port, if (w.env_snapshot) |*s| s else null, w.result.file_path) catch {
+    populateSuperglobals(&w.vm, &req, mock_conn, w.port, if (w.env_snapshot) |*s| s else null, w.doc_root, dispatch.script_filename, dispatch.front_controller) catch {
         c.state = .closing;
         return;
     };
 
-    w.vm.interpret(w.result) catch |interp_err| {
+    w.vm.interpret(dispatch.result) catch |interp_err| {
         // exit() / die() is an orderly script exit, not a 500. flush
         // whatever was buffered + any headers/status the script set and
         // return like a normal response
@@ -897,13 +969,14 @@ fn handleH2Request(w: *Worker, conn: *Connection, session: *h2.H2Session, stream
         return;
     }
 
-    // PHP execution
+    // PHP execution - php-fpm dispatch (see HTTP/1.1 path)
+    const dispatch = resolveDispatch(w, &req);
     w.vm.reset();
     const mock_conn = std.net.Server.Connection{
         .stream = conn.stream,
         .address = std.net.Address{ .in = .{ .sa = .{ .port = 0, .addr = conn.addr_bytes, .zero = [_]u8{0} ** 8 } } },
     };
-    populateSuperglobals(&w.vm, &req, mock_conn, w.port, if (w.env_snapshot) |*s| s else null, w.result.file_path) catch {
+    populateSuperglobals(&w.vm, &req, mock_conn, w.port, if (w.env_snapshot) |*s| s else null, w.doc_root, dispatch.script_filename, dispatch.front_controller) catch {
         session.submitResponse(stream_id, 500, "text/plain", "Internal Server Error");
         stream.resetRequest(w.allocator);
         return;
@@ -919,7 +992,7 @@ fn handleH2Request(w: *Worker, conn: *Connection, session: *h2.H2Session, stream
         }
     }
 
-    w.vm.interpret(w.result) catch {
+    w.vm.interpret(dispatch.result) catch {
         session.submitResponse(stream_id, 500, "text/plain", "Internal Server Error");
         stream.resetRequest(w.allocator);
         return;
@@ -1102,7 +1175,7 @@ fn parseRequest(raw: []const u8) Request {
     return req;
 }
 
-fn populateSuperglobals(vm: *VM, req: *const Request, conn: std.net.Server.Connection, port: u16, env_snapshot: ?*const env.EnvSnapshot, entry_path: []const u8) !void {
+fn populateSuperglobals(vm: *VM, req: *const Request, conn: std.net.Server.Connection, port: u16, env_snapshot: ?*const env.EnvSnapshot, doc_root: []const u8, script_filename: []const u8, front_controller: bool) !void {
     const a = vm.allocator;
     const server_arr = try a.create(PhpArray);
     server_arr.* = .{};
@@ -1125,18 +1198,31 @@ fn populateSuperglobals(vm: *VM, req: *const Request, conn: std.net.Server.Conne
     // shape: SCRIPT_NAME = /<basename of entry script>, SCRIPT_FILENAME = full
     // entry path, PHP_SELF = SCRIPT_NAME + PATH_INFO (which for rewritten URLs
     // is the request path - that's what apache writes too)
-    const entry_base = std.fs.path.basename(entry_path);
-    const script_name = try std.fmt.allocPrint(a, "/{s}", .{entry_base});
-    try vm.strings.append(a, script_name);
+    var script_name: []const u8 = undefined;
+    var php_self: []const u8 = undefined;
+    var path_info: []const u8 = undefined;
+    if (front_controller) {
+        // rewritten front controller: SCRIPT_NAME = /<entry basename> for every
+        // URL, PHP_SELF = SCRIPT_NAME + request path, PATH_INFO = request path
+        const entry_base = std.fs.path.basename(script_filename);
+        script_name = try std.fmt.allocPrint(a, "/{s}", .{entry_base});
+        try vm.strings.append(a, script_name);
+        php_self = try std.fmt.allocPrint(a, "{s}{s}", .{ script_name, req.path });
+        try vm.strings.append(a, php_self);
+        path_info = req.path;
+    } else {
+        // direct .php execution (php-fpm style): SCRIPT_NAME and PHP_SELF are the
+        // request path to the script itself, no PATH_INFO. wp-login.php and other
+        // standalone scripts read these and must NOT see the front-controller shape
+        script_name = req.path;
+        php_self = req.path;
+        path_info = "";
+    }
     try server_arr.set(a, .{ .string = "SCRIPT_NAME" }, .{ .string = script_name });
-    try server_arr.set(a, .{ .string = "SCRIPT_FILENAME" }, .{ .string = entry_path });
-    const doc_root_owned = try a.dupe(u8, std.fs.path.dirname(entry_path) orelse ".");
-    try vm.strings.append(a, doc_root_owned);
-    try server_arr.set(a, .{ .string = "DOCUMENT_ROOT" }, .{ .string = doc_root_owned });
-    const php_self = try std.fmt.allocPrint(a, "{s}{s}", .{ script_name, req.path });
-    try vm.strings.append(a, php_self);
+    try server_arr.set(a, .{ .string = "SCRIPT_FILENAME" }, .{ .string = script_filename });
+    try server_arr.set(a, .{ .string = "DOCUMENT_ROOT" }, .{ .string = doc_root });
     try server_arr.set(a, .{ .string = "PHP_SELF" }, .{ .string = php_self });
-    try server_arr.set(a, .{ .string = "PATH_INFO" }, .{ .string = req.path });
+    try server_arr.set(a, .{ .string = "PATH_INFO" }, .{ .string = path_info });
     // SCRIPT_FILENAME + DOCUMENT_ROOT + GATEWAY_INTERFACE + SERVER_SOFTWARE -
     // WordPress / Symfony / Laravel all read these during request setup
     try server_arr.set(a, .{ .string = "SERVER_SOFTWARE" }, .{ .string = "zphp" });
