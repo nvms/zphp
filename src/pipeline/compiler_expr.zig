@@ -704,7 +704,13 @@ fn cowByRefArg0(name: []const u8) bool {
         "array_walk", "array_walk_recursive", "array_multisort",
         "end", "reset", "next", "prev", "each",
     };
-    for (names) |n| if (std.mem.eql(u8, n, name)) return true;
+    // an unqualified builtin call inside a namespace resolves to the namespaced
+    // name at compile time (e.g. Foo\Bar\array_shift) but falls back to the
+    // global native at runtime. match on the basename so by-ref COW separation
+    // still fires - else array_shift($x) in ANY namespaced file (i.e. all
+    // composer/symfony/laravel code) mutates a shared array in place
+    const base = if (std.mem.lastIndexOfScalar(u8, name, '\\')) |i| name[i + 1 ..] else name;
+    for (names) |n| if (std.mem.eql(u8, n, base)) return true;
     return false;
 }
 
