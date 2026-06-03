@@ -47,6 +47,10 @@ pub const OutputBufferLevel = struct {
 
 pub const ErrorHandlerEntry = struct { handler: Value, mask: i64 };
 
+// a trait's own method (name without the `Trait::` prefix) + its compiled func,
+// cached per trait so applyTrait doesn't rescan the whole function table
+pub const TraitMethodEntry = struct { name: []const u8, func: *const ObjFunction };
+
 pub const NativeContext = struct {
     allocator: Allocator,
     arrays: *std.ArrayListUnmanaged(*PhpArray),
@@ -489,6 +493,14 @@ pub const VM = struct {
     trait_uses: std.StringHashMapUnmanaged([]const []const u8) = .{},
     trait_props: std.StringHashMapUnmanaged([]const ClassDef.PropertyDef) = .{},
     trait_static_props: std.StringHashMapUnmanaged([]const TraitStaticProp) = .{},
+    // trait_name -> its methods. applyTrait otherwise scans the ENTIRE
+    // self.functions table (every method in the program) on every trait-use to
+    // find `Trait::method` entries - O(total_functions) per use, the dominant
+    // cost re-bootstrapping a trait-heavy framework (Laravel) each serve request.
+    // persistent across reset: serve caches bytecode so the trait-method func
+    // pointers are stable, and a trait's method set doesn't change between
+    // requests (eval-redefining a trait mid-run is the only staleness case)
+    trait_method_cache: std.StringHashMapUnmanaged([]TraitMethodEntry) = .{},
     trait_constants: std.StringHashMapUnmanaged([]const TraitStaticProp) = .{},
     statics: std.StringHashMapUnmanaged(Value) = .{},
     statics_cells: std.StringHashMapUnmanaged(*Value) = .{},
@@ -1708,6 +1720,9 @@ pub const VM = struct {
         var tu_iter = self.trait_uses.valueIterator();
         while (tu_iter.next()) |subs| self.allocator.free(subs.*);
         self.trait_uses.deinit(self.allocator);
+        var tmc_iter = self.trait_method_cache.valueIterator();
+        while (tmc_iter.next()) |m| self.allocator.free(m.*);
+        self.trait_method_cache.deinit(self.allocator);
         var tp_iter = self.trait_props.valueIterator();
         while (tp_iter.next()) |props| self.allocator.free(props.*);
         self.trait_props.deinit(self.allocator);
@@ -10349,10 +10364,12 @@ pub const VM = struct {
             }
         }
 
-        const TraitMethod = struct { name: []const u8, func: *const ObjFunction };
-        var pending: [256]TraitMethod = undefined;
-        var pending_count: usize = 0;
-        {
+        // resolve the trait's methods (name -> func) once and cache it - the
+        // naive full-scan of self.functions here was applyTrait's whole cost.
+        // the cache persists across requests (stable bytecode in serve mode)
+        const trait_methods = blk: {
+            if (self.trait_method_cache.get(trait_name)) |cached| break :blk cached;
+            var list: std.ArrayListUnmanaged(TraitMethodEntry) = .{};
             var fn_iter = self.functions.iterator();
             while (fn_iter.next()) |entry| {
                 const fn_name = entry.key_ptr.*;
@@ -10360,13 +10377,17 @@ pub const VM = struct {
                     std.mem.eql(u8, fn_name[0..trait_name.len], trait_name) and
                     std.mem.eql(u8, fn_name[trait_name.len .. trait_name.len + 2], "::"))
                 {
-                    pending[pending_count] = .{ .name = fn_name[trait_name.len + 2 ..], .func = entry.value_ptr.* };
-                    pending_count += 1;
+                    try list.append(self.allocator, .{ .name = fn_name[trait_name.len + 2 ..], .func = entry.value_ptr.* });
                 }
             }
-        }
+            const owned = try list.toOwnedSlice(self.allocator);
+            // key by the persistent trait_name (a chunk constant) so the entry
+            // outlives any per-request table churn
+            try self.trait_method_cache.put(self.allocator, trait_name, owned);
+            break :blk owned;
+        };
 
-        for (pending[0..pending_count]) |tm| {
+        for (trait_methods) |tm| {
             var vis_override: ?ClassDef.Visibility = null;
             for (alias_rules) |rule| {
                 if (std.mem.eql(u8, rule.method, tm.name) and (rule.trait.len == 0 or std.mem.eql(u8, rule.trait, trait_name))) {
