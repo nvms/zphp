@@ -4085,7 +4085,21 @@ pub const VM = struct {
                             else => .{ .int = Value.toInt(key_val) },
                         };
                         const cell = try self.allocator.create(Value);
-                        cell.* = arr_ptr.get(key);
+                        var elem = arr_ptr.get(key);
+                        // `$v = &$arr[$k]` makes $arr[$k] a reference, which can't
+                        // stay COW-shared: if the element is a shared array,
+                        // separate it (write a private copy back into $arr[$k])
+                        // so a later in-place mutation through the ref doesn't
+                        // corrupt another COW holder. PHP separates at each `&`
+                        // descent level (Arr::forget's `$a = &$a[$part]` chain)
+                        if (elem == .array and elem.array.refcount > 1) {
+                            const fresh = try self.shallowCloneCow(elem.array);
+                            const old_elem = elem;
+                            elem = .{ .array = fresh };
+                            try arr_ptr.set(self.allocator, key, elem); // retains fresh -> rc 1
+                            self.releaseValue(old_elem); // drop the array's orphaned hold on the shared original
+                        }
+                        cell.* = elem;
                         try self.ref_cells.append(self.allocator, cell);
                         try self.currentFrame().ref_slots.put(self.allocator, name, cell);
                         try self.currentFrame().ref_array_bindings.append(self.allocator, .{ .cell = cell, .array = arr_ptr, .key = key });
@@ -4165,8 +4179,22 @@ pub const VM = struct {
                             else => .{ .int = Value.toInt(key_val) },
                         };
                         const cell = try self.allocator.create(Value);
-                        // seed without cloning so cell shares any nested array pointer
-                        cell.* = arr_ptr.get(key);
+                        var elem = arr_ptr.get(key);
+                        // `$v = &$arr[$k]` makes $arr[$k] a reference - it can't
+                        // stay COW-shared. if the element is a shared array,
+                        // separate it (write a private copy back into $arr[$k])
+                        // so a later in-place mutation through the ref doesn't
+                        // corrupt another COW holder. PHP separates at each `&`
+                        // descent level (Arr::forget's `$a = &$a[$part]` chain)
+                        if (elem == .array and elem.array.refcount > 1) {
+                            const fresh = try self.shallowCloneCow(elem.array);
+                            const old_elem = elem;
+                            elem = .{ .array = fresh };
+                            try arr_ptr.set(self.allocator, key, elem); // retains fresh -> rc 1
+                            self.releaseValue(old_elem); // drop the array's orphaned hold on the shared original
+                        }
+                        // seed without cloning so cell shares the (now-exclusive) pointer
+                        cell.* = elem;
                         try self.ref_cells.append(self.allocator, cell);
                         try frame.ref_slots.put(self.allocator, dst_name, cell);
                         try frame.ref_array_bindings.append(self.allocator, .{ .cell = cell, .array = arr_ptr, .key = key });
