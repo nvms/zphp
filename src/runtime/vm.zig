@@ -4563,6 +4563,8 @@ pub const VM = struct {
                             return error.RuntimeError;
                         }
                         const u_ak = Value.toArrayKey(key);
+                        // breaking a referenced element unbinds it first
+                        self.unbindArrayElemRef(arr_val.array, u_ak);
                         // release the object the removed element held (Stage 1)
                         self.releaseValue(arr_val.array.get(u_ak));
                         arr_val.array.remove(u_ak);
@@ -12753,6 +12755,33 @@ pub const VM = struct {
     // each cloned ref entry into the vm-level registry so propagateCellWrite
     // reaches the clone too - this is what makes `$d = $c; $d[$k] = X` write the
     // shared storage when $c[$k] is a reference
+    // unset($arr[$k]) on a referenced element breaks the reference: drop every
+    // binding for (array, key) from the vm-level and frame-level registries so
+    // a later write through the (still-live) cell can't resurrect the entry
+    fn unbindArrayElemRef(self: *VM, arr: *PhpArray, key: PhpArray.Key) void {
+        if (!self.array_ref_active) return;
+        const nk = PhpArray.normalizeKey(key);
+        var i: usize = 0;
+        while (i < self.array_ref_bindings.items.len) {
+            const b = self.array_ref_bindings.items[i];
+            if (b.array == arr and PhpArray.normalizeKey(b.key).eql(nk)) {
+                _ = self.array_ref_bindings.swapRemove(i);
+            } else i += 1;
+        }
+        var fi = self.frame_count;
+        while (fi > 0) {
+            fi -= 1;
+            const list = &self.frames[fi].ref_array_bindings;
+            var j: usize = 0;
+            while (j < list.items.len) {
+                const b = list.items[j];
+                if (b.array == arr and PhpArray.normalizeKey(b.key).eql(nk)) {
+                    _ = list.swapRemove(j);
+                } else j += 1;
+            }
+        }
+    }
+
     fn registerCloneRefs(self: *VM, copy: *PhpArray) RuntimeError!void {
         if (!self.array_ref_active) return;
         for (copy.entries.items) |entry| {
