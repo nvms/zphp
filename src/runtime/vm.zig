@@ -3480,11 +3480,15 @@ pub const VM = struct {
                         const ak = Value.toArrayKey(key);
                         if (arr_val.array.contains(ak)) {
                             const cloned = if (val == .array) try self.copyValue(val) else val;
-                            // Stage 2 element-overwrite release - see array_set
-                            const old_val = arr_val.array.get(ak);
-                            try arr_val.array.set(self.allocator, ak, cloned);
-                            if (old_val == .object or old_val == .array) {
-                                self.releaseValue(old_val);
+                            // Stage 2 element-overwrite release - see array_set.
+                            // a by-ref foreach writeback into a referenced element
+                            // routes through the shared cell
+                            if (!try self.writeArrayElemRef(arr_val.array, ak, cloned)) {
+                                const old_val = arr_val.array.get(ak);
+                                try arr_val.array.set(self.allocator, ak, cloned);
+                                if (old_val == .object or old_val == .array) {
+                                    self.releaseValue(old_val);
+                                }
                             }
                         }
                     }
@@ -3919,13 +3923,20 @@ pub const VM = struct {
                         // is left unbuilt. element refs still get retained to
                         // match PhpArray.set's store choke
                         try copy.entries.appendSlice(self.allocator, src.entries.items);
-                        for (copy.entries.items) |entry| switch (entry.value) {
-                            .object => |o| o.retain(),
-                            .array => |a| a.retain(),
-                            .generator => |g| g.retain(),
-                            .fiber => |f| f.retain(),
-                            else => {},
-                        };
+                        for (copy.entries.items) |*entry| {
+                            // a by-value foreach snapshot holds plain values, not
+                            // references - drop any entry.ref so the copy can't
+                            // alias the original's shared cell (entry.value already
+                            // mirrors the referenced value)
+                            entry.ref = null;
+                            switch (entry.value) {
+                                .object => |o| o.retain(),
+                                .array => |a| a.retain(),
+                                .generator => |g| g.retain(),
+                                .fiber => |f| f.retain(),
+                                else => {},
+                            }
+                        }
                         copy.next_int_key = src.next_int_key;
                         copy.has_int_keys = src.has_int_keys;
                         self.stack[self.sp - 1] = .{ .array = copy };
