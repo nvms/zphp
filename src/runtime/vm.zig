@@ -11549,8 +11549,24 @@ pub const VM = struct {
                         if (existing_cell.* == .array) arrayRetain(existing_cell.*.array);
                         try refs.put(self.allocator, func.params[ri], existing_cell);
                     } else {
+                        var bound = new_vars.get(func.params[ri]) orelse .null;
+                        // a PHP reference is never COW-shared with a non-reference:
+                        // binding the ref to a COW-shared array must give it a
+                        // private copy, else an in-place mutation through the ref
+                        // (unset/array_shift/array_splice) corrupts another COW
+                        // holder (`$reader = $shared; f($shared)` would drop the
+                        // unset key from $reader too). clone via shallowCloneCow,
+                        // NOT cowSeparate: cowSeparate decrements the original, but
+                        // here the param view isn't counted yet (retainFrameObjects
+                        // runs later) and the original stays owned by the caller's
+                        // slot + the other COW holders, which keep the source value
+                        if (bound == .array and bound.array.refcount > 1) {
+                            const fresh = try self.shallowCloneCow(bound.array);
+                            bound = .{ .array = fresh };
+                            try new_vars.put(self.allocator, func.params[ri], bound);
+                        }
                         const cell = try self.allocator.create(Value);
-                        cell.* = new_vars.get(func.params[ri]) orelse .null;
+                        cell.* = bound;
                         // the ref cell is a durable holder - retain its array value, or the
                         // callee param slot's release at frame teardown frees the array the
                         // cell (and the caller's ref binding) still points at (Stage 2)
