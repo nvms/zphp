@@ -120,6 +120,7 @@ check_status "front-page"      "/"
 check_status "posts-index"     "/posts"
 check_status "post-show"       "/posts/1"
 check_status "post-missing"    "/posts/9999"
+check_status "not-found"       "/this-route-does-not-exist"
 check_status "error-test"      "/error-test"
 
 echo
@@ -131,8 +132,6 @@ check_body_contains "post-show-body"  "/posts/1"   "Hello from the database"
 check_body_contains "middleware-text" "/middleware-test" "middleware works"
 
 # TODO (tracked in CLAUDE.md roadmap), not yet asserted here:
-#  - unmatched route: zphp returns 500, php-S returns 404 (Laravel not-found
-#    rendering path under serve)
 #  - POST /validate, /posts: php returns 419 (CSRF) without a token; a proper
 #    test must GET a token from the session first. session driver is `array`
 #    so CSRF can't round-trip across requests anyway - needs a token-fetch step.
