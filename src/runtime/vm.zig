@@ -3345,9 +3345,15 @@ pub const VM = struct {
                         // COW: the inner array (held by base[outer]) may be
                         // shared - separate before the in-place inner write and
                         // store it back through base[outer]. set/offsetSet retain,
-                        // so cancel the extra to keep a single owner
+                        // so cancel the extra to keep a single owner.
+                        // EXCEPTION: when base[outer] is itself a reference, the
+                        // inner array IS shared storage on purpose (`$r = &$a[k]`)
+                        // - a descending write must mutate it in place so every
+                        // alias of the reference sees it, never separate a copy
                         var ea = existing;
-                        const inner = try self.cowSeparate(existing.array);
+                        const outer_is_ref = base == .array and self.array_ref_active and
+                            (if (base.array.getPtr(ok)) |ep| ep.ref != null else false);
+                        const inner = if (outer_is_ref) existing.array else try self.cowSeparate(existing.array);
                         if (inner != existing.array) {
                             if (base == .array) {
                                 try base.array.set(self.allocator, ok, .{ .array = inner });
@@ -12668,6 +12674,20 @@ pub const VM = struct {
     // + string_index. nested arrays/objects are SHARED with the source (each
     // element reference retained), so a deeper write separates again at that
     // level. born at refcount 0 - cowSeparate sets it to the writer's 1
+    // after cloning a ref-containing array, the clone's referenced entries
+    // share the original's cells (PHP preserves is_ref across array copy). bind
+    // each cloned ref entry into the vm-level registry so propagateCellWrite
+    // reaches the clone too - this is what makes `$d = $c; $d[$k] = X` write the
+    // shared storage when $c[$k] is a reference
+    fn registerCloneRefs(self: *VM, copy: *PhpArray) RuntimeError!void {
+        if (!self.array_ref_active) return;
+        for (copy.entries.items) |entry| {
+            if (entry.ref) |cell| {
+                self.array_ref_bindings.append(self.allocator, .{ .cell = cell, .array = copy, .key = entry.key }) catch return error.RuntimeError;
+            }
+        }
+    }
+
     fn shallowCloneCow(self: *VM, src: *PhpArray) RuntimeError!*PhpArray {
         const copy = self.allocator.create(PhpArray) catch return error.RuntimeError;
         copy.* = .{ .next_int_key = src.next_int_key, .has_int_keys = src.has_int_keys, .cursor = src.cursor };
@@ -12680,6 +12700,7 @@ pub const VM = struct {
             }
         }
         self.arrays.append(self.allocator, copy) catch return error.RuntimeError;
+        try self.registerCloneRefs(copy);
         return copy;
     }
 
@@ -12734,6 +12755,7 @@ pub const VM = struct {
             }
         }
         self.arrays.append(self.allocator, copy) catch return error.RuntimeError;
+        try self.registerCloneRefs(copy);
         return copy;
     }
 
@@ -12757,12 +12779,13 @@ pub const VM = struct {
             } else entry.value;
             // a copied object element is a new reference from the clone
             if (cloned_value == .object) objRetain(cloned_value.object);
-            copy.entries.appendAssumeCapacity(.{ .key = entry.key, .value = cloned_value });
+            copy.entries.appendAssumeCapacity(.{ .key = entry.key, .value = cloned_value, .ref = entry.ref });
             if (entry.key == .string) {
                 copy.string_index.put(self.allocator, entry.key.string, i) catch return error.RuntimeError;
             }
         }
         self.arrays.append(self.allocator, copy) catch return error.RuntimeError;
+        try self.registerCloneRefs(copy);
         return copy;
     }
 
