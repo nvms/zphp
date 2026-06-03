@@ -1293,6 +1293,15 @@ pub const VM = struct {
         try c.put(a, "E_DEPRECATED", .{ .int = 8192 });
         try c.put(a, "E_USER_DEPRECATED", .{ .int = 16384 });
         try c.put(a, "E_ALL", .{ .int = 30719 });
+        // phpinfo() / php_ini section flags
+        try c.put(a, "INFO_GENERAL", .{ .int = 1 });
+        try c.put(a, "INFO_CREDITS", .{ .int = 2 });
+        try c.put(a, "INFO_CONFIGURATION", .{ .int = 4 });
+        try c.put(a, "INFO_MODULES", .{ .int = 8 });
+        try c.put(a, "INFO_ENVIRONMENT", .{ .int = 16 });
+        try c.put(a, "INFO_VARIABLES", .{ .int = 32 });
+        try c.put(a, "INFO_LICENSE", .{ .int = 64 });
+        try c.put(a, "INFO_ALL", .{ .int = 4294967295 });
         try c.put(a, "PHP_FLOAT_MAX", .{ .float = std.math.floatMax(f64) });
         try c.put(a, "PHP_FLOAT_MIN", .{ .float = std.math.floatMin(f64) });
         try c.put(a, "PHP_FLOAT_EPSILON", .{ .float = std.math.floatEps(f64) });
@@ -13074,6 +13083,13 @@ pub const VM = struct {
                     const const_name = rest[sep + 1 ..];
                     if (class_name.len == 0) {
                         if (self.php_constants.get(const_name)) |v| return v;
+                        // PHP namespace fallback: a bare constant default in a
+                        // namespaced function ($x = PHP_INT_MAX inside namespace
+                        // Foo) is stored qualified (Foo\PHP_INT_MAX) but must fall
+                        // back to the global constant - mirrors the constant opcode
+                        if (std.mem.lastIndexOfScalar(u8, const_name, '\\')) |nsep| {
+                            if (self.php_constants.get(const_name[nsep + 1 ..])) |v| return v;
+                        }
                         return .null;
                     }
                     if (self.getStaticProp(class_name, const_name)) |v| return v;
