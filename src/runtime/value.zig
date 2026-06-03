@@ -189,6 +189,30 @@ pub const PhpArray = struct {
         return .null;
     }
 
+    // like get() but returns a mutable pointer to the entry, or null if the
+    // key is absent. used to mark an element as a reference (entry.ref)
+    pub fn getPtr(self: *PhpArray, raw_key: Key) ?*Entry {
+        const key = normalizeKey(raw_key);
+        if (key == .int) {
+            const idx = key.int;
+            if (idx >= 0) {
+                const uidx: usize = @intCast(idx);
+                if (uidx < self.entries.items.len) {
+                    const entry = &self.entries.items[uidx];
+                    if (entry.key == .int and entry.key.int == idx) return entry;
+                }
+            }
+        }
+        if (key == .string) {
+            if (self.string_index.get(key.string)) |idx| return &self.entries.items[idx];
+            return null;
+        }
+        for (self.entries.items) |*entry| {
+            if (entry.key.eql(key)) return entry;
+        }
+        return null;
+    }
+
     pub fn length(self: *const PhpArray) i64 {
         return @intCast(self.entries.items.len);
     }

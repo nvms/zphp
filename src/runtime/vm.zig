@@ -460,6 +460,13 @@ pub const VM = struct {
     // (array elem / object prop / static prop). caller's bind_ref_from_return
     // consumes + clears them
     last_return_ref: ?*Value = null,
+    // vm-level array-element ref bindings, used for the cases where the bound
+    // array OUTLIVES the binding frame: clone-propagated refs (`$d = $c` where
+    // an element is a ref) and the `$arr[$k] = &$var` direction. frame-scoped
+    // ref_array_bindings still cover the call-scoped paths (bindRefParams) and
+    // the existing `$v = &$arr[$k]` local. propagateCellWrite scans BOTH; an
+    // entry is bound in exactly one list. cleared at reset (request lifetime)
+    array_ref_bindings: std.ArrayListUnmanaged(ArrayRefBinding) = .{},
     last_return_ref_array_bindings: std.ArrayListUnmanaged(ArrayRefBinding) = .{},
     last_return_ref_object_bindings: std.ArrayListUnmanaged(ObjectRefBinding) = .{},
     last_return_ref_static_bindings: std.ArrayListUnmanaged(@import("value.zig").StaticPropRefBinding) = .{},
@@ -1712,6 +1719,7 @@ pub const VM = struct {
         self.pending_fiber_release.deinit(self.allocator);
         self.weakmaps.deinit(self.allocator);
         self.cycle_candidates.deinit(self.allocator);
+        self.array_ref_bindings.deinit(self.allocator);
         self.last_return_ref_array_bindings.deinit(self.allocator);
         self.last_return_ref_object_bindings.deinit(self.allocator);
         self.last_return_ref_static_bindings.deinit(self.allocator);
@@ -1776,6 +1784,7 @@ pub const VM = struct {
         self.frame_high_water = 0;
         self.obj_ref_active = false;
         self.array_ref_active = false;
+        self.array_ref_bindings.clearRetainingCapacity();
         // serve mode keeps the builtin heap + class registration across requests
         self.freeHeapItems(!self.serve_mode);
         if (self.serve_mode) self.freeClassState();
@@ -3031,10 +3040,12 @@ pub const VM = struct {
                         }
                         // Stage 2 element-overwrite release - see array_set
                         const norm_key = Value.toArrayKey(key);
-                        const old_val = arr_val.array.get(norm_key);
-                        try arr_val.array.set(self.allocator, norm_key, val);
-                        if (old_val == .object or old_val == .array) {
-                            self.releaseValue(old_val);
+                        if (!try self.writeArrayElemRef(arr_val.array, norm_key, val)) {
+                            const old_val = arr_val.array.get(norm_key);
+                            try arr_val.array.set(self.allocator, norm_key, val);
+                            if (old_val == .object or old_val == .array) {
+                                self.releaseValue(old_val);
+                            }
                         }
                     } else if (arr_val == .object and self.hasMethod(arr_val.object.class_name, "offsetSet")) {
                         _ = self.callMethod(arr_val.object, "offsetSet", &.{ key, val }) catch {
@@ -3232,11 +3243,15 @@ pub const VM = struct {
                             inner.refcount -= 1;
                             ea = .{ .array = inner };
                         }
-                        // Stage 2 element-overwrite release on the inner write
-                        const inner_old = ea.array.get(ik);
-                        try ea.array.set(self.allocator, ik, v);
-                        if (inner_old == .object or inner_old == .array) {
-                            self.releaseValue(inner_old);
+                        // Stage 2 element-overwrite release on the inner write.
+                        // route a plain write to a referenced inner element
+                        // through its shared cell
+                        if (!try self.writeArrayElemRef(ea.array, ik, v)) {
+                            const inner_old = ea.array.get(ik);
+                            try ea.array.set(self.allocator, ik, v);
+                            if (inner_old == .object or inner_old == .array) {
+                                self.releaseValue(inner_old);
+                            }
                         }
                         self.push(v);
                         continue;
@@ -3349,11 +3364,15 @@ pub const VM = struct {
                             }
                             ea = .{ .array = inner };
                         }
-                        // Stage 2 element-overwrite release on the inner write
-                        const inner_old = ea.array.get(ik);
-                        try ea.array.set(self.allocator, ik, v);
-                        if (inner_old == .object or inner_old == .array) {
-                            self.releaseValue(inner_old);
+                        // Stage 2 element-overwrite release on the inner write.
+                        // route a plain write to a referenced inner element
+                        // through its shared cell
+                        if (!try self.writeArrayElemRef(ea.array, ik, v)) {
+                            const inner_old = ea.array.get(ik);
+                            try ea.array.set(self.allocator, ik, v);
+                            if (inner_old == .object or inner_old == .array) {
+                                self.releaseValue(inner_old);
+                            }
                         }
                         self.push(v);
                         continue;
@@ -3417,11 +3436,15 @@ pub const VM = struct {
                         // an existing entry, the array loses its retain on the
                         // displaced value. PhpArray.set has no VM access so the
                         // wrapper here handles it - read the old value first,
-                        // then release after the set retains the new one
-                        const old_val = arr_val.array.get(norm_key);
-                        try arr_val.array.set(self.allocator, norm_key, val);
-                        if (old_val == .object or old_val == .array) {
-                            self.releaseValue(old_val);
+                        // then release after the set retains the new one. a plain
+                        // (non =&) write to a referenced element routes through
+                        // the cell so every name for that storage sees it
+                        if (is_ref or !try self.writeArrayElemRef(arr_val.array, norm_key, val)) {
+                            const old_val = arr_val.array.get(norm_key);
+                            try arr_val.array.set(self.allocator, norm_key, val);
+                            if (old_val == .object or old_val == .array) {
+                                self.releaseValue(old_val);
+                            }
                         }
                         if (self.globals_array) |ga| {
                             if (arr_val.array == ga and key == .string) {
@@ -3579,11 +3602,16 @@ pub const VM = struct {
                             cur = .{ .array = dst };
                         }
                         const norm_key = Value.toArrayKey(key);
-                        // Stage 2 element-overwrite release - see array_set above
-                        const old_val = cur.array.get(norm_key);
-                        try cur.array.set(self.allocator, norm_key, val);
-                        if (old_val == .object or old_val == .array) {
-                            self.releaseValue(old_val);
+                        // Stage 2 element-overwrite release - see array_set above.
+                        // a plain write to a referenced element routes through the
+                        // shared cell. array_set_local_ref ($arr[k] = &$v) is
+                        // handled separately below (it BINDS, not writes)
+                        if (op == .array_set_local_ref or !try self.writeArrayElemRef(cur.array, norm_key, val)) {
+                            const old_val = cur.array.get(norm_key);
+                            try cur.array.set(self.allocator, norm_key, val);
+                            if (old_val == .object or old_val == .array) {
+                                self.releaseValue(old_val);
+                            }
                         }
                         if (self.globals_array) |ga| {
                             if (cur.array == ga and key == .string) {
@@ -4128,6 +4156,8 @@ pub const VM = struct {
                         try self.ref_cells.append(self.allocator, cell);
                         try self.currentFrame().ref_slots.put(self.allocator, name, cell);
                         try self.currentFrame().ref_array_bindings.append(self.allocator, .{ .cell = cell, .array = arr_ptr, .key = key });
+                        if (arr_ptr.getPtr(key)) |ep| ep.ref = cell;
+                        self.array_ref_active = true;
                     }
                 },
 
@@ -4223,6 +4253,8 @@ pub const VM = struct {
                         try self.ref_cells.append(self.allocator, cell);
                         try frame.ref_slots.put(self.allocator, dst_name, cell);
                         try frame.ref_array_bindings.append(self.allocator, .{ .cell = cell, .array = arr_ptr, .key = key });
+                        if (arr_ptr.getPtr(key)) |ep| ep.ref = cell;
+                        self.array_ref_active = true;
                     }
                 },
 
@@ -11131,7 +11163,32 @@ pub const VM = struct {
         }
     }
 
+    // a DIRECT write `$arr[$k] = X` to an element that is a php reference must
+    // go through the shared cell (so every other name for that storage - the
+    // bound $v, clone-shared entries - observes X), not clobber entry.value in
+    // isolation. returns true if the element was a reference and the write was
+    // routed; the caller then skips its own set + overwrite-release (the
+    // propagate below does the retaining store + releases the old value)
+    fn writeArrayElemRef(self: *VM, arr: *PhpArray, key: PhpArray.Key, val: Value) !bool {
+        if (!self.array_ref_active) return false;
+        const ep = arr.getPtr(key) orelse return false;
+        const cell = ep.ref orelse return false;
+        cell.* = val;
+        try self.propagateCellWrite(cell, val);
+        return true;
+    }
+
     fn propagateCellWrite(self: *VM, cell: *Value, val: Value) !void {
+        // vm-level array bindings outlive frames (clone-propagated refs +
+        // `$arr[$k] = &$var`). disjoint from the frame-scoped list below, so
+        // each bound entry is updated exactly once across the two scans
+        for (self.array_ref_bindings.items) |binding| {
+            if (binding.cell == cell) {
+                const old = binding.array.get(binding.key);
+                try binding.array.set(self.allocator, binding.key, val);
+                self.releaseValue(old);
+            }
+        }
         // bindings live on the frame that established the ref-to-elem/prop
         // binding, but the cell can be shared via bindRefParams into callee
         // frames. walk all active frames so a callee's write through the
