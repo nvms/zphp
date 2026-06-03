@@ -1,0 +1,147 @@
+#!/bin/bash
+# serve-mode Laravel harness: boots both zphp serve and php's built-in server
+# against the same Laravel app, curls a set of routes, and diffs status code +
+# body markers. a pass means PHP and zphp agree on what Laravel produced for
+# that request (route -> controller -> Eloquent -> SQLite -> Blade -> output,
+# plus middleware, validation, and error rendering).
+#
+# the DB is built with `zphp run artisan migrate:fresh` (artisan dispatches
+# under zphp) and posts are seeded deterministically via a small PDO script so
+# both servers see identical rows.
+set -uo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+ZPHP="${ZPHP:-$SCRIPT_DIR/../../zig-out/bin/zphp}"
+APP_DIR="$SCRIPT_DIR/app"
+ZPHP_PORT=19890
+PHP_PORT=19891
+
+if ! command -v php &>/dev/null; then echo "php not in PATH"; exit 1; fi
+if [ ! -x "$ZPHP" ]; then echo "zphp not built (make build)"; exit 1; fi
+if [ ! -d "$APP_DIR/vendor" ]; then echo "run tests/laravel/setup first"; exit 1; fi
+
+cd "$APP_DIR"
+cp .env.testing .env
+mkdir -p storage/framework/{cache,sessions,testing,views} storage/logs
+touch database/database.sqlite
+
+# build the posts schema + seed deterministically via PDO so both servers see
+# identical rows. (the schema is created directly rather than via `artisan
+# migrate:fresh` to keep the harness focused on the serve request path and
+# free of artisan's separate config-reference issue; see CLAUDE.md roadmap.)
+SEED="$APP_DIR/_serve_seed.php"
+cat > "$SEED" <<'EOF'
+<?php
+$db = __DIR__.'/database/database.sqlite';
+@unlink($db);
+$pdo = new PDO('sqlite:'.$db);
+$pdo->exec("CREATE TABLE posts (id INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT NOT NULL, body TEXT NOT NULL, published INTEGER NOT NULL DEFAULT 0, created_at TEXT, updated_at TEXT)");
+$now = '2024-01-01 00:00:00';
+$s = $pdo->prepare("INSERT INTO posts (title, body, published, created_at, updated_at) VALUES (?,?,?,?,?)");
+$s->execute(['First Post', 'Hello from the database under zphp serve.', 1, $now, $now]);
+$s->execute(['Second Post', 'Another row rendered by Blade.', 1, $now, $now]);
+echo "seeded ", $pdo->query("SELECT COUNT(*) FROM posts")->fetchColumn(), " posts\n";
+EOF
+"$ZPHP" run "$SEED" >/tmp/laravel_seed.log 2>&1 || { echo "seed failed"; cat /tmp/laravel_seed.log; exit 1; }
+rm -f "$SEED"
+
+cd "$SCRIPT_DIR"
+
+# router for php -S so it dispatches like Laravel behind a front controller:
+# existing files in public/ served directly, everything else -> public/index.php
+ROUTER="$APP_DIR/public/_serve_router.php"
+cat > "$ROUTER" <<'EOF'
+<?php
+$path = parse_url($_SERVER['REQUEST_URI'], PHP_URL_PATH);
+$full = __DIR__ . $path;
+if ($path !== '/' && is_file($full)) return false;
+$_SERVER['SCRIPT_NAME'] = '/index.php';
+$_SERVER['SCRIPT_FILENAME'] = __DIR__ . '/index.php';
+require __DIR__ . '/index.php';
+EOF
+
+cleanup() {
+    [ -n "${ZPHP_PID:-}" ] && kill "$ZPHP_PID" 2>/dev/null || true
+    [ -n "${PHP_PID:-}" ] && kill "$PHP_PID" 2>/dev/null || true
+    rm -f "$ROUTER"
+    wait 2>/dev/null || true
+}
+trap cleanup EXIT
+
+"$ZPHP" serve "$APP_DIR/public/index.php" --port "$ZPHP_PORT" --workers 2 >/tmp/zphp_laravel_serve.log 2>&1 &
+ZPHP_PID=$!
+php -S "localhost:$PHP_PORT" -t "$APP_DIR/public" "$ROUTER" >/tmp/php_laravel_serve.log 2>&1 &
+PHP_PID=$!
+
+# wait for both servers to accept
+for i in $(seq 1 60); do
+    z=$(curl -s -m 2 --connect-timeout 1 -o /dev/null -w '%{http_code}' "http://localhost:$ZPHP_PORT/" 2>/dev/null || echo 000)
+    p=$(curl -s -m 2 --connect-timeout 1 -o /dev/null -w '%{http_code}' "http://localhost:$PHP_PORT/" 2>/dev/null || echo 000)
+    if [ "$z" != "000" ] && [ "$p" != "000" ]; then break; fi
+    sleep 0.5
+done
+
+passed=0
+failed=0
+failures=""
+
+# generous timeout: warm requests are ~1.5s on the current interpreter (the
+# warm-request perf roadmap item); a tight timeout shows up as a spurious 000
+TMO=60
+
+check_status() {
+    local name="$1" path="$2"
+    local zc pc
+    zc=$(curl -s -m "$TMO" -o /dev/null -w '%{http_code}' "http://localhost:$ZPHP_PORT$path" 2>&1 || echo ERR)
+    pc=$(curl -s -m "$TMO" -o /dev/null -w '%{http_code}' "http://localhost:$PHP_PORT$path" 2>&1 || echo ERR)
+    if [ "$zc" = "$pc" ]; then
+        passed=$((passed + 1)); echo "  pass  $name (status=$zc)"
+    else
+        failed=$((failed + 1)); echo "  FAIL  $name (zphp=$zc php=$pc)"
+        failures="$failures\n$name: zphp=$zc php=$pc"
+    fi
+}
+
+check_body_contains() {
+    local name="$1" path="$2" needle="$3"
+    local zb
+    zb=$(curl -s -m "$TMO" "http://localhost:$ZPHP_PORT$path" 2>&1)
+    if echo "$zb" | grep -qF "$needle"; then
+        passed=$((passed + 1)); echo "  pass  $name (contains '$needle')"
+    else
+        failed=$((failed + 1)); echo "  FAIL  $name (missing '$needle')"
+        failures="$failures\n$name body did not contain '$needle'"
+    fi
+}
+
+echo
+echo "=== GET status-code parity (zphp vs php -S) ==="
+check_status "front-page"      "/"
+check_status "posts-index"     "/posts"
+check_status "post-show"       "/posts/1"
+check_status "post-missing"    "/posts/9999"
+check_status "error-test"      "/error-test"
+
+echo
+echo "=== body markers (full route -> controller -> Eloquent -> SQLite -> Blade) ==="
+check_body_contains "front-greeting"  "/"          "Hello from Laravel"
+check_body_contains "posts-row-1"     "/posts"     "First Post"
+check_body_contains "posts-row-2"     "/posts"     "Second Post"
+check_body_contains "post-show-body"  "/posts/1"   "Hello from the database"
+check_body_contains "middleware-text" "/middleware-test" "middleware works"
+
+# TODO (tracked in CLAUDE.md roadmap), not yet asserted here:
+#  - unmatched route: zphp returns 500, php-S returns 404 (Laravel not-found
+#    rendering path under serve)
+#  - POST /validate, /posts: php returns 419 (CSRF) without a token; a proper
+#    test must GET a token from the session first. session driver is `array`
+#    so CSRF can't round-trip across requests anyway - needs a token-fetch step.
+
+echo
+echo "$passed passed, $failed failed"
+if [ $failed -gt 0 ]; then
+    echo -e "$failures"
+    echo "--- zphp serve log (last 30 lines) ---"; tail -30 /tmp/zphp_laravel_serve.log 2>&1 || true
+    echo "--- php serve log (last 30 lines) ---"; tail -30 /tmp/php_laravel_serve.log 2>&1 || true
+    exit 1
+fi
