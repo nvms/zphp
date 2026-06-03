@@ -671,6 +671,10 @@ pub const VM = struct {
     last_dt_error_pos: u32 = 0,
     last_dt_parse_failed: bool = false,
     default_tz_offset: i32 = 0,
+    // set true once any `$r = &$obj->prop` / `&Class::$static` reference binding
+    // is created. lets writes to a prop/static-prop skip the ref-cell sync walk
+    // entirely in the common case (no such reference exists). reset() clears it
+    obj_ref_active: bool = false,
 
     pub const InlineCache = struct {
         // property access: keyed by (chunk_ptr ^ ip), stores class_ptr for visibility skip
@@ -1766,6 +1770,7 @@ pub const VM = struct {
     pub fn reset(self: *VM) void {
         self.releaseFrames();
         self.frame_high_water = 0;
+        self.obj_ref_active = false;
         // serve mode keeps the builtin heap + class registration across requests
         self.freeHeapItems(!self.serve_mode);
         if (self.serve_mode) self.freeClassState();
@@ -4236,6 +4241,7 @@ pub const VM = struct {
                         try self.ref_cells.append(self.allocator, cell);
                         try frame.ref_slots.put(self.allocator, dst_name, cell);
                         try frame.ref_object_bindings.append(self.allocator, .{ .cell = cell, .object = obj_ptr, .prop_name = prop_name });
+                        self.obj_ref_active = true;
                     }
                 },
 
@@ -4262,6 +4268,7 @@ pub const VM = struct {
                         try self.ref_cells.append(self.allocator, cell);
                         try frame.ref_slots.put(self.allocator, dst_name, cell);
                         try frame.ref_object_bindings.append(self.allocator, .{ .cell = cell, .object = obj_ptr, .prop_name = prop_owned });
+                        self.obj_ref_active = true;
                     }
                 },
                 .bind_ref_from_return => {
@@ -4277,6 +4284,7 @@ pub const VM = struct {
                         for (self.last_return_ref_array_bindings.items) |b| try frame.ref_array_bindings.append(self.allocator, b);
                         for (self.last_return_ref_object_bindings.items) |b| try frame.ref_object_bindings.append(self.allocator, b);
                         for (self.last_return_ref_static_bindings.items) |b| try frame.ref_static_bindings.append(self.allocator, b);
+                        if (self.last_return_ref_object_bindings.items.len > 0 or self.last_return_ref_static_bindings.items.len > 0) self.obj_ref_active = true;
                         self.last_return_ref_array_bindings.clearRetainingCapacity();
                         self.last_return_ref_object_bindings.clearRetainingCapacity();
                         self.last_return_ref_static_bindings.clearRetainingCapacity();
@@ -4318,6 +4326,7 @@ pub const VM = struct {
                     try self.ref_cells.append(self.allocator, cell);
                     try frame.ref_slots.put(self.allocator, dst_name, cell);
                     try frame.ref_static_bindings.append(self.allocator, .{ .cell = cell, .class_name = class_name, .prop_name = prop_name });
+                    self.obj_ref_active = true;
                 },
 
                 .unset_var => {
@@ -6437,6 +6446,7 @@ pub const VM = struct {
                             const dp_old = obj.get(prop_name);
                             try obj.set(self.allocator, prop_name, new_val);
                             self.releaseValue(dp_old);
+                            self.syncObjPropRefs(obj, prop_name, new_val);
                         }
                     }
                     self.push(new_val);
@@ -6525,6 +6535,7 @@ pub const VM = struct {
                                     retainValue(val);
                                     s[sp_entry.slot_index] = val;
                                     self.releaseValue(sp_ic_old);
+                                    self.syncObjPropRefs(obj, prop_name, val);
                                     self.push(val);
                                     continue;
                                 }
@@ -6596,6 +6607,7 @@ pub const VM = struct {
                             const sp_old_prop = obj.getForScope(prop_name, sp_scope);
                             try obj.setForScope(self.allocator, prop_name, val, sp_scope);
                             self.releaseValue(sp_old_prop);
+                            self.syncObjPropRefs(obj, prop_name, val);
                             // populate IC for slot-indexed writes. typed
                             // properties are cached too - the fast path runs
                             // checkPropertyType when prop_type is set
@@ -8607,6 +8619,7 @@ pub const VM = struct {
                         const ssp_old = cls.static_props.get(prop_name) orelse Value.null;
                         try cls.static_props.put(self.allocator, prop_name, val);
                         self.releaseValue(ssp_old);
+                        self.syncStaticPropRefs(class_name, prop_name, val);
                     }
                 },
 
@@ -11076,6 +11089,43 @@ pub const VM = struct {
         if (self.pending_destruct.items.len > 0) self.drainPendingDestruct();
     }
 
+    // the reverse of propagateCellWrite for object/static props: when $obj->prop
+    // (or Class::$static) is written DIRECTLY - not through a reference - update
+    // any ref cell that a `$r = &$obj->prop` bound to it, so $r observes the new
+    // value. PHP keeps the prop and the reference as one storage; zphp keeps two
+    // views (the prop slot + the cell) and syncs them in both directions
+    fn syncObjPropRefs(self: *VM, obj: *PhpObject, prop_name: []const u8, val: Value) void {
+        if (!self.obj_ref_active) return;
+        var fi = self.frame_count;
+        while (fi > 0) {
+            fi -= 1;
+            for (self.frames[fi].ref_object_bindings.items) |binding| {
+                if (binding.object == obj and std.mem.eql(u8, binding.prop_name, prop_name)) {
+                    const old = binding.cell.*;
+                    retainValue(val);
+                    binding.cell.* = val;
+                    self.releaseValue(old);
+                }
+            }
+        }
+    }
+
+    fn syncStaticPropRefs(self: *VM, class_name: []const u8, prop_name: []const u8, val: Value) void {
+        if (!self.obj_ref_active) return;
+        var fi = self.frame_count;
+        while (fi > 0) {
+            fi -= 1;
+            for (self.frames[fi].ref_static_bindings.items) |binding| {
+                if (std.mem.eql(u8, binding.class_name, class_name) and std.mem.eql(u8, binding.prop_name, prop_name)) {
+                    const old = binding.cell.*;
+                    retainValue(val);
+                    binding.cell.* = val;
+                    self.releaseValue(old);
+                }
+            }
+        }
+    }
+
     fn propagateCellWrite(self: *VM, cell: *Value, val: Value) !void {
         // bindings live on the frame that established the ref-to-elem/prop
         // binding, but the cell can be shared via bindRefParams into callee
@@ -11694,6 +11744,7 @@ pub const VM = struct {
                             .object = obj_val.object,
                             .prop_name = obj_ref.prop_name,
                         });
+                        self.obj_ref_active = true;
                     }
                 },
                 .chained_prop => |cp| {
@@ -11711,6 +11762,7 @@ pub const VM = struct {
                             .object = target.obj,
                             .prop_name = target.prop,
                         });
+                        self.obj_ref_active = true;
                     }
                 },
                 .prop_array_elem => |pae| {
