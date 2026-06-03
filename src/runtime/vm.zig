@@ -11625,8 +11625,25 @@ pub const VM = struct {
                 .object_prop => |obj_ref| {
                     const obj_val = self.resolveCallerVar(obj_ref.var_name, obj_ref.is_local, obj_ref.slot);
                     if (obj_val == .object) {
+                        var bound = new_vars.get(func.params[ri]) orelse .null;
+                        // a reference can't stay COW-shared: if $obj->prop holds a
+                        // shared array, give the ref a private copy and point the
+                        // property at it, so an in-place mutation through the ref
+                        // (unset/array_shift - which does NOT fire propagateCellWrite,
+                        // only cell-REASSIGNMENT does) reaches $obj->prop while the
+                        // COW readers keep the original. without this, Arr::forget's
+                        // `unset($this->items[...])` descends + writes back into the
+                        // shared config-items array in place, corrupting readers
+                        if (bound == .array and bound.array.refcount > 1) {
+                            const fresh = try self.shallowCloneCow(bound.array);
+                            const old_prop = obj_val.object.get(obj_ref.prop_name);
+                            bound = .{ .array = fresh };
+                            try new_vars.put(self.allocator, func.params[ri], bound);
+                            try obj_val.object.set(self.allocator, obj_ref.prop_name, bound); // retains fresh -> rc 1
+                            self.releaseValue(old_prop); // drop the property's orphaned hold on the original
+                        }
                         const cell = try self.allocator.create(Value);
-                        cell.* = new_vars.get(func.params[ri]) orelse .null;
+                        cell.* = bound;
                         // the ref cell is a durable holder - retain its array value, or the
                         // callee param slot's release at frame teardown frees the array the
                         // cell (and the caller's ref binding) still points at (Stage 2)

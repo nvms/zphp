@@ -82,3 +82,40 @@ echo "chain: ";
 var_dump(array_values($chain));        // [second, tail]
 echo "chainReader (untouched): ";
 var_dump($chainReader);                // [first, second]
+
+// a by-ref param bound to a COW-shared OBJECT PROPERTY array must also separate:
+// the mutation must reach $obj->prop (an in-place unset doesn't fire the cell
+// writeback, so the property is pointed at the private copy at bind time) and a
+// reader that copied the property before the call must be protected. this is the
+// shape config Repository uses: Arr::forget($this->items, $key).
+class PropHolder
+{
+    public array $items = ['a' => 1, 'b' => 2, 'c' => 3];
+}
+
+function unsetProp(array &$a): void
+{
+    unset($a['b']);
+}
+
+$ph = new PropHolder();
+$propReader = $ph->items;
+unsetProp($ph->items);
+echo "prop items after unset: ";
+var_dump(array_keys($ph->items));        // [a, c] - mutation reached the property
+echo "prop reader (untouched): ";
+var_dump(array_keys($propReader));       // [a, b, c]
+
+// non-shared object-prop by-ref still mutates the property in place
+class PropHolder2
+{
+    public array $items = ['p' => 1];
+}
+function addProp(array &$a): void
+{
+    $a['q'] = 2;
+}
+$ph2 = new PropHolder2();
+addProp($ph2->items);
+echo "prop2 has q: ";
+var_dump(isset($ph2->items['q']));       // true
