@@ -10697,12 +10697,16 @@ pub const VM = struct {
         const ac: usize = arg_count;
         const lc: usize = func.local_count;
 
-        // check if any captures are by-ref - if so, can't use locals-only fast path
-        // because fastLoop's set_local doesn't update ref_slots
-        for (self.captures.items) |cap| {
-            if (cap.ref_cell != null and
-                (cap.closure_name.ptr == name.ptr or
-                (cap.closure_name.len == name.len and std.mem.eql(u8, cap.closure_name, name))))
+        // look this closure's captures up by name once (a contiguous range +
+        // a has_refs flag) instead of scanning the whole global captures list
+        // twice per call - self.captures accumulates across every closure the
+        // program ever made, so the old O(total_captures) scans were the
+        // dominant warm-Laravel frame (closure-heavy pipeline/middleware)
+        const cap_range = self.getCaptureRange(name);
+
+        // by-ref captures can't use the locals-only fast path (fastLoop's
+        // set_local doesn't update ref_slots) - fall to the slow vars+refs path
+        if (cap_range != null and cap_range.?.has_refs) {
             {
                 // fall through to non-locals path via callNamedFunction's slow path
                 var new_vars = self.acquireFrameVars();
@@ -10750,11 +10754,10 @@ pub const VM = struct {
         self.saveFrameArgs(arg_count);
         self.dropN(ac);
 
-        // bind captures directly to locals using slot_names
-        for (self.captures.items) |cap| {
-            if (cap.closure_name.ptr == name.ptr or
-                (cap.closure_name.len == name.len and std.mem.eql(u8, cap.closure_name, name)))
-            {
+        // bind captures directly to locals using slot_names - iterate only
+        // this closure's contiguous capture range (no whole-list scan / name cmp)
+        if (cap_range) |range| {
+            for (self.captures.items[range.start .. range.start + range.len]) |cap| {
                 for (func.slot_names, 0..) |sn, si| {
                     if (sn.len == cap.var_name.len and std.mem.eql(u8, sn, cap.var_name)) {
                         locals[si] = try self.transferArg(cap.value);
