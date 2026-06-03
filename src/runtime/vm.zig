@@ -675,6 +675,10 @@ pub const VM = struct {
     // is created. lets writes to a prop/static-prop skip the ref-cell sync walk
     // entirely in the common case (no such reference exists). reset() clears it
     obj_ref_active: bool = false,
+    // set true once any `$arr[$k] = &$var` / `$v = &$arr[$k]` array-element
+    // reference binding exists. lets array reads/writes/clones/foreach skip the
+    // per-entry `ref` check in the common case. reset() clears it
+    array_ref_active: bool = false,
 
     pub const InlineCache = struct {
         // property access: keyed by (chunk_ptr ^ ip), stores class_ptr for visibility skip
@@ -1771,6 +1775,7 @@ pub const VM = struct {
         self.releaseFrames();
         self.frame_high_water = 0;
         self.obj_ref_active = false;
+        self.array_ref_active = false;
         // serve mode keeps the builtin heap + class registration across requests
         self.freeHeapItems(!self.serve_mode);
         if (self.serve_mode) self.freeClassState();

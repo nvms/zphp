@@ -21,6 +21,11 @@ pub const PhpArray = struct {
     pub const Entry = struct {
         key: Key,
         value: Value,
+        // when non-null this element IS a php reference: ref points at the
+        // shared *Value cell and `value` is ignored (held .null). readers
+        // deref through ref, writers write the cell. defaulted so the ~645
+        // existing `.{ .key, .value }` initializers stay non-breaking
+        ref: ?*Value = null,
     };
 
     pub const Key = union(enum) {
