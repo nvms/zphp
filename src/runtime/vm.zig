@@ -4870,11 +4870,26 @@ pub const VM = struct {
 
                 .get_obj_class => {
                     const v = self.pop();
-                    if (v == .object) {
-                        self.push(.{ .string = v.object.class_name });
-                    } else {
-                        self.setErrorMsg("Fatal error: Cannot use \"::class\" on non-object", .{});
-                        return error.RuntimeError;
+                    switch (v) {
+                        .object => |o| self.push(.{ .string = o.class_name }),
+                        // a closure is represented as a __closure_* string, but
+                        // it IS an object in PHP - `$closure::class` is "Closure"
+                        // (Symfony VarDumper's VarCloner does `$v::class` on
+                        // trace-arg closures while cloning an exception)
+                        .string => |s| {
+                            if (std.mem.startsWith(u8, s, "__closure_")) {
+                                self.push(.{ .string = "Closure" });
+                            } else {
+                                self.setErrorMsg("Fatal error: Cannot use \"::class\" on non-object", .{});
+                                return error.RuntimeError;
+                            }
+                        },
+                        .generator => self.push(.{ .string = "Generator" }),
+                        .fiber => self.push(.{ .string = "Fiber" }),
+                        else => {
+                            self.setErrorMsg("Fatal error: Cannot use \"::class\" on non-object", .{});
+                            return error.RuntimeError;
+                        },
                     }
                 },
 
