@@ -3812,6 +3812,15 @@ pub const VM = struct {
                         self.push(.{ .array = sep });
                         continue;
                     }
+                    // an ArrayAccess object property ($this->repo[$k][$j]=v where
+                    // $this->repo is ArrayAccess) passes THROUGH unchanged - the
+                    // chained write routes via offsetGet/offsetSet. vivifying it to
+                    // a fresh array would clobber the object (replacing a config
+                    // repository / container with an empty array)
+                    if (cur == .object) {
+                        self.push(cur);
+                        continue;
+                    }
                     const new_arr = try self.allocator.create(PhpArray);
                     new_arr.* = .{};
                     try self.arrays.append(self.allocator, new_arr);
@@ -3841,6 +3850,13 @@ pub const VM = struct {
                             // counted the slot's reference (refcount 1)
                             if (sep != cur.array) slot.* = .{ .array = sep };
                             self.push(slot.*);
+                            continue;
+                        }
+                        // an ArrayAccess object static prop passes through (the
+                        // chained write routes via offsetGet/offsetSet); vivifying
+                        // it to an array would clobber the object
+                        if (cur == .object) {
+                            self.push(cur);
                             continue;
                         }
                         const new_arr = try self.allocator.create(PhpArray);
