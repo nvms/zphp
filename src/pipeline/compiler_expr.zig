@@ -121,6 +121,18 @@ pub fn compileAssign(self: *Compiler, node: Ast.Node) Error!void {
     }
 
     if (target.tag == .array_push_target) {
+        // `$arr[] = &$var` (plain-variable ref source): append a true reference
+        if (op_tag == .equal and self.ast.nodes[node.data.rhs].tag == .ref_target) {
+            const ref_inner = self.ast.nodes[self.ast.nodes[node.data.rhs].data.lhs];
+            if (ref_inner.tag == .variable) {
+                const vname = self.ast.tokenSlice(ref_inner.main_token);
+                const vidx = try self.addConstant(.{ .string = vname });
+                try compileVivifyChain(self, target.data.lhs);
+                try self.emitOp(.array_push_bind_ref);
+                try self.emitU16(vidx);
+                return;
+            }
+        }
         try compileVivifyChain(self,target.data.lhs);
         try self.compileNode(node.data.rhs);
         try self.emitOp(.array_push);
@@ -158,6 +170,21 @@ pub fn compileAssign(self: *Compiler, node: Ast.Node) Error!void {
             try self.emitOp(.array_set);
         } else {
             const rhs_is_ref = self.ast.nodes[node.data.rhs].tag == .ref_target;
+            // `$arr[$key] = &$var` where the ref source is a plain variable:
+            // bind the element to $var's storage (a true reference) instead of
+            // storing a copy. complex ref sources (&$obj->prop etc) fall through
+            if (rhs_is_ref) {
+                const ref_inner = self.ast.nodes[self.ast.nodes[node.data.rhs].data.lhs];
+                if (ref_inner.tag == .variable) {
+                    const vname = self.ast.tokenSlice(ref_inner.main_token);
+                    const vidx = try self.addConstant(.{ .string = vname });
+                    try compileVivifyChain(self, target.data.lhs);
+                    try self.compileNode(target.data.rhs);
+                    try self.emitOp(.array_bind_ref);
+                    try self.emitU16(vidx);
+                    return;
+                }
+            }
             const target_lhs = self.ast.nodes[target.data.lhs];
             if (target_lhs.tag == .variable) {
                 const var_name = self.ast.tokenSlice(target_lhs.main_token);

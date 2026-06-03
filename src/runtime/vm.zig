@@ -3040,7 +3040,7 @@ pub const VM = struct {
                         }
                         // Stage 2 element-overwrite release - see array_set
                         const norm_key = Value.toArrayKey(key);
-                        if (!try self.writeArrayElemRef(arr_val.array, norm_key, val)) {
+                        if (!(self.array_ref_active and try self.writeArrayElemRef(arr_val.array, norm_key, val))) {
                             const old_val = arr_val.array.get(norm_key);
                             try arr_val.array.set(self.allocator, norm_key, val);
                             if (old_val == .object or old_val == .array) {
@@ -3246,7 +3246,7 @@ pub const VM = struct {
                         // Stage 2 element-overwrite release on the inner write.
                         // route a plain write to a referenced inner element
                         // through its shared cell
-                        if (!try self.writeArrayElemRef(ea.array, ik, v)) {
+                        if (!(self.array_ref_active and try self.writeArrayElemRef(ea.array, ik, v))) {
                             const inner_old = ea.array.get(ik);
                             try ea.array.set(self.allocator, ik, v);
                             if (inner_old == .object or inner_old == .array) {
@@ -3373,7 +3373,7 @@ pub const VM = struct {
                         // Stage 2 element-overwrite release on the inner write.
                         // route a plain write to a referenced inner element
                         // through its shared cell
-                        if (!try self.writeArrayElemRef(ea.array, ik, v)) {
+                        if (!(self.array_ref_active and try self.writeArrayElemRef(ea.array, ik, v))) {
                             const inner_old = ea.array.get(ik);
                             try ea.array.set(self.allocator, ik, v);
                             if (inner_old == .object or inner_old == .array) {
@@ -3445,7 +3445,7 @@ pub const VM = struct {
                         // then release after the set retains the new one. a plain
                         // (non =&) write to a referenced element routes through
                         // the cell so every name for that storage sees it
-                        if (is_ref or !try self.writeArrayElemRef(arr_val.array, norm_key, val)) {
+                        if (is_ref or !(self.array_ref_active and try self.writeArrayElemRef(arr_val.array, norm_key, val))) {
                             const old_val = arr_val.array.get(norm_key);
                             try arr_val.array.set(self.allocator, norm_key, val);
                             if (old_val == .object or old_val == .array) {
@@ -3489,7 +3489,7 @@ pub const VM = struct {
                             // Stage 2 element-overwrite release - see array_set.
                             // a by-ref foreach writeback into a referenced element
                             // routes through the shared cell
-                            if (!try self.writeArrayElemRef(arr_val.array, ak, cloned)) {
+                            if (!(self.array_ref_active and try self.writeArrayElemRef(arr_val.array, ak, cloned))) {
                                 const old_val = arr_val.array.get(ak);
                                 try arr_val.array.set(self.allocator, ak, cloned);
                                 if (old_val == .object or old_val == .array) {
@@ -3616,7 +3616,7 @@ pub const VM = struct {
                         // a plain write to a referenced element routes through the
                         // shared cell. array_set_local_ref ($arr[k] = &$v) is
                         // handled separately below (it BINDS, not writes)
-                        if (op == .array_set_local_ref or !try self.writeArrayElemRef(cur.array, norm_key, val)) {
+                        if (op == .array_set_local_ref or !(self.array_ref_active and try self.writeArrayElemRef(cur.array, norm_key, val))) {
                             const old_val = cur.array.get(norm_key);
                             try cur.array.set(self.allocator, norm_key, val);
                             if (old_val == .object or old_val == .array) {
@@ -4176,6 +4176,55 @@ pub const VM = struct {
                         if (arr_ptr.getPtr(key)) |ep| ep.ref = cell;
                         self.array_ref_active = true;
                     }
+                },
+
+                .array_bind_ref => {
+                    // `$arr[$key] = &$var`: make $var a reference (get/create its
+                    // cell) and point the array element at the SAME cell, so the
+                    // element and the variable name one shared storage
+                    const var_idx = self.readU16();
+                    const var_name = self.currentChunk().constants.items[var_idx].string;
+                    const key_val = self.pop();
+                    const arr_val = self.pop();
+                    const frame = self.currentFrame();
+                    const cell = try self.getOrCreateVarCell(frame, var_name);
+                    if (arr_val == .array) {
+                        const arr_ptr = arr_val.array;
+                        const key: PhpArray.Key = switch (key_val) {
+                            .int => |i| .{ .int = i },
+                            .string => |s| .{ .string = s },
+                            else => .{ .int = Value.toInt(key_val) },
+                        };
+                        // the element becomes a mirror of the cell: drop the
+                        // displaced value, store cell.* (retaining), mark the
+                        // entry a reference, and register the writeback binding
+                        const old = arr_ptr.get(key);
+                        try arr_ptr.set(self.allocator, key, cell.*);
+                        if (old == .object or old == .array) self.releaseValue(old);
+                        if (arr_ptr.getPtr(key)) |ep| ep.ref = cell;
+                        try self.array_ref_bindings.append(self.allocator, .{ .cell = cell, .array = arr_ptr, .key = key });
+                        self.array_ref_active = true;
+                    }
+                    self.push(cell.*);
+                },
+
+                .array_push_bind_ref => {
+                    // `$arr[] = &$var`: append a new element sharing $var's storage
+                    const var_idx = self.readU16();
+                    const var_name = self.currentChunk().constants.items[var_idx].string;
+                    const arr_val = self.pop();
+                    const frame = self.currentFrame();
+                    const cell = try self.getOrCreateVarCell(frame, var_name);
+                    if (arr_val == .array) {
+                        const arr_ptr = arr_val.array;
+                        const k = if (arr_ptr.has_int_keys) arr_ptr.next_int_key else 0;
+                        try arr_ptr.append(self.allocator, cell.*);
+                        const key: PhpArray.Key = .{ .int = k };
+                        if (arr_ptr.getPtr(key)) |ep| ep.ref = cell;
+                        try self.array_ref_bindings.append(self.allocator, .{ .cell = cell, .array = arr_ptr, .key = key });
+                        self.array_ref_active = true;
+                    }
+                    self.push(cell.*);
                 },
 
                 .break_var_ref => {
@@ -11178,6 +11227,31 @@ pub const VM = struct {
                 }
             }
         }
+    }
+
+    // get the ref cell for $var, making $var a reference if it isn't one yet
+    // (seed the cell from $var's current value, sharing any array pointer). the
+    // source-of-truth for `$arr[$k] = &$var` and `$arr[] = &$var`
+    fn getOrCreateVarCell(self: *VM, frame: *CallFrame, var_name: []const u8) RuntimeError!*Value {
+        if (frame.ref_slots.get(var_name)) |existing| return existing;
+        const cell = try self.allocator.create(Value);
+        var seed: Value = .null;
+        const sn = if (frame.func) |fn_| fn_.slot_names else self.global_slot_names;
+        var found_slot = false;
+        for (sn, 0..) |s, si| {
+            if (std.mem.eql(u8, s, var_name) and si < frame.locals.len) {
+                seed = frame.locals[si];
+                found_slot = true;
+                break;
+            }
+        }
+        if (!found_slot) {
+            if (frame.vars.get(var_name)) |v| seed = v;
+        }
+        cell.* = seed;
+        try self.ref_cells.append(self.allocator, cell);
+        try frame.ref_slots.put(self.allocator, var_name, cell);
+        return cell;
     }
 
     // a DIRECT write `$arr[$k] = X` to an element that is a php reference must

@@ -152,6 +152,16 @@ pub const OpCode = enum(u8) {
     // destructuring with `&` (e.g. `[, &$b] = $arr`).
     bind_array_ref,
 
+    // u16: source var name const. pops [array, key]. binds `$arr[key] = &$var`:
+    // makes $var a reference (get/create its cell) and points the array element
+    // at the same cell, so the element and the variable share one storage.
+    // pushes the bound value
+    array_bind_ref,
+
+    // u16: source var name const. pops [array]. binds `$arr[] = &$var`: appends
+    // a new element that shares $var's storage (a reference). pushes the value
+    array_push_bind_ref,
+
     // generators
     yield_value, // pop value, suspend generator, push received value on resume
     yield_pair, // pop value, pop key, suspend generator
@@ -285,6 +295,7 @@ pub const OpCode = enum(u8) {
             .make_var_prop_ref_dyn,
             .return_ref, .bind_ref_from_return,
             .array_set_local, .array_set_local_ref,
+            .array_bind_ref, .array_push_bind_ref,
             => 3,
             .call, .call_spread, .new_obj, .method_call, .method_call_spread, .static_call_dyn_method, .make_var_ref, .make_var_prop_ref => 4,
             .get_static_prop, .get_class_const, .set_prop_default, .set_static_prop, .get_static, .set_static,
