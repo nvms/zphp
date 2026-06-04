@@ -3402,7 +3402,7 @@ fn daysInMonth(month: i64, year: i64) i64 {
     return d;
 }
 
-const DstRule = enum { none, us, eu };
+const DstRule = enum { none, us, eu, au, nz };
 
 const TzEntry = struct {
     name: []const u8,
@@ -3461,10 +3461,12 @@ const tz_table = [_]TzEntry{
     .{ .name = "asia/dhaka", .std_offset = 6 * 3600, .dst_offset = 6 * 3600, .dst_rule = .none, .std_abbrev = "BST", .dst_abbrev = "BST" },
     .{ .name = "asia/kathmandu", .std_offset = 5 * 3600 + 2700, .dst_offset = 5 * 3600 + 2700, .dst_rule = .none, .std_abbrev = "NPT", .dst_abbrev = "NPT" },
     // oceania
-    .{ .name = "australia/sydney", .std_offset = 10 * 3600, .dst_offset = 11 * 3600, .dst_rule = .none, .std_abbrev = "AEST", .dst_abbrev = "AEDT" },
-    .{ .name = "australia/melbourne", .std_offset = 10 * 3600, .dst_offset = 11 * 3600, .dst_rule = .none, .std_abbrev = "AEST", .dst_abbrev = "AEDT" },
+    .{ .name = "australia/sydney", .std_offset = 10 * 3600, .dst_offset = 11 * 3600, .dst_rule = .au, .std_abbrev = "AEST", .dst_abbrev = "AEDT" },
+    .{ .name = "australia/melbourne", .std_offset = 10 * 3600, .dst_offset = 11 * 3600, .dst_rule = .au, .std_abbrev = "AEST", .dst_abbrev = "AEDT" },
+    .{ .name = "australia/hobart", .std_offset = 10 * 3600, .dst_offset = 11 * 3600, .dst_rule = .au, .std_abbrev = "AEST", .dst_abbrev = "AEDT" },
+    .{ .name = "australia/brisbane", .std_offset = 10 * 3600, .dst_offset = 10 * 3600, .dst_rule = .none, .std_abbrev = "AEST", .dst_abbrev = "AEST" },
     .{ .name = "australia/perth", .std_offset = 8 * 3600, .dst_offset = 8 * 3600, .dst_rule = .none, .std_abbrev = "AWST", .dst_abbrev = "AWST" },
-    .{ .name = "pacific/auckland", .std_offset = 12 * 3600, .dst_offset = 13 * 3600, .dst_rule = .none, .std_abbrev = "NZST", .dst_abbrev = "NZDT" },
+    .{ .name = "pacific/auckland", .std_offset = 12 * 3600, .dst_offset = 13 * 3600, .dst_rule = .nz, .std_abbrev = "NZST", .dst_abbrev = "NZDT" },
     // africa
     .{ .name = "africa/cairo", .std_offset = 2 * 3600, .dst_offset = 2 * 3600, .dst_rule = .none, .std_abbrev = "EET", .dst_abbrev = "EET" },
     .{ .name = "africa/lagos", .std_offset = 3600, .dst_offset = 3600, .dst_rule = .none, .std_abbrev = "WAT", .dst_abbrev = "WAT" },
@@ -3564,6 +3566,22 @@ fn isDst(utc_ts: i64, tz: TzEntry) bool {
         const dst_start = dateToTimestamp(year, 3, march_day, 1, 0, 0);
         const dst_end = dateToTimestamp(year, 10, oct_day, 1, 0, 0);
         return utc_ts >= dst_start and utc_ts < dst_end;
+    }
+
+    if (tz.dst_rule == .au or tz.dst_rule == .nz) {
+        // southern hemisphere: DST is active in the SUMMER, which wraps the
+        // year boundary - from a spring start (this calendar year) through the
+        // end of the year, AND from the start of the year through an autumn end.
+        // AU (NSW/VIC/ACT/TAS): 02:00 std first Sunday October -> 03:00 dst first
+        // Sunday April. NZ: 02:00 std last Sunday September -> 03:00 dst first
+        // Sunday April. local 02:00 std = UTC 02:00 - std_offset
+        const start_month: u8 = if (tz.dst_rule == .nz) 9 else 10;
+        const start_nth: u8 = if (tz.dst_rule == .nz) 5 else 1; // NZ last Sun, AU first Sun
+        const start_day = nthWeekday(year, start_month, start_nth, 0);
+        const apr_day = nthWeekday(year, 4, 1, 0);
+        const dst_start = dateToTimestamp(year, start_month, start_day, 2, 0, 0) - @as(i64, tz.std_offset);
+        const dst_end = dateToTimestamp(year, 4, apr_day, 3, 0, 0) - @as(i64, tz.dst_offset);
+        return utc_ts >= dst_start or utc_ts < dst_end;
     }
 
     return false;
