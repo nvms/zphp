@@ -2971,6 +2971,28 @@ fn native_proc_open(ctx: *NativeContext, args: []const Value) RuntimeError!Value
     try proc.set(ctx.allocator, "__exit", .{ .int = 0 });
     try proc.set(ctx.allocator, "__running", .{ .bool = true });
 
+    // spawn the child live now (php spawns at proc_open, not at first read). the
+    // *Child lives in vm.proc_children keyed by proc so proc_close can wait() it
+    // and reset/deinit can reap it. stdin/stdout/stderr stay buffered in phase 1:
+    // ensureProcRan flushes __stdin_buf into the live child and drains its output.
+    // cmd_copy is duped into vm.strings so it outlives this call; the argv array
+    // literal is only read during spawn()
+    const child = try ctx.vm.allocator.create(std.process.Child);
+    child.* = std.process.Child.init(&.{ "/bin/sh", "-c", cmd_copy }, ctx.vm.allocator);
+    child.stdin_behavior = .Pipe;
+    child.stdout_behavior = .Pipe;
+    child.stderr_behavior = .Pipe;
+    child.spawn() catch {
+        ctx.vm.allocator.destroy(child);
+        try proc.set(ctx.allocator, "__pid", .{ .int = 0 });
+        try proc.set(ctx.allocator, "__ran", .{ .bool = true });
+        try proc.set(ctx.allocator, "__running", .{ .bool = false });
+        try proc.set(ctx.allocator, "__exit", .{ .int = -1 });
+        return .{ .bool = false };
+    };
+    try ctx.vm.registerProcChild(proc, child);
+    try proc.set(ctx.allocator, "__pid", .{ .int = @intCast(child.id) });
+
     const pipes = if (args[2] == .array) args[2].array else blk: {
         const a = try ctx.allocator.create(PhpArray);
         a.* = .{};
@@ -3010,30 +3032,52 @@ fn native_proc_open(ctx: *NativeContext, args: []const Value) RuntimeError!Value
     return .{ .object = proc };
 }
 
-// runs the deferred process if it hasn't run yet, feeding accumulated stdin
-// and capturing stdout/stderr onto the proc object
+// drives the live proc_open child to completion if it hasn't run yet: flushes
+// the buffered stdin into the child, drains stdout/stderr, waits, and caches the
+// exit. removes + frees the *Child from vm.proc_children so reap doesn't touch it
 fn ensureProcRan(ctx: *NativeContext, proc: *PhpObject) !void {
     const ran = proc.get("__ran");
     if (ran == .bool and ran.bool) return;
-    const cmd_v = proc.get("__cmd");
-    if (cmd_v != .string) return;
+    const child = ctx.vm.lookupProcChild(proc) orelse {
+        // spawn failed earlier - nothing live to drive
+        try proc.set(ctx.allocator, "__ran", .{ .bool = true });
+        try proc.set(ctx.allocator, "__running", .{ .bool = false });
+        return;
+    };
     const sin = proc.get("__stdin_buf");
     const stdin_data: []const u8 = if (sin == .string) sin.string else "";
-    const result = runShellCapture(ctx.allocator, cmd_v.string, stdin_data) catch {
+    if (child.stdin) |*stdin_file| {
+        _ = stdin_file.writeAll(stdin_data) catch {};
+        stdin_file.close();
+        child.stdin = null;
+    }
+    var stdout_buf = std.ArrayListUnmanaged(u8){};
+    var stderr_buf = std.ArrayListUnmanaged(u8){};
+    child.collectOutput(ctx.allocator, &stdout_buf, &stderr_buf, 64 * 1024 * 1024) catch {};
+    const term = child.wait() catch {
+        ctx.vm.removeProcChild(proc);
+        ctx.vm.allocator.destroy(child);
+        stdout_buf.deinit(ctx.allocator);
+        stderr_buf.deinit(ctx.allocator);
         try proc.set(ctx.allocator, "__ran", .{ .bool = true });
         try proc.set(ctx.allocator, "__running", .{ .bool = false });
         try proc.set(ctx.allocator, "__exit", .{ .int = -1 });
         return;
     };
-    const out_copy = try ctx.allocator.dupe(u8, result.stdout);
-    const err_copy = try ctx.allocator.dupe(u8, result.stderr);
-    ctx.allocator.free(result.stdout);
-    ctx.allocator.free(result.stderr);
+    ctx.vm.removeProcChild(proc);
+    ctx.vm.allocator.destroy(child);
+    const out_copy = try stdout_buf.toOwnedSlice(ctx.allocator);
+    const err_copy = try stderr_buf.toOwnedSlice(ctx.allocator);
     try ctx.vm.strings.append(ctx.allocator, out_copy);
     try ctx.vm.strings.append(ctx.allocator, err_copy);
     try proc.set(ctx.allocator, "__stdout_buf", .{ .string = out_copy });
     try proc.set(ctx.allocator, "__stderr_buf", .{ .string = err_copy });
-    try proc.set(ctx.allocator, "__exit", .{ .int = result.exit });
+    const exit: i64 = switch (term) {
+        .Exited => |c| @intCast(c),
+        .Signal => |c| @as(i64, @intCast(c)) + 128,
+        else => -1,
+    };
+    try proc.set(ctx.allocator, "__exit", .{ .int = exit });
     try proc.set(ctx.allocator, "__ran", .{ .bool = true });
     try proc.set(ctx.allocator, "__running", .{ .bool = false });
 }
@@ -3057,8 +3101,9 @@ fn native_proc_get_status(ctx: *NativeContext, args: []const Value) RuntimeError
     try ctx.vm.arrays.append(ctx.allocator, result);
     const cmd = obj.get("__cmd");
     const exit = obj.get("__exit");
+    const pid = obj.get("__pid");
     try result.set(ctx.allocator, .{ .string = "command" }, if (cmd == .string) cmd else .{ .string = "" });
-    try result.set(ctx.allocator, .{ .string = "pid" }, .{ .int = 0 });
+    try result.set(ctx.allocator, .{ .string = "pid" }, if (pid == .int) pid else .{ .int = 0 });
     try result.set(ctx.allocator, .{ .string = "running" }, .{ .bool = false });
     try result.set(ctx.allocator, .{ .string = "signaled" }, .{ .bool = false });
     try result.set(ctx.allocator, .{ .string = "stopped" }, .{ .bool = false });

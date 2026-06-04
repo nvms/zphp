@@ -21,6 +21,9 @@ const enums = @import("../stdlib/enums.zig");
 const Allocator = std.mem.Allocator;
 pub const RuntimeError = error{ RuntimeError, OutOfMemory };
 
+// live proc_open children keyed by their ProcessResource object
+const ProcChildMap = std.AutoHashMapUnmanaged(*PhpObject, *std.process.Child);
+
 extern fn zphp_fast_loop(vm_ptr: *anyopaque) callconv(.c) u8;
 
 pub const TypeInfo = struct {
@@ -698,6 +701,50 @@ pub const VM = struct {
     // during the phased migration; the guards above gate access. freed at deinit,
     // cleared at reset
     ref_index: ?*RefIndex = null,
+
+    // live proc_open children, keyed by their ProcessResource object. lazily
+    // allocated (a single nullable pointer, fib-neutral like ref_index above) the
+    // first time proc_open spawns. each *Child outlives its native call so
+    // proc_close can wait() it; reapProcChildren SIGKILL+wait+frees any that the
+    // script opened but never closed, so serve mode doesn't leak fds or zombies
+    proc_children: ?*ProcChildMap = null,
+
+    fn procChildren(self: *VM) RuntimeError!*ProcChildMap {
+        if (self.proc_children) |pc| return pc;
+        const pc = try self.allocator.create(ProcChildMap);
+        pc.* = .{};
+        self.proc_children = pc;
+        return pc;
+    }
+
+    pub fn registerProcChild(self: *VM, proc: *PhpObject, child: *std.process.Child) RuntimeError!void {
+        try (try self.procChildren()).put(self.allocator, proc, child);
+    }
+
+    pub fn lookupProcChild(self: *VM, proc: *PhpObject) ?*std.process.Child {
+        const pc = self.proc_children orelse return null;
+        return pc.get(proc);
+    }
+
+    pub fn removeProcChild(self: *VM, proc: *PhpObject) void {
+        const pc = self.proc_children orelse return;
+        _ = pc.remove(proc);
+    }
+
+    // SIGKILL + reap every still-live child, closing its pipe fds via wait(). runs
+    // at reset (before freeHeapItems frees the proc objects -> keys still valid)
+    // and at deinit. idempotent: clears the map after reaping
+    fn reapProcChildren(self: *VM) void {
+        const pc = self.proc_children orelse return;
+        var it = pc.valueIterator();
+        while (it.next()) |child_ptr| {
+            const child = child_ptr.*;
+            std.posix.kill(child.id, std.posix.SIG.KILL) catch {};
+            _ = child.wait() catch {};
+            self.allocator.destroy(child);
+        }
+        pc.clearRetainingCapacity();
+    }
 
     fn refIndex(self: *VM) RuntimeError!*RefIndex {
         if (self.ref_index) |ri| return ri;
@@ -1821,6 +1868,12 @@ pub const VM = struct {
             self.allocator.destroy(ri);
             self.ref_index = null;
         }
+        if (self.proc_children) |pc| {
+            self.reapProcChildren();
+            pc.deinit(self.allocator);
+            self.allocator.destroy(pc);
+            self.proc_children = null;
+        }
         if (self.pending_native_args_buf) |b| {
             self.allocator.destroy(b);
             self.pending_native_args_buf = null;
@@ -1886,6 +1939,8 @@ pub const VM = struct {
 
     pub fn reset(self: *VM) void {
         self.releaseFrames();
+        // reap before freeHeapItems frees the proc objects (the map keys)
+        self.reapProcChildren();
         self.frame_high_water = 0;
         self.obj_ref_active = false;
         self.array_ref_active = false;
