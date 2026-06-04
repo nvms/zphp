@@ -249,35 +249,49 @@ pub fn compileForeach(self: *Compiler, node: Ast.Node) Error!void {
     const exit_jump = try self.emitJump(.iter_check);
 
     // iter_check pushed: key, value (value on top)
-    var ref_key_name: ?[]const u8 = null;
-    var ref_val_name: ?[]const u8 = null;
-
     const val_node = self.ast.nodes[val_n];
     if (val_node.tag == .array_literal or val_node.tag == .list_destructure) {
+        // destructure (incl. by-ref `[&$x, &$y]`, which binds per element via
+        // compileDestructure -> bind_array_ref) - consumes the value on top
         try self.compileDestructure(val_node);
         try self.emitOp(.pop);
-    } else {
-        const val_name = self.ast.tokenSlice(val_node.main_token);
-        try self.emitSetVar(val_name);
-        try self.emitOp(.pop);
-        if (val_by_ref) ref_val_name = val_name;
-    }
-
-    if (key_n != 0) {
-        const key_name = self.ast.tokenSlice(self.ast.nodes[key_n].main_token);
-        try self.emitSetVar(key_name);
-        try self.emitOp(.pop);
-        if (val_by_ref) ref_key_name = key_name;
-    } else {
-        if (val_by_ref) {
-            // unique per loop depth so nested by-ref foreach loops don't
-            // clobber each other's iteration key (and thus write back to
-            // the wrong index in the outer loop's array)
-            const synth_name = try std.fmt.allocPrint(self.allocator, "__foreach_key_{d}", .{self.loop_depth});
-            try self.string_allocs.append(self.allocator, synth_name);
-            try self.emitSetVar(synth_name);
+        if (key_n != 0) {
+            try self.emitSetVar(self.ast.tokenSlice(self.ast.nodes[key_n].main_token));
             try self.emitOp(.pop);
-            ref_key_name = synth_name;
+        } else {
+            try self.emitOp(.pop);
+        }
+    } else if (val_by_ref) {
+        // TRUE-REF foreach: bind $v as a real reference to $iterable[$key] each
+        // iteration (replacing the old value-copy + end-of-iteration writeback).
+        // body writes to $v propagate live through propagateCellWrite, and
+        // `$r = &$v` / `$arr[$k] = &$v` capture the ELEMENT'S OWN storage
+        // (distinct per iteration). the O(1) cell-keyed registry makes the
+        // per-iteration bind affordable (was O(n^2) under the linear scan)
+        const val_name = self.ast.tokenSlice(val_node.main_token);
+        const key_name = if (key_n != 0)
+            self.ast.tokenSlice(self.ast.nodes[key_n].main_token)
+        else blk: {
+            // unique per loop depth so nested by-ref foreach don't collide
+            const synth = try std.fmt.allocPrint(self.allocator, "__foreach_key_{d}", .{self.loop_depth});
+            try self.string_allocs.append(self.allocator, synth);
+            break :blk synth;
+        };
+        // stack: [key, value]
+        try self.emitOp(.pop); // discard the value copy - we bind instead
+        try self.emitSetVar(key_name); // $key = key (peek; key still on stack)
+        try self.emitOp(.pop); // -> []
+        try self.compileNode(iter_n); // push the (already-separated) iterable
+        try self.emitGetVar(key_name); // push the key
+        const vidx = try self.addConstant(.{ .string = val_name });
+        try self.emitOp(.foreach_ref_bind); // $v = &iterable[key] (reverts prior elem if uncaptured)
+        try self.emitU16(vidx);
+    } else {
+        try self.emitSetVar(self.ast.tokenSlice(val_node.main_token));
+        try self.emitOp(.pop);
+        if (key_n != 0) {
+            try self.emitSetVar(self.ast.tokenSlice(self.ast.nodes[key_n].main_token));
+            try self.emitOp(.pop);
         } else {
             try self.emitOp(.pop);
         }
@@ -288,54 +302,17 @@ pub fn compileForeach(self: *Compiler, node: Ast.Node) Error!void {
     // continue lands here, before iter_advance (same pattern as for loop update)
     try self.patchContinues(&prev_continues);
 
-    // by-ref writeback: $arr[$key] = $val. emitted at end-of-iteration so
-    // the current iteration's mutation reaches the source array. uses
-    // array_set_if_present so an unset($arr[$key]) inside the body isn't
-    // resurrected by the writeback (PHP's true-ref binding drops, ours
-    // emulates with a write-back guard)
-    if (ref_val_name) |vn| {
-        if (ref_key_name) |kn| {
-            try self.compileNode(iter_n);
-            try self.emitGetVar(kn);
-            try self.emitGetVar(vn);
-            try self.emitOp(.array_set_if_present);
-        }
-    }
-
     try self.emitOp(.iter_advance);
     try self.emitLoop(loop_top);
 
     self.patchJump(exit_jump);
 
-    // for by-ref loops, route break jumps through a writeback block so the
-    // current iteration's mutation reaches the source. normal exit (iter_check
-    // false) lands at iter_end below and skips this; only patched break jumps
-    // arrive here
+    // true-ref binding propagates writes live, so there is no end-of-iteration
+    // writeback to route break jumps through (the old copy+writeback model
+    // needed that); break just lands at iter_end
     const end_op: bytecode.OpCode = if (close_on_exit) .iter_end_close else .iter_end;
-    if (ref_val_name != null and ref_key_name != null) {
-        const after_writeback_jump = try self.emitJump(.jump);
-        const break_writeback_target = self.chunk.offset();
-        if (ref_val_name) |vn| {
-            if (ref_key_name) |kn| {
-                try self.compileNode(iter_n);
-                try self.emitGetVar(kn);
-                try self.emitGetVar(vn);
-                try self.emitOp(.array_set_if_present);
-            }
-        }
-        const skip_iter_end_jump = try self.emitJump(.jump);
-        self.patchJump(after_writeback_jump);
-        try self.emitOp(end_op);
-        const after_iter_end = self.chunk.offset();
-        self.patchJumpTo(skip_iter_end_jump, after_iter_end);
-
-        // patch break jumps to the writeback target (they'll fall into
-        // writeback then skip iter_end since iter_check never ran for them)
-        try self.patchBreaksTo(&prev_breaks, break_writeback_target);
-    } else {
-        try self.emitOp(end_op);
-        try self.patchBreaks(&prev_breaks);
-    }
+    try self.emitOp(end_op);
+    try self.patchBreaks(&prev_breaks);
     self.break_jumps = prev_breaks;
     self.continue_jumps = prev_continues;
     self.use_continue_jumps = prev_use_cj;

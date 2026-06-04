@@ -162,6 +162,14 @@ pub const OpCode = enum(u8) {
     // a new element that shares $var's storage (a reference). pushes the value
     array_push_bind_ref,
 
+    // u16: foreach value-var name. pops [array, key]. like bind_array_ref but for
+    // by-ref foreach: before binding $v to array[key], reverts the PREVIOUS
+    // element (the one $v still references) to a non-reference IF its cell has
+    // only the foreach's own binding (the body did not capture it via `$r = &$v`
+    // / `$x[] = &$v`). matches PHP, where an element stays is_ref after the loop
+    // only when something else still references it
+    foreach_ref_bind,
+
     // generators
     yield_value, // pop value, suspend generator, push received value on resume
     yield_pair, // pop value, pop key, suspend generator
@@ -295,7 +303,7 @@ pub const OpCode = enum(u8) {
             .make_var_prop_ref_dyn,
             .return_ref, .bind_ref_from_return,
             .array_set_local, .array_set_local_ref,
-            .array_bind_ref, .array_push_bind_ref,
+            .array_bind_ref, .array_push_bind_ref, .foreach_ref_bind,
             => 3,
             .call, .call_spread, .new_obj, .method_call, .method_call_spread, .static_call_dyn_method, .make_var_ref, .make_var_prop_ref => 4,
             .get_static_prop, .get_class_const, .set_prop_default, .set_static_prop, .get_static, .set_static,

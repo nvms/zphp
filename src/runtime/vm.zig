@@ -721,6 +721,34 @@ pub const VM = struct {
         try ri.addPropRev(self.allocator, .{ .object = null, .class_name = class_name, .prop_name = prop_name }, cell);
     }
 
+    // for by-ref foreach advancing past an element: if $name's current cell has
+    // ONLY the foreach's own array binding (nothing captured it via `$r = &$v` /
+    // `$x[] = &$v`), revert that element to a non-reference - clear its entry.ref
+    // and drop the binding. matches PHP (an element stays is_ref after the loop
+    // only when something else still references it)
+    fn revertUncapturedForeachCell(self: *VM, name: []const u8) void {
+        const ri = self.ref_index orelse return;
+        const frame = self.currentFrame();
+        const c_old = frame.ref_slots.get(name) orelse return;
+        const list = ri.fwd.getPtr(c_old) orelse return;
+        if (list.items.len != 1) return; // captured (>1) -> leave is_ref
+        const t = list.items[0];
+        if (t != .array) return;
+        const arr = t.array.array;
+        const key = t.array.key;
+        if (arr.getPtr(key)) |ep| {
+            if (ep.ref == c_old) ep.ref = null;
+        }
+        ri.removeTarget(self.allocator, c_old, t);
+        var i: usize = 0;
+        while (i < frame.ref_array_bindings.items.len) {
+            const b = frame.ref_array_bindings.items[i];
+            if (b.cell == c_old and b.array == arr and b.key.eql(key)) {
+                _ = frame.ref_array_bindings.swapRemove(i);
+            } else i += 1;
+        }
+    }
+
     // remove the map targets for a frame's bindings at teardown, keeping the
     // registry in lock-step with the legacy lists. driven by the legacy lists
     // themselves during the phased migration. generic over CallFrame /
@@ -4245,6 +4273,41 @@ pub const VM = struct {
                             elem = .{ .array = fresh };
                             try arr_ptr.set(self.allocator, key, elem); // retains fresh -> rc 1
                             self.releaseValue(old_elem); // drop the array's orphaned hold on the shared original
+                        }
+                        cell.* = elem;
+                        try self.ref_cells.append(self.allocator, cell);
+                        try self.currentFrame().ref_slots.put(self.allocator, name, cell);
+                        try self.currentFrame().ref_array_bindings.append(self.allocator, .{ .cell = cell, .array = arr_ptr, .key = key });
+                        try self.regRefArray(cell, arr_ptr, key);
+                        if (arr_ptr.getPtr(key)) |ep| ep.ref = cell;
+                        self.array_ref_active = true;
+                    }
+                },
+
+                .foreach_ref_bind => {
+                    // by-ref foreach: revert the prior element if uncaptured, then
+                    // bind $name as a true reference to array[key] (same as
+                    // bind_array_ref's array branch)
+                    const idx = self.readU16();
+                    const name = self.currentChunk().constants.items[idx].string;
+                    const key_val = self.pop();
+                    const src_val = self.pop();
+                    self.revertUncapturedForeachCell(name);
+                    if (src_val == .array) {
+                        const arr_ptr = src_val.array;
+                        const key: PhpArray.Key = switch (key_val) {
+                            .int => |i| .{ .int = i },
+                            .string => |s| .{ .string = s },
+                            else => .{ .int = Value.toInt(key_val) },
+                        };
+                        const cell = try self.allocator.create(Value);
+                        var elem = arr_ptr.get(key);
+                        if (elem == .array and elem.array.refcount > 1) {
+                            const fresh = try self.shallowCloneCow(elem.array);
+                            const old_elem = elem;
+                            elem = .{ .array = fresh };
+                            try arr_ptr.set(self.allocator, key, elem);
+                            self.releaseValue(old_elem);
                         }
                         cell.* = elem;
                         try self.ref_cells.append(self.allocator, cell);
