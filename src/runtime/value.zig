@@ -339,6 +339,40 @@ pub const RefIndex = struct {
         try gop.value_ptr.append(a, cell);
     }
 
+    fn targetEql(a: BindingTarget, b: BindingTarget) bool {
+        if (@intFromEnum(a) != @intFromEnum(b)) return false;
+        return switch (a) {
+            .array => |x| x.array == b.array.array and x.key.eql(b.array.key),
+            .object => |x| x.object == b.object.object and std.mem.eql(u8, x.prop_name, b.object.prop_name),
+            .static => |x| std.mem.eql(u8, x.class_name, b.static.class_name) and std.mem.eql(u8, x.prop_name, b.static.prop_name),
+        };
+    }
+
+    // remove ONE specific target from a cell's forward list (frame teardown of a
+    // single binding, unset of one element). a cell can have several targets - a
+    // referenced element that survived `$d = $c` binds the entry in BOTH arrays -
+    // so this removes only the matching one, leaving the others (e.g. the clone's
+    // array-lifetime binding survives the binding frame). also scrubs prop_rev
+    pub fn removeTarget(self: *RefIndex, a: std.mem.Allocator, cell: *Value, target: BindingTarget) void {
+        if (self.fwd.getPtr(cell)) |list| {
+            var i: usize = 0;
+            while (i < list.items.len) {
+                if (targetEql(list.items[i], target)) {
+                    _ = list.swapRemove(i);
+                } else i += 1;
+            }
+            if (list.items.len == 0) {
+                list.deinit(a);
+                _ = self.fwd.remove(cell);
+            }
+        }
+        switch (target) {
+            .object => |o| self.removePropRevCell(.{ .object = o.object, .class_name = "", .prop_name = o.prop_name }, cell),
+            .static => |s| self.removePropRevCell(.{ .object = null, .class_name = s.class_name, .prop_name = s.prop_name }, cell),
+            .array => {},
+        }
+    }
+
     // drop every target/cell associated with this cell (frame teardown, unset,
     // generator suspend). O(targets-for-this-cell), never a global scan
     pub fn removeCell(self: *RefIndex, a: std.mem.Allocator, cell: *Value) void {

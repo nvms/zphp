@@ -721,6 +721,17 @@ pub const VM = struct {
         try ri.addPropRev(self.allocator, .{ .object = null, .class_name = class_name, .prop_name = prop_name }, cell);
     }
 
+    // remove the map targets for a frame's bindings at teardown, keeping the
+    // registry in lock-step with the legacy lists. driven by the legacy lists
+    // themselves during the phased migration. generic over CallFrame /
+    // Fiber.SavedFrame (same field names, distinct types)
+    fn unregFrameBindings(self: *VM, frame: anytype) void {
+        const ri = self.ref_index orelse return;
+        for (frame.ref_array_bindings.items) |b| ri.removeTarget(self.allocator, b.cell, .{ .array = .{ .array = b.array, .key = b.key } });
+        for (frame.ref_object_bindings.items) |b| ri.removeTarget(self.allocator, b.cell, .{ .object = .{ .object = b.object, .prop_name = b.prop_name } });
+        for (frame.ref_static_bindings.items) |b| ri.removeTarget(self.allocator, b.cell, .{ .static = .{ .class_name = b.class_name, .prop_name = b.prop_name } });
+    }
+
     pub const InlineCache = struct {
         // property access: keyed by (chunk_ptr ^ ip), stores class_ptr for visibility skip
         prop: [128]PropIC = @splat(.{}),
@@ -1689,6 +1700,7 @@ pub const VM = struct {
         if (self.frame_high_water > self.frame_count) {
             for (self.frame_count..self.frame_high_water) |i| {
                 self.frames[i].ref_slots.deinit(self.allocator);
+                self.unregFrameBindings(&self.frames[i]);
                 self.frames[i].ref_array_bindings.deinit(self.allocator);
                 self.frames[i].ref_object_bindings.deinit(self.allocator);
                 self.frames[i].ref_static_bindings.deinit(self.allocator);
@@ -4455,9 +4467,21 @@ pub const VM = struct {
                         // inherit the writeback bindings from the callee so a
                         // subsequent write through $dst propagates back to the
                         // array elem / prop the function returned a ref to
-                        for (self.last_return_ref_array_bindings.items) |b| try frame.ref_array_bindings.append(self.allocator, b);
-                        for (self.last_return_ref_object_bindings.items) |b| try frame.ref_object_bindings.append(self.allocator, b);
-                        for (self.last_return_ref_static_bindings.items) |b| try frame.ref_static_bindings.append(self.allocator, b);
+                        // re-register in the map: the callee frame's teardown
+                        // (unregFrameBindings) removed these targets; the caller
+                        // now inherits them, so write them back through
+                        for (self.last_return_ref_array_bindings.items) |b| {
+                            try frame.ref_array_bindings.append(self.allocator, b);
+                            try self.regRefArray(b.cell, b.array, b.key);
+                        }
+                        for (self.last_return_ref_object_bindings.items) |b| {
+                            try frame.ref_object_bindings.append(self.allocator, b);
+                            try self.regRefObject(b.cell, b.object, b.prop_name);
+                        }
+                        for (self.last_return_ref_static_bindings.items) |b| {
+                            try frame.ref_static_bindings.append(self.allocator, b);
+                            try self.regRefStatic(b.cell, b.class_name, b.prop_name);
+                        }
                         if (self.last_return_ref_object_bindings.items.len > 0 or self.last_return_ref_static_bindings.items.len > 0) self.obj_ref_active = true;
                         self.last_return_ref_array_bindings.clearRetainingCapacity();
                         self.last_return_ref_object_bindings.clearRetainingCapacity();
@@ -10847,6 +10871,7 @@ pub const VM = struct {
         // on resume. drop the maps so frame_count -= 1 on suspend doesn't leak.
         const f = self.currentFrame();
         f.ref_slots.deinit(self.allocator);
+        self.unregFrameBindings(f);
         f.ref_array_bindings.deinit(self.allocator);
         f.ref_object_bindings.deinit(self.allocator);
         f.ref_static_bindings.deinit(self.allocator);
@@ -11203,6 +11228,7 @@ pub const VM = struct {
 
     pub fn deinitFrameSlot(self: *VM, idx: usize) void {
         self.frames[idx].ref_slots.deinit(self.allocator);
+        self.unregFrameBindings(&self.frames[idx]);
         self.frames[idx].ref_array_bindings.deinit(self.allocator);
         self.frames[idx].ref_object_bindings.deinit(self.allocator);
         self.frames[idx].ref_static_bindings.deinit(self.allocator);
@@ -11257,6 +11283,7 @@ pub const VM = struct {
             }
             f.vars.deinit(self.allocator);
             f.ref_slots.deinit(self.allocator);
+            self.unregFrameBindings(f);
             f.ref_array_bindings.deinit(self.allocator);
             f.ref_object_bindings.deinit(self.allocator);
             f.ref_static_bindings.deinit(self.allocator);
@@ -11344,43 +11371,30 @@ pub const VM = struct {
     }
 
     fn propagateCellWrite(self: *VM, cell: *Value, val: Value) !void {
-        // vm-level array bindings outlive frames (clone-propagated refs +
-        // `$arr[$k] = &$var`). disjoint from the frame-scoped list below, so
-        // each bound entry is updated exactly once across the two scans
-        for (self.array_ref_bindings.items) |binding| {
-            if (binding.cell == cell) {
-                const old = binding.array.get(binding.key);
-                try binding.array.set(self.allocator, binding.key, val);
-                self.releaseValue(old);
-            }
-        }
-        // bindings live on the frame that established the ref-to-elem/prop
-        // binding, but the cell can be shared via bindRefParams into callee
-        // frames. walk all active frames so a callee's write through the
-        // shared cell still triggers the writeback registered by the caller
-        var fi = self.frame_count;
-        while (fi > 0) {
-            fi -= 1;
-            for (self.frames[fi].ref_array_bindings.items) |binding| {
-                if (binding.cell == cell) {
-                    // retaining store - release the overwritten old value to
-                    // balance the retain (see writebackRefs)
-                    const old = binding.array.get(binding.key);
-                    try binding.array.set(self.allocator, binding.key, val);
+        // O(1): the cell-keyed registry holds exactly this cell's mirror targets
+        // (kept in lock-step with the legacy lists by write-through at creation +
+        // removeTarget at teardown/unset). a cell can have several targets - a
+        // referenced element that survived a `$d = $c` clone binds the entry in
+        // BOTH arrays - so apply every one. slice captured once (an inner set's
+        // destructor could mutate the map; matches the legacy scan's semantics)
+        const ri = self.ref_index orelse return;
+        const list = ri.fwd.getPtr(cell) orelse return;
+        const items = list.items;
+        for (items) |target| {
+            switch (target) {
+                .array => |t| {
+                    const old = t.array.get(t.key);
+                    try t.array.set(self.allocator, t.key, val);
                     self.releaseValue(old);
-                }
-            }
-            for (self.frames[fi].ref_object_bindings.items) |binding| {
-                if (binding.cell == cell) {
-                    const old = binding.object.get(binding.prop_name);
-                    try binding.object.set(self.allocator, binding.prop_name, val);
+                },
+                .object => |t| {
+                    const old = t.object.get(t.prop_name);
+                    try t.object.set(self.allocator, t.prop_name, val);
                     self.releaseValue(old);
-                }
-            }
-            for (self.frames[fi].ref_static_bindings.items) |binding| {
-                if (binding.cell == cell) {
-                    try self.writeStaticProp(binding.class_name, binding.prop_name, val);
-                }
+                },
+                .static => |t| {
+                    try self.writeStaticProp(t.class_name, t.prop_name, val);
+                },
             }
         }
     }
@@ -12841,6 +12855,7 @@ pub const VM = struct {
         while (i < self.array_ref_bindings.items.len) {
             const b = self.array_ref_bindings.items[i];
             if (b.array == arr and PhpArray.normalizeKey(b.key).eql(nk)) {
+                if (self.ref_index) |ri| ri.removeTarget(self.allocator, b.cell, .{ .array = .{ .array = b.array, .key = b.key } });
                 _ = self.array_ref_bindings.swapRemove(i);
             } else i += 1;
         }
@@ -12852,6 +12867,7 @@ pub const VM = struct {
             while (j < list.items.len) {
                 const b = list.items[j];
                 if (b.array == arr and PhpArray.normalizeKey(b.key).eql(nk)) {
+                    if (self.ref_index) |ri| ri.removeTarget(self.allocator, b.cell, .{ .array = .{ .array = b.array, .key = b.key } });
                     _ = list.swapRemove(j);
                 } else j += 1;
             }
@@ -14413,6 +14429,7 @@ pub const VM = struct {
             while (self.frame_count > base_frame) {
                 self.frame_count -= 1;
                 self.frames[self.frame_count].ref_slots.deinit(self.allocator);
+                self.unregFrameBindings(&self.frames[self.frame_count]);
                 self.frames[self.frame_count].ref_array_bindings.deinit(self.allocator);
                 self.frames[self.frame_count].ref_object_bindings.deinit(self.allocator);
                 self.frames[self.frame_count].ref_static_bindings.deinit(self.allocator);
