@@ -78,3 +78,12 @@ $bag = new Bag();
 foreach ($bag->items as &$x) { $x++; }
 unset($x);
 echo "10: ", json_encode($bag->items), "\n";       // [11,21,31]
+
+// 11. unset a FUTURE key during by-ref iteration: reaching the deleted key must
+// not resurrect it (a write to $v on a deleted key writes a detached ref)
+$u = [1, 2, 3, 4, 5];
+foreach ($u as $k => &$v) {
+    if ($k === 1) { unset($u[1], $u[3]); } else { $v *= 10; }
+}
+unset($v);
+echo "11: ", json_encode($u), "\n";                // {"0":10,"2":30,"4":50}

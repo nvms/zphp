@@ -4312,10 +4312,16 @@ pub const VM = struct {
                         cell.* = elem;
                         try self.ref_cells.append(self.allocator, cell);
                         try self.currentFrame().ref_slots.put(self.allocator, name, cell);
-                        try self.currentFrame().ref_array_bindings.append(self.allocator, .{ .cell = cell, .array = arr_ptr, .key = key });
-                        try self.regRefArray(cell, arr_ptr, key);
-                        if (arr_ptr.getPtr(key)) |ep| ep.ref = cell;
-                        self.array_ref_active = true;
+                        // only bind to the array if the key still EXISTS in the
+                        // live array. if the body unset this key earlier in the
+                        // iteration, a write to $v must NOT resurrect it (PHP
+                        // skips deleted keys) - $v becomes a detached reference
+                        if (arr_ptr.getPtr(key)) |ep| {
+                            try self.currentFrame().ref_array_bindings.append(self.allocator, .{ .cell = cell, .array = arr_ptr, .key = key });
+                            try self.regRefArray(cell, arr_ptr, key);
+                            ep.ref = cell;
+                            self.array_ref_active = true;
+                        }
                     }
                 },
 
