@@ -1545,8 +1545,10 @@ fn native_fread(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     const file = getFileHandle(obj) orelse return Value{ .bool = false };
 
     const buf = try ctx.allocator.alloc(u8, length);
-    const n = file.read(buf) catch {
+    const n = file.read(buf) catch |err| {
         ctx.allocator.free(buf);
+        // non-blocking stream with nothing buffered yet reads as "" in php, not a hard failure
+        if (err == error.WouldBlock) return .{ .string = "" };
         return .{ .bool = false };
     };
     if (n == 0) {
@@ -3070,7 +3072,14 @@ fn native_proc_terminate(_: *NativeContext, _: []const Value) RuntimeError!Value
     return .{ .bool = true };
 }
 
-fn native_stream_set_blocking(_: *NativeContext, _: []const Value) RuntimeError!Value {
+fn native_stream_set_blocking(_: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len < 2 or args[0] != .object) return .{ .bool = false };
+    const file = getFileHandle(args[0].object) orelse return .{ .bool = false };
+    const enable = args[1].isTruthy();
+    const O_NONBLOCK: u32 = if (@import("builtin").os.tag == .linux) 0x800 else 0x4;
+    const flags = std.posix.fcntl(file.handle, 3, 0) catch return .{ .bool = false };
+    const new_flags = if (enable) flags & ~@as(usize, O_NONBLOCK) else flags | O_NONBLOCK;
+    _ = std.posix.fcntl(file.handle, 4, new_flags) catch return .{ .bool = false };
     return .{ .bool = true };
 }
 
