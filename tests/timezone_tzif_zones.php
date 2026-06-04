@@ -30,6 +30,11 @@ foreach ($cases as [$zone, $when]) {
 echo 'Sao_Paulo T: ', (new DateTime('2024-06-15', new DateTimeZone('America/Sao_Paulo')))->format('T'), "\n"; // -03
 echo 'Tehran T: ',    (new DateTime('2024-06-15', new DateTimeZone('Asia/Tehran')))->format('T'), "\n";       // +0330
 echo 'Cairo T: ',     (new DateTime('2024-07-15', new DateTimeZone('Africa/Cairo')))->format('T'), "\n";      // EEST
+// more table zones whose tzdb abbrev is numeric (were ART/TRT/SGT/GST/ICT/BST/NPT)
+foreach (['Asia/Singapore'=>'+08','Asia/Bangkok'=>'+07','Asia/Dhaka'=>'+06','Asia/Dubai'=>'+04',
+          'Asia/Kathmandu'=>'+0545','Europe/Istanbul'=>'+03','America/Argentina/Buenos_Aires'=>'-03'] as $z=>$exp) {
+    echo "$z T: ", (new DateTime('2024-06-15', new DateTimeZone($z)))->format('T'), "\n";
+}
 
 // an unknown zone still throws like PHP
 try {
