@@ -362,6 +362,10 @@ fn parseDataUri(a: Allocator, path: []const u8) !?[]u8 {
 pub fn cleanupHandles(objects: std.ArrayListUnmanaged(*PhpObject)) void {
     for (objects.items) |obj| {
         if (std.mem.eql(u8, obj.class_name, "FileHandle")) {
+            // proc_open pipe fds are owned by the live *Child (closed by fclose,
+            // proc_close, or reapProcChildren via wait()); closing them here too
+            // would double-close (File.close panics on BADF)
+            if (obj.get("__proc_ref") == .object) continue;
             const open = obj.get("__open");
             if (open == .bool and open.bool) {
                 if (getFileHandle(obj)) |file| {
@@ -1437,12 +1441,31 @@ fn native_fclose(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
         obj.set(ctx.allocator, "__open", .{ .bool = false }) catch {};
         return .{ .bool = true };
     }
-    // closing a proc_open stdin pipe signals EOF to the deferred child -
-    // trigger the run so subsequent reads on stdout/stderr see the output
+    // closing a proc_open pipe: close our fd and detach it from the live child so
+    // proc_close's wait() (cleanupStreams) won't double-close the same fd. closing
+    // the stdin pipe also signals EOF to the child. each fd is owned exactly once
     const proc_ref = obj.get("__proc_ref");
     const proc_role = obj.get("__proc_role");
-    if (proc_ref == .object and proc_role == .int and proc_role.int == 0) {
-        try ensureProcRan(ctx, proc_ref.object);
+    if (proc_ref == .object and proc_role == .int) {
+        if (ctx.vm.lookupProcChild(proc_ref.object)) |pc| {
+            const child = pc.child;
+            switch (proc_role.int) {
+                0 => if (child.stdin) |*f| {
+                    f.close();
+                    child.stdin = null;
+                },
+                1 => if (child.stdout) |*f| {
+                    f.close();
+                    child.stdout = null;
+                },
+                2 => if (child.stderr) |*f| {
+                    f.close();
+                    child.stderr = null;
+                },
+                else => {},
+            }
+        }
+        obj.set(ctx.allocator, "__fd", .{ .int = -1 }) catch {};
         obj.set(ctx.allocator, "__open", .{ .bool = false }) catch {};
         return .{ .bool = true };
     }
@@ -1517,22 +1540,6 @@ fn native_fread(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
         if (result == .string) return result;
         return .{ .string = "" };
     }
-    // proc_open stdout/stderr: drive the deferred process and read from its buffer
-    const proc_ref = obj.get("__proc_ref");
-    const proc_role = obj.get("__proc_role");
-    if (proc_ref == .object and proc_role == .int and (proc_role.int == 1 or proc_role.int == 2)) {
-        try ensureProcRan(ctx, proc_ref.object);
-        const key: []const u8 = if (proc_role.int == 1) "__stdout_buf" else "__stderr_buf";
-        const buf_v = proc_ref.object.get(key);
-        const buf: []const u8 = if (buf_v == .string) buf_v.string else "";
-        const pos = getBufferPos(obj);
-        if (pos >= buf.len) return .{ .string = "" };
-        const end = @min(pos + length, buf.len);
-        const slice = try ctx.allocator.dupe(u8, buf[pos..end]);
-        try ctx.strings.append(ctx.allocator, slice);
-        setBufferPos(obj, end);
-        return .{ .string = slice };
-    }
     if (getBufferBacking(obj)) |buffer| {
         const pos = getBufferPos(obj);
         if (pos >= buffer.len) return .{ .string = "" };
@@ -1597,20 +1604,6 @@ fn native_fwrite(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
         @memcpy(combined[cur_str.len..], data);
         try ctx.strings.append(ctx.allocator, combined);
         try obj.set(ctx.allocator, "__buffer", .{ .string = combined });
-        return .{ .int = @intCast(data.len) };
-    }
-    // proc_open stdin pipe: buffer onto the linked proc's __stdin_buf
-    const proc_ref = obj.get("__proc_ref");
-    const proc_role = obj.get("__proc_role");
-    if (proc_ref == .object and proc_role == .int and proc_role.int == 0) {
-        const proc = proc_ref.object;
-        const cur = proc.get("__stdin_buf");
-        const cur_str: []const u8 = if (cur == .string) cur.string else "";
-        const combined = try ctx.allocator.alloc(u8, cur_str.len + data.len);
-        @memcpy(combined[0..cur_str.len], cur_str);
-        @memcpy(combined[cur_str.len..], data);
-        try ctx.strings.append(ctx.allocator, combined);
-        try proc.set(ctx.allocator, "__stdin_buf", .{ .string = combined });
         return .{ .int = @intCast(data.len) };
     }
     const file = getFileHandle(obj) orelse return Value{ .bool = false };
@@ -2295,22 +2288,6 @@ fn stream_get_contents(ctx: *NativeContext, args: []const Value) RuntimeError!Va
     // offset: -1 (default) means start at current position; >=0 means seek
     const offset: i64 = if (args.len >= 3 and args[2] == .int) args[2].int else -1;
 
-    // proc_open stdout/stderr pipe: drive the deferred child then drain its buffer
-    const proc_ref = obj.get("__proc_ref");
-    const proc_role = obj.get("__proc_role");
-    if (proc_ref == .object and proc_role == .int and (proc_role.int == 1 or proc_role.int == 2)) {
-        try ensureProcRan(ctx, proc_ref.object);
-        const key: []const u8 = if (proc_role.int == 1) "__stdout_buf" else "__stderr_buf";
-        const buf_v = proc_ref.object.get(key);
-        const buf: []const u8 = if (buf_v == .string) buf_v.string else "";
-        if (offset >= 0) setBufferPos(obj, @intCast(offset));
-        const pos = getBufferPos(obj);
-        if (pos >= buf.len) return .{ .string = "" };
-        const remaining = buf[pos..];
-        const take = if (length >= 0) @min(@as(usize, @intCast(length)), remaining.len) else remaining.len;
-        setBufferPos(obj, pos + take);
-        return .{ .string = try ctx.createString(remaining[0..take]) };
-    }
     if (getBufferBacking(obj)) |buffer| {
         if (offset >= 0) setBufferPos(obj, @intCast(offset));
         const pos = getBufferPos(obj);
@@ -2964,19 +2941,17 @@ fn native_proc_open(ctx: *NativeContext, args: []const Value) RuntimeError!Value
     const cmd_copy = try ctx.vm.allocator.dupe(u8, cmd);
     try ctx.vm.strings.append(ctx.allocator, cmd_copy);
     try proc.set(ctx.allocator, "__cmd", .{ .string = cmd_copy });
-    try proc.set(ctx.allocator, "__stdin_buf", .{ .string = "" });
-    try proc.set(ctx.allocator, "__stdout_buf", .{ .string = "" });
-    try proc.set(ctx.allocator, "__stderr_buf", .{ .string = "" });
-    try proc.set(ctx.allocator, "__ran", .{ .bool = false });
     try proc.set(ctx.allocator, "__exit", .{ .int = 0 });
     try proc.set(ctx.allocator, "__running", .{ .bool = true });
 
     // spawn the child live now (php spawns at proc_open, not at first read). the
     // *Child lives in vm.proc_children keyed by proc so proc_close can wait() it
-    // and reset/deinit can reap it. stdin/stdout/stderr stay buffered in phase 1:
-    // ensureProcRan flushes __stdin_buf into the live child and drains its output.
-    // cmd_copy is duped into vm.strings so it outlives this call; the argv array
-    // literal is only read during spawn()
+    // and reset/deinit can reap it. the three parent-side pipe fds become __fd on
+    // the FileHandle pipe objects, so fread/fwrite/stream_select operate on real
+    // live fds. each fd is closed EXACTLY once: by fclose (which nulls the matching
+    // child.std* so wait() won't double-close) or by proc_close/reap. cmd_copy is
+    // duped into vm.strings so it outlives this call; the argv literal is only read
+    // during spawn()
     const child = try ctx.vm.allocator.create(std.process.Child);
     child.* = std.process.Child.init(&.{ "/bin/sh", "-c", cmd_copy }, ctx.vm.allocator);
     child.stdin_behavior = .Pipe;
@@ -2985,13 +2960,17 @@ fn native_proc_open(ctx: *NativeContext, args: []const Value) RuntimeError!Value
     child.spawn() catch {
         ctx.vm.allocator.destroy(child);
         try proc.set(ctx.allocator, "__pid", .{ .int = 0 });
-        try proc.set(ctx.allocator, "__ran", .{ .bool = true });
+        try proc.set(ctx.allocator, "__reaped", .{ .bool = true });
         try proc.set(ctx.allocator, "__running", .{ .bool = false });
         try proc.set(ctx.allocator, "__exit", .{ .int = -1 });
         return .{ .bool = false };
     };
     try ctx.vm.registerProcChild(proc, child);
     try proc.set(ctx.allocator, "__pid", .{ .int = @intCast(child.id) });
+    try proc.set(ctx.allocator, "__reaped", .{ .bool = false });
+    const stdin_fd: i64 = if (child.stdin) |f| @intCast(f.handle) else -1;
+    const stdout_fd: i64 = if (child.stdout) |f| @intCast(f.handle) else -1;
+    const stderr_fd: i64 = if (child.stderr) |f| @intCast(f.handle) else -1;
 
     const pipes = if (args[2] == .array) args[2].array else blk: {
         const a = try ctx.allocator.create(PhpArray);
@@ -3004,6 +2983,7 @@ fn native_proc_open(ctx: *NativeContext, args: []const Value) RuntimeError!Value
     try ctx.vm.objects.append(ctx.allocator, stdin_obj);
     try stdin_obj.set(ctx.allocator, "__open", .{ .bool = true });
     try stdin_obj.set(ctx.allocator, "__mode", .{ .string = "w" });
+    try stdin_obj.set(ctx.allocator, "__fd", .{ .int = stdin_fd });
     try stdin_obj.set(ctx.allocator, "__proc_ref", .{ .object = proc });
     try stdin_obj.set(ctx.allocator, "__proc_role", .{ .int = 0 });
     try pipes.set(ctx.allocator, .{ .int = 0 }, .{ .object = stdin_obj });
@@ -3013,7 +2993,7 @@ fn native_proc_open(ctx: *NativeContext, args: []const Value) RuntimeError!Value
     try ctx.vm.objects.append(ctx.allocator, stdout_obj);
     try stdout_obj.set(ctx.allocator, "__open", .{ .bool = true });
     try stdout_obj.set(ctx.allocator, "__mode", .{ .string = "r" });
-    try stdout_obj.set(ctx.allocator, "__pos", .{ .int = 0 });
+    try stdout_obj.set(ctx.allocator, "__fd", .{ .int = stdout_fd });
     try stdout_obj.set(ctx.allocator, "__proc_ref", .{ .object = proc });
     try stdout_obj.set(ctx.allocator, "__proc_role", .{ .int = 1 });
     try pipes.set(ctx.allocator, .{ .int = 1 }, .{ .object = stdout_obj });
@@ -3023,7 +3003,7 @@ fn native_proc_open(ctx: *NativeContext, args: []const Value) RuntimeError!Value
     try ctx.vm.objects.append(ctx.allocator, stderr_obj);
     try stderr_obj.set(ctx.allocator, "__open", .{ .bool = true });
     try stderr_obj.set(ctx.allocator, "__mode", .{ .string = "r" });
-    try stderr_obj.set(ctx.allocator, "__pos", .{ .int = 0 });
+    try stderr_obj.set(ctx.allocator, "__fd", .{ .int = stderr_fd });
     try stderr_obj.set(ctx.allocator, "__proc_ref", .{ .object = proc });
     try stderr_obj.set(ctx.allocator, "__proc_role", .{ .int = 2 });
     try pipes.set(ctx.allocator, .{ .int = 2 }, .{ .object = stderr_obj });
@@ -3032,88 +3012,119 @@ fn native_proc_open(ctx: *NativeContext, args: []const Value) RuntimeError!Value
     return .{ .object = proc };
 }
 
-// drives the live proc_open child to completion if it hasn't run yet: flushes
-// the buffered stdin into the child, drains stdout/stderr, waits, and caches the
-// exit. removes + frees the *Child from vm.proc_children so reap doesn't touch it
-fn ensureProcRan(ctx: *NativeContext, proc: *PhpObject) !void {
-    const ran = proc.get("__ran");
-    if (ran == .bool and ran.bool) return;
-    const child = ctx.vm.lookupProcChild(proc) orelse {
-        // spawn failed earlier - nothing live to drive
-        try proc.set(ctx.allocator, "__ran", .{ .bool = true });
-        try proc.set(ctx.allocator, "__running", .{ .bool = false });
-        return;
-    };
-    const sin = proc.get("__stdin_buf");
-    const stdin_data: []const u8 = if (sin == .string) sin.string else "";
-    if (child.stdin) |*stdin_file| {
-        _ = stdin_file.writeAll(stdin_data) catch {};
-        stdin_file.close();
-        child.stdin = null;
+const PosixW = std.posix.W;
+
+// decode a waitpid status onto the proc object's cached fields. marks __reaped so
+// no later wait() runs on the same (now-consumed) pid
+fn cacheProcTerm(ctx: *NativeContext, proc: *PhpObject, status: u32) void {
+    proc.set(ctx.allocator, "__reaped", .{ .bool = true }) catch {};
+    proc.set(ctx.allocator, "__running", .{ .bool = false }) catch {};
+    if (PosixW.IFEXITED(status)) {
+        proc.set(ctx.allocator, "__exit", .{ .int = @intCast(PosixW.EXITSTATUS(status)) }) catch {};
+    } else if (PosixW.IFSIGNALED(status)) {
+        const sig: i64 = @intCast(PosixW.TERMSIG(status));
+        proc.set(ctx.allocator, "__exit", .{ .int = sig + 128 }) catch {};
+        proc.set(ctx.allocator, "__termsig", .{ .int = sig }) catch {};
+        proc.set(ctx.allocator, "__signaled", .{ .bool = true }) catch {};
+    } else {
+        proc.set(ctx.allocator, "__exit", .{ .int = -1 }) catch {};
     }
-    var stdout_buf = std.ArrayListUnmanaged(u8){};
-    var stderr_buf = std.ArrayListUnmanaged(u8){};
-    child.collectOutput(ctx.allocator, &stdout_buf, &stderr_buf, 64 * 1024 * 1024) catch {};
-    const term = child.wait() catch {
-        ctx.vm.removeProcChild(proc);
-        ctx.vm.allocator.destroy(child);
-        stdout_buf.deinit(ctx.allocator);
-        stderr_buf.deinit(ctx.allocator);
-        try proc.set(ctx.allocator, "__ran", .{ .bool = true });
-        try proc.set(ctx.allocator, "__running", .{ .bool = false });
-        try proc.set(ctx.allocator, "__exit", .{ .int = -1 });
-        return;
-    };
-    ctx.vm.removeProcChild(proc);
-    ctx.vm.allocator.destroy(child);
-    const out_copy = try stdout_buf.toOwnedSlice(ctx.allocator);
-    const err_copy = try stderr_buf.toOwnedSlice(ctx.allocator);
-    try ctx.vm.strings.append(ctx.allocator, out_copy);
-    try ctx.vm.strings.append(ctx.allocator, err_copy);
-    try proc.set(ctx.allocator, "__stdout_buf", .{ .string = out_copy });
-    try proc.set(ctx.allocator, "__stderr_buf", .{ .string = err_copy });
-    const exit: i64 = switch (term) {
-        .Exited => |c| @intCast(c),
-        .Signal => |c| @as(i64, @intCast(c)) + 128,
-        else => -1,
-    };
-    try proc.set(ctx.allocator, "__exit", .{ .int = exit });
-    try proc.set(ctx.allocator, "__ran", .{ .bool = true });
-    try proc.set(ctx.allocator, "__running", .{ .bool = false });
 }
 
 fn native_proc_close(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len == 0 or args[0] != .object) return .{ .int = -1 };
     const obj = args[0].object;
-    // if proc_open's child never ran (no fclose stdin, no fread), drive it
-    // now so the exit code reflects an actual run
-    if (obj.get("__cmd") == .string) try ensureProcRan(ctx, obj);
+    const pc = ctx.vm.lookupProcChild(obj) orelse {
+        // already finalized (or spawn failed) - return the cached exit
+        const cached = obj.get("__exit");
+        return .{ .int = if (cached == .int) cached.int else 0 };
+    };
+    const child = pc.child;
+    if (!pc.reaped) {
+        // closing stdin signals EOF so the child can finish; wait() reaps + closes
+        // whatever streams the script didn't already fclose
+        if (child.stdin) |*f| {
+            f.close();
+            child.stdin = null;
+        }
+        const term = child.wait() catch {
+            ctx.vm.removeProcChild(obj);
+            ctx.vm.allocator.destroy(child);
+            obj.set(ctx.allocator, "__exit", .{ .int = -1 }) catch {};
+            return .{ .int = -1 };
+        };
+        const exit: i64 = switch (term) {
+            .Exited => |c| @intCast(c),
+            .Signal => |c| @as(i64, @intCast(c)) + 128,
+            else => -1,
+        };
+        obj.set(ctx.allocator, "__exit", .{ .int = exit }) catch {};
+    } else {
+        // a prior proc_get_status already reaped the pid; just close leftover fds
+        if (child.stdin) |*f| {
+            f.close();
+            child.stdin = null;
+        }
+        if (child.stdout) |*f| {
+            f.close();
+            child.stdout = null;
+        }
+        if (child.stderr) |*f| {
+            f.close();
+            child.stderr = null;
+        }
+    }
+    ctx.vm.removeProcChild(obj);
+    ctx.vm.allocator.destroy(child);
     const exit = obj.get("__exit");
-    if (exit == .int) return .{ .int = exit.int };
-    return .{ .int = 0 };
+    return .{ .int = if (exit == .int) exit.int else 0 };
 }
 
 fn native_proc_get_status(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len == 0 or args[0] != .object) return .{ .bool = false };
     const obj = args[0].object;
+    // non-blocking liveness poll. if the child has exited, reap the zombie (mark
+    // .reaped so proc_close/reap won't wait again -> ECHILD) and cache the exit,
+    // but leave the pipe fds + *Child intact: the script may still read buffered
+    // output, and proc_close finalizes the fds
+    var running = false;
+    if (ctx.vm.lookupProcChild(obj)) |pc| {
+        if (!pc.reaped) {
+            const res = std.posix.waitpid(pc.child.id, PosixW.NOHANG);
+            if (res.pid == 0) {
+                running = true;
+            } else {
+                pc.reaped = true;
+                cacheProcTerm(ctx, obj, res.status);
+            }
+        }
+    }
     const result = try ctx.allocator.create(PhpArray);
     result.* = .{};
     try ctx.vm.arrays.append(ctx.allocator, result);
     const cmd = obj.get("__cmd");
     const exit = obj.get("__exit");
     const pid = obj.get("__pid");
+    const signaled = obj.get("__signaled");
+    const termsig = obj.get("__termsig");
     try result.set(ctx.allocator, .{ .string = "command" }, if (cmd == .string) cmd else .{ .string = "" });
     try result.set(ctx.allocator, .{ .string = "pid" }, if (pid == .int) pid else .{ .int = 0 });
-    try result.set(ctx.allocator, .{ .string = "running" }, .{ .bool = false });
-    try result.set(ctx.allocator, .{ .string = "signaled" }, .{ .bool = false });
+    try result.set(ctx.allocator, .{ .string = "running" }, .{ .bool = running });
+    try result.set(ctx.allocator, .{ .string = "signaled" }, .{ .bool = signaled == .bool and signaled.bool });
     try result.set(ctx.allocator, .{ .string = "stopped" }, .{ .bool = false });
-    try result.set(ctx.allocator, .{ .string = "exitcode" }, if (exit == .int) exit else .{ .int = 0 });
-    try result.set(ctx.allocator, .{ .string = "termsig" }, .{ .int = 0 });
+    // exitcode is only meaningful once the process has terminated
+    try result.set(ctx.allocator, .{ .string = "exitcode" }, if (!running and exit == .int) exit else .{ .int = -1 });
+    try result.set(ctx.allocator, .{ .string = "termsig" }, if (termsig == .int) termsig else .{ .int = 0 });
     try result.set(ctx.allocator, .{ .string = "stopsig" }, .{ .int = 0 });
     return .{ .array = result };
 }
 
-fn native_proc_terminate(_: *NativeContext, _: []const Value) RuntimeError!Value {
+fn native_proc_terminate(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len == 0 or args[0] != .object) return .{ .bool = false };
+    const sig: u8 = if (args.len >= 2 and args[1] == .int) @intCast(args[1].int) else std.posix.SIG.TERM;
+    if (ctx.vm.lookupProcChild(args[0].object)) |pc| {
+        std.posix.kill(pc.child.id, sig) catch return .{ .bool = false };
+    }
     return .{ .bool = true };
 }
 
