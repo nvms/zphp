@@ -28,6 +28,7 @@ pub const entries = .{
     .{ "checkdnsrr", native_checkdnsrr },
     .{ "dns_get_record", native_dns_get_record },
     .{ "stream_select", native_stream_select },
+    .{ "stream_socket_pair", native_stream_socket_pair },
 };
 
 fn streamFd(v: Value) ?i32 {
@@ -92,6 +93,31 @@ fn native_stream_select(ctx: *NativeContext, args: []const Value) RuntimeError!V
         ctx.setCallerVar(slot, args.len, .{ .array = arr });
     }
     return .{ .int = count };
+}
+
+extern "c" fn socketpair(domain: c_int, sock_type: c_int, protocol: c_int, sv: *[2]c_int) c_int;
+
+// stream_socket_pair(int $domain, int $type, int $protocol): array|false
+// creates a connected pair of sockets (socketpair(2)) returned as two stream
+// objects (each with __fd) usable by fread/fwrite/stream_select/fclose
+fn native_stream_socket_pair(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    const domain: c_int = if (args.len > 0) @intCast(Value.toInt(args[0])) else @intCast(std.posix.AF.UNIX);
+    const sock_type: c_int = if (args.len > 1) @intCast(Value.toInt(args[1])) else @intCast(std.posix.SOCK.STREAM);
+    const protocol: c_int = if (args.len > 2) @intCast(Value.toInt(args[2])) else 0;
+    var sv: [2]c_int = undefined;
+    if (socketpair(domain, sock_type, protocol, &sv) != 0) return .{ .bool = false };
+    const arr = try ctx.createArray();
+    for (sv) |fd| {
+        const obj = try ctx.allocator.create(PhpObject);
+        obj.* = .{ .class_name = "FileHandle" };
+        try ctx.vm.objects.append(ctx.allocator, obj);
+        try obj.set(ctx.allocator, "__fd", .{ .int = @intCast(fd) });
+        try obj.set(ctx.allocator, "__open", .{ .bool = true });
+        try obj.set(ctx.allocator, "__mode", .{ .string = "r+" });
+        try obj.set(ctx.allocator, "__net", .{ .bool = true });
+        try arr.append(ctx.allocator, .{ .object = obj });
+    }
+    return .{ .array = arr };
 }
 
 fn native_stream_context_create(ctx: *NativeContext, args: []const Value) RuntimeError!Value {

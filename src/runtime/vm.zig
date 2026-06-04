@@ -1454,6 +1454,16 @@ pub const VM = struct {
         try c.put(a, "STREAM_CLIENT_CONNECT", .{ .int = 4 });
         try c.put(a, "STREAM_CLIENT_PERSISTENT", .{ .int = 1 });
         try c.put(a, "STREAM_CLIENT_ASYNC_CONNECT", .{ .int = 2 });
+        // socket address families / types (the OS values, so they pass straight
+        // to socketpair()/socket()) - for stream_socket_pair etc.
+        try c.put(a, "STREAM_PF_INET", .{ .int = @as(i64, std.posix.AF.INET) });
+        try c.put(a, "STREAM_PF_INET6", .{ .int = @as(i64, std.posix.AF.INET6) });
+        try c.put(a, "STREAM_PF_UNIX", .{ .int = @as(i64, std.posix.AF.UNIX) });
+        try c.put(a, "STREAM_SOCK_STREAM", .{ .int = @as(i64, std.posix.SOCK.STREAM) });
+        try c.put(a, "STREAM_SOCK_DGRAM", .{ .int = @as(i64, std.posix.SOCK.DGRAM) });
+        try c.put(a, "STREAM_IPPROTO_IP", .{ .int = 0 });
+        try c.put(a, "STREAM_IPPROTO_TCP", .{ .int = 6 });
+        try c.put(a, "STREAM_IPPROTO_UDP", .{ .int = 17 });
         try c.put(a, "PHP_OS_FAMILY", .{ .string = switch (@import("builtin").os.tag) {
             .macos => "Darwin",
             .linux => "Linux",
