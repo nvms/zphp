@@ -6,6 +6,9 @@ const Generator = @import("value.zig").Generator;
 const Fiber = @import("value.zig").Fiber;
 const ArrayRefBinding = @import("value.zig").ArrayRefBinding;
 const ObjectRefBinding = @import("value.zig").ObjectRefBinding;
+const RefIndex = @import("value.zig").RefIndex;
+const BindingTarget = @import("value.zig").BindingTarget;
+const PropRefKey = @import("value.zig").PropRefKey;
 const bytecode = @import("../pipeline/bytecode.zig");
 const Chunk = bytecode.Chunk;
 const OpCode = bytecode.OpCode;
@@ -686,6 +689,37 @@ pub const VM = struct {
     // reference binding exists. lets array reads/writes/clones/foreach skip the
     // per-entry `ref` check in the common case. reset() clears it
     array_ref_active: bool = false,
+    // cell-keyed reference-binding registry (O(1) propagateCellWrite + prop sync).
+    // lazily allocated on first ref binding so non-ref programs pay one nullable
+    // pointer and nothing else. coexists with the legacy frame/vm binding lists
+    // during the phased migration; the guards above gate access. freed at deinit,
+    // cleared at reset
+    ref_index: ?*RefIndex = null,
+
+    fn refIndex(self: *VM) RuntimeError!*RefIndex {
+        if (self.ref_index) |ri| return ri;
+        const ri = try self.allocator.create(RefIndex);
+        ri.* = .{};
+        self.ref_index = ri;
+        return ri;
+    }
+
+    // write-through registration into the cell-keyed registry. called at every
+    // ref-binding creation site alongside the legacy list append (phased
+    // migration). cheap: only reached when a ref actually exists
+    fn regRefArray(self: *VM, cell: *Value, arr: *PhpArray, key: PhpArray.Key) RuntimeError!void {
+        try (try self.refIndex()).addForward(self.allocator, cell, .{ .array = .{ .array = arr, .key = key } });
+    }
+    fn regRefObject(self: *VM, cell: *Value, obj: *PhpObject, prop_name: []const u8) RuntimeError!void {
+        const ri = try self.refIndex();
+        try ri.addForward(self.allocator, cell, .{ .object = .{ .object = obj, .prop_name = prop_name } });
+        try ri.addPropRev(self.allocator, .{ .object = obj, .class_name = "", .prop_name = prop_name }, cell);
+    }
+    fn regRefStatic(self: *VM, cell: *Value, class_name: []const u8, prop_name: []const u8) RuntimeError!void {
+        const ri = try self.refIndex();
+        try ri.addForward(self.allocator, cell, .{ .static = .{ .class_name = class_name, .prop_name = prop_name } });
+        try ri.addPropRev(self.allocator, .{ .object = null, .class_name = class_name, .prop_name = prop_name }, cell);
+    }
 
     pub const InlineCache = struct {
         // property access: keyed by (chunk_ptr ^ ip), stores class_ptr for visibility skip
@@ -1729,6 +1763,11 @@ pub const VM = struct {
         self.weakmaps.deinit(self.allocator);
         self.cycle_candidates.deinit(self.allocator);
         self.array_ref_bindings.deinit(self.allocator);
+        if (self.ref_index) |ri| {
+            ri.deinit(self.allocator);
+            self.allocator.destroy(ri);
+            self.ref_index = null;
+        }
         self.last_return_ref_array_bindings.deinit(self.allocator);
         self.last_return_ref_object_bindings.deinit(self.allocator);
         self.last_return_ref_static_bindings.deinit(self.allocator);
@@ -1794,6 +1833,7 @@ pub const VM = struct {
         self.obj_ref_active = false;
         self.array_ref_active = false;
         self.array_ref_bindings.clearRetainingCapacity();
+        if (self.ref_index) |ri| ri.clear(self.allocator);
         // serve mode keeps the builtin heap + class registration across requests
         self.freeHeapItems(!self.serve_mode);
         if (self.serve_mode) self.freeClassState();
@@ -4198,6 +4238,7 @@ pub const VM = struct {
                         try self.ref_cells.append(self.allocator, cell);
                         try self.currentFrame().ref_slots.put(self.allocator, name, cell);
                         try self.currentFrame().ref_array_bindings.append(self.allocator, .{ .cell = cell, .array = arr_ptr, .key = key });
+                        try self.regRefArray(cell, arr_ptr, key);
                         if (arr_ptr.getPtr(key)) |ep| ep.ref = cell;
                         self.array_ref_active = true;
                     }
@@ -4228,6 +4269,7 @@ pub const VM = struct {
                         if (old == .object or old == .array) self.releaseValue(old);
                         if (arr_ptr.getPtr(key)) |ep| ep.ref = cell;
                         try self.array_ref_bindings.append(self.allocator, .{ .cell = cell, .array = arr_ptr, .key = key });
+                        try self.regRefArray(cell, arr_ptr, key);
                         self.array_ref_active = true;
                     }
                     self.push(cell.*);
@@ -4247,6 +4289,7 @@ pub const VM = struct {
                         const key: PhpArray.Key = .{ .int = k };
                         if (arr_ptr.getPtr(key)) |ep| ep.ref = cell;
                         try self.array_ref_bindings.append(self.allocator, .{ .cell = cell, .array = arr_ptr, .key = key });
+                        try self.regRefArray(cell, arr_ptr, key);
                         self.array_ref_active = true;
                     }
                     self.push(cell.*);
@@ -4344,6 +4387,7 @@ pub const VM = struct {
                         try self.ref_cells.append(self.allocator, cell);
                         try frame.ref_slots.put(self.allocator, dst_name, cell);
                         try frame.ref_array_bindings.append(self.allocator, .{ .cell = cell, .array = arr_ptr, .key = key });
+                        try self.regRefArray(cell, arr_ptr, key);
                         if (arr_ptr.getPtr(key)) |ep| ep.ref = cell;
                         self.array_ref_active = true;
                     }
@@ -4369,6 +4413,7 @@ pub const VM = struct {
                         try self.ref_cells.append(self.allocator, cell);
                         try frame.ref_slots.put(self.allocator, dst_name, cell);
                         try frame.ref_object_bindings.append(self.allocator, .{ .cell = cell, .object = obj_ptr, .prop_name = prop_name });
+                        try self.regRefObject(cell, obj_ptr, prop_name);
                         self.obj_ref_active = true;
                     }
                 },
@@ -4396,6 +4441,7 @@ pub const VM = struct {
                         try self.ref_cells.append(self.allocator, cell);
                         try frame.ref_slots.put(self.allocator, dst_name, cell);
                         try frame.ref_object_bindings.append(self.allocator, .{ .cell = cell, .object = obj_ptr, .prop_name = prop_owned });
+                        try self.regRefObject(cell, obj_ptr, prop_owned);
                         self.obj_ref_active = true;
                     }
                 },
@@ -4454,6 +4500,7 @@ pub const VM = struct {
                     try self.ref_cells.append(self.allocator, cell);
                     try frame.ref_slots.put(self.allocator, dst_name, cell);
                     try frame.ref_static_bindings.append(self.allocator, .{ .cell = cell, .class_name = class_name, .prop_name = prop_name });
+                    try self.regRefStatic(cell, class_name, prop_name);
                     self.obj_ref_active = true;
                 },
 
@@ -11889,6 +11936,7 @@ pub const VM = struct {
                             .array = arr_val.array,
                             .key = Value.toArrayKey(ae.key),
                         });
+                        try self.regRefArray(cell, arr_val.array, Value.toArrayKey(ae.key));
                     }
                 },
                 .object_prop => |obj_ref| {
@@ -11924,6 +11972,7 @@ pub const VM = struct {
                             .object = obj_val.object,
                             .prop_name = obj_ref.prop_name,
                         });
+                        try self.regRefObject(cell, obj_val.object, obj_ref.prop_name);
                         self.obj_ref_active = true;
                     }
                 },
@@ -11942,6 +11991,7 @@ pub const VM = struct {
                             .object = target.obj,
                             .prop_name = target.prop,
                         });
+                        try self.regRefObject(cell, target.obj, target.prop);
                         self.obj_ref_active = true;
                     }
                 },
@@ -11963,6 +12013,7 @@ pub const VM = struct {
                                 .array = prop_val.array,
                                 .key = Value.toArrayKey(pae.key),
                             });
+                            try self.regRefArray(cell, prop_val.array, Value.toArrayKey(pae.key));
                         }
                     }
                 },
@@ -12812,6 +12863,7 @@ pub const VM = struct {
         for (copy.entries.items) |entry| {
             if (entry.ref) |cell| {
                 self.array_ref_bindings.append(self.allocator, .{ .cell = cell, .array = copy, .key = entry.key }) catch return error.RuntimeError;
+                self.regRefArray(cell, copy, entry.key) catch return error.RuntimeError;
             }
         }
     }

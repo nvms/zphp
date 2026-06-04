@@ -277,6 +277,112 @@ pub const StaticPropRefBinding = struct {
     prop_name: []const u8,
 };
 
+// a destination an lvalue-reference cell mirrors into. the cell pointer is the
+// KEY in RefIndex.fwd, so it's not repeated here. propagateCellWrite(cell) looks
+// the cell up and writes every target in its list (a cell can mirror several -
+// e.g. a referenced array element that survived a `$d = $c` clone binds the
+// entry in BOTH arrays)
+pub const BindingTarget = union(enum) {
+    array: struct { array: *PhpArray, key: PhpArray.Key },
+    object: struct { object: *PhpObject, prop_name: []const u8 },
+    static: struct { class_name: []const u8, prop_name: []const u8 },
+};
+
+// reverse index key for the prop/static sync direction (a DIRECT write to
+// $obj->prop / Class::$s must update any cell bound to it). keyed by the
+// storage location, value is the list of cells mirroring it
+pub const PropRefKey = struct {
+    object: ?*PhpObject, // null for a static prop
+    class_name: []const u8, // "" for an instance prop
+    prop_name: []const u8,
+
+    pub fn eql(a: PropRefKey, b: PropRefKey) bool {
+        return a.object == b.object and
+            std.mem.eql(u8, a.class_name, b.class_name) and
+            std.mem.eql(u8, a.prop_name, b.prop_name);
+    }
+    pub fn hash(self: PropRefKey) u64 {
+        var h = std.hash.Wyhash.init(0);
+        h.update(std.mem.asBytes(&self.object));
+        h.update(self.class_name);
+        h.update(self.prop_name);
+        return h.final();
+    }
+};
+
+const PropRefKeyContext = struct {
+    pub fn hash(_: PropRefKeyContext, k: PropRefKey) u64 {
+        return k.hash();
+    }
+    pub fn eql(_: PropRefKeyContext, a: PropRefKey, b: PropRefKey) bool {
+        return a.eql(b);
+    }
+};
+
+// cell-keyed binding registry. fwd: cell -> targets it mirrors (the O(1)
+// propagateCellWrite source). prop_rev: storage location -> cells mirroring it
+// (the O(1) syncObjPropRefs/syncStaticPropRefs source). lives behind a pointer
+// on the VM so the hot interpreter struct stays a single nullable pointer wider
+pub const RefIndex = struct {
+    fwd: std.AutoHashMapUnmanaged(*Value, std.ArrayListUnmanaged(BindingTarget)) = .{},
+    prop_rev: std.HashMapUnmanaged(PropRefKey, std.ArrayListUnmanaged(*Value), PropRefKeyContext, 80) = .{},
+
+    pub fn addForward(self: *RefIndex, a: std.mem.Allocator, cell: *Value, target: BindingTarget) !void {
+        const gop = try self.fwd.getOrPut(a, cell);
+        if (!gop.found_existing) gop.value_ptr.* = .{};
+        try gop.value_ptr.append(a, target);
+    }
+
+    pub fn addPropRev(self: *RefIndex, a: std.mem.Allocator, key: PropRefKey, cell: *Value) !void {
+        const gop = try self.prop_rev.getOrPut(a, key);
+        if (!gop.found_existing) gop.value_ptr.* = .{};
+        try gop.value_ptr.append(a, cell);
+    }
+
+    // drop every target/cell associated with this cell (frame teardown, unset,
+    // generator suspend). O(targets-for-this-cell), never a global scan
+    pub fn removeCell(self: *RefIndex, a: std.mem.Allocator, cell: *Value) void {
+        if (self.fwd.fetchRemove(cell)) |kv| {
+            var list = kv.value;
+            // also scrub this cell from any prop_rev lists it appears in
+            for (list.items) |t| {
+                switch (t) {
+                    .object => |o| self.removePropRevCell(.{ .object = o.object, .class_name = "", .prop_name = o.prop_name }, cell),
+                    .static => |s| self.removePropRevCell(.{ .object = null, .class_name = s.class_name, .prop_name = s.prop_name }, cell),
+                    .array => {},
+                }
+            }
+            list.deinit(a);
+        }
+    }
+
+    fn removePropRevCell(self: *RefIndex, key: PropRefKey, cell: *Value) void {
+        if (self.prop_rev.getPtr(key)) |list| {
+            var i: usize = 0;
+            while (i < list.items.len) {
+                if (list.items[i] == cell) {
+                    _ = list.swapRemove(i);
+                } else i += 1;
+            }
+        }
+    }
+
+    pub fn clear(self: *RefIndex, a: std.mem.Allocator) void {
+        var it = self.fwd.valueIterator();
+        while (it.next()) |list| list.deinit(a);
+        self.fwd.clearRetainingCapacity();
+        var it2 = self.prop_rev.valueIterator();
+        while (it2.next()) |list| list.deinit(a);
+        self.prop_rev.clearRetainingCapacity();
+    }
+
+    pub fn deinit(self: *RefIndex, a: std.mem.Allocator) void {
+        self.clear(a);
+        self.fwd.deinit(a);
+        self.prop_rev.deinit(a);
+    }
+};
+
 pub const Generator = struct {
     // refcount Stage 2: every live Value handle bumps this. 0 means
     // unreachable; the VM runs closeGenerator + releases gen.vars at that
