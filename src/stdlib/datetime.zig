@@ -3418,7 +3418,7 @@ const tz_table = [_]TzEntry{
     .{ .name = "america/toronto", .std_offset = -5 * 3600, .dst_offset = -4 * 3600, .dst_rule = .us, .std_abbrev = "EST", .dst_abbrev = "EDT" },
     .{ .name = "america/vancouver", .std_offset = -8 * 3600, .dst_offset = -7 * 3600, .dst_rule = .us, .std_abbrev = "PST", .dst_abbrev = "PDT" },
     .{ .name = "america/mexico_city", .std_offset = -6 * 3600, .dst_offset = -6 * 3600, .dst_rule = .none, .std_abbrev = "CST", .dst_abbrev = "CST" },
-    .{ .name = "america/sao_paulo", .std_offset = -3 * 3600, .dst_offset = -3 * 3600, .dst_rule = .none, .std_abbrev = "BRT", .dst_abbrev = "BRT" },
+    .{ .name = "america/sao_paulo", .std_offset = -3 * 3600, .dst_offset = -3 * 3600, .dst_rule = .none, .std_abbrev = "-03", .dst_abbrev = "-03" },
     .{ .name = "america/argentina/buenos_aires", .std_offset = -3 * 3600, .dst_offset = -3 * 3600, .dst_rule = .none, .std_abbrev = "ART", .dst_abbrev = "ART" },
     .{ .name = "pacific/honolulu", .std_offset = -10 * 3600, .dst_offset = -10 * 3600, .dst_rule = .none, .std_abbrev = "HST", .dst_abbrev = "HST" },
     // europe
@@ -3448,7 +3448,7 @@ const tz_table = [_]TzEntry{
     .{ .name = "asia/seoul", .std_offset = 9 * 3600, .dst_offset = 9 * 3600, .dst_rule = .none, .std_abbrev = "KST", .dst_abbrev = "KST" },
     .{ .name = "asia/bangkok", .std_offset = 7 * 3600, .dst_offset = 7 * 3600, .dst_rule = .none, .std_abbrev = "ICT", .dst_abbrev = "ICT" },
     .{ .name = "asia/jakarta", .std_offset = 7 * 3600, .dst_offset = 7 * 3600, .dst_rule = .none, .std_abbrev = "WIB", .dst_abbrev = "WIB" },
-    .{ .name = "asia/tehran", .std_offset = 3 * 3600 + 1800, .dst_offset = 3 * 3600 + 1800, .dst_rule = .none, .std_abbrev = "IRST", .dst_abbrev = "IRST" },
+    .{ .name = "asia/tehran", .std_offset = 3 * 3600 + 1800, .dst_offset = 3 * 3600 + 1800, .dst_rule = .none, .std_abbrev = "+0330", .dst_abbrev = "+0330" },
     .{ .name = "asia/karachi", .std_offset = 5 * 3600, .dst_offset = 5 * 3600, .dst_rule = .none, .std_abbrev = "PKT", .dst_abbrev = "PKT" },
     .{ .name = "asia/dhaka", .std_offset = 6 * 3600, .dst_offset = 6 * 3600, .dst_rule = .none, .std_abbrev = "BST", .dst_abbrev = "BST" },
     .{ .name = "asia/kathmandu", .std_offset = 5 * 3600 + 2700, .dst_offset = 5 * 3600 + 2700, .dst_rule = .none, .std_abbrev = "NPT", .dst_abbrev = "NPT" },
@@ -3460,7 +3460,9 @@ const tz_table = [_]TzEntry{
     .{ .name = "australia/perth", .std_offset = 8 * 3600, .dst_offset = 8 * 3600, .dst_rule = .none, .std_abbrev = "AWST", .dst_abbrev = "AWST" },
     .{ .name = "pacific/auckland", .std_offset = 12 * 3600, .dst_offset = 13 * 3600, .dst_rule = .nz, .std_abbrev = "NZST", .dst_abbrev = "NZDT" },
     // africa
-    .{ .name = "africa/cairo", .std_offset = 2 * 3600, .dst_offset = 2 * 3600, .dst_rule = .none, .std_abbrev = "EET", .dst_abbrev = "EET" },
+    // africa/cairo intentionally NOT tabled: Egypt's DST is irregular (announced
+    // yearly, Fri/Thu transitions - not a Sunday rule), so it resolves via TZif
+    // for correctness (the old .none entry was wrong every summer: +02 not +03)
     .{ .name = "africa/lagos", .std_offset = 3600, .dst_offset = 3600, .dst_rule = .none, .std_abbrev = "WAT", .dst_abbrev = "WAT" },
     .{ .name = "africa/johannesburg", .std_offset = 2 * 3600, .dst_offset = 2 * 3600, .dst_rule = .none, .std_abbrev = "SAST", .dst_abbrev = "SAST" },
     .{ .name = "africa/nairobi", .std_offset = 3 * 3600, .dst_offset = 3 * 3600, .dst_rule = .none, .std_abbrev = "EAT", .dst_abbrev = "EAT" },

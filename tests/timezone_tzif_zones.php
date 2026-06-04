@@ -14,12 +14,22 @@ $cases = [
     ['Africa/Johannesburg', '2024-06-15 12:00:00'], // +02:00 (no DST)
     ['Asia/Kolkata',        '2024-06-15 12:00:00'], // +05:30 (no DST)
     ['Pacific/Marquesas',   '2024-06-15 12:00:00'], // -09:30 (rare half-hour offset)
+    // Egypt's DST is irregular (not a Sunday rule) so it resolves via TZif:
+    // wrong-every-summer (+02 not +03) under the old hardcoded .none entry
+    ['Africa/Cairo',        '2024-01-15 12:00:00'], // +02:00 (winter)
+    ['Africa/Cairo',        '2024-07-15 12:00:00'], // +03:00 (summer DST)
 ];
 
 foreach ($cases as [$zone, $when]) {
     $d = new DateTime($when, new DateTimeZone($zone));
     echo str_pad($zone, 22), $d->format('P'), ' offset=', $d->getOffset(), "\n";
 }
+
+// modern-tzdb numeric abbreviations for zones that dropped DST (these were
+// "BRT" / "IRST" letter codes in the table; PHP/tzdb now use numeric)
+echo 'Sao_Paulo T: ', (new DateTime('2024-06-15', new DateTimeZone('America/Sao_Paulo')))->format('T'), "\n"; // -03
+echo 'Tehran T: ',    (new DateTime('2024-06-15', new DateTimeZone('Asia/Tehran')))->format('T'), "\n";       // +0330
+echo 'Cairo T: ',     (new DateTime('2024-07-15', new DateTimeZone('Africa/Cairo')))->format('T'), "\n";      // EEST
 
 // an unknown zone still throws like PHP
 try {
