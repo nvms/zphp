@@ -24,8 +24,13 @@ pub const RuntimeError = error{ RuntimeError, OutOfMemory };
 // live proc_open children keyed by their ProcessResource object. `reaped` lives
 // here (not on the proc object) because std.posix.waitpid hits `unreachable` on
 // ECHILD, so the pid must be waited EXACTLY once - and reapProcChildren runs at
-// deinit where the proc objects may already be freed, so it can't read them
-pub const ProcChild = struct { child: *std.process.Child, reaped: bool };
+// deinit where the proc objects may already be freed, so it can't read them.
+// pipe_fds are the parent-side ends (role 0/1/2); -1 once fclose has consumed one
+pub const ProcChild = struct {
+    pid: std.posix.pid_t,
+    reaped: bool,
+    pipe_fds: [3]std.posix.fd_t = .{ -1, -1, -1 },
+};
 const ProcChildMap = std.AutoHashMapUnmanaged(*PhpObject, ProcChild);
 
 extern fn zphp_fast_loop(vm_ptr: *anyopaque) callconv(.c) u8;
@@ -721,8 +726,8 @@ pub const VM = struct {
         return pc;
     }
 
-    pub fn registerProcChild(self: *VM, proc: *PhpObject, child: *std.process.Child) RuntimeError!void {
-        try (try self.procChildren()).put(self.allocator, proc, .{ .child = child, .reaped = false });
+    pub fn registerProcChild(self: *VM, proc: *PhpObject, pid: std.posix.pid_t, pipe_fds: [3]std.posix.fd_t) RuntimeError!void {
+        try (try self.procChildren()).put(self.allocator, proc, .{ .pid = pid, .reaped = false, .pipe_fds = pipe_fds });
     }
 
     // returns a pointer into the map (valid until the next put). callers read
@@ -738,33 +743,21 @@ pub const VM = struct {
         _ = pc.remove(proc);
     }
 
-    // reap every still-live child. an un-reaped pid is SIGKILL'd + waited (which
-    // also closes its pipe fds via cleanupStreams); an already-reaped one only
-    // needs its leftover pipe fds closed (waiting again would ECHILD->unreachable).
-    // runs at reset (before freeHeapItems) and deinit; clears the map after
+    // reap every still-live child. an un-reaped pid is SIGKILL'd + waited (one
+    // waitpid per pid - again would ECHILD->unreachable). then any parent-side
+    // pipe fd the script never fclose'd is closed. runs at reset (before
+    // freeHeapItems) and deinit; clears the map after
     fn reapProcChildren(self: *VM) void {
         const pc = self.proc_children orelse return;
         var it = pc.valueIterator();
         while (it.next()) |entry| {
-            const child = entry.child;
             if (!entry.reaped) {
-                std.posix.kill(child.id, std.posix.SIG.KILL) catch {};
-                _ = child.wait() catch {};
-            } else {
-                if (child.stdin) |*f| {
-                    f.close();
-                    child.stdin = null;
-                }
-                if (child.stdout) |*f| {
-                    f.close();
-                    child.stdout = null;
-                }
-                if (child.stderr) |*f| {
-                    f.close();
-                    child.stderr = null;
-                }
+                std.posix.kill(entry.pid, std.posix.SIG.KILL) catch {};
+                _ = std.posix.waitpid(entry.pid, 0);
             }
-            self.allocator.destroy(child);
+            for (entry.pipe_fds) |fd| {
+                if (fd != -1) std.posix.close(fd);
+            }
         }
         pc.clearRetainingCapacity();
     }

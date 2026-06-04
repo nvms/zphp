@@ -1448,21 +1448,10 @@ fn native_fclose(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     const proc_role = obj.get("__proc_role");
     if (proc_ref == .object and proc_role == .int) {
         if (ctx.vm.lookupProcChild(proc_ref.object)) |pc| {
-            const child = pc.child;
-            switch (proc_role.int) {
-                0 => if (child.stdin) |*f| {
-                    f.close();
-                    child.stdin = null;
-                },
-                1 => if (child.stdout) |*f| {
-                    f.close();
-                    child.stdout = null;
-                },
-                2 => if (child.stderr) |*f| {
-                    f.close();
-                    child.stderr = null;
-                },
-                else => {},
+            const r: usize = if (proc_role.int >= 0 and proc_role.int < 3) @intCast(proc_role.int) else 3;
+            if (r < 3 and pc.pipe_fds[r] != -1) {
+                std.posix.close(pc.pipe_fds[r]);
+                pc.pipe_fds[r] = -1;
             }
         }
         obj.set(ctx.allocator, "__fd", .{ .int = -1 }) catch {};
@@ -2926,6 +2915,88 @@ fn native_pclose(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     return .{ .int = 0 };
 }
 
+const ProcPipes = struct {
+    pid: std.posix.pid_t,
+    stdin_w: std.posix.fd_t,
+    stdout_r: std.posix.fd_t,
+    stderr_r: std.posix.fd_t,
+};
+
+// in the forked child: wire a pipe end onto a std fd. dup2 clears CLOEXEC on the
+// new fd so it survives exec. on failure, report the errno to the parent + _exit
+fn procChildDup(pipe_end: std.posix.fd_t, target: std.posix.fd_t, err_fd: std.posix.fd_t) void {
+    std.posix.dup2(pipe_end, target) catch |e| procChildFail(err_fd, e);
+}
+
+fn procChildFail(err_fd: std.posix.fd_t, err: anyerror) noreturn {
+    var buf: [8]u8 = undefined;
+    std.mem.writeInt(u64, &buf, @intFromError(err), .little);
+    _ = std.posix.write(err_fd, &buf) catch {};
+    std.c._exit(1);
+}
+
+// fork + exec `/bin/sh -c <cmd>` with all three std streams piped. phase A of
+// descriptor-spec support: behavior-identical to the prior std.process.Child path
+// (always 3 pipes). returns the parent-side fds + pid. replicates Child.spawnPosix:
+// pipes are CLOEXEC (so the parent-retained ends never leak into the child), and a
+// dedicated err pipe carries a pre-exec failure back so we can report it instead of
+// leaving a half-spawned child. all allocation happens before fork (posix forbids
+// malloc between fork and execve)
+fn forkExecShell(allocator: std.mem.Allocator, cmd: []const u8) !ProcPipes {
+    const cloexec: std.posix.O = .{ .CLOEXEC = true };
+    const in_pipe = try std.posix.pipe2(cloexec);
+    errdefer closePair(in_pipe);
+    const out_pipe = try std.posix.pipe2(cloexec);
+    errdefer closePair(out_pipe);
+    const err_pipe = try std.posix.pipe2(cloexec);
+    errdefer closePair(err_pipe);
+    const xrep = try std.posix.pipe2(cloexec);
+    errdefer closePair(xrep);
+
+    const cmdz = try allocator.dupeZ(u8, cmd);
+    defer allocator.free(cmdz);
+    var argv = [_:null]?[*:0]const u8{ "/bin/sh", "-c", cmdz.ptr };
+    const envp: [*:null]const ?[*:0]const u8 = @ptrCast(std.c.environ);
+
+    const pid = try std.posix.fork();
+    if (pid == 0) {
+        procChildDup(in_pipe[0], 0, xrep[1]);
+        procChildDup(out_pipe[1], 1, xrep[1]);
+        procChildDup(err_pipe[1], 2, xrep[1]);
+        const e = std.posix.execveZ("/bin/sh", &argv, envp);
+        procChildFail(xrep[1], e);
+    }
+
+    // parent: close the child-side ends + the err-pipe write end
+    std.posix.close(xrep[1]);
+    std.posix.close(in_pipe[0]);
+    std.posix.close(out_pipe[1]);
+    std.posix.close(err_pipe[1]);
+    // a non-empty err pipe means the child failed before/at exec (CLOEXEC closes
+    // the write end on a successful exec -> we read EOF)
+    var buf: [8]u8 = undefined;
+    var got: usize = 0;
+    while (got < buf.len) {
+        const n = std.posix.read(xrep[0], buf[got..]) catch break;
+        if (n == 0) break;
+        got += n;
+    }
+    std.posix.close(xrep[0]);
+    if (got > 0) {
+        _ = std.posix.waitpid(pid, 0);
+        std.posix.close(in_pipe[1]);
+        std.posix.close(out_pipe[0]);
+        std.posix.close(err_pipe[0]);
+        return error.ProcSpawnFailed;
+    }
+    return .{ .pid = pid, .stdin_w = in_pipe[1], .stdout_r = out_pipe[0], .stderr_r = err_pipe[0] };
+}
+
+fn closePair(p: [2]std.posix.fd_t) void {
+    std.posix.close(p[0]);
+    std.posix.close(p[1]);
+}
+
 fn native_proc_open(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len < 3 or args[0] != .string) return .{ .bool = false };
     const cmd = args[0].string;
@@ -2944,33 +3015,25 @@ fn native_proc_open(ctx: *NativeContext, args: []const Value) RuntimeError!Value
     try proc.set(ctx.allocator, "__exit", .{ .int = 0 });
     try proc.set(ctx.allocator, "__running", .{ .bool = true });
 
-    // spawn the child live now (php spawns at proc_open, not at first read). the
-    // *Child lives in vm.proc_children keyed by proc so proc_close can wait() it
-    // and reset/deinit can reap it. the three parent-side pipe fds become __fd on
-    // the FileHandle pipe objects, so fread/fwrite/stream_select operate on real
-    // live fds. each fd is closed EXACTLY once: by fclose (which nulls the matching
-    // child.std* so wait() won't double-close) or by proc_close/reap. cmd_copy is
-    // duped into vm.strings so it outlives this call; the argv literal is only read
-    // during spawn()
-    const child = try ctx.vm.allocator.create(std.process.Child);
-    child.* = std.process.Child.init(&.{ "/bin/sh", "-c", cmd_copy }, ctx.vm.allocator);
-    child.stdin_behavior = .Pipe;
-    child.stdout_behavior = .Pipe;
-    child.stderr_behavior = .Pipe;
-    child.spawn() catch {
-        ctx.vm.allocator.destroy(child);
+    // spawn the child live now (php spawns at proc_open, not at first read) via
+    // fork/exec. the pid + the three parent-side pipe fds live in vm.proc_children
+    // keyed by proc, so proc_close waitpid's the pid and reset/deinit can reap it.
+    // the pipe fds also become __fd on the FileHandle pipe objects, so
+    // fread/fwrite/stream_select operate on real live fds. each fd is closed
+    // EXACTLY once: by fclose (which clears pipe_fds[role]) or by proc_close/reap
+    const spawned = forkExecShell(ctx.vm.allocator, cmd_copy) catch {
         try proc.set(ctx.allocator, "__pid", .{ .int = 0 });
         try proc.set(ctx.allocator, "__reaped", .{ .bool = true });
         try proc.set(ctx.allocator, "__running", .{ .bool = false });
         try proc.set(ctx.allocator, "__exit", .{ .int = -1 });
         return .{ .bool = false };
     };
-    try ctx.vm.registerProcChild(proc, child);
-    try proc.set(ctx.allocator, "__pid", .{ .int = @intCast(child.id) });
+    try ctx.vm.registerProcChild(proc, spawned.pid, .{ spawned.stdin_w, spawned.stdout_r, spawned.stderr_r });
+    try proc.set(ctx.allocator, "__pid", .{ .int = @intCast(spawned.pid) });
     try proc.set(ctx.allocator, "__reaped", .{ .bool = false });
-    const stdin_fd: i64 = if (child.stdin) |f| @intCast(f.handle) else -1;
-    const stdout_fd: i64 = if (child.stdout) |f| @intCast(f.handle) else -1;
-    const stderr_fd: i64 = if (child.stderr) |f| @intCast(f.handle) else -1;
+    const stdin_fd: i64 = @intCast(spawned.stdin_w);
+    const stdout_fd: i64 = @intCast(spawned.stdout_r);
+    const stderr_fd: i64 = @intCast(spawned.stderr_r);
 
     const pipes = if (args[2] == .array) args[2].array else blk: {
         const a = try ctx.allocator.create(PhpArray);
@@ -3039,43 +3102,27 @@ fn native_proc_close(ctx: *NativeContext, args: []const Value) RuntimeError!Valu
         const cached = obj.get("__exit");
         return .{ .int = if (cached == .int) cached.int else 0 };
     };
-    const child = pc.child;
+    // close stdin first so the child sees EOF and can finish
+    if (pc.pipe_fds[0] != -1) {
+        std.posix.close(pc.pipe_fds[0]);
+        pc.pipe_fds[0] = -1;
+    }
     if (!pc.reaped) {
-        // closing stdin signals EOF so the child can finish; wait() reaps + closes
-        // whatever streams the script didn't already fclose
-        if (child.stdin) |*f| {
-            f.close();
-            child.stdin = null;
-        }
-        const term = child.wait() catch {
-            ctx.vm.removeProcChild(obj);
-            ctx.vm.allocator.destroy(child);
-            obj.set(ctx.allocator, "__exit", .{ .int = -1 }) catch {};
-            return .{ .int = -1 };
-        };
-        const exit: i64 = switch (term) {
-            .Exited => |c| @intCast(c),
-            .Signal => |c| @as(i64, @intCast(c)) + 128,
-            else => -1,
-        };
-        obj.set(ctx.allocator, "__exit", .{ .int = exit }) catch {};
-    } else {
-        // a prior proc_get_status already reaped the pid; just close leftover fds
-        if (child.stdin) |*f| {
-            f.close();
-            child.stdin = null;
-        }
-        if (child.stdout) |*f| {
-            f.close();
-            child.stdout = null;
-        }
-        if (child.stderr) |*f| {
-            f.close();
-            child.stderr = null;
-        }
+        // a prior proc_get_status may have already reaped via WNOHANG; if not, do a
+        // blocking wait now (exactly one waitpid per pid - ECHILD is unreachable)
+        const res = std.posix.waitpid(pc.pid, 0);
+        cacheProcTerm(ctx, obj, res.status);
+    }
+    // close any parent-side fds the script didn't fclose
+    if (pc.pipe_fds[1] != -1) {
+        std.posix.close(pc.pipe_fds[1]);
+        pc.pipe_fds[1] = -1;
+    }
+    if (pc.pipe_fds[2] != -1) {
+        std.posix.close(pc.pipe_fds[2]);
+        pc.pipe_fds[2] = -1;
     }
     ctx.vm.removeProcChild(obj);
-    ctx.vm.allocator.destroy(child);
     const exit = obj.get("__exit");
     return .{ .int = if (exit == .int) exit.int else 0 };
 }
@@ -3090,7 +3137,7 @@ fn native_proc_get_status(ctx: *NativeContext, args: []const Value) RuntimeError
     var running = false;
     if (ctx.vm.lookupProcChild(obj)) |pc| {
         if (!pc.reaped) {
-            const res = std.posix.waitpid(pc.child.id, PosixW.NOHANG);
+            const res = std.posix.waitpid(pc.pid, PosixW.NOHANG);
             if (res.pid == 0) {
                 running = true;
             } else {
@@ -3123,7 +3170,7 @@ fn native_proc_terminate(ctx: *NativeContext, args: []const Value) RuntimeError!
     if (args.len == 0 or args[0] != .object) return .{ .bool = false };
     const sig: u8 = if (args.len >= 2 and args[1] == .int) @intCast(args[1].int) else std.posix.SIG.TERM;
     if (ctx.vm.lookupProcChild(args[0].object)) |pc| {
-        std.posix.kill(pc.child.id, sig) catch return .{ .bool = false };
+        std.posix.kill(pc.pid, sig) catch return .{ .bool = false };
     }
     return .{ .bool = true };
 }
