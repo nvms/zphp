@@ -550,8 +550,8 @@ fn dtConstruct(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
             if (explicit_offset) |off| {
                 ts -= off;
                 try obj.set(ctx.allocator, "__timezone", .{ .string = explicit_name.? });
-            } else if (lookupTimezone(tz_name)) |tz| {
-                ts -= @as(i64, tzOffsetForWall(tz, ts));
+            } else {
+                ts -= @as(i64, tzOffsetForWallByName(ctx.allocator, tz_name, ts));
             }
         } else if (s.len >= 10 and s[2] == '-' and s[5] == '-' and
             std.ascii.isDigit(s[0]) and std.ascii.isDigit(s[1]) and
@@ -570,7 +570,7 @@ fn dtConstruct(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
                 sec = std.fmt.parseInt(i64, s[17..19], 10) catch 0;
             }
             ts = dateToTimestamp(year, month, day, hour, min, sec);
-            if (lookupTimezone(tz_name)) |tz| ts -= @as(i64, tzOffsetForWall(tz, ts));
+            ts -= @as(i64, tzOffsetForWallByName(ctx.allocator, tz_name, ts));
         } else {
             const result = parseRelativeTime(s, ts);
             if (result == .int) {
@@ -597,7 +597,7 @@ fn dtFormat(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     const ts = getTimestamp(obj);
     const tz_val = obj.get("__timezone");
     const tz_name = if (tz_val == .string) tz_val.string else ctx.vm.default_tz_name;
-    const offset = if (lookupTimezone(tz_name)) |tz| tzOffsetAt(tz, ts) else @as(i32, 0);
+    const offset = tzOffsetForName(ctx.allocator, tz_name, ts);
     const us_v = obj.get("__microseconds");
     const us: i64 = if (us_v == .int) us_v.int else 0;
     return formatTimestampTzMicros(ctx, ts, args[0].string, offset, tz_name, us);
@@ -605,7 +605,7 @@ fn dtFormat(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
 
 pub fn formatTimestamp(ctx: *NativeContext, timestamp: i64, format: []const u8) RuntimeError!Value {
     const tz_name = ctx.vm.default_tz_name;
-    const offset = if (lookupTimezone(tz_name)) |tz| tzOffsetAt(tz, timestamp) else @as(i32, 0);
+    const offset = tzOffsetForName(ctx.allocator, tz_name, timestamp);
     return formatTimestampTzMicros(ctx, timestamp, format, offset, tz_name, 0);
 }
 
@@ -861,8 +861,9 @@ pub fn formatTimestampTzMicros(ctx: *NativeContext, timestamp: i64, format: []co
                 try buf.appendSlice(a, tz_name);
             },
             'T' => {
-                if (lookupTimezone(tz_name)) |tz| {
-                    try buf.appendSlice(a, tzAbbrevAt(tz, timestamp));
+                if (tzAbbrevForName(a, tz_name, timestamp)) |ab| {
+                    defer a.free(ab);
+                    try buf.appendSlice(a, ab);
                 } else {
                     try buf.appendSlice(a, tz_name);
                 }
@@ -1301,9 +1302,7 @@ fn createBareDt(ctx: *NativeContext, class_name: []const u8, args: []const Value
                 sec = std.fmt.parseInt(i64, s[17..19], 10) catch 0;
             }
             ts = dateToTimestamp(year, month, day, hour, min, sec);
-            if (lookupTimezone(tz_name)) |tz| {
-                ts -= @as(i64, tzOffsetForWall(tz, ts));
-            }
+            ts -= @as(i64, tzOffsetForWallByName(ctx.allocator, tz_name, ts));
         } else {
             const result = parseRelativeTime(s, ts);
             if (result == .int) ts = result.int;
@@ -1338,7 +1337,7 @@ fn native_date_format(ctx: *NativeContext, args: []const Value) RuntimeError!Val
     const ts = getTimestamp(obj);
     const tz_val = obj.get("__timezone");
     const tz_name = if (tz_val == .string) tz_val.string else ctx.vm.default_tz_name;
-    const offset = if (lookupTimezone(tz_name)) |tz| tzOffsetAt(tz, ts) else @as(i32, 0);
+    const offset = tzOffsetForName(ctx.allocator, tz_name, ts);
     return formatTimestampTz(ctx, ts, args[1].string, offset, tz_name);
 }
 
@@ -1827,10 +1826,7 @@ fn dtGetOffset(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
     const tz_val = obj.get("__timezone");
     const tz_name = if (tz_val == .string) tz_val.string else "UTC";
     const ts = getTimestamp(obj);
-    if (lookupTimezone(tz_name)) |tz| {
-        return .{ .int = @intCast(tzOffsetAt(tz, ts)) };
-    }
-    return .{ .int = 0 };
+    return .{ .int = @intCast(tzOffsetForName(ctx.allocator, tz_name, ts)) };
 }
 
 fn dtSetTimezone(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
@@ -1873,6 +1869,7 @@ fn dtzConstruct(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
             is_named_passthrough = true;
         }
         if (lookupTimezone(name) != null) is_named_passthrough = true;
+        if (!is_named_passthrough and parseTimezoneOffset(name) == null and tzIsKnown(ctx.allocator, name)) is_named_passthrough = true;
         if (!is_named_passthrough) {
             if (parseTimezoneOffset(name)) |off| {
                 const sign: u8 = if (off < 0) '-' else '+';
@@ -2129,10 +2126,7 @@ fn dtzGetOffset(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
         ref_ts = getTimestamp(args[0].object);
     }
 
-    if (lookupTimezone(tz_name)) |tz| {
-        return .{ .int = @intCast(tzOffsetAt(tz, ref_ts)) };
-    }
-    return .{ .int = 0 };
+    return .{ .int = @intCast(tzOffsetForName(ctx.allocator, tz_name, ref_ts)) };
 }
 
 // PHP's getLocation returns {country_code, latitude, longitude, comments}
@@ -2200,9 +2194,7 @@ fn native_mktime(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     const day: i64 = if (args.len > 4) Value.toInt(args[4]) else 1;
     const year: i64 = if (args.len > 5) Value.toInt(args[5]) else 1970;
     var ts = dateToTimestamp(year, month, day, hour, min, sec);
-    if (lookupTimezone(ctx.vm.default_tz_name)) |tz| {
-        ts -= @as(i64, tzOffsetForWall(tz, ts));
-    }
+    ts -= @as(i64, tzOffsetForWallByName(ctx.allocator, ctx.vm.default_tz_name, ts));
     return .{ .int = ts };
 }
 
@@ -3502,6 +3494,166 @@ fn lookupTimezone(name: []const u8) ?TzEntry {
         if (eqlLower(name, entry.name)) return entry;
     }
     return null;
+}
+
+// ---- TZif (system zoneinfo) fallback for zones not in the hardcoded table ----
+// parses /usr/share/zoneinfo/<Zone> (the IANA tzdb binary) to give correct
+// offsets/DST/abbreviations/historical transitions for ANY zone. the hardcoded
+// table is tried first (fast, no I/O, works where zoneinfo is absent e.g. musl);
+// this only runs for zones the table doesn't cover.
+
+const TzifRes = struct { offset: i32, is_dst: bool, abbrev_buf: [16]u8 = undefined, abbrev_len: u8 = 0 };
+
+fn tzNameValid(name: []const u8) bool {
+    if (name.len == 0 or name.len > 64) return false;
+    if (name[0] == '/' or name[0] == '+' or name[0] == '-') return false;
+    if (std.mem.indexOf(u8, name, "..") != null) return false;
+    for (name) |c| {
+        if (!(std.ascii.isAlphanumeric(c) or c == '/' or c == '_' or c == '-' or c == '+')) return false;
+    }
+    return true;
+}
+
+fn readZoneInfo(allocator: Allocator, name: []const u8) ?[]u8 {
+    if (!tzNameValid(name)) return null;
+    const dirs = [_][]const u8{ "/usr/share/zoneinfo/", "/etc/zoneinfo/", "/usr/lib/zoneinfo/", "/usr/share/lib/zoneinfo/" };
+    for (dirs) |dir| {
+        var pathbuf: [320]u8 = undefined;
+        const path = std.fmt.bufPrint(&pathbuf, "{s}{s}", .{ dir, name }) catch continue;
+        const file = std.fs.openFileAbsolute(path, .{}) catch continue;
+        defer file.close();
+        const data = file.readToEndAlloc(allocator, 1 << 20) catch continue;
+        return data;
+    }
+    return null;
+}
+
+fn firstNonDstType(bytes: []const u8, ttinfo_off: usize, typecnt: usize) u8 {
+    var t: usize = 0;
+    while (t < typecnt) : (t += 1) {
+        if (bytes[ttinfo_off + t * 6 + 4] == 0) return @intCast(t);
+    }
+    return 0;
+}
+
+// resolve offset/isdst/abbrev in effect at a UTC timestamp from TZif bytes.
+// supports v1 (32-bit) and v2/v3 (64-bit, preferred). null on malformed input.
+fn tzifLookupUtc(bytes: []const u8, utc_ts: i64) ?TzifRes {
+    if (bytes.len < 44 or !std.mem.eql(u8, bytes[0..4], "TZif")) return null;
+    const ver = bytes[4];
+    const rdU32 = struct {
+        fn f(b: []const u8, off: usize) usize {
+            return std.mem.readInt(u32, b[off..][0..4], .big);
+        }
+    }.f;
+    const v1_isutcnt = rdU32(bytes, 20);
+    const v1_isstdcnt = rdU32(bytes, 24);
+    const v1_leapcnt = rdU32(bytes, 28);
+    const v1_timecnt = rdU32(bytes, 32);
+    const v1_typecnt = rdU32(bytes, 36);
+    const v1_charcnt = rdU32(bytes, 40);
+
+    var timecnt = v1_timecnt;
+    var typecnt = v1_typecnt;
+    var charcnt = v1_charcnt;
+    var base: usize = 44;
+    var time_size: usize = 4;
+
+    if (ver == '2' or ver == '3') {
+        const v1_data = v1_timecnt * 4 + v1_timecnt + v1_typecnt * 6 + v1_charcnt + v1_leapcnt * 8 + v1_isstdcnt + v1_isutcnt;
+        const v2_hdr = 44 + v1_data;
+        if (v2_hdr + 44 > bytes.len or !std.mem.eql(u8, bytes[v2_hdr .. v2_hdr + 4], "TZif")) return null;
+        timecnt = rdU32(bytes, v2_hdr + 32);
+        typecnt = rdU32(bytes, v2_hdr + 36);
+        charcnt = rdU32(bytes, v2_hdr + 40);
+        base = v2_hdr + 44;
+        time_size = 8;
+    }
+    if (typecnt == 0) return null;
+
+    const times_off = base;
+    const types_off = times_off + timecnt * time_size;
+    const ttinfo_off = types_off + timecnt;
+    const abbrev_off = ttinfo_off + typecnt * 6;
+    if (abbrev_off + charcnt > bytes.len) return null;
+
+    const readTime = struct {
+        fn f(b: []const u8, off: usize, sz: usize) i64 {
+            return if (sz == 8) std.mem.readInt(i64, b[off..][0..8], .big) else @as(i64, std.mem.readInt(i32, b[off..][0..4], .big));
+        }
+    }.f;
+
+    // largest transition <= utc_ts
+    var lo: usize = 0;
+    var hi: usize = timecnt;
+    while (lo < hi) {
+        const mid = lo + (hi - lo) / 2;
+        if (readTime(bytes, times_off + mid * time_size, time_size) <= utc_ts) lo = mid + 1 else hi = mid;
+    }
+    const type_idx: u8 = if (lo == 0) firstNonDstType(bytes, ttinfo_off, typecnt) else bytes[types_off + (lo - 1)];
+    if (type_idx >= typecnt) return null;
+    const ti = ttinfo_off + @as(usize, type_idx) * 6;
+    var res = TzifRes{ .offset = std.mem.readInt(i32, bytes[ti..][0..4], .big), .is_dst = bytes[ti + 4] != 0 };
+    const abbrind: usize = bytes[ti + 5];
+    var i = abbrev_off + abbrind;
+    while (i < abbrev_off + charcnt and bytes[i] != 0 and res.abbrev_len < res.abbrev_buf.len) : (i += 1) {
+        res.abbrev_buf[res.abbrev_len] = bytes[i];
+        res.abbrev_len += 1;
+    }
+    return res;
+}
+
+// wall-clock (naive local) -> resolved offset. guess the offset treating the
+// wall time as UTC, then refine once (converges for non-transition times;
+// picks an interpretation at ambiguous fall-back / spring-forward gaps)
+fn tzifLookupWall(bytes: []const u8, wall_ts: i64) ?TzifRes {
+    const g0 = tzifLookupUtc(bytes, wall_ts) orelse return null;
+    return tzifLookupUtc(bytes, wall_ts - g0.offset) orelse g0;
+}
+
+// table-first, TZif-fallback. these replace the bare `lookupTimezone(name) ->
+// tzOffsetAt(tz, ts)` pattern at the call sites so non-table zones work too.
+pub fn tzOffsetForName(allocator: Allocator, name: []const u8, utc_ts: i64) i32 {
+    if (lookupTimezone(name)) |tz| return tzOffsetAt(tz, utc_ts);
+    if (readZoneInfo(allocator, name)) |bytes| {
+        defer allocator.free(bytes);
+        if (tzifLookupUtc(bytes, utc_ts)) |r| return r.offset;
+    }
+    return 0;
+}
+
+pub fn tzOffsetForWallByName(allocator: Allocator, name: []const u8, wall_ts: i64) i32 {
+    if (lookupTimezone(name)) |tz| return tzOffsetForWall(tz, wall_ts);
+    if (readZoneInfo(allocator, name)) |bytes| {
+        defer allocator.free(bytes);
+        if (tzifLookupWall(bytes, wall_ts)) |r| return r.offset;
+    }
+    return 0;
+}
+
+// resolve the abbreviation for a zone+timestamp into an owned slice (caller
+// frees), or null if unknown. table abbrevs are static; TZif ones are duped
+// returns a freshly-allocated abbrev (caller frees) so table + TZif cases are
+// uniform, or null if unknown
+pub fn tzAbbrevForName(allocator: Allocator, name: []const u8, utc_ts: i64) ?[]const u8 {
+    if (lookupTimezone(name)) |tz| return allocator.dupe(u8, tzAbbrevAt(tz, utc_ts)) catch null;
+    if (readZoneInfo(allocator, name)) |bytes| {
+        defer allocator.free(bytes);
+        if (tzifLookupUtc(bytes, utc_ts)) |r| {
+            return allocator.dupe(u8, r.abbrev_buf[0..r.abbrev_len]) catch null;
+        }
+    }
+    return null;
+}
+
+// is this a zone zphp can resolve (table OR a readable zoneinfo file)?
+pub fn tzIsKnown(allocator: Allocator, name: []const u8) bool {
+    if (lookupTimezone(name) != null) return true;
+    if (readZoneInfo(allocator, name)) |bytes| {
+        defer allocator.free(bytes);
+        return tzifLookupUtc(bytes, 0) != null;
+    }
+    return false;
 }
 
 fn parseFixedOffset(s: []const u8) ?i32 {
