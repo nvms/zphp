@@ -530,7 +530,11 @@ pub const VM = struct {
     // depth-0 frame ('#0 file(N): native_func(args)') that PHP includes
     pending_native_name: ?[]const u8 = null,
     pending_native_args: []const Value = &.{},
-    pending_native_args_buf: [16]Value = @splat(.null),
+    // heap-allocated (lazy) so this 16-wide Value array is NOT inlined into the
+    // hot VM struct - an inline [16]Value perturbed fastLoop codegen and
+    // regressed fibonacci ~8% (struct-layout sensitivity, same class as the IC).
+    // only touched on the rare native-throws-uncaught path
+    pending_native_args_buf: ?*[16]Value = null,
     // true when pending_native_name is a 'Class::method' reached as an
     // instance method - the trace renders it with '->' instead of '::'
     pending_native_is_instance: bool = false,
@@ -1807,6 +1811,10 @@ pub const VM = struct {
             ri.deinit(self.allocator);
             self.allocator.destroy(ri);
             self.ref_index = null;
+        }
+        if (self.pending_native_args_buf) |b| {
+            self.allocator.destroy(b);
+            self.pending_native_args_buf = null;
         }
         self.last_return_ref_array_bindings.deinit(self.allocator);
         self.last_return_ref_object_bindings.deinit(self.allocator);
@@ -13941,9 +13949,15 @@ pub const VM = struct {
                     if (!isFrameOutNative(name)) {
                         self.pending_native_name = name;
                         self.pending_native_is_instance = false;
-                        const argc_cap: usize = @min(ac, self.pending_native_args_buf.len);
-                        for (0..argc_cap) |i| self.pending_native_args_buf[i] = args[i];
-                        self.pending_native_args = self.pending_native_args_buf[0..argc_cap];
+                        const buf = self.pending_native_args_buf orelse blk: {
+                            const b = try self.allocator.create([16]Value);
+                            b.* = @splat(.null);
+                            self.pending_native_args_buf = b;
+                            break :blk b;
+                        };
+                        const argc_cap: usize = @min(ac, buf.len);
+                        for (0..argc_cap) |i| buf[i] = args[i];
+                        self.pending_native_args = buf[0..argc_cap];
                         try self.prependNativeFrameToTrace(exc, name, args[0..ac]);
                     }
                     self.pending_exception = null;
