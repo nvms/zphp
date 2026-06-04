@@ -27,7 +27,72 @@ pub const entries = .{
     .{ "stream_context_set_default", native_stream_context_set_default },
     .{ "checkdnsrr", native_checkdnsrr },
     .{ "dns_get_record", native_dns_get_record },
+    .{ "stream_select", native_stream_select },
 };
+
+fn streamFd(v: Value) ?i32 {
+    if (v != .object) return null;
+    const fdv = v.object.get("__fd");
+    if (fdv != .int or fdv.int < 0) return null;
+    return @intCast(fdv.int);
+}
+
+// stream_select(&$read, &$write, &$except, ?int $seconds, int $microseconds = 0): int|false
+// polls the underlying fds of the stream objects in each (by-ref) array and
+// rewrites each array to the ready subset, returning the number ready (false on
+// error). read=POLLIN, write=POLLOUT, except=POLLPRI. null $seconds blocks
+fn native_stream_select(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    var pollfds: std.ArrayListUnmanaged(std.posix.pollfd) = .{};
+    defer pollfds.deinit(ctx.allocator);
+    const Tracked = struct { slot: u8, val: Value };
+    var tracked: std.ArrayListUnmanaged(Tracked) = .{};
+    defer tracked.deinit(ctx.allocator);
+
+    const want = [_]i16{ std.posix.POLL.IN, std.posix.POLL.OUT, std.posix.POLL.PRI };
+    var total_streams: usize = 0;
+    var slot: usize = 0;
+    while (slot < 3) : (slot += 1) {
+        if (slot >= args.len or args[slot] != .array) continue;
+        for (args[slot].array.entries.items) |entry| {
+            total_streams += 1;
+            const fd = streamFd(entry.value) orelse continue;
+            try pollfds.append(ctx.allocator, .{ .fd = fd, .events = want[slot], .revents = 0 });
+            try tracked.append(ctx.allocator, .{ .slot = @intCast(slot), .val = entry.value });
+        }
+    }
+    if (total_streams == 0) {
+        try ctx.vm.setPendingException("ValueError", "No stream arrays were passed");
+        return error.RuntimeError;
+    }
+
+    const block = args.len < 4 or args[3] == .null;
+    const sec: i64 = if (!block) Value.toInt(args[3]) else 0;
+    const usec: i64 = if (args.len > 4) Value.toInt(args[4]) else 0;
+    const timeout_ms: i32 = if (block) -1 else @intCast(@max(0, sec * 1000 + @divTrunc(usec, 1000)));
+
+    if (pollfds.items.len > 0) {
+        _ = std.posix.poll(pollfds.items, timeout_ms) catch return .{ .bool = false };
+    }
+
+    var out = [_]?*PhpArray{ null, null, null };
+    var count: i64 = 0;
+    for (pollfds.items, tracked.items) |pfd, t| {
+        const mask = want[t.slot] | std.posix.POLL.ERR | std.posix.POLL.HUP;
+        if ((pfd.revents & mask) != 0) {
+            if (out[t.slot] == null) out[t.slot] = try ctx.createArray();
+            try out[t.slot].?.append(ctx.allocator, t.val);
+            count += 1;
+        }
+    }
+    // rewrite each by-ref array to the ready subset (empty array if none ready)
+    slot = 0;
+    while (slot < 3) : (slot += 1) {
+        if (slot >= args.len or args[slot] != .array) continue;
+        const arr = out[slot] orelse try ctx.createArray();
+        ctx.setCallerVar(slot, args.len, .{ .array = arr });
+    }
+    return .{ .int = count };
+}
 
 fn native_stream_context_create(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     const obj = try ctx.vm.allocator.create(PhpObject);
