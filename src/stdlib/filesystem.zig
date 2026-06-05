@@ -2915,17 +2915,35 @@ fn native_pclose(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     return .{ .int = 0 };
 }
 
-const ProcPipes = struct {
-    pid: std.posix.pid_t,
-    stdin_w: std.posix.fd_t,
-    stdout_r: std.posix.fd_t,
-    stderr_r: std.posix.fd_t,
+// per-fd descriptor for child fds 0/1/2 (parsed from proc_open's spec arg)
+const FdDesc = union(enum) {
+    inherit, // leave the child fd inheriting the parent's (no dup)
+    pipe_r, // child reads this fd; parent keeps the write end
+    pipe_w, // child writes this fd; parent keeps the read end
+    file: struct { path: []const u8, mode: []const u8 }, // open + dup onto the child fd
+    redirect: std.posix.fd_t, // dup an already-open (script-owned) fd onto the child fd
 };
 
-// in the forked child: wire a pipe end onto a std fd. dup2 clears CLOEXEC on the
-// new fd so it survives exec. on failure, report the errno to the parent + _exit
-fn procChildDup(pipe_end: std.posix.fd_t, target: std.posix.fd_t, err_fd: std.posix.fd_t) void {
-    std.posix.dup2(pipe_end, target) catch |e| procChildFail(err_fd, e);
+const ProcSpawn = struct {
+    pid: std.posix.pid_t,
+    pipe_fds: [3]std.posix.fd_t, // parent-side end per fd; -1 if that fd is not a pipe
+};
+
+fn closeFdArray(fds: *[3]std.posix.fd_t) void {
+    for (fds.*) |f| if (f != -1) std.posix.close(f);
+}
+
+// set FD_CLOEXEC so an opened redirect file doesn't survive into the exec'd child
+// except via the explicit dup2 onto its target (dup2 clears CLOEXEC on the target)
+fn setCloexec(fd: std.posix.fd_t) void {
+    const flags = std.posix.fcntl(fd, 1, 0) catch return; // F_GETFD
+    _ = std.posix.fcntl(fd, 2, flags | 1) catch {}; // F_SETFD, FD_CLOEXEC
+}
+
+// in the forked child: dup a source fd onto a target std fd. dup2 clears CLOEXEC
+// on the target so it survives exec. on failure, report the errno + _exit
+fn procChildDup(src: std.posix.fd_t, target: std.posix.fd_t, err_fd: std.posix.fd_t) void {
+    std.posix.dup2(src, target) catch |e| procChildFail(err_fd, e);
 }
 
 fn procChildFail(err_fd: std.posix.fd_t, err: anyerror) noreturn {
@@ -2935,43 +2953,106 @@ fn procChildFail(err_fd: std.posix.fd_t, err: anyerror) noreturn {
     std.c._exit(1);
 }
 
-// fork + exec `/bin/sh -c <cmd>` with all three std streams piped. phase A of
-// descriptor-spec support: behavior-identical to the prior std.process.Child path
-// (always 3 pipes). returns the parent-side fds + pid. replicates Child.spawnPosix:
-// pipes are CLOEXEC (so the parent-retained ends never leak into the child), and a
-// dedicated err pipe carries a pre-exec failure back so we can report it instead of
-// leaving a half-spawned child. all allocation happens before fork (posix forbids
-// malloc between fork and execve)
-fn forkExecShell(allocator: std.mem.Allocator, cmd: []const u8) !ProcPipes {
-    const cloexec: std.posix.O = .{ .CLOEXEC = true };
-    const in_pipe = try std.posix.pipe2(cloexec);
-    errdefer closePair(in_pipe);
-    const out_pipe = try std.posix.pipe2(cloexec);
-    errdefer closePair(out_pipe);
-    const err_pipe = try std.posix.pipe2(cloexec);
-    errdefer closePair(err_pipe);
-    const xrep = try std.posix.pipe2(cloexec);
-    errdefer closePair(xrep);
+fn closePair(p: [2]std.posix.fd_t) void {
+    std.posix.close(p[0]);
+    std.posix.close(p[1]);
+}
 
-    const cmdz = try allocator.dupeZ(u8, cmd);
+// fork + exec `/bin/sh -c <cmd>`, wiring child fds 0/1/2 per `descs`. pipes are
+// created here CLOEXEC (so the parent-retained ends never leak into the exec'd
+// child) and redirect files are opened here; a dedicated err pipe carries any
+// pre-exec failure back so a bad spawn returns an error instead of a half-started
+// child. all allocation happens before fork (posix forbids malloc between fork and
+// execve). returns the pid + the parent-side pipe ends (per fd, -1 if not a pipe)
+fn forkExecDesc(allocator: std.mem.Allocator, cmd: []const u8, descs: [3]FdDesc) !ProcSpawn {
+    const cloexec: std.posix.O = .{ .CLOEXEC = true };
+    var parent_ends: [3]std.posix.fd_t = .{ -1, -1, -1 };
+    var child_ends: [3]std.posix.fd_t = .{ -1, -1, -1 };
+    var file_fds: [3]std.posix.fd_t = .{ -1, -1, -1 };
+
+    for (descs, 0..) |d, i| {
+        switch (d) {
+            .pipe_r => {
+                const p = std.posix.pipe2(cloexec) catch {
+                    closeFdArray(&parent_ends);
+                    closeFdArray(&child_ends);
+                    closeFdArray(&file_fds);
+                    return error.ProcSpawnFailed;
+                };
+                child_ends[i] = p[0];
+                parent_ends[i] = p[1];
+            },
+            .pipe_w => {
+                const p = std.posix.pipe2(cloexec) catch {
+                    closeFdArray(&parent_ends);
+                    closeFdArray(&child_ends);
+                    closeFdArray(&file_fds);
+                    return error.ProcSpawnFailed;
+                };
+                child_ends[i] = p[1];
+                parent_ends[i] = p[0];
+            },
+            .file => |f| {
+                const file = openWithMode(f.path, f.mode) catch {
+                    closeFdArray(&parent_ends);
+                    closeFdArray(&child_ends);
+                    closeFdArray(&file_fds);
+                    return error.ProcSpawnFailed;
+                };
+                setCloexec(file.handle);
+                file_fds[i] = file.handle;
+            },
+            .inherit, .redirect => {},
+        }
+    }
+
+    const xrep = std.posix.pipe2(cloexec) catch {
+        closeFdArray(&parent_ends);
+        closeFdArray(&child_ends);
+        closeFdArray(&file_fds);
+        return error.ProcSpawnFailed;
+    };
+
+    const cmdz = allocator.dupeZ(u8, cmd) catch {
+        closeFdArray(&parent_ends);
+        closeFdArray(&child_ends);
+        closeFdArray(&file_fds);
+        closePair(xrep);
+        return error.OutOfMemory;
+    };
     defer allocator.free(cmdz);
     var argv = [_:null]?[*:0]const u8{ "/bin/sh", "-c", cmdz.ptr };
     const envp: [*:null]const ?[*:0]const u8 = @ptrCast(std.c.environ);
 
-    const pid = try std.posix.fork();
+    const pid = std.posix.fork() catch {
+        closeFdArray(&parent_ends);
+        closeFdArray(&child_ends);
+        closeFdArray(&file_fds);
+        closePair(xrep);
+        return error.ProcSpawnFailed;
+    };
     if (pid == 0) {
-        procChildDup(in_pipe[0], 0, xrep[1]);
-        procChildDup(out_pipe[1], 1, xrep[1]);
-        procChildDup(err_pipe[1], 2, xrep[1]);
+        for (descs, 0..) |d, i| {
+            const target: std.posix.fd_t = @intCast(i);
+            switch (d) {
+                .inherit => {},
+                .pipe_r, .pipe_w => procChildDup(child_ends[i], target, xrep[1]),
+                .file => procChildDup(file_fds[i], target, xrep[1]),
+                .redirect => |src| {
+                    procChildDup(src, target, xrep[1]);
+                    if (src != target) std.posix.close(src);
+                },
+            }
+        }
         const e = std.posix.execveZ("/bin/sh", &argv, envp);
         procChildFail(xrep[1], e);
     }
 
-    // parent: close the child-side ends + the err-pipe write end
+    // parent: close the err-pipe write end, the child-side pipe ends, and the
+    // opened redirect files (the child holds its own dup of each)
     std.posix.close(xrep[1]);
-    std.posix.close(in_pipe[0]);
-    std.posix.close(out_pipe[1]);
-    std.posix.close(err_pipe[1]);
+    closeFdArray(&child_ends);
+    closeFdArray(&file_fds);
     // a non-empty err pipe means the child failed before/at exec (CLOEXEC closes
     // the write end on a successful exec -> we read EOF)
     var buf: [8]u8 = undefined;
@@ -2984,28 +3065,16 @@ fn forkExecShell(allocator: std.mem.Allocator, cmd: []const u8) !ProcPipes {
     std.posix.close(xrep[0]);
     if (got > 0) {
         _ = std.posix.waitpid(pid, 0);
-        std.posix.close(in_pipe[1]);
-        std.posix.close(out_pipe[0]);
-        std.posix.close(err_pipe[0]);
+        closeFdArray(&parent_ends);
         return error.ProcSpawnFailed;
     }
-    return .{ .pid = pid, .stdin_w = in_pipe[1], .stdout_r = out_pipe[0], .stderr_r = err_pipe[0] };
-}
-
-fn closePair(p: [2]std.posix.fd_t) void {
-    std.posix.close(p[0]);
-    std.posix.close(p[1]);
+    return .{ .pid = pid, .pipe_fds = parent_ends };
 }
 
 fn native_proc_open(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len < 3 or args[0] != .string) return .{ .bool = false };
     const cmd = args[0].string;
 
-    // deferred-run model: the child isn't spawned until either stdin is
-    // closed (signaling EOF) or a read happens on stdout/stderr. that lets
-    // the common pattern `proc_open -> fwrite(stdin) -> fclose(stdin) ->
-    // stream_get_contents(stdout)` work with a single synchronous run while
-    // still respecting the user's stdin bytes
     const proc = try ctx.allocator.create(PhpObject);
     proc.* = .{ .class_name = "ProcessResource" };
     try ctx.vm.objects.append(ctx.allocator, proc);
@@ -3015,63 +3084,96 @@ fn native_proc_open(ctx: *NativeContext, args: []const Value) RuntimeError!Value
     try proc.set(ctx.allocator, "__exit", .{ .int = 0 });
     try proc.set(ctx.allocator, "__running", .{ .bool = true });
 
+    // parse the descriptor spec (arg 1) into per-fd actions for child fds 0/1/2.
+    // absent/unknown -> inherit the parent's fd. only ['pipe',...] entries get a
+    // $pipes FileHandle; ['file',...] redirects and stream-resource entries dup
+    // straight onto the child fd with no $pipes entry (matches php). fds >= 3 and
+    // 'pty' are not yet supported (treated as inherit)
+    var descs: [3]FdDesc = .{ .inherit, .inherit, .inherit };
+    if (args[1] == .array) {
+        for (args[1].array.entries.items) |entry| {
+            if (entry.key != .int) continue;
+            const k = entry.key.int;
+            if (k < 0 or k > 2) continue;
+            const idx: usize = @intCast(k);
+            const v = entry.value;
+            if (v == .array) {
+                const tag = v.array.get(.{ .int = 0 });
+                if (tag != .string) continue;
+                if (std.mem.eql(u8, tag.string, "pipe")) {
+                    const mode = v.array.get(.{ .int = 1 });
+                    const ms: []const u8 = if (mode == .string) mode.string else "r";
+                    descs[idx] = if (ms.len > 0 and ms[0] == 'r') .pipe_r else .pipe_w;
+                } else if (std.mem.eql(u8, tag.string, "file")) {
+                    const pathv = v.array.get(.{ .int = 1 });
+                    const modev = v.array.get(.{ .int = 2 });
+                    if (pathv == .string and modev == .string) {
+                        descs[idx] = .{ .file = .{ .path = pathv.string, .mode = modev.string } };
+                    }
+                }
+            } else if (v == .object) {
+                const fdv = v.object.get("__fd");
+                if (fdv == .int and fdv.int >= 0) descs[idx] = .{ .redirect = @intCast(fdv.int) };
+            }
+        }
+    }
+
+    // a child inheriting our stdout/stderr writes straight to fd 1/2, bypassing
+    // vm.output - flush any buffered echo first so ordering matches php
+    const inherits_out = switch (descs[1]) {
+        .inherit => true,
+        else => false,
+    } or switch (descs[2]) {
+        .inherit => true,
+        else => false,
+    };
+    if (inherits_out and ctx.vm.output.items.len > 0) {
+        const stdout = std.fs.File{ .handle = 1 };
+        _ = stdout.write(ctx.vm.output.items) catch {};
+        ctx.vm.output.clearRetainingCapacity();
+    }
+
     // spawn the child live now (php spawns at proc_open, not at first read) via
-    // fork/exec. the pid + the three parent-side pipe fds live in vm.proc_children
-    // keyed by proc, so proc_close waitpid's the pid and reset/deinit can reap it.
-    // the pipe fds also become __fd on the FileHandle pipe objects, so
-    // fread/fwrite/stream_select operate on real live fds. each fd is closed
-    // EXACTLY once: by fclose (which clears pipe_fds[role]) or by proc_close/reap
-    const spawned = forkExecShell(ctx.vm.allocator, cmd_copy) catch {
+    // fork/exec. the pid + parent-side pipe fds live in vm.proc_children keyed by
+    // proc, so proc_close waitpid's the pid and reset/deinit reaps it. each pipe fd
+    // becomes __fd on a FileHandle so fread/fwrite/stream_select use real live fds;
+    // each is closed EXACTLY once: by fclose (clears pipe_fds[role]) or proc_close/reap
+    const spawned = forkExecDesc(ctx.vm.allocator, cmd_copy, descs) catch {
         try proc.set(ctx.allocator, "__pid", .{ .int = 0 });
         try proc.set(ctx.allocator, "__reaped", .{ .bool = true });
         try proc.set(ctx.allocator, "__running", .{ .bool = false });
         try proc.set(ctx.allocator, "__exit", .{ .int = -1 });
         return .{ .bool = false };
     };
-    try ctx.vm.registerProcChild(proc, spawned.pid, .{ spawned.stdin_w, spawned.stdout_r, spawned.stderr_r });
+    try ctx.vm.registerProcChild(proc, spawned.pid, spawned.pipe_fds);
     try proc.set(ctx.allocator, "__pid", .{ .int = @intCast(spawned.pid) });
     try proc.set(ctx.allocator, "__reaped", .{ .bool = false });
-    const stdin_fd: i64 = @intCast(spawned.stdin_w);
-    const stdout_fd: i64 = @intCast(spawned.stdout_r);
-    const stderr_fd: i64 = @intCast(spawned.stderr_r);
 
-    const pipes = if (args[2] == .array) args[2].array else blk: {
-        const a = try ctx.allocator.create(PhpArray);
-        a.* = .{};
-        try ctx.vm.arrays.append(ctx.allocator, a);
-        break :blk a;
-    };
-    const stdin_obj = try ctx.allocator.create(PhpObject);
-    stdin_obj.* = .{ .class_name = "FileHandle" };
-    try ctx.vm.objects.append(ctx.allocator, stdin_obj);
-    try stdin_obj.set(ctx.allocator, "__open", .{ .bool = true });
-    try stdin_obj.set(ctx.allocator, "__mode", .{ .string = "w" });
-    try stdin_obj.set(ctx.allocator, "__fd", .{ .int = stdin_fd });
-    try stdin_obj.set(ctx.allocator, "__proc_ref", .{ .object = proc });
-    try stdin_obj.set(ctx.allocator, "__proc_role", .{ .int = 0 });
-    try pipes.set(ctx.allocator, .{ .int = 0 }, .{ .object = stdin_obj });
+    // build $pipes: one FileHandle per pipe fd, in fd order. a pipe_r fd is a write
+    // handle for the caller (we write the child's stdin); pipe_w is a read handle
+    const pipes = try ctx.allocator.create(PhpArray);
+    pipes.* = .{};
+    try ctx.vm.arrays.append(ctx.allocator, pipes);
+    for (descs, 0..) |d, i| {
+        const pmode: ?[]const u8 = switch (d) {
+            .pipe_r => "w",
+            .pipe_w => "r",
+            else => null,
+        };
+        if (pmode) |m| {
+            const fobj = try ctx.allocator.create(PhpObject);
+            fobj.* = .{ .class_name = "FileHandle" };
+            try ctx.vm.objects.append(ctx.allocator, fobj);
+            try fobj.set(ctx.allocator, "__open", .{ .bool = true });
+            try fobj.set(ctx.allocator, "__mode", .{ .string = m });
+            try fobj.set(ctx.allocator, "__fd", .{ .int = @intCast(spawned.pipe_fds[i]) });
+            try fobj.set(ctx.allocator, "__proc_ref", .{ .object = proc });
+            try fobj.set(ctx.allocator, "__proc_role", .{ .int = @intCast(i) });
+            try pipes.set(ctx.allocator, .{ .int = @intCast(i) }, .{ .object = fobj });
+        }
+    }
 
-    const stdout_obj = try ctx.allocator.create(PhpObject);
-    stdout_obj.* = .{ .class_name = "FileHandle" };
-    try ctx.vm.objects.append(ctx.allocator, stdout_obj);
-    try stdout_obj.set(ctx.allocator, "__open", .{ .bool = true });
-    try stdout_obj.set(ctx.allocator, "__mode", .{ .string = "r" });
-    try stdout_obj.set(ctx.allocator, "__fd", .{ .int = stdout_fd });
-    try stdout_obj.set(ctx.allocator, "__proc_ref", .{ .object = proc });
-    try stdout_obj.set(ctx.allocator, "__proc_role", .{ .int = 1 });
-    try pipes.set(ctx.allocator, .{ .int = 1 }, .{ .object = stdout_obj });
-
-    const stderr_obj = try ctx.allocator.create(PhpObject);
-    stderr_obj.* = .{ .class_name = "FileHandle" };
-    try ctx.vm.objects.append(ctx.allocator, stderr_obj);
-    try stderr_obj.set(ctx.allocator, "__open", .{ .bool = true });
-    try stderr_obj.set(ctx.allocator, "__mode", .{ .string = "r" });
-    try stderr_obj.set(ctx.allocator, "__fd", .{ .int = stderr_fd });
-    try stderr_obj.set(ctx.allocator, "__proc_ref", .{ .object = proc });
-    try stderr_obj.set(ctx.allocator, "__proc_role", .{ .int = 2 });
-    try pipes.set(ctx.allocator, .{ .int = 2 }, .{ .object = stderr_obj });
-
-    if (args[2] != .array) ctx.setCallerVar(2, args.len, .{ .array = pipes });
+    ctx.setCallerVar(2, args.len, .{ .array = pipes });
     return .{ .object = proc };
 }
 
