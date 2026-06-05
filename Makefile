@@ -30,6 +30,11 @@ bench: ## Run runtime benchmarks (ReleaseFast)
 	zig build -Doptimize=ReleaseFast
 	./benchmarks/runtime/run
 
+.PHONY: bench-macro
+bench-macro: ## Track real-app perf vs php (WordPress + Laravel harnesses, ReleaseFast)
+	zig build -Doptimize=ReleaseFast
+	./benchmarks/macro/run
+
 .PHONY: laravel
 laravel: build ## Run Laravel compatibility tests (requires PHP 8.4 + composer)
 	./tests/laravel/run

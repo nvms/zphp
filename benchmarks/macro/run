@@ -1,0 +1,125 @@
+#!/usr/bin/env python3
+# internal macro-perf tracker (NOT for publication / the public benchmarks README).
+# the north star: real-world PHP apps must not be slower under zphp than under php.
+# php is the live baseline - measured fresh every run - so there is nothing stored
+# to go stale and no perf claim to leak. each real-app harness is timed under both
+# runtimes and anything where zphp is slower is flagged.
+#
+# usage:
+#   make bench-macro                 # build release + run everything
+#   benchmarks/macro/run             # run against ./zig-out/bin/zphp (must be release)
+#   benchmarks/macro/run --runs 7    # more samples (default 5)
+#   benchmarks/macro/run --fail-over 1.5   # exit nonzero if any harness > 1.5x php
+#   benchmarks/macro/run --filter laravel  # only harnesses whose path matches
+#
+# total wall time is measured (startup included) because these are one-shot CLI
+# invocations - exactly how artisan/wp-cli/phpunit are run. for long-lived request
+# throughput (startup amortized) see benchmarks/serve instead.
+
+import argparse
+import glob
+import os
+import subprocess
+import sys
+import time
+
+ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+ZPHP = os.path.join(ROOT, "zig-out", "bin", "zphp")
+
+# real-app harnesses (bootstrap real WordPress / Laravel and do actual work).
+# extra suites can be added here as the project grows (e.g. a pinned phpunit run).
+GROUPS = {
+    "wordpress": "tests/wordpress/harness/*.php",
+    "laravel": "tests/laravel/harness/*.php",
+}
+
+
+def best_ms(cmd, runs):
+    b = None
+    for _ in range(runs):
+        t0 = time.perf_counter()
+        r = subprocess.run(cmd, cwd=ROOT, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        dt = (time.perf_counter() - t0) * 1000.0
+        if r.returncode != 0:
+            return None
+        b = dt if b is None else min(b, dt)
+    return b
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--runs", type=int, default=5, help="samples per harness (min wins)")
+    ap.add_argument("--filter", default="", help="only harnesses whose path contains this")
+    ap.add_argument("--fail-over", type=float, default=0.0,
+                    help="exit nonzero if any harness ratio exceeds this (e.g. 1.5)")
+    args = ap.parse_args()
+
+    if not os.path.exists(ZPHP):
+        print(f"error: {ZPHP} not found - run `make release` first", file=sys.stderr)
+        return 2
+
+    files = []
+    for label, pat in GROUPS.items():
+        for f in sorted(glob.glob(os.path.join(ROOT, pat))):
+            rel = os.path.relpath(f, ROOT)
+            if args.filter and args.filter not in rel:
+                continue
+            files.append((label, rel))
+
+    if not files:
+        print("no harnesses matched", file=sys.stderr)
+        return 2
+
+    print(f"macro perf: zphp vs php (min of {args.runs}, total wall incl. startup)")
+    print(f"{'harness':<40}{'zphp':>8}{'php':>8}{'ratio':>8}  verdict")
+    print("-" * 74)
+
+    rows = []
+    for label, rel in files:
+        z = best_ms([ZPHP, "run", rel], args.runs)
+        p = best_ms(["php", rel], args.runs)
+        if z is None or p is None:
+            print(f"{rel:<40}{'':>8}{'':>8}{'':>8}  SKIP (errored under "
+                  f"{'zphp' if z is None else 'php'})")
+            continue
+        ratio = z / p if p > 0 else 0.0
+        rows.append((label, rel, z, p, ratio))
+
+    rows.sort(key=lambda r: r[4], reverse=True)
+    slower = []
+    for label, rel, z, p, ratio in rows:
+        if ratio > 1.10:
+            verdict = "SLOWER"
+            slower.append((rel, ratio))
+        elif ratio > 1.00:
+            verdict = "~even"
+        else:
+            verdict = "faster"
+        print(f"{rel:<40}{z:>7.0f}{p:>8.0f}{ratio:>7.2f}x  {verdict}")
+
+    print("-" * 74)
+    if rows:
+        geomean = 1.0
+        for _, _, _, _, ratio in rows:
+            geomean *= ratio
+        geomean = geomean ** (1.0 / len(rows))
+        worst = max(rows, key=lambda r: r[4])
+        print(f"harnesses: {len(rows)}   geomean ratio: {geomean:.2f}x   "
+              f"worst: {os.path.basename(worst[1])} {worst[4]:.2f}x")
+    if slower:
+        print(f"\n{len(slower)} harness(es) SLOWER than php (>1.10x):")
+        for rel, ratio in sorted(slower, key=lambda x: -x[1]):
+            print(f"  {ratio:.2f}x  {rel}")
+    else:
+        print("\nno harness is meaningfully slower than php. good.")
+
+    if args.fail_over > 0:
+        over = [r for r in rows if r[4] > args.fail_over]
+        if over:
+            print(f"\nFAIL: {len(over)} harness(es) exceed {args.fail_over}x", file=sys.stderr)
+            return 1
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
