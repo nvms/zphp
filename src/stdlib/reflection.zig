@@ -3180,10 +3180,12 @@ fn rpConstruct(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
         try this.set(ctx.allocator, "_declaring_class", .{ .string = result.declaring_class });
         try this.set(ctx.allocator, "_is_readonly", .{ .bool = result.prop.is_readonly });
     } else {
-        try this.set(ctx.allocator, "_visibility", .{ .int = 0 });
-        try this.set(ctx.allocator, "_has_default", .{ .bool = false });
-        try this.set(ctx.allocator, "_declaring_class", .{ .string = class_name });
-        try this.set(ctx.allocator, "_is_readonly", .{ .bool = false });
+        // PHP throws when the property is not declared on the class (or any
+        // ancestor) - a non-existent / dynamic-only property has no
+        // ReflectionProperty. matches "Property C::$x does not exist"
+        const msg = try std.fmt.allocPrint(ctx.allocator, "Property {s}::${s} does not exist", .{ class_name, prop_name });
+        try ctx.vm.strings.append(ctx.allocator, msg);
+        return throwReflection(ctx, msg);
     }
     return .null;
 }
