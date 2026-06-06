@@ -1053,6 +1053,25 @@ pub const VM = struct {
         try c.put(a, "PHP_SESSION_ACTIVE", .{ .int = 2 });
         try c.put(a, "PHP_VERSION", .{ .string = "8.4.1" });
         try c.put(a, "PHP_VERSION_ID", .{ .int = 80401 });
+        {
+            // PCRE_VERSION / _MAJOR / _MINOR from the linked libpcre2. vendor
+            // polyfills (symfony/polyfill-intl-grapheme) reference PCRE_VERSION
+            // at load time; an undefined constant throws and breaks the polyfill
+            const pv = @import("../stdlib/pcre.zig").libVersion();
+            if (pv.len > 0) {
+                try c.put(a, "PCRE_VERSION", .{ .string = pv });
+                var major: i64 = 0;
+                var minor: i64 = 0;
+                if (std.mem.indexOfScalar(u8, pv, '.')) |dot| {
+                    major = std.fmt.parseInt(i64, pv[0..dot], 10) catch 0;
+                    const rest = pv[dot + 1 ..];
+                    const end = std.mem.indexOfAny(u8, rest, " .") orelse rest.len;
+                    minor = std.fmt.parseInt(i64, rest[0..end], 10) catch 0;
+                }
+                try c.put(a, "PCRE_VERSION_MAJOR", .{ .int = major });
+                try c.put(a, "PCRE_VERSION_MINOR", .{ .int = minor });
+            }
+        }
         try c.put(a, "PHP_SAPI", .{ .string = "cli" });
         try c.put(a, "PHP_OS", .{ .string = if (@import("builtin").os.tag == .macos) "Darwin" else "Linux" });
         try c.put(a, "DIRECTORY_SEPARATOR", .{ .string = "/" });

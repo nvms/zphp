@@ -107,7 +107,22 @@ const pcre2 = struct {
         outputbuffer: ?[*]u8,
         outlengthptr: *usize,
     ) callconv(.c) c_int;
+
+    extern "pcre2-8" fn pcre2_config_8(what: u32, where_: ?*anyopaque) callconv(.c) c_int;
+    const CONFIG_VERSION: u32 = 11;
 };
+
+// the linked libpcre2 version string, e.g. "10.42 2022-12-11". php exposes this
+// as the PCRE_VERSION constant; vendor polyfills (symfony/polyfill-intl-grapheme)
+// gate behaviour on `(float) PCRE_VERSION`, so it must be defined and accurate.
+// written into a process-lifetime static buffer so the constant slice stays
+// valid without a heap allocation the constants map would leak
+var version_buf: [64]u8 = undefined;
+pub fn libVersion() []const u8 {
+    const n = pcre2.pcre2_config_8(pcre2.CONFIG_VERSION, &version_buf);
+    if (n <= 1 or @as(usize, @intCast(n)) > version_buf.len) return "";
+    return version_buf[0..@intCast(n - 1)]; // n includes the trailing nul
+}
 
 pub const entries = .{
     .{ "preg_match", preg_match },

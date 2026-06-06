@@ -2231,6 +2231,11 @@ fn registerConstants(vm: *VM, a: Allocator) !void {
     const cs = .{
         .{ "INTL_MAX_LOCALE_LEN", 80 },
         .{ "INTL_ICU_VERSION", 0 },
+        // grapheme_extract() $type modes. zphp reports intl loaded, so the
+        // symfony grapheme polyfill returns early expecting these to exist
+        .{ "GRAPHEME_EXTR_COUNT", 0 },
+        .{ "GRAPHEME_EXTR_MAXBYTES", 1 },
+        .{ "GRAPHEME_EXTR_MAXCHARS", 2 },
         .{ "U_USING_FALLBACK_WARNING", -128 },
         .{ "U_USING_DEFAULT_WARNING", -127 },
         .{ "U_SAFECLONE_ALLOCATED_WARNING", -126 },
