@@ -16,7 +16,7 @@ class Box extends Base {
 function probe(string $class, string $prop): string {
     try {
         $rp = new ReflectionProperty($class, $prop);
-        return "$prop: declared(" . $rp->getName() . ")";
+        return "$prop: declared(mods=" . $rp->getModifiers() . ")";
     } catch (ReflectionException $e) {
         return "$prop: " . $e->getMessage();
     }

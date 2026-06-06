@@ -3398,15 +3398,16 @@ fn rpropHasType(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
 fn rpropGetModifiers(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
     const this = getThis(ctx) orelse return .{ .int = 0 };
     const vis = this.get("_visibility");
-    if (vis == .int) {
-        return switch (vis.int) {
-            0 => .{ .int = 1 },
-            1 => .{ .int = 2 },
-            2 => .{ .int = 4 },
-            else => .{ .int = 1 },
-        };
-    }
-    return .{ .int = 1 };
+    var mods: i64 = switch (if (vis == .int) vis.int else -1) {
+        1 => 2, // protected
+        2 => 4, // private
+        else => 1, // public (0) / fallback
+    };
+    // a readonly property carries IS_READONLY (128) plus an internal readonly
+    // flag (2048); php 8.4 and 8.5 both report 2177 for a public readonly prop
+    const ro = this.get("_is_readonly");
+    if (ro == .bool and ro.bool) mods |= 128 | 2048;
+    return .{ .int = mods };
 }
 
 fn rpropGetAttributes(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
