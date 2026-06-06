@@ -514,6 +514,13 @@ fn soapServerConstruct(ctx: *NativeContext, args: []const Value) RuntimeError!Va
     try obj.set(ctx.allocator, "__functions", .{ .array = try ctx.createArray() });
     try obj.set(ctx.allocator, "__class", .null);
     try obj.set(ctx.allocator, "__object", .null);
+    // the response namespace (ns1) comes from options['uri'] in non-WSDL mode
+    var uri: Value = .null;
+    if (args.len > 1 and args[1] == .array) {
+        const u = args[1].array.get(.{ .string = "uri" });
+        if (u == .string) uri = u;
+    }
+    try obj.set(ctx.allocator, "__uri", uri);
     return .null;
 }
 fn soapServerAddFunction(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
@@ -542,8 +549,193 @@ fn soapServerSetClass(ctx: *NativeContext, args: []const Value) RuntimeError!Val
     try obj.set(ctx.allocator, "__class", args[0]);
     return .{ .bool = true };
 }
-fn soapServerHandle(_: *NativeContext, _: []const Value) RuntimeError!Value {
-    // full server handling requires dispatching to user code via VM. left for future iteration.
+fn xmlUnescape(allocator: Allocator, s: []const u8) ![]u8 {
+    var out = std.ArrayListUnmanaged(u8){};
+    errdefer out.deinit(allocator);
+    var i: usize = 0;
+    while (i < s.len) {
+        if (s[i] == '&') {
+            if (std.mem.startsWith(u8, s[i..], "&amp;")) {
+                try out.append(allocator, '&');
+                i += 5;
+                continue;
+            } else if (std.mem.startsWith(u8, s[i..], "&lt;")) {
+                try out.append(allocator, '<');
+                i += 4;
+                continue;
+            } else if (std.mem.startsWith(u8, s[i..], "&gt;")) {
+                try out.append(allocator, '>');
+                i += 4;
+                continue;
+            } else if (std.mem.startsWith(u8, s[i..], "&quot;")) {
+                try out.append(allocator, '"');
+                i += 6;
+                continue;
+            } else if (std.mem.startsWith(u8, s[i..], "&apos;")) {
+                try out.append(allocator, '\'');
+                i += 6;
+                continue;
+            }
+        }
+        try out.append(allocator, s[i]);
+        i += 1;
+    }
+    return try out.toOwnedSlice(allocator);
+}
+
+// encode a return value as PHP SoapServer does: a typed <return> element.
+// server-mode uses xsd:float (the client request path's appendValue uses
+// xsd:double - they genuinely differ, so this is separate)
+fn encodeReturn(ctx: *NativeContext, out: *std.ArrayListUnmanaged(u8), val: Value) RuntimeError!void {
+    const a = ctx.allocator;
+    switch (val) {
+        .null => try out.appendSlice(a, "<return xsi:nil=\"true\"/>"),
+        .int => |i| {
+            const s = try std.fmt.allocPrint(a, "{d}", .{i});
+            defer a.free(s);
+            try out.appendSlice(a, "<return xsi:type=\"xsd:int\">");
+            try out.appendSlice(a, s);
+            try out.appendSlice(a, "</return>");
+        },
+        .float => |f| {
+            const s = try std.fmt.allocPrint(a, "{d}", .{f});
+            defer a.free(s);
+            try out.appendSlice(a, "<return xsi:type=\"xsd:float\">");
+            try out.appendSlice(a, s);
+            try out.appendSlice(a, "</return>");
+        },
+        .bool => |b| {
+            try out.appendSlice(a, "<return xsi:type=\"xsd:boolean\">");
+            try out.appendSlice(a, if (b) "true" else "false");
+            try out.appendSlice(a, "</return>");
+        },
+        .string => |s| {
+            const esc = try xmlEscape(a, s);
+            defer a.free(esc);
+            try out.appendSlice(a, "<return xsi:type=\"xsd:string\">");
+            try out.appendSlice(a, esc);
+            try out.appendSlice(a, "</return>");
+        },
+        else => try out.appendSlice(a, "<return/>"),
+    }
+}
+
+fn dispatchSoap(ctx: *NativeContext, server: *PhpObject, method: []const u8, args: []const Value) RuntimeError!Value {
+    const o = server.get("__object");
+    if (o == .object) return ctx.callMethod(o.object, method, args);
+    const cls = server.get("__class");
+    if (cls == .string) {
+        const inst = try ctx.createObject(cls.string);
+        if (ctx.vm.hasMethod(cls.string, "__construct")) {
+            _ = try ctx.callMethod(inst, "__construct", &.{});
+        }
+        return ctx.callMethod(inst, method, args);
+    }
+    // addFunction mode: dispatch to a registered free function by name
+    const fns = server.get("__functions");
+    if (fns == .array) {
+        for (fns.array.entries.items) |e| {
+            if (e.value == .string and std.mem.eql(u8, e.value.string, method)) {
+                return ctx.callFunction(method, args);
+            }
+        }
+    }
+    return .null;
+}
+
+fn soapServerHandle(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    const obj = getThis(ctx) orelse return .null;
+    // request XML: explicit arg, else the raw HTTP body (php://input)
+    var req: []const u8 = "";
+    if (args.len > 0 and args[0] == .string) {
+        req = args[0].string;
+    } else if (ctx.vm.request_vars.get("__raw_body")) |body_val| {
+        if (body_val == .string) req = body_val.string;
+    }
+    if (req.len == 0) return .null;
+
+    // locate the SOAP Body open tag's end ("...Body>"); the close tag
+    // "</...Body>" appears later, so the first match is the open
+    const body_open = std.mem.indexOf(u8, req, "Body>") orelse return .null;
+    var p = body_open + "Body>".len;
+    while (p < req.len and (req[p] == ' ' or req[p] == '\n' or req[p] == '\r' or req[p] == '\t')) : (p += 1) {}
+    if (p >= req.len or req[p] != '<') return .null;
+
+    // method element start tag (full name keeps the ns prefix for the close)
+    const mtag_start = p + 1;
+    var q = mtag_start;
+    while (q < req.len and req[q] != '>' and req[q] != ' ' and req[q] != '/') : (q += 1) {}
+    const mtag_full = req[mtag_start..q];
+    const method = if (std.mem.lastIndexOfScalar(u8, mtag_full, ':')) |ci| mtag_full[ci + 1 ..] else mtag_full;
+    var st_end = q;
+    while (st_end < req.len and req[st_end] != '>') : (st_end += 1) {}
+    const self_closing = st_end > 0 and req[st_end - 1] == '/';
+
+    var arg_vals = std.ArrayListUnmanaged(Value){};
+    defer arg_vals.deinit(ctx.allocator);
+    if (!self_closing and st_end < req.len) {
+        const content_start = st_end + 1;
+        var close_marker = std.ArrayListUnmanaged(u8){};
+        defer close_marker.deinit(ctx.allocator);
+        try close_marker.appendSlice(ctx.allocator, "</");
+        try close_marker.appendSlice(ctx.allocator, mtag_full);
+        const content_end = std.mem.indexOfPos(u8, req, content_start, close_marker.items) orelse req.len;
+        const content = req[content_start..content_end];
+        var cp: usize = 0;
+        while (cp < content.len) {
+            while (cp < content.len and content[cp] != '<') : (cp += 1) {}
+            if (cp >= content.len) break;
+            var ce = cp + 1;
+            while (ce < content.len and content[ce] != '>' and content[ce] != ' ' and content[ce] != '/') : (ce += 1) {}
+            var cse = ce;
+            while (cse < content.len and content[cse] != '>') : (cse += 1) {}
+            if (cse > 0 and content[cse - 1] == '/') {
+                try arg_vals.append(ctx.allocator, .{ .string = "" });
+                cp = cse + 1;
+                continue;
+            }
+            const txt_start = cse + 1;
+            const txt_end = std.mem.indexOfPos(u8, content, txt_start, "</") orelse content.len;
+            const txt = try xmlUnescape(ctx.allocator, content[txt_start..txt_end]);
+            try ctx.vm.strings.append(ctx.allocator, txt);
+            try arg_vals.append(ctx.allocator, .{ .string = txt });
+            cp = (std.mem.indexOfPos(u8, content, txt_end, ">") orelse content.len -| 1) + 1;
+        }
+    }
+
+    const result = try dispatchSoap(ctx, obj, method, arg_vals.items);
+
+    const uri_v = obj.get("__uri");
+    const uri = if (uri_v == .string) uri_v.string else "";
+    const uri_esc = try xmlEscape(ctx.allocator, uri);
+    defer ctx.allocator.free(uri_esc);
+    var out = std.ArrayListUnmanaged(u8){};
+    defer out.deinit(ctx.allocator);
+    try out.appendSlice(ctx.allocator, "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<SOAP-ENV:Envelope xmlns:SOAP-ENV=\"http://schemas.xmlsoap.org/soap/envelope/\" xmlns:ns1=\"");
+    try out.appendSlice(ctx.allocator, uri_esc);
+    // namespace declaration order mirrors PHP's libxml: a nil return references
+    // only xsi (xsi:nil), so xsi is declared before xsd; a typed return puts
+    // xsd first. matching this exactly keeps the response byte-identical
+    const xsd = "xmlns:xsd=\"http://www.w3.org/2001/XMLSchema\"";
+    const xsi = "xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\"";
+    try out.appendSlice(ctx.allocator, "\" ");
+    if (result == .null) {
+        try out.appendSlice(ctx.allocator, xsi);
+        try out.appendSlice(ctx.allocator, " ");
+        try out.appendSlice(ctx.allocator, xsd);
+    } else {
+        try out.appendSlice(ctx.allocator, xsd);
+        try out.appendSlice(ctx.allocator, " ");
+        try out.appendSlice(ctx.allocator, xsi);
+    }
+    try out.appendSlice(ctx.allocator, " xmlns:SOAP-ENC=\"http://schemas.xmlsoap.org/soap/encoding/\" SOAP-ENV:encodingStyle=\"http://schemas.xmlsoap.org/soap/encoding/\"><SOAP-ENV:Body><ns1:");
+    try out.appendSlice(ctx.allocator, method);
+    try out.appendSlice(ctx.allocator, "Response>");
+    try encodeReturn(ctx, &out, result);
+    try out.appendSlice(ctx.allocator, "</ns1:");
+    try out.appendSlice(ctx.allocator, method);
+    try out.appendSlice(ctx.allocator, "Response></SOAP-ENV:Body></SOAP-ENV:Envelope>\n");
+    try ctx.vm.output.appendSlice(ctx.allocator, out.items);
     return .null;
 }
 fn soapServerFault(_: *NativeContext, _: []const Value) RuntimeError!Value {
