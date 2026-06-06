@@ -141,8 +141,11 @@ pub fn compileAssign(self: *Compiler, node: Ast.Node) Error!void {
 
     if (target.tag == .array_access) {
         if (op_tag == .question_question_equal) {
-            // read with coalesce-safe fetch so undefined keys don't warn
-            try self.compileNode(target.data.lhs);
+            // read with coalesce-safe fetch so undefined keys don't warn -
+            // recurse on the base too, else a nested `$a[k1][k2] ??= v` warns on
+            // the intermediate `$a[k1]` read when k1 is also absent (php's `??=`
+            // suppresses the whole read chain)
+            try compileCoalesceFetch(self, target.data.lhs);
             try self.compileNode(target.data.rhs);
             try self.emitOp(.array_get_coalesce);
             const skip_jump = try self.emitJump(.jump_if_not_null);
