@@ -1441,6 +1441,7 @@ pub const entries = .{
     .{ "grapheme_substr", intlWrap(graphemeSubstr) },
     .{ "grapheme_strpos", intlWrap(graphemeStrpos) },
     .{ "grapheme_stripos", intlWrap(graphemeStripos) },
+    .{ "grapheme_extract", intlWrap(graphemeExtract) },
 };
 
 // count grapheme clusters in a UTF-8 string. uses ICU's character-level
@@ -1499,6 +1500,62 @@ fn graphemeSubstr(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     }
 
     return .{ .string = try dupString(ctx, s[start_byte..end_byte]) };
+}
+
+// grapheme_extract($haystack, $size, $type, $offset): extract a run of grapheme
+// clusters from byte offset $offset, bounded by $size per $type - COUNT(0) =
+// cluster count, MAXBYTES(1) = total bytes, MAXCHARS(2) = total code points.
+// returns the extracted string or false. the by-ref $next (5th) out-param isn't
+// written back (no generic native by-ref path); callers using only the return
+// value (e.g. symfony/string startsWith) are unaffected
+fn graphemeExtract(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len < 2 or args[0] != .string) return .{ .bool = false };
+    const s = args[0].string;
+    const size: i64 = Value.toInt(args[1]);
+    const extr_type: i64 = if (args.len >= 3 and args[2] != .null) Value.toInt(args[2]) else 0;
+    const start_off: i64 = if (args.len >= 4 and args[3] != .null) Value.toInt(args[3]) else 0;
+    if (size < 0 or extr_type < 0 or extr_type > 2 or start_off < 0 or @as(usize, @intCast(start_off)) > s.len) return .{ .bool = false };
+    const start: usize = @intCast(start_off);
+
+    const w = (try openBrk(ctx, 0, "")) orelse return .{ .bool = false };
+    defer zphp_ubrk_close(w);
+    var status: UErrorCode = U_ZERO_ERROR;
+    zphp_ubrk_setText(w, s.ptr, @intCast(s.len), &status);
+    if (intlRecord(ctx.vm, status)) return .{ .bool = false };
+
+    var offsets = std.ArrayListUnmanaged(i32){};
+    defer offsets.deinit(ctx.allocator);
+    var pos = zphp_ubrk_first(w);
+    while (pos != -1) : (pos = zphp_ubrk_next(w)) {
+        try offsets.append(ctx.allocator, pos);
+    }
+    // first cluster boundary at or after the requested byte offset
+    var bi: usize = 0;
+    while (bi < offsets.items.len and @as(usize, @intCast(offsets.items[bi])) < start) bi += 1;
+    if (bi >= offsets.items.len) return .{ .bool = false };
+    const begin_byte: usize = @intCast(offsets.items[bi]);
+    // nothing to extract (empty haystack, or offset at/after the last cluster)
+    if (begin_byte >= s.len) return .{ .bool = false };
+
+    var end_byte: usize = begin_byte;
+    var taken: i64 = 0;
+    var chars: i64 = 0;
+    var j = bi;
+    while (j + 1 < offsets.items.len) : (j += 1) {
+        const cl_start: usize = @intCast(offsets.items[j]);
+        const cl_end: usize = @intCast(offsets.items[j + 1]);
+        const cl_bytes: i64 = @intCast(cl_end - cl_start);
+        const cl_chars: i64 = @intCast(std.unicode.utf8CountCodepoints(s[cl_start..cl_end]) catch (cl_end - cl_start));
+        switch (extr_type) {
+            0 => if (taken >= size) break,
+            1 => if (@as(i64, @intCast(end_byte - begin_byte)) + cl_bytes > size) break,
+            else => if (chars + cl_chars > size) break,
+        }
+        end_byte = cl_end;
+        taken += 1;
+        chars += cl_chars;
+    }
+    return .{ .string = try dupString(ctx, s[begin_byte..end_byte]) };
 }
 
 fn graphemeStrposImpl(ctx: *NativeContext, args: []const Value, case_insensitive: bool) !Value {
