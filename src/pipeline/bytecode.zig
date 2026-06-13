@@ -290,6 +290,13 @@ pub const OpCode = enum(u8) {
     // matching isset-semantics
     get_prop_coalesce,
 
+    // bind a conditionally-declared function (one nested in an if/loop/try or
+    // another function body) into the VM function table when execution reaches
+    // the declaration. u16: cond id matching ObjFunction.cond_id within the
+    // declaring CompileResult. unconditional top-level declarations are still
+    // hoisted at registration time, matching PHP's early binding
+    declare_fn,
+
     pub fn width(self: OpCode) usize {
         return switch (self) {
             .constant, .get_var, .set_var, .jump, .jump_back, .jump_if_false, .jump_if_true,
@@ -304,6 +311,7 @@ pub const OpCode = enum(u8) {
             .return_ref, .bind_ref_from_return,
             .array_set_local, .array_set_local_ref,
             .array_bind_ref, .array_push_bind_ref, .foreach_ref_bind,
+            .declare_fn,
             => 3,
             .call, .call_spread, .new_obj, .method_call, .method_call_spread, .static_call_dyn_method, .make_var_ref, .make_var_prop_ref => 4,
             .get_static_prop, .get_class_const, .set_prop_default, .set_static_prop, .get_static, .set_static,
@@ -521,4 +529,8 @@ pub const ObjFunction = struct {
     start_line: u32 = 0,
     end_line: u32 = 0,
     doc_comment: []const u8 = "",
+    // 0 = unconditional (hoisted at registration). > 0 = conditionally
+    // declared; registration is deferred until the declare_fn opcode with the
+    // matching id executes (PHP runtime function binding)
+    cond_id: u16 = 0,
 };

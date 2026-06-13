@@ -197,6 +197,12 @@ pub const Compiler = struct {
     // pick iter_end_close vs iter_end
     loop_foreach_close: [32]bool = [_]bool{false} ** 32,
     closure_count: u32 = 0,
+    // PHP hoists (early-binds) only function declarations that are direct
+    // top-level statements of a file - reachable through bare blocks and
+    // namespace declarations but not through if/loops/try or another function
+    // body. those compile to a declare_fn opcode and bind at runtime
+    hoistable: bool = true,
+    cond_fn_count: u16 = 0,
     is_generator: bool = false,
     returns_ref: bool = false,
     namespace: []const u8 = "",
@@ -245,6 +251,16 @@ pub const Compiler = struct {
     pub fn compileNode(self: *Compiler, idx: u32) Error!void {
         const node = self.ast.nodes[idx];
         self.current_source_offset = self.ast.tokens[node.main_token].start;
+        // function declarations stay hoistable through bare blocks and
+        // namespace declarations only; descending into anything else (if,
+        // loops, try, switch, match, ...) makes nested declarations
+        // conditional. function_decl itself reads the flag before clearing
+        const was_hoistable = self.hoistable;
+        self.hoistable = switch (node.tag) {
+            .block, .namespace_decl, .function_decl => was_hoistable,
+            else => false,
+        };
+        defer self.hoistable = was_hoistable;
         switch (node.tag) {
             .expression_stmt => {
                 if (self.tryCompileLocalAssignSuper(node.data.lhs)) |emitted| {

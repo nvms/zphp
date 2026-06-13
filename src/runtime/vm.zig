@@ -620,6 +620,12 @@ pub const VM = struct {
     // resolve a frame's class scope in O(K) (K = small) instead of O(N)
     // iterating self.functions (grows large in framework-heavy workloads).
     chunk_to_func_names: std.AutoHashMapUnmanaged(usize, std.ArrayListUnmanaged([]const u8)) = .{},
+    // chunk-ptr → owning CompileResult, for every main chunk and function
+    // chunk. declare_fn resolves its conditionally-declared function through
+    // the executing frame's chunk here. entries are overwritten on
+    // re-registration so stale pointers from freed results are never read by
+    // a live chunk
+    chunk_to_result: std.AutoHashMapUnmanaged(usize, *const CompileResult) = .{},
     // cache of parsed phars by archive path so each require_once doesn't
     // re-read + re-parse the entire archive (large phars with many internal
     // entries can pile up GBs of redundant reads otherwise)
@@ -1851,6 +1857,7 @@ pub const VM = struct {
         var ctfn_iter = self.chunk_to_func_names.iterator();
         while (ctfn_iter.next()) |e| e.value_ptr.*.deinit(self.allocator);
         self.chunk_to_func_names.deinit(self.allocator);
+        self.chunk_to_result.deinit(self.allocator);
         self.phar_aliases.deinit(self.allocator);
         self.exception_handler_stack.deinit(self.allocator);
         for (self.vars_pool.items) |*hm| {
@@ -2084,13 +2091,12 @@ pub const VM = struct {
             self.closure_instance_count = 0;
         } else {
             self.compile_results.clearRetainingCapacity();
+            self.chunk_to_result.clearRetainingCapacity();
         }
     }
 
     pub fn interpret(self: *VM, result: *const CompileResult) RuntimeError!void {
-        for (result.functions.items) |*func| {
-            try self.registerFunction(func);
-        }
+        try self.registerResultFunctions(result);
         for (result.type_hints.items) |th| {
             try g_type_info.put(self.allocator, th.name, .{ .param_types = th.param_types, .return_type = th.return_type });
         }
@@ -2193,6 +2199,18 @@ pub const VM = struct {
         try self.indexFunctionByChunk(func.name, &func.chunk);
     }
 
+    // register a compile result's functions: unconditional declarations are
+    // hoisted (PHP early binding); conditional ones (cond_id != 0) wait for
+    // their declare_fn opcode. every chunk is mapped to the result so
+    // declare_fn can find its function from the executing frame's chunk
+    pub fn registerResultFunctions(self: *VM, result: *const CompileResult) RuntimeError!void {
+        try self.chunk_to_result.put(self.allocator, @intFromPtr(&result.chunk), result);
+        for (result.functions.items) |*func| {
+            try self.chunk_to_result.put(self.allocator, @intFromPtr(&func.chunk), result);
+            if (func.cond_id == 0) try self.registerFunction(func);
+        }
+    }
+
     pub fn indexFunctionByChunk(self: *VM, name: []const u8, chunk: *const Chunk) RuntimeError!void {
         const gop = try self.chunk_to_func_names.getOrPut(self.allocator, @intFromPtr(chunk));
         if (!gop.found_existing) gop.value_ptr.* = .{};
@@ -2248,9 +2266,7 @@ pub const VM = struct {
         try heap_result.string_allocs.append(self.allocator, display_path);
         try self.compile_results.append(self.allocator, heap_result);
 
-        for (heap_result.functions.items) |*func| {
-            try self.registerFunction(func);
-        }
+        try self.registerResultFunctions(heap_result);
         for (heap_result.type_hints.items) |th| {
             try g_type_info.put(self.allocator, th.name, .{ .param_types = th.param_types, .return_type = th.return_type });
         }
@@ -5454,6 +5470,24 @@ pub const VM = struct {
                     try self.php_constants.put(self.allocator, name, val);
                 },
 
+                .declare_fn => {
+                    const cond_id = self.readU16();
+                    const result = self.chunk_to_result.get(@intFromPtr(self.currentFrame().chunk)) orelse {
+                        self.setErrorMsg("Fatal error: internal: declare_fn without owning compile result", .{});
+                        return error.RuntimeError;
+                    };
+                    for (result.functions.items) |*func| {
+                        if (func.cond_id != cond_id) continue;
+                        if (self.functions.contains(func.name) or self.native_fns.contains(func.name)) {
+                            self.setErrorMsg("Fatal error: Cannot redeclare function {s}()", .{func.name});
+                            return error.RuntimeError;
+                        }
+                        try self.functions.put(self.allocator, func.name, func);
+                        try self.indexFunctionByChunk(func.name, &func.chunk);
+                        break;
+                    }
+                },
+
                 .closure_bind => {
                     if (self.frame_count == 1) self.global_vars_dirty = true;
                     if (self.global_vars_dirty) try self.syncGlobalLocalsToVars();
@@ -5724,9 +5758,7 @@ pub const VM = struct {
                                     try self.compile_results.append(self.allocator, r);
                                 }
 
-                                for (r.functions.items) |*func| {
-                                    try self.registerFunction(func);
-                                }
+                                try self.registerResultFunctions(r);
                                 for (r.type_hints.items) |th| {
                                     try g_type_info.put(self.allocator, th.name, .{ .param_types = th.param_types, .return_type = th.return_type });
                                 }

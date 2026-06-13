@@ -9,7 +9,7 @@ const TypeHint = @import("pipeline/compiler.zig").TypeHint;
 const Allocator = std.mem.Allocator;
 
 const MAGIC = "ZPHPC\x00";
-const FORMAT_VERSION: u16 = 3;
+const FORMAT_VERSION: u16 = 4;
 
 // tag bytes for serialized values
 const TAG_NULL: u8 = 0;
@@ -158,6 +158,7 @@ fn serializeFunction(buf: *std.ArrayListUnmanaged(u8), allocator: Allocator, str
     if (func.is_generator) flags |= 2;
     if (func.is_arrow) flags |= 4;
     try buf.append(allocator, flags);
+    try writeU16(buf, allocator, func.cond_id);
 
     try buf.append(allocator, @intCast(func.params.len));
     for (func.params) |p| {
@@ -435,6 +436,7 @@ fn deserializeFunction(r: *Reader, ctx: *DeserCtx) !ObjFunction {
     const arity = try r.readByte();
     const required = try r.readByte();
     const flags = try r.readByte();
+    const cond_id = try r.readU16();
 
     const param_count = try r.readByte();
     const params = try allocator.alloc([]const u8, param_count);
@@ -472,6 +474,7 @@ fn deserializeFunction(r: *Reader, ctx: *DeserCtx) !ObjFunction {
         .is_variadic = (flags & 1) != 0,
         .is_generator = (flags & 2) != 0,
         .is_arrow = (flags & 4) != 0,
+        .cond_id = cond_id,
         .params = params,
         .defaults = defaults,
         .ref_params = ref_params,

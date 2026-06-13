@@ -710,6 +710,8 @@ pub fn compileFunction(self: *Compiler, node: Ast.Node) Error!void {
         .is_generator = gen,
         .returns_ref = returns_ref,
         .closure_count = self.closure_count,
+        .cond_fn_count = self.cond_fn_count,
+        .hoistable = false,
         .file_path = self.file_path,
         .namespace = self.namespace,
         .use_aliases = self.use_aliases,
@@ -748,6 +750,7 @@ pub fn compileFunction(self: *Compiler, node: Ast.Node) Error!void {
     sub.continue_jumps.deinit(self.allocator);
 
     self.closure_count = sub.closure_count;
+    self.cond_fn_count = sub.cond_fn_count;
     const slot_names = try sub.buildSlotNames();
     const local_count = sub.next_slot;
     sub.local_slots.deinit(self.allocator);
@@ -755,8 +758,18 @@ pub fn compileFunction(self: *Compiler, node: Ast.Node) Error!void {
     const is_closure = std.mem.startsWith(u8, name, "__closure_");
     const lo = !is_closure and !gen and !is_variadic and !hasRefParams(ref_flags) and !needsVarSync(&sub.chunk) and sub.closure_count == 0;
 
+    // closures stay eagerly registered (instantiation opcodes look them up by
+    // internal name); a non-hoistable named function binds at runtime via
+    // declare_fn at the declaration site, matching PHP
+    var cond_id: u16 = 0;
+    if (!self.hoistable and !is_closure) {
+        self.cond_fn_count += 1;
+        cond_id = self.cond_fn_count;
+    }
+
     try self.functions.append(self.allocator, .{
         .name = name,
+        .cond_id = cond_id,
         .arity = @intCast(param_nodes.len),
         .required_params = required,
         .is_variadic = is_variadic,
@@ -807,6 +820,11 @@ pub fn compileFunction(self: *Compiler, node: Ast.Node) Error!void {
     sub.function_attrs.deinit(self.allocator);
     for (sub.new_defaults.items) |nd| try self.new_defaults.append(self.allocator, nd);
     sub.new_defaults.deinit(self.allocator);
+
+    if (cond_id != 0) {
+        try self.emitOp(.declare_fn);
+        try self.emitU16(cond_id);
+    }
 }
 
 pub fn compileClosure(self: *Compiler, node: Ast.Node) Error!void {
@@ -878,6 +896,8 @@ pub fn compileClosure(self: *Compiler, node: Ast.Node) Error!void {
         .is_generator = gen,
         .returns_ref = false,
         .closure_count = self.closure_count,
+        .cond_fn_count = self.cond_fn_count,
+        .hoistable = false,
         .file_path = self.file_path,
         .namespace = self.namespace,
         .use_aliases = self.use_aliases,
@@ -934,6 +954,7 @@ pub fn compileClosure(self: *Compiler, node: Ast.Node) Error!void {
     sub.break_jumps.deinit(self.allocator);
 
     self.closure_count = sub.closure_count;
+    self.cond_fn_count = sub.cond_fn_count;
 
     const ref_params = if (has_any_ref) blk: {
         const rp = try self.allocator.alloc(bool, param_nodes.len);
@@ -2509,6 +2530,8 @@ fn compileClassMethodBody(self: *Compiler, class_name: []const u8, member: Ast.N
         .is_generator = method_gen,
         .returns_ref = method_returns_ref,
         .closure_count = self.closure_count,
+        .cond_fn_count = self.cond_fn_count,
+        .hoistable = false,
         .file_path = self.file_path,
         .namespace = self.namespace,
         .use_aliases = self.use_aliases,
@@ -2572,6 +2595,7 @@ fn compileClassMethodBody(self: *Compiler, class_name: []const u8, member: Ast.N
     sub.break_jumps.deinit(self.allocator);
 
     self.closure_count = sub.closure_count;
+    self.cond_fn_count = sub.cond_fn_count;
     const slot_names = try sub.buildSlotNames();
     const local_count = sub.next_slot;
     sub.local_slots.deinit(self.allocator);
@@ -2650,6 +2674,8 @@ fn compilePropertyHook(self: *Compiler, class_name: []const u8, prop_name: []con
         .break_jumps = .{},
         .continue_jumps = .{},
         .closure_count = self.closure_count,
+        .cond_fn_count = self.cond_fn_count,
+        .hoistable = false,
         .file_path = self.file_path,
         .namespace = self.namespace,
         .use_aliases = self.use_aliases,
@@ -2701,6 +2727,7 @@ fn compilePropertyHook(self: *Compiler, class_name: []const u8, prop_name: []con
     sub.continue_jumps.deinit(self.allocator);
 
     self.closure_count = sub.closure_count;
+    self.cond_fn_count = sub.cond_fn_count;
     const slot_names = try sub.buildSlotNames();
     const local_count = sub.next_slot;
     sub.local_slots.deinit(self.allocator);
