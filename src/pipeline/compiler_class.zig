@@ -12,6 +12,7 @@ const Value = @import("../runtime/value.zig").Value;
 const PhpArray = @import("../runtime/value.zig").PhpArray;
 const Allocator = std.mem.Allocator;
 const Error = Allocator.Error || error{CompileError};
+const compiler_stmt = @import("compiler_stmt.zig");
 
 const ParsedAttr = struct {
     name: []const u8,
@@ -1063,6 +1064,158 @@ pub fn compileClosure(self: *Compiler, node: Ast.Node) Error!void {
     const this_idx = try self.addConstant(.{ .string = "$this" });
     try self.emitOp(.closure_bind);
     try self.emitU16(this_idx);
+}
+
+// a class/interface declaration default is "hoist-safe" only when it folds to
+// a compile-time literal with no external name reference. anything that reads a
+// constant, another class's const, a variable, self::CONST, or a call is NOT
+// safe: PHP evaluates property defaults at instantiation, so relocating a class
+// ahead of a `const`/`define` it depends on would evaluate the default too
+// early. literals (and literal arrays / unary / binary of literals) are
+// order-independent and safe to relocate
+fn defaultExprIsLiteral(ast: *const Ast, idx: u32) bool {
+    if (idx == 0) return true;
+    const node = ast.nodes[idx];
+    return switch (node.tag) {
+        .integer_literal, .float_literal, .string_literal,
+        .true_literal, .false_literal, .null_literal => true,
+        .prefix_op => defaultExprIsLiteral(ast, node.data.lhs),
+        .binary_op => defaultExprIsLiteral(ast, node.data.lhs) and defaultExprIsLiteral(ast, node.data.rhs),
+        .array_literal => {
+            for (ast.extraSlice(node.data.lhs)) |el_idx| {
+                const el = ast.nodes[el_idx];
+                if (el.tag != .array_element) return false;
+                if (!defaultExprIsLiteral(ast, el.data.lhs)) return false;
+                if (el.data.rhs != 0 and !defaultExprIsLiteral(ast, el.data.rhs)) return false;
+            }
+            return true;
+        },
+        // self::CONST / parent::CONST in a default are order-independent: the
+        // compiler bakes them to the concrete class name (current_class /
+        // current_parent), the class registers its own constants before its
+        // instance-property defaults run, and a hoisted class's parent was
+        // emitted earlier in the prelude. static:: (late static binding) and
+        // explicit ClassName::CONST stay excluded - their target may not be
+        // available at the relocated position
+        .static_prop_access => {
+            const member = ast.tokenSlice(node.main_token);
+            if (member.len == 0 or member[0] == '$' or std.mem.eql(u8, member, "class")) return false;
+            const class_node = ast.nodes[node.data.lhs];
+            if (class_node.tag != .identifier) return false;
+            const cls = ast.tokenSlice(class_node.main_token);
+            return std.ascii.eqlIgnoreCase(cls, "self") or std.ascii.eqlIgnoreCase(cls, "parent");
+        },
+        else => false,
+    };
+}
+
+// PHP early-binds a top-level class only if it is self-sufficient at its
+// declaration point: a parent (if any) already bound, no interfaces, no traits.
+// we additionally require literal defaults (see defaultExprIsLiteral) so the
+// relocation can never reorder a default ahead of a constant it reads
+fn classDeclEarlyBindable(self: *Compiler, node: Ast.Node) bool {
+    if (declHasAttributes(self, node)) return false;
+    const rhs_base = node.data.rhs;
+    if (self.ast.extra_data[rhs_base + 2] != 0) return false; // implements
+    const parent_node = self.ast.extra_data[rhs_base + 1];
+    if (parent_node != 0) {
+        const pnode = self.ast.nodes[parent_node];
+        const parent_name = if (pnode.tag == .qualified_name)
+            (self.buildQualifiedString(self.ast.extraSlice(pnode.data.lhs)) catch return false)
+        else
+            self.resolveClassName(self.ast.tokenSlice(pnode.main_token));
+        if (!self.hoisted_names.contains(parent_name)) return false;
+    }
+    for (self.ast.extraSlice(node.data.lhs)) |m_idx| {
+        const m = self.ast.nodes[m_idx];
+        switch (m.tag) {
+            .trait_use => return false,
+            .class_property, .static_class_property => {
+                if (m.data.lhs != 0 and !defaultExprIsLiteral(self.ast, m.data.lhs)) return false;
+            },
+            .const_decl => {
+                if (!defaultExprIsLiteral(self.ast, m.data.lhs)) return false;
+            },
+            .class_property_hooks => {
+                const default_idx = self.ast.extra_data[m.data.lhs];
+                if (default_idx != 0 and !defaultExprIsLiteral(self.ast, default_idx)) return false;
+            },
+            else => {},
+        }
+    }
+    return true;
+}
+
+// attribute arguments are another decl-time construct that can reference
+// external names (another class's constant, an enum case), so relocating a
+// class with attributes can reorder it ahead of what its attributes read.
+// conservatively refuse to hoist any declaration carrying attributes anywhere
+fn declHasAttributes(self: *Compiler, node: Ast.Node) bool {
+    if (self.ast.attr_ranges.len == 0) return false;
+    if (findAttrRangeForToken(self.ast.attr_ranges, self.ast.tokens, node.main_token) != null) return true;
+    for (self.ast.extraSlice(node.data.lhs)) |m_idx| {
+        const m = self.ast.nodes[m_idx];
+        if (findAttrRangeForToken(self.ast.attr_ranges, self.ast.tokens, m.main_token) != null) return true;
+        if (m.tag == .class_method or m.tag == .static_class_method) {
+            for (self.ast.extraSlice(m.data.lhs)) |pn| {
+                if (findAttrRangeForToken(self.ast.attr_ranges, self.ast.tokens, self.ast.nodes[pn].main_token) != null) return true;
+            }
+        }
+    }
+    return false;
+}
+
+fn interfaceDeclEarlyBindable(self: *Compiler, node: Ast.Node) bool {
+    if (declHasAttributes(self, node)) return false;
+    if (node.data.rhs != 0) {
+        const parent_count = self.ast.extra_data[node.data.rhs];
+        for (0..parent_count) |i| {
+            const pnode = self.ast.nodes[self.ast.extra_data[node.data.rhs + 1 + i]];
+            const pname = if (pnode.tag == .qualified_name)
+                (self.buildQualifiedString(self.ast.extraSlice(pnode.data.lhs)) catch return false)
+            else
+                self.resolveClassName(self.ast.tokenSlice(pnode.main_token));
+            if (!self.hoisted_names.contains(pname)) return false;
+        }
+    }
+    for (self.ast.extraSlice(node.data.lhs)) |m_idx| {
+        const m = self.ast.nodes[m_idx];
+        if (m.tag == .const_decl and !defaultExprIsLiteral(self.ast, m.data.lhs)) return false;
+    }
+    return true;
+}
+
+// emit early-bindable top-level class/interface declarations into a prelude.
+// namespace/use statements are replayed as compiler state (they emit nothing)
+// so names resolve correctly; bare blocks are descended like PHP's binding pass.
+// hoisted_names accumulates in source order so a class extending an
+// already-hoisted class is itself recognized as bindable
+pub fn hoistEarlyClasses(self: *Compiler, stmts: []const u32) Error!void {
+    for (stmts) |idx| {
+        const node = self.ast.nodes[idx];
+        switch (node.tag) {
+            .namespace_decl => try compiler_stmt.compileNamespace(self, node),
+            .use_stmt => try compiler_stmt.compileUse(self, node),
+            .use_fn_stmt => try compiler_stmt.compileUseFn(self, node),
+            .use_const_stmt => try compiler_stmt.compileUseConst(self, node),
+            .block => try hoistEarlyClasses(self, self.ast.extraSlice(node.data.lhs)),
+            .class_decl => if (classDeclEarlyBindable(self, node)) {
+                self.current_source_offset = self.ast.tokens[node.main_token].start;
+                const name = self.resolveClassName(self.ast.tokenSlice(node.main_token));
+                try compileClassDecl(self, node);
+                try self.hoisted_nodes.put(self.allocator, idx, {});
+                try self.hoisted_names.put(self.allocator, name, {});
+            },
+            .interface_decl => if (interfaceDeclEarlyBindable(self, node)) {
+                self.current_source_offset = self.ast.tokens[node.main_token].start;
+                const name = self.resolveClassName(self.ast.tokenSlice(node.main_token));
+                try compileInterfaceDecl(self, node);
+                try self.hoisted_nodes.put(self.allocator, idx, {});
+                try self.hoisted_names.put(self.allocator, name, {});
+            },
+            else => {},
+        }
+    }
 }
 
 pub fn compileClassDecl(self: *Compiler, node: Ast.Node) Error!void {

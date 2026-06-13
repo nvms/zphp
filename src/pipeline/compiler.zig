@@ -119,9 +119,20 @@ pub fn compileWithPath(ast: *const Ast, allocator: Allocator, file_path: []const
         c.use_const_aliases.deinit(allocator);
         c.pending_gotos.deinit(allocator);
         c.labels.deinit(allocator);
+        c.hoisted_nodes.deinit(allocator);
+        c.hoisted_names.deinit(allocator);
     }
 
     const root = ast.nodes[0];
+    // PHP early-binds (relocates to before main execution) top-level class and
+    // interface declarations that are self-sufficient at their declaration
+    // point. emit those into a prelude first, then compile everything else with
+    // the relocated declarations skipped at their original site
+    try compiler_class.hoistEarlyClasses(&c, ast.extraSlice(root.data.lhs));
+    c.namespace = "";
+    c.use_aliases.clearRetainingCapacity();
+    c.use_fn_aliases.clearRetainingCapacity();
+    c.use_const_aliases.clearRetainingCapacity();
     for (ast.extraSlice(root.data.lhs)) |stmt| {
         try c.compileNode(stmt);
     }
@@ -142,6 +153,8 @@ pub fn compileWithPath(ast: *const Ast, allocator: Allocator, file_path: []const
     c.use_aliases.deinit(allocator);
     c.use_fn_aliases.deinit(allocator);
     c.use_const_aliases.deinit(allocator);
+    c.hoisted_nodes.deinit(allocator);
+    c.hoisted_names.deinit(allocator);
     const slot_names = try c.buildSlotNames();
     const local_count = c.next_slot;
     c.local_slots.deinit(allocator);
@@ -203,6 +216,13 @@ pub const Compiler = struct {
     // body. those compile to a declare_fn opcode and bind at runtime
     hoistable: bool = true,
     cond_fn_count: u16 = 0,
+    // top-level class/interface declaration node indices that were emitted into
+    // the early-binding prelude. compileNode skips them at their original site
+    hoisted_nodes: std.AutoHashMapUnmanaged(u32, void) = .{},
+    // names of classes/interfaces already hoisted, so a later declaration whose
+    // parent is one of them is recognized as early-bindable too (PHP only
+    // early-binds a class whose parent is already bound at its declaration point)
+    hoisted_names: std.StringHashMapUnmanaged(void) = .{},
     is_generator: bool = false,
     returns_ref: bool = false,
     namespace: []const u8 = "",
@@ -249,6 +269,9 @@ pub const Compiler = struct {
     // ==================================================================
 
     pub fn compileNode(self: *Compiler, idx: u32) Error!void {
+        // early-bound class/interface declarations are relocated to a prelude
+        // (see hoistEarlyClasses); their original location emits nothing
+        if (self.hoisted_nodes.contains(idx)) return;
         const node = self.ast.nodes[idx];
         self.current_source_offset = self.ast.tokens[node.main_token].start;
         // function declarations stay hoistable through bare blocks and
