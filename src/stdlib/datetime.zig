@@ -2074,6 +2074,37 @@ fn dtzListAbbreviations(ctx: *NativeContext, _: []const Value) RuntimeError!Valu
             try appendAbbrevEntry(ctx, arr, key, true, z.dst_offset, canonical);
         }
     }
+    // the single-letter military timezones (RFC 822 / NATO phonetic). these are
+    // fixed by definition, not derived from the tz database, so they're stable
+    // across tzdb versions. PHP lists each with a null timezone_id. 'j' (local)
+    // is intentionally absent. the multi-letter historical abbreviations PHP
+    // also returns are intentionally NOT fully reproduced here: that set is
+    // coupled to PHP's bundled timezonedb version (per-abbreviation zone lists
+    // shift across releases), so chasing byte-for-byte parity would be brittle
+    // for a near-unused function - treated as implementation-defined
+    const military = [_]struct { c: u8, off: i32 }{
+        .{ .c = 'a', .off = 3600 },   .{ .c = 'b', .off = 7200 },   .{ .c = 'c', .off = 10800 },
+        .{ .c = 'd', .off = 14400 },  .{ .c = 'e', .off = 18000 },  .{ .c = 'f', .off = 21600 },
+        .{ .c = 'g', .off = 25200 },  .{ .c = 'h', .off = 28800 },  .{ .c = 'i', .off = 32400 },
+        .{ .c = 'k', .off = 36000 },  .{ .c = 'l', .off = 39600 },  .{ .c = 'm', .off = 43200 },
+        .{ .c = 'n', .off = -3600 },  .{ .c = 'o', .off = -7200 },  .{ .c = 'p', .off = -10800 },
+        .{ .c = 'q', .off = -14400 }, .{ .c = 'r', .off = -18000 }, .{ .c = 's', .off = -21600 },
+        .{ .c = 't', .off = -25200 }, .{ .c = 'u', .off = -28800 }, .{ .c = 'v', .off = -32400 },
+        .{ .c = 'w', .off = -36000 }, .{ .c = 'x', .off = -39600 }, .{ .c = 'y', .off = -43200 },
+        .{ .c = 'z', .off = 0 },
+    };
+    for (military) |m| {
+        if (arr.get(.{ .string = &[_]u8{m.c} }) != .null) continue;
+        const key = try ctx.allocator.dupe(u8, &[_]u8{m.c});
+        try ctx.vm.strings.append(ctx.allocator, key);
+        const list = try ctx.createArray();
+        const entry = try ctx.createArray();
+        try entry.set(ctx.allocator, .{ .string = "dst" }, .{ .bool = false });
+        try entry.set(ctx.allocator, .{ .string = "offset" }, .{ .int = @as(i64, m.off) });
+        try entry.set(ctx.allocator, .{ .string = "timezone_id" }, .null);
+        try list.append(ctx.allocator, .{ .array = entry });
+        try arr.set(ctx.allocator, .{ .string = key }, .{ .array = list });
+    }
     return .{ .array = arr };
 }
 
