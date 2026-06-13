@@ -7,6 +7,7 @@ const NativeContext = vm_mod.NativeContext;
 const ClassDef = vm_mod.ClassDef;
 const Allocator = std.mem.Allocator;
 const RuntimeError = error{ RuntimeError, OutOfMemory };
+const zlib = @cImport(@cInclude("zlib.h"));
 
 const DT_FORMAT_CONSTS = .{
     .{ "ATOM", "Y-m-d\\TH:i:sP" },
@@ -3530,6 +3531,124 @@ fn readZoneInfo(allocator: Allocator, name: []const u8) ?[]u8 {
     return null;
 }
 
+// embedded IANA tzdb, used when the host has no /usr/share/zoneinfo (musl /
+// Alpine). bundles the TZif bytes for the zones zphp advertises via
+// timezone_identifiers_list(). regenerate with scripts/gen-tzdata. format:
+// "ZTZ1" | u32 count | { u16 name_len, name, u32 data_len, tzif_bytes }*
+const tzdata_gz = @embedFile("tzdata.bin.gz");
+
+// the decompressed blob lives for the process lifetime (read-only after init),
+// so it's allocated from the page allocator rather than a request arena and
+// never freed. guarded so concurrent first-touch in threaded serve workers
+// can't double-decompress
+var g_tz_mutex: std.Thread.Mutex = .{};
+var g_tz_blob: ?[]const u8 = null;
+var g_tz_init = false;
+
+fn inflateGzipPage(input: []const u8) ?[]u8 {
+    var stream: zlib.z_stream = std.mem.zeroes(zlib.z_stream);
+    // 15 window bits + 16 selects gzip framing
+    if (zlib.inflateInit2_(&stream, 15 + 16, zlib.zlibVersion(), @sizeOf(zlib.z_stream)) != zlib.Z_OK) return null;
+    defer _ = zlib.inflateEnd(&stream);
+    const a = std.heap.page_allocator;
+    var out = std.ArrayListUnmanaged(u8){};
+    errdefer out.deinit(a);
+    stream.next_in = @constCast(input.ptr);
+    stream.avail_in = @intCast(input.len);
+    var chunk: [32 * 1024]u8 = undefined;
+    while (true) {
+        stream.next_out = &chunk;
+        stream.avail_out = chunk.len;
+        const rc = zlib.inflate(&stream, zlib.Z_NO_FLUSH);
+        const produced = chunk.len - stream.avail_out;
+        if (produced > 0) out.appendSlice(a, chunk[0..produced]) catch return null;
+        if (rc == zlib.Z_STREAM_END) break;
+        if (rc != zlib.Z_OK) return null;
+        if (stream.avail_in == 0 and produced == 0) break;
+    }
+    return out.toOwnedSlice(a) catch null;
+}
+
+fn embeddedBlob() ?[]const u8 {
+    g_tz_mutex.lock();
+    defer g_tz_mutex.unlock();
+    if (g_tz_init) return g_tz_blob;
+    g_tz_init = true;
+    g_tz_blob = inflateGzipPage(tzdata_gz);
+    return g_tz_blob;
+}
+
+// borrowed TZif bytes for `name` from the embedded blob (valid for the process
+// lifetime, never freed), or null. exact-case match, mirroring readZoneInfo's
+// case-sensitive path lookup
+fn embeddedZoneInfo(name: []const u8) ?[]const u8 {
+    if (!tzNameValid(name)) return null;
+    const blob = embeddedBlob() orelse return null;
+    if (blob.len < 8 or !std.mem.eql(u8, blob[0..4], "ZTZ1")) return null;
+    var off: usize = 4;
+    const count = std.mem.readInt(u32, blob[off..][0..4], .little);
+    off += 4;
+    var i: u32 = 0;
+    while (i < count) : (i += 1) {
+        if (off + 2 > blob.len) return null;
+        const nl = std.mem.readInt(u16, blob[off..][0..2], .little);
+        off += 2;
+        if (off + nl + 4 > blob.len) return null;
+        const ename = blob[off .. off + nl];
+        off += nl;
+        const dl = std.mem.readInt(u32, blob[off..][0..4], .little);
+        off += 4;
+        if (off + dl > blob.len) return null;
+        const data = blob[off .. off + dl];
+        off += dl;
+        if (std.mem.eql(u8, ename, name)) return data;
+    }
+    return null;
+}
+
+// TZif bytes for a zone: system zoneinfo first (owned, must be freed), then the
+// embedded blob (borrowed, must NOT be freed). centralizes the system-then-
+// embedded fallback so every call site handles ownership uniformly
+const TzBytes = struct {
+    bytes: []const u8,
+    owned: bool,
+    fn deinit(self: TzBytes, allocator: Allocator) void {
+        if (self.owned) allocator.free(@constCast(self.bytes));
+    }
+};
+
+fn resolveTzif(allocator: Allocator, name: []const u8) ?TzBytes {
+    if (readZoneInfo(allocator, name)) |b| return .{ .bytes = b, .owned = true };
+    if (embeddedZoneInfo(name)) |b| return .{ .bytes = b, .owned = false };
+    return null;
+}
+
+test "embedded tzdata resolves non-table zones without system zoneinfo" {
+    // exercises the musl/Alpine fallback path directly: decompress the embedded
+    // blob, find the zone, parse its TZif. independent of the host filesystem so
+    // it proves the fallback works where /usr/share/zoneinfo is absent.
+    // 2026-01-01T00:00:00Z (well clear of any DST edge for these zones)
+    const ts: i64 = 1767225600;
+
+    // Kathmandu is the canonical odd offset: +5:45, no DST
+    const kt = embeddedZoneInfo("Asia/Kathmandu") orelse return error.ZoneMissing;
+    const ktr = tzifLookupUtc(kt, ts) orelse return error.TzifParseFailed;
+    try std.testing.expectEqual(@as(i32, 5 * 3600 + 45 * 60), ktr.offset);
+
+    // Chatham: +12:45 standard (NZ summer DST in January -> +13:45)
+    const ch = embeddedZoneInfo("Pacific/Chatham") orelse return error.ZoneMissing;
+    const chr = tzifLookupUtc(ch, ts) orelse return error.TzifParseFailed;
+    try std.testing.expectEqual(@as(i32, 13 * 3600 + 45 * 60), chr.offset);
+
+    // a zone that lives in the hardcoded table is still present in the blob
+    const ny = embeddedZoneInfo("America/New_York") orelse return error.ZoneMissing;
+    const nyr = tzifLookupUtc(ny, ts) orelse return error.TzifParseFailed;
+    try std.testing.expectEqual(@as(i32, -5 * 3600), nyr.offset); // EST in January
+
+    // bogus names resolve to nothing
+    try std.testing.expect(embeddedZoneInfo("Not/AReal_Zone") == null);
+}
+
 fn firstNonDstType(bytes: []const u8, ttinfo_off: usize, typecnt: usize) u8 {
     var t: usize = 0;
     while (t < typecnt) : (t += 1) {
@@ -3617,18 +3736,18 @@ fn tzifLookupWall(bytes: []const u8, wall_ts: i64) ?TzifRes {
 // tzOffsetAt(tz, ts)` pattern at the call sites so non-table zones work too.
 pub fn tzOffsetForName(allocator: Allocator, name: []const u8, utc_ts: i64) i32 {
     if (lookupTimezone(name)) |tz| return tzOffsetAt(tz, utc_ts);
-    if (readZoneInfo(allocator, name)) |bytes| {
-        defer allocator.free(bytes);
-        if (tzifLookupUtc(bytes, utc_ts)) |r| return r.offset;
+    if (resolveTzif(allocator, name)) |h| {
+        defer h.deinit(allocator);
+        if (tzifLookupUtc(h.bytes, utc_ts)) |r| return r.offset;
     }
     return 0;
 }
 
 pub fn tzOffsetForWallByName(allocator: Allocator, name: []const u8, wall_ts: i64) i32 {
     if (lookupTimezone(name)) |tz| return tzOffsetForWall(tz, wall_ts);
-    if (readZoneInfo(allocator, name)) |bytes| {
-        defer allocator.free(bytes);
-        if (tzifLookupWall(bytes, wall_ts)) |r| return r.offset;
+    if (resolveTzif(allocator, name)) |h| {
+        defer h.deinit(allocator);
+        if (tzifLookupWall(h.bytes, wall_ts)) |r| return r.offset;
     }
     return 0;
 }
@@ -3639,21 +3758,21 @@ pub fn tzOffsetForWallByName(allocator: Allocator, name: []const u8, wall_ts: i6
 // uniform, or null if unknown
 pub fn tzAbbrevForName(allocator: Allocator, name: []const u8, utc_ts: i64) ?[]const u8 {
     if (lookupTimezone(name)) |tz| return allocator.dupe(u8, tzAbbrevAt(tz, utc_ts)) catch null;
-    if (readZoneInfo(allocator, name)) |bytes| {
-        defer allocator.free(bytes);
-        if (tzifLookupUtc(bytes, utc_ts)) |r| {
+    if (resolveTzif(allocator, name)) |h| {
+        defer h.deinit(allocator);
+        if (tzifLookupUtc(h.bytes, utc_ts)) |r| {
             return allocator.dupe(u8, r.abbrev_buf[0..r.abbrev_len]) catch null;
         }
     }
     return null;
 }
 
-// is this a zone zphp can resolve (table OR a readable zoneinfo file)?
+// is this a zone zphp can resolve (table, system zoneinfo, or embedded blob)?
 pub fn tzIsKnown(allocator: Allocator, name: []const u8) bool {
     if (lookupTimezone(name) != null) return true;
-    if (readZoneInfo(allocator, name)) |bytes| {
-        defer allocator.free(bytes);
-        return tzifLookupUtc(bytes, 0) != null;
+    if (resolveTzif(allocator, name)) |h| {
+        defer h.deinit(allocator);
+        return tzifLookupUtc(h.bytes, 0) != null;
     }
     return false;
 }

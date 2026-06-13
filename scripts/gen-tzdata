@@ -1,0 +1,67 @@
+#!/usr/bin/env python3
+# Regenerates src/stdlib/tzdata.bin.gz, the embedded IANA timezone database used
+# as a fallback when the host has no /usr/share/zoneinfo (e.g. musl/Alpine).
+#
+# It bundles the TZif files for exactly the zones zphp advertises via
+# timezone_identifiers_list(), so the embedded set matches the supported set.
+# The blob format is a flat, linearly-scanned index:
+#
+#   "ZTZ1" | u32 count | { u16 name_len | name | u32 data_len | tzif_bytes } *
+#
+# all integers little-endian. gzip with a zero mtime so the artifact is
+# reproducible. run from the repo root: python3 scripts/gen-tzdata
+#
+# the zone list is sourced from the running zphp binary so it always matches the
+# build; the TZif bytes come from the build host's zoneinfo, so regenerate on a
+# host with a current tzdata (note the tzdb version in the commit message).
+
+import os, sys, struct, gzip, subprocess
+
+REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+ZPHP = os.path.join(REPO, "zig-out", "bin", "zphp")
+OUT = os.path.join(REPO, "src", "stdlib", "tzdata.bin.gz")
+
+ZONEINFO_DIRS = [
+    "/usr/share/zoneinfo",
+    "/var/db/timezone/zoneinfo",  # macOS
+    "/etc/zoneinfo",
+]
+
+
+def zoneinfo_dir():
+    for d in ZONEINFO_DIRS:
+        if os.path.isfile(os.path.join(d, "UTC")) or os.path.isdir(os.path.join(d, "America")):
+            return d
+    sys.exit("no system zoneinfo directory found; install tzdata")
+
+
+def advertised_zones():
+    php = "<?php foreach (timezone_identifiers_list() as $z) echo $z, \"\\n\";"
+    out = subprocess.run([ZPHP, "run", "/dev/stdin"], input=php, capture_output=True, text=True)
+    if out.returncode != 0:
+        sys.exit("failed to list zones from zphp: " + out.stderr)
+    return [z.strip() for z in out.stdout.splitlines() if z.strip()]
+
+
+def main():
+    zi = zoneinfo_dir()
+    zones = advertised_zones()
+    buf = bytearray(b"ZTZ1")
+    buf += struct.pack("<I", len(zones))
+    missing = 0
+    for z in zones:
+        path = os.path.join(zi, z)
+        if not os.path.isfile(path):
+            missing += 1
+            continue
+        data = open(path, "rb").read()
+        nb = z.encode()
+        buf += struct.pack("<H", len(nb)) + nb + struct.pack("<I", len(data)) + data
+    gz = gzip.compress(bytes(buf), 9, mtime=0)
+    open(OUT, "wb").write(gz)
+    print(f"wrote {OUT}: {len(gz)} bytes ({len(gz)//1024} KB) from {zi}")
+    print(f"zones: {len(zones)} ({missing} missing in host zoneinfo)")
+
+
+if __name__ == "__main__":
+    main()
