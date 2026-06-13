@@ -2650,9 +2650,20 @@ fn unicodeToUpper(cp: u21) u21 {
     if (cp >= 0x00E0 and cp <= 0x00F6) return cp - 0x20;
     // latin-1 supplement: o-with-slash through thorn
     if (cp >= 0x00F8 and cp <= 0x00FE) return cp - 0x20;
-    // latin extended-a pairs (0100-017E): odd codepoints are lowercase
-    if (cp >= 0x0100 and cp <= 0x017E) {
-        if (cp % 2 == 1) return cp - 1;
+    // latin extended-a: pairing alternates per subrange. 0100-0137 and
+    // 014A-0177 pair even-upper/odd-lower; 0139-0148 and 0179-017E pair
+    // odd-upper/even-lower. 0138 (kra) and 0149 have no uppercase pair
+    if (cp >= 0x0100 and cp <= 0x0137 and cp % 2 == 1) return cp - 1;
+    if (cp >= 0x014A and cp <= 0x0177 and cp % 2 == 1) return cp - 1;
+    if (cp >= 0x013A and cp <= 0x0148 and cp % 2 == 0) return cp - 1;
+    if (cp >= 0x017A and cp <= 0x017E and cp % 2 == 0) return cp - 1;
+    switch (cp) {
+        0x00FF => return 0x0178, // y with diaeresis
+        0x01C6, 0x01C5 => return 0x01C4, // dž digraph
+        0x01C9, 0x01C8 => return 0x01C7, // lj digraph
+        0x01CC, 0x01CB => return 0x01CA, // nj digraph
+        0x01F3, 0x01F2 => return 0x01F1, // dz digraph
+        else => {},
     }
     // greek lowercase to uppercase (03B1-03C9 -> 0391-03A9)
     if (cp >= 0x03B1 and cp <= 0x03C9) return cp - 0x20;
@@ -2674,14 +2685,23 @@ fn unicodeToUpper(cp: u21) u21 {
     return cp;
 }
 
-fn unicodeToLower(cp: u21) u21 {
+pub fn unicodeToLower(cp: u21) u21 {
     // latin-1 supplement: A-with-grave through O-with-diaeresis
     if (cp >= 0x00C0 and cp <= 0x00D6) return cp + 0x20;
     // latin-1 supplement: O-with-slash through Thorn
     if (cp >= 0x00D8 and cp <= 0x00DE) return cp + 0x20;
-    // latin extended-a pairs (0100-017E): even codepoints are uppercase
-    if (cp >= 0x0100 and cp <= 0x017E) {
-        if (cp % 2 == 0) return cp + 1;
+    // latin extended-a: pairing alternates per subrange (see unicodeToUpper)
+    if (cp >= 0x0100 and cp <= 0x0137 and cp % 2 == 0) return cp + 1;
+    if (cp >= 0x014A and cp <= 0x0177 and cp % 2 == 0) return cp + 1;
+    if (cp >= 0x0139 and cp <= 0x0147 and cp % 2 == 1) return cp + 1;
+    if (cp >= 0x0179 and cp <= 0x017D and cp % 2 == 1) return cp + 1;
+    switch (cp) {
+        0x0178 => return 0x00FF, // Y with diaeresis
+        0x01C4, 0x01C5 => return 0x01C6, // DŽ digraph
+        0x01C7, 0x01C8 => return 0x01C9, // LJ digraph
+        0x01CA, 0x01CB => return 0x01CC, // NJ digraph
+        0x01F1, 0x01F2 => return 0x01F3, // DZ digraph
+        else => {},
     }
     // greek uppercase to lowercase (0391-03A9 -> 03B1-03C9)
     if (cp >= 0x0391 and cp <= 0x03A9) return cp + 0x20;

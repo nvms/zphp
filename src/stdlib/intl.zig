@@ -8,6 +8,7 @@ const NativeContext = vm_mod.NativeContext;
 const ClassDef = vm_mod.ClassDef;
 const Allocator = std.mem.Allocator;
 const RuntimeError = error{ RuntimeError, OutOfMemory };
+const strings_mod = @import("strings.zig");
 
 // libicu uses preprocessor macros to rename its API per ABI version
 // (u_strFromUTF8 -> u_strFromUTF8_77 on linux distros). zig's @cImport doesn't
@@ -1441,6 +1442,11 @@ pub const entries = .{
     .{ "grapheme_substr", intlWrap(graphemeSubstr) },
     .{ "grapheme_strpos", intlWrap(graphemeStrpos) },
     .{ "grapheme_stripos", intlWrap(graphemeStripos) },
+    .{ "grapheme_strrpos", intlWrap(graphemeStrrpos) },
+    .{ "grapheme_strripos", intlWrap(graphemeStrripos) },
+    .{ "grapheme_strstr", intlWrap(graphemeStrstr) },
+    .{ "grapheme_stristr", intlWrap(graphemeStristr) },
+    .{ "grapheme_str_split", intlWrap(graphemeStrSplit) },
     .{ "grapheme_extract", intlWrap(graphemeExtract) },
 };
 
@@ -1558,53 +1564,213 @@ fn graphemeExtract(ctx: *NativeContext, args: []const Value) RuntimeError!Value 
     return .{ .string = try dupString(ctx, s[begin_byte..end_byte]) };
 }
 
-fn graphemeStrposImpl(ctx: *NativeContext, args: []const Value, case_insensitive: bool) !Value {
+// grapheme cluster boundary byte offsets for s: [0, ..., s.len]. count of
+// graphemes = offsets.len - 1. null on ICU error
+fn collectGraphemeBounds(ctx: *NativeContext, s: []const u8) !?std.ArrayListUnmanaged(i32) {
+    const w = (try openBrk(ctx, 0, "")) orelse return null;
+    defer zphp_ubrk_close(w);
+    var status: UErrorCode = U_ZERO_ERROR;
+    zphp_ubrk_setText(w, s.ptr, @intCast(s.len), &status);
+    if (intlRecord(ctx.vm, status)) return null;
+    var list = std.ArrayListUnmanaged(i32){};
+    errdefer list.deinit(ctx.allocator);
+    var pos = zphp_ubrk_first(w);
+    while (pos != -1) : (pos = zphp_ubrk_next(w)) {
+        try list.append(ctx.allocator, pos);
+    }
+    return list;
+}
+
+// unicode-lowercase fold that preserves byte positions: a codepoint is only
+// substituted when its lowercase form encodes to the same UTF-8 length (true
+// for every mapping in unicodeToLower - this is just defense), so any byte
+// offset in the folded string is valid in the original
+fn foldPreservingOffsets(ctx: *NativeContext, s: []const u8) ![]u8 {
+    const out = try ctx.allocator.dupe(u8, s);
+    var i: usize = 0;
+    while (i < s.len) {
+        const len = std.unicode.utf8ByteSequenceLength(s[i]) catch {
+            i += 1;
+            continue;
+        };
+        if (i + len > s.len) break;
+        if (len == 1) {
+            out[i] = std.ascii.toLower(s[i]);
+            i += 1;
+            continue;
+        }
+        const cp = std.unicode.utf8Decode(s[i..][0..len]) catch {
+            i += len;
+            continue;
+        };
+        const lower = strings_mod.unicodeToLower(cp);
+        if (lower != cp) {
+            var enc: [4]u8 = undefined;
+            const enc_len = std.unicode.utf8Encode(lower, &enc) catch {
+                i += len;
+                continue;
+            };
+            if (enc_len == len) @memcpy(out[i..][0..len], enc[0..enc_len]);
+        }
+        i += len;
+    }
+    return out;
+}
+
+fn graphemeIndexOfByte(bounds: []const i32, byte_pos: usize) ?usize {
+    for (bounds, 0..) |b, i| {
+        if (@as(usize, @intCast(b)) == byte_pos) return i;
+        if (@as(usize, @intCast(b)) > byte_pos) return null;
+    }
+    return null;
+}
+
+fn graphemeOffsetError(ctx: *NativeContext, comptime fname: []const u8) RuntimeError!Value {
+    try ctx.vm.setPendingException("ValueError", fname ++ "(): Argument #3 ($offset) must be contained in argument #1 ($haystack)");
+    return error.RuntimeError;
+}
+
+fn graphemePositionImpl(ctx: *NativeContext, args: []const Value, comptime fname: []const u8, case_insensitive: bool, reverse: bool) RuntimeError!Value {
     if (args.len < 2 or args[0] != .string or args[1] != .string) return Value{ .bool = false };
     const haystack = args[0].string;
     const needle = args[1].string;
-    if (needle.len == 0) return .{ .bool = false };
+    const offset: i64 = if (args.len >= 3 and args[2] != .null) Value.toInt(args[2]) else 0;
 
-    var h_search = haystack;
-    var n_search = needle;
+    var bounds = (try collectGraphemeBounds(ctx, haystack)) orelse return Value{ .bool = false };
+    defer bounds.deinit(ctx.allocator);
+    const n_g: i64 = @intCast(bounds.items.len - 1);
+    if (offset < -n_g or offset > n_g) return graphemeOffsetError(ctx, fname);
+
+    if (needle.len == 0) {
+        if (reverse) return .{ .int = if (offset >= 0) n_g else n_g + offset };
+        return .{ .int = if (offset >= 0) offset else n_g + offset };
+    }
+
+    var h_search: []const u8 = haystack;
+    var n_search: []const u8 = needle;
     var h_buf: ?[]u8 = null;
     var n_buf: ?[]u8 = null;
     defer if (h_buf) |b| ctx.allocator.free(b);
     defer if (n_buf) |b| ctx.allocator.free(b);
     if (case_insensitive) {
-        const hb = try ctx.allocator.alloc(u8, haystack.len);
-        for (haystack, 0..) |c, i| hb[i] = std.ascii.toLower(c);
-        h_buf = hb;
-        h_search = hb;
-        const nb = try ctx.allocator.alloc(u8, needle.len);
-        for (needle, 0..) |c, i| nb[i] = std.ascii.toLower(c);
-        n_buf = nb;
-        n_search = nb;
+        h_buf = try foldPreservingOffsets(ctx, haystack);
+        h_search = h_buf.?;
+        n_buf = try foldPreservingOffsets(ctx, needle);
+        n_search = n_buf.?;
     }
 
-    const byte_pos = std.mem.indexOf(u8, h_search, n_search) orelse return Value{ .bool = false };
-
-    // convert byte offset to grapheme offset using BreakIterator on the
-    // ORIGINAL haystack so multi-byte sequences map correctly
-    const w = (try openBrk(ctx, 0, "")) orelse return Value{ .bool = false };
-    defer zphp_ubrk_close(w);
-    var status: UErrorCode = U_ZERO_ERROR;
-    zphp_ubrk_setText(w, haystack.ptr, @intCast(haystack.len), &status);
-    if (intlRecord(ctx.vm, status)) return .{ .bool = false };
-    var g_idx: i64 = 0;
-    var pos = zphp_ubrk_first(w);
-    while (pos != -1) : (pos = zphp_ubrk_next(w)) {
-        if (pos == @as(i32, @intCast(byte_pos))) return .{ .int = g_idx };
-        g_idx += 1;
+    // boundary-aligned occurrences only; folding preserves byte offsets so
+    // positions in h_search are valid in haystack
+    if (reverse) {
+        // offset >= 0: match must start at grapheme >= offset
+        // offset < 0: match must start at grapheme <= n_g + offset
+        var best: ?i64 = null;
+        var from: usize = 0;
+        while (std.mem.indexOfPos(u8, h_search, from, n_search)) |p| : (from = p + 1) {
+            const g = graphemeIndexOfByte(bounds.items, p) orelse continue;
+            const gi: i64 = @intCast(g);
+            if (offset >= 0) {
+                if (gi >= offset) best = gi;
+            } else {
+                if (gi <= n_g + offset) best = gi;
+            }
+        }
+        if (best) |b| return .{ .int = b };
+        return .{ .bool = false };
     }
-    return .{ .int = g_idx };
+
+    const start_g: usize = @intCast(if (offset >= 0) offset else n_g + offset);
+    var from: usize = @intCast(bounds.items[start_g]);
+    while (std.mem.indexOfPos(u8, h_search, from, n_search)) |p| : (from = p + 1) {
+        const g = graphemeIndexOfByte(bounds.items, p) orelse continue;
+        return .{ .int = @intCast(g) };
+    }
+    return .{ .bool = false };
 }
 
 fn graphemeStrpos(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    return graphemeStrposImpl(ctx, args, false);
+    return graphemePositionImpl(ctx, args, "grapheme_strpos", false, false);
 }
 
 fn graphemeStripos(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    return graphemeStrposImpl(ctx, args, true);
+    return graphemePositionImpl(ctx, args, "grapheme_stripos", true, false);
+}
+
+fn graphemeStrrpos(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    return graphemePositionImpl(ctx, args, "grapheme_strrpos", false, true);
+}
+
+fn graphemeStrripos(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    return graphemePositionImpl(ctx, args, "grapheme_strripos", true, true);
+}
+
+fn graphemeStrstrImpl(ctx: *NativeContext, args: []const Value, case_insensitive: bool) RuntimeError!Value {
+    if (args.len < 2 or args[0] != .string or args[1] != .string) return Value{ .bool = false };
+    const haystack = args[0].string;
+    const needle = args[1].string;
+    const before_needle = args.len >= 3 and args[2].isTruthy();
+
+    if (needle.len == 0) {
+        if (before_needle) return .{ .string = try dupString(ctx, "") };
+        return .{ .string = try dupString(ctx, haystack) };
+    }
+
+    var bounds = (try collectGraphemeBounds(ctx, haystack)) orelse return Value{ .bool = false };
+    defer bounds.deinit(ctx.allocator);
+
+    var h_search: []const u8 = haystack;
+    var n_search: []const u8 = needle;
+    var h_buf: ?[]u8 = null;
+    var n_buf: ?[]u8 = null;
+    defer if (h_buf) |b| ctx.allocator.free(b);
+    defer if (n_buf) |b| ctx.allocator.free(b);
+    if (case_insensitive) {
+        h_buf = try foldPreservingOffsets(ctx, haystack);
+        h_search = h_buf.?;
+        n_buf = try foldPreservingOffsets(ctx, needle);
+        n_search = n_buf.?;
+    }
+
+    var from: usize = 0;
+    while (std.mem.indexOfPos(u8, h_search, from, n_search)) |p| : (from = p + 1) {
+        if (graphemeIndexOfByte(bounds.items, p) == null) continue;
+        if (before_needle) return .{ .string = try dupString(ctx, haystack[0..p]) };
+        return .{ .string = try dupString(ctx, haystack[p..]) };
+    }
+    return .{ .bool = false };
+}
+
+fn graphemeStrstr(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    return graphemeStrstrImpl(ctx, args, false);
+}
+
+fn graphemeStristr(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    return graphemeStrstrImpl(ctx, args, true);
+}
+
+fn graphemeStrSplit(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len == 0 or args[0] != .string) return .{ .bool = false };
+    const s = args[0].string;
+    const length: i64 = if (args.len >= 2 and args[1] != .null) Value.toInt(args[1]) else 1;
+    if (length < 1 or length > 1073741823) {
+        try ctx.vm.setPendingException("ValueError", "grapheme_str_split(): Argument #2 ($length) must be greater than 0 and less than or equal to 1073741823");
+        return error.RuntimeError;
+    }
+
+    var bounds = (try collectGraphemeBounds(ctx, s)) orelse return Value{ .bool = false };
+    defer bounds.deinit(ctx.allocator);
+    const n_g = bounds.items.len - 1;
+
+    const arr = try ctx.createArray();
+    const step: usize = @intCast(length);
+    var i: usize = 0;
+    while (i < n_g) : (i += step) {
+        const end = @min(i + step, n_g);
+        const a: usize = @intCast(bounds.items[i]);
+        const b: usize = @intCast(bounds.items[end]);
+        try arr.append(ctx.allocator, .{ .string = try dupString(ctx, s[a..b]) });
+    }
+    return .{ .array = arr };
 }
 
 // procedural shim: accepts a Transliterator instance or an ID string
