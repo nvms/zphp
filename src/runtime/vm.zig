@@ -3324,6 +3324,9 @@ pub const VM = struct {
                             if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
                             return error.RuntimeError;
                         };
+                    } else if (arr_val == .string) {
+                        if (try self.throwBuiltinException("Error", "[] operator not supported for strings")) continue;
+                        return error.RuntimeError;
                     }
                 },
                 .array_set_elem => {
@@ -3468,6 +3471,16 @@ pub const VM = struct {
                                 } else {
                                     self.push(existing);
                                 }
+                            } else if (existing == .string) {
+                                // never clobber a string element: push it through
+                                // and let the consumer produce PHP's error -
+                                // array_push throws "[] operator not supported for
+                                // strings", a deeper vivify throws "Cannot use
+                                // string offset as an array"
+                                self.push(existing);
+                            } else if (existing == .int or existing == .float or (existing == .bool and existing.bool)) {
+                                if (try self.throwBuiltinException("Error", "Cannot use a scalar value as an array")) continue;
+                                return error.RuntimeError;
                             } else {
                                 const new_arr = try self.allocator.create(PhpArray);
                                 new_arr.* = .{};
@@ -3490,6 +3503,10 @@ pub const VM = struct {
                             return error.RuntimeError;
                         };
                         self.push(result);
+                    } else if (arr_val == .string) {
+                        // descending through a string offset as a container
+                        if (try self.throwBuiltinException("Error", "Cannot use string offset as an array")) continue;
+                        return error.RuntimeError;
                     } else {
                         self.push(.null);
                     }
@@ -3516,7 +3533,15 @@ pub const VM = struct {
                     const existing = obj.get(pname);
                     if (existing == .string) {
                         const s = existing.string;
-                        var idx: i64 = switch (ik) { .int => |n| n, .string => |str| @intCast(std.fmt.parseInt(i64, str, 10) catch 0) };
+                        var idx: i64 = switch (ik) {
+                            .int => |n| n,
+                            // a non-numeric string key on a string offset is a
+                            // TypeError in PHP, not offset 0
+                            .string => |str| std.fmt.parseInt(i64, str, 10) catch {
+                                if (try self.throwBuiltinException("TypeError", "Cannot access offset of type string on string")) continue;
+                                return error.RuntimeError;
+                            },
+                        };
                         if (idx < 0) idx = @as(i64, @intCast(s.len)) + idx;
                         if (idx < 0) { self.push(v); continue; }
                         var write_byte: u8 = 0;
@@ -3621,7 +3646,15 @@ pub const VM = struct {
                     const ok = Value.toArrayKey(outer_key);
                     if (existing == .string) {
                         const s = existing.string;
-                        var idx: i64 = switch (ik) { .int => |n| n, .string => |str| @intCast(std.fmt.parseInt(i64, str, 10) catch 0) };
+                        var idx: i64 = switch (ik) {
+                            .int => |n| n,
+                            // a non-numeric string key on a string offset is a
+                            // TypeError in PHP, not offset 0
+                            .string => |str| std.fmt.parseInt(i64, str, 10) catch {
+                                if (try self.throwBuiltinException("TypeError", "Cannot access offset of type string on string")) continue;
+                                return error.RuntimeError;
+                            },
+                        };
                         if (idx < 0) idx = @as(i64, @intCast(s.len)) + idx;
                         if (idx < 0) { self.push(v); continue; }
                         var write_byte: u8 = 0;
@@ -4142,6 +4175,13 @@ pub const VM = struct {
                         self.push(cur);
                         continue;
                     }
+                    // a string prop passes through unchanged - the consumer
+                    // throws PHP's error (array_push: "[] operator not supported
+                    // for strings"; deeper vivify: string-offset-as-array)
+                    if (cur == .string) {
+                        self.push(cur);
+                        continue;
+                    }
                     const new_arr = try self.allocator.create(PhpArray);
                     new_arr.* = .{};
                     try self.arrays.append(self.allocator, new_arr);
@@ -4177,6 +4217,11 @@ pub const VM = struct {
                         // chained write routes via offsetGet/offsetSet); vivifying
                         // it to an array would clobber the object
                         if (cur == .object) {
+                            self.push(cur);
+                            continue;
+                        }
+                        // string static prop passes through - consumer throws
+                        if (cur == .string) {
                             self.push(cur);
                             continue;
                         }
