@@ -832,6 +832,80 @@ pub const VM = struct {
         }
     }
 
+    // unbinding a ref VARIABLE (unset($r) where $r came from `$r = &$a[k]` /
+    // `$r = &$o->p` / foreach-by-ref): if the cell's only remaining mirror is a
+    // single binding and no other live variable aliases the cell, the reference
+    // set has collapsed to one holder - revert the target to a plain value
+    // (clear the element's entry.ref / the prop_rev entry) so later writes COW-
+    // separate normally instead of leaking through a dead reference. matches
+    // PHP (is_ref drops when the last alias goes away). conservative: any doubt
+    // (extra mirrors, another alias anywhere) leaves the binding in place
+    fn revertUncapturedCell(self: *VM, cell: *Value) void {
+        const ri = self.ref_index orelse return;
+        const list = ri.fwd.getPtr(cell) orelse return;
+        if (list.items.len != 1) return;
+        var fi: usize = 0;
+        while (fi < self.frame_count) : (fi += 1) {
+            var it = self.frames[fi].ref_slots.valueIterator();
+            while (it.next()) |c| if (c.* == cell) return;
+        }
+        var git = self.globals_cells.valueIterator();
+        while (git.next()) |c| if (c.* == cell) return;
+        const t = list.items[0];
+        switch (t) {
+            .array => |ab| {
+                if (ab.array.getPtr(ab.key)) |ep| {
+                    if (ep.ref == cell) ep.ref = null;
+                }
+                var i: usize = 0;
+                while (i < self.array_ref_bindings.items.len) {
+                    const b = self.array_ref_bindings.items[i];
+                    if (b.cell == cell and b.array == ab.array and b.key.eql(ab.key)) {
+                        _ = self.array_ref_bindings.swapRemove(i);
+                    } else i += 1;
+                }
+                fi = 0;
+                while (fi < self.frame_count) : (fi += 1) {
+                    const frame = &self.frames[fi];
+                    i = 0;
+                    while (i < frame.ref_array_bindings.items.len) {
+                        const b = frame.ref_array_bindings.items[i];
+                        if (b.cell == cell and b.array == ab.array and b.key.eql(ab.key)) {
+                            _ = frame.ref_array_bindings.swapRemove(i);
+                        } else i += 1;
+                    }
+                }
+            },
+            .object => |ob| {
+                fi = 0;
+                while (fi < self.frame_count) : (fi += 1) {
+                    const frame = &self.frames[fi];
+                    var i: usize = 0;
+                    while (i < frame.ref_object_bindings.items.len) {
+                        const b = frame.ref_object_bindings.items[i];
+                        if (b.cell == cell and b.object == ob.object and std.mem.eql(u8, b.prop_name, ob.prop_name)) {
+                            _ = frame.ref_object_bindings.swapRemove(i);
+                        } else i += 1;
+                    }
+                }
+            },
+            .static => |sb| {
+                fi = 0;
+                while (fi < self.frame_count) : (fi += 1) {
+                    const frame = &self.frames[fi];
+                    var i: usize = 0;
+                    while (i < frame.ref_static_bindings.items.len) {
+                        const b = frame.ref_static_bindings.items[i];
+                        if (b.cell == cell and std.mem.eql(u8, b.class_name, sb.class_name) and std.mem.eql(u8, b.prop_name, sb.prop_name)) {
+                            _ = frame.ref_static_bindings.swapRemove(i);
+                        } else i += 1;
+                    }
+                }
+            },
+        }
+        ri.removeTarget(self.allocator, cell, t);
+    }
+
     // remove the map targets for a frame's bindings at teardown, keeping the
     // registry in lock-step with the legacy lists. driven by the legacy lists
     // themselves during the phased migration. generic over CallFrame /
@@ -4774,7 +4848,12 @@ pub const VM = struct {
                     // from vars alone left the old value readable (so isset()
                     // still reported it set). reset the slot and drop any ref
                     // binding so the name reads as undefined afterward
+                    const u_cell = uframe.ref_slots.get(name);
                     _ = uframe.ref_slots.remove(name);
+                    // this variable may have been the last alias of a ref cell
+                    // (`$r = &$a[k]; unset($r)` / post-foreach `unset($it)`) -
+                    // revert the bound element/prop to a plain value if so
+                    if (u_cell) |cell| self.revertUncapturedCell(cell);
                     const u_sn = if (uframe.func) |f| f.slot_names else self.global_slot_names;
                     for (u_sn, 0..) |sn, si| {
                         if (sn.len == name.len and std.mem.eql(u8, sn, name)) {
