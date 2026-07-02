@@ -3425,7 +3425,10 @@ pub const VM = struct {
                     // direct property access on base (never offsetGet/Set).
                     // clone array values for copy-on-assign semantics
                     const raw_v = self.pop();
-                    const v = if (raw_v == .array) try self.copyValue(raw_v) else raw_v;
+                    // set/new_arr.set/offsetSet retain v once (store choke); the
+                    // string-char path only reads v. copyValue would double-retain
+                    // (see array_set) - pass raw
+                    const v = raw_v;
                     const inner_key = self.pop();
                     const prop_key = self.pop();
                     const base = self.pop();
@@ -3513,7 +3516,10 @@ pub const VM = struct {
                     // pops [val, inner_key, outer_key, base]
                     // clone array values for copy-on-assign semantics
                     const raw_v = self.pop();
-                    const v = if (raw_v == .array) try self.copyValue(raw_v) else raw_v;
+                    // set/new_arr.set/offsetSet retain v once (store choke); the
+                    // string-char path only reads v. copyValue would double-retain
+                    // (see array_set) - pass raw
+                    const v = raw_v;
                     const inner_key = self.pop();
                     const outer_key = self.pop();
                     const base = self.pop();
@@ -3655,15 +3661,12 @@ pub const VM = struct {
                     const raw_val = self.pop();
                     const key = self.pop();
                     const arr_val = self.pop();
-                    // value-assign clones so the destination has an
-                    // independent iterator pointer (PHP copy-on-assign).
-                    // ref-assign (=&) intentionally shares the underlying
-                    // PhpArray so cycle identity survives for print_r /
-                    // var_dump / var_export recursion detection
-                    const val = if (!is_ref and raw_val == .array)
-                        try self.copyValue(raw_val)
-                    else
-                        raw_val;
+                    // PhpArray.set retains the stored value once (store choke).
+                    // copyValue'ing an array first would DOUBLE-retain (share+retain
+                    // then set's retain), inflating rc -> spurious cowSeparate. under
+                    // COW copyValue shares (no independent iterator pointer) so it
+                    // adds nothing here - pass raw, let set do the single retain
+                    const val = raw_val;
                     if (arr_val == .array) {
                         if (key == .array or key == .object) {
                             if (try self.throwOffsetKeyType(key, .access)) continue;
@@ -3717,7 +3720,9 @@ pub const VM = struct {
                     if (arr_val == .array) {
                         const ak = Value.toArrayKey(key);
                         if (arr_val.array.contains(ak)) {
-                            const cloned = if (val == .array) try self.copyValue(val) else val;
+                            // set/writeArrayElemRef retain once; copyValue would
+                            // double-retain (see array_set). pass raw
+                            const cloned = val;
                             // Stage 2 element-overwrite release - see array_set.
                             // a by-ref foreach writeback into a referenced element
                             // routes through the shared cell
