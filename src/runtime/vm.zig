@@ -793,6 +793,17 @@ pub const VM = struct {
         try ri.addPropRev(self.allocator, .{ .object = null, .class_name = class_name, .prop_name = prop_name }, cell);
     }
 
+    // is `obj->prop_name` the target of a live reference (`$r = &$obj->prop`)?
+    // if so, its array value is shared storage on purpose and an in-place inner
+    // write must NOT cowSeparate it (every alias must see the mutation)
+    fn propIsReferenced(self: *VM, obj: *PhpObject, prop_name: []const u8) bool {
+        const ri = self.ref_index orelse return false;
+        if (ri.prop_rev.get(.{ .object = obj, .class_name = "", .prop_name = prop_name })) |list| {
+            return list.items.len > 0;
+        }
+        return false;
+    }
+
     // for by-ref foreach advancing past an element: if $name's current cell has
     // ONLY the foreach's own array binding (nothing captured it via `$r = &$v` /
     // `$x[] = &$v`), revert that element to a non-reference - clear its entry.ref
@@ -3367,8 +3378,15 @@ pub const VM = struct {
                                 // (the vivify chain descends to write through it).
                                 // separate it from co-holders and store back into
                                 // the parent (already separated at the root). set
-                                // retains, so cancel the extra to keep one owner
-                                const inner = try self.cowSeparate(existing.array);
+                                // retains, so cancel the extra to keep one owner.
+                                // EXCEPTION (mirrors the array_set nested-write path):
+                                // when parent[key] is itself a reference (`$r=&$a[k]`)
+                                // the inner array is shared storage on purpose - the
+                                // descending write must mutate it in place so every
+                                // alias sees it, never separate a copy
+                                const inner_is_ref = self.array_ref_active and
+                                    (if (arr_val.array.getPtr(arr_key)) |ep| ep.ref != null else false);
+                                const inner = if (inner_is_ref) existing.array else try self.cowSeparate(existing.array);
                                 if (inner != existing.array) {
                                     try arr_val.array.set(self.allocator, arr_key, .{ .array = inner });
                                     inner.refcount -= 1;
@@ -3449,7 +3467,9 @@ pub const VM = struct {
                         // before the inner write; store it back via obj.set
                         // (retains - cancel the extra to keep one owner)
                         var ea = existing;
-                        const inner = try self.cowSeparate(existing.array);
+                        // a referenced property (`$r=&$obj->prop`) is shared on
+                        // purpose - mutate in place, never separate a copy
+                        const inner = if (self.propIsReferenced(obj, pname)) existing.array else try self.cowSeparate(existing.array);
                         if (inner != existing.array) {
                             try obj.set(self.allocator, pname, .{ .array = inner });
                             inner.refcount -= 1;
@@ -3817,8 +3837,10 @@ pub const VM = struct {
                             if (try self.throwOffsetKeyType(key, .access)) continue;
                             return error.RuntimeError;
                         }
-                        // COW: separate a shared array before writing the element
-                        const dst = try self.cowSeparate(cur.array);
+                        // COW: separate a shared array before writing the element -
+                        // UNLESS the slot is a reference (`$r=&$arr`), whose array is
+                        // shared storage on purpose and must be mutated in place
+                        const dst = if (ref_cell != null) cur.array else try self.cowSeparate(cur.array);
                         if (dst != cur.array) {
                             try self.storeLocalSlot(frame, slot, .{ .array = dst });
                             cur = .{ .array = dst };
@@ -3871,8 +3893,8 @@ pub const VM = struct {
                         }
                     }
                     var cur: Value = .null;
+                    var from_ref = false;
                     if (frame.func) |func| {
-                        var from_ref = false;
                         if (slot < func.slot_names.len and func.slot_names[slot].len > 0) {
                             if (frame.ref_slots.get(func.slot_names[slot])) |cell| {
                                 cur = cell.*;
@@ -3890,8 +3912,10 @@ pub const VM = struct {
                     if (cur != .null and !(cur == .bool and !cur.bool)) {
                         // COW: this array is about to be mutated in place (the
                         // pushed array feeds array_push / array_set / chain).
-                        // separate it from any co-holders first
-                        if (cur == .array) {
+                        // separate it from any co-holders first - UNLESS the local
+                        // is a reference (`$r=&$x`), whose array is shared storage
+                        // on purpose; separating it would break the alias
+                        if (cur == .array and !from_ref) {
                             const sep = try self.cowSeparate(cur.array);
                             if (sep != cur.array) {
                                 try self.storeLocalSlot(frame, slot, .{ .array = sep });
@@ -4016,6 +4040,12 @@ pub const VM = struct {
                         return error.RuntimeError;
                     }
                     if (cur == .array) {
+                        // a referenced property (`$r=&$obj->prop`) is shared on
+                        // purpose - write through it in place, never separate
+                        if (self.propIsReferenced(eap_obj, prop_name)) {
+                            self.push(cur);
+                            continue;
+                        }
                         const sep = try self.cowSeparate(cur.array);
                         if (sep != cur.array) {
                             try eap_obj.set(self.allocator, prop_name, .{ .array = sep });
@@ -4091,8 +4121,8 @@ pub const VM = struct {
                     const slot = self.readU16();
                     const frame = self.currentFrame();
                     var cur: Value = .null;
+                    var from_ref = false;
                     if (frame.func) |func| {
-                        var from_ref = false;
                         if (slot < func.slot_names.len and func.slot_names[slot].len > 0) {
                             if (frame.ref_slots.get(func.slot_names[slot])) |cell| {
                                 cur = cell.*;
@@ -4103,7 +4133,9 @@ pub const VM = struct {
                     } else {
                         cur = self.getLocalGlobal(slot, frame);
                     }
-                    if (cur == .array) {
+                    // a referenced local's array is shared storage on purpose
+                    // (`$r = &$x`) - never separate it, or aliases diverge
+                    if (cur == .array and !from_ref) {
                         const sep = try self.cowSeparate(cur.array);
                         if (sep != cur.array) try self.storeLocalSlot(frame, slot, .{ .array = sep });
                     }
