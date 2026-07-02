@@ -21,7 +21,8 @@ jobs:
             name: linux-x86_64
           - os: ubuntu-24.04-arm
             name: linux-aarch64
-          - os: macos-latest
+          # pinned to 15: macos-latest = macOS 26 whose SDK zig 0.15.1 can't link
+          - os: macos-15
             name: macos-aarch64
           - os: ubuntu-latest
             name: linux-x86_64-musl

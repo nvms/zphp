@@ -17,7 +17,9 @@ jobs:
   test:
     strategy:
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        # macos pinned to 15: macos-latest resolved to macOS 26 in 2026-07 and
+        # zig 0.15.1 cannot link against its SDK (undefined libSystem symbols)
+        os: [ubuntu-latest, macos-15]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v6
