@@ -518,6 +518,7 @@ test {
     _ = @import("stdlib/exceptions.zig");
     _ = @import("stdlib/registry.zig");
     _ = @import("stdlib/datetime.zig");
+    _ = @import("stdlib/pcre.zig");
     _ = @import("pipeline/parser_tests.zig");
     _ = @import("integration_tests.zig");
     _ = @import("fmt.zig");

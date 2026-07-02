@@ -195,9 +195,70 @@ fn parsePattern(raw_in: []const u8) ?PatternInfo {
     return .{ .pattern = pattern, .flags = flags };
 }
 
+// PCRE2 10.43+ (what modern PHP bundles) recognizes {,n} as the quantifier
+// {0,n}; older system libpcre2 (ubuntu 24.04 ships 10.42) treats it as a
+// literal. rewrite {,n} to {0,n} - identical semantics on every pcre2
+// version - so zphp matches PHP regardless of which libpcre2 it links.
+// skips escaped braces, character classes, and \Q...\E quoted runs.
+// returns null when no rewrite is needed (the common case, no allocation)
+fn normalizeOpenBoundQuantifier(pattern: []const u8) ?[]u8 {
+    var out: ?std.ArrayListUnmanaged(u8) = null;
+    var copied: usize = 0;
+    var in_class = false;
+    var in_quote = false;
+    var i: usize = 0;
+    while (i < pattern.len) : (i += 1) {
+        const c = pattern[i];
+        if (in_quote) {
+            if (c == '\\' and i + 1 < pattern.len and pattern[i + 1] == 'E') {
+                in_quote = false;
+                i += 1;
+            }
+            continue;
+        }
+        if (c == '\\') {
+            if (i + 1 < pattern.len and pattern[i + 1] == 'Q') in_quote = true;
+            i += 1;
+            continue;
+        }
+        if (in_class) {
+            if (c == ']') in_class = false;
+            continue;
+        }
+        if (c == '[') {
+            in_class = true;
+            // a ] right after [ or [^ is a literal member, not the closer
+            var j = i + 1;
+            if (j < pattern.len and pattern[j] == '^') j += 1;
+            if (j < pattern.len and pattern[j] == ']') i = j;
+            continue;
+        }
+        if (c == '{' and i + 2 < pattern.len and pattern[i + 1] == ',' and std.ascii.isDigit(pattern[i + 2])) {
+            var j = i + 3;
+            while (j < pattern.len and std.ascii.isDigit(pattern[j])) j += 1;
+            if (j < pattern.len and pattern[j] == '}') {
+                if (out == null) out = .{};
+                out.?.appendSlice(std.heap.c_allocator, pattern[copied .. i + 1]) catch return null;
+                out.?.append(std.heap.c_allocator, '0') catch return null;
+                copied = i + 1;
+                i = j - 1;
+            }
+        }
+    }
+    if (out) |*o| {
+        o.appendSlice(std.heap.c_allocator, pattern[copied..]) catch return null;
+        return o.toOwnedSlice(std.heap.c_allocator) catch return null;
+    }
+    return null;
+}
+
 fn compilePattern(pattern: []const u8, flags: u32) ?*pcre2.Code {
     var err_code: c_int = 0;
     var err_offset: usize = 0;
+    if (normalizeOpenBoundQuantifier(pattern)) |buf| {
+        defer std.heap.c_allocator.free(buf);
+        return pcre2.pcre2_compile_8(buf.ptr, buf.len, flags, &err_code, &err_offset, null);
+    }
     return pcre2.pcre2_compile_8(
         pattern.ptr,
         pattern.len,
@@ -206,6 +267,42 @@ fn compilePattern(pattern: []const u8, flags: u32) ?*pcre2.Code {
         &err_offset,
         null,
     );
+}
+
+test "normalizeOpenBoundQuantifier" {
+    const t = std.testing;
+    try t.expectEqual(@as(?[]u8, null), normalizeOpenBoundQuantifier("a{2,4}b"));
+    try t.expectEqual(@as(?[]u8, null), normalizeOpenBoundQuantifier("a{,}b"));
+    try t.expectEqual(@as(?[]u8, null), normalizeOpenBoundQuantifier("plain"));
+    {
+        const r = normalizeOpenBoundQuantifier("a{,3}b").?;
+        defer std.heap.c_allocator.free(r);
+        try t.expectEqualStrings("a{0,3}b", r);
+    }
+    {
+        const r = normalizeOpenBoundQuantifier("a{,3}b{,12}c").?;
+        defer std.heap.c_allocator.free(r);
+        try t.expectEqualStrings("a{0,3}b{0,12}c", r);
+    }
+    // escaped brace is a literal, not a quantifier
+    try t.expectEqual(@as(?[]u8, null), normalizeOpenBoundQuantifier("a\\{,3}b"));
+    // inside a character class braces are literal
+    try t.expectEqual(@as(?[]u8, null), normalizeOpenBoundQuantifier("[{,3}]a"));
+    try t.expectEqual(@as(?[]u8, null), normalizeOpenBoundQuantifier("[]{,3}]a"));
+    try t.expectEqual(@as(?[]u8, null), normalizeOpenBoundQuantifier("[^]{,3}]a"));
+    // \Q...\E quotes everything
+    try t.expectEqual(@as(?[]u8, null), normalizeOpenBoundQuantifier("\\Qa{,3}\\Eb"));
+    {
+        const r = normalizeOpenBoundQuantifier("\\Qa{,3}\\Eb{,2}").?;
+        defer std.heap.c_allocator.free(r);
+        try t.expectEqualStrings("\\Qa{,3}\\Eb{0,2}", r);
+    }
+    // class followed by a real open-bound quantifier still rewrites
+    {
+        const r = normalizeOpenBoundQuantifier("[ab]{,3}c").?;
+        defer std.heap.c_allocator.free(r);
+        try t.expectEqualStrings("[ab]{0,3}c", r);
+    }
 }
 
 // emit a PHP-format 'preg_<fn>(): Compilation failed: <message> at offset N'
