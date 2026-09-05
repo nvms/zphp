@@ -16,22 +16,35 @@ fi
 
 passed=0
 failed=0
-errors=""
+capture_dir=$(mktemp -d "${TMPDIR:-/tmp}/zphp-compat.XXXXXX")
+trap 'rm -rf "$capture_dir"' EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 for f in "$SCRIPT_DIR"/*.php; do
     name="$(basename "$f")"
     # skip tests that require external database servers
     case "$name" in pdo_mysql.php|pdo_pgsql.php) continue ;; esac
-    php_out="$(php -d error_reporting='E_ALL & ~E_DEPRECATED' -d display_errors=0 -d zend.exception_ignore_args=0 -d zend.exception_string_param_max_len=15 "$f" 2>&1)" || true
-    zphp_out="$("$ZPHP" run "$f" 2>&1)" || true
+    php_status=0
+    zphp_status=0
+    php -d error_reporting='E_ALL & ~E_DEPRECATED' -d display_errors=0 -d zend.exception_ignore_args=0 -d zend.exception_string_param_max_len=15 "$f" >"$capture_dir/php.stdout" 2>"$capture_dir/php.stderr" || php_status=$?
+    "$ZPHP" run "$f" >"$capture_dir/zphp.stdout" 2>"$capture_dir/zphp.stderr" || zphp_status=$?
 
-    if [ "$php_out" = "$zphp_out" ]; then
+    if [ "$php_status" -eq "$zphp_status" ] &&
+        cmp -s "$capture_dir/php.stdout" "$capture_dir/zphp.stdout" &&
+        cmp -s "$capture_dir/php.stderr" "$capture_dir/zphp.stderr"; then
         passed=$((passed + 1))
         echo "  pass  $name"
     else
         failed=$((failed + 1))
         echo "  FAIL  $name"
-        errors="$errors\n--- $name ---\nexpected (php):\n$php_out\ngot (zphp):\n$zphp_out\n"
+        printf '    exit status: php=%s zphp=%s\n' "$php_status" "$zphp_status"
+        for stream in stdout stderr; do
+            if ! cmp -s "$capture_dir/php.$stream" "$capture_dir/zphp.$stream"; then
+                printf '    %s differs (php / zphp):\n' "$stream"
+                diff -u "$capture_dir/php.$stream" "$capture_dir/zphp.$stream" || true
+            fi
+        done
     fi
 done
 
@@ -39,6 +52,5 @@ echo ""
 echo "$passed passed, $failed failed"
 
 if [ $failed -gt 0 ]; then
-    echo -e "$errors"
     exit 1
 fi

@@ -136,6 +136,7 @@ jobs:
           php-version: '8.5'
       - run: zig build
       - run: php --version
+      - run: python3 ./tests/compat_runner_test
       - run: ./tests/run
 
   examples:

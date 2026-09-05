@@ -61,6 +61,8 @@ pub const PharCacheEntry = struct {
 pub const OutputBufferLevel = struct {
     start: usize,
     callback: ?Value = null,
+    started: bool = false,
+    disabled: bool = false,
 };
 
 pub const ErrorHandlerEntry = struct { handler: Value, mask: i64 };
@@ -16184,6 +16186,10 @@ pub const VM = struct {
     }
 
     pub fn releaseCallbackRegistries(self: *VM) void {
+        for (self.ob_stack.items) |*level| {
+            if (level.callback) |cb| self.releaseValue(cb);
+            level.callback = null;
+        }
         for (self.shutdown_callbacks.items) |cb| self.releaseValue(cb);
         self.shutdown_callbacks.clearRetainingCapacity();
         for (self.autoload_callbacks.items) |cb| self.releaseValue(cb);

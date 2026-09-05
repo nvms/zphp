@@ -508,7 +508,7 @@ fn runWithVM(allocator: std.mem.Allocator, result: *CompileResult, script_path: 
                 if (vm.exit_requested) std.process.exit(vm.exit_code);
                 if (vm.pending_exception != null) {
                     const fallback = error_format.formatRuntimeError(allocator, vm);
-                    if (fallback.len > 0) try writeStderr(fallback);
+                    if (fallback.len > 0 and (vm.error_reporting_level & 1) != 0) try writeStderr(fallback);
                     std.process.exit(255);
                 }
                 return;
@@ -518,10 +518,12 @@ fn runWithVM(allocator: std.mem.Allocator, result: *CompileResult, script_path: 
         if (vm.output.items.len > 0) try writeStdout(vm.output.items);
         if (std.posix.getenv("ZPHP_DBG_PROFILE") != null) dumpProfile(vm);
         const msg = error_format.formatRuntimeError(allocator, vm);
-        if (msg.len > 0) {
-            try writeStderr(msg);
-        } else {
-            try writeStderr(vm.error_msg orelse "runtime error\n");
+        if ((vm.error_reporting_level & 1) != 0) {
+            if (msg.len > 0) {
+                try writeStderr(msg);
+            } else {
+                try writeStderr(vm.error_msg orelse "runtime error\n");
+            }
         }
         std.process.exit(255);
     };

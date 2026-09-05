@@ -1,0 +1,70 @@
+#!/usr/bin/env python3
+import os
+from pathlib import Path
+import shutil
+import subprocess
+import tempfile
+import unittest
+
+
+class CompatRunnerTest(unittest.TestCase):
+    def check_runner(self, php, zphp, expected_status, expected_output):
+        with tempfile.TemporaryDirectory(prefix="zphp-compat-test-") as directory:
+            root = Path(directory)
+            shutil.copyfile(Path(__file__).with_name("run"), root / "run")
+            (root / "probe.php").write_text("<?php\n")
+            captures = root / "captures"
+            captures.mkdir()
+            for name, body in (("php", php), ("zphp", zphp)):
+                executable = root / name
+                executable.write_text("#!/bin/sh\n" + body + "\n")
+                executable.chmod(0o755)
+            env = dict(os.environ, PATH=directory + os.pathsep + os.environ["PATH"],
+                       ZPHP=str(root / "zphp"), TMPDIR=str(captures))
+            result = subprocess.run(["bash", str(root / "run")], env=env,
+                                    capture_output=True, timeout=10)
+            self.assertEqual(result.returncode, expected_status, result.stdout)
+            self.assertIn(expected_output, result.stdout)
+            self.assertEqual(list(captures.iterdir()), [])
+
+    def test_equal_output(self):
+        self.check_runner("printf 'hello\\n'; printf 'warning\\n' >&2",
+                          "printf 'hello\\n'; printf 'warning\\n' >&2",
+                          0, b"1 passed, 0 failed")
+
+    def test_equal_nonzero_status(self):
+        self.check_runner("exit 7", "exit 7", 0, b"1 passed, 0 failed")
+
+    def test_different_status(self):
+        self.check_runner("printf same", "printf same; exit 7", 1,
+                          b"exit status: php=0 zphp=7")
+
+    def test_different_stdout(self):
+        self.check_runner("printf expected", "printf actual", 1, b"stdout differs")
+
+    def test_different_stderr(self):
+        self.check_runner("printf expected >&2", "printf actual >&2", 1, b"stderr differs")
+
+    def test_output_on_wrong_stream(self):
+        self.check_runner("printf same", "printf same >&2", 1, b"1 failed")
+
+    def test_trailing_newlines(self):
+        self.check_runner("printf 'same\\n'", "printf 'same\\n\\n'", 1, b"stdout differs")
+
+    def test_missing_final_newline(self):
+        self.check_runner("printf 'same\\n'", "printf same", 1, b"stdout differs")
+
+    def test_stderr_trailing_newlines(self):
+        self.check_runner("printf 'same\\n' >&2", "printf 'same\\n\\n' >&2", 1,
+                          b"stderr differs")
+
+    def test_embedded_null(self):
+        self.check_runner("printf 'a\\000b'", "printf ab", 1, b"stdout differs")
+
+    def test_equal_binary_output(self):
+        self.check_runner("printf 'a\\000b\\n'", "printf 'a\\000b\\n'", 0,
+                          b"1 passed, 0 failed")
+
+
+if __name__ == "__main__":
+    unittest.main()

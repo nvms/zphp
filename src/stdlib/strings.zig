@@ -421,7 +421,12 @@ fn strtolower(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
 }
 
 fn strtoupper(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len == 0) return .{ .string = Value.String.borrowed("") };
+    if (args.len != 1) {
+        const msg = try std.fmt.allocPrint(ctx.allocator, "strtoupper() expects exactly 1 argument, {d} given", .{args.len});
+        try ctx.strings.append(ctx.allocator, msg);
+        try ctx.vm.setPendingException("ArgumentCountError", msg);
+        return error.RuntimeError;
+    }
     if (try rejectArrayParam(ctx, args[0], "strtoupper")) return error.RuntimeError;
     const s = try coerceToString(ctx, args[0]);
     const buf = try ctx.allocator.alloc(u8, s.len);
@@ -4183,7 +4188,7 @@ fn rejectArrayParam(ctx: *NativeContext, v: Value, comptime func_name: []const u
     return false;
 }
 
-fn coerceToString(ctx: *NativeContext, v: Value) ![]const u8 {
+pub fn coerceToString(ctx: *NativeContext, v: Value) ![]const u8 {
     return switch (v) {
         .string => |s| s.bytes(),
         .int => |n| blk: {
