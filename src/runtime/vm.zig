@@ -6223,7 +6223,10 @@ pub const VM = struct {
                         }
                         try self.objects.append(self.allocator, copy);
                         if (self.hasMethod(src.class_name, "__clone")) {
-                            _ = self.callMethod(copy, "__clone", &.{}) catch {};
+                            _ = self.callMethod(copy, "__clone", &.{}) catch {
+                                if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
+                                return error.RuntimeError;
+                            };
                         }
                         self.push(.{ .object = copy });
                     } else {
@@ -8358,6 +8361,13 @@ pub const VM = struct {
                                     // name so the stack trace shows it at #0
                                     if (self.pending_exception) |exc| {
                                         if (!isFrameOutNative(mc_entry.full_name)) self.prependNativeFrameToTrace(exc, mc_entry.full_name, args_buf[0..ac]) catch {};
+                                        // Cached calls must dispatch pending callback exceptions
+                                        // just like uncached native calls, but only to a handler
+                                        // owned by this execution boundary.
+                                        if (self.dispatchPendingException(base_frame)) {
+                                            self.pending_native_name = null;
+                                            continue;
+                                        }
                                         self.pending_native_name = mc_entry.full_name;
                                         self.pending_native_is_instance = true;
                                     }

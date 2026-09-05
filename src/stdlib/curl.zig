@@ -26,14 +26,11 @@ pub const entries = .{
     .{ "curl_strerror", curlStrerror },
     .{ "curl_escape", curlEscape },
     .{ "curl_unescape", curlUnescape },
-    // curl_share_* - minimal stubs that return plausible values. real
-    // cross-handle sharing isn't supported but most code paths only use these
-    // for cookie / DNS jar setup and tolerate the no-op
     .{ "curl_share_init", curlShareInit },
     .{ "curl_share_close", curlShareClose },
     .{ "curl_share_setopt", curlShareSetopt },
     .{ "curl_share_errno", curlShareErrno },
-    .{ "curl_share_strerror", curlStrerror },
+    .{ "curl_share_strerror", curlShareStrerror },
     // curl_multi_* - real concurrent transfers via libcurl's multi interface
     .{ "curl_multi_init", curlMultiInit },
     .{ "curl_multi_add_handle", curlMultiAddHandle },
@@ -98,6 +95,8 @@ fn curlInit(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     try obj.set(ctx.allocator, "__header_out", .{ .bool = false });
     try obj.set(ctx.allocator, "__http_code", .{ .int = 0 });
 
+    try obj.set(ctx.allocator, "__share_state", .{ .int = 0 });
+
     // store slist pointers for cleanup
     try obj.set(ctx.allocator, "__slist_ptr", .{ .int = 0 });
 
@@ -119,11 +118,27 @@ fn curlSetopt(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
 }
 
 fn applySetopt(ctx: *NativeContext, handle: *c.CURL, obj: *PhpObject, option: i64, value: Value) RuntimeError!Value {
+    if (option == c.CURLOPT_SHARE) {
+        // PHP ignores non-share values (including null); they do not detach.
+        if (value != .object or !std.mem.eql(u8, value.object.class_name, "CurlShareHandle")) return .{ .bool = true };
+        const share = getShareState(value.object) orelse return .{ .bool = false };
+        const code = c.curl_easy_setopt(handle, c.CURLOPT_SHARE, share.handle);
+        if (code == c.CURLE_OK) {
+            // Native references outlive PHP wrappers, including request sweeping
+            // in allocation order. reset preserves libcurl's share association.
+            share.refs += 1;
+            releaseEasyShare(obj);
+            obj.properties.getPtr("__share_state").?.* = .{ .int = @intCast(@intFromPtr(share)) };
+        }
+        try obj.set(ctx.allocator, "__errno", .{ .int = @intCast(code) });
+        return .{ .bool = code == c.CURLE_OK };
+    }
     // string options
     if (option == c.CURLOPT_URL or
         option == c.CURLOPT_USERAGENT or
         option == c.CURLOPT_REFERER or
         option == c.CURLOPT_COOKIE or
+        option == c.CURLOPT_COOKIELIST or
         option == c.CURLOPT_COOKIEFILE or
         option == c.CURLOPT_COOKIEJAR or
         option == c.CURLOPT_USERPWD or
@@ -388,18 +403,22 @@ fn curlClose(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
 
 pub fn cleanupHandle(obj: *PhpObject) void {
     if (obj.pooled) return;
+    // The property map belongs to the VM allocator (also used by native
+    // contexts). Cleanup only clears existing pointer slots: even put of an
+    // existing key can grow a full map, so it must not use page_allocator.
     // free slist
     const slist_v = obj.get("__slist_ptr");
     if (slist_v == .int and slist_v.int != 0) {
         const sl: *c.struct_curl_slist = @ptrFromInt(@as(usize, @intCast(slist_v.int)));
         c.curl_slist_free_all(sl);
-        obj.properties.put(std.heap.page_allocator, "__slist_ptr", .{ .int = 0 }) catch {};
+        obj.properties.getPtr("__slist_ptr").?.* = .{ .int = 0 };
     }
 
     // free curl handle
     if (getHandle(obj)) |handle| {
         c.curl_easy_cleanup(handle);
-        obj.properties.put(std.heap.page_allocator, "__curl_ptr", .{ .int = 0 }) catch {};
+        releaseEasyShare(obj);
+        obj.properties.getPtr("__curl_ptr").?.* = .{ .int = 0 };
     }
 }
 
@@ -431,6 +450,17 @@ fn curlGetinfo(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
 }
 
 fn getInfoOption(ctx: *NativeContext, handle: *c.CURL, option: i64) RuntimeError!Value {
+    if (option == c.CURLINFO_COOKIELIST) {
+        var list: ?*c.struct_curl_slist = null;
+        if (c.curl_easy_getinfo(handle, c.CURLINFO_COOKIELIST, &list) != c.CURLE_OK) return .{ .bool = false };
+        defer c.curl_slist_free_all(list);
+        const arr = try ctx.createArray();
+        var node = list;
+        while (node) |item| : (node = item.next) {
+            try arr.append(ctx.allocator, .{ .string = Value.String.borrowed(try ctx.createString(std.mem.span(item.data))) });
+        }
+        return .{ .array = arr };
+    }
     // string info types
     if (option == c.CURLINFO_EFFECTIVE_URL or
         option == c.CURLINFO_CONTENT_TYPE or
@@ -701,31 +731,114 @@ fn curlStrerror(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     return .{ .string = Value.String.borrowed(owned) };
 }
 
+// Separate native ownership keeps shares alive even when their PHP wrapper is
+// swept before an attached easy handle. No VM layout or GC changes are needed.
+const ShareState = struct {
+    handle: *c.CURLSH,
+    refs: usize = 1,
+    errno: c_uint = c.CURLSHE_OK,
+};
+
+fn getShareState(obj: *PhpObject) ?*ShareState {
+    const v = obj.get("__share_state");
+    if (v != .int or v.int == 0) return null;
+    return @ptrFromInt(@as(usize, @intCast(v.int)));
+}
+
+fn releaseShare(state: *ShareState) void {
+    state.refs -= 1;
+    if (state.refs == 0) {
+        _ = c.curl_share_cleanup(state.handle);
+        std.heap.page_allocator.destroy(state);
+    }
+}
+
+fn releaseEasyShare(obj: *PhpObject) void {
+    if (getShareState(obj)) |state| {
+        obj.properties.getPtr("__share_state").?.* = .{ .int = 0 };
+        releaseShare(state);
+    }
+}
+
+fn cleanupShare(obj: *PhpObject) bool {
+    if (!obj.pooled) releaseEasyShare(obj);
+    return true;
+}
+
+fn requireShare(ctx: *NativeContext, args: []const Value, name: []const u8) RuntimeError!*ShareState {
+    if (args.len > 0 and args[0] == .object and std.mem.eql(u8, args[0].object.class_name, "CurlShareHandle")) {
+        if (getShareState(args[0].object)) |state| return state;
+    }
+    const msg = try std.fmt.allocPrint(ctx.allocator, "{s}(): Argument #1 ($share_handle) must be of type CurlShareHandle", .{name});
+    try ctx.vm.setPendingException("TypeError", msg);
+    return error.RuntimeError;
+}
+
+fn curlShareConstruct(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    try ctx.vm.setPendingException("Error", "Cannot directly construct CurlShareHandle, use curl_share_init() instead");
+    return error.RuntimeError;
+}
+
+fn curlShareClone(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    // The VM copies properties before invoking __clone. Remove the borrowed
+    // native pointer so failed-clone teardown cannot release the original state.
+    if (getThis(ctx)) |obj| {
+        if (obj.properties.getPtr("__share_state")) |ptr| ptr.* = .{ .int = 0 };
+    }
+    try ctx.vm.setPendingException("Error", "Trying to clone an uncloneable object of class CurlShareHandle");
+    return error.RuntimeError;
+}
+
 fn curlShareInit(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    ensureGlobalInit();
+    const handle = c.curl_share_init() orelse return .{ .bool = false };
+    errdefer _ = c.curl_share_cleanup(handle);
+    const state = try std.heap.page_allocator.create(ShareState);
+    errdefer std.heap.page_allocator.destroy(state);
     const obj = try ctx.createObject("CurlShareHandle");
+    state.* = .{ .handle = handle };
+    try obj.set(ctx.allocator, "__share_state", .{ .int = @intCast(@intFromPtr(state)) });
     return .{ .object = obj };
 }
 
-fn curlShareClose(_: *NativeContext, _: []const Value) RuntimeError!Value {
+fn curlShareClose(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    // Like PHP 8, close is a validated no-op; destruction owns cleanup.
+    _ = try requireShare(ctx, args, "curl_share_close");
     return .null;
 }
 
-fn curlShareSetopt(_: *NativeContext, _: []const Value) RuntimeError!Value {
-    // sharing isn't actually wired through libcurl's share interface; accept
-    // any CURLSHOPT_* setopt call so userland doesn't see a hard failure
-    return .{ .bool = true };
+fn curlShareSetopt(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    const state = try requireShare(ctx, args, "curl_share_setopt");
+    if (args.len < 3) return .{ .bool = false };
+    const option = Value.toInt(args[1]);
+    if (option != c.CURLSHOPT_SHARE and option != c.CURLSHOPT_UNSHARE) {
+        state.errno = c.CURLSHE_BAD_OPTION;
+        try ctx.vm.setPendingException("ValueError", "curl_share_setopt(): Argument #2 ($option) is not a valid cURL share option");
+        return error.RuntimeError;
+    }
+    const data: c_int = @truncate(Value.toInt(args[2]));
+    state.errno = @intCast(c.curl_share_setopt(state.handle, @as(c_uint, @intCast(option)), data));
+    return .{ .bool = state.errno == c.CURLSHE_OK };
 }
 
-fn curlShareErrno(_: *NativeContext, _: []const Value) RuntimeError!Value {
-    return .{ .int = 0 };
+fn curlShareErrno(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    return .{ .int = (try requireShare(ctx, args, "curl_share_errno")).errno };
+}
+
+fn curlShareStrerror(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len == 0) return .null;
+    const code: c_uint = @bitCast(@as(c_int, @truncate(Value.toInt(args[0]))));
+    const msg = c.curl_share_strerror(code);
+    if (msg == null) return .null;
+    return .{ .string = Value.String.borrowed(try ctx.createString(std.mem.span(msg))) };
 }
 
 // ---------------- curl_multi ----------------
 // each easy handle added to a multi handle gets a heap-allocated
 // WriteCallbackData so its response body survives from add_handle through
 // curl_multi_getcontent. the WCB pointers live in a side table keyed by the
-// easy CURL* - keeping them off PhpObject.properties avoids growing that
-// hashmap from a later native call's arena (which corrupts its allocator)
+// easy CURL*. The side table and callback buffers use page_allocator;
+// PhpObject property maps instead belong to the VM allocator.
 
 var multi_wcb_table: std.AutoHashMapUnmanaged(usize, *WriteCallbackData) = .{};
 
@@ -839,7 +952,7 @@ fn curlMultiClose(_: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len < 1 or args[0] != .object) return .null;
     const mh = getMultiHandle(args[0].object) orelse return .null;
     _ = c.curl_multi_cleanup(mh);
-    args[0].object.properties.put(std.heap.page_allocator, "__multi_ptr", .{ .int = 0 }) catch {};
+    args[0].object.properties.getPtr("__multi_ptr").?.* = .{ .int = 0 };
     return .null;
 }
 
@@ -1008,9 +1121,11 @@ pub fn register(vm: *VM, a: std.mem.Allocator) !void {
     try vm.classes.put(a, "CurlHandle", curl_def);
     _ = &curl_def;
 
-    var share_def = ClassDef{ .name = "CurlShareHandle" };
+    var share_def = ClassDef{ .name = "CurlShareHandle", .native_cleanup = cleanupShare };
     try vm.classes.put(a, "CurlShareHandle", share_def);
     _ = &share_def;
+    try vm.native_fns.put(a, "CurlShareHandle::__construct", curlShareConstruct);
+    try vm.native_fns.put(a, "CurlShareHandle::__clone", curlShareClone);
 
     var mh_def = ClassDef{ .name = "CurlMultiHandle" };
     try vm.classes.put(a, "CurlMultiHandle", mh_def);
@@ -1049,6 +1164,10 @@ pub fn register(vm: *VM, a: std.mem.Allocator) !void {
     try vm.php_constants.put(a, "CURL_LOCK_DATA_COOKIE", .{ .int = 2 });
     try vm.php_constants.put(a, "CURL_LOCK_DATA_DNS", .{ .int = 3 });
     try vm.php_constants.put(a, "CURL_LOCK_DATA_SSL_SESSION", .{ .int = 4 });
+
+    inline for (.{ "CURLSHOPT_UNSHARE", "CURL_LOCK_DATA_CONNECT", "CURL_LOCK_DATA_PSL", "CURLSHE_OK", "CURLSHE_BAD_OPTION", "CURLSHE_IN_USE", "CURLSHE_INVALID", "CURLSHE_NOMEM", "CURLSHE_NOT_BUILT_IN", "CURLOPT_SHARE", "CURLOPT_COOKIELIST", "CURLINFO_COOKIELIST" }) |name| {
+        try vm.php_constants.put(a, name, .{ .int = @field(c, name) });
+    }
 
     // CURLOPT constants
     try vm.php_constants.put(a, "CURLOPT_URL", .{ .int = c.CURLOPT_URL });
@@ -1146,6 +1265,48 @@ pub fn cleanupResources(objects: std.ArrayListUnmanaged(*PhpObject)) void {
     for (objects.items) |obj| {
         if (std.mem.eql(u8, obj.class_name, "CurlHandle")) {
             cleanupHandle(obj);
+        } else if (std.mem.eql(u8, obj.class_name, "CurlShareHandle")) {
+            _ = cleanupShare(obj);
         }
     }
+}
+
+test "curl property growth across native contexts and allocation-free cleanup" {
+    const a = std.testing.allocator;
+    const vm = try VM.initOnHeap(a);
+    defer a.destroy(vm);
+    defer vm.deinit();
+    var init_ctx = vm.makeContext("curl_init");
+    const easy = try curlInit(&init_ctx, &.{});
+    var later_ctx = vm.makeContext("curl_setopt");
+    const headers = try later_ctx.createArray();
+    try headers.append(later_ctx.allocator, .{ .string = Value.String.borrowed("X-Allocator-Test: yes") });
+    _ = try curlSetopt(&later_ctx, &.{ easy, .{ .int = c.CURLOPT_HTTPHEADER }, .{ .array = headers } });
+    // Fill to an exact capacity boundary, growing repeatedly using a later
+    // context. put(existing_key) would reserve count + 1 at this boundary.
+    var keys: [256][32]u8 = undefined;
+    const initial_capacity = easy.object.properties.capacity();
+    var i: usize = 0;
+    while (easy.object.properties.capacity() <= initial_capacity or
+        easy.object.properties.count() < easy.object.properties.capacity()) : (i += 1)
+    {
+        const key = try std.fmt.bufPrint(&keys[i], "test_property_{d}", .{i});
+        try easy.object.set(later_ctx.allocator, key, .{ .int = @intCast(i) });
+    }
+    const capacity = easy.object.properties.capacity();
+    _ = try curlClose(&later_ctx, &.{easy});
+    try std.testing.expectEqual(capacity, easy.object.properties.capacity());
+    try std.testing.expectEqual(@as(i64, 0), easy.object.get("__curl_ptr").int);
+    cleanupHandle(easy.object);
+
+    const multi = try curlMultiInit(&init_ctx, &.{});
+    i = 0;
+    while (multi.object.properties.count() < multi.object.properties.capacity()) : (i += 1) {
+        const key = try std.fmt.bufPrint(&keys[128 + i], "multi_property_{d}", .{i});
+        try multi.object.set(later_ctx.allocator, key, .null);
+    }
+    const multi_capacity = multi.object.properties.capacity();
+    _ = try curlMultiClose(&later_ctx, &.{multi});
+    try std.testing.expectEqual(multi_capacity, multi.object.properties.capacity());
+    _ = try curlMultiClose(&later_ctx, &.{multi});
 }

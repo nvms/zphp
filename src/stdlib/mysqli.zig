@@ -17,6 +17,10 @@ const ClassDef = vm_mod.ClassDef;
 const Allocator = std.mem.Allocator;
 const RuntimeError = error{ RuntimeError, OutOfMemory };
 
+const mysql_headers = @cImport({
+    @cInclude("mysql.h");
+});
+
 const mysql = struct {
     const MYSQL = opaque {};
     const MYSQL_RES = opaque {};
@@ -26,6 +30,7 @@ const mysql = struct {
     extern "mysqlclient" fn mysql_real_connect(m: *MYSQL, host: ?[*:0]const u8, user: ?[*:0]const u8, passwd: ?[*:0]const u8, db: ?[*:0]const u8, port: c_uint, socket: ?[*:0]const u8, flags: c_ulong) callconv(.c) ?*MYSQL;
     extern "mysqlclient" fn mysql_close(m: *MYSQL) callconv(.c) void;
     extern "mysqlclient" fn mysql_error(m: *MYSQL) callconv(.c) [*:0]const u8;
+    extern "mysqlclient" fn mysql_sqlstate(m: *MYSQL) callconv(.c) [*:0]const u8;
     extern "mysqlclient" fn mysql_errno(m: *MYSQL) callconv(.c) c_uint;
     extern "mysqlclient" fn mysql_real_query(m: *MYSQL, q: [*]const u8, len: c_ulong) callconv(.c) c_int;
     extern "mysqlclient" fn mysql_store_result(m: *MYSQL) callconv(.c) ?*MYSQL_RES;
@@ -135,6 +140,7 @@ fn doConnect(ctx: *NativeContext, obj: *PhpObject, host: ?[]const u8, user: ?[]c
 
     if (mysql.mysql_real_connect(conn, host_z, user_z, pass_z, db_z, port, sock_z, 0) == null) {
         try setErrorState(ctx, obj, conn);
+        try reportFailure(ctx, conn, "mysqli_connect", true);
         return false;
     }
     try obj.set(ctx.allocator, "__connected", .{ .bool = true });
@@ -228,6 +234,7 @@ fn mysqliQuery(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     const sql = sql_arg.string.bytes();
     if (mysql.mysql_real_query(conn, sql.ptr, @intCast(sql.len)) != 0) {
         try setErrorState(ctx, link, conn);
+        try reportFailure(ctx, conn, "mysqli_query", false);
         return .{ .bool = false };
     }
     try setErrorState(ctx, link, conn);
@@ -240,6 +247,30 @@ fn mysqliQuery(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     try link.set(ctx.allocator, "insert_id", .{ .int = @intCast(mysql.mysql_insert_id(conn)) });
     // not all queries return a result set; for INSERT/UPDATE/DELETE return true
     const res_opt = mysql.mysql_store_result(conn);
+    if (res_opt == null and mysql.mysql_errno(conn) != 0) {
+        try setErrorState(ctx, link, conn);
+        try reportFailure(ctx, conn, "mysqli_query", false);
+        return .{ .bool = false };
+    }
+    // Use the installed client header rather than guessing MYSQL's ABI layout.
+    if (reportMode(ctx) & 4 != 0) {
+        const native: *mysql_headers.MYSQL = @ptrCast(@alignCast(conn));
+        const index: ?[]const u8 = if (native.server_status & 16 != 0) "Bad index" else if (native.server_status & 32 != 0) "No index" else null;
+        if (index) |label| {
+            const message = try std.fmt.allocPrint(ctx.allocator, "{s} used in query/prepared statement {s}", .{ label, sql });
+            try ctx.vm.strings.append(ctx.allocator, message);
+            if (reportMode(ctx) & 2 != 0) {
+                if (res_opt) |r| mysql.mysql_free_result(r);
+                const exception = try ctx.createObject("mysqli_sql_exception");
+                try exception.set(ctx.allocator, "message", .{ .string = Value.String.borrowed(message) });
+                try exception.set(ctx.allocator, "code", .{ .int = 0 });
+                try exception.set(ctx.allocator, "sqlstate", .{ .string = Value.String.borrowed("00000") });
+                ctx.vm.pending_exception = .{ .object = exception };
+                return error.RuntimeError;
+            }
+            ctx.vm.emitWarning(message);
+        }
+    }
     const res = res_opt orelse return .{ .bool = true };
 
     const result_obj = try ctx.createObject("mysqli_result");
@@ -409,6 +440,7 @@ fn mysqliSelectDb(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     const rc = mysql.mysql_select_db(conn, db_z.ptr);
     if (rc != 0) {
         try setErrorState(ctx, link, conn);
+        try reportFailure(ctx, conn, "mysqli_select_db", false);
         return .{ .bool = false };
     }
     return .{ .bool = true };
@@ -491,7 +523,10 @@ fn mysqliPing(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     const link = linkObj(ctx, args, 0) orelse return .{ .bool = false };
     const conn = getConn(link) orelse return .{ .bool = false };
     if (!isConnected(link)) return .{ .bool = false };
-    return .{ .bool = mysql.mysql_ping(conn) == 0 };
+    const ok = mysql.mysql_ping(conn) == 0;
+    try setErrorState(ctx, link, conn);
+    if (!ok) try reportFailure(ctx, conn, "mysqli_ping", false);
+    return .{ .bool = ok };
 }
 
 fn mysqliAutocommit(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
@@ -500,21 +535,30 @@ fn mysqliAutocommit(ctx: *NativeContext, args: []const Value) RuntimeError!Value
     if (!isConnected(link)) return .{ .bool = false };
     const mode_arg: Value = if (args.len > 0 and args[0] == .object) (if (args.len > 1) args[1] else .{ .bool = true }) else if (args.len > 0) args[0] else .{ .bool = true };
     const mode: u8 = if (mode_arg.isTruthy()) 1 else 0;
-    return .{ .bool = mysql.mysql_autocommit(conn, mode) == 0 };
+    const ok = mysql.mysql_autocommit(conn, mode) == 0;
+    try setErrorState(ctx, link, conn);
+    if (!ok) try reportFailure(ctx, conn, "mysqli_autocommit", false);
+    return .{ .bool = ok };
 }
 
 fn mysqliCommit(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     const link = linkObj(ctx, args, 0) orelse return .{ .bool = false };
     const conn = getConn(link) orelse return .{ .bool = false };
     if (!isConnected(link)) return .{ .bool = false };
-    return .{ .bool = mysql.mysql_commit(conn) == 0 };
+    const ok = mysql.mysql_commit(conn) == 0;
+    try setErrorState(ctx, link, conn);
+    if (!ok) try reportFailure(ctx, conn, "mysqli_commit", false);
+    return .{ .bool = ok };
 }
 
 fn mysqliRollback(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     const link = linkObj(ctx, args, 0) orelse return .{ .bool = false };
     const conn = getConn(link) orelse return .{ .bool = false };
     if (!isConnected(link)) return .{ .bool = false };
-    return .{ .bool = mysql.mysql_rollback(conn) == 0 };
+    const ok = mysql.mysql_rollback(conn) == 0;
+    try setErrorState(ctx, link, conn);
+    if (!ok) try reportFailure(ctx, conn, "mysqli_rollback", false);
+    return .{ .bool = ok };
 }
 
 fn mysqliFreeResult(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
@@ -542,12 +586,60 @@ fn mysqliNumFields(ctx: *NativeContext, args: []const Value) RuntimeError!Value 
     return if (v == .int) v else .{ .int = 0 };
 }
 
-fn mysqliReport(_: *NativeContext, _: []const Value) RuntimeError!Value {
-    // we don't emit warning streams driven by mysql_report() so accepting the
-    // call as a no-op is correct: a real run with REPORT_ERROR would have
-    // raised PHP warnings on every libmysql error, but we already surface
-    // errors via mysqli_error / errno
+// State belongs to the VM's class registry, not a process-global variable:
+// independent VMs and reset requests must not inherit another request's mode.
+fn reportMode(ctx: *NativeContext) i64 {
+    return ctx.vm.classes.get("mysqli_driver").?.static_props.get("__report_mode").?.int;
+}
+
+fn mysqliReport(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len != 1) return reportArgumentError(ctx, "ArgumentCountError", "mysqli_report() expects exactly 1 argument");
+    if (args[0] == .array or args[0] == .object) return reportArgumentError(ctx, "TypeError", "mysqli_report(): Argument #1 ($flags) must be of type int");
+    try ctx.vm.classes.getPtr("mysqli_driver").?.static_props.put(ctx.allocator, "__report_mode", .{ .int = args[0].toInt() });
     return .{ .bool = true };
+}
+
+fn reportArgumentError(ctx: *NativeContext, class: []const u8, msg: []const u8) RuntimeError!Value {
+    const obj = try ctx.createObject(class);
+    try obj.set(ctx.allocator, "message", .{ .string = Value.String.borrowed(msg) });
+    try obj.set(ctx.allocator, "code", .{ .int = 0 });
+    ctx.vm.pending_exception = .{ .object = obj };
+    return error.RuntimeError;
+}
+
+fn driverGet(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len > 0 and args[0] == .string and std.mem.eql(u8, args[0].string.bytes(), "report_mode")) return .{ .int = reportMode(ctx) };
+    return .null;
+}
+
+fn driverSet(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len > 1 and args[0] == .string and std.mem.eql(u8, args[0].string.bytes(), "report_mode")) _ = try mysqliReport(ctx, args[1..2]);
+    return .null;
+}
+
+fn exceptionSqlState(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    const obj = linkObj(ctx, args, 0) orelse return .null;
+    return obj.get("sqlstate");
+}
+
+fn reportFailure(ctx: *NativeContext, conn: *mysql.MYSQL, operation: []const u8, connection: bool) RuntimeError!void {
+    const mode = reportMode(ctx);
+    // PHP always reports connection failures; other errors require ERROR.
+    if (!connection and mode & 1 == 0) return;
+    const message = std.mem.span(mysql.mysql_error(conn));
+    const state = std.mem.span(mysql.mysql_sqlstate(conn));
+    const code = mysql.mysql_errno(conn);
+    if (mode & 2 != 0) {
+        const obj = try ctx.createObject("mysqli_sql_exception");
+        try obj.set(ctx.allocator, "message", .{ .string = Value.String.borrowed((try dupZ(ctx, message))) });
+        try obj.set(ctx.allocator, "sqlstate", .{ .string = Value.String.borrowed((try dupZ(ctx, state))) });
+        try obj.set(ctx.allocator, "code", .{ .int = code });
+        ctx.vm.pending_exception = .{ .object = obj };
+        return error.RuntimeError;
+    }
+    const warning = try std.fmt.allocPrint(ctx.allocator, "{s}(): ({s}/{d}): {s}", .{ operation, state, code, message });
+    defer ctx.allocator.free(warning);
+    ctx.vm.emitWarning(warning);
 }
 
 // ---------- class constructor ----------
@@ -674,9 +766,18 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try sc.methods.put(a, "__construct", .{ .name = "__construct", .arity = 2 });
     try vm.classes.put(a, "mysqli_stmt", sc);
 
-    try vm.classes.put(a, "mysqli_driver", ClassDef{ .name = "mysqli_driver" });
+    var driver = ClassDef{ .name = "mysqli_driver" };
+    try driver.static_props.put(a, "__report_mode", .{ .int = 3 });
+    try driver.methods.put(a, "__get", .{ .name = "__get", .arity = 1 });
+    try driver.methods.put(a, "__set", .{ .name = "__set", .arity = 2 });
+    try vm.classes.put(a, "mysqli_driver", driver);
+    try vm.native_fns.put(a, "mysqli_driver::__get", driverGet);
+    try vm.native_fns.put(a, "mysqli_driver::__set", driverSet);
     try vm.classes.put(a, "mysqli_warning", ClassDef{ .name = "mysqli_warning" });
-    try vm.classes.put(a, "mysqli_sql_exception", ClassDef{ .name = "mysqli_sql_exception", .parent = "RuntimeException" });
+    var exception = ClassDef{ .name = "mysqli_sql_exception", .parent = "RuntimeException" };
+    try exception.methods.put(a, "getSqlState", .{ .name = "getSqlState", .arity = 0 });
+    try vm.classes.put(a, "mysqli_sql_exception", exception);
+    try vm.native_fns.put(a, "mysqli_sql_exception::getSqlState", exceptionSqlState);
 }
 
 pub fn cleanupConnections(objects: std.ArrayListUnmanaged(*PhpObject)) void {

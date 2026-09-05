@@ -26,6 +26,7 @@ const sqlite = struct {
 
     extern "sqlite3" fn sqlite3_open(filename: [*:0]const u8, ppDb: *?*Db) callconv(.c) c_int;
     extern "sqlite3" fn sqlite3_close_v2(db: *Db) callconv(.c) c_int;
+    extern "sqlite3" fn sqlite3_free(ptr: ?*anyopaque) callconv(.c) void;
     extern "sqlite3" fn sqlite3_exec(db: *Db, sql: [*:0]const u8, callback: ?*anyopaque, arg: ?*anyopaque, errmsg: ?*[*:0]u8) callconv(.c) c_int;
     extern "sqlite3" fn sqlite3_prepare_v2(db: *Db, sql: [*:0]const u8, nByte: c_int, ppStmt: *?*Stmt, pzTail: ?*[*:0]const u8) callconv(.c) c_int;
     extern "sqlite3" fn sqlite3_step(stmt: *Stmt) callconv(.c) c_int;
@@ -76,6 +77,7 @@ const sqlite = struct {
         xDestroy: ?*const fn (?*anyopaque) callconv(.c) void,
     ) callconv(.c) c_int;
 
+    extern "sqlite3" fn sqlite3_aggregate_context(ctx: *Context, size: c_int) callconv(.c) ?*anyopaque;
     extern "sqlite3" fn sqlite3_user_data(ctx: *Context) callconv(.c) ?*anyopaque;
 
     extern "sqlite3" fn sqlite3_value_type(v: *Value_t) callconv(.c) c_int;
@@ -214,6 +216,14 @@ fn getStmtPtr(obj: *PhpObject) ?*sqlite.Stmt {
     return getOpaquePtr(sqlite.Stmt, obj, "__stmt_ptr");
 }
 
+// SQLite callbacks cannot unwind through C. Re-throw their pending PHP
+// exception at every stepping boundary, including fetch loops and silent mode.
+fn stepSqlite(ctx: *NativeContext, stmt: *sqlite.Stmt) RuntimeError!c_int {
+    const rc = sqlite.sqlite3_step(stmt);
+    if (ctx.vm.pending_exception != null) return error.RuntimeError;
+    return rc;
+}
+
 // build the SQLSTATE-prefixed message PHP's PDO uses for sqlite errors:
 // "SQLSTATE[HY000]: General error: <sqlite_errcode> <sqlite_errmsg>"
 fn pdoSqlMsg(ctx: *NativeContext, db: *sqlite.Db, raw: []const u8) ![]const u8 {
@@ -224,6 +234,7 @@ fn pdoSqlMsg(ctx: *NativeContext, db: *sqlite.Db, raw: []const u8) ![]const u8 {
 }
 
 pub fn throwPdo(ctx: *NativeContext, msg: []const u8) RuntimeError!Value {
+    if (ctx.vm.pending_exception != null) return error.RuntimeError;
     // honor ATTR_ERRMODE: silent (0) returns false, warning (1) returns false,
     // exception (2) throws PDOException. default in PHP 8 is exception, but for
     // backward-compat zphp defaults the construct path to exception too
@@ -367,12 +378,12 @@ pub fn register(vm: *VM, a: Allocator) !void {
     // hit "class not found" (used by WP's sqlite-database-integration)
     inline for (.{ "Sqlite", "SQLite", "Mysql", "MySql", "Pgsql", "PgSql", "Odbc", "ODBC", "Firebird", "Dblib" }) |driver| {
         const fqn = "PDO\\" ++ driver;
-        var sub_def = ClassDef{ .name = fqn, .parent = "PDO" };
+        var sub_def = ClassDef{ .name = fqn, .parent = "PDO", .native_cleanup = cleanupConnection };
         try sub_def.methods.put(a, "__construct", .{ .name = "__construct", .arity = 3 });
         // Sqlite-specific extension methods (user-defined SQL function /
-        // aggregate / collation hooks). registered as no-ops so frameworks
+        // aggregate / collation hooks). Backed by SQLite callbacks so frameworks
         // that conditionally call them (WordPress's sqlite-database-integration)
-        // can boot. callbacks aren't dispatched into SQLite yet
+        // can register real SQL callbacks.
         try sub_def.methods.put(a, "createFunction", .{ .name = "createFunction", .arity = 2 });
         try sub_def.methods.put(a, "createAggregate", .{ .name = "createAggregate", .arity = 3 });
         try sub_def.methods.put(a, "createCollation", .{ .name = "createCollation", .arity = 2 });
@@ -382,6 +393,12 @@ pub fn register(vm: *VM, a: Allocator) !void {
         try vm.native_fns.put(a, fqn ++ "::createAggregate", pdoSqliteCreateAggregate);
         try vm.native_fns.put(a, fqn ++ "::createCollation", pdoSqliteCreateCollation);
     }
+
+    // PHP's documented spelling; class construction currently uses exact keys.
+    var sqlite_alias = ClassDef{ .name = "Pdo\\Sqlite", .parent = "PDO\\Sqlite", .native_cleanup = cleanupConnection };
+    try sqlite_alias.methods.put(a, "__construct", .{ .name = "__construct", .arity = 3 });
+    try vm.classes.put(a, "Pdo\\Sqlite", sqlite_alias);
+    try vm.native_fns.put(a, "Pdo\\Sqlite::__construct", pdoConstruct);
 
     try vm.native_fns.put(a, "PDO::__construct", pdoConstruct);
     try vm.native_fns.put(a, "PDO::connect", pdoConnect);
@@ -526,6 +543,8 @@ fn cleanupConnection(obj: *PhpObject) bool {
     } else if (std.mem.eql(u8, drv, "pgsql")) {
         pdo_pgsql.cleanupConnection(obj);
     } else if (getDbPtr(obj)) |db| {
+        // v2 defers destruction until outstanding statements are finalized;
+        // sqlite3_close would return BUSY and leak the connection/registrations.
         _ = sqlite.sqlite3_close_v2(db);
     }
     if (obj.properties.getPtr("__db_ptr")) |slot| slot.* = .{ .int = 0 };
@@ -552,7 +571,7 @@ pub fn cleanupResources(objects: std.ArrayListUnmanaged(*PhpObject)) void {
     for (objects.items) |obj| {
         if (obj.pooled) continue;
         // PDO base class plus the PHP 8.4 driver subclasses live under PDO\
-        if (std.mem.eql(u8, obj.class_name, "PDO") or std.mem.startsWith(u8, obj.class_name, "PDO\\")) {
+        if (std.mem.eql(u8, obj.class_name, "PDO") or (obj.class_name.len >= 4 and std.ascii.eqlIgnoreCase(obj.class_name[0..4], "PDO\\"))) {
             const drv = getDriver(obj);
             if (std.mem.eql(u8, drv, "mysql")) {
                 pdo_mysql.cleanupConnection(obj);
@@ -629,14 +648,147 @@ fn pdoSqliteCreateFunction(ctx: *NativeContext, args: []const Value) RuntimeErro
     return .{ .bool = true };
 }
 
-// aggregates require xStep + xFinal + per-row context state. PHP's signature
-// is createAggregate(string, callable $step, callable $final, int $argc = -1).
-// not commonly used by frameworks (WordPress's SQLite plugin doesn't register
-// aggregates), so we register the function name and accept the call without
-// surfacing an error - the actual SQL would fail with "no such function" if a
-// query references the registered aggregate, which mirrors a registration miss
-fn pdoSqliteCreateAggregate(_: *NativeContext, _: []const Value) RuntimeError!Value {
-    return .{ .bool = true };
+// SQLite owns registrations; each aggregate group owns an independent PHP
+// accumulator until xFinal (also called on reset/finalize after a failed step).
+const UserSqlAggregate = struct { vm: *VM, step: Value, final: Value };
+const AggregateGroup = struct { value: Value = .null, row: i64 = 0, failed: bool = false };
+
+fn aggregateDestroy(p: ?*anyopaque) callconv(.c) void {
+    const registration: *UserSqlAggregate = @ptrCast(@alignCast(p orelse return));
+    registration.vm.releaseValue(registration.step);
+    registration.vm.releaseValue(registration.final);
+    registration.vm.allocator.destroy(registration);
+}
+
+fn aggregateGroup(ctx: *sqlite.Context, vm: *VM) ?*AggregateGroup {
+    // SQLite zero-initializes this pointer slot, not a tagged Zig Value.
+    const slot: *?*AggregateGroup = @ptrCast(@alignCast(sqlite.sqlite3_aggregate_context(ctx, @sizeOf(?*AggregateGroup)) orelse return null));
+    if (slot.* == null) {
+        const group = vm.allocator.create(AggregateGroup) catch return null;
+        group.* = .{};
+        slot.* = group;
+    }
+    return slot.*;
+}
+
+fn aggregateStep(ctx: *sqlite.Context, argc: c_int, argv: [*]?*sqlite.Value_t) callconv(.c) void {
+    const reg: *UserSqlAggregate = @ptrCast(@alignCast(sqlite.sqlite3_user_data(ctx).?));
+    const group = aggregateGroup(ctx, reg.vm) orelse {
+        sqlite.sqlite3_result_error(ctx, "out of memory", 13);
+        return;
+    };
+    if (group.failed) return;
+    const n: usize = @intCast(@max(argc, 0));
+    const args = reg.vm.allocator.alloc(Value, n + 2) catch {
+        group.failed = true;
+        sqlite.sqlite3_result_error(ctx, "out of memory", 13);
+        return;
+    };
+    defer reg.vm.allocator.free(args);
+    group.row += 1;
+    args[0] = group.value;
+    args[1] = .{ .int = group.row };
+    var nc = reg.vm.makeContext(null);
+    for (args[2..], 0..) |*arg, i| {
+        const v = argv[i] orelse {
+            arg.* = .null;
+            continue;
+        };
+        arg.* = switch (sqlite.sqlite3_value_type(v)) {
+            sqlite.INTEGER => .{ .int = sqlite.sqlite3_value_int64(v) },
+            sqlite.FLOAT => .{ .float = sqlite.sqlite3_value_double(v) },
+            sqlite.NULL => .null,
+            else => blk: {
+                const ptr = sqlite.sqlite3_value_text(v) orelse break :blk .null;
+                const text = nc.createString(ptr[0..@intCast(@max(sqlite.sqlite3_value_bytes(v), 0))]) catch {
+                    group.failed = true;
+                    sqlite.sqlite3_result_error(ctx, "out of memory", 13);
+                    return;
+                };
+                break :blk .{ .string = Value.String.borrowed(text) };
+            },
+        };
+    }
+    const result = nc.invokeCallable(reg.step, args) catch {
+        group.failed = true;
+        sqlite.sqlite3_result_error(ctx, "callback failed", 15);
+        return;
+    };
+    // Call results are borrowed-deferred: pin before releasing the old context.
+    VM.retainValue(result);
+    reg.vm.releaseValue(group.value);
+    group.value = result;
+}
+
+fn aggregateFinal(ctx: *sqlite.Context) callconv(.c) void {
+    const reg: *UserSqlAggregate = @ptrCast(@alignCast(sqlite.sqlite3_user_data(ctx).?));
+    const group = aggregateGroup(ctx, reg.vm) orelse {
+        sqlite.sqlite3_result_error(ctx, "out of memory", 13);
+        return;
+    };
+    defer {
+        reg.vm.releaseValue(group.value);
+        reg.vm.allocator.destroy(group);
+        const slot: *?*AggregateGroup = @ptrCast(@alignCast(sqlite.sqlite3_aggregate_context(ctx, 0).?));
+        slot.* = null;
+    }
+    if (group.failed or reg.vm.pending_exception != null) return;
+    var nc = reg.vm.makeContext(null);
+    // PHP increments the row counter for final too, including empty groups.
+    const result = nc.invokeCallable(reg.final, &.{ group.value, .{ .int = group.row + 1 } }) catch {
+        sqlite.sqlite3_result_error(ctx, "callback failed", 15);
+        return;
+    };
+    VM.retainValue(result);
+    defer reg.vm.releaseValue(result);
+    switch (result) {
+        .null => sqlite.sqlite3_result_null(ctx),
+        .int => |v| sqlite.sqlite3_result_int64(ctx, v),
+        .float => |v| sqlite.sqlite3_result_double(ctx, v),
+        .object => |obj| {
+            const text = reg.vm.objectToString(obj) catch {
+                sqlite.sqlite3_result_error(ctx, "callback result conversion failed", 33);
+                return;
+            };
+            sqlite.sqlite3_result_text(ctx, text.ptr, @intCast(text.len), sqlite.TRANSIENT());
+        },
+        else => {
+            var buffer: std.ArrayListUnmanaged(u8) = .empty;
+            defer buffer.deinit(reg.vm.allocator);
+            result.format(&buffer, reg.vm.allocator) catch {
+                sqlite.sqlite3_result_error(ctx, "callback result conversion failed", 33);
+                return;
+            };
+            const text = buffer.items;
+            sqlite.sqlite3_result_text(ctx, text.ptr, @intCast(text.len), sqlite.TRANSIENT());
+        },
+    }
+}
+
+fn pdoSqliteCreateAggregate(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len < 3 or args[0] != .string) return .{ .bool = false };
+    for (args[1..3], 2..) |callback, position| {
+        const valid = try ctx.callFunction("is_callable", &.{callback});
+        if (!valid.isTruthy()) {
+            const message = try std.fmt.allocPrint(ctx.allocator, "PDO::sqliteCreateAggregate(): Argument #{d} (${s}) must be a valid callback", .{ position, if (position == 2) "step" else "finalize" });
+            defer ctx.allocator.free(message);
+            _ = try ctx.vm.throwBuiltinException("TypeError", message);
+            return error.RuntimeError;
+        }
+    }
+    const this = getThis(ctx) orelse return .{ .bool = false };
+    const db = getDbPtr(this) orelse return .{ .bool = false };
+    const count = if (args.len > 3) args[3].toInt() else -1;
+    const num_args = std.math.cast(c_int, count) orelse return .{ .bool = false };
+    const name = try ctx.allocator.dupeZ(u8, args[0].string.bytes());
+    defer ctx.allocator.free(name);
+    const reg = try ctx.allocator.create(UserSqlAggregate);
+    reg.* = .{ .vm = ctx.vm, .step = args[1], .final = args[2] };
+    VM.retainValue(reg.step);
+    VM.retainValue(reg.final);
+    // v2 invokes the destructor even when registration fails.
+    const rc = sqlite.sqlite3_create_function_v2(db, name, num_args, sqlite.UTF8, reg, null, aggregateStep, aggregateFinal, aggregateDestroy);
+    return .{ .bool = rc == sqlite.OK };
 }
 
 fn pdoSqliteCreateCollation(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
@@ -657,7 +809,7 @@ fn pdoSqliteCreateCollation(ctx: *NativeContext, args: []const Value) RuntimeErr
 
     const rc = sqlite.sqlite3_create_collation_v2(db, @ptrCast(name_buf.ptr), sqlite.UTF8, @ptrCast(state), sqliteCollationTrampoline, sqliteFuncDestroy);
     if (rc != 0) {
-        ctx.vm.allocator.destroy(state);
+        sqliteFuncDestroy(state);
         return .{ .bool = false };
     }
     return .{ .bool = true };
@@ -722,6 +874,8 @@ fn pdoExec(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     const sql_z = try dupeZ(ctx, args[0].string.bytes());
     var errmsg: ?[*:0]u8 = null;
     const rc = sqlite.sqlite3_exec(db, sql_z, null, null, @ptrCast(&errmsg));
+    defer if (errmsg) |message| sqlite.sqlite3_free(message);
+    if (ctx.vm.pending_exception != null) return error.RuntimeError;
     if (rc != sqlite.OK) {
         const raw = if (errmsg) |e| std.mem.span(e) else "SQL execution error";
         const result = try throwPdo(ctx, try pdoSqlMsg(ctx, db, raw));
@@ -752,7 +906,9 @@ fn pdoQuery(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     try stmt_obj.set(ctx.allocator, "__db_ptr", .{ .int = @intCast(@intFromPtr(db)) });
     try stmt_obj.set(ctx.allocator, "__pdo", .{ .object = obj });
     // step once to position on first row
-    const step_rc = sqlite.sqlite3_step(stmt_ptr.?);
+    const step_rc = try stepSqlite(ctx, stmt_ptr.?);
+    if (step_rc != sqlite.ROW and step_rc != sqlite.DONE)
+        return throwPdo(ctx, try pdoSqlMsg(ctx, db, std.mem.span(sqlite.sqlite3_errmsg(db))));
     try stmt_obj.set(ctx.allocator, "__has_row", .{ .bool = step_rc == sqlite.ROW });
     try stmt_obj.set(ctx.allocator, "__stepped", .{ .bool = true });
 
@@ -919,7 +1075,7 @@ fn stmtExecute(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
         try bindParams(ctx, stmt, args[0].array);
     }
 
-    const rc = sqlite.sqlite3_step(stmt);
+    const rc = try stepSqlite(ctx, stmt);
     try obj.set(ctx.allocator, "__has_row", .{ .bool = rc == sqlite.ROW });
     try obj.set(ctx.allocator, "__stepped", .{ .bool = true });
 
@@ -955,7 +1111,7 @@ fn stmtFetch(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
 
     // if not yet stepped (shouldn't happen after execute), step now
     if (stepped != .bool or !stepped.bool) {
-        const rc = sqlite.sqlite3_step(stmt);
+        const rc = try stepSqlite(ctx, stmt);
         try obj.set(ctx.allocator, "__has_row", .{ .bool = rc == sqlite.ROW });
         try obj.set(ctx.allocator, "__stepped", .{ .bool = true });
         if (rc != sqlite.ROW) return .{ .bool = false };
@@ -967,7 +1123,7 @@ fn stmtFetch(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
 
     if (mode == 5) {
         const row = try fetchRowAsObject(ctx, stmt);
-        const next_rc = sqlite.sqlite3_step(stmt);
+        const next_rc = try stepSqlite(ctx, stmt);
         try obj.set(ctx.allocator, "__has_row", .{ .bool = next_rc == sqlite.ROW });
         return row;
     }
@@ -981,7 +1137,7 @@ fn stmtFetch(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
         if (!std.mem.eql(u8, class_name, "stdClass")) {
             try invokeCtorWithArgs(ctx, inst, class_name, if (ctor_args_v == .array) ctor_args_v.array else null);
         }
-        const next_rc = sqlite.sqlite3_step(stmt);
+        const next_rc = try stepSqlite(ctx, stmt);
         try obj.set(ctx.allocator, "__has_row", .{ .bool = next_rc == sqlite.ROW });
         return inst;
     }
@@ -989,7 +1145,7 @@ fn stmtFetch(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (mode == 9) {
         const target_v = obj.get("__fetch_into");
         if (target_v == .object) try populateObjectFromRow(ctx, target_v.object, stmt);
-        const next_rc = sqlite.sqlite3_step(stmt);
+        const next_rc = try stepSqlite(ctx, stmt);
         try obj.set(ctx.allocator, "__has_row", .{ .bool = next_rc == sqlite.ROW });
         return target_v;
     }
@@ -997,7 +1153,7 @@ fn stmtFetch(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     const row = try fetchRow(ctx, stmt, mode);
 
     // advance to next row
-    const next_rc = sqlite.sqlite3_step(stmt);
+    const next_rc = try stepSqlite(ctx, stmt);
     try obj.set(ctx.allocator, "__has_row", .{ .bool = next_rc == sqlite.ROW });
 
     return .{ .array = row };
@@ -1027,7 +1183,7 @@ fn stmtFetchAll(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
             const stepped_pre0 = obj.get("__stepped");
             const start_with_row0 = first and stepped_pre0 == .bool and stepped_pre0.bool and has_row_pre0 == .bool and has_row_pre0.bool;
             if (!start_with_row0) {
-                const rc = sqlite.sqlite3_step(stmt);
+                const rc = try stepSqlite(ctx, stmt);
                 if (rc != sqlite.ROW) break;
             }
             first = false;
@@ -1106,14 +1262,14 @@ fn stmtFetchAll(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
             }
             try result.append(ctx.allocator, inst);
         }
-        var rc = sqlite.sqlite3_step(stmt);
+        var rc = try stepSqlite(ctx, stmt);
         while (rc == sqlite.ROW) {
             const inst = try fetchRowAsClass(ctx, stmt, class_name);
             if (!is_stdclass) {
                 if (ctor_args_arr) |ca| try invokeCtorWithArgs(ctx, inst, class_name, ca) else try invokeCtorWithArgs(ctx, inst, class_name, null);
             }
             try result.append(ctx.allocator, inst);
-            rc = sqlite.sqlite3_step(stmt);
+            rc = try stepSqlite(ctx, stmt);
         }
         try obj.set(ctx.allocator, "__has_row", .{ .bool = false });
         return .{ .array = result };
@@ -1131,11 +1287,11 @@ fn stmtFetchAll(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
             try populateObjectFromRow(ctx, target, stmt);
             try result.append(ctx.allocator, .{ .object = target });
         }
-        var rc = sqlite.sqlite3_step(stmt);
+        var rc = try stepSqlite(ctx, stmt);
         while (rc == sqlite.ROW) {
             try populateObjectFromRow(ctx, target, stmt);
             try result.append(ctx.allocator, .{ .object = target });
-            rc = sqlite.sqlite3_step(stmt);
+            rc = try stepSqlite(ctx, stmt);
         }
         try obj.set(ctx.allocator, "__has_row", .{ .bool = false });
         return .{ .array = result };
@@ -1155,7 +1311,7 @@ fn stmtFetchAll(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
             const r = try ctx.invokeCallable(callable, call_args);
             try result.append(ctx.allocator, r);
         }
-        var rc = sqlite.sqlite3_step(stmt);
+        var rc = try stepSqlite(ctx, stmt);
         while (rc == sqlite.ROW) {
             var call_args = try ctx.allocator.alloc(Value, @intCast(col_count));
             defer ctx.allocator.free(call_args);
@@ -1163,7 +1319,7 @@ fn stmtFetchAll(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
             while (i < col_count) : (i += 1) call_args[@intCast(i)] = try columnToValue(ctx, stmt, i);
             const r = try ctx.invokeCallable(callable, call_args);
             try result.append(ctx.allocator, r);
-            rc = sqlite.sqlite3_step(stmt);
+            rc = try stepSqlite(ctx, stmt);
         }
         try obj.set(ctx.allocator, "__has_row", .{ .bool = false });
         return .{ .array = result };
@@ -1181,7 +1337,7 @@ fn stmtFetchAll(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
             };
             try result.set(ctx.allocator, ak, val_v);
         }
-        var rc = sqlite.sqlite3_step(stmt);
+        var rc = try stepSqlite(ctx, stmt);
         while (rc == sqlite.ROW) {
             const key_v = try columnToValue(ctx, stmt, 0);
             const val_v = try columnToValue(ctx, stmt, 1);
@@ -1191,7 +1347,7 @@ fn stmtFetchAll(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
                 else => .{ .int = Value.toInt(key_v) },
             };
             try result.set(ctx.allocator, ak, val_v);
-            rc = sqlite.sqlite3_step(stmt);
+            rc = try stepSqlite(ctx, stmt);
         }
         try obj.set(ctx.allocator, "__has_row", .{ .bool = false });
         return .{ .array = result };
@@ -1204,11 +1360,11 @@ fn stmtFetchAll(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
             const val_v = try columnToValue(ctx, stmt, col_idx);
             try result.append(ctx.allocator, val_v);
         }
-        var rc = sqlite.sqlite3_step(stmt);
+        var rc = try stepSqlite(ctx, stmt);
         while (rc == sqlite.ROW) {
             const val_v = try columnToValue(ctx, stmt, col_idx);
             try result.append(ctx.allocator, val_v);
-            rc = sqlite.sqlite3_step(stmt);
+            rc = try stepSqlite(ctx, stmt);
         }
         try obj.set(ctx.allocator, "__has_row", .{ .bool = false });
         return .{ .array = result };
@@ -1218,21 +1374,21 @@ fn stmtFetchAll(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     const stepped = obj.get("__stepped");
 
     if (stepped != .bool or !stepped.bool) {
-        var rc = sqlite.sqlite3_step(stmt);
+        var rc = try stepSqlite(ctx, stmt);
         while (rc == sqlite.ROW) {
             const row = try fetchRow(ctx, stmt, mode);
             try result.append(ctx.allocator, .{ .array = row });
-            rc = sqlite.sqlite3_step(stmt);
+            rc = try stepSqlite(ctx, stmt);
         }
     } else {
         if (has_row == .bool and has_row.bool) {
             const row = try fetchRow(ctx, stmt, mode);
             try result.append(ctx.allocator, .{ .array = row });
-            var rc = sqlite.sqlite3_step(stmt);
+            var rc = try stepSqlite(ctx, stmt);
             while (rc == sqlite.ROW) {
                 const next_row = try fetchRow(ctx, stmt, mode);
                 try result.append(ctx.allocator, .{ .array = next_row });
-                rc = sqlite.sqlite3_step(stmt);
+                rc = try stepSqlite(ctx, stmt);
             }
         }
     }
@@ -1254,7 +1410,7 @@ fn stmtFetchColumn(ctx: *NativeContext, args: []const Value) RuntimeError!Value 
     const stepped = obj.get("__stepped");
 
     if (stepped != .bool or !stepped.bool) {
-        const rc = sqlite.sqlite3_step(stmt);
+        const rc = try stepSqlite(ctx, stmt);
         if (rc != sqlite.ROW) return .{ .bool = false };
     } else if (has_row != .bool or !has_row.bool) {
         return .{ .bool = false };
@@ -1262,7 +1418,7 @@ fn stmtFetchColumn(ctx: *NativeContext, args: []const Value) RuntimeError!Value 
 
     const val = try columnToValue(ctx, stmt, col);
 
-    const next_rc = sqlite.sqlite3_step(stmt);
+    const next_rc = try stepSqlite(ctx, stmt);
     try obj.set(ctx.allocator, "__has_row", .{ .bool = next_rc == sqlite.ROW });
     try obj.set(ctx.allocator, "__stepped", .{ .bool = true });
 
@@ -1538,21 +1694,21 @@ fn fetchAllAsObjects(ctx: *NativeContext, stmt: *sqlite.Stmt, result: *PhpArray,
     const stepped = obj_parent.get("__stepped");
 
     if (stepped != .bool or !stepped.bool) {
-        var rc = sqlite.sqlite3_step(stmt);
+        var rc = try stepSqlite(ctx, stmt);
         while (rc == sqlite.ROW) {
             const row = try fetchRowAsObject(ctx, stmt);
             try result.append(ctx.allocator, row);
-            rc = sqlite.sqlite3_step(stmt);
+            rc = try stepSqlite(ctx, stmt);
         }
     } else {
         if (has_row == .bool and has_row.bool) {
             const row = try fetchRowAsObject(ctx, stmt);
             try result.append(ctx.allocator, row);
-            var rc = sqlite.sqlite3_step(stmt);
+            var rc = try stepSqlite(ctx, stmt);
             while (rc == sqlite.ROW) {
                 const next_row = try fetchRowAsObject(ctx, stmt);
                 try result.append(ctx.allocator, next_row);
-                rc = sqlite.sqlite3_step(stmt);
+                rc = try stepSqlite(ctx, stmt);
             }
         }
     }
