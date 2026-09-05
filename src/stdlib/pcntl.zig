@@ -284,8 +284,47 @@ fn native_pcntl_strerror(ctx: *NativeContext, args: []const Value) RuntimeError!
     return .{ .string = Value.String.borrowed(owned) };
 }
 
-fn native_pcntl_sigprocmask(_: *NativeContext, _: []const Value) RuntimeError!Value {
-    // best-effort no-op: returns true. correct impl would translate the mask array
+fn maskFailure() Value {
+    last_errno = std.c._errno().*;
+    return .{ .bool = false };
+}
+
+fn native_pcntl_sigprocmask(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    if (args.len < 2 or args[0] != .int or args[1] != .array) {
+        last_errno = @intFromEnum(posix.E.INVAL);
+        return .{ .bool = false };
+    }
+    const how = std.math.cast(c_int, args[0].int) orelse {
+        last_errno = @intFromEnum(posix.E.INVAL);
+        return .{ .bool = false };
+    };
+    // Use libc's sigset_t and helpers: Darwin's set is a scalar, Linux's
+    // is an array, and the libc ABI need not match the kernel syscall ABI.
+    var set: std.c.sigset_t = undefined;
+    if (std.c.sigemptyset(&set) != 0) return maskFailure();
+    for (args[1].array.entries.items) |entry| {
+        const sig = std.math.cast(c_int, entry.value.toInt()) orelse {
+            last_errno = @intFromEnum(posix.E.INVAL);
+            return .{ .bool = false };
+        };
+        // Darwin's libc helpers do not reject every out-of-range signal.
+        if (sig <= 0 or sig >= std.c.NSIG) {
+            last_errno = @intFromEnum(posix.E.INVAL);
+            return .{ .bool = false };
+        }
+        if (std.c.sigaddset(&set, sig) != 0) return maskFailure();
+    }
+    var old: std.c.sigset_t = undefined;
+    if (std.c.sigprocmask(how, &set, &old) != 0) return maskFailure();
+    if (args.len > 2) {
+        const result = try ctx.createArray();
+        var sig: c_int = 1;
+        while (sig < std.c.NSIG) : (sig += 1) {
+            if (std.c.sigismember(&old, sig) == 1)
+                try result.append(ctx.allocator, .{ .int = sig });
+        }
+        ctx.setCallerVar(2, args.len, .{ .array = result });
+    }
     return .{ .bool = true };
 }
 
