@@ -1325,15 +1325,31 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                     ip += 1;
                     continue :dispatch @as(OpCode, @enumFromInt(next));
                 },
-                .arg_guard_prop, .arg_guard_prop_dynamic, .arg_guard_dim => {
-                    // by value: the plain fetch that follows runs here untouched.
-                    // capture: runLoop re-executes the guard and the fetch
+                // by value: the plain fetch that follows runs here untouched.
+                // capture: runLoop re-executes the guard and the fetch. `byte`
+                // is the first opcode of this dispatch chain, not the current
+                // one, so the operand count is fixed per arm
+                .arg_guard_prop => {
                     const field = ip;
                     const delta = (@as(u16, code[ip]) << 8) | code[ip + 1];
                     const pos = code[ip + 2];
-                    const operands: usize = if (byte == .arg_guard_prop) 1 else 2;
                     self.sp = sp;
-                    const capture = self.argCaptureCached(frame.chunk, field, delta, pos, operands) orelse true;
+                    const capture = self.argCaptureCached(frame.chunk, field, delta, pos, 1) orelse true;
+                    if (capture) {
+                        frame.ip = ip - 1;
+                        return;
+                    }
+                    ip += 3;
+                    const next = code[ip];
+                    ip += 1;
+                    continue :dispatch @as(OpCode, @enumFromInt(next));
+                },
+                .arg_guard_prop_dynamic, .arg_guard_dim => {
+                    const field = ip;
+                    const delta = (@as(u16, code[ip]) << 8) | code[ip + 1];
+                    const pos = code[ip + 2];
+                    self.sp = sp;
+                    const capture = self.argCaptureCached(frame.chunk, field, delta, pos, 2) orelse true;
                     if (capture) {
                         frame.ip = ip - 1;
                         return;

@@ -13993,6 +13993,7 @@ pub const VM = struct {
     }
 
     inline fn guardIdentity(self: *VM, slots: u8, args_base: usize) ?usize {
+        if (slots < 3 and args_base < slots) return null;
         return switch (slots) {
             0 => 0,
             1 => valueIdentity(self.stack[args_base - 1]),
