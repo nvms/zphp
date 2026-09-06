@@ -1,0 +1,46 @@
+#!/usr/bin/env python3
+"""Reduced PHP 8.5 declaration parity; run after make release."""
+import os
+from pathlib import Path
+import subprocess
+import tempfile
+
+ROOT = Path(__file__).resolve().parent.parent
+CASES = [
+    ('public protected(set)', 'public private(set)', 'must be protected(set) (as in class A) or weaker'),
+    ('public', 'public private(set)', 'must be omitted (as in class A)'),
+    ('public', 'public protected(set)', 'must be omitted (as in class A)'),
+]
+programs = [(f'class A {{ {a} int $x; }} class B extends A {{ {b} int $x; }}', message)
+            for a, b, message in CASES]
+programs += [
+    ('class A { public private(set) int $x { set {} } }',
+     'Write-only virtual property A::$x must not specify asymmetric visibility'),
+    ('class A { private(set) protected(set) int $x; }', None),
+    ('trait T { private(set) private(set) int $x; }', None),
+    ('class A { function __construct(public private(set) protected(set) int $x) {} }', None),
+    ('class A { public private(set) int $x { get => 1; } }',
+     'Read-only virtual property A::$x must not specify asymmetric visibility'),
+    ('class A { public private(set) int $x; } class B extends A { public int $x; }',
+     'Cannot override final property A::$x'),
+    ('class A {public protected(set) int $x;} class B extends A {public int $x;} class C extends B {public protected(set) int $x;}',
+     'Set access level of C::$x must be omitted (as in class B)'),
+]
+with tempfile.TemporaryDirectory(dir=os.environ.get('PICO_SCRATCHPAD')) as tmp:
+    for i, (source, message) in enumerate(programs):
+        path = Path(tmp) / f'case{i}.php'
+        path.write_text('<?php ' + source)
+        for command in ([os.environ.get('PHP_BIN', 'php')], [str(ROOT / 'zig-out/bin/zphp'), 'run']):
+            result = subprocess.run(command + [str(path)], capture_output=True, text=True, timeout=15)
+            output = result.stdout + result.stderr
+            # Parser diagnostics currently use exit 1, rather than PHP's fatal 255.
+            expected = (1, 255) if message is None and len(command) > 1 else (255,)
+            assert result.returncode in expected, (i, command, result.returncode, output)
+            if message:
+                assert message in output, (i, command, output)
+    path = ROOT / 'tests/asymmetric_declaration_metadata.php'
+    php = subprocess.run([os.environ.get('PHP_BIN', 'php'), str(path)], capture_output=True, timeout=15)
+    zphp = subprocess.run([str(ROOT / 'zig-out/bin/zphp'), 'run', str(path)], capture_output=True, timeout=15)
+    assert php.returncode == zphp.returncode == 0, (php, zphp)
+    assert php.stdout == zphp.stdout, (php.stdout, zphp.stdout)
+print(f'{len(programs)} negative declaration cases and positive metadata parity passed')

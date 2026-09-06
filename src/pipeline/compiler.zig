@@ -1388,7 +1388,7 @@ pub const Compiler = struct {
         const ret_name = "$__ret_ref";
         const ret_name_idx = try self.addConstant(.{ .string = Value.String.borrowed(ret_name) });
         if (expr.tag == .array_access) {
-            try self.compileNode(expr.data.lhs); // base
+            try @import("compiler_expr.zig").compileVivifyChain(self, expr.data.lhs); // writable dimension base
             try self.compileNode(expr.data.rhs); // key
             try self.emitOp(.make_var_array_elem_ref);
             try self.emitU16(ret_name_idx);

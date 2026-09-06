@@ -30,7 +30,7 @@ errors=""
 
 for f in "$SCRIPT_DIR"/harness/test-*.php; do
     name="$(basename "$f" .php)"
-    php_out="$(php -d error_reporting=E_ALL\&~E_DEPRECATED\&~E_WARNING "$f" 2>&1)" || true
+    php_out="$(php -d error_reporting=E_ALL\&~E_DEPRECATED\&~E_WARNING "$f" 2>&1)" && php_exit=0 || php_exit=$?
     TIMEOUT_CMD=""
     if command -v timeout &>/dev/null; then
         TIMEOUT_CMD="timeout 120"
@@ -39,12 +39,14 @@ for f in "$SCRIPT_DIR"/harness/test-*.php; do
     fi
     zphp_out="$($TIMEOUT_CMD "$ZPHP" run "$f" 2>&1)" && zphp_exit=0 || zphp_exit=$?
 
-    if [ "$php_out" = "$zphp_out" ]; then
+    if [ "$php_exit" -eq 0 ] && [ "$zphp_exit" -eq 0 ] && [ "$php_out" = "$zphp_out" ]; then
         passed=$((passed + 1))
         echo "  pass  $name"
     else
         failed=$((failed + 1))
-        if [ $zphp_exit -eq 124 ]; then
+        if [ $php_exit -ne 0 ]; then
+            echo "  FAIL  $name (php exit $php_exit, zphp exit $zphp_exit)"
+        elif [ $zphp_exit -eq 124 ]; then
             echo "  FAIL  $name (timeout)"
         elif [ $zphp_exit -ne 0 ]; then
             echo "  FAIL  $name (exit $zphp_exit)"

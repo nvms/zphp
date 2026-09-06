@@ -685,6 +685,8 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                         self.sp = sp;
                         return;
                     }
+                    self.sp = sp;
+                    self.clearArgStackFrom(sp - ci_acn - 1);
                     for (0..ci_acn) |i| {
                         self.stack[sp - ci_acn - 1 + i] = self.stack[sp - ci_acn + i];
                     }
@@ -720,6 +722,7 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                     self.frames[self.frame_count] = .{
                         .chunk = &ci_func.chunk,
                         .ip = 0,
+                        .entry_sp = sp,
                         .vars = .{},
                         .locals = ci_locals,
                         .func = ci_func,
@@ -877,6 +880,7 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                                 self.frames[self.frame_count] = .{
                                     .chunk = &mc_func.chunk,
                                     .ip = 0,
+                                    .entry_sp = sp,
                                     .vars = .{},
                                     .locals = mc_locals,
                                     .func = mc_func,
@@ -914,7 +918,10 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                             break :blk f;
                         }
                         // try inline native handling for hot builtins
+                        const native_sp = sp;
                         if (inlineNativeCall(self, name, arg_count, &sp)) {
+                            self.sp = native_sp;
+                            self.clearArgStackFrom(native_sp - arg_count);
                             const _next = code[ip];
                             ip += 1;
                             continue :dispatch @as(OpCode, @enumFromInt(_next));
@@ -970,6 +977,7 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                     self.frames[self.frame_count] = .{
                         .chunk = &func.chunk,
                         .ip = 0,
+                        .entry_sp = sp,
                         .vars = .{},
                         .locals = new_locals,
                         .func = func,
@@ -1007,6 +1015,8 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                     if (ret_string_pin) |s| s.retain();
                     const ret_arr_pin = if (result == .array) result.array else null;
                     if (ret_arr_pin) |a| VM.arrayRetain(a);
+                    self.sp = sp;
+                    self.clearArgStackFrom(frame.entry_sp);
                     if (frame.call_name) |name| self.releaseClosureByName(name);
                     if (locals.len > 0) {
                         // move model (Stage 1): release $this and the parameter
@@ -1039,6 +1049,8 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                         self.sp = sp;
                         return;
                     }
+                    self.sp = sp;
+                    self.clearArgStackFrom(frame.entry_sp);
                     if (frame.call_name) |name| self.releaseClosureByName(name);
                     if (locals.len > 0) {
                         // move model (Stage 1): release $this and parameter locals
@@ -1296,6 +1308,40 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                         self.sp = sp;
                         return;
                     }
+                },
+                .arg_variable => {
+                    const idx = (@as(u16, code[ip]) << 8) | code[ip + 1];
+                    const field = ip + 2;
+                    const delta = (@as(u16, code[ip + 2]) << 8) | code[ip + 3];
+                    const pos = code[ip + 4];
+                    self.sp = sp;
+                    const capture = self.argCaptureCached(frame.chunk, field, delta, pos, 1) orelse {
+                        frame.ip = ip - 1;
+                        return;
+                    };
+                    ip += 5;
+                    if (capture) self.setArgSource(sp - 1, .{ .simple = consts[idx].string.bytes() });
+                    const next = code[ip];
+                    ip += 1;
+                    continue :dispatch @as(OpCode, @enumFromInt(next));
+                },
+                .arg_guard_prop, .arg_guard_prop_dynamic, .arg_guard_dim => {
+                    // by value: the plain fetch that follows runs here untouched.
+                    // capture: runLoop re-executes the guard and the fetch
+                    const field = ip;
+                    const delta = (@as(u16, code[ip]) << 8) | code[ip + 1];
+                    const pos = code[ip + 2];
+                    const operands: usize = if (byte == .arg_guard_prop) 1 else 2;
+                    self.sp = sp;
+                    const capture = self.argCaptureCached(frame.chunk, field, delta, pos, operands) orelse true;
+                    if (capture) {
+                        frame.ip = ip - 1;
+                        return;
+                    }
+                    ip += 3;
+                    const next = code[ip];
+                    ip += 1;
+                    continue :dispatch @as(OpCode, @enumFromInt(next));
                 },
                 else => {
                     frame.ip = ip - 1;

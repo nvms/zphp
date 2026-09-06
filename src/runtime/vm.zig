@@ -117,10 +117,15 @@ pub const NativeContext = struct {
             if (arg_index < args.len) args[arg_index] = value;
         }
         if (vm.frame_count == 0) return;
-        const arg_sources = vm.scanCallerArgSources(arg_count);
+        const arg_sources = vm.callerArgSources(arg_count);
+        if (arg_index >= arg_sources.len) return;
         const caller = vm.currentFrame();
 
         switch (arg_sources[arg_index]) {
+            .cell => |c| {
+                vm.setCell(c.value, value);
+                vm.propagateCellWrite(c.value, value) catch {};
+            },
             .simple => |var_name| {
                 if (VM.isSuperglobal(var_name)) {
                     vm.putRequestVar(var_name, value) catch {};
@@ -155,33 +160,6 @@ pub const NativeContext = struct {
                     vm.releaseValue(old);
                 } else if (old_local) |old| {
                     vm.releaseValue(old);
-                }
-            },
-            .array_elem => |ae| {
-                const arr_val = vm.resolveCallerVar(ae.var_name, ae.is_local, ae.slot);
-                if (arr_val == .array) {
-                    vm.arraySetOwned(arr_val.array, Value.toArrayKey(ae.key), value) catch return;
-                }
-            },
-            .object_prop => |op| {
-                const obj_val = vm.resolveCallerVar(op.var_name, op.is_local, op.slot);
-                if (obj_val == .object) {
-                    vm.objectSetOwned(obj_val.object, op.prop_name, value) catch return;
-                }
-            },
-            .chained_prop => |cp| {
-                vm.objectSetOwned(cp.object, cp.prop_name, value) catch return;
-            },
-            .resolved_array_elem => |ae| {
-                ae.array.set(vm.allocator, Value.toArrayKey(ae.key), value) catch return;
-            },
-            .prop_array_elem => |pae| {
-                const obj_val = vm.resolveCallerVar(pae.var_name, pae.is_local, pae.slot);
-                if (obj_val == .object) {
-                    const prop_val = obj_val.object.get(pae.prop_name);
-                    if (prop_val == .array) {
-                        prop_val.array.set(vm.allocator, Value.toArrayKey(pae.key), value) catch return;
-                    }
                 }
             },
             .none => {},
@@ -262,36 +240,14 @@ pub const CaptureEntry = struct {
     ref_cell: ?*Value = null,
 };
 
+// where an evaluated argument came from, recorded only when the call it
+// feeds may bind that position by reference. `simple` names a caller
+// variable; `cell` is the canonical reference cell of a property or array
+// element, carrying the error text if the current scope may not write it
 const RefSource = union(enum) {
     none,
     simple: []const u8,
-    array_elem: struct {
-        var_name: []const u8,
-        is_local: bool,
-        slot: u16,
-        key: Value,
-    },
-    object_prop: struct {
-        var_name: []const u8,
-        is_local: bool,
-        slot: u16,
-        prop_name: []const u8,
-    },
-    chained_prop: struct {
-        object: *PhpObject,
-        prop_name: []const u8,
-    },
-    resolved_array_elem: struct {
-        array: *PhpArray,
-        key: Value,
-    },
-    prop_array_elem: struct {
-        var_name: []const u8,
-        is_local: bool,
-        slot: u16,
-        prop_name: []const u8,
-        key: Value,
-    },
+    cell: struct { value: *Value, denial: ?[]const u8 = null },
 };
 
 pub const CaptureRange = struct {
@@ -798,6 +754,12 @@ pub const VM = struct {
     // reference binding exists. lets array reads/writes/clones/foreach skip the
     // per-entry `ref` check in the common case. reset() clears it
     array_ref_active: bool = false,
+    // set by an argument guard whose callee takes that position by reference
+    // or cannot be resolved yet; consumed by the fetch opcode right after it
+    arg_capture_pending: bool = false,
+    // exclusive high-water mark of provenance writes in ic.arg_stack,
+    // independent of sp: fastLoop pops values without visiting the transport
+    arg_source_end: usize = 0,
     // cell-keyed reference-binding registry (O(1) propagateCellWrite + prop sync).
     // lazily allocated on first ref binding so non-ref programs pay one nullable
     // pointer and nothing else. coexists with the legacy frame/vm binding lists
@@ -1015,6 +977,7 @@ pub const VM = struct {
     }
     fn regRefObject(self: *VM, owner: RefIndex.OwnerId, cell: *Value, obj: *PhpObject, prop_name: []const u8) RuntimeError!void {
         try (try self.refIndex()).addOwned(self.allocator, owner, cell, .{ .object = .{ .object = obj, .prop_name = prop_name } });
+        obj.ref_mirrored = true;
     }
     fn regRefStatic(self: *VM, owner: RefIndex.OwnerId, cell: *Value, class_name: []const u8, prop_name: []const u8) RuntimeError!void {
         try (try self.refIndex()).addOwned(self.allocator, owner, cell, .{ .static = .{ .class_name = class_name, .prop_name = prop_name } });
@@ -1146,9 +1109,27 @@ pub const VM = struct {
     fn unregFrameBindings(self: *VM, frame: anytype) void {
         if (frame.ref_owner == 0) return;
         if (self.ref_index) |ri| ri.releaseOwner(self.allocator, frame.ref_owner);
+        self.releaseBoundArgSources(frame.ref_owner);
     }
 
+    const ArgEntry = struct { array: *PhpArray, key: PhpArray.Key, source: RefSource };
+
     pub const InlineCache = struct {
+        // argument guard sites: keyed by (chunk_ptr ^ guard ip); `guard` is the
+        // identity of the receiver/callable read from the stack and
+        // `generation` the function+class registry size, so a site re-resolves
+        // when a different class arrives or new code is declared
+        intent: []IntentIC = &.{},
+        arg_stack: []RefSource = &.{},
+        // provenance of the call family opcode being executed, saved across a
+        // nested call so a native callback's own calls cannot clobber it
+        saved_sources: std.ArrayListUnmanaged(RefSource) = .{},
+        arg_arrays: std.ArrayListUnmanaged(ArgEntry) = .{},
+        bound_arg_sources: std.ArrayListUnmanaged(struct { owner: RefIndex.OwnerId, source: RefSource }) = .{},
+        active_args: []RefSource = &.{},
+        active_frame: usize = 0,
+        active_arg_count: usize = 0,
+
         // property access: keyed by (chunk_ptr ^ ip), stores class_ptr for visibility skip
         prop: [128]PropIC = @splat(.{}),
         // method call: keyed by (chunk_ptr ^ ip), stores class_ptr + resolved func
@@ -1193,6 +1174,20 @@ pub const VM = struct {
             native: ?NativeFn = null,
             full_name: []const u8 = "",
         };
+
+        const IntentIC = struct {
+            key: usize = 0,
+            chunk_key: usize = 0,
+            guard: usize = 0,
+            generation: usize = 0,
+            // which stack slots below the arguments identify the callee
+            slots: u8 = 0,
+            capture: bool = true,
+        };
+
+        pub fn intentIndex(chunk_ptr: usize, ip: usize) u9 {
+            return @truncate((chunk_ptr ^ ip) *% 0x517CC1B727220A95);
+        }
 
         pub fn propIndex(chunk_ptr: usize, ip: usize) u7 {
             return @truncate((chunk_ptr ^ ip) *% 0x517CC1B727220A95);
@@ -1349,6 +1344,12 @@ pub const VM = struct {
         vm.error_reporting_level = 30719;
         vm.ic = try allocator.create(InlineCache);
         vm.ic.?.* = .{};
+        vm.ic.?.arg_stack = try allocator.alloc(RefSource, 2048);
+        @memset(vm.ic.?.arg_stack, .none);
+        vm.ic.?.active_args = try allocator.alloc(RefSource, 256);
+        @memset(vm.ic.?.active_args, .none);
+        vm.ic.?.intent = try allocator.alloc(InlineCache.IntentIC, 512);
+        @memset(vm.ic.?.intent, .{});
         const locals_buf = try allocator.alloc(Value, 8192);
         vm.ic.?.locals_buf = locals_buf.ptr;
         vm.ic.?.locals_cap = 8192;
@@ -2481,6 +2482,10 @@ pub const VM = struct {
     }
 
     pub fn deinit(self: *VM) void {
+        if (self.ic) |ic| for (ic.arg_stack) |*source| self.releaseArgSource(source);
+        self.clearActiveArgSources();
+        self.clearArgArraySources(null);
+        self.releaseBoundArgSources(null);
         if (std.posix.getenv("ZPHP_HEAP_STATS") != null) self.printHeapStats();
         self.releaseFrames();
         self.releaseCallbackRegistries();
@@ -2501,6 +2506,12 @@ pub const VM = struct {
         self.builtin_classes.deinit(self.allocator);
         self.builtin_interfaces.deinit(self.allocator);
         if (self.ic) |ic_ptr| {
+            ic_ptr.arg_arrays.deinit(self.allocator);
+            ic_ptr.bound_arg_sources.deinit(self.allocator);
+            ic_ptr.saved_sources.deinit(self.allocator);
+            self.allocator.free(ic_ptr.arg_stack);
+            self.allocator.free(ic_ptr.active_args);
+            self.allocator.free(ic_ptr.intent);
             ic_ptr.concat_buf.deinit(self.allocator);
             if (ic_ptr.locals_cap > 0) self.allocator.free(ic_ptr.locals_buf[0..ic_ptr.locals_cap]);
             self.allocator.destroy(ic_ptr);
@@ -2631,6 +2642,15 @@ pub const VM = struct {
     }
 
     pub fn reset(self: *VM) void {
+        if (self.ic) |ic| {
+            for (ic.arg_stack) |*source| self.releaseArgSource(source);
+            self.clearActiveArgSources();
+            self.clearArgArraySources(null);
+            self.releaseBoundArgSources(null);
+            ic.active_frame = 0;
+            self.arg_source_end = 0;
+            ic.arg_arrays.clearRetainingCapacity();
+        }
         self.installHooks();
         self.releaseFrames();
         self.releaseCallbackRegistries();
@@ -3036,6 +3056,7 @@ pub const VM = struct {
             }
             self.global_slot_names = saved_slot_names;
             self.script_strict_types = saved_strict;
+            self.clearArgStackFrom(sp_before_eval);
             self.sp = sp_before_eval;
             return error.RuntimeError;
         };
@@ -3052,6 +3073,7 @@ pub const VM = struct {
         // stack is unchanged
         if (self.sp > sp_before_eval) {
             const r = self.stack[self.sp - 1];
+            self.clearArgStackFrom(sp_before_eval);
             self.sp = sp_before_eval;
             return r;
         }
@@ -3121,6 +3143,8 @@ pub const VM = struct {
     }
 
     fn runLoop(self: *VM, base_frame: usize) RuntimeError!void {
+        // the dispatch body inlines readByte/readU16/push at thousands of sites
+        @setEvalBranchQuota(100000);
         const prev_base_frame = self.run_base_frame;
         self.run_base_frame = base_frame;
         defer self.run_base_frame = prev_base_frame;
@@ -3600,13 +3624,20 @@ pub const VM = struct {
                 },
 
                 .call => {
+                    const cf_scope = try self.enterCallFamily(op);
+                    defer self.leaveCallFamily(cf_scope);
                     const name_idx = self.readU16();
                     const arg_count = self.readByte();
                     const name = self.currentChunk().constants.items[name_idx].string.bytes();
                     if (self.global_vars_dirty) try self.syncGlobalLocalsToVars();
-                    try self.callNamedFunction(name, arg_count);
+                    self.callNamedFunction(name, arg_count) catch {
+                        if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
+                        return error.RuntimeError;
+                    };
                 },
                 .call_indirect => {
+                    const cf_scope = try self.enterCallFamily(op);
+                    defer self.leaveCallFamily(cf_scope);
                     if (self.global_vars_dirty) try self.syncGlobalLocalsToVars();
                     const arg_count = self.readByte();
                     const ac: usize = arg_count;
@@ -3616,13 +3647,18 @@ pub const VM = struct {
                         var i: usize = 0;
                         while (i < ac) : (i += 1) {
                             self.stack[self.sp - ac - 1 + i] = self.stack[self.sp - ac + i];
+                            self.setArgSource(self.sp - ac - 1 + i, self.ic.?.arg_stack[self.sp - ac + i]);
                         }
+                        self.clearArgStackFrom(self.sp - 1);
                         self.sp -= 1;
                         // the closure value slot is consumed here; the callee
                         // frame retains the instance by call_name, and the
                         // deferred release keeps the name alive until then
                         self.stackRelease(name_val);
-                        try self.callNamedFunction(name, arg_count);
+                        self.callNamedFunction(name, arg_count) catch {
+                            if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
+                            return error.RuntimeError;
+                        };
                     } else if (name_val == .object) {
                         var args_buf: [16]Value = undefined;
                         for (0..ac) |i| args_buf[i] = self.stack[self.sp - ac + i];
@@ -3677,6 +3713,8 @@ pub const VM = struct {
                     }
                 },
                 .call_spread => {
+                    const cf_scope = try self.enterCallFamily(op);
+                    defer self.leaveCallFamily(cf_scope);
                     if (self.global_vars_dirty) try self.syncGlobalLocalsToVars();
                     const name_idx = self.readU16();
                     const name = self.currentChunk().constants.items[name_idx].string.bytes();
@@ -3705,6 +3743,8 @@ pub const VM = struct {
                     if (has_named) {
                         if (self.functions.get(name)) |func| {
                             var resolved: [256]Value = .{.null} ** 256;
+                            var resolved_sources: [256]RefSource = undefined;
+                            @memset(resolved_sources[0..@min(resolved_sources.len, func.params.len + arr.entries.items.len)], .none);
                             if (func.params.len > resolved.len) return error.RuntimeError;
                             var assigned: [16]bool = .{false} ** 16;
                             var pos: usize = 0;
@@ -3729,6 +3769,7 @@ pub const VM = struct {
                                                 return error.RuntimeError;
                                             }
                                             resolved[pi] = entry.value;
+                                            resolved_sources[pi] = self.argArraySource(arr, entry.key);
                                             assigned[pi] = true;
                                             if (pi >= pos) pos = pi + 1;
                                             found = true;
@@ -3792,6 +3833,7 @@ pub const VM = struct {
                                         ok = true;
                                     }
                                     resolved[pos] = entry.value;
+                                    resolved_sources[pos] = self.argArraySource(arr, entry.key);
                                     assigned[pos] = true;
                                     pos += 1;
                                 }
@@ -3803,10 +3845,18 @@ pub const VM = struct {
                                     resolved[i] = try self.resolveDefault(func.defaults[i]);
                                 }
                             }
-                            for (0..count) |i| self.push(resolved[i]);
-                            try self.callNamedFunctionV(name, @intCast(count), named_extras);
+                            for (0..count) |i| {
+                                self.push(resolved[i]);
+                                self.setArgSource(self.sp - 1, resolved_sources[i]);
+                            }
+                            self.callNamedFunctionV(name, @intCast(count), named_extras) catch {
+                                if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
+                                return error.RuntimeError;
+                            };
                         } else if (@import("../stdlib/native_params.zig").map.get(name)) |params| {
                             var resolved: [256]Value = .{.null} ** 256;
+                            var resolved_sources: [256]RefSource = undefined;
+                            @memset(resolved_sources[0..@min(resolved_sources.len, params.len + arr.entries.items.len)], .none);
                             if (params.len > resolved.len) return error.RuntimeError;
                             var pos: usize = 0;
                             for (arr.entries.items) |entry| {
@@ -3814,20 +3864,31 @@ pub const VM = struct {
                                     for (params, 0..) |p, pi| {
                                         if (std.mem.eql(u8, p[1..], entry.key.string.bytes()) or std.mem.eql(u8, p, entry.key.string.bytes())) {
                                             resolved[pi] = entry.value;
+                                            resolved_sources[pi] = self.argArraySource(arr, entry.key);
                                             if (pi >= pos) pos = pi + 1;
                                             break;
                                         }
                                     }
                                 } else {
                                     resolved[pos] = entry.value;
+                                    resolved_sources[pos] = self.argArraySource(arr, entry.key);
                                     pos += 1;
                                 }
                             }
-                            for (0..pos) |i| self.push(resolved[i]);
-                            try self.callNamedFunction(name, @intCast(pos));
+                            for (0..pos) |i| {
+                                self.push(resolved[i]);
+                                self.setArgSource(self.sp - 1, resolved_sources[i]);
+                            }
+                            self.callNamedFunction(name, @intCast(pos)) catch {
+                                if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
+                                return error.RuntimeError;
+                            };
                         } else {
-                            for (arr.entries.items) |entry| self.push(entry.value);
-                            try self.callNamedFunction(name, @intCast(arr.entries.items.len));
+                            for (arr.entries.items) |entry| self.pushArgEntry(arr, entry);
+                            self.callNamedFunction(name, @intCast(arr.entries.items.len)) catch {
+                                if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
+                                return error.RuntimeError;
+                            };
                         }
                     } else {
                         const ref_func = self.functions.get(name);
@@ -3861,12 +3922,17 @@ pub const VM = struct {
                             }
                             self.pushCallResult(result);
                         } else {
-                            for (arr.entries.items) |entry| self.push(entry.value);
-                            try self.callNamedFunction(name, @intCast(arr.entries.items.len));
+                            for (arr.entries.items) |entry| self.pushArgEntry(arr, entry);
+                            self.callNamedFunction(name, @intCast(arr.entries.items.len)) catch {
+                                if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
+                                return error.RuntimeError;
+                            };
                         }
                     }
                 },
                 .call_indirect_spread => {
+                    const cf_scope = try self.enterCallFamily(op);
+                    defer self.leaveCallFamily(cf_scope);
                     const name_val = self.pop();
                     const args_val = self.pop();
                     if (args_val != .array) {
@@ -3927,6 +3993,8 @@ pub const VM = struct {
                         if (has_named_args) {
                             if (self.functions.get(name_val.string.bytes())) |func| {
                                 var resolved: [256]Value = .{.null} ** 256;
+                                var resolved_sources: [256]RefSource = undefined;
+                                @memset(resolved_sources[0..@min(resolved_sources.len, func.params.len + arr.entries.items.len)], .none);
                                 if (func.params.len > resolved.len) return error.RuntimeError;
                                 var pos: usize = 0;
                                 for (arr.entries.items) |entry| {
@@ -3935,26 +4003,40 @@ pub const VM = struct {
                                             const pn = if (p.len > 0 and p[0] == '$') p[1..] else p;
                                             if (std.mem.eql(u8, pn, entry.key.string.bytes())) {
                                                 resolved[pi] = entry.value;
+                                                resolved_sources[pi] = self.argArraySource(arr, entry.key);
                                                 if (pi >= pos) pos = pi + 1;
                                                 break;
                                             }
                                         }
                                     } else {
                                         resolved[pos] = entry.value;
+                                        resolved_sources[pos] = self.argArraySource(arr, entry.key);
                                         pos += 1;
                                     }
                                 }
-                                for (0..pos) |i| self.push(resolved[i]);
-                                try self.callNamedFunction(name_val.string.bytes(), @intCast(pos));
+                                for (0..pos) |i| {
+                                    self.push(resolved[i]);
+                                    self.setArgSource(self.sp - 1, resolved_sources[i]);
+                                }
+                                self.callNamedFunction(name_val.string.bytes(), @intCast(pos)) catch {
+                                    if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
+                                    return error.RuntimeError;
+                                };
                             } else {
-                                for (arr.entries.items) |entry| self.push(entry.value);
+                                for (arr.entries.items) |entry| self.pushArgEntry(arr, entry);
                                 const ac2: u8 = @intCast(arr.entries.items.len);
-                                try self.callNamedFunction(name_val.string.bytes(), ac2);
+                                self.callNamedFunction(name_val.string.bytes(), ac2) catch {
+                                    if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
+                                    return error.RuntimeError;
+                                };
                             }
                         } else {
-                            for (arr.entries.items) |entry| self.push(entry.value);
+                            for (arr.entries.items) |entry| self.pushArgEntry(arr, entry);
                             const ac: u8 = @intCast(arr.entries.items.len);
-                            try self.callNamedFunction(name_val.string.bytes(), ac);
+                            self.callNamedFunction(name_val.string.bytes(), ac) catch {
+                                if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
+                                return error.RuntimeError;
+                            };
                         }
                     } else if (name_val == .array) {
                         const cb_arr = name_val.array;
@@ -4126,11 +4208,14 @@ pub const VM = struct {
                     }
                     self.push(val);
                 },
-                .array_push => {
+                .array_push, .arg_array_push => {
+                    var source = if (op == .arg_array_push) self.retainArgSource(self.ic.?.arg_stack[self.sp - 1]) else RefSource.none;
+                    defer self.releaseArgSource(&source);
                     const val = self.popTransfer();
                     const arr_val = self.peek();
                     if (arr_val == .array) {
                         try arr_val.array.append(self.allocator, val);
+                        if (op == .arg_array_push) try self.recordArgArraySource(arr_val.array, arr_val.array.entries.items[arr_val.array.entries.items.len - 1].key, source);
                         self.stackRelease(val);
                     } else if (arr_val == .object and self.hasMethod(arr_val.object.class_name, "offsetSet")) {
                         _ = self.callMethod(arr_val.object, "offsetSet", &.{ .null, val }) catch {
@@ -4147,7 +4232,9 @@ pub const VM = struct {
                         self.stackRelease(val);
                     }
                 },
-                .array_set_elem => {
+                .array_set_elem, .arg_array_set => {
+                    var source = if (op == .arg_array_set) self.retainArgSource(self.ic.?.arg_stack[self.sp - 1]) else RefSource.none;
+                    defer self.releaseArgSource(&source);
                     const val = self.pop();
                     const key = self.pop();
                     const arr_val = self.peek();
@@ -4157,6 +4244,7 @@ pub const VM = struct {
                             return error.RuntimeError;
                         }
                         const norm_key = Value.toArrayKey(key);
+                        if (op == .arg_array_set) try self.recordArgArraySource(arr_val.array, norm_key, source);
                         if (!(self.array_ref_active and try self.writeArrayElemRef(arr_val.array, norm_key, val))) {
                             try self.arraySetOwned(arr_val.array, norm_key, val);
                         }
@@ -4168,8 +4256,30 @@ pub const VM = struct {
                     }
                 },
                 .array_get => {
+                    const capturing = self.arg_capture_pending;
+                    self.arg_capture_pending = false;
                     const key = self.pop();
+                    var base_source = if (capturing) self.retainArgSource(self.ic.?.arg_stack[self.sp - 1]) else RefSource.none;
+                    defer self.releaseArgSource(&base_source);
                     const arr_val = self.pop();
+                    const arg_sp = self.sp;
+                    if (capturing) {
+                        retainValue(arr_val);
+                        retainValue(key);
+                    }
+                    defer if (capturing) {
+                        // Removing this temporary lifetime pin does not remove
+                        // a graph edge and cannot create an array cycle. Avoid
+                        // scheduling a full cycle walk of the argument's parent.
+                        if (arr_val == .array) {
+                            arrayUnpin(arr_val.array);
+                            if (arr_val.array.refcount == 0) self.queueArrayRelease(arr_val.array);
+                        } else self.releaseValue(arr_val);
+                        self.releaseValue(key);
+                    };
+                    defer if (capturing and arr_val == .array and self.sp == arg_sp + 1 and self.pending_exception == null) {
+                        self.captureDimensionCell(arg_sp, arr_val.array, key, base_source) catch unreachable;
+                    };
                     if (arr_val == .array) {
                         if (self.globals_array) |ga| {
                             if (arr_val.array == ga and key == .string) {
@@ -4370,7 +4480,7 @@ pub const VM = struct {
                         }) orelse .null;
                         if (try self.propGetReturnsRef(obj, pname)) {
                             hook_cell = try self.takeHookReturnCell();
-                            if (hook_cell) |cell| existing = try self.prepareHookArray(cell);
+                            if (hook_cell) |cell| existing = cell.*;
                         }
                         if (existing != .object and !try self.propGetReturnsRef(obj, pname)) {
                             const msg = try std.fmt.allocPrint(self.allocator, "Indirect modification of {s}::${s} is not allowed", .{ obj.class_name, pname });
@@ -4379,6 +4489,10 @@ pub const VM = struct {
                             return error.RuntimeError;
                         }
                     }
+                    if (existing != .object) {
+                        if (try self.checkPropertyMutation(obj, pname, .indirect)) continue;
+                    }
+                    if (hook_cell) |cell| existing = try self.prepareHookArray(cell);
                     if (existing == .string) {
                         const s = existing.string.bytes();
                         var idx: i64 = switch (ik) {
@@ -4979,7 +5093,7 @@ pub const VM = struct {
                         }) orelse .null;
                         if (try self.propGetReturnsRef(eap_obj, prop_name)) {
                             hook_cell = try self.takeHookReturnCell();
-                            if (hook_cell) |cell| cur = try self.prepareHookArray(cell);
+                            if (hook_cell) |cell| cur = cell.*;
                         }
                         if (cur != .object and !try self.propGetReturnsRef(eap_obj, prop_name)) {
                             const msg = try std.fmt.allocPrint(self.allocator, "Indirect modification of {s}::${s} is not allowed", .{ eap_obj.class_name, prop_name });
@@ -4988,6 +5102,10 @@ pub const VM = struct {
                             return error.RuntimeError;
                         }
                     }
+                    if (cur != .object) {
+                        if (try self.checkPropertyMutation(eap_obj, prop_name, .indirect)) continue;
+                    }
+                    if (hook_cell) |cell| cur = try self.prepareHookArray(cell);
                     if (cur == .int or cur == .float or (cur == .bool and cur.bool)) {
                         if (try self.throwBuiltinException("Error", "Cannot use a scalar value as an array")) continue;
                         return error.RuntimeError;
@@ -5611,6 +5729,7 @@ pub const VM = struct {
                         try self.bindRefSlot(&frame.ref_slots, dst_name, c);
                     } else {
                         const obj_ptr = obj_val.object;
+                        if (try self.checkPropertyMutation(obj_ptr, prop_name, .indirect)) continue;
                         if (self.hasPropHook(obj_ptr.class_name, prop_name, .get) and !self.inPropHook(obj_ptr, prop_name) and !try self.propGetReturnsRef(obj_ptr, prop_name)) {
                             obj_ptr.refcount +%= 1;
                             defer self.releaseValue(.{ .object = obj_ptr });
@@ -5684,6 +5803,7 @@ pub const VM = struct {
                         // dupe so the binding's prop_name outlives the temporary
                         const prop_owned = try self.allocator.dupe(u8, prop_str);
                         try self.strings.append(self.allocator, prop_owned);
+                        if (try self.checkPropertyMutation(obj_ptr, prop_owned, .indirect)) continue;
                         if (self.hasPropHook(obj_ptr.class_name, prop_owned, .get) and !self.inPropHook(obj_ptr, prop_owned) and !try self.propGetReturnsRef(obj_ptr, prop_owned)) {
                             obj_ptr.refcount +%= 1;
                             defer self.releaseValue(.{ .object = obj_ptr });
@@ -5871,6 +5991,9 @@ pub const VM = struct {
                     const obj_val = self.pop();
                     if (obj_val == .object) {
                         const obj = obj_val.object;
+                        if (!obj.isUnset(prop_name)) {
+                            if (try self.checkPropertyMutation(obj, prop_name, .unset)) continue;
+                        }
                         {
                             const vr = self.findPropertyVisibility(obj.class_name, prop_name);
                             if (vr.is_readonly and obj.get(prop_name) != .null) {
@@ -5880,7 +6003,7 @@ pub const VM = struct {
                                 return error.RuntimeError;
                             }
                         }
-                        if (self.hasMethod(obj.class_name, "__unset")) {
+                        if (self.shouldCallMagicUnset(obj, prop_name)) {
                             _ = self.callMethod(obj, "__unset", &.{.{ .string = Value.String.borrowed(prop_name) }}) catch {};
                         } else {
                             // mark the property as unset so subsequent reads
@@ -5908,6 +6031,9 @@ pub const VM = struct {
                     if (obj_val == .object and name_val == .string) {
                         const obj = obj_val.object;
                         const prop_name = name_val.string.bytes();
+                        if (!obj.isUnset(prop_name)) {
+                            if (try self.checkPropertyMutation(obj, prop_name, .unset)) continue;
+                        }
                         const vr = self.findPropertyVisibility(obj.class_name, prop_name);
                         if (vr.is_readonly and obj.get(prop_name) != .null) {
                             const msg = try std.fmt.allocPrint(self.allocator, "Cannot unset readonly property {s}::${s}", .{ obj.class_name, prop_name });
@@ -5915,7 +6041,7 @@ pub const VM = struct {
                             if (try self.throwBuiltinException("Error", msg)) continue;
                             return error.RuntimeError;
                         }
-                        if (self.hasMethod(obj.class_name, "__unset")) {
+                        if (self.shouldCallMagicUnset(obj, prop_name)) {
                             _ = self.callMethod(obj, "__unset", &.{.{ .string = Value.String.borrowed(prop_name) }}) catch {};
                         } else {
                             try obj.markUnset(self.allocator, prop_name);
@@ -5933,6 +6059,18 @@ pub const VM = struct {
                     }
                     if (self.hasPendingReleases()) self.drainPendingDestruct();
                 },
+                .check_prop_dimension => {
+                    const obj_val = self.stack[self.sp - 2];
+                    const name = try self.valueToString(self.stack[self.sp - 1]);
+                    if (obj_val == .object) {
+                        const vr = self.findPropertyVisibility(obj_val.object.class_name, name);
+                        const cur = obj_val.object.getForScope(name, if (vr.visibility == .private) vr.defining_class else null);
+                        if (cur != .object) {
+                            if (try self.checkPropertyMutationVis(obj_val.object, name, .indirect, vr)) continue;
+                        }
+                    }
+                },
+
                 .unset_array_elem => {
                     const key = self.pop();
                     const arr_val = self.pop();
@@ -6745,6 +6883,8 @@ pub const VM = struct {
                         self.deinitFrameSlot(self.frame_count);
                     }
 
+                    self.discardArgTransport(handler.sp);
+
                     self.sp = handler.sp;
                     self.pushTransfer(exception);
 
@@ -6987,6 +7127,7 @@ pub const VM = struct {
                                                     self.frame_count -= 1;
                                                     self.deinitFrameSlot(self.frame_count);
                                                 }
+                                                self.discardArgTransport(handler.sp);
                                                 self.sp = handler.sp;
                                                 self.push(exc);
                                                 self.currentFrame().ip = handler.catch_ip;
@@ -7155,6 +7296,7 @@ pub const VM = struct {
                             try def.static_props.put(self.allocator, cname, try self.copyDefault(cval));
                             try def.constant_names.put(self.allocator, cname, {});
                         }
+                        self.clearArgStackFrom(self.sp - const_count);
                         self.sp -= const_count;
                     } else {
                         // read const names even when 0 (shouldn't have any)
@@ -7241,11 +7383,13 @@ pub const VM = struct {
                         var tp_names: [32][]const u8 = undefined;
                         var tp_has_default: [32]u8 = undefined;
                         var tp_vis: [32]ClassDef.Visibility = undefined;
+                        var tp_flags: [32]u8 = undefined;
                         for (0..tp_count) |pi| {
                             tp_names[pi] = self.currentChunk().constants.items[self.readU16()].string.bytes();
                             tp_has_default[pi] = self.readByte();
                             const vis_byte = self.readByte();
                             tp_vis[pi] = @enumFromInt(vis_byte & 0x03);
+                            tp_flags[pi] = vis_byte;
                         }
                         const tp_defaults = self.popDefaults(32, tp_has_default[0..tp_count]);
                         const props = try self.allocator.alloc(ClassDef.PropertyDef, tp_count);
@@ -7258,7 +7402,27 @@ pub const VM = struct {
                             } else Value{ .null = {} };
                             // the trait definition owns its defaults (popDefaults released the stack's reference)
                             retainValue(dval);
-                            props[pi] = .{ .name = tp_names[pi], .default = dval, .visibility = tp_vis[pi] };
+                            // Ordinary trait properties have symmetric read/write visibility,
+                            // just like properties declared directly on a class. Leaving
+                            // set_visibility at its public default invents a wider parent
+                            // write contract when a child redeclares a protected property.
+                            const flags = tp_flags[pi];
+                            const has_set_visibility = (flags & 0x20) != 0;
+                            const set_visibility: ClassDef.Visibility = if (has_set_visibility)
+                                @enumFromInt((flags >> 3) & 0x03)
+                            else if ((flags & 0x04) != 0 and tp_vis[pi] == .public)
+                                .protected
+                            else
+                                tp_vis[pi];
+                            props[pi] = .{
+                                .name = tp_names[pi],
+                                .default = dval,
+                                .visibility = tp_vis[pi],
+                                .set_visibility = set_visibility,
+                                .has_set_visibility = has_set_visibility,
+                                .is_readonly = (flags & 0x04) != 0,
+                                .is_final = (flags & 0x80) != 0 or (has_set_visibility and set_visibility == .private),
+                            };
                         }
                         try self.trait_props.put(self.allocator, trait_name, props);
                     }
@@ -7349,6 +7513,8 @@ pub const VM = struct {
                 .enum_decl => try self.handleEnumDecl(),
 
                 .new_obj => {
+                    const cf_scope = try self.enterCallFamily(op);
+                    defer self.leaveCallFamily(cf_scope);
                     const name_idx = self.readU16();
                     var arg_count = self.readByte();
                     // 0xFF signals spread args: top of stack is an array to unpack
@@ -7386,6 +7552,8 @@ pub const VM = struct {
                                 if (ctor_name) |ctn| {
                                     if (self.functions.get(ctn)) |func| {
                                         var resolved: [256]Value = .{.null} ** 256;
+                                        var resolved_sources: [256]RefSource = undefined;
+                                        @memset(resolved_sources[0..@min(resolved_sources.len, func.params.len + entries.len)], .none);
                                         if (func.params.len > resolved.len) return error.RuntimeError;
                                         var pos: usize = 0;
                                         for (entries) |entry| {
@@ -7394,12 +7562,14 @@ pub const VM = struct {
                                                     const pname = if (p.len > 0 and p[0] == '$') p[1..] else p;
                                                     if (std.mem.eql(u8, pname, entry.key.string.bytes()) or std.mem.eql(u8, p, entry.key.string.bytes())) {
                                                         resolved[pi] = entry.value;
+                                                        resolved_sources[pi] = self.argArraySource(arr_val.array, entry.key);
                                                         if (pi >= pos) pos = pi + 1;
                                                         break;
                                                     }
                                                 }
                                             } else {
                                                 resolved[pos] = entry.value;
+                                                resolved_sources[pos] = self.argArraySource(arr_val.array, entry.key);
                                                 pos += 1;
                                             }
                                         }
@@ -7409,18 +7579,21 @@ pub const VM = struct {
                                                 resolved[i] = try self.resolveDefault(func.defaults[i]);
                                             }
                                         }
-                                        for (0..count) |i| self.push(resolved[i]);
+                                        for (0..count) |i| {
+                                            self.push(resolved[i]);
+                                            self.setArgSource(self.sp - 1, resolved_sources[i]);
+                                        }
                                         arg_count = @intCast(count);
                                     } else {
-                                        for (entries) |entry| self.push(entry.value);
+                                        for (entries) |entry| self.pushArgEntry(arr_val.array, entry);
                                         arg_count = @intCast(entries.len);
                                     }
                                 } else {
-                                    for (entries) |entry| self.push(entry.value);
+                                    for (entries) |entry| self.pushArgEntry(arr_val.array, entry);
                                     arg_count = @intCast(entries.len);
                                 }
                             } else {
-                                for (entries) |entry| self.push(entry.value);
+                                for (entries) |entry| self.pushArgEntry(arr_val.array, entry);
                                 arg_count = @intCast(entries.len);
                             }
                         } else {
@@ -7546,6 +7719,7 @@ pub const VM = struct {
                                             self.frame_count -= 1;
                                             self.deinitFrameSlot(self.frame_count);
                                         }
+                                        self.discardArgTransport(handler.sp);
                                         self.sp = handler.sp;
                                         self.push(exc);
                                         self.currentFrame().ip = handler.catch_ip;
@@ -7645,12 +7819,22 @@ pub const VM = struct {
                                         try new_vars.put(self.allocator, func.params[i], try self.bindFrameArg(self.stack[self.sp - ac + i]));
                                     }
                                 }
+                                var ctor_refs: std.StringHashMapUnmanaged(*Value) = .{};
+                                const ctor_owner = try self.argRefOwner(func);
+                                self.captureArgSources(ac);
+                                self.bindOwnedRefParams(ac, func, &new_vars, &ctor_refs, ctor_owner) catch |err| {
+                                    new_vars.deinit(self.allocator);
+                                    self.deinitRefSlots(&ctor_refs);
+                                    if (self.ref_index) |ri| ri.releaseOwner(self.allocator, ctor_owner);
+                                    if (self.dispatchPendingException(base_frame)) continue;
+                                    return err;
+                                };
                                 self.dropN(ac);
                                 if (!func.is_variadic and ac < func.arity) for (ac..func.arity) |i| {
                                     const default = if (i < func.defaults.len) try self.resolveDefault(func.defaults[i]) else Value.null;
                                     try new_vars.put(self.allocator, func.params[i], default);
                                 };
-                                self.frames[self.frame_count] = .{ .chunk = &func.chunk, .ip = 0, .vars = new_vars, .locals = try self.allocLocals(func, &new_vars), .func = func, .called_class = class_name };
+                                self.frames[self.frame_count] = .{ .chunk = &func.chunk, .ip = 0, .vars = new_vars, .locals = try self.allocLocals(func, &new_vars), .func = func, .called_class = class_name, .ref_slots = ctor_refs, .ref_owner = ctor_owner };
                                 self.frames[self.frame_count].entry_sp = self.sp;
                                 self.frame_count += 1;
                                 self.retainFrameObjects(self.frame_count - 1);
@@ -7671,13 +7855,15 @@ pub const VM = struct {
                 },
 
                 .new_obj_dynamic => {
+                    const cf_scope = try self.enterCallFamily(op);
+                    defer self.leaveCallFamily(cf_scope);
                     var arg_count = self.readByte();
                     // 0xFF signals spread args: top of stack is an array to unpack
                     if (arg_count == 0xFF) {
                         const arr_val = self.pop();
                         if (arr_val == .array) {
                             const entries = arr_val.array.entries.items;
-                            for (entries) |entry| self.push(entry.value);
+                            for (entries) |entry| self.pushArgEntry(arr_val.array, entry);
                             arg_count = @intCast(entries.len);
                         } else {
                             arg_count = 0;
@@ -7744,6 +7930,7 @@ pub const VM = struct {
                                             self.frame_count -= 1;
                                             self.deinitFrameSlot(self.frame_count);
                                         }
+                                        self.discardArgTransport(handler.sp);
                                         self.sp = handler.sp;
                                         self.push(exc);
                                         self.currentFrame().ip = handler.catch_ip;
@@ -7764,12 +7951,22 @@ pub const VM = struct {
                             for (0..@min(ac, func.arity)) |i| {
                                 try new_vars.put(self.allocator, func.params[i], try self.bindFrameArg(self.stack[self.sp - ac + i]));
                             }
+                            var ctor_refs: std.StringHashMapUnmanaged(*Value) = .{};
+                            const ctor_owner = try self.argRefOwner(func);
+                            self.captureArgSources(ac);
+                            self.bindOwnedRefParams(ac, func, &new_vars, &ctor_refs, ctor_owner) catch |err| {
+                                new_vars.deinit(self.allocator);
+                                self.deinitRefSlots(&ctor_refs);
+                                if (self.ref_index) |ri| ri.releaseOwner(self.allocator, ctor_owner);
+                                if (self.dispatchPendingException(base_frame)) continue;
+                                return err;
+                            };
                             self.dropN(ac + 1);
                             for (@min(ac, func.arity)..func.arity) |i| {
                                 const default = if (i < func.defaults.len) try self.resolveDefault(func.defaults[i]) else Value.null;
                                 try new_vars.put(self.allocator, func.params[i], default);
                             }
-                            self.frames[self.frame_count] = .{ .chunk = &func.chunk, .ip = 0, .vars = new_vars, .locals = try self.allocLocals(func, &new_vars), .func = func, .called_class = class_name };
+                            self.frames[self.frame_count] = .{ .chunk = &func.chunk, .ip = 0, .vars = new_vars, .locals = try self.allocLocals(func, &new_vars), .func = func, .called_class = class_name, .ref_slots = ctor_refs, .ref_owner = ctor_owner };
                             self.frames[self.frame_count].entry_sp = self.sp;
                             self.frame_count += 1;
                             self.retainFrameObjects(self.frame_count - 1);
@@ -7787,13 +7984,37 @@ pub const VM = struct {
                     self.push(.{ .object = obj });
                 },
 
+                .arg_variable => {
+                    const name_idx = self.readU16();
+                    const field = self.currentFrame().ip;
+                    const delta = self.readU16();
+                    const pos = self.readByte();
+                    if (self.argNeedsCapture(self.currentChunk(), field, delta, pos, 1))
+                        self.setArgSource(self.sp - 1, .{ .simple = self.currentChunk().constants.items[name_idx].string.bytes() });
+                },
+                .arg_guard_prop, .arg_guard_prop_dynamic, .arg_guard_dim => {
+                    const field = self.currentFrame().ip;
+                    const delta = self.readU16();
+                    const pos = self.readByte();
+                    const operands: usize = if (op == .arg_guard_prop) 1 else 2;
+                    self.arg_capture_pending = self.argNeedsCapture(self.currentChunk(), field, delta, pos, operands);
+                },
                 .get_prop, .get_prop_dynamic => {
+                    const capturing = self.arg_capture_pending;
+                    self.arg_capture_pending = false;
                     const gp_ip = self.currentFrame().ip;
                     const prop_name = if (op == .get_prop_dynamic) try self.valueToString(self.pop()) else blk: {
                         const name_idx = self.readU16();
                         break :blk self.currentChunk().constants.items[name_idx].string.bytes();
                     };
                     const obj_val = self.pop();
+                    const arg_sp = self.sp;
+                    defer if (capturing and self.hasPendingReleases()) self.drainPendingDestruct();
+                    if (capturing) stackRetain(obj_val);
+                    defer if (capturing) self.releaseValue(obj_val);
+                    defer if (capturing and obj_val == .object and self.sp == arg_sp + 1 and self.pending_exception == null) {
+                        self.capturePropertyCell(arg_sp, obj_val.object, prop_name) catch unreachable;
+                    };
                     if (obj_val == .object) {
                         const obj = obj_val.object;
                         obj.refcount +%= 1;
@@ -8013,6 +8234,15 @@ pub const VM = struct {
 
                         if (obj.lazy_initializer != .null) try self.triggerLazyInit(obj);
 
+                        // the set-scope gate runs before hooks and __set, but only
+                        // an asymmetric or readonly declaration can ever deny a write
+                        const vr = self.findPropertyVisibility(obj.class_name, prop_name);
+                        if (vr.is_readonly or vr.set_visibility != vr.visibility) {
+                            if (!(obj.isUnset(prop_name) and self.hasMethod(obj.class_name, "__set"))) {
+                                if (try self.checkPropertyMutationVis(obj, prop_name, .write, vr)) continue;
+                            }
+                        }
+
                         // property hooks: dispatch to set hook if present (and not recursing).
                         // an exception thrown inside the hook must dispatch back into the
                         // caller's try/catch instead of bubbling out of runLoop
@@ -8081,13 +8311,12 @@ pub const VM = struct {
                             }
                         }
 
-                        const has_prop = obj.properties.contains(prop_name) or (obj.slots != null and obj.getSlotIndex(prop_name) != null);
+                        const has_prop = !obj.isUnset(prop_name) and (obj.properties.contains(prop_name) or (obj.slots != null and obj.getSlotIndex(prop_name) != null));
                         if (!has_prop and self.hasMethod(obj.class_name, "__set") and !obj.magic_set_active.contains(prop_name)) {
                             try obj.magic_set_active.put(self.allocator, prop_name, {});
                             _ = self.callMethod(obj, "__set", &.{ .{ .string = Value.String.borrowed(prop_name) }, val }) catch {};
                             _ = obj.magic_set_active.remove(prop_name);
                         } else {
-                            const vr = self.findPropertyVisibility(obj.class_name, prop_name);
                             if (!self.checkVisibility(vr.defining_class, vr.visibility)) {
                                 if (self.hasMethod(obj.class_name, "__set") and !obj.magic_set_active.contains(prop_name)) {
                                     try obj.magic_set_active.put(self.allocator, prop_name, {});
@@ -8099,27 +8328,6 @@ pub const VM = struct {
                                 const msg = try std.fmt.allocPrint(self.allocator, "Cannot access {s} property {s}::${s}", .{
                                     @tagName(vr.visibility), vr.defining_class, prop_name,
                                 });
-                                try self.strings.append(self.allocator, msg);
-                                if (try self.throwBuiltinException("Error", msg)) continue;
-                                return error.RuntimeError;
-                            }
-                            if (vr.set_visibility != vr.visibility and !self.checkVisibility(vr.defining_class, vr.set_visibility)) {
-                                if (self.hasMethod(obj.class_name, "__set") and !obj.magic_set_active.contains(prop_name)) {
-                                    try obj.magic_set_active.put(self.allocator, prop_name, {});
-                                    _ = self.callMethod(obj, "__set", &.{ .{ .string = Value.String.borrowed(prop_name) }, val }) catch {};
-                                    _ = obj.magic_set_active.remove(prop_name);
-                                    self.push(val);
-                                    continue;
-                                }
-                                const scope_name = self.currentDefiningClass();
-                                const msg = if (scope_name) |sn|
-                                    try std.fmt.allocPrint(self.allocator, "Cannot modify {s}(set) property {s}::${s} from scope {s}", .{
-                                        @tagName(vr.set_visibility), vr.defining_class, prop_name, sn,
-                                    })
-                                else
-                                    try std.fmt.allocPrint(self.allocator, "Cannot modify {s}(set) property {s}::${s} from global scope", .{
-                                        @tagName(vr.set_visibility), vr.defining_class, prop_name,
-                                    });
                                 try self.strings.append(self.allocator, msg);
                                 if (try self.throwBuiltinException("Error", msg)) continue;
                                 return error.RuntimeError;
@@ -8149,7 +8357,7 @@ pub const VM = struct {
                             // properties are cached too - the fast path runs
                             // checkPropertyType when prop_type is set
                             if (if (op == .set_prop) self.ic else null) |ic| {
-                                if (vr.visibility == .public and vr.set_visibility == .public) {
+                                if (vr.visibility == .public and vr.set_visibility == .public and !vr.is_readonly) {
                                     const sp_idx = InlineCache.propIndex(@intFromPtr(self.currentChunk()), sp_ip);
                                     const si = if (obj.slot_layout != null) obj.getSlotIndex(prop_name) orelse @as(u16, 0xFFFF) else @as(u16, 0xFFFF);
                                     ic.prop[sp_idx] = .{ .key = sp_ip, .chunk_key = @intFromPtr(self.currentChunk()), .class_ptr = @intFromPtr(obj.class_name.ptr), .slot_index = si, .prop_type = vr.type_str, .decl_class = vr.defining_class };
@@ -8161,6 +8369,8 @@ pub const VM = struct {
                 },
 
                 .method_call => {
+                    const cf_scope = try self.enterCallFamily(op);
+                    defer self.leaveCallFamily(cf_scope);
                     const name_idx = self.readU16();
                     const arg_count = self.readByte();
                     const method_name = self.currentChunk().constants.items[name_idx].string.bytes();
@@ -8297,7 +8507,10 @@ pub const VM = struct {
 
                             for (0..ac) |i| self.push(args_buf[i]);
                             if (fiber.callable == .string) {
-                                try self.callNamedFunction(fiber.callable.string.bytes(), @intCast(ac));
+                                self.callNamedFunction(fiber.callable.string.bytes(), @intCast(ac)) catch {
+                                    if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
+                                    return error.RuntimeError;
+                                };
                             } else {
                                 var ctx = self.makeContext(null);
                                 _ = try ctx.invokeCallable(fiber.callable, args_buf[0..ac]);
@@ -8653,6 +8866,7 @@ pub const VM = struct {
                                         self.frame_count -= 1;
                                         self.deinitFrameSlot(self.frame_count);
                                     }
+                                    self.discardArgTransport(handler.sp);
                                     self.sp = handler.sp;
                                     self.push(exc);
                                     self.currentFrame().ip = handler.catch_ip;
@@ -8718,8 +8932,15 @@ pub const VM = struct {
                             try self.fillDefaults(&new_vars, func, ac);
                         }
                         var method_refs: std.StringHashMapUnmanaged(*Value) = .{};
-                        const method_owner = (try self.refIndex()).createOwner();
-                        try self.bindRefParams(ac, func, &new_vars, &method_refs, method_owner);
+                        const method_owner = try self.argRefOwner(func);
+                        self.captureArgSources(ac);
+                        self.bindOwnedRefParams(ac, func, &new_vars, &method_refs, method_owner) catch {
+                            new_vars.deinit(self.allocator);
+                            self.deinitRefSlots(&method_refs);
+                            if (self.ref_index) |ri| ri.releaseOwner(self.allocator, method_owner);
+                            if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
+                            return error.RuntimeError;
+                        };
                         // bindRefParams may have set a ref binding on a param;
                         // the copyValue above clones the array, breaking the
                         // ref. for params with ref bindings, restore the
@@ -8760,6 +8981,8 @@ pub const VM = struct {
                 },
 
                 .method_call_spread => {
+                    const cf_scope = try self.enterCallFamily(op);
+                    defer self.leaveCallFamily(cf_scope);
                     const name_idx = self.readU16();
                     const method_name = self.currentChunk().constants.items[name_idx].string.bytes();
                     const args_val = self.pop();
@@ -8785,10 +9008,12 @@ pub const VM = struct {
                         }
                     }
 
-                    var resolved_buf: [16]Value = .{.null} ** 16;
+                    var resolved_buf: [256]Value = .{.null} ** 256;
+                    var resolved_sources: [256]RefSource = undefined;
                     var ac = arr.entries.items.len;
 
                     if (has_named) {
+                        @memset(resolved_sources[0..], .none);
                         const obj_peek = self.stack[self.sp - 1];
                         if (obj_peek == .object) {
                             const full = self.resolveMethod(obj_peek.object.class_name, method_name) catch null;
@@ -8800,12 +9025,14 @@ pub const VM = struct {
                                             for (func.params, 0..) |p, pi| {
                                                 if (std.mem.eql(u8, p[1..], entry.key.string.bytes()) or std.mem.eql(u8, p, entry.key.string.bytes())) {
                                                     resolved_buf[pi] = entry.value;
+                                                    resolved_sources[pi] = self.argArraySource(arr, entry.key);
                                                     if (pi >= pos) pos = pi + 1;
                                                     break;
                                                 }
                                             }
                                         } else {
                                             resolved_buf[pos] = entry.value;
+                                            resolved_sources[pos] = self.argArraySource(arr, entry.key);
                                             pos += 1;
                                         }
                                     }
@@ -8815,18 +9042,21 @@ pub const VM = struct {
                                             resolved_buf[i] = try self.resolveDefault(func.defaults[i]);
                                         }
                                     }
-                                    for (0..ac) |i| self.push(resolved_buf[i]);
+                                    for (0..ac) |i| {
+                                        self.push(resolved_buf[i]);
+                                        self.setArgSource(self.sp - 1, resolved_sources[i]);
+                                    }
                                 } else {
-                                    for (arr.entries.items) |entry| self.push(entry.value);
+                                    for (arr.entries.items) |entry| self.pushArgEntry(arr, entry);
                                 }
                             } else {
-                                for (arr.entries.items) |entry| self.push(entry.value);
+                                for (arr.entries.items) |entry| self.pushArgEntry(arr, entry);
                             }
                         } else {
-                            for (arr.entries.items) |entry| self.push(entry.value);
+                            for (arr.entries.items) |entry| self.pushArgEntry(arr, entry);
                         }
                     } else {
-                        for (arr.entries.items) |entry| self.push(entry.value);
+                        for (arr.entries.items) |entry| self.pushArgEntry(arr, entry);
                     }
                     const obj_val = self.stack[self.sp - ac - 1];
                     if (obj_val != .object) {
@@ -8880,6 +9110,7 @@ pub const VM = struct {
                                         self.frame_count -= 1;
                                         self.deinitFrameSlot(self.frame_count);
                                     }
+                                    self.discardArgTransport(handler.sp);
                                     self.sp = handler.sp;
                                     self.push(exc);
                                     self.currentFrame().ip = handler.catch_ip;
@@ -8925,10 +9156,20 @@ pub const VM = struct {
                                 if (i < func.defaults.len) try new_vars.put(self.allocator, func.params[i], try self.resolveDefault(func.defaults[i]));
                             }
                         }
+                        var method_refs: std.StringHashMapUnmanaged(*Value) = .{};
+                        const method_owner = try self.argRefOwner(func);
+                        self.captureArgSources(ac);
+                        self.bindOwnedRefParams(ac, func, &new_vars, &method_refs, method_owner) catch {
+                            new_vars.deinit(self.allocator);
+                            self.deinitRefSlots(&method_refs);
+                            if (self.ref_index) |ri| ri.releaseOwner(self.allocator, method_owner);
+                            if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
+                            return error.RuntimeError;
+                        };
                         self.saveFrameArgs(mcs_ac_u8);
                         self.dropN(ac);
                         self.dropN(1);
-                        self.frames[self.frame_count] = .{ .chunk = &func.chunk, .ip = 0, .vars = new_vars, .locals = try self.allocLocals(func, &new_vars), .func = func };
+                        self.frames[self.frame_count] = .{ .chunk = &func.chunk, .ip = 0, .vars = new_vars, .locals = try self.allocLocals(func, &new_vars), .func = func, .ref_slots = method_refs, .ref_owner = method_owner };
                         self.setFrameArgCount(mcs_ac_u8);
                         self.frames[self.frame_count].entry_sp = self.sp;
                         self.frame_count += 1;
@@ -8945,6 +9186,8 @@ pub const VM = struct {
                 },
 
                 .method_call_dynamic => {
+                    const cf_scope = try self.enterCallFamily(op);
+                    defer self.leaveCallFamily(cf_scope);
                     const arg_count = self.readByte();
                     const ac: usize = arg_count;
                     // stack: [object, method_name, arg1, ..., argN]
@@ -8969,7 +9212,9 @@ pub const VM = struct {
                     var i: usize = 0;
                     while (i < ac) : (i += 1) {
                         self.stack[self.sp - ac - 1 + i] = self.stack[self.sp - ac + i];
+                        self.setArgSource(self.sp - ac - 1 + i, self.ic.?.arg_stack[self.sp - ac + i]);
                     }
+                    self.clearArgStackFrom(self.sp - 1);
                     self.sp -= 1;
                     // now stack is [object, arg1, ..., argN] - same layout as method_call
                     const full_name = self.resolveMethod(obj.class_name, method_name) catch {
@@ -9027,6 +9272,7 @@ pub const VM = struct {
                                         self.frame_count -= 1;
                                         self.deinitFrameSlot(self.frame_count);
                                     }
+                                    self.discardArgTransport(handler.sp);
                                     self.sp = handler.sp;
                                     self.push(exc);
                                     self.currentFrame().ip = handler.catch_ip;
@@ -9074,10 +9320,20 @@ pub const VM = struct {
                                 }
                             }
                         }
+                        var method_refs: std.StringHashMapUnmanaged(*Value) = .{};
+                        const method_owner = try self.argRefOwner(func);
+                        self.captureArgSources(ac);
+                        self.bindOwnedRefParams(ac, func, &new_vars, &method_refs, method_owner) catch {
+                            new_vars.deinit(self.allocator);
+                            self.deinitRefSlots(&method_refs);
+                            if (self.ref_index) |ri| ri.releaseOwner(self.allocator, method_owner);
+                            if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
+                            return error.RuntimeError;
+                        };
                         self.saveFrameArgs(arg_count);
                         self.dropN(ac);
                         self.dropN(1);
-                        self.frames[self.frame_count] = .{ .chunk = &func.chunk, .ip = 0, .vars = new_vars, .locals = try self.allocLocals(func, &new_vars), .func = func };
+                        self.frames[self.frame_count] = .{ .chunk = &func.chunk, .ip = 0, .vars = new_vars, .locals = try self.allocLocals(func, &new_vars), .func = func, .ref_slots = method_refs, .ref_owner = method_owner };
                         self.setFrameArgCount(arg_count);
                         self.frames[self.frame_count].entry_sp = self.sp;
                         self.frame_count += 1;
@@ -9125,7 +9381,7 @@ pub const VM = struct {
                     const ac = arr.entries.items.len;
                     // push object and args back in method_call layout
                     self.push(obj_val);
-                    for (arr.entries.items) |entry| self.push(entry.value);
+                    for (arr.entries.items) |entry| self.pushArgEntry(arr, entry);
                     const full_name = self.resolveMethod(obj.class_name, method_name) catch {
                         if (self.hasMethod(obj.class_name, "__call")) {
                             const obj_id = @intFromPtr(obj);
@@ -9199,6 +9455,7 @@ pub const VM = struct {
                                         self.frame_count -= 1;
                                         self.deinitFrameSlot(self.frame_count);
                                     }
+                                    self.discardArgTransport(handler.sp);
                                     self.sp = handler.sp;
                                     self.push(exc);
                                     self.currentFrame().ip = handler.catch_ip;
@@ -9246,10 +9503,20 @@ pub const VM = struct {
                                 }
                             }
                         }
+                        var method_refs: std.StringHashMapUnmanaged(*Value) = .{};
+                        const method_owner = try self.argRefOwner(func);
+                        self.captureArgSources(ac);
+                        self.bindOwnedRefParams(ac, func, &new_vars, &method_refs, method_owner) catch {
+                            new_vars.deinit(self.allocator);
+                            self.deinitRefSlots(&method_refs);
+                            if (self.ref_index) |ri| ri.releaseOwner(self.allocator, method_owner);
+                            if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
+                            return error.RuntimeError;
+                        };
                         self.saveFrameArgs(mcds_ac_u8);
                         self.dropN(ac);
                         self.dropN(1);
-                        self.frames[self.frame_count] = .{ .chunk = &func.chunk, .ip = 0, .vars = new_vars, .locals = try self.allocLocals(func, &new_vars), .func = func };
+                        self.frames[self.frame_count] = .{ .chunk = &func.chunk, .ip = 0, .vars = new_vars, .locals = try self.allocLocals(func, &new_vars), .func = func, .ref_slots = method_refs, .ref_owner = method_owner };
                         self.setFrameArgCount(mcds_ac_u8);
                         self.frames[self.frame_count].entry_sp = self.sp;
                         self.frame_count += 1;
@@ -9266,6 +9533,8 @@ pub const VM = struct {
                 },
 
                 .static_call => {
+                    const cf_scope = try self.enterCallFamily(op);
+                    defer self.leaveCallFamily(cf_scope);
                     const class_idx = self.readU16();
                     const method_idx = self.readU16();
                     const arg_count = self.readByte();
@@ -9293,6 +9562,7 @@ pub const VM = struct {
                     }
 
                     if (std.mem.eql(u8, class_name, "Fiber") and std.mem.eql(u8, method_name, "getCurrent")) {
+                        self.clearArgStackFrom(self.sp - @as(usize, arg_count));
                         self.sp -= @as(usize, arg_count);
                         if (self.current_fiber) |fiber| {
                             self.push(.{ .fiber = fiber });
@@ -9449,6 +9719,7 @@ pub const VM = struct {
                                                 self.frame_count -= 1;
                                                 self.deinitFrameSlot(self.frame_count);
                                             }
+                                            self.discardArgTransport(handler.sp);
                                             self.sp = handler.sp;
                                             self.push(exc);
                                             self.currentFrame().ip = handler.catch_ip;
@@ -9479,6 +9750,8 @@ pub const VM = struct {
                 },
 
                 .static_call_spread => {
+                    const cf_scope = try self.enterCallFamily(op);
+                    defer self.leaveCallFamily(cf_scope);
                     const class_idx = self.readU16();
                     const method_idx = self.readU16();
                     var class_name = self.currentChunk().constants.items[class_idx].string.bytes();
@@ -9559,6 +9832,8 @@ pub const VM = struct {
                     if (has_named_sc) {
                         if (self.functions.get(full_name)) |func2| {
                             var resolved: [256]Value = .{.null} ** 256;
+                            var resolved_sources: [256]RefSource = undefined;
+                            @memset(resolved_sources[0..@min(resolved_sources.len, func2.params.len + arr.entries.items.len)], .none);
                             if (func2.params.len > resolved.len) return error.RuntimeError;
                             var pos: usize = 0;
                             for (arr.entries.items) |entry| {
@@ -9567,22 +9842,27 @@ pub const VM = struct {
                                         const pn = if (p.len > 0 and p[0] == '$') p[1..] else p;
                                         if (std.mem.eql(u8, pn, entry.key.string.bytes())) {
                                             resolved[pi] = entry.value;
+                                            resolved_sources[pi] = self.argArraySource(arr, entry.key);
                                             if (pi >= pos) pos = pi + 1;
                                             break;
                                         }
                                     }
                                 } else {
                                     resolved[pos] = entry.value;
+                                    resolved_sources[pos] = self.argArraySource(arr, entry.key);
                                     pos += 1;
                                 }
                             }
-                            for (0..pos) |i| self.push(resolved[i]);
+                            for (0..pos) |i| {
+                                self.push(resolved[i]);
+                                self.setArgSource(self.sp - 1, resolved_sources[i]);
+                            }
                             resolved_ac = pos;
                         } else {
-                            for (arr.entries.items) |entry| self.push(entry.value);
+                            for (arr.entries.items) |entry| self.pushArgEntry(arr, entry);
                         }
                     } else {
-                        for (arr.entries.items) |entry| self.push(entry.value);
+                        for (arr.entries.items) |entry| self.pushArgEntry(arr, entry);
                     }
 
                     if (this_val) |tv| {
@@ -9628,10 +9908,16 @@ pub const VM = struct {
                                 return error.RuntimeError;
                             }
                         } else {
-                            try self.callNamedFunction(full_name, @intCast(resolved_ac));
+                            self.callNamedFunction(full_name, @intCast(resolved_ac)) catch {
+                                if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
+                                return error.RuntimeError;
+                            };
                         }
                     } else {
-                        try self.callNamedFunction(full_name, @intCast(resolved_ac));
+                        self.callNamedFunction(full_name, @intCast(resolved_ac)) catch {
+                            if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
+                            return error.RuntimeError;
+                        };
                     }
                 },
 
@@ -9679,12 +9965,16 @@ pub const VM = struct {
                     var i: usize = 0;
                     while (i < ac) : (i += 1) {
                         self.stack[self.sp - ac - 1 + i] = self.stack[self.sp - ac + i];
+                        self.setArgSource(self.sp - ac - 1 + i, self.ic.?.arg_stack[self.sp - ac + i]);
                     }
+                    self.clearArgStackFrom(self.sp - 1);
                     self.sp -= 1;
                     try self.callStaticFunction(full_name, arg_count, class_name);
                 },
 
                 .static_call_dyn_method => {
+                    const cf_scope = try self.enterCallFamily(op);
+                    defer self.leaveCallFamily(cf_scope);
                     const class_idx = self.readU16();
                     const arg_count = self.readByte();
                     var class_name = self.currentChunk().constants.items[class_idx].string.bytes();
@@ -9741,12 +10031,16 @@ pub const VM = struct {
                     var i: usize = 0;
                     while (i < ac) : (i += 1) {
                         self.stack[self.sp - ac - 1 + i] = self.stack[self.sp - ac + i];
+                        self.setArgSource(self.sp - ac - 1 + i, self.ic.?.arg_stack[self.sp - ac + i]);
                     }
+                    self.clearArgStackFrom(self.sp - 1);
                     self.sp -= 1;
                     try self.callStaticFunction(full_name, arg_count, effective_called);
                 },
 
                 .static_call_dyn_both => {
+                    const cf_scope = try self.enterCallFamily(op);
+                    defer self.leaveCallFamily(cf_scope);
                     const arg_count = self.readByte();
                     const ac: usize = arg_count;
                     const method_val = self.stack[self.sp - ac - 1];
@@ -9807,12 +10101,16 @@ pub const VM = struct {
                     var i: usize = 0;
                     while (i < ac) : (i += 1) {
                         self.stack[self.sp - ac - 2 + i] = self.stack[self.sp - ac + i];
+                        self.setArgSource(self.sp - ac - 2 + i, self.ic.?.arg_stack[self.sp - ac + i]);
                     }
+                    self.clearArgStackFrom(self.sp - 2);
                     self.sp -= 2;
                     try self.callStaticFunction(full_name, arg_count, effective_called);
                 },
 
                 .static_call_dyn_both_spread => {
+                    const cf_scope = try self.enterCallFamily(op);
+                    defer self.leaveCallFamily(cf_scope);
                     const args_val = self.pop();
                     const method_val = self.pop();
                     const class_val = self.pop();
@@ -9853,7 +10151,7 @@ pub const VM = struct {
                         self.setErrorMsg("Fatal error: Uncaught Error: {s}", .{msg});
                         return error.RuntimeError;
                     };
-                    for (arr.entries.items) |entry| self.push(entry.value);
+                    for (arr.entries.items) |entry| self.pushArgEntry(arr, entry);
                     const ac: u8 = @intCast(arr.entries.items.len);
                     try self.callStaticFunction(full_name, ac, class_name);
                 },
@@ -10938,6 +11236,8 @@ pub const VM = struct {
             self.deinitFrameSlot(self.frame_count);
         }
 
+        self.discardArgTransport(handler.sp);
+
         self.sp = handler.sp;
         self.push(.{ .object = obj });
         self.currentFrame().ip = handler.catch_ip;
@@ -10956,6 +11256,7 @@ pub const VM = struct {
             self.frame_count -= 1;
             self.deinitFrameSlot(self.frame_count);
         }
+        self.discardArgTransport(handler.sp);
         self.sp = handler.sp;
         self.push(exc);
         self.currentFrame().ip = handler.catch_ip;
@@ -11080,6 +11381,7 @@ pub const VM = struct {
                     self.frame_count -= 1;
                     self.deinitFrameSlot(self.frame_count);
                 }
+                self.clearArgStackFrom(saved_sp);
                 self.sp = saved_sp;
                 self.handler_floor = prev_floor;
                 return error.RuntimeError;
@@ -11089,10 +11391,12 @@ pub const VM = struct {
         self.runUntilFrame(return_frame) catch |err| {
             self.handler_floor = prev_floor;
             if (gen.state == .suspended) {
+                self.clearArgStackFrom(saved_sp);
                 self.sp = saved_sp;
                 return;
             }
             if (gen.state == .completed) {
+                self.clearArgStackFrom(saved_sp);
                 self.sp = saved_sp;
                 return;
             }
@@ -11102,6 +11406,7 @@ pub const VM = struct {
                 self.frame_count -= 1;
                 self.deinitFrameSlot(self.frame_count);
             }
+            self.clearArgStackFrom(saved_sp);
             self.sp = saved_sp;
             if (self.pending_exception != null) {
                 return error.RuntimeError;
@@ -11113,6 +11418,7 @@ pub const VM = struct {
             gen.state = .completed;
             self.releaseGeneratorVars(gen);
         }
+        self.clearArgStackFrom(saved_sp);
         self.sp = saved_sp;
     }
 
@@ -11604,6 +11910,12 @@ pub const VM = struct {
             retainValue(default_val);
 
             const effective_readonly = prop_readonly[pi] or def.is_readonly;
+            // PHP 8.5 gives public readonly properties implicit protected(set),
+            // including promoted properties and properties of readonly classes.
+            if (effective_readonly and !prop_has_set_vis[pi] and prop_vis[pi] == .public) {
+                prop_set_vis[pi] = .protected;
+                prop_has_set_vis[pi] = true;
+            }
             // PHP 8.4 implicitly finalizes only asymmetric private(set).
             // Symmetric private private(set) and private readonly are not final.
             const reflection_final =
@@ -11785,23 +12097,50 @@ pub const VM = struct {
                 const parent_cls = self.classes.get(parent_class_name) orelse break;
 
                 for (parent_cls.properties.items) |parent_prop| {
-                    if (!parent_prop.is_final) continue;
-
                     for (def.properties.items) |child_prop| {
                         if (!std.mem.eql(u8, parent_prop.name, child_prop.name)) continue;
-
-                        const msg = try std.fmt.allocPrint(
-                            self.allocator,
-                            "Cannot override final property {s}::${s}",
-                            .{ parent_class_name, parent_prop.name },
-                        );
-                        try self.strings.append(self.allocator, msg);
-                        self.error_msg = msg;
-                        return error.RuntimeError;
+                        if (parent_prop.is_final) {
+                            self.setErrorMsg("Cannot override final property {s}::${s}", .{ parent_class_name, parent_prop.name });
+                            return error.RuntimeError;
+                        }
+                        // Private properties are separate declarations, not overrides.
+                        if (parent_prop.visibility == .private) continue;
+                        if (@intFromEnum(child_prop.visibility) > @intFromEnum(parent_prop.visibility)) {
+                            self.setErrorMsg("Access level to {s}::${s} must be {s} (as in class {s}) or weaker", .{ class_name, child_prop.name, @tagName(parent_prop.visibility), parent_class_name });
+                            return error.RuntimeError;
+                        }
+                        // A virtual get-only property imposes no write contract.
+                        const setter = try std.fmt.allocPrint(self.allocator, "{s}$hook_set", .{parent_prop.name});
+                        defer self.allocator.free(setter);
+                        if (parent_prop.is_virtual and !parent_cls.methods.contains(setter)) continue;
+                        if (@intFromEnum(child_prop.set_visibility) > @intFromEnum(parent_prop.set_visibility)) {
+                            if (parent_prop.set_visibility == .public) {
+                                self.setErrorMsg("Set access level of {s}::${s} must be omitted (as in class {s})", .{ class_name, child_prop.name, parent_class_name });
+                            } else {
+                                self.setErrorMsg("Set access level of {s}::${s} must be {s}(set) (as in class {s}) or weaker", .{ class_name, child_prop.name, @tagName(parent_prop.set_visibility), parent_class_name });
+                            }
+                            return error.RuntimeError;
+                        }
                     }
                 }
 
                 current_parent = parent_cls.parent;
+            }
+        }
+
+        for (def.properties.items) |prop| {
+            if (!prop.is_virtual or !prop.has_set_visibility or prop.set_visibility == prop.visibility) continue;
+            const setter = try std.fmt.allocPrint(self.allocator, "{s}$hook_set", .{prop.name});
+            defer self.allocator.free(setter);
+            if (!def.methods.contains(setter)) {
+                self.setErrorMsg("Read-only virtual property {s}::${s} must not specify asymmetric visibility", .{ class_name, prop.name });
+                return error.RuntimeError;
+            }
+            const getter = try std.fmt.allocPrint(self.allocator, "{s}$hook_get", .{prop.name});
+            defer self.allocator.free(getter);
+            if (!def.methods.contains(getter)) {
+                self.setErrorMsg("Write-only virtual property {s}::${s} must not specify asymmetric visibility", .{ class_name, prop.name });
+                return error.RuntimeError;
             }
         }
 
@@ -13606,393 +13945,567 @@ pub const VM = struct {
         return frame.vars.get(var_name) orelse .null;
     }
 
+    // argument guards. a guard names the call opcode it feeds and the position
+    // it fills; the callee's signature decides whether the fetch that follows
+    // must record lvalue provenance (by reference, or not resolvable without
+    // side effects) or may run as a plain read. resolution never executes PHP
+    // and never autoloads: an unregistered callee simply captures
+    pub fn argNeedsCapture(self: *VM, chunk: *const Chunk, field: usize, delta: u16, pos: u8, operands: usize) bool {
+        if (self.argCaptureCached(chunk, field, delta, pos, operands)) |cached| return cached;
+        const code = chunk.code.items;
+        const call_ip = field + delta;
+        if (call_ip >= code.len) return true;
+        const args_base = self.argsBase(pos, operands) orelse return true;
+        const slots = guardSlots(code, call_ip);
+        const guard = self.guardIdentity(slots, args_base);
+        const by_value = self.callSiteByValue(chunk, call_ip, pos, args_base) orelse false;
+        if (self.ic) |ic| if (guard) |g| {
+            const chunk_key = @intFromPtr(chunk);
+            ic.intent[InlineCache.intentIndex(chunk_key, field)] = .{ .key = field, .chunk_key = chunk_key, .guard = g, .generation = self.registryGeneration(), .slots = slots, .capture = !by_value };
+        };
+        return !by_value;
+    }
+
+    // the cached answer for a guard site, or null when the site must resolve
+    pub inline fn argCaptureCached(self: *VM, chunk: *const Chunk, field: usize, delta: u16, pos: u8, operands: usize) ?bool {
+        if (delta == 0) return true;
+        const ic = self.ic orelse return null;
+        const chunk_key = @intFromPtr(chunk);
+        const e = &ic.intent[InlineCache.intentIndex(chunk_key, field)];
+        if (e.key != field or e.chunk_key != chunk_key or e.generation != self.registryGeneration()) return null;
+        const args_base = self.argsBase(pos, operands) orelse return true;
+        const guard = self.guardIdentity(e.slots, args_base) orelse return null;
+        if (e.guard != guard) return null;
+        return e.capture;
+    }
+
+    // how many stack slots below the arguments identify the callee: the
+    // receiver or callable (1), a receiver plus a name (2), or the calling
+    // class for static:: dispatch (3)
+    fn guardSlots(code: []const u8, call_ip: usize) u8 {
+        const call_op = std.meta.intToEnum(OpCode, code[call_ip]) catch return 0;
+        return switch (call_op) {
+            .method_call, .method_call_spread, .static_call_dynamic, .new_obj_dynamic, .call_indirect, .static_call_dyn_method => 1,
+            .method_call_dynamic, .method_call_dynamic_spread, .static_call_dyn_both, .static_call_dyn_both_spread => 2,
+            .static_call, .static_call_spread => 3,
+            else => 0,
+        };
+    }
+
+    inline fn guardIdentity(self: *VM, slots: u8, args_base: usize) ?usize {
+        return switch (slots) {
+            0 => 0,
+            1 => valueIdentity(self.stack[args_base - 1]),
+            2 => blk: {
+                const a = valueIdentity(self.stack[args_base - 2]) orelse break :blk null;
+                const b = valueIdentity(self.stack[args_base - 1]) orelse break :blk null;
+                break :blk a ^ (b *% 0x9E3779B97F4A7C15);
+            },
+            else => if (self.currentFrame().called_class) |cc| @intFromPtr(cc.ptr) else 0,
+        };
+    }
+
+    inline fn registryGeneration(self: *VM) usize {
+        return self.functions.count() + self.native_fns.count() + self.classes.count();
+    }
+
+    // stack index of the first argument slot (or of the spread array)
+    inline fn argsBase(self: *VM, pos: u8, operands: usize) ?usize {
+        const region: usize = switch (pos) {
+            arg_pos_spread => 1,
+            arg_pos_named => 2,
+            else => pos,
+        };
+        if (self.sp < operands + region) return null;
+        return self.sp - operands - region;
+    }
+
+    const arg_pos_spread: u8 = 0xFF;
+    const arg_pos_named: u8 = 0xFE;
+
+    fn callOpU16(code: []const u8, at: usize) u16 {
+        return (@as(u16, code[at]) << 8) | code[at + 1];
+    }
+
+    inline fn valueIdentity(value: Value) ?usize {
+        return switch (value) {
+            .object => |o| @intFromPtr(o.class_name.ptr),
+            .string => |s| @intFromPtr(s.bytes().ptr),
+            .array => null,
+            else => 0,
+        };
+    }
+
+    // true when the callee takes `pos` by value, false when by reference,
+    // null when the callee cannot be resolved without side effects
+    fn callSiteByValue(self: *VM, chunk: *const Chunk, call_ip: usize, pos: u8, args_base: usize) ?bool {
+        const code = chunk.code.items;
+        const consts = chunk.constants.items;
+        const call_op = std.meta.intToEnum(OpCode, code[call_ip]) catch return null;
+        return switch (call_op) {
+            .call, .call_spread => self.functionByValue(consts[callOpU16(code, call_ip + 1)].string.bytes(), pos),
+            .call_indirect => self.callableByValue(self.stack[args_base - 1], pos),
+            .method_call, .method_call_spread => self.methodByValue(self.stack[args_base - 1], consts[callOpU16(code, call_ip + 1)].string.bytes(), pos),
+            .method_call_dynamic, .method_call_dynamic_spread => blk: {
+                const name = self.stack[args_base - 1];
+                if (name != .string) break :blk null;
+                break :blk self.methodByValue(self.stack[args_base - 2], name.string.bytes(), pos);
+            },
+            .static_call, .static_call_spread => self.staticByValue(consts[callOpU16(code, call_ip + 1)].string.bytes(), consts[callOpU16(code, call_ip + 3)].string.bytes(), pos),
+            .static_call_dynamic => self.classValueStaticByValue(self.stack[args_base - 1], consts[callOpU16(code, call_ip + 1)].string.bytes(), pos),
+            .static_call_dyn_method => blk: {
+                const method = self.stack[args_base - 1];
+                if (method != .string) break :blk null;
+                break :blk self.staticByValue(consts[callOpU16(code, call_ip + 1)].string.bytes(), method.string.bytes(), pos);
+            },
+            .static_call_dyn_both, .static_call_dyn_both_spread => blk: {
+                const method = self.stack[args_base - 1];
+                if (method != .string) break :blk null;
+                break :blk self.classValueStaticByValue(self.stack[args_base - 2], method.string.bytes(), pos);
+            },
+            .new_obj => self.constructorByValue(consts[callOpU16(code, call_ip + 1)].string.bytes(), pos),
+            .new_obj_dynamic => blk: {
+                const class_val = self.stack[args_base - 1];
+                break :blk switch (class_val) {
+                    .string => |s| self.constructorByValue(s.bytes(), pos),
+                    .object => |o| self.constructorByValue(o.class_name, pos),
+                    else => null,
+                };
+            },
+            else => null,
+        };
+    }
+
+    fn funcByValue(func: *const ObjFunction, pos: u8) bool {
+        if (pos >= arg_pos_named) return std.mem.indexOfScalar(bool, func.ref_params, true) == null;
+        if (pos < func.ref_params.len) return !func.ref_params[pos];
+        return !(func.is_variadic and func.ref_params.len > 0 and func.ref_params[func.ref_params.len - 1]);
+    }
+
+    fn nativeByValue(name: []const u8, pos: u8) bool {
+        if (pos >= arg_pos_named) return !byref_args.hasByRefParams(name);
+        return !byref_args.isByRef(name, pos);
+    }
+
+    fn resolvedByValue(self: *VM, full: []const u8, pos: u8) ?bool {
+        if (self.functions.get(full)) |func| return funcByValue(func, pos);
+        if (self.native_fns.contains(full)) return !byref_args.hasByRefParams(full) or nativeByValue(full, pos);
+        return null;
+    }
+
+    fn functionByValue(self: *VM, raw_name: []const u8, pos: u8) ?bool {
+        const name = if (raw_name.len > 0 and raw_name[0] == '\\') raw_name[1..] else raw_name;
+        if (self.resolvedByValue(name, pos)) |v| return v;
+        if (std.mem.lastIndexOfScalar(u8, name, '\\')) |sep| {
+            if (self.resolvedByValue(name[sep + 1 ..], pos)) |v| return v;
+        }
+        return null;
+    }
+
+    fn classMethodByValue(self: *VM, class_name: []const u8, method: []const u8, pos: u8, magic: []const u8) ?bool {
+        var buf: [512]u8 = undefined;
+        if (self.classes.get(class_name) == null) {
+            const full = std.fmt.bufPrint(&buf, "{s}::{s}", .{ class_name, method }) catch return null;
+            if (self.native_fns.contains(full)) return nativeByValue(full, pos);
+            return null;
+        }
+        const full = self.resolveMethod(class_name, method) catch {
+            return if (self.hasMethod(class_name, magic)) true else null;
+        };
+        return self.resolvedByValue(full, pos);
+    }
+
+    fn methodByValue(self: *VM, receiver: Value, method: []const u8, pos: u8) ?bool {
+        if (receiver != .object) return null;
+        if (receiver.object.lazy_initializer != .null) return null;
+        return self.classMethodByValue(receiver.object.class_name, method, pos, "__call");
+    }
+
+    fn intentClassName(self: *VM, raw_class: []const u8) ?[]const u8 {
+        if (std.mem.eql(u8, raw_class, "static")) return self.currentFrame().called_class orelse self.currentDefiningClass();
+        if (std.mem.eql(u8, raw_class, "self")) return self.currentDefiningClass();
+        if (std.mem.eql(u8, raw_class, "parent")) {
+            const defining = self.currentDefiningClass() orelse return null;
+            const cls = self.classes.get(defining) orelse return null;
+            return cls.parent;
+        }
+        return if (raw_class.len > 0 and raw_class[0] == '\\') raw_class[1..] else raw_class;
+    }
+
+    fn staticByValue(self: *VM, raw_class: []const u8, method: []const u8, pos: u8) ?bool {
+        const class_name = self.intentClassName(raw_class) orelse return null;
+        return self.classMethodByValue(class_name, method, pos, "__callStatic");
+    }
+
+    fn classValueStaticByValue(self: *VM, class_val: Value, method: []const u8, pos: u8) ?bool {
+        return switch (class_val) {
+            .string => |s| self.staticByValue(s.bytes(), method, pos),
+            .object => |o| self.classMethodByValue(o.class_name, method, pos, "__call"),
+            else => null,
+        };
+    }
+
+    fn constructorByValue(self: *VM, raw_class: []const u8, pos: u8) ?bool {
+        const class_name = self.intentClassName(raw_class) orelse return null;
+        if (self.classes.get(class_name) == null) return null;
+        const full = self.resolveMethod(class_name, "__construct") catch return true;
+        return self.resolvedByValue(full, pos);
+    }
+
+    fn callableByValue(self: *VM, callable: Value, pos: u8) ?bool {
+        switch (callable) {
+            .string => |s| {
+                const bytes = s.bytes();
+                if (std.mem.indexOf(u8, bytes, "::")) |sep| return self.staticByValue(bytes[0..sep], bytes[sep + 2 ..], pos);
+                return self.functionByValue(bytes, pos);
+            },
+            .object => |o| {
+                if (std.mem.eql(u8, o.class_name, "Closure")) return self.callableByValue(o.get("__callable"), pos);
+                return self.methodByValue(callable, "__invoke", pos);
+            },
+            .array => |a| {
+                if (a.entries.items.len != 2) return null;
+                const target = a.entries.items[0].value;
+                const method = a.entries.items[1].value;
+                if (method != .string) return null;
+                return switch (target) {
+                    .object => self.methodByValue(target, method.string.bytes(), pos),
+                    .string => |s| self.staticByValue(s.bytes(), method.string.bytes(), pos),
+                    else => null,
+                };
+            },
+            else => return null,
+        }
+    }
+
+    const CallFamilyScope = struct { base: usize, count: usize, frame: usize };
+
+    // a native callback's own calls run at this frame depth; keep the
+    // enclosing call's output destinations across them. every call family
+    // opcode enters at its start and leaves on every exit path
+    fn enterCallFamily(self: *VM, op: OpCode) RuntimeError!CallFamilyScope {
+        const ic = self.ic.?;
+        const scope: CallFamilyScope = .{ .base = ic.saved_sources.items.len, .count = ic.active_arg_count, .frame = ic.active_frame };
+        if (scope.count > 0) try ic.saved_sources.appendSlice(self.allocator, ic.active_args[0..scope.count]);
+        ic.active_arg_count = 0;
+        const code = self.currentChunk().code.items;
+        const ip = self.currentFrame().ip;
+        const ac: usize = switch (op) {
+            .call, .method_call, .new_obj, .static_call_dyn_method => code[ip + 2],
+            .call_indirect, .method_call_dynamic, .static_call_dyn_both => code[ip],
+            .static_call => code[ip + 4],
+            else => 0,
+        };
+        self.captureArgSources(ac);
+        return scope;
+    }
+
+    fn leaveCallFamily(self: *VM, scope: CallFamilyScope) void {
+        const ic = self.ic.?;
+        self.clearActiveArgSources();
+        if (scope.count > 0) {
+            @memcpy(ic.active_args[0..scope.count], ic.saved_sources.items[scope.base .. scope.base + scope.count]);
+            ic.saved_sources.shrinkRetainingCapacity(scope.base);
+        }
+        ic.active_arg_count = scope.count;
+        ic.active_frame = scope.frame;
+    }
+
     fn isCallFamilyOp(op: OpCode) bool {
         return switch (op) {
-            .call, .call_spread, .call_indirect, .call_indirect_spread, .new_obj, .method_call, .method_call_spread, .method_call_dynamic, .static_call, .static_call_spread, .static_call_dyn_method, .static_call_dyn_both => true,
+            .call, .call_spread, .call_indirect, .call_indirect_spread, .new_obj, .method_call, .method_call_spread, .method_call_dynamic, .static_call, .static_call_spread, .static_call_dyn_method, .static_call_dyn_both, .static_call_dyn_both_spread, .new_obj_dynamic => true,
             else => false,
         };
     }
 
-    fn resolveMixedLvalue(self: *VM, chunk: *const Chunk, caller: *CallFrame, code: []const u8, instrs: []const usize) RefSource {
-        if (instrs.len < 2) return .none;
-        var values: [128]Value = undefined;
-        var value_count: usize = 0;
-        for (instrs, 0..) |pos, index| {
-            const op = std.meta.intToEnum(OpCode, code[pos]) catch return .none;
-            const final = index + 1 == instrs.len;
-            switch (op) {
-                .get_var => {
-                    const ci = (@as(u16, code[pos + 1]) << 8) | code[pos + 2];
-                    if (ci >= chunk.constants.items.len or chunk.constants.items[ci] != .string or value_count >= values.len) return .none;
-                    values[value_count] = self.resolveCallerVar(chunk.constants.items[ci].string.bytes(), false, 0);
-                    value_count += 1;
-                },
-                .get_local => {
-                    const slot = (@as(u16, code[pos + 1]) << 8) | code[pos + 2];
-                    if (slot >= caller.locals.len or value_count >= values.len) return .none;
-                    values[value_count] = caller.locals[slot];
-                    value_count += 1;
-                },
-                .constant => {
-                    const ci = (@as(u16, code[pos + 1]) << 8) | code[pos + 2];
-                    if (ci >= chunk.constants.items.len or value_count >= values.len) return .none;
-                    values[value_count] = chunk.constants.items[ci];
-                    value_count += 1;
-                },
-                .get_prop => {
-                    if (value_count < 1) return .none;
-                    const ci = (@as(u16, code[pos + 1]) << 8) | code[pos + 2];
-                    if (ci >= chunk.constants.items.len or chunk.constants.items[ci] != .string) return .none;
-                    const object = values[value_count - 1];
-                    if (object != .object) return .none;
-                    const prop_name = chunk.constants.items[ci].string.bytes();
-                    if (final) return .{ .chained_prop = .{ .object = object.object, .prop_name = prop_name } };
-                    values[value_count - 1] = object.object.get(prop_name);
-                },
-                .get_prop_dynamic => {
-                    if (value_count < 2) return .none;
-                    const prop = values[value_count - 1];
-                    const object = values[value_count - 2];
-                    if (object != .object or prop != .string) return .none;
-                    value_count -= 1;
-                    if (final) return .{ .chained_prop = .{ .object = object.object, .prop_name = prop.string.bytes() } };
-                    values[value_count - 1] = object.object.get(prop.string.bytes());
-                },
-                .array_get => {
-                    if (value_count < 2) return .none;
-                    const key = values[value_count - 1];
-                    const array = values[value_count - 2];
-                    if (array != .array) return .none;
-                    value_count -= 1;
-                    if (final) return .{ .resolved_array_elem = .{ .array = array.array, .key = key } };
-                    values[value_count - 1] = array.array.get(Value.toArrayKey(key));
-                },
-                else => return .none,
+    // Provenance is an owning transport, independent of the evaluated value.
+    fn captureDimensionCell(self: *VM, slot: usize, array: *PhpArray, key: Value, base: RefSource) RuntimeError!void {
+        const ak = Value.toArrayKey(key);
+        if (!array.contains(ak)) try self.arraySetOwned(array, ak, .null);
+        const entry = array.getPtr(ak).?;
+        const cell = entry.ref orelse blk: {
+            const fresh = try self.newRefCell();
+            self.setCell(fresh, entry.value);
+            self.setEntryRef(entry, fresh);
+            break :blk fresh;
+        };
+        try self.regRefArray(try self.persistentRefOwner(), cell, array, ak);
+        self.array_ref_active = true;
+        self.setArgSource(slot, .{ .cell = .{ .value = cell, .denial = switch (base) {
+            .cell => |c| c.denial,
+            else => null,
+        } } });
+    }
+
+    fn checkArgCell(self: *VM, denial: ?[]const u8) RuntimeError!void {
+        if (denial) |text| {
+            const floor = self.handler_floor;
+            self.handler_floor = self.handler_count;
+            defer self.handler_floor = floor;
+            _ = try self.throwBuiltinException("Error", text);
+            return error.RuntimeError;
+        }
+    }
+
+    fn capturePropertyCell(self: *VM, slot: usize, obj: *PhpObject, name: []const u8) RuntimeError!void {
+        const vr = self.findPropertyVisibility(obj.class_name, name);
+        var denial: ?[]const u8 = null;
+        if (vr.set_visibility != vr.visibility and !self.checkVisibility(vr.defining_class, vr.set_visibility)) {
+            const ro: []const u8 = if (vr.is_readonly and vr.set_visibility == .protected) " readonly" else "";
+            denial = if (self.currentDefiningClass()) |sc|
+                try std.fmt.allocPrint(self.allocator, "Cannot indirectly modify {s}(set){s} property {s}::${s} from scope {s}", .{ @tagName(vr.set_visibility), ro, vr.defining_class, name, sc })
+            else
+                try std.fmt.allocPrint(self.allocator, "Cannot indirectly modify {s}(set){s} property {s}::${s} from global scope", .{ @tagName(vr.set_visibility), ro, vr.defining_class, name });
+        } else if (vr.is_readonly) {
+            denial = try std.fmt.allocPrint(self.allocator, "Cannot modify readonly property {s}::${s}", .{ vr.defining_class, name });
+        }
+        if (denial) |text| try self.strings.append(self.allocator, text);
+        const index = try self.refIndex();
+        const cell = cell: {
+            if (index.prop_rev.get(.{ .object = obj, .class_name = "", .prop_name = name })) |cells| {
+                if (cells.items.len > 0) break :cell cells.items[0];
             }
+            const fresh = try self.newRefCell();
+            self.setCell(fresh, self.stack[slot]);
+            break :cell fresh;
+        };
+        // The property target is weak; receiver reclamation detaches it. The
+        // argument owns the cell, never the temporary receiver.
+        const owned_name = try self.allocator.dupe(u8, name);
+        try self.strings.append(self.allocator, owned_name);
+        try self.regRefObject(try self.persistentRefOwner(), cell, obj, owned_name);
+        self.obj_ref_active = true;
+        self.setArgSource(slot, .{ .cell = .{ .value = cell, .denial = denial } });
+    }
+
+    fn retainArgSource(self: *VM, source: RefSource) RefSource {
+        if (source == .cell) self.bindCell(source.cell.value);
+        return source;
+    }
+
+    fn releaseArgSource(self: *VM, source: *RefSource) void {
+        if (source.* == .none) return;
+        const old = source.*;
+        source.* = .none;
+        switch (old) {
+            .cell => |c| {
+                // A speculative argument reference with only its storage and
+                // final transport holder left must not turn a value read into
+                // a persistent array-element alias.
+                if (cellOf(c.value).binders == 2) {
+                    if (self.ref_index) |ri| {
+                        if (ri.fwd.get(c.value)) |targets| {
+                            if (targets.items.len == 1) {
+                                const target = targets.items[0];
+                                if (target == .array) {
+                                    if (target.array.array.getPtr(target.array.key)) |entry| {
+                                        if (entry.ref == c.value) self.setEntryRef(entry, null);
+                                    }
+                                    ri.removeTargetAllOwners(self.allocator, c.value, target);
+                                } else if (target == .object) {
+                                    ri.removeTargetAllOwners(self.allocator, c.value, target);
+                                }
+                            }
+                        }
+                    }
+                }
+                self.unbindCell(c.value);
+            },
+            .simple, .none => {},
+        }
+    }
+
+    fn discardArgTransport(self: *VM, floor: usize) void {
+        if (floor < self.sp) for (self.stack[floor..self.sp]) |v| {
+            if (v == .array) self.clearArgArraySources(v.array);
+        };
+        self.clearArgStackFrom(floor);
+        if (floor < self.sp) for (self.stack[floor..self.sp]) |v| {
+            if (v == .array and v.array.refcount == 0) self.queueArrayRelease(v.array);
+        };
+    }
+
+    // Most operand-stack operations carry no lvalue provenance. Keep that
+    // check inline without pulling source release/ref-index work into hot loops.
+    pub inline fn clearArgStackFrom(self: *VM, floor: usize) void {
+        if (floor >= self.arg_source_end) return;
+        self.clearArgStackFromSlow(floor);
+    }
+
+    // fastLoop pops without visiting the transport, so a slot above sp may
+    // still carry provenance from an earlier call; drop it before reuse
+    fn releaseStaleArgSource(self: *VM, slot: usize) void {
+        const ic = self.ic orelse return;
+        if (ic.arg_stack[slot] != .none) self.releaseArgSource(&ic.arg_stack[slot]);
+    }
+
+    fn clearArgStackFromSlow(self: *VM, floor: usize) void {
+        if (self.ic) |ic| {
+            const end = @min(self.sp, self.arg_source_end);
+            if (floor < end) for (ic.arg_stack[floor..end]) |*source| {
+                if (source.* != .none) self.releaseArgSource(source);
+            };
+            if (self.sp >= self.arg_source_end and floor < self.arg_source_end) self.arg_source_end = floor;
+        }
+    }
+
+    pub fn setArgSource(self: *VM, slot: usize, source: RefSource) void {
+        const ic = self.ic orelse return;
+        if (source == .none and slot >= self.arg_source_end) return;
+        const owned = self.retainArgSource(source);
+        if (ic.arg_stack[slot] != .none) self.releaseArgSource(&ic.arg_stack[slot]);
+        ic.arg_stack[slot] = owned;
+        if (source != .none) self.arg_source_end = @max(self.arg_source_end, slot + 1);
+    }
+
+    fn clearActiveArgSources(self: *VM) void {
+        if (self.ic) |ic| {
+            for (ic.active_args[0..ic.active_arg_count]) |*source| self.releaseArgSource(source);
+            ic.active_arg_count = 0;
+        }
+    }
+
+    fn clearArgArraySources(self: *VM, array: ?*PhpArray) void {
+        const ic = self.ic orelse return;
+        var i: usize = 0;
+        while (i < ic.arg_arrays.items.len) {
+            if (array == null or ic.arg_arrays.items[i].array == array.?) {
+                var entry = ic.arg_arrays.swapRemove(i);
+                self.releaseArgSource(&entry.source);
+                if (entry.key == .string) self.releaseValue(.{ .string = entry.key.string });
+            } else i += 1;
+        }
+    }
+
+    fn recordArgArraySource(self: *VM, array: *PhpArray, key: PhpArray.Key, source: RefSource) !void {
+        const ic = self.ic orelse return;
+        for (ic.arg_arrays.items) |*entry| {
+            if (entry.array == array and entry.key.eql(key)) {
+                const owned = self.retainArgSource(source);
+                self.releaseArgSource(&entry.source);
+                entry.source = owned;
+                return;
+            }
+        }
+        const owned_key: PhpArray.Key = switch (key) {
+            .string => |v| blk: {
+                v.retain();
+                break :blk .{ .string = v };
+            },
+            else => key,
+        };
+        errdefer if (owned_key == .string) self.releaseValue(.{ .string = owned_key.string });
+        var owned = self.retainArgSource(source);
+        errdefer self.releaseArgSource(&owned);
+        try ic.arg_arrays.append(self.allocator, .{ .array = array, .key = owned_key, .source = owned });
+    }
+
+    fn releaseBoundArgSources(self: *VM, owner: ?RefIndex.OwnerId) void {
+        const ic = self.ic orelse return;
+        var i: usize = 0;
+        while (i < ic.bound_arg_sources.items.len) {
+            if (owner == null or ic.bound_arg_sources.items[i].owner == owner.?) {
+                var entry = ic.bound_arg_sources.swapRemove(i);
+                self.releaseArgSource(&entry.source);
+            } else i += 1;
+        }
+    }
+
+    fn argRefOwner(self: *VM, func: *const ObjFunction) RuntimeError!RefIndex.OwnerId {
+        // A nonzero frame owner disables fastLoop local writes. Do not mark
+        // by-value method/constructor frames as reference-bound.
+        if (std.mem.indexOfScalar(bool, func.ref_params, true) == null) return 0;
+        return (try self.refIndex()).createOwner();
+    }
+
+    fn bindOwnedRefParams(self: *VM, ac: usize, func: *const ObjFunction, vars: *std.StringHashMapUnmanaged(Value), refs: *std.StringHashMapUnmanaged(*Value), owner: RefIndex.OwnerId) !void {
+        // By-value calls need neither an owning snapshot nor binding storage.
+        const ref_count = @min(ac, func.ref_params.len);
+        if (std.mem.indexOfScalar(bool, func.ref_params[0..ref_count], true) == null) return;
+        var source_buf: [256]RefSource = undefined;
+        const live_sources = self.callerArgSources(ac);
+        const source_count = @min(live_sources.len, source_buf.len);
+        @memcpy(source_buf[0..source_count], live_sources[0..source_count]);
+        const sources = source_buf[0..source_count];
+        const saved_active_count = self.ic.?.active_arg_count;
+        var saved_active: [256]RefSource = undefined;
+        @memcpy(saved_active[0..saved_active_count], self.ic.?.active_args[0..saved_active_count]);
+        for (self.ic.?.active_args[0..self.ic.?.active_arg_count]) |*source| source.* = self.retainArgSource(source.*);
+        defer {
+            self.clearActiveArgSources();
+            @memcpy(self.ic.?.active_args[0..saved_active_count], saved_active[0..saved_active_count]);
+            self.ic.?.active_arg_count = saved_active_count;
+        }
+        errdefer self.releaseBoundArgSources(owner);
+        for (0..@min(@min(ac, func.ref_params.len), sources.len)) |i| {
+            if (!func.ref_params[i] or sources[i] == .none) continue;
+            var source = self.retainArgSource(sources[i]);
+            errdefer self.releaseArgSource(&source);
+            try self.ic.?.bound_arg_sources.append(self.allocator, .{ .owner = owner, .source = source });
+            self.releaseArgSource(&self.ic.?.active_args[i]);
+            self.ic.?.active_args[i] = self.retainArgSource(source);
+        }
+        // Keep binding names alive with the owner, not the transient active buffer.
+        const active_count = self.ic.?.active_arg_count;
+        var active: [256]RefSource = undefined;
+        @memcpy(active[0..active_count], self.ic.?.active_args[0..active_count]);
+        var position: usize = 0;
+        for (0..@min(@min(ac, func.ref_params.len), sources.len)) |i| {
+            if (!func.ref_params[i] or sources[i] == .none) continue;
+            while (self.ic.?.bound_arg_sources.items[position].owner != owner) position += 1;
+            self.ic.?.active_args[i] = self.ic.?.bound_arg_sources.items[position].source;
+            position += 1;
+        }
+        defer {
+            @memcpy(self.ic.?.active_args[0..active_count], active[0..active_count]);
+            self.ic.?.active_arg_count = active_count;
+        }
+        try self.bindRefParams(ac, func, vars, refs, owner);
+    }
+
+    // provenance of the call being bound, valid until the next capture. a
+    // consumer that binds while argument sources may change copies it first
+    fn callerArgSources(self: *VM, ac: usize) []const RefSource {
+        const ic = self.ic orelse return &.{};
+        if (ic.active_frame != self.frame_count) return &.{};
+        return ic.active_args[0..@min(ac, ic.active_arg_count)];
+    }
+
+    fn captureArgSources(self: *VM, ac: usize) void {
+        const ic = self.ic orelse return;
+        self.clearActiveArgSources();
+        ic.active_frame = self.frame_count;
+        if (ac <= self.sp) {
+            const floor = self.sp - ac;
+            const end = @min(self.sp, self.arg_source_end);
+            if (end <= floor) return;
+            var count = @min(end - floor, 256);
+            while (count > 0 and ic.arg_stack[floor + count - 1] == .none) count -= 1;
+            ic.active_arg_count = count;
+            for (0..count) |i| ic.active_args[i] = self.retainArgSource(ic.arg_stack[floor + i]);
+        }
+    }
+
+    fn argArraySource(self: *VM, arr: *PhpArray, key: PhpArray.Key) RefSource {
+        const ic = self.ic orelse return .none;
+        for (ic.arg_arrays.items) |entry| {
+            if (entry.array == arr and entry.key.eql(key)) return entry.source;
         }
         return .none;
     }
 
-    fn scanCallerArgSources(self: *VM, ac: usize) [16]RefSource {
-        var sources: [16]RefSource = .{.none} ** 16;
-        if (ac == 0) return sources;
-        const caller = self.currentFrame();
-        const chunk = caller.chunk;
-        const ip = caller.ip;
-        if (ip < 2) return sources;
-        const code = chunk.code.items;
-        // determine the call op width: try each plausible op width and pick the one
-        // whose byte at (ip - width) matches its widthFromByte. .call is 4 bytes;
-        // call_indirect / require / method_call_dynamic are 2; etc
-        var call_pos: usize = 0;
-        var found_call = false;
-        // static_call is 6-wide and static_call_spread is 5-wide; without these
-        // the by-ref args of a static method call (e.g. Arr::set($this->items,
-        // ...)) were never classified, so the writeback binding was never made.
-        // require the byte to be an actual call-family opcode so an operand byte
-        // that merely happens to match a non-call op of width w can't false-match
-        const candidates = [_]usize{ 4, 6, 2, 5, 1, 3 };
-        for (candidates) |w| {
-            if (ip < w) continue;
-            const p = ip - w;
-            const b = code[p];
-            if (OpCode.widthFromByte(b) != w) continue;
-            const op = std.meta.intToEnum(OpCode, b) catch continue;
-            if (!isCallFamilyOp(op)) continue;
-            call_pos = p;
-            found_call = true;
-            break;
-        }
-        if (!found_call) return sources;
+    fn pushArgEntry(self: *VM, arr: *PhpArray, entry: PhpArray.Entry) void {
+        self.push(entry.value);
+        self.setArgSource(self.sp - 1, self.argArraySource(arr, entry.key));
+    }
 
-        // bytes to walk backwards from the call site. each PHP arg can
-        // compile to ~3 instructions of ~3 bytes per level of access chain;
-        // a 16-deep chain ~= 16*3*3 = 144 bytes per arg. give plenty of
-        // headroom so deep ->a->b->c->... chains find their root op
-        const max_scan = ac * 96;
-        const region_start = if (call_pos > max_scan) call_pos - max_scan else 0;
-
-        var instrs: [128]usize = undefined;
-        var instr_count: usize = 0;
-        var try_start = region_start;
-        while (try_start < call_pos) : (try_start += 1) {
-            var pos = try_start;
-            var count: usize = 0;
-            while (pos < call_pos and count < 128) {
-                instrs[count] = pos;
-                count += 1;
-                pos += OpCode.widthFromByte(code[pos]);
-            }
-            if (pos == call_pos) {
-                instr_count = count;
-                break;
-            }
-        }
-        if (instr_count == 0) return sources;
-
-        // for call_indirect (and similar indirect calls), the function name was
-        // for both .call and .call_indirect the topmost producers ARE the args
-        // (call_indirect pushes the callable first, then args; .call has the
-        // function name encoded as a u16 constant in the opcode). scan straight
-        var i = instr_count;
-
-        var scan_idx: usize = ac;
-
-        while (scan_idx > 0 and i > 0) {
-            scan_idx -= 1;
-            var depth: i32 = 0;
-            const arg_end = i;
-            var bad_op = false;
-            while (i > 0 and depth < 1) {
-                i -= 1;
-                const pos = instrs[i];
-                const op: OpCode = std.meta.intToEnum(OpCode, code[pos]) catch {
-                    bad_op = true;
-                    break;
-                };
-                // call-family opcodes have a VARIADIC stack effect (1-argc, or
-                // -argc for forms that also pop a receiver/callable) that a fixed
-                // stackEffect() can't express. read argc from the operand so the
-                // backward arg-boundary walk stays correct when an argument is a
-                // function/method call (e.g. Arr::set($x, $k, array_merge(...))).
-                // without this the by-ref lvalue arg is mis-delimited and loses
-                // its writeback binding
-                const eff: i32 = switch (op) {
-                    .ensure_array_var => if (pos + 3 < code.len and code[pos + 3] != 0) 0 else 1,
-                    .call, .new_obj => if (pos + 3 < code.len) 1 - @as(i32, code[pos + 3]) else op.stackEffect(),
-                    .method_call => if (pos + 3 < code.len) -@as(i32, code[pos + 3]) else op.stackEffect(),
-                    .static_call => if (pos + 5 < code.len) 1 - @as(i32, code[pos + 5]) else op.stackEffect(),
-                    .call_indirect => if (pos + 1 < code.len) -@as(i32, code[pos + 1]) else op.stackEffect(),
-                    else => @as(i32, op.stackEffect()),
-                };
-                depth += eff;
-            }
-            if (bad_op or depth < 1) break;
-
-            const arg_instr_count = arg_end - i;
-            if (arg_instr_count >= 5) {
-                const resolved_mixed = self.resolveMixedLvalue(chunk, caller, code, instrs[i..arg_end]);
-                if (resolved_mixed != .none) {
-                    sources[scan_idx] = resolved_mixed;
-                    continue;
-                }
-            }
-
-            if (arg_instr_count == 1) {
-                const aip = instrs[i];
-                if (code[aip] == @intFromEnum(OpCode.get_var)) {
-                    const ci = (@as(u16, code[aip + 1]) << 8) | code[aip + 2];
-                    if (ci < chunk.constants.items.len) {
-                        sources[scan_idx] = .{ .simple = chunk.constants.items[ci].string.bytes() };
-                    }
-                } else if (code[aip] == @intFromEnum(OpCode.get_local)) {
-                    const slot = (@as(u16, code[aip + 1]) << 8) | code[aip + 2];
-                    const sn = if (caller.func) |func| func.slot_names else self.global_slot_names;
-                    if (slot < sn.len) {
-                        sources[scan_idx] = .{ .simple = sn[slot] };
-                    }
-                }
-            } else if (arg_instr_count == 2) {
-                const first_ip = instrs[i];
-                const second_ip = instrs[i + 1];
-                if (code[second_ip] == @intFromEnum(OpCode.get_prop)) {
-                    var var_name: ?[]const u8 = null;
-                    var is_local = false;
-                    var slot: u16 = 0;
-                    if (code[first_ip] == @intFromEnum(OpCode.get_var)) {
-                        const ci = (@as(u16, code[first_ip + 1]) << 8) | code[first_ip + 2];
-                        if (ci < chunk.constants.items.len) var_name = chunk.constants.items[ci].string.bytes();
-                    } else if (code[first_ip] == @intFromEnum(OpCode.get_local)) {
-                        slot = (@as(u16, code[first_ip + 1]) << 8) | code[first_ip + 2];
-                        const sn = if (caller.func) |func| func.slot_names else self.global_slot_names;
-                        if (slot < sn.len) {
-                            var_name = sn[slot];
-                            is_local = true;
-                        }
-                    }
-                    if (var_name) |vn| {
-                        const prop_ci = (@as(u16, code[second_ip + 1]) << 8) | code[second_ip + 2];
-                        if (prop_ci < chunk.constants.items.len) {
-                            if (chunk.constants.items[prop_ci] == .string) {
-                                sources[scan_idx] = .{ .object_prop = .{
-                                    .var_name = vn,
-                                    .is_local = is_local,
-                                    .slot = slot,
-                                    .prop_name = chunk.constants.items[prop_ci].string.bytes(),
-                                } };
-                            }
-                        }
-                    }
-                }
-            } else if (arg_instr_count >= 3) {
-                const first_ip = instrs[i];
-                const last_ip = instrs[i + arg_instr_count - 1];
-                if (arg_instr_count == 3 and code[last_ip] == @intFromEnum(OpCode.array_get)) {
-                    const mid_ip = instrs[i + 1];
-                    var var_name: ?[]const u8 = null;
-                    var is_local = false;
-                    var slot: u16 = 0;
-                    if (code[first_ip] == @intFromEnum(OpCode.get_var)) {
-                        const ci = (@as(u16, code[first_ip + 1]) << 8) | code[first_ip + 2];
-                        if (ci < chunk.constants.items.len) var_name = chunk.constants.items[ci].string.bytes();
-                    } else if (code[first_ip] == @intFromEnum(OpCode.get_local)) {
-                        slot = (@as(u16, code[first_ip + 1]) << 8) | code[first_ip + 2];
-                        const sn = if (caller.func) |func| func.slot_names else self.global_slot_names;
-                        if (slot < sn.len) {
-                            var_name = sn[slot];
-                            is_local = true;
-                        }
-                    }
-                    if (var_name) |vn| {
-                        var key_val: ?Value = null;
-                        if (code[mid_ip] == @intFromEnum(OpCode.constant)) {
-                            const ci = (@as(u16, code[mid_ip + 1]) << 8) | code[mid_ip + 2];
-                            if (ci < chunk.constants.items.len) key_val = chunk.constants.items[ci];
-                        } else if (code[mid_ip] == @intFromEnum(OpCode.get_var)) {
-                            const ci = (@as(u16, code[mid_ip + 1]) << 8) | code[mid_ip + 2];
-                            if (ci < chunk.constants.items.len) {
-                                if (chunk.constants.items[ci] == .string) {
-                                    const kname = chunk.constants.items[ci].string.bytes();
-                                    key_val = caller.vars.get(kname);
-                                    if (key_val == null and caller.locals.len > 0) {
-                                        const sn = if (caller.func) |func| func.slot_names else self.global_slot_names;
-                                        for (sn, 0..) |sn_name, si| {
-                                            if (std.mem.eql(u8, sn_name, kname)) {
-                                                if (si < caller.locals.len) key_val = caller.locals[si];
-                                                break;
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        } else if (code[mid_ip] == @intFromEnum(OpCode.get_local)) {
-                            const kslot = (@as(u16, code[mid_ip + 1]) << 8) | code[mid_ip + 2];
-                            if (kslot < caller.locals.len) key_val = caller.locals[kslot];
-                        }
-                        if (key_val) |kv| {
-                            sources[scan_idx] = .{ .array_elem = .{
-                                .var_name = vn,
-                                .is_local = is_local,
-                                .slot = slot,
-                                .key = kv,
-                            } };
-                        }
-                    }
-                } else if (arg_instr_count == 4 and code[last_ip] == @intFromEnum(OpCode.array_get)) {
-                    // $obj->prop['key'] pattern: get_var/get_local + get_prop + key + array_get
-                    const prop_ip = instrs[i + 1];
-                    const key_ip = instrs[i + 2];
-                    if (code[prop_ip] == @intFromEnum(OpCode.get_prop)) {
-                        var var_name: ?[]const u8 = null;
-                        var is_local = false;
-                        var slot: u16 = 0;
-                        if (code[first_ip] == @intFromEnum(OpCode.get_var)) {
-                            const ci = (@as(u16, code[first_ip + 1]) << 8) | code[first_ip + 2];
-                            if (ci < chunk.constants.items.len) var_name = chunk.constants.items[ci].string.bytes();
-                        } else if (code[first_ip] == @intFromEnum(OpCode.get_local)) {
-                            slot = (@as(u16, code[first_ip + 1]) << 8) | code[first_ip + 2];
-                            const sn = if (caller.func) |func| func.slot_names else self.global_slot_names;
-                            if (slot < sn.len) {
-                                var_name = sn[slot];
-                                is_local = true;
-                            }
-                        }
-                        if (var_name) |vn| {
-                            const pci = (@as(u16, code[prop_ip + 1]) << 8) | code[prop_ip + 2];
-                            if (pci < chunk.constants.items.len and chunk.constants.items[pci] == .string) {
-                                const prop_name = chunk.constants.items[pci].string.bytes();
-                                var key_val: ?Value = null;
-                                if (code[key_ip] == @intFromEnum(OpCode.constant)) {
-                                    const ci = (@as(u16, code[key_ip + 1]) << 8) | code[key_ip + 2];
-                                    if (ci < chunk.constants.items.len) key_val = chunk.constants.items[ci];
-                                } else if (code[key_ip] == @intFromEnum(OpCode.get_var)) {
-                                    const ci = (@as(u16, code[key_ip + 1]) << 8) | code[key_ip + 2];
-                                    if (ci < chunk.constants.items.len) {
-                                        if (chunk.constants.items[ci] == .string) {
-                                            const kname = chunk.constants.items[ci].string.bytes();
-                                            key_val = caller.vars.get(kname);
-                                            if (key_val == null and caller.locals.len > 0) {
-                                                const sn = if (caller.func) |func| func.slot_names else self.global_slot_names;
-                                                for (sn, 0..) |sn_name, si| {
-                                                    if (std.mem.eql(u8, sn_name, kname)) {
-                                                        if (si < caller.locals.len) key_val = caller.locals[si];
-                                                        break;
-                                                    }
-                                                }
-                                            }
-                                        }
-                                    }
-                                } else if (code[key_ip] == @intFromEnum(OpCode.get_local)) {
-                                    const kslot = (@as(u16, code[key_ip + 1]) << 8) | code[key_ip + 2];
-                                    if (kslot < caller.locals.len) key_val = caller.locals[kslot];
-                                }
-                                if (key_val) |kv| {
-                                    sources[scan_idx] = .{ .prop_array_elem = .{
-                                        .var_name = vn,
-                                        .is_local = is_local,
-                                        .slot = slot,
-                                        .prop_name = prop_name,
-                                        .key = kv,
-                                    } };
-                                }
-                            }
-                        }
-                    }
-                } else if (code[last_ip] == @intFromEnum(OpCode.get_prop) or code[last_ip] == @intFromEnum(OpCode.get_prop_dynamic)) {
-                    var current: Value = .null;
-                    if (code[first_ip] == @intFromEnum(OpCode.get_var)) {
-                        const ci = (@as(u16, code[first_ip + 1]) << 8) | code[first_ip + 2];
-                        if (ci < chunk.constants.items.len and chunk.constants.items[ci] == .string) {
-                            current = self.resolveCallerVar(chunk.constants.items[ci].string.bytes(), false, 0);
-                        }
-                    } else if (code[first_ip] == @intFromEnum(OpCode.get_local)) {
-                        const root_slot = (@as(u16, code[first_ip + 1]) << 8) | code[first_ip + 2];
-                        if (root_slot < caller.locals.len) current = caller.locals[root_slot];
-                    }
-
-                    const dynamic_final = code[last_ip] == @intFromEnum(OpCode.get_prop_dynamic);
-                    const intermediate_end = if (dynamic_final) arg_instr_count - 2 else arg_instr_count - 1;
-                    var prop_index: usize = 1;
-                    while (current == .object and prop_index < intermediate_end) : (prop_index += 1) {
-                        const prop_ip = instrs[i + prop_index];
-                        if (code[prop_ip] != @intFromEnum(OpCode.get_prop)) break;
-                        const prop_ci = (@as(u16, code[prop_ip + 1]) << 8) | code[prop_ip + 2];
-                        if (prop_ci >= chunk.constants.items.len or chunk.constants.items[prop_ci] != .string) break;
-                        current = current.object.get(chunk.constants.items[prop_ci].string.bytes());
-                    }
-                    if (current == .object and prop_index == intermediate_end) {
-                        var final_name: ?[]const u8 = null;
-                        if (!dynamic_final) {
-                            const prop_ci = (@as(u16, code[last_ip + 1]) << 8) | code[last_ip + 2];
-                            if (prop_ci < chunk.constants.items.len and chunk.constants.items[prop_ci] == .string) {
-                                final_name = chunk.constants.items[prop_ci].string.bytes();
-                            }
-                        } else {
-                            const name_ip = instrs[i + arg_instr_count - 2];
-                            if (code[name_ip] == @intFromEnum(OpCode.get_var)) {
-                                const name_ci = (@as(u16, code[name_ip + 1]) << 8) | code[name_ip + 2];
-                                if (name_ci < chunk.constants.items.len and chunk.constants.items[name_ci] == .string) {
-                                    const name_value = self.resolveCallerVar(chunk.constants.items[name_ci].string.bytes(), false, 0);
-                                    if (name_value == .string) final_name = name_value.string.bytes();
-                                }
-                            } else if (code[name_ip] == @intFromEnum(OpCode.get_local)) {
-                                const name_slot = (@as(u16, code[name_ip + 1]) << 8) | code[name_ip + 2];
-                                if (name_slot < caller.locals.len and caller.locals[name_slot] == .string) {
-                                    final_name = caller.locals[name_slot].string.bytes();
-                                }
-                            }
-                        }
-                        if (final_name) |prop_name| {
-                            sources[scan_idx] = .{ .chained_prop = .{
-                                .object = current.object,
-                                .prop_name = prop_name,
-                            } };
-                        }
-                    }
-                }
-            }
-        }
-        return sources;
+    // Binding runs below call setup, not in the dispatch loop. Queue an
+    // exception without unwinding caller frames underneath the binding code.
+    fn checkPropertyReferenceBinding(self: *VM, obj: *PhpObject, name: []const u8) RuntimeError!void {
+        const floor = self.handler_floor;
+        self.handler_floor = self.handler_count;
+        defer self.handler_floor = floor;
+        _ = try self.checkPropertyMutation(obj, name, .indirect);
     }
 
     fn bindRefParams(
@@ -14003,12 +14516,10 @@ pub const VM = struct {
         refs: *std.StringHashMapUnmanaged(*Value),
         owner: RefIndex.OwnerId,
     ) !void {
+        _ = owner;
         if (func.ref_params.len == 0) return;
-        // ref_params is per-position. if none of the actually-passed args land
-        // on a ref position, we can skip the expensive bytecode scan entirely.
-        // many framework helpers declare ref params via reflection but
-        // their hot callers never pass an arg in the ref-typed position -
-        // the bytecode scan was a large fraction of release-mode samples
+        // reference flags are per-position; only bind passed reference params.
+        // destinations come from evaluated argument transport, not bytecode
         const ref_window = @min(ac, func.ref_params.len);
         var any_ref = false;
         for (0..ref_window) |ri| {
@@ -14018,10 +14529,27 @@ pub const VM = struct {
             }
         }
         if (!any_ref) return;
-        const arg_sources = self.scanCallerArgSources(ac);
-        for (0..ref_window) |ri| {
-            if (!func.ref_params[ri]) continue;
-            switch (arg_sources[ri]) {
+        var source_buf: [256]RefSource = undefined;
+        const live_sources = self.callerArgSources(ac);
+        const source_count = @min(live_sources.len, source_buf.len);
+        @memcpy(source_buf[0..source_count], live_sources[0..source_count]);
+        const arg_sources = source_buf[0..source_count];
+        for (arg_sources, 0..) |source, ri| {
+            if (ri >= ref_window or !func.ref_params[ri]) continue;
+            if (source == .cell) try self.checkArgCell(source.cell.denial);
+        }
+        for (arg_sources, 0..) |source, ri| {
+            if (ri >= ref_window or !func.ref_params[ri]) continue;
+            switch (source) {
+                .cell => |c| {
+                    if (c.value.* == .array and c.value.array.refcount > 1) {
+                        const separated = try self.shallowCloneCow(c.value.array);
+                        self.setCell(c.value, .{ .array = separated });
+                        try self.propagateCellWrite(c.value, c.value.*);
+                    }
+                    try new_vars.put(self.allocator, func.params[ri], c.value.*);
+                    try self.bindRefSlot(refs, func.params[ri], c.value);
+                },
                 .simple => |caller_var| {
                     if (isSuperglobal(caller_var)) {
                         const cell = try self.superglobalCell(caller_var);
@@ -14058,80 +14586,6 @@ pub const VM = struct {
 
                         try self.bindRefSlot(&self.currentFrame().ref_slots, caller_var, cell);
                         try self.bindRefSlot(refs, func.params[ri], cell);
-                    }
-                },
-                .array_elem => |ae| {
-                    const arr_val = self.resolveCallerVar(ae.var_name, ae.is_local, ae.slot);
-                    if (arr_val == .array) {
-                        const cell = try self.newRefCell();
-                        self.setCell(cell, new_vars.get(func.params[ri]) orelse .null);
-                        // the ref cell is a durable holder - retain its array value, or the
-                        // callee param slot's release at frame teardown frees the array the
-                        // cell (and the caller's ref binding) still points at (Stage 2)
-
-                        try self.bindRefSlot(refs, func.params[ri], cell);
-                        try self.regRefArray(owner, cell, arr_val.array, Value.toArrayKey(ae.key));
-                    }
-                },
-                .object_prop => |obj_ref| {
-                    const obj_val = self.resolveCallerVar(obj_ref.var_name, obj_ref.is_local, obj_ref.slot);
-                    if (obj_val == .object) {
-                        var bound = new_vars.get(func.params[ri]) orelse .null;
-                        // a reference can't stay COW-shared: if $obj->prop holds a
-                        // shared array, give the ref a private copy and point the
-                        // property at it, so an in-place mutation through the ref
-                        // (unset/array_shift - which does NOT fire propagateCellWrite,
-                        // only cell-REASSIGNMENT does) reaches $obj->prop while the
-                        // COW readers keep the original. without this, Arr::forget's
-                        // `unset($this->items[...])` descends + writes back into the
-                        // shared config-items array in place, corrupting readers
-                        if (bound == .array and bound.array.refcount > 1) {
-                            const fresh = try self.shallowCloneCow(bound.array);
-                            bound = .{ .array = fresh };
-                            try new_vars.put(self.allocator, func.params[ri], bound);
-                            try self.objectSetOwned(obj_val.object, obj_ref.prop_name, bound);
-                        }
-                        const cell = try self.newRefCell();
-                        self.setCell(cell, bound);
-                        // the ref cell is a durable holder - retain its array value, or the
-                        // callee param slot's release at frame teardown frees the array the
-                        // cell (and the caller's ref binding) still points at (Stage 2)
-
-                        try self.bindRefSlot(refs, func.params[ri], cell);
-                        try self.regRefObject(owner, cell, obj_val.object, obj_ref.prop_name);
-                        self.obj_ref_active = true;
-                    }
-                },
-                .chained_prop => |cp| {
-                    const cell = try self.newRefCell();
-                    self.setCell(cell, new_vars.get(func.params[ri]) orelse .null);
-
-                    try self.bindRefSlot(refs, func.params[ri], cell);
-                    try self.regRefObject(owner, cell, cp.object, cp.prop_name);
-                    self.obj_ref_active = true;
-                },
-                .resolved_array_elem => |ae| {
-                    const cell = try self.newRefCell();
-                    self.setCell(cell, new_vars.get(func.params[ri]) orelse .null);
-
-                    try self.bindRefSlot(refs, func.params[ri], cell);
-                    try self.regRefArray(owner, cell, ae.array, Value.toArrayKey(ae.key));
-                    self.array_ref_active = true;
-                },
-                .prop_array_elem => |pae| {
-                    const obj_val = self.resolveCallerVar(pae.var_name, pae.is_local, pae.slot);
-                    if (obj_val == .object) {
-                        const prop_val = obj_val.object.get(pae.prop_name);
-                        if (prop_val == .array) {
-                            const cell = try self.newRefCell();
-                            self.setCell(cell, new_vars.get(func.params[ri]) orelse .null);
-                            // the ref cell is a durable holder - retain its array value, or the
-                            // callee param slot's release at frame teardown frees the array the
-                            // cell (and the caller's ref binding) still points at (Stage 2)
-
-                            try self.bindRefSlot(refs, func.params[ri], cell);
-                            try self.regRefArray(owner, cell, prop_val.array, Value.toArrayKey(pae.key));
-                        }
                     }
                 },
                 .none => {},
@@ -14378,6 +14832,52 @@ pub const VM = struct {
         return self.isInstanceOf(caller_class, target_class) or self.isInstanceOf(target_class, caller_class);
     }
 
+    fn shouldCallMagicUnset(self: *VM, obj: *PhpObject, name: []const u8) bool {
+        if (!self.hasMethod(obj.class_name, "__unset")) return false;
+        const vr = self.findPropertyVisibility(obj.class_name, name);
+        return obj.isUnset(name) or !self.checkVisibility(vr.defining_class, vr.visibility) or
+            (obj.getSlotIndex(name) == null and !obj.properties.contains(name));
+    }
+
+    // Property write, reference and dimension handlers share a set-scope gate.
+    // Object interiors are
+    // reads of the property, not mutations of its storage (callers skip this
+    // gate when a dimension operation resolves to an object).
+    const MutationAction = enum { write, indirect, unset };
+
+    fn checkPropertyMutation(self: *VM, obj: *PhpObject, name: []const u8, action: MutationAction) RuntimeError!bool {
+        return self.checkPropertyMutationVis(obj, name, action, self.findPropertyVisibility(obj.class_name, name));
+    }
+
+    fn checkPropertyMutationVis(self: *VM, obj: *PhpObject, name: []const u8, action: MutationAction, vr: VisResult) RuntimeError!bool {
+        var msg: ?[]const u8 = null;
+        if (action == .write and vr.is_readonly and vr.set_visibility == .protected and obj.getForScope(name, if (vr.visibility == .private) vr.defining_class else null) != .null) {
+            msg = try std.fmt.allocPrint(self.allocator, "Cannot modify readonly property {s}::${s}", .{ vr.defining_class, name });
+        } else if (vr.set_visibility != vr.visibility and !self.checkVisibility(vr.defining_class, vr.set_visibility)) {
+            const verb: []const u8 = switch (action) {
+                .write => "modify",
+                .indirect => "indirectly modify",
+                .unset => "unset",
+            };
+            const ro: []const u8 = if (vr.is_readonly and vr.set_visibility == .protected) " readonly" else "";
+            const scope = self.currentDefiningClass();
+            msg = if (scope) |sc|
+                try std.fmt.allocPrint(self.allocator, "Cannot {s} {s}(set){s} property {s}::${s} from scope {s}", .{ verb, @tagName(vr.set_visibility), ro, vr.defining_class, name, sc })
+            else
+                try std.fmt.allocPrint(self.allocator, "Cannot {s} {s}(set){s} property {s}::${s} from global scope", .{ verb, @tagName(vr.set_visibility), ro, vr.defining_class, name });
+        } else if (action == .indirect and !self.checkVisibility(vr.defining_class, vr.visibility)) {
+            msg = try std.fmt.allocPrint(self.allocator, "Cannot access {s} property {s}::${s}", .{ @tagName(vr.visibility), vr.defining_class, name });
+        } else if (action == .indirect and vr.is_readonly) {
+            msg = try std.fmt.allocPrint(self.allocator, "Cannot modify readonly property {s}::${s}", .{ vr.defining_class, name });
+        }
+        if (msg) |text| {
+            try self.strings.append(self.allocator, text);
+            if (try self.throwBuiltinException("Error", text)) return true;
+            return error.RuntimeError;
+        }
+        return false;
+    }
+
     pub const VisResult = struct { visibility: ClassDef.Visibility, defining_class: []const u8, is_readonly: bool = false, set_visibility: ClassDef.Visibility = .public, type_str: []const u8 = "" };
 
     pub fn findPropertyVisibility(self: *VM, class_name: []const u8, prop_name: []const u8) VisResult {
@@ -14402,7 +14902,7 @@ pub const VM = struct {
                 if (self.classes.get(sc)) |scls| {
                     for (scls.properties.items) |prop| {
                         if (std.mem.eql(u8, prop.name, prop_name) and prop.visibility == .private) {
-                            return .{ .visibility = prop.visibility, .defining_class = sc, .is_readonly = prop.is_readonly, .set_visibility = prop.set_visibility, .type_str = prop.type_str };
+                            return .{ .visibility = prop.visibility, .defining_class = sc, .is_readonly = prop.is_readonly, .set_visibility = if (prop.is_readonly and !prop.has_set_visibility and prop.visibility == .public) .protected else prop.set_visibility, .type_str = prop.type_str };
                         }
                     }
                 }
@@ -14412,7 +14912,7 @@ pub const VM = struct {
         while (current) |cn| {
             if (self.classes.get(cn)) |cls| {
                 for (cls.properties.items) |prop| {
-                    if (std.mem.eql(u8, prop.name, prop_name)) return .{ .visibility = prop.visibility, .defining_class = cn, .is_readonly = prop.is_readonly, .set_visibility = prop.set_visibility, .type_str = prop.type_str };
+                    if (std.mem.eql(u8, prop.name, prop_name)) return .{ .visibility = prop.visibility, .defining_class = cn, .is_readonly = prop.is_readonly, .set_visibility = if (prop.is_readonly and !prop.has_set_visibility and prop.visibility == .public) .protected else prop.set_visibility, .type_str = prop.type_str };
                 }
                 current = cls.parent;
             } else break;
@@ -15321,7 +15821,29 @@ pub const VM = struct {
     // does not own arrays and a refcount-0 array arg is never queued, so it
     // cannot be freed mid-native - retaining arrays here would instead
     // QUEUE them (releaseValue queues at 0) and free live data (Stage 2)
-    fn invokeNative(self: *VM, native: NativeFn, ctx: *NativeContext, native_args: []const Value, name: ?[]const u8) RuntimeError!Value {
+    fn invokeNative(self: *VM, native: NativeFn, ctx: *NativeContext, input_args: []const Value, name: ?[]const u8) RuntimeError!Value {
+        var args_buf: [256]Value = undefined;
+        if (input_args.len > args_buf.len) return error.RuntimeError;
+        var native_args = input_args;
+        // only a call whose arguments recorded provenance can bind an output
+        // position; by-value sites skip the name lookup entirely
+        const sources = self.callerArgSources(input_args.len);
+        if (name) |n| if (sources.len > 0 and byref_args.hasByRefParams(n)) {
+            for (sources, 0..) |source, i| {
+                if (source != .cell or !byref_args.isByRef(n, i)) continue;
+                // array_multisort's variadic integers are flags, not outputs
+                const base = if (std.mem.lastIndexOfScalar(u8, n, '\\')) |pos| n[pos + 1 ..] else n;
+                if (std.ascii.eqlIgnoreCase(base, "array_multisort") and input_args[i] != .array) continue;
+                try self.checkArgCell(source.cell.denial);
+            }
+            if (sources.len > 0 and sources[0] != .none and input_args[0] == .array and input_args[0].array.refcount > 1 and byref_args.arg0IsByRef(n)) {
+                const separated: Value = .{ .array = try self.shallowCloneCow(input_args[0].array) };
+                @memcpy(args_buf[0..input_args.len], input_args);
+                args_buf[0] = separated;
+                native_args = args_buf[0..input_args.len];
+                ctx.setCallerVar(0, native_args.len, separated);
+            }
+        };
         for (native_args) |a| stackRetain(a);
         defer for (native_args) |a| self.stackRelease(a);
         // an array argument with no durable owner (a literal, a call result)
@@ -16146,6 +16668,7 @@ pub const VM = struct {
     // parameter fall into a variadic param keyed by their name. when set, its
     // entries are merged into the variadic rest array
     fn callNamedFunctionV(self: *VM, raw_name: []const u8, arg_count: u8, named_extras: ?*PhpArray) RuntimeError!void {
+        self.captureArgSources(arg_count);
         // PHP normalizes leading-backslash on function callable strings
         const name = if (raw_name.len > 0 and raw_name[0] == '\\') raw_name[1..] else raw_name;
         if (self.dbg_profile_enabled) {
@@ -16195,6 +16718,7 @@ pub const VM = struct {
                             self.frame_count -= 1;
                             self.deinitFrameSlot(self.frame_count);
                         }
+                        self.discardArgTransport(handler.sp);
                         self.sp = handler.sp;
                         self.push(exc);
                         self.currentFrame().ip = handler.catch_ip;
@@ -16274,7 +16798,12 @@ pub const VM = struct {
             }
             var callee_refs = closure_refs;
             const callee_owner = (try self.refIndex()).createOwner();
-            try self.bindRefParams(ac, func, &new_vars, &callee_refs, callee_owner);
+            self.bindOwnedRefParams(ac, func, &new_vars, &callee_refs, callee_owner) catch |err| {
+                new_vars.deinit(self.allocator);
+                self.deinitRefSlots(&callee_refs);
+                if (self.ref_index) |ri| ri.releaseOwner(self.allocator, callee_owner);
+                return err;
+            };
 
             if (func.is_generator) {
                 // by-ref params: ref_slots on the generator so subsequent
@@ -16343,6 +16872,20 @@ pub const VM = struct {
     }
 
     pub fn callMethod(self: *VM, obj: *PhpObject, method_name: []const u8, args: []const Value) RuntimeError!Value {
+        // A native callback may execute calls at the same VM frame depth.
+        // Restore the enclosing call's output-argument destinations afterwards.
+        const saved_sources_count = self.ic.?.active_arg_count;
+        var saved_sources: [256]RefSource = undefined;
+        @memcpy(saved_sources[0..saved_sources_count], self.ic.?.active_args[0..saved_sources_count]);
+        const saved_source_frame = self.ic.?.active_frame;
+        for (self.ic.?.active_args[0..self.ic.?.active_arg_count]) |*source| source.* = self.retainArgSource(source.*);
+        defer {
+            self.clearActiveArgSources();
+            @memcpy(self.ic.?.active_args[0..saved_sources_count], saved_sources[0..saved_sources_count]);
+            self.ic.?.active_arg_count = saved_sources_count;
+            self.ic.?.active_frame = saved_source_frame;
+        }
+
         if (self.frame_count >= 2047) {
             self.error_msg = "Fatal error: maximum call stack depth exceeded";
             return error.RuntimeError;
@@ -16534,6 +17077,20 @@ pub const VM = struct {
     }
 
     pub fn callByName(self: *VM, raw_name: []const u8, args: []const Value) RuntimeError!Value {
+        // A native callback may execute calls at the same VM frame depth.
+        // Restore the enclosing call's output-argument destinations afterwards.
+        const saved_sources_count = self.ic.?.active_arg_count;
+        var saved_sources: [256]RefSource = undefined;
+        @memcpy(saved_sources[0..saved_sources_count], self.ic.?.active_args[0..saved_sources_count]);
+        const saved_source_frame = self.ic.?.active_frame;
+        for (self.ic.?.active_args[0..self.ic.?.active_arg_count]) |*source| source.* = self.retainArgSource(source.*);
+        defer {
+            self.clearActiveArgSources();
+            @memcpy(self.ic.?.active_args[0..saved_sources_count], saved_sources[0..saved_sources_count]);
+            self.ic.?.active_arg_count = saved_sources_count;
+            self.ic.?.active_frame = saved_source_frame;
+        }
+
         // PHP normalizes leading-backslash on function callable strings:
         // call_user_func('\App\f') and call_user_func('App\f') are equivalent
         const name = if (raw_name.len > 0 and raw_name[0] == '\\') raw_name[1..] else raw_name;
@@ -16772,6 +17329,7 @@ pub const VM = struct {
                 self.frame_count -= 1;
                 self.deinitFrameSlot(self.frame_count);
             }
+            self.clearArgStackFrom(base_sp);
             self.sp = base_sp;
             self.handler_count = base_handler;
             return err;
@@ -16784,6 +17342,7 @@ pub const VM = struct {
             fiber.return_value = self.popTransfer();
             if (fiber.return_value == .array) retainValue(fiber.return_value);
         }
+        self.clearArgStackFrom(base_sp);
         self.sp = base_sp;
         return .null;
     }
@@ -16819,6 +17378,7 @@ pub const VM = struct {
         for (self.stack[base_sp..self.sp]) |val| {
             try fiber.saved_stack.append(self.allocator, val);
         }
+        self.clearArgStackFrom(base_sp);
         self.sp = base_sp;
 
         // save exception handlers as relative offsets
@@ -16876,14 +17436,14 @@ pub const VM = struct {
         fiber.saved_handlers.clearRetainingCapacity();
     }
 
-    fn readByte(self: *VM) u8 {
+    inline fn readByte(self: *VM) u8 {
         const frame = &self.frames[self.frame_count - 1];
         const byte = frame.chunk.code.items[frame.ip];
         frame.ip += 1;
         return byte;
     }
 
-    fn readU16(self: *VM) u16 {
+    inline fn readU16(self: *VM) u16 {
         const hi: u16 = self.readByte();
         const lo: u16 = self.readByte();
         return (hi << 8) | lo;
@@ -17009,15 +17569,16 @@ pub const VM = struct {
         return value;
     }
 
-    fn pushTransfer(self: *VM, value: Value) void {
+    inline fn pushTransfer(self: *VM, value: Value) void {
         if (value == .string) {
             if (value.string.owner) |owner| self.removePendingStringRelease(owner);
         }
+        if (self.sp < self.arg_source_end) self.releaseStaleArgSource(self.sp);
         self.stack[self.sp] = value;
         self.sp += 1;
     }
 
-    fn push(self: *VM, value: Value) void {
+    inline fn push(self: *VM, value: Value) void {
         if (value == .string) {
             if (value.string.owner) |owner| self.removePendingStringRelease(owner);
         }
@@ -17028,11 +17589,13 @@ pub const VM = struct {
         // it cycle 0->1->0 and be freed while still live. arrays are freed
         // only when their durable container releases them (refcounting Stage 2)
         stackRetain(value);
+        if (self.sp < self.arg_source_end) self.releaseStaleArgSource(self.sp);
         self.stack[self.sp] = value;
         self.sp += 1;
     }
 
     fn pop(self: *VM) Value {
+        self.clearArgStackFrom(self.sp - 1);
         self.sp -= 1;
         const v = self.stack[self.sp];
         self.stackRelease(v);
@@ -17040,6 +17603,7 @@ pub const VM = struct {
     }
 
     fn popTransfer(self: *VM) Value {
+        self.clearArgStackFrom(self.sp - 1);
         self.sp -= 1;
         return self.stack[self.sp];
     }
@@ -17051,12 +17615,13 @@ pub const VM = struct {
     pub fn dropN(self: *VM, n: usize) void {
         var k: usize = 0;
         while (k < n) : (k += 1) {
+            self.clearArgStackFrom(self.sp - 1);
             self.sp -= 1;
             self.stackRelease(self.stack[self.sp]);
         }
     }
 
-    fn peek(self: *const VM) Value {
+    inline fn peek(self: *const VM) Value {
         return self.stack[self.sp - 1];
     }
 
@@ -17132,6 +17697,7 @@ pub const VM = struct {
                         i += 1;
                     }
                 }
+                self.clearArgArraySources(arr);
                 arr.deinit(self.allocator);
                 arr.pooled = true;
                 self.free_arrays.append(self.allocator, arr) catch {};
@@ -17772,7 +18338,7 @@ pub const VM = struct {
         }
     }
 
-    fn collectCyclesIfNeeded(self: *VM) void {
+    inline fn collectCyclesIfNeeded(self: *VM) void {
         if (!self.gc_enabled) return;
         const roots = self.cycle_candidates.items.len + self.cycle_array_candidates.items.len;
         if (roots >= self.gc_threshold) _ = self.collectCycles();
@@ -17959,6 +18525,7 @@ pub const VM = struct {
     // object elements reach refcount 0 and get __destruct'd, and nested
     // arrays cascade. clearing prevents any later walk from double-releasing
     fn releaseArrayElements(self: *VM, arr: *PhpArray) void {
+        self.clearArgArraySources(arr);
         for (arr.entries.items) |*e| {
             if (!arr.weak) self.releaseValue(e.value);
             e.value = .null;
@@ -18012,7 +18579,7 @@ pub const VM = struct {
     // the statement-boundary gate. every queue triggers it; in-transit values
     // that cross PHP execution (yield_from handoffs, returns) are pinned by
     // their opcodes rather than protected by a narrower gate
-    pub fn hasPendingReleases(self: *VM) bool {
+    pub inline fn hasPendingReleases(self: *VM) bool {
         return self.pending_destruct.items.len > 0 or
             self.pending_string_release.items.len > 0 or
             self.pending_array_release.items.len > 0 or
@@ -18024,6 +18591,23 @@ pub const VM = struct {
     // slots, so a destructed object's children become unreachable (Stage 1).
     // clearing prevents any later sweep from double-releasing
     fn releaseObjectProperties(self: *VM, obj: *PhpObject) void {
+        // detach weak property mirrors before this address can be pooled
+        if (obj.ref_mirrored) if (self.ref_index) |ri| {
+            while (true) {
+                var found: ?RefIndex.OwnedBinding = null;
+                var it = ri.fwd.iterator();
+                outer: while (it.next()) |entry| {
+                    for (entry.value_ptr.items) |target| {
+                        if (target == .object and target.object.object == obj) {
+                            found = .{ .cell = entry.key_ptr.*, .target = target };
+                            break :outer;
+                        }
+                    }
+                }
+                const binding = found orelse break;
+                ri.removeTargetAllOwners(self.allocator, binding.cell, binding.target);
+            }
+        };
         if (obj.lazy_initializer != .null) {
             self.releaseValue(obj.lazy_initializer);
             obj.lazy_initializer = .null;

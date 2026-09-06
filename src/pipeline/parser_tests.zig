@@ -827,3 +827,11 @@ test "property hook abstract final reference and setter type metadata" {
     }
     try std.testing.expectEqual(@as(usize, 2), count);
 }
+
+test "duplicate read and set visibility modifiers are rejected in all property contexts" {
+    try expectError("<?php class T { private(set) protected(set) int $x; }");
+    try expectError("<?php trait T { private(set) private(set) int $x; }");
+    try expectError("<?php $x = new class { public public int $x; };");
+    try expectError("<?php class T { function __construct(public private(set) protected(set) int $x) {} }");
+    try expectError("<?php class T { function __construct(public public int $x) {} }");
+}

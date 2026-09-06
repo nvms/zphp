@@ -16,6 +16,7 @@ test: ## Run zig unit tests
 .PHONY: compat
 compat: build ## Run PHP compatibility tests (requires PHP 8.4)
 	python3 ./tests/compat_runner_test
+	python3 ./tests/asymmetric_declaration_validation_test
 	./tests/run
 
 .PHONY: pdo

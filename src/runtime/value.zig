@@ -767,6 +767,9 @@ pub const PhpObject = struct {
     // and the end-of-request safety sweep must not double-fire it)
     destructed: bool = false,
     pooled: bool = false,
+    // a reference cell has targeted one of this object's properties; the
+    // release path must detach those weak mirrors before the address is reused
+    ref_mirrored: bool = false,
 
     pub const SlotLayout = struct {
         names: []const []const u8,

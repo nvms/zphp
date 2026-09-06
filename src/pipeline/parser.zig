@@ -1309,6 +1309,7 @@ const Parser = struct {
             var visibility: u32 = 0;
             var set_visibility: u32 = 0;
             var has_set_vis = false;
+            var has_read_vis = false;
             while (self.peek() == .kw_public or self.peek() == .kw_protected or
                 self.peek() == .kw_private or self.peek() == .kw_static or
                 self.peek() == .kw_abstract or self.peek() == .kw_final or self.peek() == .kw_readonly)
@@ -1339,9 +1340,18 @@ const Parser = struct {
                     _ = self.advance();
                     _ = self.advance();
                     _ = self.advance();
+                    if (has_set_vis) {
+                        try self.addError(.unexpected_token);
+                        return error.ParseError;
+                    }
                     set_visibility = vis_val;
                     has_set_vis = true;
                 } else {
+                    if (has_read_vis) {
+                        try self.addError(.unexpected_token);
+                        return error.ParseError;
+                    }
+                    has_read_vis = true;
                     visibility = vis_val;
                 }
             }
@@ -1498,6 +1508,7 @@ const Parser = struct {
             var visibility: u32 = 0; // 0=public, 1=protected, 2=private
             var set_visibility: u32 = 0;
             var has_set_vis = false;
+            var has_read_vis = false;
             while (self.peek() == .kw_public or self.peek() == .kw_protected or
                 self.peek() == .kw_private or self.peek() == .kw_static or
                 self.peek() == .kw_abstract or self.peek() == .kw_final or self.peek() == .kw_readonly)
@@ -1528,9 +1539,18 @@ const Parser = struct {
                     _ = self.advance();
                     _ = self.advance();
                     _ = self.advance();
+                    if (has_set_vis) {
+                        try self.addError(.unexpected_token);
+                        return error.ParseError;
+                    }
                     set_visibility = vis_val;
                     has_set_vis = true;
                 } else {
+                    if (has_read_vis) {
+                        try self.addError(.unexpected_token);
+                        return error.ParseError;
+                    }
+                    has_read_vis = true;
                     visibility = vis_val;
                 }
             }
@@ -1723,6 +1743,7 @@ const Parser = struct {
             var visibility: u32 = 0; // 0=public, 1=protected, 2=private
             var set_visibility: u32 = 0;
             var has_set_vis = false;
+            var has_read_vis = false;
 
             while (self.peek() == .kw_public or self.peek() == .kw_protected or
                 self.peek() == .kw_private or self.peek() == .kw_static or
@@ -1762,9 +1783,18 @@ const Parser = struct {
                     _ = self.advance();
                     _ = self.advance();
                     _ = self.advance();
+                    if (has_set_vis) {
+                        try self.addError(.unexpected_token);
+                        return error.ParseError;
+                    }
                     set_visibility = vis_val;
                     has_set_vis = true;
                 } else {
+                    if (has_read_vis) {
+                        try self.addError(.unexpected_token);
+                        return error.ParseError;
+                    }
+                    has_read_vis = true;
                     visibility = vis_val;
                 }
             }
@@ -2488,8 +2518,16 @@ const Parser = struct {
                     _ = self.advance();
                     _ = self.advance();
                     _ = self.advance();
+                    if (set_promotion != 0) {
+                        try self.addError(.unexpected_token);
+                        return error.ParseError;
+                    }
                     set_promotion = vis_val;
                 } else {
+                    if (promotion != 0) {
+                        try self.addError(.unexpected_token);
+                        return error.ParseError;
+                    }
                     promotion = vis_val;
                 }
                 continue;

@@ -304,8 +304,24 @@ pub const OpCode = enum(u8) {
     ensure_array_prop_dynamic,
     get_prop_coalesce_dynamic,
 
+    // argument guards. each carries the u16 distance from its own delta field
+    // to the call opcode it feeds plus the u8 argument position (0xFF for a
+    // positional spread entry, 0xFE for a named one). the runtime resolves the
+    // callee's by-reference intent for that position; a by-value position is
+    // a no-op and the following plain fetch runs unchanged, anything else
+    // records lvalue provenance for the call
+    arg_variable, // u16 name, u16 delta, u8 pos - after the variable read
+    arg_guard_prop, // u16 delta, u8 pos - before get_prop
+    arg_guard_prop_dynamic, // u16 delta, u8 pos - before get_prop_dynamic
+    arg_guard_dim, // u16 delta, u8 pos - before array_get
+    arg_array_set,
+    arg_array_push,
+    check_prop_dimension, // peek object + property name; guard indirect storage mutation
+
     pub fn width(self: OpCode) usize {
         return switch (self) {
+            .arg_variable => 6,
+            .arg_guard_prop, .arg_guard_prop_dynamic, .arg_guard_dim => 4,
             .constant,
             .get_var,
             .set_var,

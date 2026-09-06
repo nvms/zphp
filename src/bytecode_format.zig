@@ -11,8 +11,9 @@ const Allocator = std.mem.Allocator;
 
 const MAGIC = "ZPHPC\x00";
 // v10 adds property-hook metadata and interface_decl property operands.
+// v15 renumbers opcodes and adds the argument guard operands.
 // Older chunks cannot be decoded by the current VM.
-pub const FORMAT_VERSION: u16 = 10;
+pub const FORMAT_VERSION: u16 = 15;
 
 // tag bytes for serialized values
 const TAG_NULL: u8 = 0;
