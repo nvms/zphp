@@ -12,6 +12,9 @@ const Value = @import("../runtime/value.zig").Value;
 const PhpArray = @import("../runtime/value.zig").PhpArray;
 const Allocator = std.mem.Allocator;
 const Error = Allocator.Error || error{CompileError};
+// Declaration dependencies must use the same alias/absolute/namespace-relative
+// resolution as expressions, including the early-binding eligibility pass.
+const resolveNodeClassName = @import("compiler_expr.zig").resolveNodeClassName;
 const compiler_stmt = @import("compiler_stmt.zig");
 
 const ParsedAttr = struct {
@@ -1184,10 +1187,7 @@ fn classDeclEarlyBindable(self: *Compiler, node: Ast.Node) bool {
     const parent_node = self.ast.extra_data[rhs_base + 1];
     if (parent_node != 0) {
         const pnode = self.ast.nodes[parent_node];
-        const parent_name = if (pnode.tag == .qualified_name)
-            (self.buildQualifiedString(self.ast.extraSlice(pnode.data.lhs)) catch return false)
-        else
-            self.resolveClassName(self.ast.tokenSlice(pnode.main_token));
+        const parent_name = resolveNodeClassName(self, pnode) catch return false;
         if (!self.hoisted_names.contains(parent_name) and
             !@import("../stdlib/builtin_classes.zig").contains(parent_name)) return false;
     }
@@ -1236,10 +1236,7 @@ fn interfaceDeclEarlyBindable(self: *Compiler, node: Ast.Node) bool {
         const parent_count = self.ast.extra_data[node.data.rhs];
         for (0..parent_count) |i| {
             const pnode = self.ast.nodes[self.ast.extra_data[node.data.rhs + 1 + i]];
-            const pname = if (pnode.tag == .qualified_name)
-                (self.buildQualifiedString(self.ast.extraSlice(pnode.data.lhs)) catch return false)
-            else
-                self.resolveClassName(self.ast.tokenSlice(pnode.main_token));
+            const pname = resolveNodeClassName(self, pnode) catch return false;
             if (!self.hoisted_names.contains(pname)) return false;
         }
     }
@@ -1299,13 +1296,13 @@ pub fn compileClassDecl(self: *Compiler, node: Ast.Node) Error!void {
     var impl_names: [16][]const u8 = undefined;
     for (0..impl_count) |i| {
         const impl_node = self.ast.nodes[self.ast.extra_data[rhs_base + 3 + i]];
-        impl_names[i] = if (impl_node.tag == .qualified_name) (self.buildQualifiedString(self.ast.extraSlice(impl_node.data.lhs)) catch self.ast.tokenSlice(impl_node.main_token)) else self.resolveClassName(self.ast.tokenSlice(impl_node.main_token));
+        impl_names[i] = try resolveNodeClassName(self, impl_node);
     }
 
     const prev_parent = self.current_parent;
     self.current_parent = if (parent_node != 0) blk: {
         const pnode = self.ast.nodes[parent_node];
-        break :blk if (pnode.tag == .qualified_name) (self.buildQualifiedString(self.ast.extraSlice(pnode.data.lhs)) catch self.ast.tokenSlice(pnode.main_token)) else self.resolveClassName(self.ast.tokenSlice(pnode.main_token));
+        break :blk try resolveNodeClassName(self, pnode);
     } else "";
     defer self.current_parent = prev_parent;
 
@@ -1630,7 +1627,7 @@ pub fn compileClassDecl(self: *Compiler, node: Ast.Node) Error!void {
 
     if (parent_node != 0) {
         const pnode = self.ast.nodes[parent_node];
-        const parent_name = if (pnode.tag == .qualified_name) try self.buildQualifiedString(self.ast.extraSlice(pnode.data.lhs)) else self.resolveClassName(self.ast.tokenSlice(pnode.main_token));
+        const parent_name = try resolveNodeClassName(self, pnode);
         const parent_idx = try self.addConstant(.{ .string = Value.String.borrowed(parent_name) });
         try self.emitU16(parent_idx);
     } else {
@@ -1909,7 +1906,7 @@ pub fn compileAnonymousClass(self: *Compiler, node: Ast.Node) Error!void {
     var impl_names: [16][]const u8 = undefined;
     for (0..impl_count) |i| {
         const impl_node = self.ast.nodes[self.ast.extra_data[ctor_args_start + ctor_arg_count + 2 + i]];
-        impl_names[i] = if (impl_node.tag == .qualified_name) (self.buildQualifiedString(self.ast.extraSlice(impl_node.data.lhs)) catch self.ast.tokenSlice(impl_node.main_token)) else self.resolveClassName(self.ast.tokenSlice(impl_node.main_token));
+        impl_names[i] = try resolveNodeClassName(self, impl_node);
     }
 
     var method_count: u16 = 0;
@@ -2095,7 +2092,7 @@ pub fn compileAnonymousClass(self: *Compiler, node: Ast.Node) Error!void {
 
     if (parent_node != 0) {
         const apnode = self.ast.nodes[parent_node];
-        const parent_name = if (apnode.tag == .qualified_name) try self.buildQualifiedString(self.ast.extraSlice(apnode.data.lhs)) else self.resolveClassName(self.ast.tokenSlice(apnode.main_token));
+        const parent_name = try resolveNodeClassName(self, apnode);
         const parent_idx = try self.addConstant(.{ .string = Value.String.borrowed(parent_name) });
         try self.emitU16(parent_idx);
     } else {
@@ -2237,7 +2234,7 @@ pub fn compileInterfaceDecl(self: *Compiler, node: Ast.Node) Error!void {
         try self.emitByte(@intCast(parent_count));
         for (0..parent_count) |i| {
             const pnode = self.ast.nodes[self.ast.extra_data[node.data.rhs + 1 + i]];
-            const parent_name = if (pnode.tag == .qualified_name) try self.buildQualifiedString(self.ast.extraSlice(pnode.data.lhs)) else self.resolveClassName(self.ast.tokenSlice(pnode.main_token));
+            const parent_name = try resolveNodeClassName(self, pnode);
             const pidx = try self.addConstant(.{ .string = Value.String.borrowed(parent_name) });
             try self.emitU16(pidx);
         }

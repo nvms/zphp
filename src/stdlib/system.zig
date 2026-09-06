@@ -570,10 +570,14 @@ fn native_putenv(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     }
 }
 
+threadlocal var previous_uniqid_microsecond: i128 = -1;
+
 fn native_uniqid(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     const prefix = if (args.len >= 1 and args[0] == .string) args[0].string.bytes() else "";
     const more_entropy = args.len >= 2 and args[1].isTruthy();
-    const ns = std.time.nanoTimestamp();
+    var ns = std.time.nanoTimestamp();
+    while (@divFloor(ns, 1_000) == previous_uniqid_microsecond) ns = std.time.nanoTimestamp();
+    previous_uniqid_microsecond = @divFloor(ns, 1_000);
     const abs_ns: u64 = @intCast(if (ns < 0) -ns else ns);
     const usec: u64 = @divTrunc(@mod(abs_ns, 1_000_000_000), 1_000);
     const sec: u64 = @divTrunc(abs_ns, 1_000_000_000);
