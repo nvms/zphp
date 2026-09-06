@@ -13,6 +13,25 @@ const Allocator = std.mem.Allocator;
 const RuntimeError = error{ RuntimeError, OutOfMemory };
 
 pub fn register(vm: *VM, a: Allocator) !void {
+    // Unit enum cases are request-lifetime objects, just like RoundingMode.
+    var hook_type = ClassDef{ .name = "PropertyHookType", .is_enum = true, .is_final = true };
+    for ([_][]const u8{ "Get", "Set" }) |name| {
+        const obj = try a.create(PhpObject);
+        vm.next_object_id += 1;
+        obj.* = .{ .class_name = "PropertyHookType", .id = vm.next_object_id };
+        try vm.objects.append(a, obj);
+        try obj.set(a, "name", .{ .string = Value.String.borrowed(name) });
+        VM.objRetain(obj);
+        try hook_type.static_props.put(a, name, .{ .object = obj });
+        try hook_type.constant_names.put(a, name, {});
+        try hook_type.constant_order.append(a, name);
+        try hook_type.case_order.append(a, name);
+    }
+    try hook_type.interfaces.append(a, "UnitEnum");
+    try hook_type.addMethod(a, .{ .name = "cases", .arity = 0, .is_static = true });
+    try vm.classes.put(a, "PropertyHookType", hook_type);
+    try vm.native_fns.put(a, "PropertyHookType::cases", @import("enums.zig").enumCases);
+
     // Reflector marker interface - all Reflection* implement it
     var reflector_iface = @import("../runtime/vm.zig").InterfaceDef{ .name = "Reflector" };
     try reflector_iface.methods.append(a, "__toString");
@@ -561,10 +580,10 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try vm.native_fns.put(a, "ReflectionProperty::isProtectedSet", rpropIsProtectedSet);
     try vm.native_fns.put(a, "ReflectionProperty::isFinal", rpropIsFinal);
     try vm.native_fns.put(a, "ReflectionProperty::isAbstract", rpropIsAbstract);
-    try vm.native_fns.put(a, "ReflectionProperty::hasHooks", reflectionFalse);
-    try vm.native_fns.put(a, "ReflectionProperty::hasHook", reflectionFalse);
+    try vm.native_fns.put(a, "ReflectionProperty::hasHooks", rpropHasHooks);
+    try vm.native_fns.put(a, "ReflectionProperty::hasHook", rpropHasHook);
     try vm.native_fns.put(a, "ReflectionProperty::getHooks", rpropGetHooks);
-    try vm.native_fns.put(a, "ReflectionProperty::getHook", reflectionNoop);
+    try vm.native_fns.put(a, "ReflectionProperty::getHook", rpropGetHook);
     try vm.native_fns.put(a, "ReflectionProperty::isLazy", reflectionFalse);
     try vm.native_fns.put(a, "ReflectionProperty::skipLazyInitialization", reflectionNoop);
     try vm.native_fns.put(a, "ReflectionProperty::getDefaultValue", rpropGetDefaultValue);
@@ -910,6 +929,11 @@ fn findPropertyDef(vm: *VM, class_name: []const u8, prop_name: []const u8) ?Prop
             const synth: ClassDef.PropertyDef = .{ .name = prop_name, .default = v, .has_default = true };
             return .{ .prop = synth, .declaring_class = name, .is_static = true };
         }
+        if (vm.interfaces.get(name)) |iface| {
+            for (iface.parents.items) |parent| {
+                if (findPropertyDef(vm, parent, prop_name)) |result| return result;
+            }
+        }
         current = cls.parent;
     }
     return null;
@@ -1207,6 +1231,7 @@ fn rcGetMethods(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     // interface methods (declaration order, abstract by definition)
     if (ctx.vm.interfaces.get(class_name)) |iface| {
         for (iface.methods.items) |method_name| {
+            if (std.mem.indexOf(u8, method_name, "$hook_") != null) continue;
             if (seen.contains(method_name)) continue;
             try seen.put(ctx.allocator, method_name, {});
             const info = ClassDef.MethodInfo{ .name = method_name, .arity = 0, .visibility = .public, .is_abstract = true };
@@ -1225,6 +1250,7 @@ fn rcGetMethods(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
         if (cls.method_order.items.len > 0) {
             for (cls.method_order.items) |method_name| {
                 const info = cls.methods.get(method_name) orelse continue;
+                if (std.mem.indexOf(u8, method_name, "$hook_") != null) continue;
                 if (depth > 0 and info.visibility == .private) continue;
                 if (seen.contains(method_name)) continue;
                 try seen.put(ctx.allocator, method_name, {});
@@ -1238,6 +1264,7 @@ fn rcGetMethods(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
             while (it.next()) |entry| {
                 const method_name = entry.key_ptr.*;
                 const info = entry.value_ptr.*;
+                if (std.mem.indexOf(u8, method_name, "$hook_") != null) continue;
                 if (depth > 0 and info.visibility == .private) continue;
                 if (seen.contains(method_name)) continue;
                 try seen.put(ctx.allocator, method_name, {});
@@ -1617,10 +1644,27 @@ fn rcGetProperties(ctx: *NativeContext, args: []const Value) RuntimeError!Value 
                 try arr.append(ctx.allocator, .{ .object = obj });
             }
         }
+        if (ctx.vm.interfaces.contains(name)) {
+            try appendInterfaceProperties(ctx, class_name, name, filter, arr, &seen);
+        }
         current = cls.parent;
         is_own = false;
     }
     return .{ .array = arr };
+}
+
+fn appendInterfaceProperties(ctx: *NativeContext, reflected: []const u8, name: []const u8, filter: i64, arr: *PhpArray, seen: *std.StringHashMapUnmanaged(void)) RuntimeError!void {
+    const iface = ctx.vm.interfaces.get(name) orelse return;
+    for (iface.parents.items) |parent| {
+        const cls = ctx.vm.classes.get(parent) orelse continue;
+        for (cls.properties.items) |prop| {
+            if (seen.contains(prop.name) or !matchPropFilter(filter, prop.visibility, false)) continue;
+            try seen.put(ctx.allocator, prop.name, {});
+            const obj = try buildPropertyObj(ctx, reflected, prop, parent);
+            try arr.append(ctx.allocator, .{ .object = obj });
+        }
+        try appendInterfaceProperties(ctx, reflected, parent, filter, arr, seen);
+    }
 }
 
 fn matchPropFilter(filter: i64, vis: ClassDef.Visibility, is_static: bool) bool {
@@ -2289,7 +2333,7 @@ fn rmGetName(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
 
 fn rmLookupFunc(ctx: *NativeContext) ?@TypeOf(ctx.vm.functions.get("").?) {
     const this = getThis(ctx) orelse return null;
-    const method_name = if (this.get("name") == .string) this.get("name").string.bytes() else return null;
+    const method_name = methodLookupName(this) orelse return null;
     const declaring = if (this.get("_declaring_class") == .string) this.get("_declaring_class").string.bytes() else return null;
     var buf: [256]u8 = undefined;
     const key = std.fmt.bufPrint(&buf, "{s}::{s}", .{ declaring, method_name }) catch return null;
@@ -2332,14 +2376,20 @@ fn reflectionEmptyString(_: *NativeContext, _: []const Value) RuntimeError!Value
 
 fn rmGetParameters(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
     const this = getThis(ctx) orelse return .null;
-    const method_name = if (this.get("name") == .string) this.get("name").string.bytes() else return .null;
+    const method_name = methodLookupName(this) orelse return .null;
     const declaring = if (this.get("_declaring_class") == .string) this.get("_declaring_class").string.bytes() else return .null;
 
     var buf: [256]u8 = undefined;
     const key = std.fmt.bufPrint(&buf, "{s}::{s}", .{ declaring, method_name }) catch return .null;
     const func = ctx.vm.functions.get(key) orelse return .{ .array = try ctx.createArray() };
 
-    return buildParamArray(ctx, func, key);
+    const result = try buildParamArray(ctx, func, key);
+    if (this.get("_hook_method") == .string and result == .array) {
+        for (result.array.entries.items) |entry| {
+            if (entry.value == .object) try entry.value.object.set(ctx.allocator, "_hook_declaring_function", .{ .object = this });
+        }
+    }
+    return result;
 }
 
 fn rmIsPublic(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
@@ -2378,7 +2428,12 @@ fn rmGetDeclaringClass(ctx: *NativeContext, _: []const Value) RuntimeError!Value
 
 fn rmGetReturnType(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
     const this = getThis(ctx) orelse return .null;
-    const method_name = if (this.get("name") == .string) this.get("name").string.bytes() else return .null;
+    const hook_type = this.get("_hook_return_type");
+    if (hook_type == .string) {
+        if (hook_type.string.bytes().len == 0) return .null;
+        return .{ .object = try createTypeObj(ctx, hook_type.string.bytes(), false, this.get("_declaring_class").string.bytes()) };
+    }
+    const method_name = methodLookupName(this) orelse return .null;
     const declaring = if (this.get("_declaring_class") == .string) this.get("_declaring_class").string.bytes() else return .null;
 
     var buf: [256]u8 = undefined;
@@ -2392,7 +2447,11 @@ fn rmGetReturnType(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
 
 fn rmHasReturnType(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
     const this = getThis(ctx) orelse return .{ .bool = false };
-    const method_name = if (this.get("name") == .string) this.get("name").string.bytes() else return .{ .bool = false };
+    const hook_type = this.get("_hook_return_type");
+    if (hook_type == .string) {
+        return .{ .bool = hook_type.string.bytes().len > 0 };
+    }
+    const method_name = methodLookupName(this) orelse return .{ .bool = false };
     const declaring = if (this.get("_declaring_class") == .string) this.get("_declaring_class").string.bytes() else return .{ .bool = false };
 
     var buf: [256]u8 = undefined;
@@ -2571,6 +2630,8 @@ fn rpIsVariadic(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
 
 fn rpGetDeclaringFunction(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
     const this = getThis(ctx) orelse return .null;
+    const hook = this.get("_hook_declaring_function");
+    if (hook == .object) return hook;
     const func_name = if (this.get("_function") == .string) this.get("_function").string.bytes() else "";
     const declaring = if (this.get("_declaring_class") == .string) this.get("_declaring_class").string.bytes() else "";
     if (declaring.len > 0) {
@@ -3240,8 +3301,80 @@ fn reflectionFalse(_: *NativeContext, _: []const Value) RuntimeError!Value {
     return .{ .bool = false };
 }
 
+fn methodLookupName(obj: *PhpObject) ?[]const u8 {
+    const internal = obj.get("_hook_method");
+    if (internal == .string) return internal.string.bytes();
+    const name = obj.get("name");
+    return if (name == .string) name.string.bytes() else null;
+}
+
+const ReflectedHook = struct {
+    declaring: []const u8,
+    info: ClassDef.MethodInfo,
+};
+
+fn lookupPropertyHook(ctx: *NativeContext, kind: []const u8) ?ReflectedHook {
+    const this = getThis(ctx) orelse return null;
+    const name = this.get("name");
+    const declaring = this.get("_declaring_class");
+    if (name != .string or declaring != .string) return null;
+    var buf: [512]u8 = undefined;
+    const method = std.fmt.bufPrint(&buf, "{s}$hook_{s}", .{ name.string.bytes(), kind }) catch return null;
+    const cls = ctx.vm.classes.getPtr(declaring.string.bytes()) orelse return null;
+    const hook = ctx.vm.resolvePropertyHook(cls, method) orelse return null;
+    return .{ .declaring = hook.declaring, .info = hook.info };
+}
+
+fn hookKind(ctx: *NativeContext, args: []const Value) RuntimeError![]const u8 {
+    if (args.len > 0 and args[0] == .object and std.mem.eql(u8, args[0].object.class_name, "PropertyHookType")) {
+        const name = args[0].object.get("name");
+        if (name == .string) {
+            if (std.mem.eql(u8, name.string.bytes(), "Get")) return "get";
+            if (std.mem.eql(u8, name.string.bytes(), "Set")) return "set";
+        }
+    }
+    _ = try ctx.vm.throwBuiltinException("TypeError", "Argument #1 ($type) must be of type PropertyHookType");
+    return error.RuntimeError;
+}
+
+fn buildHookObj(ctx: *NativeContext, hook: ReflectedHook, kind: []const u8) !*PhpObject {
+    const this = getThis(ctx).?;
+    var info = hook.info;
+    // PHP exposes hook ReflectionMethods as public, even on private properties.
+    info.visibility = .public;
+    const obj = try buildMethodObj(ctx, hook.declaring, hook.info.name, info, hook.declaring);
+    const display = try std.fmt.allocPrint(ctx.allocator, "${s}::{s}", .{ this.get("name").string.bytes(), kind });
+    try ctx.strings.append(ctx.allocator, display);
+    try obj.set(ctx.allocator, "name", .{ .string = Value.String.borrowed(display) });
+    try obj.set(ctx.allocator, "_hook_method", .{ .string = Value.String.borrowed(hook.info.name) });
+    try obj.set(ctx.allocator, "_hook_property", this.get("name"));
+    const prop = findPropertyDef(ctx.vm, hook.declaring, this.get("name").string.bytes());
+    const return_type = if (std.mem.eql(u8, kind, "set")) "void" else if (prop) |p| p.prop.type_str else "";
+    try obj.set(ctx.allocator, "_hook_return_type", .{ .string = Value.String.borrowed(return_type) });
+    return obj;
+}
+
+fn rpropHasHooks(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    return .{ .bool = lookupPropertyHook(ctx, "get") != null or lookupPropertyHook(ctx, "set") != null };
+}
+
+fn rpropHasHook(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    return .{ .bool = lookupPropertyHook(ctx, try hookKind(ctx, args)) != null };
+}
+
+fn rpropGetHook(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    const kind = try hookKind(ctx, args);
+    const hook = lookupPropertyHook(ctx, kind) orelse return .null;
+    return .{ .object = try buildHookObj(ctx, hook, kind) };
+}
+
 fn rpropGetHooks(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
     const arr = try ctx.createArray();
+    for ([_][]const u8{ "get", "set" }) |kind| {
+        if (lookupPropertyHook(ctx, kind)) |hook| {
+            try arr.set(ctx.allocator, .{ .string = Value.String.borrowed(kind) }, .{ .object = try buildHookObj(ctx, hook, kind) });
+        }
+    }
     return .{ .array = arr };
 }
 
@@ -3543,7 +3676,12 @@ fn rpropIsFinal(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
     return .{ .bool = implicit_private_set_final };
 }
 
-fn rpropIsAbstract(_: *NativeContext, _: []const Value) RuntimeError!Value {
+fn rpropIsAbstract(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    for ([_][]const u8{ "get", "set" }) |kind| {
+        if (lookupPropertyHook(ctx, kind)) |hook| {
+            if (hook.info.is_abstract) return .{ .bool = true };
+        }
+    }
     return .{ .bool = false };
 }
 
@@ -3697,13 +3835,28 @@ fn rpropGetDocComment(ctx: *NativeContext, _: []const Value) RuntimeError!Value 
     return .{ .bool = false };
 }
 
-fn rpropIsVirtual(_: *NativeContext, _: []const Value) RuntimeError!Value {
+fn rpropIsVirtual(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const this = getThis(ctx) orelse return .null;
+    const dc = this.get("_declaring_class");
+    const name = this.get("name");
+    if (dc == .string and name == .string) {
+        if (ctx.vm.classes.get(dc.string.bytes())) |cls| {
+            for (cls.properties.items) |p| {
+                if (std.mem.eql(u8, p.name, name.string.bytes())) return .{ .bool = p.is_virtual };
+            }
+        }
+    }
     return .{ .bool = false };
 }
 
 fn rmInvoke(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     const this = getThis(ctx) orelse return .null;
-    const method_name = if (this.get("name") == .string) this.get("name").string.bytes() else return .null;
+    const guard_count = ctx.vm.prop_hook_guard.items.len;
+    defer ctx.vm.prop_hook_guard.shrinkRetainingCapacity(guard_count);
+    if (this.get("_hook_property") == .string and args.len > 0 and args[0] == .object) {
+        try ctx.vm.prop_hook_guard.append(ctx.allocator, .{ .obj_ptr = @intFromPtr(args[0].object), .prop_name = this.get("_hook_property").string.bytes() });
+    }
+    const method_name = methodLookupName(this) orelse return .null;
     if (args.len > 0 and args[0] == .object) {
         return ctx.callMethod(args[0].object, method_name, args[1..]) catch .null;
     }
@@ -3717,7 +3870,12 @@ fn rmInvoke(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
 
 fn rmInvokeArgs(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     const this = getThis(ctx) orelse return .null;
-    const method_name = if (this.get("name") == .string) this.get("name").string.bytes() else return .null;
+    const guard_count = ctx.vm.prop_hook_guard.items.len;
+    defer ctx.vm.prop_hook_guard.shrinkRetainingCapacity(guard_count);
+    if (this.get("_hook_property") == .string and args.len > 0 and args[0] == .object) {
+        try ctx.vm.prop_hook_guard.append(ctx.allocator, .{ .obj_ptr = @intFromPtr(args[0].object), .prop_name = this.get("_hook_property").string.bytes() });
+    }
+    const method_name = methodLookupName(this) orelse return .null;
     if (args.len < 1) return .null;
     const target = args[0];
 
@@ -3740,7 +3898,7 @@ fn rmInvokeArgs(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
 
 fn rmGetClosure(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     const this = getThis(ctx) orelse return .null;
-    const method_name = if (this.get("name") == .string) this.get("name").string.bytes() else return .null;
+    const method_name = methodLookupName(this) orelse return .null;
     if (args.len < 1 or args[0] != .object) return .null;
 
     const arr = try ctx.createArray();
@@ -3751,7 +3909,7 @@ fn rmGetClosure(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
 
 fn rmIsAbstract(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
     const this = getThis(ctx) orelse return .{ .bool = false };
-    const method_name = if (this.get("name") == .string) this.get("name").string.bytes() else return .{ .bool = false };
+    const method_name = methodLookupName(this) orelse return .{ .bool = false };
     const declaring = if (this.get("_declaring_class") == .string) this.get("_declaring_class").string.bytes() else return .{ .bool = false };
 
     if (ctx.vm.interfaces.contains(declaring)) return .{ .bool = true };
@@ -3770,7 +3928,7 @@ fn rmIsAbstract(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
 
 fn rmIsFinal(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
     const this = getThis(ctx) orelse return .{ .bool = false };
-    const method_name = if (this.get("name") == .string) this.get("name").string.bytes() else return .{ .bool = false };
+    const method_name = methodLookupName(this) orelse return .{ .bool = false };
     const declaring = if (this.get("_declaring_class") == .string) this.get("_declaring_class").string.bytes() else return .{ .bool = false };
     const cls = ctx.vm.classes.get(declaring) orelse return .{ .bool = false };
     const m = cls.methods.get(method_name) orelse return .{ .bool = false };
@@ -3779,7 +3937,7 @@ fn rmIsFinal(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
 
 fn rmFullName(ctx: *NativeContext) ?[]const u8 {
     const this = getThis(ctx) orelse return null;
-    const method_name = if (this.get("name") == .string) this.get("name").string.bytes() else return null;
+    const method_name = methodLookupName(this) orelse return null;
     const declaring = if (this.get("_declaring_class") == .string) this.get("_declaring_class").string.bytes() else return null;
     var buf: [256]u8 = undefined;
     const key = std.fmt.bufPrint(&buf, "{s}::{s}", .{ declaring, method_name }) catch return null;
@@ -3802,11 +3960,11 @@ fn rmIsGenerator(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
 
 fn rmGetModifiers(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
     const this = getThis(ctx) orelse return .{ .int = 0 };
-    const method_name = if (this.get("name") == .string) this.get("name").string.bytes() else return .{ .int = 0 };
+    const method_name = methodLookupName(this) orelse return .{ .int = 0 };
     const declaring = if (this.get("_declaring_class") == .string) this.get("_declaring_class").string.bytes() else return .{ .int = 0 };
     const cls = ctx.vm.classes.get(declaring) orelse return .{ .int = 0 };
     const info = cls.methods.get(method_name) orelse return .{ .int = 0 };
-    return .{ .int = methodModifiers(info) };
+    return .{ .int = if (this.get("_hook_method") == .string) (methodModifiers(info) & ~@as(i64, 7)) | 1 else methodModifiers(info) };
 }
 
 fn reflectionGetModifierNames(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
@@ -3824,7 +3982,7 @@ fn reflectionGetModifierNames(ctx: *NativeContext, args: []const Value) RuntimeE
 
 fn rmGetAttributes(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     const this = getThis(ctx) orelse return .{ .array = try ctx.createArray() };
-    const method_name = if (this.get("name") == .string) this.get("name").string.bytes() else return .{ .array = try ctx.createArray() };
+    const method_name = methodLookupName(this) orelse return .{ .array = try ctx.createArray() };
     const declaring = if (this.get("_declaring_class") == .string) this.get("_declaring_class").string.bytes() else return .{ .array = try ctx.createArray() };
     const cls = ctx.vm.classes.get(declaring) orelse return .{ .array = try ctx.createArray() };
     const attrs = cls.method_attributes.get(method_name) orelse return .{ .array = try ctx.createArray() };

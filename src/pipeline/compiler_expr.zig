@@ -226,12 +226,16 @@ pub fn compileAssign(self: *Compiler, node: Ast.Node) Error!void {
                 try self.emitOp(.array_set_chain);
                 return;
             }
-            if (target_lhs.tag == .property_access and !self.isDynamicProp(target_lhs)) {
+            if (target_lhs.tag == .property_access) {
                 try self.compileNode(target_lhs.data.lhs); // push $obj
-                const prop_name = self.propName(target_lhs);
-                const cidx = try self.addConstant(.{ .string = Value.String.borrowed(prop_name) });
-                try self.emitOp(.constant);
-                try self.emitU16(cidx); // push prop name
+                if (self.isDynamicProp(target_lhs)) {
+                    try self.compileNode(target_lhs.data.rhs);
+                } else {
+                    const prop_name = self.propName(target_lhs);
+                    const cidx = try self.addConstant(.{ .string = Value.String.borrowed(prop_name) });
+                    try self.emitOp(.constant);
+                    try self.emitU16(cidx); // push prop name
+                }
                 try self.compileNode(target.data.rhs); // push inner key
                 try self.compileNode(node.data.rhs); // push value
                 try self.emitOp(.prop_set_chain);
@@ -705,14 +709,19 @@ fn compileCoalesceFetch(self: *Compiler, node_idx: u32) Error!void {
         try self.emitOp(.array_get_coalesce);
         return;
     }
-    // a static-name property read under `??` uses isset-semantics: an
+    // A property read under `??` uses isset-semantics: an
     // uninitialized typed property must read as null, not throw. recurse so a
     // chain `$a->b->c ?? x` is non-throwing all the way down
-    if (n.tag == .property_access and !self.isDynamicProp(n)) {
+    if (n.tag == .property_access) {
         try compileCoalesceFetch(self, n.data.lhs);
-        const name_idx = try self.addConstant(.{ .string = Value.String.borrowed(self.propName(n)) });
-        try self.emitOp(.get_prop_coalesce);
-        try self.emitU16(name_idx);
+        if (self.isDynamicProp(n)) {
+            try self.compileNode(n.data.rhs);
+            try self.emitOp(.get_prop_coalesce_dynamic);
+        } else {
+            const name_idx = try self.addConstant(.{ .string = Value.String.borrowed(self.propName(n)) });
+            try self.emitOp(.get_prop_coalesce);
+            try self.emitU16(name_idx);
+        }
         return;
     }
     try self.compileNode(node_idx);
@@ -837,38 +846,11 @@ pub fn compileCall(self: *Compiler, node: Ast.Node) Error!void {
                         try self.emitU16(prop_idx);
                     }
                 } else if (arg.tag == .array_access) {
-                    const lhs_node = self.ast.nodes[arg.data.lhs];
-                    if (lhs_node.tag == .property_access and !self.isDynamicProp(lhs_node)) {
-                        // for isset($obj->prop[key]), PHP first calls __isset('prop')
-                        // and short-circuits to false without calling __get when the
-                        // property isn't set. emit: obj, dup, isset_prop, branch on
-                        // false (drop the obj, push false), else get_prop and isset_index
-                        try self.compileNode(lhs_node.data.lhs);
-                        try self.emitOp(.dup);
-                        const prop_name = self.propName(lhs_node);
-                        const prop_idx = try self.addConstant(.{ .string = Value.String.borrowed(prop_name) });
-                        try self.emitOp(.isset_prop);
-                        try self.emitU16(prop_idx);
-                        // stack: [obj, bool]
-                        const false_jump = try self.emitJump(.jump_if_false);
-                        try self.emitOp(.pop); // drop true bool → [obj]
-                        try self.emitOp(.get_prop);
-                        try self.emitU16(prop_idx);
-                        try self.compileNode(arg.data.rhs);
-                        try self.emitOp(.isset_index); // → [bool]
-                        const done_jump = try self.emitJump(.jump);
-                        self.patchJump(false_jump);
-                        // stack: [obj, false] — swap and drop obj to leave [false]
-                        try self.emitOp(.swap);
-                        try self.emitOp(.pop);
-                        self.patchJump(done_jump);
-                    } else {
-                        // use coalesce fetch for the LHS chain so nested
-                        // isset($a[x][y]) doesn't warn on the inner read
-                        try compileCoalesceFetch(self, arg.data.lhs);
-                        try self.compileNode(arg.data.rhs);
-                        try self.emitOp(.isset_index);
-                    }
+                    // Fetch each chain link once: hooks are reads, not a separate
+                    // existence probe followed by another getter invocation.
+                    try compileCoalesceFetch(self, arg.data.lhs);
+                    try self.compileNode(arg.data.rhs);
+                    try self.emitOp(.isset_index);
                 } else {
                     try self.compileNode(arg_idx);
                     try self.emitOp(.op_null);
@@ -1171,13 +1153,18 @@ pub fn compileVivifyChain(self: *Compiler, node_idx: u32) Error!void {
     } else if (node.tag == .variable or node.tag == .identifier) {
         const name = self.ast.tokenSlice(node.main_token);
         try emitEnsureArray(self, name);
-    } else if (node.tag == .property_access and !self.isDynamicProp(node)) {
+    } else if (node.tag == .property_access) {
         // $obj->prop[]=x / $obj->prop[k] op= v: load the property array for
         // in-place write with COW separation + write-back (ensure_array_prop)
         try self.compileNode(node.data.lhs);
-        const prop_idx = try self.addConstant(.{ .string = Value.String.borrowed(self.propName(node)) });
-        try self.emitOp(.ensure_array_prop);
-        try self.emitU16(prop_idx);
+        if (self.isDynamicProp(node)) {
+            try self.compileNode(node.data.rhs);
+            try self.emitOp(.ensure_array_prop_dynamic);
+        } else {
+            const prop_idx = try self.addConstant(.{ .string = Value.String.borrowed(self.propName(node)) });
+            try self.emitOp(.ensure_array_prop);
+            try self.emitU16(prop_idx);
+        }
     } else if (node.tag == .static_prop_access and self.ast.nodes[node.data.lhs].tag != .variable) {
         // Class::$prop[]=x: load the static-prop array for in-place write with
         // COW separation + write-back (ensure_array_static_prop). dynamic

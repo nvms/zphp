@@ -300,6 +300,9 @@ pub const OpCode = enum(u8) {
     // hoisted at registration time, matching PHP's early binding
     declare_fn,
     array_push_assign,
+    // Stack-name variants: pop property name and object, push fetched value.
+    ensure_array_prop_dynamic,
+    get_prop_coalesce_dynamic,
 
     pub fn width(self: OpCode) usize {
         return switch (self) {
@@ -409,6 +412,8 @@ pub const OpCode = enum(u8) {
             .array_get_coalesce,
             .array_get_vivify,
             .get_prop_dynamic,
+            .ensure_array_prop_dynamic,
+            .get_prop_coalesce_dynamic,
             .isset_prop_dynamic,
             .array_elem_inc,
             .array_elem_dec,

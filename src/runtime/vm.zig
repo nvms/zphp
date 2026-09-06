@@ -382,6 +382,7 @@ pub const ClassDef = struct {
         is_readonly: bool = false,
         is_final: bool = false,
         is_promoted: bool = false,
+        is_virtual: bool = false,
         type_str: []const u8 = "",
         doc_comment: []const u8 = "",
     };
@@ -4354,7 +4355,30 @@ pub const VM = struct {
                     const obj = base.object;
                     const pname = prop_key.string.bytes();
                     const ik = Value.toArrayKey(inner_key);
-                    const existing = obj.get(pname);
+                    // Hook reads must precede vivification/COW. A by-value hook
+                    // may expose an object for offsetSet, but not writable array storage.
+                    obj.refcount +%= 1;
+                    defer self.releaseValue(.{ .object = obj });
+                    var existing = obj.get(pname);
+                    var hook_cell: ?*Value = null;
+                    defer if (hook_cell) |cell| self.unbindCell(cell);
+                    if (self.hasPropHook(obj.class_name, pname, .get) and !self.inPropHook(obj, pname)) {
+                        self.setReturnRef(null);
+                        existing = (self.callPropHook(obj, pname, .get, .null) catch {
+                            if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
+                            return error.RuntimeError;
+                        }) orelse .null;
+                        if (try self.propGetReturnsRef(obj, pname)) {
+                            hook_cell = try self.takeHookReturnCell();
+                            if (hook_cell) |cell| existing = try self.prepareHookArray(cell);
+                        }
+                        if (existing != .object and !try self.propGetReturnsRef(obj, pname)) {
+                            const msg = try std.fmt.allocPrint(self.allocator, "Indirect modification of {s}::${s} is not allowed", .{ obj.class_name, pname });
+                            try self.strings.append(self.allocator, msg);
+                            if (try self.throwBuiltinException("Error", msg)) continue;
+                            return error.RuntimeError;
+                        }
+                    }
                     if (existing == .string) {
                         const s = existing.string.bytes();
                         var idx: i64 = switch (ik) {
@@ -4387,7 +4411,11 @@ pub const VM = struct {
                         if (new_len > s.len) @memset(buf[s.len..], ' ');
                         buf[target_idx] = write_byte;
                         try self.strings.append(self.allocator, buf);
-                        try self.objectSetOwned(obj, pname, .{ .string = Value.String.borrowed(buf) });
+                        if (hook_cell) |cell| {
+                            const result = Value{ .string = Value.String.borrowed(buf) };
+                            self.setCell(cell, result);
+                            try self.propagateCellWrite(cell, result);
+                        } else try self.objectSetOwned(obj, pname, .{ .string = Value.String.borrowed(buf) });
                         self.push(v);
                         continue;
                     }
@@ -4398,7 +4426,7 @@ pub const VM = struct {
                         var ea = existing;
                         // a referenced property (`$r=&$obj->prop`) is shared on
                         // purpose - mutate in place, never separate a copy
-                        const inner = if (self.propIsReferenced(obj, pname)) existing.array else try self.cowSeparate(existing.array);
+                        const inner = if (hook_cell != null or self.propIsReferenced(obj, pname)) existing.array else try self.cowSeparate(existing.array);
                         if (inner != existing.array) {
                             try obj.set(self.allocator, pname, .{ .array = inner });
                             inner.refcount -= 1;
@@ -4415,7 +4443,10 @@ pub const VM = struct {
                         new_arr.* = .{};
                         try self.arrays.append(self.allocator, new_arr);
                         try new_arr.set(self.allocator, ik, v);
-                        try obj.set(self.allocator, pname, .{ .array = new_arr });
+                        if (hook_cell) |cell| {
+                            self.setCell(cell, .{ .array = new_arr });
+                            try self.propagateCellWrite(cell, cell.*);
+                        } else try obj.set(self.allocator, pname, .{ .array = new_arr });
                         self.push(v);
                         continue;
                     }
@@ -4918,20 +4949,45 @@ pub const VM = struct {
                     self.push(new_val);
                 },
 
-                .ensure_array_prop => {
+                .ensure_array_prop, .ensure_array_prop_dynamic => {
                     // load an object's property array for in-place write
                     // ($obj->prop[]=x, $obj->prop[k] op= v). COW-separate it
                     // from co-holders and write the unshared array back to the
                     // property; vivify null/false to a fresh array
-                    const name_idx = self.readU16();
-                    const prop_name = self.currentChunk().constants.items[name_idx].string.bytes();
+                    const prop_name = if (op == .ensure_array_prop_dynamic) try self.valueToString(self.pop()) else blk: {
+                        const name_idx = self.readU16();
+                        break :blk self.currentChunk().constants.items[name_idx].string.bytes();
+                    };
                     const obj_val = self.pop();
                     if (obj_val != .object) {
                         self.push(.null);
                         continue;
                     }
                     const eap_obj = obj_val.object;
-                    const cur = eap_obj.get(prop_name);
+                    // Hook reads must precede vivification/COW. A by-value hook
+                    // may expose an object for offsetSet, but not writable array storage.
+                    eap_obj.refcount +%= 1;
+                    defer self.releaseValue(.{ .object = eap_obj });
+                    var cur = eap_obj.get(prop_name);
+                    var hook_cell: ?*Value = null;
+                    defer if (hook_cell) |cell| self.unbindCell(cell);
+                    if (self.hasPropHook(eap_obj.class_name, prop_name, .get) and !self.inPropHook(eap_obj, prop_name)) {
+                        self.setReturnRef(null);
+                        cur = (self.callPropHook(eap_obj, prop_name, .get, .null) catch {
+                            if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
+                            return error.RuntimeError;
+                        }) orelse .null;
+                        if (try self.propGetReturnsRef(eap_obj, prop_name)) {
+                            hook_cell = try self.takeHookReturnCell();
+                            if (hook_cell) |cell| cur = try self.prepareHookArray(cell);
+                        }
+                        if (cur != .object and !try self.propGetReturnsRef(eap_obj, prop_name)) {
+                            const msg = try std.fmt.allocPrint(self.allocator, "Indirect modification of {s}::${s} is not allowed", .{ eap_obj.class_name, prop_name });
+                            try self.strings.append(self.allocator, msg);
+                            if (try self.throwBuiltinException("Error", msg)) continue;
+                            return error.RuntimeError;
+                        }
+                    }
                     if (cur == .int or cur == .float or (cur == .bool and cur.bool)) {
                         if (try self.throwBuiltinException("Error", "Cannot use a scalar value as an array")) continue;
                         return error.RuntimeError;
@@ -4939,7 +4995,7 @@ pub const VM = struct {
                     if (cur == .array) {
                         // a referenced property (`$r=&$obj->prop`) is shared on
                         // purpose - write through it in place, never separate
-                        if (self.propIsReferenced(eap_obj, prop_name)) {
+                        if (hook_cell != null or self.propIsReferenced(eap_obj, prop_name)) {
                             self.push(cur);
                             continue;
                         }
@@ -4971,7 +5027,10 @@ pub const VM = struct {
                     new_arr.* = .{};
                     try self.arrays.append(self.allocator, new_arr);
                     // obj.set retains -> refcount 1 (the property slot owns it)
-                    try eap_obj.set(self.allocator, prop_name, .{ .array = new_arr });
+                    if (hook_cell) |cell| {
+                        self.setCell(cell, .{ .array = new_arr });
+                        try self.propagateCellWrite(cell, cell.*);
+                    } else try eap_obj.set(self.allocator, prop_name, .{ .array = new_arr });
                     self.push(.{ .array = new_arr });
                 },
 
@@ -5524,6 +5583,12 @@ pub const VM = struct {
                     const source_name = self.currentChunk().constants.items[source_idx].string.bytes();
                     const obj_val = self.pop();
                     if (obj_val == .object) {
+                        if (!self.inPropHook(obj_val.object, prop_name) and
+                            (self.hasPropHook(obj_val.object.class_name, prop_name, .get) or self.hasPropHook(obj_val.object.class_name, prop_name, .set)))
+                        {
+                            if (try self.throwBuiltinException("Error", "Cannot assign by reference to overloaded object")) continue;
+                            return error.RuntimeError;
+                        }
                         const frame = self.currentFrame();
                         const cell = try self.getOrCreateVarCell(frame, source_name);
                         try self.objectSetOwned(obj_val.object, prop_name, cell.*);
@@ -5546,10 +5611,32 @@ pub const VM = struct {
                         try self.bindRefSlot(&frame.ref_slots, dst_name, c);
                     } else {
                         const obj_ptr = obj_val.object;
+                        if (self.hasPropHook(obj_ptr.class_name, prop_name, .get) and !self.inPropHook(obj_ptr, prop_name) and !try self.propGetReturnsRef(obj_ptr, prop_name)) {
+                            obj_ptr.refcount +%= 1;
+                            defer self.releaseValue(.{ .object = obj_ptr });
+                            _ = self.callPropHook(obj_ptr, prop_name, .get, .null) catch {
+                                if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
+                                return error.RuntimeError;
+                            };
+                            const msg = try std.fmt.allocPrint(self.allocator, "Indirect modification of {s}::${s} is not allowed", .{ obj_ptr.class_name, prop_name });
+                            try self.strings.append(self.allocator, msg);
+                            if (try self.throwBuiltinException("Error", msg)) continue;
+                            return error.RuntimeError;
+                        }
                         const has_prop = obj_ptr.properties.contains(prop_name) or (obj_ptr.slots != null and obj_ptr.getSlotIndex(prop_name) != null);
-                        if (!has_prop and self.hasMethod(obj_ptr.class_name, "__get")) {
+                        const ref_hook = self.hasPropHook(obj_ptr.class_name, prop_name, .get) and !self.inPropHook(obj_ptr, prop_name);
+                        if (ref_hook or (!has_prop and self.hasMethod(obj_ptr.class_name, "__get"))) {
+                            obj_ptr.refcount +%= 1;
+                            defer self.releaseValue(.{ .object = obj_ptr });
                             self.setReturnRef(null);
-                            _ = try self.callMagicGet(obj_ptr, prop_name);
+                            if (ref_hook) {
+                                _ = self.callPropHook(obj_ptr, prop_name, .get, .null) catch {
+                                    if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
+                                    return error.RuntimeError;
+                                };
+                            } else {
+                                _ = try self.callMagicGet(obj_ptr, prop_name);
+                            }
                             if (self.last_return_ref) |cell| {
                                 try self.bindRefSlot(&frame.ref_slots, dst_name, cell);
                                 const owner = try self.ensureRefOwner(frame);
@@ -5563,8 +5650,16 @@ pub const VM = struct {
                                 continue;
                             }
                         }
-                        const cell = try self.newRefCell();
-                        self.setCell(cell, obj_ptr.get(prop_name));
+                        const cell = blk: {
+                            if (self.ref_index) |ri| {
+                                if (ri.prop_rev.get(.{ .object = obj_ptr, .class_name = "", .prop_name = prop_name })) |cells| {
+                                    if (cells.items.len > 0) break :blk cells.items[0];
+                                }
+                            }
+                            const fresh = try self.newRefCell();
+                            self.setCell(fresh, obj_ptr.get(prop_name));
+                            break :blk fresh;
+                        };
 
                         try self.bindRefSlot(&frame.ref_slots, dst_name, cell);
                         try self.regRefObject(try self.ensureRefOwner(frame), cell, obj_ptr, prop_name);
@@ -5589,10 +5684,32 @@ pub const VM = struct {
                         // dupe so the binding's prop_name outlives the temporary
                         const prop_owned = try self.allocator.dupe(u8, prop_str);
                         try self.strings.append(self.allocator, prop_owned);
+                        if (self.hasPropHook(obj_ptr.class_name, prop_owned, .get) and !self.inPropHook(obj_ptr, prop_owned) and !try self.propGetReturnsRef(obj_ptr, prop_owned)) {
+                            obj_ptr.refcount +%= 1;
+                            defer self.releaseValue(.{ .object = obj_ptr });
+                            _ = self.callPropHook(obj_ptr, prop_owned, .get, .null) catch {
+                                if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
+                                return error.RuntimeError;
+                            };
+                            const msg = try std.fmt.allocPrint(self.allocator, "Indirect modification of {s}::${s} is not allowed", .{ obj_ptr.class_name, prop_owned });
+                            try self.strings.append(self.allocator, msg);
+                            if (try self.throwBuiltinException("Error", msg)) continue;
+                            return error.RuntimeError;
+                        }
                         const has_prop = obj_ptr.properties.contains(prop_owned) or (obj_ptr.slots != null and obj_ptr.getSlotIndex(prop_owned) != null);
-                        if (!has_prop and self.hasMethod(obj_ptr.class_name, "__get")) {
+                        const ref_hook = self.hasPropHook(obj_ptr.class_name, prop_owned, .get) and !self.inPropHook(obj_ptr, prop_owned);
+                        if (ref_hook or (!has_prop and self.hasMethod(obj_ptr.class_name, "__get"))) {
+                            obj_ptr.refcount +%= 1;
+                            defer self.releaseValue(.{ .object = obj_ptr });
                             self.setReturnRef(null);
-                            _ = try self.callMagicGet(obj_ptr, prop_owned);
+                            if (ref_hook) {
+                                _ = self.callPropHook(obj_ptr, prop_owned, .get, .null) catch {
+                                    if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
+                                    return error.RuntimeError;
+                                };
+                            } else {
+                                _ = try self.callMagicGet(obj_ptr, prop_owned);
+                            }
                             if (self.last_return_ref) |cell| {
                                 try self.bindRefSlot(&frame.ref_slots, dst_name, cell);
                                 const owner = try self.ensureRefOwner(frame);
@@ -5606,8 +5723,16 @@ pub const VM = struct {
                                 continue;
                             }
                         }
-                        const cell = try self.newRefCell();
-                        self.setCell(cell, obj_ptr.get(prop_owned));
+                        const cell = blk: {
+                            if (self.ref_index) |ri| {
+                                if (ri.prop_rev.get(.{ .object = obj_ptr, .class_name = "", .prop_name = prop_owned })) |cells| {
+                                    if (cells.items.len > 0) break :blk cells.items[0];
+                                }
+                            }
+                            const fresh = try self.newRefCell();
+                            self.setCell(fresh, obj_ptr.get(prop_owned));
+                            break :blk fresh;
+                        };
 
                         try self.bindRefSlot(&frame.ref_slots, dst_name, cell);
                         try self.regRefObject(try self.ensureRefOwner(frame), cell, obj_ptr, prop_owned);
@@ -6126,6 +6251,16 @@ pub const VM = struct {
                     const obj_val = self.pop();
                     if (obj_val == .object) {
                         const obj = obj_val.object;
+                        if (self.hasPropHook(obj.class_name, prop_name, .get) and !self.inPropHook(obj, prop_name)) {
+                            obj.refcount +%= 1;
+                            defer self.releaseValue(.{ .object = obj });
+                            const result = self.callPropHook(obj, prop_name, .get, .null) catch {
+                                if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
+                                return error.RuntimeError;
+                            };
+                            self.push(.{ .bool = (result orelse .null) != .null });
+                            continue;
+                        }
                         if (obj.properties.contains(prop_name) or (obj.slots != null and obj.getSlotIndex(prop_name) != null)) {
                             self.push(.{ .bool = obj.get(prop_name) != .null });
                         } else if (self.hasMethod(obj.class_name, "__isset")) {
@@ -6144,6 +6279,16 @@ pub const VM = struct {
                     if (obj_val == .object and prop_name_val == .string) {
                         const obj = obj_val.object;
                         const prop_name = prop_name_val.string.bytes();
+                        if (self.hasPropHook(obj.class_name, prop_name, .get) and !self.inPropHook(obj, prop_name)) {
+                            obj.refcount +%= 1;
+                            defer self.releaseValue(.{ .object = obj });
+                            const result = self.callPropHook(obj, prop_name, .get, .null) catch {
+                                if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
+                                return error.RuntimeError;
+                            };
+                            self.push(.{ .bool = (result orelse .null) != .null });
+                            continue;
+                        }
                         if (obj.properties.contains(prop_name) or (obj.slots != null and obj.getSlotIndex(prop_name) != null)) {
                             self.push(.{ .bool = obj.get(prop_name) != .null });
                         } else if (self.hasMethod(obj.class_name, "__isset")) {
@@ -7030,6 +7175,42 @@ pub const VM = struct {
                         try def.method_attributes.put(self.allocator, ma_name, ma_attrs);
                     }
 
+                    const property_count = self.readU16();
+                    for (0..property_count) |_| {
+                        const prop_name = self.currentChunk().constants.items[self.readU16()].string.bytes();
+                        const type_idx = self.readU16();
+                        const doc_idx = self.readU16();
+                        try def.properties.append(self.allocator, .{
+                            .name = prop_name,
+                            .default = .null,
+                            .is_virtual = true,
+                            .type_str = if (type_idx == 0xffff) "" else self.currentChunk().constants.items[type_idx].string.bytes(),
+                            .doc_comment = if (doc_idx == 0xffff) "" else self.currentChunk().constants.items[doc_idx].string.bytes(),
+                        });
+                        const mask = self.readByte();
+                        for (0..2) |i| {
+                            if (mask & (@as(u8, 1) << @intCast(i)) == 0) continue;
+                            const hook = self.currentChunk().constants.items[self.readU16()].string.bytes();
+                            try idef.methods.append(self.allocator, hook);
+                            try def.methods.put(self.allocator, hook, .{ .name = hook, .arity = @intCast(i), .is_abstract = true });
+                        }
+                        const attrs = try self.readAttributeDefs();
+                        if (attrs.len > 0) try def.property_attributes.put(self.allocator, prop_name, attrs);
+                    }
+                    // Interfaces inherit contracts from every parent, including
+                    // diamonds. Keep local declarations authoritative.
+                    for (idef.parents.items) |parent| {
+                        if (!self.interfaces.contains(parent)) try self.tryAutoload(parent);
+                        if (self.classes.get(parent)) |base| {
+                            _ = base;
+                            if (self.interfaces.get(parent)) |parent_iface| {
+                                for (parent_iface.methods.items) |method| {
+                                    if (std.mem.indexOf(u8, method, "$hook_") != null) try idef.methods.append(self.allocator, method);
+                                }
+                            }
+                        }
+                    }
+
                     if (self.classes.fetchRemove(iface_name)) |old| {
                         var od = old.value;
                         od.deinit(self.allocator);
@@ -7606,13 +7787,17 @@ pub const VM = struct {
                     self.push(.{ .object = obj });
                 },
 
-                .get_prop => {
+                .get_prop, .get_prop_dynamic => {
                     const gp_ip = self.currentFrame().ip;
-                    const name_idx = self.readU16();
-                    const prop_name = self.currentChunk().constants.items[name_idx].string.bytes();
+                    const prop_name = if (op == .get_prop_dynamic) try self.valueToString(self.pop()) else blk: {
+                        const name_idx = self.readU16();
+                        break :blk self.currentChunk().constants.items[name_idx].string.bytes();
+                    };
                     const obj_val = self.pop();
                     if (obj_val == .object) {
                         const obj = obj_val.object;
+                        obj.refcount +%= 1;
+                        defer self.releaseValue(.{ .object = obj });
 
                         if (obj.lazy_initializer != .null) try self.triggerLazyInit(obj);
 
@@ -7632,7 +7817,7 @@ pub const VM = struct {
                         // IC: slot-indexed fast path. skip the cache when the
                         // property was explicitly unset - the slot still holds
                         // a value, but we need to fall through to __get
-                        if (self.ic) |ic| {
+                        if (if (op == .get_prop) self.ic else null) |ic| {
                             const gp_idx = InlineCache.propIndex(@intFromPtr(self.currentChunk()), gp_ip);
                             const gp_entry = &ic.prop[gp_idx];
                             const gp_chunk_key = @intFromPtr(self.currentChunk());
@@ -7701,7 +7886,7 @@ pub const VM = struct {
                                 if (try self.throwBuiltinException("Error", msg)) continue;
                                 return error.RuntimeError;
                             }
-                            if (self.ic) |ic| {
+                            if (if (op == .get_prop) self.ic else null) |ic| {
                                 if (vr.visibility == .public) {
                                     const gp_idx = InlineCache.propIndex(@intFromPtr(self.currentChunk()), gp_ip);
                                     const si = if (obj.slot_layout != null) obj.getSlotIndex(prop_name) orelse @as(u16, 0xFFFF) else @as(u16, 0xFFFF);
@@ -7730,15 +7915,19 @@ pub const VM = struct {
                     }
                 },
 
-                .get_prop_coalesce => {
+                .get_prop_coalesce, .get_prop_coalesce_dynamic => {
                     // non-throwing property read for `??` / `??=`. an
                     // uninitialized typed property reads as a null slot value,
                     // which `??` then routes to the RHS - no error
-                    const name_idx = self.readU16();
-                    const prop_name = self.currentChunk().constants.items[name_idx].string.bytes();
+                    const prop_name = if (op == .get_prop_coalesce_dynamic) try self.valueToString(self.pop()) else blk: {
+                        const name_idx = self.readU16();
+                        break :blk self.currentChunk().constants.items[name_idx].string.bytes();
+                    };
                     const obj_val = self.pop();
                     if (obj_val == .object) {
                         const obj = obj_val.object;
+                        obj.refcount +%= 1;
+                        defer self.releaseValue(.{ .object = obj });
                         if (obj.lazy_initializer != .null) try self.triggerLazyInit(obj);
                         if (self.hasPropHook(obj.class_name, prop_name, .get) and !self.inPropHook(obj, prop_name)) {
                             const hook_result = self.callPropHook(obj, prop_name, .get, .null) catch {
@@ -7762,6 +7951,16 @@ pub const VM = struct {
                             const cvr = self.findPropertyVisibility(obj.class_name, prop_name);
                             if (!self.checkVisibility(cvr.defining_class, cvr.visibility)) {
                                 if (self.hasMethod(obj.class_name, "__get")) {
+                                    if (self.hasMethod(obj.class_name, "__isset")) {
+                                        const present = self.callMethod(obj, "__isset", &.{.{ .string = Value.String.borrowed(prop_name) }}) catch {
+                                            if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
+                                            return error.RuntimeError;
+                                        };
+                                        if (!present.isTruthy()) {
+                                            self.push(.null);
+                                            continue;
+                                        }
+                                    }
                                     self.push(try self.callMagicGet(obj, prop_name));
                                 } else {
                                     self.push(.null);
@@ -7770,6 +7969,16 @@ pub const VM = struct {
                                 self.push(val);
                             }
                         } else if (self.hasMethod(obj.class_name, "__get")) {
+                            if (self.hasMethod(obj.class_name, "__isset")) {
+                                const present = self.callMethod(obj, "__isset", &.{.{ .string = Value.String.borrowed(prop_name) }}) catch {
+                                    if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
+                                    return error.RuntimeError;
+                                };
+                                if (!present.isTruthy()) {
+                                    self.push(.null);
+                                    continue;
+                                }
+                            }
                             self.push(try self.callMagicGet(obj, prop_name));
                         } else {
                             self.push(.null);
@@ -7779,50 +7988,12 @@ pub const VM = struct {
                     }
                 },
 
-                .get_prop_dynamic => {
-                    const prop_name_val = self.pop();
-                    const obj_val = self.pop();
-                    if (obj_val == .object and prop_name_val == .string) {
-                        const obj = obj_val.object;
-                        const prop_name = prop_name_val.string.bytes();
-                        const val = obj.get(prop_name);
-                        if (val != .null or obj.properties.contains(prop_name) or (obj.slots != null and obj.getSlotIndex(prop_name) != null)) {
-                            self.push(val);
-                        } else if (self.hasMethod(obj.class_name, "__get")) {
-                            const result = try self.callMagicGet(obj, prop_name);
-                            self.push(result);
-                        } else {
-                            self.push(.null);
-                        }
-                    } else {
-                        self.push(.null);
-                    }
-                },
-
-                .set_prop_dynamic => {
-                    const prop_name_val = self.pop();
-                    const new_val = try self.copyValue(self.pop());
-                    const obj_val = self.pop();
-                    if (obj_val == .object and prop_name_val == .string) {
-                        const obj = obj_val.object;
-                        const prop_name = prop_name_val.string.bytes();
-                        const has_prop = obj.properties.contains(prop_name) or (obj.slots != null and obj.getSlotIndex(prop_name) != null);
-                        if (!has_prop and self.hasMethod(obj.class_name, "__set") and !obj.magic_set_active.contains(prop_name)) {
-                            try obj.magic_set_active.put(self.allocator, prop_name, {});
-                            _ = self.callMethod(obj, "__set", &.{ .{ .string = Value.String.borrowed(prop_name) }, new_val }) catch {};
-                            _ = obj.magic_set_active.remove(prop_name);
-                        } else {
-                            try self.objectSetOwned(obj, prop_name, new_val);
-                            self.syncObjPropRefs(obj, prop_name, new_val);
-                        }
-                    }
-                    self.push(new_val);
-                },
-
-                .set_prop => {
+                .set_prop, .set_prop_dynamic => {
                     const sp_ip = self.currentFrame().ip;
-                    const name_idx = self.readU16();
-                    const prop_name = self.currentChunk().constants.items[name_idx].string.bytes();
+                    const prop_name = if (op == .set_prop_dynamic) try self.valueToString(self.pop()) else blk: {
+                        const name_idx = self.readU16();
+                        break :blk self.currentChunk().constants.items[name_idx].string.bytes();
+                    };
                     // transferArg: clone an array, leave an object raw - the
                     // property store retains the object exactly once (obj.set
                     // on the slow path, retainValue on the IC path)
@@ -7837,6 +8008,8 @@ pub const VM = struct {
                     const obj_val = self.pop();
                     if (obj_val == .object) {
                         const obj = obj_val.object;
+                        obj.refcount +%= 1;
+                        defer self.releaseValue(.{ .object = obj });
 
                         if (obj.lazy_initializer != .null) try self.triggerLazyInit(obj);
 
@@ -7879,7 +8052,7 @@ pub const VM = struct {
                             // fall through to the regular slot/property write
                         }
 
-                        if (self.ic) |ic| {
+                        if (if (op == .set_prop) self.ic else null) |ic| {
                             const sp_idx = InlineCache.propIndex(@intFromPtr(self.currentChunk()), sp_ip);
                             const sp_entry = &ic.prop[sp_idx];
                             if (sp_entry.key == sp_ip and sp_entry.chunk_key == @intFromPtr(self.currentChunk()) and sp_entry.slot_index != 0xFFFF and sp_entry.class_ptr == @intFromPtr(obj.class_name.ptr)) {
@@ -7975,7 +8148,7 @@ pub const VM = struct {
                             // populate IC for slot-indexed writes. typed
                             // properties are cached too - the fast path runs
                             // checkPropertyType when prop_type is set
-                            if (self.ic) |ic| {
+                            if (if (op == .set_prop) self.ic else null) |ic| {
                                 if (vr.visibility == .public and vr.set_visibility == .public) {
                                     const sp_idx = InlineCache.propIndex(@intFromPtr(self.currentChunk()), sp_ip);
                                     const si = if (obj.slot_layout != null) obj.getSlotIndex(prop_name) orelse @as(u16, 0xFFFF) else @as(u16, 0xFFFF);
@@ -10876,6 +11049,16 @@ pub const VM = struct {
         self.retainFrameObjects(self.frame_count - 1);
         if (self.frame_count > self.frame_high_water) self.frame_high_water = self.frame_count;
 
+        const hook_guard_count = self.prop_hook_guard.items.len;
+        if (std.mem.endsWith(u8, gen.func.name, "$hook_get")) {
+            const name_start = if (std.mem.lastIndexOf(u8, gen.func.name, "::")) |sep| sep + 2 else 0;
+            const prop_name = gen.func.name[name_start .. gen.func.name.len - "$hook_get".len];
+            const receiver = self.currentFrame().vars.get("$this") orelse .null;
+            if (receiver == .object) {
+                try self.prop_hook_guard.append(self.allocator, .{ .obj_ptr = @intFromPtr(receiver.object), .prop_name = prop_name });
+            }
+        }
+        defer self.prop_hook_guard.shrinkRetainingCapacity(hook_guard_count);
         self.restoreGeneratorHandlers(gen);
 
         if (gen.ip > 0) {
@@ -11200,6 +11383,17 @@ pub const VM = struct {
         }
     }
 
+    fn valueToString(self: *VM, v: Value) RuntimeError![]const u8 {
+        if (v == .string) return v.string.bytes();
+        if (v == .object) return self.objectToString(v.object);
+        if (v == .array) self.emitWarning("Array to string conversion");
+        var buf = std.ArrayListUnmanaged(u8){};
+        try v.format(&buf, self.allocator);
+        const str = try buf.toOwnedSlice(self.allocator);
+        try self.strings.append(self.allocator, str);
+        return str;
+    }
+
     pub fn objectToString(self: *VM, obj: *PhpObject) RuntimeError![]const u8 {
         const method_name = self.resolveMethod(obj.class_name, "__toString") catch {
             // PHP: 'Object of class X could not be converted to string'.
@@ -11303,6 +11497,8 @@ pub const VM = struct {
         const prop_set_vis = try self.allocator.alloc(ClassDef.Visibility, prop_count);
         const prop_has_set_vis = try self.allocator.alloc(bool, prop_count);
         const prop_readonly = try self.allocator.alloc(bool, prop_count);
+        const prop_virtual = try self.allocator.alloc(bool, prop_count);
+        defer self.allocator.free(prop_virtual);
         const prop_final = try self.allocator.alloc(bool, prop_count);
         const prop_promoted = try self.allocator.alloc(bool, prop_count);
         const prop_type = try self.allocator.alloc([]const u8, prop_count);
@@ -11322,7 +11518,9 @@ pub const VM = struct {
         for (0..prop_count) |pi| {
             const pname_idx = self.readU16();
             prop_names[pi] = self.currentChunk().constants.items[pname_idx].string.bytes();
-            prop_has_default[pi] = self.readByte();
+            const default_flags = self.readByte();
+            prop_has_default[pi] = default_flags & 1;
+            prop_virtual[pi] = (default_flags & 2) != 0;
 
             const vis_byte = self.readByte();
 
@@ -11424,6 +11622,7 @@ pub const VM = struct {
                 .is_readonly = effective_readonly,
                 .is_final = reflection_final,
                 .is_promoted = prop_promoted[pi],
+                .is_virtual = prop_virtual[pi],
                 .type_str = prop_type[pi],
                 .doc_comment = prop_doc[pi],
             });
@@ -11649,7 +11848,7 @@ pub const VM = struct {
             // doesn't `implements Bar` directly)
             var iface_walk_parent: ?[]const u8 = class_name;
             while (iface_walk_parent) |cn| {
-                if (self.classes.get(cn)) |cd| {
+                if (if (std.mem.eql(u8, cn, class_name)) @as(?ClassDef, def) else self.classes.get(cn)) |cd| {
                     for (cd.interfaces.items) |iname| {
                         var current_iface: ?[]const u8 = iname;
                         while (current_iface) |in| {
@@ -11667,24 +11866,44 @@ pub const VM = struct {
             }
             var sa_iter = seen_abstract.iterator();
             while (sa_iter.next()) |se| {
-                // walk parent chain looking for a non-abstract implementation
-                var found_concrete = false;
-                if (def.methods.get(se.key_ptr.*)) |m| {
-                    if (!m.is_abstract) found_concrete = true;
-                }
-                if (!found_concrete) {
-                    var pp: ?[]const u8 = def.parent;
-                    while (pp) |pn2| {
-                        if (self.classes.get(pn2)) |pc| {
-                            if (pc.methods.get(se.key_ptr.*)) |pm| {
-                                if (!pm.is_abstract) {
-                                    found_concrete = true;
-                                    break;
+                if (std.mem.indexOf(u8, se.key_ptr.*, "$hook_") != null) {
+                    if (self.resolvePropertyHook(&def, se.key_ptr.*)) |hook| {
+                        if (!hook.info.is_abstract) continue;
+                    } else {
+                        // Only a declared property can satisfy a hook contract.
+                        const split = std.mem.indexOf(u8, se.key_ptr.*, "$hook_").?;
+                        var current: ?*const ClassDef = &def;
+                        var has_property = false;
+                        while (current) |cls| {
+                            for (cls.properties.items) |prop| {
+                                if (std.mem.eql(u8, prop.name, se.key_ptr.*[0..split])) {
+                                    if (!prop.is_virtual and prop.visibility == .public and
+                                        !(std.mem.endsWith(u8, se.key_ptr.*, "$hook_set") and prop.is_readonly)) has_property = true;
                                 }
                             }
-                            pp = pc.parent;
-                        } else break;
+                            current = if (cls.parent) |parent| self.classes.getPtr(parent) else null;
+                        }
+                        if (has_property) continue;
                     }
+                }
+                // Start with the in-progress definition: it is not in classes yet.
+                // Native methods need not have entries in ClassDef.methods, so
+                // check their registry at each level, but never skip an abstract
+                // redeclaration to reach a concrete implementation further up.
+                var found_concrete = false;
+                var implementation_class: ?*const ClassDef = &def;
+                while (implementation_class) |cls| {
+                    if (cls.methods.get(se.key_ptr.*)) |method| {
+                        found_concrete = !method.is_abstract;
+                        break;
+                    }
+                    const full = try std.fmt.allocPrint(self.allocator, "{s}::{s}", .{ cls.name, se.key_ptr.* });
+                    defer self.allocator.free(full);
+                    if (self.native_fns.contains(full)) {
+                        found_concrete = true;
+                        break;
+                    }
+                    implementation_class = if (cls.parent) |parent| self.classes.getPtr(parent) else null;
                 }
                 if (!found_concrete) {
                     const msg = try std.fmt.allocPrint(self.allocator, "Class {s} contains abstract method {s}::{s} and must therefore be declared abstract or implement it", .{ class_name, se.value_ptr.*, se.key_ptr.* });
@@ -14479,6 +14698,37 @@ pub const VM = struct {
         return name;
     }
 
+    // Adopt the returned source binding, never manufacture storage on a virtual
+    // property. Keep it alive across nested execution and preserve its mirrors.
+    fn takeHookReturnCell(self: *VM) RuntimeError!?*Value {
+        const cell = self.last_return_ref orelse return null;
+        self.bindCell(cell);
+        if (self.last_return_ref_owner != 0) {
+            const ri = try self.refIndex();
+            try ri.transferCell(self.allocator, self.last_return_ref_owner, try self.persistentRefOwner(), cell);
+            ri.releaseOwner(self.allocator, self.last_return_ref_owner);
+            self.last_return_ref_owner = 0;
+        }
+        self.setReturnRef(null);
+        return cell;
+    }
+
+    fn prepareHookArray(self: *VM, cell: *Value) RuntimeError!Value {
+        if (cell.* == .array and cell.array.refcount - cell.array.byref_pins > self.referenceAliasCount(cell)) {
+            const clone = try self.shallowCloneCow(cell.array);
+            self.setCell(cell, .{ .array = clone });
+            try self.propagateCellWrite(cell, cell.*);
+        }
+        return cell.*;
+    }
+
+    fn propGetReturnsRef(self: *VM, obj: *PhpObject, prop_name: []const u8) RuntimeError!bool {
+        const name = self.propHookName(prop_name, .get) orelse return error.OutOfMemory;
+        const full_name = try self.resolveMethod(obj.class_name, name);
+        const func = self.functions.get(full_name) orelse return false;
+        return func.returns_ref;
+    }
+
     pub fn inPropHook(self: *VM, obj: *PhpObject, prop_name: []const u8) bool {
         const obj_id = @intFromPtr(obj);
         for (self.prop_hook_guard.items) |g| {
@@ -14495,7 +14745,7 @@ pub const VM = struct {
         };
         const hook_name = try std.fmt.allocPrint(self.allocator, "{s}{s}", .{ prop_name, suffix });
         try self.strings.append(self.allocator, hook_name);
-        if (!self.hasMethod(obj.class_name, hook_name)) return null;
+        if (!self.hasPropHook(obj.class_name, prop_name, if (kind == .get) .get else .set)) return null;
         const obj_id = @intFromPtr(obj);
         try self.prop_hook_guard.append(self.allocator, .{ .obj_ptr = obj_id, .prop_name = prop_name });
         defer {
@@ -14556,7 +14806,7 @@ pub const VM = struct {
         };
         var buf: [256]u8 = undefined;
         const hook_name = std.fmt.bufPrint(&buf, "{s}{s}", .{ prop_name, suffix }) catch return false;
-        const result = self.hasMethod(class_name, hook_name);
+        const result = if (self.classes.getPtr(class_name)) |cls| self.resolvePropertyHook(cls, hook_name) != null else false;
         self.has_hook_cache_class = class_name;
         self.has_hook_cache_prop = prop_name;
         self.has_hook_cache_kind = kind_bit;
@@ -14574,6 +14824,25 @@ pub const VM = struct {
             const parent = cls.parent orelse return;
             if (!self.classes.contains(parent)) self.tryAutoload(parent) catch return;
             current = parent;
+        }
+    }
+
+    // An ordinary redeclaration supplies storage implementations for abstract
+    // hooks, but retains concrete hooks inherited from its ancestors.
+    pub fn resolvePropertyHook(self: *VM, start: *const ClassDef, method: []const u8) ?struct { declaring: []const u8, info: ClassDef.MethodInfo } {
+        const split = std.mem.indexOf(u8, method, "$hook_") orelse return null;
+        const prop_name = method[0..split];
+        var backed_replacement = false;
+        var cls = start;
+        while (true) {
+            if (cls.methods.get(method)) |info| {
+                if (info.is_abstract and backed_replacement) return null;
+                return .{ .declaring = cls.name, .info = info };
+            }
+            for (cls.properties.items) |prop| {
+                if (std.mem.eql(u8, prop.name, prop_name) and !prop.is_virtual) backed_replacement = true;
+            }
+            cls = self.classes.getPtr(cls.parent orelse return null) orelse return null;
         }
     }
 

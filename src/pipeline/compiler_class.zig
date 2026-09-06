@@ -1327,12 +1327,12 @@ pub fn compileClassDecl(self: *Compiler, node: Ast.Node) Error!void {
             const set_short = self.ast.extra_data[ext + 5];
             var prop_name = self.ast.tokenSlice(member.main_token);
             if (prop_name.len > 0 and prop_name[0] == '$') prop_name = prop_name[1..];
-            if (get_body != 0) {
-                try compilePropertyHook(self, class_name, prop_name, get_body, .get, get_short != 0, 0);
+            if (get_body != 0 or (self.ast.extra_data[ext + 4] & 8) != 0) {
+                try compilePropertyHook(self, class_name, prop_name, get_body, .get, get_short, 0, member);
                 method_count += 1;
             }
-            if (set_body != 0) {
-                try compilePropertyHook(self, class_name, prop_name, set_body, .set, set_short != 0, set_param_tok);
+            if (set_body != 0 or (self.ast.extra_data[ext + 5] & 8) != 0) {
+                try compilePropertyHook(self, class_name, prop_name, set_body, .set, set_short, set_param_tok, member);
                 method_count += 1;
             }
         }
@@ -1382,13 +1382,13 @@ pub fn compileClassDecl(self: *Compiler, node: Ast.Node) Error!void {
         const set_short = self.ast.extra_data[ext + 5];
         var prop_name = self.ast.tokenSlice(tmember.main_token);
         if (prop_name.len > 0 and prop_name[0] == '$') prop_name = prop_name[1..];
-        if (get_body != 0) {
-            try compilePropertyHook(self, class_name, prop_name, get_body, .get, get_short != 0, 0);
+        if (get_body != 0 or (self.ast.extra_data[ext + 4] & 8) != 0) {
+            try compilePropertyHook(self, class_name, prop_name, get_body, .get, get_short, 0, tmember);
             method_count += 1;
             try trait_hook_members.append(self.allocator, tpi);
         }
-        if (set_body != 0) {
-            try compilePropertyHook(self, class_name, prop_name, set_body, .set, set_short != 0, set_param_tok);
+        if (set_body != 0 or (self.ast.extra_data[ext + 5] & 8) != 0) {
+            try compilePropertyHook(self, class_name, prop_name, set_body, .set, set_short, set_param_tok, tmember);
             method_count += 1;
             // mark second slot for emitting set-method metadata too
             try trait_hook_members.append(self.allocator, tpi | 0x80000000);
@@ -1486,7 +1486,7 @@ pub fn compileClassDecl(self: *Compiler, node: Ast.Node) Error!void {
             const set_body = self.ast.extra_data[ext + 2];
             var prop_name = self.ast.tokenSlice(member.main_token);
             if (prop_name.len > 0 and prop_name[0] == '$') prop_name = prop_name[1..];
-            if (get_body != 0) {
+            if (get_body != 0 or (self.ast.extra_data[ext + 4] & 8) != 0) {
                 const hk_name = try std.fmt.allocPrint(self.allocator, "{s}$hook_get", .{prop_name});
                 try self.string_allocs.append(self.allocator, hk_name);
                 const mname_idx = try self.addConstant(.{ .string = Value.String.borrowed(hk_name) });
@@ -1494,9 +1494,9 @@ pub fn compileClassDecl(self: *Compiler, node: Ast.Node) Error!void {
                 try self.emitByte(0); // arity
                 try self.emitByte(0); // not static
                 try self.emitByte(2); // private vis
-                try self.emitByte(0); // flags
+                try self.emitByte(@intCast((self.ast.extra_data[ext + 4] >> 3) & 3)); // abstract/final
             }
-            if (set_body != 0) {
+            if (set_body != 0 or (self.ast.extra_data[ext + 5] & 8) != 0) {
                 const hk_name = try std.fmt.allocPrint(self.allocator, "{s}$hook_set", .{prop_name});
                 try self.string_allocs.append(self.allocator, hk_name);
                 const mname_idx = try self.addConstant(.{ .string = Value.String.borrowed(hk_name) });
@@ -1504,7 +1504,7 @@ pub fn compileClassDecl(self: *Compiler, node: Ast.Node) Error!void {
                 try self.emitByte(1); // arity
                 try self.emitByte(0); // not static
                 try self.emitByte(2); // private vis
-                try self.emitByte(0); // flags
+                try self.emitByte(@intCast((self.ast.extra_data[ext + 5] >> 3) & 3)); // abstract/final
             }
         } else if (member.tag == .interface_method) {
             const method_name_str = self.ast.tokenSlice(member.main_token);
@@ -1533,7 +1533,7 @@ pub fn compileClassDecl(self: *Compiler, node: Ast.Node) Error!void {
         try self.emitByte(if (is_set) @as(u8, 1) else @as(u8, 0));
         try self.emitByte(0); // not static
         try self.emitByte(2); // private vis
-        try self.emitByte(0); // flags
+        try self.emitByte(@intCast((self.ast.extra_data[tmember.data.lhs + @as(u32, if (is_set) 5 else 4)] >> 3) & 3));
     }
 
     try self.emitU16(prop_count);
@@ -1554,7 +1554,7 @@ pub fn compileClassDecl(self: *Compiler, node: Ast.Node) Error!void {
             const pname_idx = try self.addConstant(.{ .string = Value.String.borrowed(prop_name) });
             try self.emitU16(pname_idx);
             const default_idx = self.ast.extra_data[member.data.lhs];
-            try self.emitByte(if (default_idx != 0) @as(u8, 1) else @as(u8, 0));
+            try self.emitByte((if (default_idx != 0) @as(u8, 1) else @as(u8, 0)) | propertyVirtualFlag(self, member));
             try self.emitByte(@intCast(member.data.rhs & 0xff));
             try self.emitU16(try propertyTypeConst(self, member.data.rhs));
             try self.emitU16(try docCommentConst(self, member.main_token));
@@ -1571,7 +1571,7 @@ pub fn compileClassDecl(self: *Compiler, node: Ast.Node) Error!void {
             const default_idx = self.ast.extra_data[tmember.data.lhs];
             break :blk if (default_idx != 0) @as(u8, 1) else @as(u8, 0);
         } else if (tmember.data.lhs != 0) @as(u8, 1) else @as(u8, 0);
-        try self.emitByte(has_default);
+        try self.emitByte(has_default | propertyVirtualFlag(self, tmember));
         try self.emitByte(@intCast(tmember.data.rhs & 0xff));
         try self.emitU16(try propertyTypeConst(self, tmember.data.rhs));
         try self.emitU16(try docCommentConst(self, tmember.main_token));
@@ -2285,6 +2285,34 @@ pub fn compileInterfaceDecl(self: *Compiler, node: Ast.Node) Error!void {
     }
     for (methods_with_attrs.items) |ma| freeAttrSlice(self.allocator, ma.attrs);
 
+    // Property contracts carry their own metadata, not callable dummy methods.
+    var property_count: u16 = 0;
+    for (members) |m| {
+        if (self.ast.nodes[m].tag == .class_property_hooks) property_count += 1;
+    }
+    try self.emitU16(property_count);
+    for (members) |m| {
+        const member = self.ast.nodes[m];
+        if (member.tag != .class_property_hooks) continue;
+        const prop_name = self.ast.tokenSlice(member.main_token)[1..];
+        try self.emitU16(try self.addConstant(.{ .string = Value.String.borrowed(prop_name) }));
+        try self.emitU16(try propertyTypeConst(self, member.data.rhs));
+        try self.emitU16(try docCommentConst(self, member.main_token));
+        const ext = member.data.lhs;
+        const mask: u8 = (if ((self.ast.extra_data[ext + 4] & 8) != 0) @as(u8, 1) else 0) |
+            (if ((self.ast.extra_data[ext + 5] & 8) != 0) @as(u8, 2) else 0);
+        try self.emitByte(mask);
+        for ([_][]const u8{ "$hook_get", "$hook_set" }, 0..) |suffix, i| {
+            if (mask & (@as(u8, 1) << @intCast(i)) == 0) continue;
+            const hook = try std.fmt.allocPrint(self.allocator, "{s}{s}", .{ prop_name, suffix });
+            try self.string_allocs.append(self.allocator, hook);
+            try self.emitU16(try self.addConstant(.{ .string = Value.String.borrowed(hook) }));
+        }
+        const attrs = extractAttributes(self, member.main_token);
+        try emitAttributeData(self, attrs);
+        freeAttrSlice(self.allocator, attrs);
+    }
+
     // set interface constants after interface_decl so self:: references resolve
     for (members) |m| {
         const member = self.ast.nodes[m];
@@ -2304,6 +2332,11 @@ pub fn compileInterfaceDecl(self: *Compiler, node: Ast.Node) Error!void {
         const member = self.ast.nodes[m];
         if (member.tag == .interface_method) {
             try compileInterfaceMethodStub(self, iface_name, member);
+        } else if (member.tag == .class_property_hooks) {
+            const ext = member.data.lhs;
+            const prop_name = self.ast.tokenSlice(member.main_token)[1..];
+            if ((self.ast.extra_data[ext + 4] & 8) != 0) try compilePropertyHook(self, iface_name, prop_name, 0, .get, self.ast.extra_data[ext + 4], 0, member);
+            if ((self.ast.extra_data[ext + 5] & 8) != 0) try compilePropertyHook(self, iface_name, prop_name, 0, .set, self.ast.extra_data[ext + 5], self.ast.extra_data[ext + 3], member);
         }
     }
 }
@@ -2401,9 +2434,8 @@ pub fn compileTraitDecl(self: *Compiler, node: Ast.Node) Error!void {
     // compile defaults for own properties last (popped first by VM)
     for (own_props.items) |pi| {
         const pmember = self.ast.nodes[pi];
-        if (pmember.data.lhs != 0) {
-            try self.compileNode(pmember.data.lhs);
-        }
+        const default = if (pmember.tag == .class_property_hooks) self.ast.extra_data[pmember.data.lhs] else pmember.data.lhs;
+        if (default != 0) try self.compileNode(default);
     }
 
     const name_idx = try self.addConstant(.{ .string = Value.String.borrowed(trait_name) });
@@ -2421,7 +2453,8 @@ pub fn compileTraitDecl(self: *Compiler, node: Ast.Node) Error!void {
         if (pname.len > 0 and pname[0] == '$') pname = pname[1..];
         const pname_idx = try self.addConstant(.{ .string = Value.String.borrowed(pname) });
         try self.emitU16(pname_idx);
-        try self.emitByte(if (pmember.data.lhs != 0) @as(u8, 1) else @as(u8, 0));
+        const default = if (pmember.tag == .class_property_hooks) self.ast.extra_data[pmember.data.lhs] else pmember.data.lhs;
+        try self.emitByte(if (default != 0) @as(u8, 1) else @as(u8, 0));
         try self.emitByte(@intCast(pmember.data.rhs & 0xff));
     }
     try self.emitByte(@intCast(static_props.items.len));
@@ -2863,12 +2896,32 @@ fn compileClassMethodBody(self: *Compiler, class_name: []const u8, member: Ast.N
     sub.new_defaults.deinit(self.allocator);
 }
 
+fn propertyVirtualFlag(self: *Compiler, member: Ast.Node) u8 {
+    return if (member.tag == .class_property_hooks and (self.ast.extra_data[member.data.lhs + 4] & 32) == 0) 2 else 0;
+}
+
 const HookKind = enum { get, set };
 
-fn compilePropertyHook(self: *Compiler, class_name: []const u8, prop_name: []const u8, body_idx: u32, kind: HookKind, is_short: bool, set_param_tok: u32) Error!void {
+fn compilePropertyHook(self: *Compiler, class_name: []const u8, prop_name: []const u8, body_idx: u32, kind: HookKind, hook_flags: u32, set_param_tok: u32, member: Ast.Node) Error!void {
+    const is_short = (hook_flags & 1) != 0;
+    const is_generator = (hook_flags & 2) != 0;
     const suffix = if (kind == .get) "$hook_get" else "$hook_set";
     const full_name = try std.fmt.allocPrint(self.allocator, "{s}::{s}{s}", .{ class_name, prop_name, suffix });
     try self.string_allocs.append(self.allocator, full_name);
+
+    const type_extra = member.data.rhs >> 16;
+    const prop_type = if (type_extra != 0)
+        try buildTypeString(self, self.ast.extra_data[type_extra - 1], self.ast.extra_data[type_extra])
+    else
+        "";
+    const ext = member.data.lhs;
+    const param_types = try self.allocator.alloc([]const u8, if (kind == .set) 1 else 0);
+    if (kind == .set) {
+        const start = self.ast.extra_data[ext + 6];
+        const end = self.ast.extra_data[ext + 7];
+        param_types[0] = if (end > start) try buildTypeString(self, start, end) else prop_type;
+    }
+    try self.type_hints.append(self.allocator, .{ .name = full_name, .param_types = param_types, .return_type = if (kind == .get) prop_type else "void" });
 
     var param_names_list = std.ArrayListUnmanaged([]const u8){};
     defer param_names_list.deinit(self.allocator);
@@ -2902,6 +2955,8 @@ fn compilePropertyHook(self: *Compiler, class_name: []const u8, prop_name: []con
         .use_aliases = self.use_aliases,
         .use_fn_aliases = self.use_fn_aliases,
         .use_const_aliases = self.use_const_aliases,
+        .is_generator = is_generator,
+        .returns_ref = (hook_flags & 4) != 0,
         .current_class = class_name,
         .current_function = full_name,
     };
@@ -2921,8 +2976,10 @@ fn compilePropertyHook(self: *Compiler, class_name: []const u8, prop_name: []con
 
     if (is_short) {
         if (kind == .get) {
-            try sub.compileNode(body_idx);
-            try sub.emitOp(.return_val);
+            if (!(sub.returns_ref and !is_generator and try sub.tryCompileRefReturn(body_idx))) {
+                try sub.compileNode(body_idx);
+                try sub.emitOp(if (is_generator) .generator_return else .return_val);
+            }
         } else {
             // set short form: $this->prop = expr (raw write since hook guard is active)
             const this_slot = sub.local_slots.get("$this") orelse 0;
@@ -2934,7 +2991,7 @@ fn compilePropertyHook(self: *Compiler, class_name: []const u8, prop_name: []con
             try sub.emitU16(prop_idx);
             try sub.emitOp(.pop);
         }
-    } else {
+    } else if (body_idx != 0) {
         try sub.compileNode(body_idx);
     }
     for (sub.pending_gotos.items) |pg| {
@@ -2943,7 +3000,7 @@ fn compilePropertyHook(self: *Compiler, class_name: []const u8, prop_name: []con
     sub.pending_gotos.deinit(self.allocator);
     sub.labels.deinit(self.allocator);
     try sub.emitOp(.op_null);
-    try sub.emitOp(.return_val);
+    try sub.emitOp(if (is_generator) .generator_return else .return_val);
     sub.break_jumps.deinit(self.allocator);
     sub.continue_jumps.deinit(self.allocator);
 
@@ -2953,7 +3010,7 @@ fn compilePropertyHook(self: *Compiler, class_name: []const u8, prop_name: []con
     const local_count = sub.next_slot;
     sub.local_slots.deinit(self.allocator);
 
-    const method_lo = !needsVarSync(&sub.chunk) and sub.closure_count == 0;
+    const method_lo = !is_generator and !needsVarSync(&sub.chunk) and sub.closure_count == 0;
 
     try self.functions.append(self.allocator, .{
         .name = full_name,
@@ -2963,11 +3020,13 @@ fn compilePropertyHook(self: *Compiler, class_name: []const u8, prop_name: []con
         .defaults = defaults,
         .ref_params = ref_flags,
         .chunk = sub.chunk,
+        .is_generator = is_generator,
         .locals_only = method_lo,
         .local_count = local_count,
         .slot_names = slot_names,
         .file_path = self.file_path,
         .start_line = if (body_idx != 0) lineForToken(self, self.ast.nodes[body_idx].main_token) else 0,
+        .returns_ref = (hook_flags & 4) != 0,
     });
 
     for (sub.functions.items) |f| try self.functions.append(self.allocator, f);

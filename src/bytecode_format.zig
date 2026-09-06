@@ -10,7 +10,9 @@ const TypeHint = compiler.TypeHint;
 const Allocator = std.mem.Allocator;
 
 const MAGIC = "ZPHPC\x00";
-const FORMAT_VERSION: u16 = 9;
+// v10 adds property-hook metadata and interface_decl property operands.
+// Older chunks cannot be decoded by the current VM.
+pub const FORMAT_VERSION: u16 = 10;
 
 // tag bytes for serialized values
 const TAG_NULL: u8 = 0;
@@ -748,4 +750,27 @@ pub fn detectEmbeddedBytecode(allocator: Allocator) ?[]const u8 {
         return null;
     }
     return bc;
+}
+
+test "property hook interface bytecode rejects pre-hook format" {
+    const allocator = std.testing.allocator;
+    var ast = try @import("pipeline/parser.zig").parse(
+        allocator,
+        "<?php interface CachedContract { public int $value { get; } }",
+    );
+    defer ast.deinit();
+    var compiled = try compiler.compile(&ast, allocator);
+    defer compiled.deinit();
+    const data = try serialize(allocator, &compiled);
+    defer allocator.free(data);
+
+    var decoded = try deserialize(allocator, data);
+    defer decoded.deinit();
+    try std.testing.expectEqualSlices(u8, compiled.chunk.code.items, decoded.chunk.code.items);
+
+    // A v9 cache can have the same source identity but lacks the new operands.
+    // Reject it at the header, rather than passing incompatible code to the VM.
+    data[MAGIC.len] = 9;
+    data[MAGIC.len + 1] = 0;
+    try std.testing.expectError(error.InvalidFormat, deserialize(allocator, data));
 }

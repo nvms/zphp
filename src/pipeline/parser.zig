@@ -1652,25 +1652,15 @@ const Parser = struct {
             } else if (self.peek() == .kw_const) {
                 try methods.append(self.allocator, try self.parseConstDecl());
             } else {
-                // PHP 8.4 interface property hooks: `public T $name { get; }` or
-                // `public T $name { get; set; }`. we accept the syntax for parse
-                // compatibility but don't store the contract since hooks are
-                // already validated at the class level.
-                if (self.isTypeName() or self.peek() == .question) self.skipTypeHint();
-                if (self.peek() == .variable) {
-                    _ = self.advance();
-                    if (self.peek() == .l_brace) {
-                        var depth: u32 = 1;
-                        _ = self.advance();
-                        while (depth > 0 and self.peek() != .eof) : (_ = self.advance()) {
-                            if (self.peek() == .l_brace) depth += 1 else if (self.peek() == .r_brace) depth -= 1;
-                        }
-                    } else if (self.peek() == .semicolon) {
-                        _ = self.advance();
-                    }
-                } else {
-                    _ = self.advance();
+                const tr = self.collectTypeHint();
+                if (self.peek() != .variable) return error.ParseError;
+                const prop = try self.parseClassProperty();
+                if (self.nodes.items[prop].tag != .class_property_hooks) return error.ParseError;
+                if (tr[0] != tr[1]) {
+                    const ext = try self.addExtra(&tr);
+                    self.nodes.items[prop].data.rhs = (ext + 1) << 16;
                 }
+                try methods.append(self.allocator, prop);
             }
         }
         _ = try self.expect(.r_brace);
@@ -2109,10 +2099,14 @@ const Parser = struct {
         var set_param_tok: u32 = 0;
         var get_short: u32 = 0;
         var set_short: u32 = 0;
+        var set_type_start: u32 = 0;
+        var set_type_end: u32 = 0;
+        const hook_nodes_start = self.nodes.items.len;
         while (self.peek() != .r_brace and self.peek() != .eof) {
             // skip attributes / final / & before the hook name
             self.skipAttributes();
-            if (self.peek() == .kw_final) _ = self.advance();
+            const is_final = self.peek() == .kw_final;
+            if (is_final) _ = self.advance();
             const is_ref = self.peek() == .amp;
             if (is_ref) _ = self.advance();
             if (self.peek() != .identifier) {
@@ -2133,7 +2127,9 @@ const Parser = struct {
             if (is_set and self.peek() == .l_paren) {
                 _ = self.advance();
                 if (self.peek() != .r_paren) {
+                    set_type_start = self.pos;
                     self.skipTypeHint();
+                    set_type_end = self.pos;
                     if (self.peek() == .amp) _ = self.advance();
                     if (self.peek() == .variable) {
                         local_set_param = self.advance();
@@ -2141,6 +2137,10 @@ const Parser = struct {
                 }
                 _ = try self.expect(.r_paren);
             }
+
+            const prev_yield = self.found_yield;
+            self.found_yield = false;
+            defer self.found_yield = prev_yield;
 
             if (self.peek() == .fat_arrow) {
                 _ = self.advance();
@@ -2163,15 +2163,39 @@ const Parser = struct {
                     set_param_tok = local_set_param;
                 }
             } else if (self.peek() == .semicolon) {
-                // abstract hook in interface (rare); skip
+                // Preserve body-less hooks independently from absent hooks.
+                if (is_get) get_short |= 8 else set_short |= 8;
+                if (is_set) set_param_tok = local_set_param;
                 _ = self.advance();
             } else {
                 _ = self.advance();
             }
+            if (is_final) {
+                if (is_get) get_short |= 16 else set_short |= 16;
+            }
+            if (is_get and is_ref) get_short |= 4;
+            // Hook flags: bit 0 = short expression, bit 1 = generator, bit 2 = reference.
+            if (self.found_yield) {
+                if (is_get) get_short |= 2 else set_short |= 2;
+            }
         }
         _ = try self.expect(.r_brace);
 
-        const extra_idx = try self.addExtra(&[_]u32{ default, get_body, set_body, set_param_tok, get_short, set_short });
+        // Backing is a syntactic access to this property's storage in either body.
+        // A short setter implicitly writes that storage.
+        var backed = (set_short & 1) != 0;
+        for (self.nodes.items[hook_nodes_start..]) |n| {
+            if (n.tag != .property_access) continue;
+            const receiver = self.nodes.items[n.data.lhs];
+            if (receiver.tag != .variable or !std.mem.eql(u8, self.tokens[receiver.main_token].lexeme(self.source), "$this")) continue;
+            const prop_node = self.nodes.items[n.data.rhs];
+            if (n.main_token == 0 or self.tokens[prop_node.main_token].tag == .variable) continue;
+            const property = self.tokens[prop_node.main_token].lexeme(self.source);
+            if (std.mem.eql(u8, property, self.tokens[name_tok].lexeme(self.source)[1..])) backed = true;
+        }
+        if (backed) get_short |= 32;
+
+        const extra_idx = try self.addExtra(&[_]u32{ default, get_body, set_body, set_param_tok, get_short, set_short, set_type_start, set_type_end });
         return self.addNode(.{ .tag = .class_property_hooks, .main_token = name_tok, .data = .{ .lhs = extra_idx } });
     }
 

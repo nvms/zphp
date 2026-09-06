@@ -126,7 +126,7 @@ pub const Ast = struct {
             class_decl, // main_token = class name, lhs = extra index -> {count, member_nodes...}, rhs = extra index -> {parent_node, implements_count, implements_nodes...}
             class_method, // main_token = method name, lhs = extra index -> {count, param...}, rhs = body block
             class_property, // main_token = property variable, lhs = default value (0 = none)
-            class_property_hooks, // main_token = property variable, lhs = extra index -> {default, get_body, set_body, set_param_tok, get_short, set_short}, rhs = visibility flags
+            class_property_hooks, // main_token = property variable, lhs = extra index -> {default, get_body, set_body, set_param_tok, get_flags, set_flags, set_type_start, set_type_end} (hook flags: bit 0 short, bit 1 generator, bit 2 reference, bit 3 abstract, bit 4 final, bit 5 backed), rhs = visibility flags
 
             static_class_method, // same as class_method but static
             static_class_property, // same as class_property but static

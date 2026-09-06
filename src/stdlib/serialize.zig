@@ -10,9 +10,11 @@ const RuntimeError = error{ RuntimeError, OutOfMemory };
 const SerCtx = struct {
     objects: std.AutoHashMapUnmanaged(*PhpObject, usize) = .{},
     arrays: std.AutoHashMapUnmanaged(*PhpArray, usize) = .{},
+    cells: std.AutoHashMapUnmanaged(*Value, usize) = .{},
     next_slot: usize = 1,
 
     fn deinit(self: *SerCtx, a: Allocator) void {
+        self.cells.deinit(a);
         self.objects.deinit(a);
         self.arrays.deinit(a);
     }
@@ -24,8 +26,11 @@ const AllowedClasses = union(enum) {
     list: []const []const u8,
 };
 
+const ArrayTarget = struct { array: *PhpArray, key: PhpArray.Key };
+
 const UnserCtx = struct {
     slots: std.ArrayListUnmanaged(Value) = .{},
+    array_targets: std.AutoHashMapUnmanaged(usize, ArrayTarget) = .{},
     allowed: AllowedClasses = .all,
     // set when we threw a user-visible exception (e.g. TypeError on a typed
     // property) so native_unserialize knows to propagate the error instead
@@ -43,6 +48,7 @@ const UnserCtx = struct {
     err_pos: usize = 0,
 
     fn deinit(self: *UnserCtx, a: Allocator) void {
+        self.array_targets.deinit(a);
         self.slots.deinit(a);
     }
 
@@ -287,6 +293,7 @@ fn serializeValue(ctx: *NativeContext, buf: *std.ArrayListUnmanaged(u8), sctx: *
                 return;
             }
             try sctx.arrays.put(a, arr, sctx.next_slot - 1);
+            defer _ = sctx.arrays.remove(arr);
             try buf.appendSlice(a, "a:");
             var tmp: [20]u8 = undefined;
             const len_s = std.fmt.bufPrint(&tmp, "{d}", .{arr.entries.items.len}) catch return;
@@ -302,6 +309,15 @@ fn serializeValue(ctx: *NativeContext, buf: *std.ArrayListUnmanaged(u8), sctx: *
                         try buf.append(a, ';');
                     },
                     .string => |s| try emitLenString(buf, a, s.bytes()),
+                }
+                if (if (entry.ref) |cell| (if (@import("../runtime/value.zig").cellOf(cell).binders > 1) cell else null) else null) |cell| {
+                    if (sctx.cells.get(cell)) |id| {
+                        const ref = try std.fmt.allocPrint(a, "R:{d};", .{id});
+                        defer a.free(ref);
+                        try buf.appendSlice(a, ref);
+                        continue;
+                    }
+                    try sctx.cells.put(a, cell, sctx.next_slot);
                 }
                 try serializeValue(ctx, buf, sctx, entry.value);
             }
@@ -368,10 +384,6 @@ fn serializeValue(ctx: *NativeContext, buf: *std.ArrayListUnmanaged(u8), sctx: *
             // checks Serializable first only if __serialize is absent. handle
             // the Serializable path here so it precedes the regular property
             // serialization but does not override __serialize/__sleep below
-            // a class that declares Serializable but provides no serialize()
-            // method (e.g. ArrayObject in PHP 8.4 - the interface is listed for
-            // BC but actual serialization goes through the default property path)
-            // falls through to default object serialization
             if (!ctx.vm.hasMethod(obj.class_name, "__serialize") and ctx.vm.isInstanceOf(obj.class_name, "Serializable") and ctx.vm.hasMethod(obj.class_name, "serialize")) {
                 const ser_result = try ctx.vm.callMethod(obj, "serialize", &.{});
                 const payload: []const u8 = if (ser_result == .string) ser_result.string.bytes() else "";
@@ -552,6 +564,9 @@ fn unserializeValue(ctx: *NativeContext, uctx: *UnserCtx, s: []const u8, pos: us
         return error.RuntimeError;
     }
 
+    errdefer if (uctx.err_pos == 0) {
+        uctx.err_pos = pos;
+    };
     switch (s[pos]) {
         'N' => {
             if (pos + 1 < s.len and s[pos + 1] == ';') {
@@ -619,16 +634,30 @@ fn unserializeValue(ctx: *NativeContext, uctx: *UnserCtx, s: []const u8, pos: us
                 p = key_result.pos;
                 uctx.slots.items.len = key_slots_before;
 
+                const value_pos = p;
+                const value_slot = uctx.slots.items.len;
                 const val_result = try unserializeValue(ctx, uctx, s, p);
                 p = val_result.pos;
                 const key: PhpArray.Key = switch (key_result.value) {
                     .int => |i| .{ .int = i },
                     .string => |str| .{ .string = str },
-                    else => .{ .int = 0 },
+                    else => return error.RuntimeError,
                 };
                 try arr.set(ctx.allocator, key, val_result.value);
+                if (s[value_pos] == 'R') {
+                    const id = try std.fmt.parseInt(usize, s[value_pos + 2 .. p - 1], 10);
+                    if (uctx.array_targets.get(id - 1)) |target| {
+                        try bindDecodedArrayReference(ctx, target.array, target.key, arr, key);
+                    }
+                } else {
+                    try uctx.array_targets.put(ctx.allocator, value_slot, .{ .array = arr, .key = key });
+                }
             }
-            if (p < s.len and s[p] == '}') p += 1;
+            if (p >= s.len or s[p] != '}') {
+                uctx.err_pos = p;
+                return error.RuntimeError;
+            }
+            p += 1;
             return .{ .value = .{ .array = arr }, .pos = p };
         },
         'E' => {
@@ -750,7 +779,11 @@ fn unserializeValue(ctx: *NativeContext, uctx: *UnserCtx, s: []const u8, pos: us
                 try obj.set(ctx.allocator, "__size", .{ .int = @intCast(prop_count) });
                 try obj.set(ctx.allocator, "__cursor", .{ .int = 0 });
             }
-            if (p < s.len and s[p] == '}') p += 1;
+            if (p >= s.len or s[p] != '}') {
+                uctx.err_pos = p;
+                return error.RuntimeError;
+            }
+            p += 1;
 
             if (has_unserialize) {
                 if (collected) |arr| {
@@ -779,7 +812,11 @@ fn unserializeValue(ctx: *NativeContext, uctx: *UnserCtx, s: []const u8, pos: us
             if (data_start + data_len > s.len) return error.RuntimeError;
             const payload = s[data_start .. data_start + data_len];
             p = data_start + data_len;
-            if (p < s.len and s[p] == '}') p += 1;
+            if (p >= s.len or s[p] != '}') {
+                uctx.err_pos = p;
+                return error.RuntimeError;
+            }
+            p += 1;
 
             const obj = try ctx.createObject(class_name);
             const slot_idx = try uctx.reserve(ctx.allocator);
@@ -801,7 +838,8 @@ fn unserializeValue(ctx: *NativeContext, uctx: *UnserCtx, s: []const u8, pos: us
             const idx = std.fmt.parseInt(usize, s[start..end], 10) catch return error.RuntimeError;
             if (idx == 0 or idx > uctx.slots.items.len) return error.RuntimeError;
             const v = uctx.slots.items[idx - 1];
-            try uctx.slots.append(ctx.allocator, v);
+            if (s[pos] == 'r' and v != .object) return error.RuntimeError;
+            if (s[pos] == 'r') try uctx.slots.append(ctx.allocator, v);
             return .{ .value = v, .pos = end + 1 };
         },
         else => return error.RuntimeError,
@@ -823,4 +861,193 @@ fn parseString(s: []const u8, pos: usize) !StringResult {
     const end = str_start + str_len;
     if (end + 1 >= s.len or s[end] != '"' or s[end + 1] != ';') return error.RuntimeError;
     return .{ .str = str, .pos = end + 2 };
+}
+
+// SPL's legacy Serializable stream has one reference table spanning flags,
+// storage, and members (the separators themselves consume no reference IDs).
+pub fn serializeSplArray(ctx: *NativeContext, obj: *PhpObject) RuntimeError!Value {
+    var buf: std.ArrayListUnmanaged(u8) = .{};
+    errdefer buf.deinit(ctx.allocator);
+    var refs: SerCtx = .{};
+    defer refs.deinit(ctx.allocator);
+    try buf.appendSlice(ctx.allocator, "x:");
+    try serializeValue(ctx, &buf, &refs, obj.get("__flags"));
+    const flags = obj.get("__flags").toInt();
+    if ((flags & 16777216) == 0) {
+        try serializeValue(ctx, &buf, &refs, obj.get("__data"));
+        try buf.appendSlice(ctx.allocator, ";");
+    }
+    try buf.appendSlice(ctx.allocator, "m:");
+    const members = try splMembers(ctx, obj);
+    try serializeValue(ctx, &buf, &refs, .{ .array = members });
+    const result = try buf.toOwnedSlice(ctx.allocator);
+    try ctx.strings.append(ctx.allocator, result);
+    return .{ .string = Value.String.borrowed(result) };
+}
+
+fn splInternal(name: []const u8) bool {
+    return std.mem.eql(u8, name, "__data") or std.mem.eql(u8, name, "__flags") or
+        std.mem.eql(u8, name, "__cursor") or std.mem.eql(u8, name, "__iter_class");
+}
+
+fn splMember(ctx: *NativeContext, obj: *PhpObject, members: *PhpArray, name: []const u8, val: Value) !void {
+    if (splInternal(name) or obj.isUnset(name)) return;
+    const cls = ctx.vm.classes.get(obj.class_name);
+    const vis = if (cls) |c| findPropertyVisibility(c, name) else .public;
+    const key = switch (vis) {
+        .public => name,
+        .protected => try std.fmt.allocPrint(ctx.allocator, "\x00*\x00{s}", .{name}),
+        .private => try std.fmt.allocPrint(ctx.allocator, "\x00{s}\x00{s}", .{ obj.class_name, name }),
+    };
+    if (vis != .public) try ctx.strings.append(ctx.allocator, @constCast(key));
+    try members.set(ctx.allocator, .{ .string = Value.String.borrowed(key) }, val);
+}
+
+fn splMembers(ctx: *NativeContext, obj: *PhpObject) !*PhpArray {
+    const members = try ctx.createArray();
+    if (obj.slot_layout) |layout| {
+        if (obj.slots) |slots| {
+            for (layout.names, 0..) |name, i| try splMember(ctx, obj, members, name, slots[i]);
+        }
+    }
+    var it = obj.properties.iterator();
+    while (it.next()) |entry| try splMember(ctx, obj, members, entry.key_ptr.*, entry.value_ptr.*);
+    return members;
+}
+
+pub fn unserializeSplArray(ctx: *NativeContext, obj: *PhpObject, s: []const u8) RuntimeError!Value {
+    if (s.len == 0) return .null; // PHP treats an empty payload as a no-op.
+    var refs: UnserCtx = .{};
+    defer refs.deinit(ctx.allocator);
+    var pos: usize = 0;
+    parseSplArray(ctx, obj, &refs, s, &pos) catch |err| {
+        if (err == error.OutOfMemory) return error.OutOfMemory;
+        if (refs.threw or ctx.vm.pending_exception != null) return error.RuntimeError;
+        const msg = try std.fmt.allocPrint(ctx.allocator, "Error at offset {d} of {d} bytes", .{ @max(pos, refs.err_pos), s.len });
+        try ctx.strings.append(ctx.allocator, msg);
+        try ctx.vm.setPendingException("UnexpectedValueException", msg);
+        return error.RuntimeError;
+    };
+    return .null;
+}
+
+fn parseSplArray(ctx: *NativeContext, obj: *PhpObject, refs: *UnserCtx, s: []const u8, pos: *usize) !void {
+    if (!std.mem.startsWith(u8, s, "x:")) return error.RuntimeError;
+    pos.* = 2;
+    const flags = try unserializeValue(ctx, refs, s, pos.*);
+    pos.* = flags.pos;
+    if (flags.value != .int) return error.RuntimeError;
+    var storage: Value = .{ .object = obj };
+    if ((flags.value.int & 16777216) == 0) {
+        if (pos.* >= s.len or (s[pos.*] != 'a' and s[pos.*] != 'O' and s[pos.*] != 'C' and s[pos.*] != 'r')) return error.RuntimeError;
+        const parsed = try unserializeValue(ctx, refs, s, pos.*);
+        pos.* = parsed.pos;
+        storage = parsed.value;
+        if (storage != .array and storage != .object) return error.RuntimeError;
+        if (pos.* >= s.len or s[pos.*] != ';') return error.RuntimeError;
+        pos.* += 1;
+    }
+    if (!std.mem.startsWith(u8, s[pos.*..], "m:")) return error.RuntimeError;
+    pos.* += 2;
+    const members = try unserializeValue(ctx, refs, s, pos.*);
+    pos.* = members.pos;
+    if (members.value != .array) return error.RuntimeError;
+    try obj.set(ctx.allocator, "__flags", flags.value);
+    try obj.set(ctx.allocator, "__data", storage);
+    try obj.set(ctx.allocator, "__cursor", .{ .int = 0 });
+    for (members.value.array.entries.items) |entry| {
+        if (entry.key == .string) {
+            const name = stripVisibilityPrefix(entry.key.string.bytes());
+            if (!splInternal(name)) try obj.set(ctx.allocator, name, entry.value);
+        }
+    }
+    // Trailing bytes are intentionally ignored, as in PHP 8.5.
+}
+
+pub fn splArrayState(ctx: *NativeContext, obj: *PhpObject) RuntimeError!Value {
+    const state = try ctx.createArray();
+    try state.append(ctx.allocator, obj.get("__flags"));
+    const data = obj.get("__data");
+    // __serialize exposes a value snapshot, not the mutable internal table.
+    try state.append(ctx.allocator, if (data == .array) .{ .array = try splStorageSnapshot(ctx, data.array) } else data);
+    try state.append(ctx.allocator, .{ .array = try splMembers(ctx, obj) });
+    try state.append(ctx.allocator, obj.get("__iter_class"));
+    return .{ .array = state };
+}
+
+pub fn restoreSplArrayState(ctx: *NativeContext, obj: *PhpObject, state: Value) RuntimeError!Value {
+    if (state != .array) return error.RuntimeError;
+    const flags = state.array.get(.{ .int = 0 });
+    const storage = state.array.get(.{ .int = 1 });
+    const members = state.array.get(.{ .int = 2 });
+    const iterator = state.array.get(.{ .int = 3 });
+    if (flags != .int or members != .array or (iterator != .null and iterator != .string)) {
+        try ctx.vm.setPendingException("UnexpectedValueException", "Incomplete or ill-typed serialization data");
+        return error.RuntimeError;
+    }
+    if (storage != .array and storage != .object) {
+        try ctx.vm.setPendingException("InvalidArgumentException", "Passed variable is not an array or object");
+        return error.RuntimeError;
+    }
+    if (iterator == .string and !ctx.vm.isInstanceOf(iterator.string.bytes(), "Iterator")) {
+        const msg = try std.fmt.allocPrint(ctx.allocator, "Cannot deserialize ArrayObject with iterator class '{s}'; this class does not implement the Iterator interface", .{iterator.string.bytes()});
+        try ctx.strings.append(ctx.allocator, msg);
+        try ctx.vm.setPendingException("UnexpectedValueException", msg);
+        return error.RuntimeError;
+    }
+    try obj.set(ctx.allocator, "__flags", flags);
+    try obj.set(ctx.allocator, "__data", storage);
+    try obj.set(ctx.allocator, "__cursor", .{ .int = 0 });
+    try obj.set(ctx.allocator, "__iter_class", iterator);
+    for (members.array.entries.items) |entry| {
+        if (entry.key == .string) {
+            const name = stripVisibilityPrefix(entry.key.string.bytes());
+            if (!splInternal(name)) try obj.set(ctx.allocator, name, entry.value);
+        }
+    }
+    return .null;
+}
+
+// Decode R: aliases into the same owning cells/registry used by VM array
+// references. The registry is request-local; no serializer state escapes.
+fn bindDecodedArrayReference(ctx: *NativeContext, source: *PhpArray, source_key: PhpArray.Key, dest: *PhpArray, dest_key: PhpArray.Key) !void {
+    const values = @import("../runtime/value.zig");
+    const first = source.getPtr(source_key) orelse return;
+    const cell = first.ref orelse blk: {
+        const owner = try ctx.allocator.create(values.RefCell);
+        owner.* = .{};
+        try ctx.vm.ref_cells.append(ctx.allocator, owner);
+        ctx.vm.setCell(&owner.value, first.value);
+        break :blk &owner.value;
+    };
+    if (ctx.vm.ref_index == null) {
+        const index = try ctx.allocator.create(values.RefIndex);
+        index.* = .{};
+        ctx.vm.ref_index = index;
+    }
+    const index = ctx.vm.ref_index.?;
+    if (ctx.vm.persistent_ref_owner == 0) ctx.vm.persistent_ref_owner = index.createOwner();
+    const arrays = [_]*PhpArray{ source, dest };
+    const keys = [_]PhpArray.Key{ source_key, dest_key };
+    for (arrays, keys) |array, key| {
+        const entry = array.getPtr(key) orelse continue;
+        if (entry.ref == cell) continue;
+        entry.ref = cell;
+        values.cellOf(cell).binders += 1;
+        try ctx.vm.array_ref_bindings.append(ctx.allocator, .{ .cell = cell, .array = array, .key = key });
+        try index.addOwned(ctx.allocator, ctx.vm.persistent_ref_owner, cell, .{ .array = .{ .array = array, .key = key } });
+    }
+    ctx.vm.array_ref_active = true;
+}
+
+fn splStorageSnapshot(ctx: *NativeContext, source: *PhpArray) !*PhpArray {
+    const copy = try ctx.createArray();
+    for (source.entries.items) |entry| {
+        try copy.set(ctx.allocator, entry.key, entry.value);
+        if (entry.ref) |cell| {
+            if (@import("../runtime/value.zig").cellOf(cell).binders > 1)
+                try bindDecodedArrayReference(ctx, source, entry.key, copy, entry.key);
+        }
+    }
+    return copy;
 }

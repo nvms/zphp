@@ -767,3 +767,63 @@ test "php84 abbreviated promoted asymmetric visibility parses" {
     defer ast.deinit();
     try std.testing.expectEqual(@as(usize, 0), ast.errors.len);
 }
+
+test "property hook generator flags are scoped independently" {
+    var ast = try parse(std.testing.allocator,
+        \\<?php function factory() {
+        \\    class Sequence {
+        \\        public $block { get { yield 1; } set { echo $value; } }
+        \\        public $short { get => yield 2; }
+        \\        public $closure { get => function () { yield 3; }; }
+        \\    }
+        \\    return new Sequence();
+        \\}
+    );
+    defer ast.deinit();
+    try std.testing.expectEqual(@as(usize, 0), ast.errors.len);
+    var hooks: usize = 0;
+    for (ast.nodes) |node| {
+        if (node.tag == .function_decl) {
+            try std.testing.expectEqual(@as(u32, 0), node.data.rhs & 0x80000000);
+        }
+        if (node.tag != .class_property_hooks) continue;
+        const expected: u32 = switch (hooks) {
+            0 => 2, // block generator
+            1 => 3, // short generator
+            2 => 1, // nested generator does not mark the hook
+            else => unreachable,
+        };
+        try std.testing.expectEqual(expected, ast.extra_data[node.data.lhs + 4]);
+        try std.testing.expectEqual(@as(u32, 0), ast.extra_data[node.data.lhs + 5]);
+        hooks += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 3), hooks);
+}
+
+test "property hook abstract final reference and setter type metadata" {
+    var ast = try parse(std.testing.allocator,
+        \\<?php
+        \\abstract class HookFlags {
+        \\    abstract public string $name { get; set(string $input); }
+        \\    public array $items { final &get => $this->items; }
+        \\}
+    );
+    defer ast.deinit();
+    try std.testing.expectEqual(@as(usize, 0), ast.errors.len);
+    var count: usize = 0;
+    for (ast.nodes) |node| {
+        if (node.tag != .class_property_hooks) continue;
+        const ext = node.data.lhs;
+        if (count == 0) {
+            try std.testing.expectEqual(@as(u32, 8), ast.extra_data[ext + 4]);
+            try std.testing.expectEqual(@as(u32, 8), ast.extra_data[ext + 5]);
+            try std.testing.expectEqualStrings("$input", ast.tokenSlice(ast.extra_data[ext + 3]));
+            try std.testing.expectEqualStrings("string", ast.tokenSlice(ast.extra_data[ext + 6]));
+            try std.testing.expectEqual(ast.extra_data[ext + 6] + 1, ast.extra_data[ext + 7]);
+        } else {
+            try std.testing.expectEqual(@as(u32, 53), ast.extra_data[ext + 4]);
+        }
+        count += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 2), count);
+}

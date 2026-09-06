@@ -152,7 +152,7 @@ fn dumpProfile(vm: *@import("runtime/vm.zig").VM) void {
     }
 }
 
-const compile_cache_dir = "bytecode-v9";
+const compile_cache_dir = std.fmt.comptimePrint("bytecode-v{d}", .{bytecode_format.FORMAT_VERSION});
 
 fn compileCachePath(allocator: std.mem.Allocator, path: []const u8, stat: std.fs.File.Stat, closure_counter: u32) ![]u8 {
     var digest: [32]u8 = undefined;

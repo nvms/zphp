@@ -190,8 +190,16 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try ao_def.static_props.put(a, "ARRAY_AS_PROPS", .{ .int = 2 });
     try ao_def.constant_names.put(a, "STD_PROP_LIST", {});
     try ao_def.constant_names.put(a, "ARRAY_AS_PROPS", {});
+    try ao_def.methods.put(a, "__serialize", .{ .name = "__serialize", .arity = 0 });
+    try ao_def.methods.put(a, "__unserialize", .{ .name = "__unserialize", .arity = 1 });
+    try ao_def.methods.put(a, "serialize", .{ .name = "serialize", .arity = 0 });
+    try ao_def.methods.put(a, "unserialize", .{ .name = "unserialize", .arity = 1 });
     try vm.classes.put(a, "ArrayObject", ao_def);
 
+    try vm.native_fns.put(a, "ArrayObject::__serialize", aoSerializeState);
+    try vm.native_fns.put(a, "ArrayObject::__unserialize", aoUnserializeState);
+    try vm.native_fns.put(a, "ArrayObject::serialize", aoSerialize);
+    try vm.native_fns.put(a, "ArrayObject::unserialize", aoUnserialize);
     try vm.native_fns.put(a, "ArrayObject::__construct", aoConstruct);
     try vm.native_fns.put(a, "ArrayObject::offsetGet", aoOffsetGet);
     try vm.native_fns.put(a, "ArrayObject::offsetSet", aoOffsetSet);
@@ -219,6 +227,7 @@ pub fn register(vm: *VM, a: Allocator) !void {
 
     // ArrayIterator
     var ai_def = ClassDef{ .name = "ArrayIterator" };
+    try ai_def.interfaces.append(a, "Serializable");
     try ai_def.interfaces.append(a, "Iterator");
     try ai_def.interfaces.append(a, "Countable");
     try ai_def.interfaces.append(a, "ArrayAccess");
@@ -244,8 +253,16 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try ai_def.methods.put(a, "natsort", .{ .name = "natsort", .arity = 0 });
     try ai_def.methods.put(a, "natcasesort", .{ .name = "natcasesort", .arity = 0 });
     try ai_def.methods.put(a, "seek", .{ .name = "seek", .arity = 1 });
+    try ai_def.methods.put(a, "__serialize", .{ .name = "__serialize", .arity = 0 });
+    try ai_def.methods.put(a, "__unserialize", .{ .name = "__unserialize", .arity = 1 });
+    try ai_def.methods.put(a, "serialize", .{ .name = "serialize", .arity = 0 });
+    try ai_def.methods.put(a, "unserialize", .{ .name = "unserialize", .arity = 1 });
     try vm.classes.put(a, "ArrayIterator", ai_def);
 
+    try vm.native_fns.put(a, "ArrayIterator::__serialize", aoSerializeState);
+    try vm.native_fns.put(a, "ArrayIterator::__unserialize", aoUnserializeState);
+    try vm.native_fns.put(a, "ArrayIterator::serialize", aoSerialize);
+    try vm.native_fns.put(a, "ArrayIterator::unserialize", aoUnserialize);
     try vm.native_fns.put(a, "ArrayIterator::__construct", aiConstruct);
     try vm.native_fns.put(a, "ArrayIterator::rewind", aiRewind);
     try vm.native_fns.put(a, "ArrayIterator::current", aiCurrent);
@@ -871,9 +888,39 @@ fn stackToArray(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
 
 // --- ArrayObject ---
 
+fn aoSerializeState(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const obj = getThis(ctx) orelse return .null;
+    if (obj.get("__data") == .null) _ = try ensureData(ctx, obj);
+    return @import("serialize.zig").splArrayState(ctx, obj);
+}
+
+fn aoUnserializeState(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    const obj = getThis(ctx) orelse return .null;
+    if (args.len == 0 or args[0] != .array) {
+        try ctx.vm.setPendingException("TypeError", "__unserialize(): Argument #1 ($data) must be of type array");
+        return error.RuntimeError;
+    }
+    return @import("serialize.zig").restoreSplArrayState(ctx, obj, args[0]);
+}
+
+fn aoSerialize(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+    const obj = getThis(ctx) orelse return .null;
+    if (obj.get("__data") == .null) _ = try ensureData(ctx, obj);
+    return @import("serialize.zig").serializeSplArray(ctx, obj);
+}
+
+fn aoUnserialize(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    const obj = getThis(ctx) orelse return .null;
+    if (args.len == 0 or args[0] != .string) {
+        try ctx.vm.setPendingException("TypeError", "unserialize(): Argument #1 ($data) must be of type string");
+        return error.RuntimeError;
+    }
+    return @import("serialize.zig").unserializeSplArray(ctx, obj, args[0].string.bytes());
+}
+
 fn aoConstruct(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     const obj = getThis(ctx) orelse return .null;
-    if (args.len >= 1 and args[0] == .array) {
+    if (args.len >= 1 and (args[0] == .array or args[0] == .object)) {
         try obj.set(ctx.allocator, "__data", args[0]);
     } else {
         _ = try ensureData(ctx, obj);
@@ -941,6 +988,8 @@ fn aoMagicUnset(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
 
 fn aoOffsetGet(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     const obj = getThis(ctx) orelse return .null;
+    if (args.len > 0 and obj.get("__data") == .object and args[0] == .string)
+        return obj.get("__data").object.get(args[0].string.bytes());
     const arr = getData(obj) orelse return .null;
     if (args.len == 0) return .null;
     return arr.get(args[0].toArrayKey());
@@ -953,6 +1002,7 @@ fn aoOffsetSet(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args[0] == .null) {
         try arr.append(ctx.allocator, args[1]);
     } else {
+        detachSplReference(ctx, arr, args[0].toArrayKey());
         try arr.set(ctx.allocator, args[0].toArrayKey(), args[1]);
     }
     return .null;
@@ -999,6 +1049,18 @@ fn aoAppend(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
 
 fn aoGetArrayCopy(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
     const obj = getThis(ctx) orelse return .null;
+    if (obj.get("__data") == .object) {
+        const storage = obj.get("__data").object;
+        const copy = try ctx.createArray();
+        if (storage.slot_layout) |layout| {
+            if (storage.slots) |slots| {
+                for (layout.names, 0..) |name, i| try copy.set(ctx.allocator, .{ .string = Value.String.borrowed(name) }, slots[i]);
+            }
+        }
+        var it = storage.properties.iterator();
+        while (it.next()) |entry| try copy.set(ctx.allocator, .{ .string = Value.String.borrowed(entry.key_ptr.*) }, entry.value_ptr.*);
+        return .{ .array = copy };
+    }
     const arr = getData(obj) orelse {
         const empty = try ctx.allocator.create(PhpArray);
         empty.* = .{};
@@ -1139,13 +1201,13 @@ fn aoGetFlags(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
 
 fn aiConstruct(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     const obj = getThis(ctx) orelse return .null;
-    if (args.len >= 1 and args[0] == .array) {
+    if (args.len >= 1 and (args[0] == .array or args[0] == .object)) {
         try obj.set(ctx.allocator, "__data", args[0]);
     } else {
         _ = try ensureData(ctx, obj);
     }
     try obj.set(ctx.allocator, "__cursor", .{ .int = 0 });
-    try obj.set(ctx.allocator, "__flags", .{ .int = 0 });
+    try obj.set(ctx.allocator, "__flags", .{ .int = if (args.len >= 2) args[1].toInt() else 0 });
     return .null;
 }
 
@@ -1209,6 +1271,8 @@ fn aiCount(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
 
 fn aiOffsetGet(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     const obj = getThis(ctx) orelse return .null;
+    if (args.len > 0 and obj.get("__data") == .object and args[0] == .string)
+        return obj.get("__data").object.get(args[0].string.bytes());
     const arr = getData(obj) orelse return .null;
     if (args.len == 0) return .null;
     return arr.get(args[0].toArrayKey());
@@ -1221,6 +1285,7 @@ fn aiOffsetSet(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args[0] == .null) {
         try arr.append(ctx.allocator, args[1]);
     } else {
+        detachSplReference(ctx, arr, args[0].toArrayKey());
         try arr.set(ctx.allocator, args[0].toArrayKey(), args[1]);
     }
     return .null;
@@ -1254,6 +1319,18 @@ fn aiOffsetUnset(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
 
 fn aiGetArrayCopy(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
     const obj = getThis(ctx) orelse return .null;
+    if (obj.get("__data") == .object) {
+        const storage = obj.get("__data").object;
+        const copy = try ctx.createArray();
+        if (storage.slot_layout) |layout| {
+            if (storage.slots) |slots| {
+                for (layout.names, 0..) |name, i| try copy.set(ctx.allocator, .{ .string = Value.String.borrowed(name) }, slots[i]);
+            }
+        }
+        var it = storage.properties.iterator();
+        while (it.next()) |entry| try copy.set(ctx.allocator, .{ .string = Value.String.borrowed(entry.key_ptr.*) }, entry.value_ptr.*);
+        return .{ .array = copy };
+    }
     const arr = getData(obj) orelse {
         const empty = try ctx.allocator.create(PhpArray);
         empty.* = .{};
@@ -2643,4 +2720,21 @@ fn sosOffsetUnset(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len == 0) return .null;
     if (!try sosRequireObjectKey(ctx, "offsetUnset", args[0])) return error.RuntimeError;
     return sosDetach(ctx, args);
+}
+
+// SPL offsetSet replaces the bucket, rather than writing through a reference
+// in it (unlike a PHP array assignment).
+fn detachSplReference(ctx: *NativeContext, arr: *PhpArray, key: PhpArray.Key) void {
+    const entry = arr.getPtr(key) orelse return;
+    const cell = entry.ref orelse return;
+    entry.ref = null;
+    if (ctx.vm.ref_index) |index| index.removeTargetAllOwners(ctx.allocator, cell, .{ .array = .{ .array = arr, .key = key } });
+    var i: usize = 0;
+    while (i < ctx.vm.array_ref_bindings.items.len) {
+        const binding = ctx.vm.array_ref_bindings.items[i];
+        if (binding.array == arr and binding.key.eql(key)) {
+            _ = ctx.vm.array_ref_bindings.swapRemove(i);
+        } else i += 1;
+    }
+    if (@import("../runtime/value.zig").cell_unbind_hook) |hook| hook.call(hook.ctx, cell);
 }

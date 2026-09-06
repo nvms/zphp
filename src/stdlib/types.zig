@@ -1227,6 +1227,7 @@ fn native_get_class_methods(ctx: *NativeContext, args: []const Value) RuntimeErr
         if (ctx.vm.classes.get(cn)) |cls| {
             const emit = struct {
                 fn run(c: *NativeContext, a: *@import("../runtime/value.zig").PhpArray, s: *std.StringHashMapUnmanaged(void), name: []const u8, info: anytype, d: usize, cnn: []const u8, clsn: []const u8, callr: ?[]const u8) !void {
+                    if (std.mem.indexOf(u8, name, "$hook_") != null) return;
                     if (d > 0 and info.visibility == .private) return;
                     const visible = switch (info.visibility) {
                         .public => true,
