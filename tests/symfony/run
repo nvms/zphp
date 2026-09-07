@@ -20,22 +20,29 @@ if [ ! -d "$APP_DIR/vendor" ]; then
     exit 1
 fi
 
+bounded() {
+    python3 - "$@" <<'PY'
+import subprocess
+import sys
+try:
+    result = subprocess.run(sys.argv[1:], timeout=60)
+except subprocess.TimeoutExpired:
+    print('Symfony harness timed out', file=sys.stderr)
+    sys.exit(124)
+sys.exit(result.returncode if result.returncode >= 0 else 128 - result.returncode)
+PY
+}
+
 passed=0
 failed=0
 errors=""
 
 for f in "$SCRIPT_DIR"/harness/test-*.php; do
     name="$(basename "$f" .php)"
-    php_out="$(php -d error_reporting=E_ALL\&~E_DEPRECATED\&~E_WARNING "$f" 2>&1)" || true
-    TIMEOUT_CMD=""
-    if command -v timeout &>/dev/null; then
-        TIMEOUT_CMD="timeout 60"
-    elif command -v gtimeout &>/dev/null; then
-        TIMEOUT_CMD="gtimeout 60"
-    fi
-    zphp_out="$($TIMEOUT_CMD "$ZPHP" run "$f" 2>&1)" && zphp_exit=0 || zphp_exit=$?
+    php_out="$(bounded php -d error_reporting=E_ALL\&~E_DEPRECATED\&~E_WARNING "$f" 2>&1)" && php_exit=0 || php_exit=$?
+    zphp_out="$(bounded "$ZPHP" run "$f" 2>&1)" && zphp_exit=0 || zphp_exit=$?
 
-    if [ "$php_out" = "$zphp_out" ]; then
+    if [ "$php_exit" -eq 0 ] && [ "$zphp_exit" -eq 0 ] && [ "$php_out" = "$zphp_out" ]; then
         passed=$((passed + 1))
         echo "  pass  $name"
     else

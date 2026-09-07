@@ -774,10 +774,26 @@ pub const PhpObject = struct {
 
     pub const LazyState = struct {
         initializer: Value,
+        proxy: bool = false,
+        backing: ?*PhpObject = null,
         pending: []bool,
         skip_serialize: bool = false,
         running: bool = false,
     };
+
+    pub fn backingValue(self: *const PhpObject) Value {
+        if (self.lazy) |state| if (state.backing) |obj| return .{ .object = obj };
+        return .null;
+    }
+
+    pub fn storage(self: *PhpObject) *PhpObject {
+        if (self.lazy) |state| if (state.backing) |obj| return obj;
+        return self;
+    }
+
+    pub fn ownsDestructor(self: *const PhpObject) bool {
+        return self.lazyInitializer() == .null and self.backingValue() == .null;
+    }
 
     pub fn lazyInitializer(self: *const PhpObject) Value {
         const state = self.lazy orelse return .null;
@@ -787,7 +803,7 @@ pub const PhpObject = struct {
     pub fn isLazySlot(self: *const PhpObject, name: []const u8, scope: ?[]const u8) bool {
         const state = self.lazy orelse return false;
         if (state.running or state.initializer == .null) return false;
-        const index = self.getSlotIndexForScope(name, scope) orelse return false;
+        const index = self.getSlotIndexForScope(name, scope) orelse return state.proxy;
         return state.pending[index];
     }
     pub const SlotLayout = struct {
@@ -824,6 +840,7 @@ pub const PhpObject = struct {
     }
 
     pub fn isUnset(self: *const PhpObject, name: []const u8) bool {
+        if (self.backingValue() == .object) return self.backingValue().object.isUnset(name);
         return self.unset_slots.contains(name);
     }
 
@@ -873,6 +890,7 @@ pub const PhpObject = struct {
     }
 
     pub fn getForScope(self: *const PhpObject, name: []const u8, scope: ?[]const u8) Value {
+        if (self.backingValue() == .object) return self.backingValue().object.getForScope(name, scope);
         if (self.slots) |s| {
             if (self.getSlotIndexForScope(name, scope)) |idx| return s[idx];
         }
@@ -880,6 +898,7 @@ pub const PhpObject = struct {
     }
 
     pub fn set(self: *PhpObject, allocator: std.mem.Allocator, name: []const u8, value: Value) !void {
+        if (self.storage() != self) return self.storage().set(allocator, name, value);
         // the universal property-store choke point: the property takes a
         // reference to the value (callers pass raw values, never copyValue'd
         // ones) and the value it replaces is released through the VM's hook
@@ -907,6 +926,7 @@ pub const PhpObject = struct {
     // scope-aware variant for the set_prop opcode path where we know the
     // declaring class (private slots are picked correctly)
     pub fn setForScope(self: *PhpObject, allocator: std.mem.Allocator, name: []const u8, value: Value, scope: ?[]const u8) !void {
+        if (self.storage() != self) return self.storage().setForScope(allocator, name, value, scope);
         retainStored(value);
         self.clearUnset(name);
         if (self.slots) |s| {

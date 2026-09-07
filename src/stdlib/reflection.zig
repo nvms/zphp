@@ -180,7 +180,7 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try vm.native_fns.put(a, "ReflectionClass::hasProperty", rcHasProperty);
     try vm.native_fns.put(a, "ReflectionClass::newInstanceWithoutConstructor", rcNewInstanceWithoutConstructor);
     try vm.native_fns.put(a, "ReflectionClass::newLazyGhost", rcNewLazyGhost);
-    try vm.native_fns.put(a, "ReflectionClass::newLazyProxy", rcNewLazyGhost);
+    try vm.native_fns.put(a, "ReflectionClass::newLazyProxy", rcNewLazyProxy);
     try vm.native_fns.put(a, "ReflectionClass::initializeLazyObject", rcInitializeLazyObject);
     try vm.native_fns.put(a, "ReflectionClass::isUninitializedLazyObject", rcIsUninitializedLazyObject);
     try vm.native_fns.put(a, "ReflectionClass::markLazyObjectAsInitialized", rcMarkLazyObjectAsInitialized);
@@ -1712,6 +1712,12 @@ fn rcHasProperty(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     return .{ .bool = findPropertyDef(ctx.vm, class_name, args[0].string.bytes()) != null };
 }
 
+fn rcNewLazyProxy(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    const result = try rcNewLazyGhost(ctx, args);
+    if (result == .object) result.object.lazy.?.proxy = true;
+    return result;
+}
+
 fn rcNewLazyGhost(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     const this = getThis(ctx) orelse return .null;
     const class_name = if (this.get("name") == .string) this.get("name").string.bytes() else return .null;
@@ -1740,7 +1746,7 @@ fn rcInitializeLazyObject(ctx: *NativeContext, args: []const Value) RuntimeError
     if (args.len < 1 or args[0] != .object) return .null;
     const obj = args[0].object;
     try ctx.vm.triggerLazyInit(obj);
-    return .{ .object = obj };
+    return .{ .object = obj.storage() };
 }
 
 fn rcIsUninitializedLazyObject(_: *NativeContext, args: []const Value) RuntimeError!Value {
@@ -1758,7 +1764,7 @@ fn rcMarkLazyObjectAsInitialized(ctx: *NativeContext, args: []const Value) Runti
             ctx.vm.releaseValue(initializer);
         }
     }
-    return .{ .object = args[0].object };
+    return .{ .object = args[0].object.storage() };
 }
 
 fn rcNewInstanceWithoutConstructor(ctx: *NativeContext, _: []const Value) RuntimeError!Value {

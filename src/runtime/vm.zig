@@ -2878,7 +2878,7 @@ pub const VM = struct {
             if (obj.destructed) continue;
             if (self.pendingExceptionIs(obj)) continue;
             obj.destructed = true;
-            if (obj.lazyInitializer() == .null and self.hasMethod(obj.class_name, "__destruct")) {
+            if (obj.ownsDestructor() and self.hasMethod(obj.class_name, "__destruct")) {
                 _ = self.callMethod(obj, "__destruct", &.{}) catch {
                     self.pending_exception = null;
                 };
@@ -4464,12 +4464,13 @@ pub const VM = struct {
                         self.push(v);
                         continue;
                     }
-                    const obj = base.object;
+                    var obj = base.object;
                     const pname = prop_key.string.bytes();
                     self.triggerLazyProperty(obj, pname, self.currentDefiningClass()) catch {
                         if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
                         return error.RuntimeError;
                     };
+                    obj = obj.storage();
                     const ik = Value.toArrayKey(inner_key);
                     // Hook reads must precede vivification/COW. A by-value hook
                     // may expose an object for offsetSet, but not writable array storage.
@@ -5087,15 +5088,16 @@ pub const VM = struct {
                         self.push(.null);
                         continue;
                     }
-                    const eap_obj = obj_val.object;
+                    var eap_obj = obj_val.object;
                     // Hook reads must precede vivification/COW. A by-value hook
                     // may expose an object for offsetSet, but not writable array storage.
                     eap_obj.refcount +%= 1;
-                    defer self.releaseValue(.{ .object = eap_obj });
+                    defer self.releaseValue(obj_val);
                     self.triggerLazyProperty(eap_obj, prop_name, self.currentDefiningClass()) catch {
                         if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
                         return error.RuntimeError;
                     };
+                    eap_obj = eap_obj.storage();
                     var cur = eap_obj.get(prop_name);
                     var hook_cell: ?*Value = null;
                     defer if (hook_cell) |cell| self.unbindCell(cell);
@@ -5342,11 +5344,12 @@ pub const VM = struct {
                         } else if (iterable == .array) {
                             self.push(.{ .int = 0 });
                         } else if (iterable == .object) {
-                            const obj = iterable.object;
+                            var obj = iterable.object;
                             self.triggerLazyInit(obj) catch {
                                 if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
                                 return error.RuntimeError;
                             };
+                            obj = obj.storage();
                             const arr = try self.allocator.create(PhpArray);
                             arr.* = .{};
                             try self.arrays.append(self.allocator, arr);
@@ -5760,7 +5763,12 @@ pub const VM = struct {
 
                         try self.bindRefSlot(&frame.ref_slots, dst_name, c);
                     } else {
-                        const obj_ptr = obj_val.object;
+                        var obj_ptr = obj_val.object;
+                        self.triggerLazyProperty(obj_ptr, prop_name, self.currentDefiningClass()) catch {
+                            if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
+                            return error.RuntimeError;
+                        };
+                        obj_ptr = obj_ptr.storage();
                         if (try self.checkPropertyMutation(obj_ptr, prop_name, .indirect)) continue;
                         if (self.hasPropHook(obj_ptr.class_name, prop_name, .get) and !self.inPropHook(obj_ptr, prop_name) and !try self.propGetReturnsRef(obj_ptr, prop_name)) {
                             obj_ptr.refcount +%= 1;
@@ -5830,11 +5838,16 @@ pub const VM = struct {
 
                         try self.bindRefSlot(&frame.ref_slots, dst_name, c);
                     } else {
-                        const obj_ptr = obj_val.object;
+                        var obj_ptr = obj_val.object;
                         const prop_str = (try self.coerceToStringValue(name_val)).string.bytes();
                         // dupe so the binding's prop_name outlives the temporary
                         const prop_owned = try self.allocator.dupe(u8, prop_str);
                         try self.strings.append(self.allocator, prop_owned);
+                        self.triggerLazyProperty(obj_ptr, prop_owned, self.currentDefiningClass()) catch {
+                            if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
+                            return error.RuntimeError;
+                        };
+                        obj_ptr = obj_ptr.storage();
                         if (try self.checkPropertyMutation(obj_ptr, prop_owned, .indirect)) continue;
                         if (self.hasPropHook(obj_ptr.class_name, prop_owned, .get) and !self.inPropHook(obj_ptr, prop_owned) and !try self.propGetReturnsRef(obj_ptr, prop_owned)) {
                             obj_ptr.refcount +%= 1;
@@ -6022,11 +6035,12 @@ pub const VM = struct {
                     const prop_name = self.currentChunk().constants.items[name_idx].string.bytes();
                     const obj_val = self.pop();
                     if (obj_val == .object) {
-                        const obj = obj_val.object;
+                        var obj = obj_val.object;
                         self.triggerLazyProperty(obj, prop_name, self.currentDefiningClass()) catch {
                             if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
                             return error.RuntimeError;
                         };
+                        obj = obj.storage();
                         if (!obj.isUnset(prop_name)) {
                             if (try self.checkPropertyMutation(obj, prop_name, .unset)) continue;
                         }
@@ -6065,11 +6079,12 @@ pub const VM = struct {
                     const name_val = self.pop();
                     const obj_val = self.pop();
                     if (obj_val == .object and name_val == .string) {
-                        const obj = obj_val.object;
+                        var obj = obj_val.object;
                         self.triggerLazyProperty(obj, name_val.string.bytes(), self.currentDefiningClass()) catch {
                             if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
                             return error.RuntimeError;
                         };
+                        obj = obj.storage();
                         const prop_name = name_val.string.bytes();
                         if (!obj.isUnset(prop_name)) {
                             if (try self.checkPropertyMutation(obj, prop_name, .unset)) continue;
@@ -6428,11 +6443,12 @@ pub const VM = struct {
                     const prop_name = self.currentChunk().constants.items[name_idx].string.bytes();
                     const obj_val = self.pop();
                     if (obj_val == .object) {
-                        const obj = obj_val.object;
+                        var obj = obj_val.object;
                         self.triggerLazyProperty(obj, prop_name, self.currentDefiningClass()) catch {
                             if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
                             return error.RuntimeError;
                         };
+                        obj = obj.storage();
                         if (self.hasPropHook(obj.class_name, prop_name, .get) and !self.inPropHook(obj, prop_name)) {
                             obj.refcount +%= 1;
                             defer self.releaseValue(.{ .object = obj });
@@ -6459,11 +6475,12 @@ pub const VM = struct {
                     const prop_name_val = self.pop();
                     const obj_val = self.pop();
                     if (obj_val == .object and prop_name_val == .string) {
-                        const obj = obj_val.object;
+                        var obj = obj_val.object;
                         self.triggerLazyProperty(obj, prop_name_val.string.bytes(), self.currentDefiningClass()) catch {
                             if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
                             return error.RuntimeError;
                         };
+                        obj = obj.storage();
                         const prop_name = prop_name_val.string.bytes();
                         if (self.hasPropHook(obj.class_name, prop_name, .get) and !self.inPropHook(obj, prop_name)) {
                             obj.refcount +%= 1;
@@ -6536,11 +6553,12 @@ pub const VM = struct {
                         return error.RuntimeError;
                     }
                     if (val == .object) {
-                        const src = val.object;
+                        var src = val.object;
                         self.triggerLazyInit(src) catch {
                             if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
                             return error.RuntimeError;
                         };
+                        src = src.storage();
                         const copy = try self.allocator.create(PhpObject);
                         self.next_object_id += 1;
                         copy.* = .{ .class_name = src.class_name, .id = self.next_object_id };
@@ -6557,13 +6575,37 @@ pub const VM = struct {
                             try copy.properties.put(self.allocator, entry.key_ptr.*, try self.copyObjectCloneValue(entry.value_ptr.*));
                         }
                         try self.objects.append(self.allocator, copy);
+                        if (src.ref_mirrored) {
+                            if (src.slot_layout) |layout| {
+                                for (layout.names) |name| {
+                                    if (self.ref_index) |ri| {
+                                        if (ri.prop_rev.get(.{ .object = src, .class_name = "", .prop_name = name })) |cells| {
+                                            if (cells.items.len > 0) {
+                                                const cell = cells.items[0];
+                                                try self.regRefObject(try self.persistentRefOwner(), cell, copy, name);
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
                         if (self.hasMethod(src.class_name, "__clone")) {
                             _ = self.callMethod(copy, "__clone", &.{}) catch {
                                 if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
                                 return error.RuntimeError;
                             };
                         }
-                        self.push(.{ .object = copy });
+                        if (val.object.backingValue() != .null) {
+                            const proxy = try self.allocator.create(PhpObject);
+                            self.next_object_id += 1;
+                            proxy.* = .{ .class_name = val.object.class_name, .id = self.next_object_id, .slot_layout = val.object.slot_layout };
+                            const state = try self.allocator.create(PhpObject.LazyState);
+                            state.* = .{ .initializer = .null, .proxy = true, .pending = try self.allocator.alloc(bool, 0), .backing = copy };
+                            proxy.lazy = state;
+                            copy.retain();
+                            try self.objects.append(self.allocator, proxy);
+                            self.push(.{ .object = proxy });
+                        } else self.push(.{ .object = copy });
                     } else {
                         self.push(val);
                     }
@@ -6660,7 +6702,7 @@ pub const VM = struct {
                     if (v == .array) {
                         self.push(v);
                     } else if (v == .object) {
-                        const obj = v.object;
+                        const obj = v.object.storage();
                         const arr = try self.allocator.create(PhpArray);
                         arr.* = .{};
                         try self.arrays.append(self.allocator, arr);
@@ -8024,17 +8066,18 @@ pub const VM = struct {
                     if (capturing) stackRetain(obj_val);
                     defer if (capturing) self.releaseValue(obj_val);
                     defer if (capturing and obj_val == .object and self.sp == arg_sp + 1 and self.pending_exception == null) {
-                        self.capturePropertyCell(arg_sp, obj_val.object, prop_name) catch unreachable;
+                        self.capturePropertyCell(arg_sp, obj_val.object.storage(), prop_name) catch unreachable;
                     };
                     if (obj_val == .object) {
-                        const obj = obj_val.object;
+                        var obj = obj_val.object;
                         obj.refcount +%= 1;
-                        defer self.releaseValue(.{ .object = obj });
+                        defer self.releaseValue(obj_val);
 
                         if (obj.isLazySlot(prop_name, self.currentDefiningClass())) self.triggerLazyInit(obj) catch {
                             if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
                             return error.RuntimeError;
                         };
+                        obj = obj.storage();
 
                         // property hooks: dispatch to get hook if present (and not recursing).
                         // route exceptions through the local try/catch handler
@@ -8160,13 +8203,14 @@ pub const VM = struct {
                     };
                     const obj_val = self.pop();
                     if (obj_val == .object) {
-                        const obj = obj_val.object;
+                        var obj = obj_val.object;
                         obj.refcount +%= 1;
-                        defer self.releaseValue(.{ .object = obj });
+                        defer self.releaseValue(obj_val);
                         if (obj.isLazySlot(prop_name, self.currentDefiningClass())) self.triggerLazyInit(obj) catch {
                             if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
                             return error.RuntimeError;
                         };
+                        obj = obj.storage();
                         if (self.hasPropHook(obj.class_name, prop_name, .get) and !self.inPropHook(obj, prop_name)) {
                             const hook_result = self.callPropHook(obj, prop_name, .get, .null) catch {
                                 if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
@@ -8245,14 +8289,15 @@ pub const VM = struct {
                     defer if (sp_val_pin) |p| self.objRelease(p);
                     const obj_val = self.pop();
                     if (obj_val == .object) {
-                        const obj = obj_val.object;
+                        var obj = obj_val.object;
                         obj.refcount +%= 1;
-                        defer self.releaseValue(.{ .object = obj });
+                        defer self.releaseValue(obj_val);
 
                         if (obj.isLazySlot(prop_name, self.currentDefiningClass())) self.triggerLazyInit(obj) catch {
                             if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
                             return error.RuntimeError;
                         };
+                        obj = obj.storage();
 
                         // the set-scope gate runs before hooks and __set, but only
                         // an asymmetric or readonly declaration can ever deny a write
@@ -14160,7 +14205,7 @@ pub const VM = struct {
 
     fn methodByValue(self: *VM, receiver: Value, method: []const u8, pos: u8) ?bool {
         if (receiver != .object) return null;
-        if (receiver.object.lazyInitializer() != .null) return null;
+        if (receiver.object.lazy != null) return null;
         return self.classMethodByValue(receiver.object.class_name, method, pos, "__call");
     }
 
@@ -15241,7 +15286,7 @@ pub const VM = struct {
         state.running = true;
         defer state.running = false;
         var ctx = self.makeContext(null);
-        const result = ctx.invokeCallable(state.initializer, &.{.{ .object = obj }}) catch |err| {
+        errdefer {
             for (slots, saved, 0..) |*slot, v, i| {
                 if (self.ref_index) |ri| {
                     if (obj.slot_layout) |layout| {
@@ -15256,13 +15301,52 @@ pub const VM = struct {
             obj.properties.clearRetainingCapacity();
             for (props.keys(), props.values()) |k, v| {
                 retainValue(v);
-                try obj.properties.put(self.allocator, k, v);
+                obj.properties.put(self.allocator, k, v) catch unreachable;
             }
             obj.unset_slots.deinit(self.allocator);
             obj.unset_slots = unset;
             unset = .{};
-            return err;
-        };
+        }
+        if (state.proxy) {
+            const result = try ctx.invokeCallable(state.initializer, &.{.{ .object = obj }});
+            if (result != .object) {
+                const kind: []const u8 = switch (result) {
+                    .null => "null",
+                    .int => "int",
+                    .bool => "bool",
+                    .float => "float",
+                    .string => "string",
+                    .array => "array",
+                    else => "object",
+                };
+                const msg = try std.fmt.allocPrint(self.allocator, "Lazy proxy factory must return an instance of a class compatible with {s}, {s} returned", .{ obj.class_name, kind });
+                try self.strings.append(self.allocator, msg);
+                try self.setPendingException("TypeError", msg);
+                return error.RuntimeError;
+            }
+            const backing = result.object;
+            if (backing == obj or backing.lazyInitializer() != .null or backing.backingValue() != .null) {
+                try self.setPendingException("Error", "Lazy proxy factory must return a non-lazy object");
+                return error.RuntimeError;
+            }
+            if (!self.isInstanceOf(obj.class_name, backing.class_name) or
+                (if (obj.slots) |v| v.len else 0) != (if (backing.slots) |v| v.len else 0) or
+                (self.hasMethod(obj.class_name, "__clone") and (!self.hasMethod(backing.class_name, "__clone") or !std.mem.eql(u8, try self.resolveMethod(obj.class_name, "__clone"), try self.resolveMethod(backing.class_name, "__clone")))) or
+                (self.hasMethod(obj.class_name, "__destruct") and (!self.hasMethod(backing.class_name, "__destruct") or !std.mem.eql(u8, try self.resolveMethod(obj.class_name, "__destruct"), try self.resolveMethod(backing.class_name, "__destruct")))))
+            {
+                const msg = try std.fmt.allocPrint(self.allocator, "The real instance class {s} is not compatible with the proxy class {s}. The proxy must be a instance of the same class as the real instance, or a sub-class with no additional properties, and no overrides of the __destructor or __clone methods.", .{ backing.class_name, obj.class_name });
+                try self.strings.append(self.allocator, msg);
+                try self.setPendingException("TypeError", msg);
+                return error.RuntimeError;
+            }
+            retainValue(result);
+            state.backing = backing;
+            const initializer = state.initializer;
+            state.initializer = .null;
+            self.releaseValue(initializer);
+            return;
+        }
+        const result = try ctx.invokeCallable(state.initializer, &.{.{ .object = obj }});
         _ = result;
         const initializer = state.initializer;
         state.initializer = .null;
@@ -17833,7 +17917,7 @@ pub const VM = struct {
                 if (self.valueInGlobalsCell(.{ .object = obj })) continue;
                 if (self.debug_gc_verify) self.gcVerifyDestructing(obj);
                 obj.destructed = true;
-                if (obj.lazyInitializer() == .null and self.hasMethod(obj.class_name, "__destruct")) {
+                if (obj.ownsDestructor() and self.hasMethod(obj.class_name, "__destruct")) {
                     _ = self.callMethod(obj, "__destruct", &.{}) catch {
                         // a throwing destructor must not corrupt the drop site
                         // it was called from - swallow (revisit for fidelity)
@@ -18243,6 +18327,7 @@ pub const VM = struct {
             };
             var pit = obj.properties.iterator();
             while (pit.next()) |e| if (gcTargetMatches(t, e.value_ptr.*)) gcNote(&c, in_graph, "object {s}#{d} rc {d} scratch {d} prop {s}", .{ obj.class_name, obj.id, obj.refcount, obj.scratch_rc, e.key_ptr.* });
+            if (gcTargetMatches(t, obj.backingValue())) gcNote(&c, in_graph, "object {s}#{d} lazy_backing", .{ obj.class_name, obj.id });
             if (gcTargetMatches(t, obj.lazyInitializer())) gcNote(&c, in_graph, "object {s}#{d} lazy_initializer", .{ obj.class_name, obj.id });
         }
         const rc: u32 = switch (t) {
@@ -18514,6 +18599,7 @@ pub const VM = struct {
         vo.put(self.allocator, obj, {}) catch return;
         obj.scratch_rc = @intCast(obj.refcount);
         self.cycleVisitChild(obj.lazyInitializer(), vo, va);
+        self.cycleVisitChild(obj.backingValue(), vo, va);
         if (obj.slots) |s| {
             for (s) |v| self.cycleVisitChild(v, vo, va);
         }
@@ -18582,6 +18668,7 @@ pub const VM = struct {
 
     fn cycleDecrementChildren(self: *VM, obj: *PhpObject, vo: anytype, va: anytype) void {
         self.cycleDecChild(obj.lazyInitializer(), vo, va);
+        self.cycleDecChild(obj.backingValue(), vo, va);
         if (obj.slots) |s| {
             for (s) |v| self.cycleDecChild(v, vo, va);
         }
@@ -18622,6 +18709,7 @@ pub const VM = struct {
 
     fn cycleMarkAlive(self: *VM, obj: *PhpObject, vo: anytype, va: anytype) bool {
         var changed = self.cycleMarkAliveChild(obj.lazyInitializer(), vo, va);
+        changed = self.cycleMarkAliveChild(obj.backingValue(), vo, va) or changed;
         if (obj.slots) |s| {
             for (s) |v| if (self.cycleMarkAliveChild(v, vo, va)) {
                 changed = true;
@@ -18819,6 +18907,10 @@ pub const VM = struct {
                 ri.removeTargetAllOwners(self.allocator, binding.cell, binding.target);
             }
         };
+        if (obj.backingValue() != .null) {
+            self.releaseValue(obj.backingValue());
+            obj.lazy.?.backing = null;
+        }
         if (obj.lazyInitializer() != .null) {
             self.releaseValue(obj.lazyInitializer());
             obj.lazy.?.initializer = .null;

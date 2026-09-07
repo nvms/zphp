@@ -323,10 +323,12 @@ fn serializeValue(ctx: *NativeContext, buf: *std.ArrayListUnmanaged(u8), sctx: *
             }
             try buf.append(a, '}');
         },
-        .object => |obj| {
+        .object => |proxy| {
+            var obj = proxy;
             if (obj.lazy) |state| {
                 if (!state.skip_serialize) try ctx.vm.triggerLazyInit(obj);
             }
+            obj = obj.storage();
             // emit a back-reference if we've already serialized this object
             if (sctx.objects.get(obj)) |existing_slot| {
                 // rewind the slot counter: this r: entry occupies the slot we already consumed

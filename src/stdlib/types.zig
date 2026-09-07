@@ -1089,8 +1089,8 @@ fn native_get_object_vars(ctx: *NativeContext, args: []const Value) RuntimeError
         return .{ .array = empty };
     }
     if (args.len == 0 or args[0] != .object) return Value{ .bool = false };
-    const obj = args[0].object;
-    try ctx.vm.triggerLazyInit(obj);
+    try ctx.vm.triggerLazyInit(args[0].object);
+    const obj = args[0].object.storage();
     var arr = try ctx.createArray();
 
     // Determine caller's class scope via the calling frame's function name (which is

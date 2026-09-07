@@ -320,8 +320,9 @@ fn encodeValue(buf: *std.ArrayListUnmanaged(u8), a: std.mem.Allocator, val: Valu
                 try buf.append(a, '}');
             }
         },
-        .object => |obj| {
-            if (vm) |runtime| try runtime.triggerLazyInit(obj);
+        .object => |proxy| {
+            if (vm) |runtime| try runtime.triggerLazyInit(proxy);
+            const obj = proxy.storage();
             // PHP treats resources (fopen handles, curl handles, etc.) as
             // unsupported in json_encode: returns false + sets last_error to
             // 'Type is not supported' (and JsonException with THROW_ON_ERROR).
