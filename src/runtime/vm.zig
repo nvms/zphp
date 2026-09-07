@@ -5507,6 +5507,14 @@ pub const VM = struct {
                             .string => |s| .{ .string = s },
                             else => .{ .int = Value.toInt(key_val) },
                         };
+                        // An element already referenced by a closure/variable
+                        // denotes that same cell; rebinding must not sever it.
+                        if (arr_ptr.getPtr(key)) |entry| {
+                            if (entry.ref) |cell| {
+                                try self.bindRefSlot(&self.currentFrame().ref_slots, name, cell);
+                                continue;
+                            }
+                        }
                         const cell = try self.newRefCell();
                         var elem = arr_ptr.get(key);
                         // `$v = &$arr[$k]` makes $arr[$k] a reference, which can't
@@ -5684,6 +5692,12 @@ pub const VM = struct {
                             else => .{ .int = Value.toInt(key_val) },
                         };
                         if (append_ref) try self.arraySetOwned(arr_ptr, key, .null);
+                        if (arr_ptr.getPtr(key)) |entry| {
+                            if (entry.ref) |cell| {
+                                try self.bindRefSlot(&frame.ref_slots, dst_name, cell);
+                                continue;
+                            }
+                        }
                         const cell = try self.newRefCell();
                         var elem = arr_ptr.get(key);
                         // `$v = &$arr[$k]` makes $arr[$k] a reference - it can't
@@ -6799,52 +6813,10 @@ pub const VM = struct {
                         .value = val,
                     });
                     const gop = try self.capture_index.getOrPut(self.allocator, closure_name);
-                    const first_bind = !gop.found_existing or gop.value_ptr.len == 0;
                     if (gop.found_existing) {
                         gop.value_ptr.len += 1;
                     } else {
                         gop.value_ptr.* = .{ .start = cap_pos, .len = 1, .has_refs = false };
-                    }
-                    // closures defined inside class methods inherit class scope
-                    const lexical_class = self.currentDefiningClass();
-                    if (std.mem.eql(u8, var_name, "$this") and val == .object) {
-                        // instance method closure: LSB = $this's runtime class
-                        try self.captures.append(self.allocator, .{
-                            .closure_name = closure_name,
-                            .var_name = "$__closure_scope",
-                            .value = .{ .string = Value.String.borrowed(val.object.class_name) },
-                        });
-                        const gop2 = try self.capture_index.getOrPut(self.allocator, closure_name);
-                        gop2.value_ptr.len += 1;
-                        if (lexical_class) |class_name| {
-                            try self.captures.append(self.allocator, .{
-                                .closure_name = closure_name,
-                                .var_name = "$__closure_defclass",
-                                .value = .{ .string = Value.String.borrowed(class_name) },
-                            });
-                            const gop3 = try self.capture_index.getOrPut(self.allocator, closure_name);
-                            gop3.value_ptr.len += 1;
-                        }
-                    } else if (first_bind) {
-                        const scope = self.currentFrame().called_class orelse lexical_class;
-                        if (scope) |class_name| {
-                            try self.captures.append(self.allocator, .{
-                                .closure_name = closure_name,
-                                .var_name = "$__closure_scope",
-                                .value = .{ .string = Value.String.borrowed(class_name) },
-                            });
-                            const gop2 = try self.capture_index.getOrPut(self.allocator, closure_name);
-                            gop2.value_ptr.len += 1;
-                        }
-                        if (lexical_class) |class_name| {
-                            try self.captures.append(self.allocator, .{
-                                .closure_name = closure_name,
-                                .var_name = "$__closure_defclass",
-                                .value = .{ .string = Value.String.borrowed(class_name) },
-                            });
-                            const gop2 = try self.capture_index.getOrPut(self.allocator, closure_name);
-                            gop2.value_ptr.len += 1;
-                        }
                     }
                 },
 
@@ -12808,6 +12780,32 @@ pub const VM = struct {
         {
             const func = self.functions.get(compile_name) orelse return error.RuntimeError;
             self.stack[self.sp - 1] = try self.newClosureInstance(compile_name, func);
+            // Scope belongs to the closure instance, not to a particular kind
+            // of use capture. Reference-only static closures need it too.
+            const name = self.peek().string.bytes();
+            const lexical_class = self.currentDefiningClass();
+            const this_val = self.getLocalByName("$this");
+            const scope = if (lexical_class != null)
+                self.currentFrame().called_class orelse
+                    (if (this_val == .object) this_val.object.class_name else lexical_class)
+            else
+                null;
+            if (scope) |class_name| {
+                try self.captures.append(self.allocator, .{
+                    .closure_name = name,
+                    .var_name = "$__closure_scope",
+                    .value = .{ .string = Value.String.borrowed(class_name) },
+                });
+                self.capture_index.getPtr(name).?.len += 1;
+            }
+            if (lexical_class) |class_name| {
+                try self.captures.append(self.allocator, .{
+                    .closure_name = name,
+                    .var_name = "$__closure_defclass",
+                    .value = .{ .string = Value.String.borrowed(class_name) },
+                });
+                self.capture_index.getPtr(name).?.len += 1;
+            }
         }
     }
 
@@ -15167,8 +15165,8 @@ pub const VM = struct {
             if (self.closureScopeForFrame(&self.frames[self.frame_count - 1])) |scope|
                 return scope;
         }
-        // walk the call stack from current frame upward to find enclosing class method
-        // closures inside methods need the enclosing method's class for visibility checks
+        // Includes/native bridge frames can inherit scope, but a PHP function
+        // is a lexical boundary: never grant its caller's private access.
         var fi: usize = self.frame_count;
         while (fi > 0) {
             fi -= 1;
@@ -15214,6 +15212,7 @@ pub const VM = struct {
                 }
             }
             if (best) |b| return b;
+            if (frame.func != null) return null;
         }
         return null;
     }
@@ -17197,6 +17196,7 @@ pub const VM = struct {
             if (args.len < func.required_params) return error.RuntimeError;
             if (self.ic) |ic| ic.pending_arg_count = @intCast(@min(args.len, 255));
             self.pending_call_name = name;
+            self.pending_called_class = self.closureScopeByName(name);
             const saved_pia_outer = self.pending_invoke_args;
             self.pending_invoke_args = args;
             defer self.pending_invoke_args = saved_pia_outer;
@@ -17373,6 +17373,8 @@ pub const VM = struct {
             }
             try self.fillDefaults(&new_vars, func, bind_count);
 
+            self.pending_call_name = name;
+            self.pending_called_class = self.closureScopeByName(name);
             const result = try self.executeFunctionWithRefs(func, new_vars, ref_slots);
 
             for (0..bind_count) |i| {

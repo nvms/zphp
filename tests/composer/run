@@ -1,18 +1,45 @@
 #!/bin/sh
 set -eu
 D=$(CDPATH= cd -- "$(dirname "$0")" && pwd); Z=${ZPHP:-"$D/../../zig-out/bin/zphp"}; P="$D/composer.phar"; A="$D/fixture/app"
+T=$(mktemp -d)
+trap 'rm -rf "$T"' EXIT HUP INT TERM
 export COMPOSER_AUTH='{}'
-export COMPOSER_HOME="$D/.composer-home"
-rm -rf "$COMPOSER_HOME"
+export COMPOSER_HOME="$T/home"
+unset COMPOSER_ROOT_VERSION
 mkdir -p "$COMPOSER_HOME"
+cp -R "$D/fixture" "$T/fixture"
+A="$T/fixture/app"
+rm -rf "$A/vendor"
+git -C "$A" init -q -b main
+git -C "$A" add .
+git -C "$A" -c user.name=zphp -c user.email=fixture@example.invalid -c commit.gpgsign=false commit -qm fixture
+git -C "$A" switch -qc feature/version-discovery
 [ -x "$Z" ] || { echo "zphp not found at $Z"; exit 1; }; [ -f "$P" ] || { echo "run tests/composer/setup first"; exit 1; }; command -v php >/dev/null
-bounded() { if command -v timeout >/dev/null 2>&1; then timeout 120 "$@"; elif command -v gtimeout >/dev/null 2>&1; then gtimeout 120 "$@"; else "$@"; fi; }
+bounded() {
+    python3 - "$@" <<'PYTHON'
+import subprocess
+import sys
+try:
+    result = subprocess.run(sys.argv[1:], timeout=120)
+except subprocess.TimeoutExpired:
+    print('Composer command timed out', file=sys.stderr)
+    sys.exit(124)
+sys.exit(result.returncode if result.returncode >= 0 else 128 - result.returncode)
+PYTHON
+}
+locked_json() {
+    php -r '$v=json_decode(stream_get_contents(STDIN),true,512,JSON_THROW_ON_ERROR); if (!is_array($v) || !isset($v["locked"]) || count($v["locked"]) !== 1 || $v["locked"][0]["name"] !== "acme/greeter" || $v["locked"][0]["version"] !== "1.0.0") { throw new RuntimeException("Unexpected locked packages"); } echo json_encode($v, JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR);'
+}
 cd "$A"
-php_version=$(bounded php "$P" --version 2>/dev/null | sed 's/ PHP version.*//')
-zphp_version=$(bounded "$Z" run "$P" --version 2>/dev/null | sed 's/ PHP version.*//')
+php_version_raw=$(bounded php "$P" --version) || { echo 'php version failed'; exit 1; }
+zphp_version_raw=$(bounded "$Z" run "$P" --version) || { echo 'zphp version failed'; exit 1; }
+php_version=$(printf '%s' "$php_version_raw" | sed 's/ PHP version.*//')
+zphp_version=$(printf '%s' "$zphp_version_raw" | sed 's/ PHP version.*//')
 [ "$php_version" = "$zphp_version" ] || { printf 'version mismatch\nphp: %s\nzphp: %s\n' "$php_version" "$zphp_version"; exit 1; }
-php_locked=$(bounded php "$P" show --locked --format=json --no-interaction 2>/dev/null | php -r '$v=json_decode(stream_get_contents(STDIN),true); echo json_encode($v, JSON_UNESCAPED_SLASHES);')
-zphp_locked=$(bounded "$Z" run "$P" show --locked --format=json --no-interaction 2>/dev/null | php -r '$v=json_decode(stream_get_contents(STDIN),true); echo json_encode($v, JSON_UNESCAPED_SLASHES);')
+php_locked_raw=$(bounded php "$P" show --locked --format=json --no-interaction) || { echo 'php locked-package inspection failed'; exit 1; }
+zphp_locked_raw=$(bounded "$Z" run "$P" show --locked --format=json --no-interaction) || { echo 'zphp locked-package inspection failed'; exit 1; }
+php_locked=$(printf '%s' "$php_locked_raw" | locked_json)
+zphp_locked=$(printf '%s' "$zphp_locked_raw" | locked_json)
 [ "$php_locked" = "$zphp_locked" ] || { printf 'locked-package mismatch\nphp: %s\nzphp: %s\n' "$php_locked" "$zphp_locked"; exit 1; }
 php_validate=$(bounded php "$P" validate --no-check-publish --no-check-version --no-interaction 2>&1) || { printf 'php validate failed:\n%s\n' "$php_validate"; exit 1; }
 zphp_validate=$(bounded "$Z" run "$P" validate --no-check-publish --no-check-version --no-interaction 2>&1) || { printf 'zphp validate failed:\n%s\n' "$zphp_validate"; exit 1; }

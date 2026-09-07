@@ -1095,6 +1095,14 @@ pub fn compileClosure(self: *Compiler, node: Ast.Node) Error!void {
     const idx = try self.addConstant(.{ .string = Value.String.borrowed(owned_name) });
     try self.emitConstant(idx);
 
+    // Even a capture-free static closure has lexical/late-static scope.
+    // A harmless internal capture instantiates it without binding $this.
+    if (is_static_closure and self.current_class.len > 0) {
+        const scope_idx = try self.addConstant(.{ .string = Value.String.borrowed("$__closure_context") });
+        try self.emitOp(.closure_bind);
+        try self.emitU16(scope_idx);
+    }
+
     for (use_vars) |use_var_node| {
         const use_node = self.ast.nodes[use_var_node];
         const var_name = self.ast.tokenSlice(use_node.main_token);
