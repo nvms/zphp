@@ -530,6 +530,7 @@ pub const VM = struct {
     captures: std.ArrayListUnmanaged(CaptureEntry) = .{},
     capture_index: std.StringHashMapUnmanaged(CaptureRange) = .{},
     cycle_closures: std.AutoArrayHashMapUnmanaged(*Value.String.Owner, i64) = .{},
+    collecting_cycles: bool = false,
     closure_instance_count: u32 = 0,
     captures_dead: usize = 0,
     // ZPHP_HEAP_STATS diagnostics: every live closure owner, so survivors of
@@ -17964,7 +17965,9 @@ pub const VM = struct {
     // 4. remaining nodes (scratch_rc == 0) are unreachable cycles - destruct
     //    + free
     pub fn collectCycles(self: *VM) usize {
-        if (self.draining_destructors) return 0;
+        if (self.draining_destructors or self.collecting_cycles) return 0;
+        self.collecting_cycles = true;
+        defer self.collecting_cycles = false;
         if (self.cycle_candidates.items.len == 0 and self.cycle_array_candidates.items.len == 0 and self.capture_index.count() == 0) return 0;
         self.gc_runs += 1;
         // drain any pending normal destructs first so the candidate set
@@ -18002,6 +18005,12 @@ pub const VM = struct {
             for (self.captures.items[range.start..][0..range.len]) |capture| {
                 self.cycleDecChild(capture.value, &visited_objs, &visited_arrs);
                 if (capture.ref_cell) |cell| cellOf(cell).scratch -= 1;
+            }
+            if (range.has_statics) {
+                var statics = self.statics_cells.iterator();
+                while (statics.next()) |entry| {
+                    if (closureOwnsStatic(owner.bytes, entry.key_ptr.*)) cellOf(entry.value_ptr.*).scratch -= 1;
+                }
             }
         }
 
@@ -18059,6 +18068,17 @@ pub const VM = struct {
                         }
                     }
                 }
+                if (range.has_statics) {
+                    var statics = self.statics_cells.iterator();
+                    while (statics.next()) |entry| {
+                        if (!closureOwnsStatic(owner.bytes, entry.key_ptr.*)) continue;
+                        const cell = cellOf(entry.value_ptr.*);
+                        if (cell.scratch == 0) {
+                            cell.scratch = 1;
+                            changed = true;
+                        }
+                    }
+                }
             }
             var it = visited_objs.iterator();
             while (it.next()) |kv| {
@@ -18101,8 +18121,36 @@ pub const VM = struct {
                 collected += 1;
             }
         }
+        // Pin dead closures while breaking their outgoing edges. Their names
+        // still occur in cells/containers being drained; forcing string RC to
+        // zero would make those ordinary releases underflow or use freed owners.
+        for (self.cycle_closures.keys(), self.cycle_closures.values()) |owner, scratch| {
+            if (scratch == 0) owner.refcount += 1;
+        }
+        for (self.cycle_closures.keys(), self.cycle_closures.values()) |owner, scratch| {
+            if (scratch != 0) continue;
+            const range = self.capture_index.get(owner.bytes) orelse continue;
+            for (self.captures.items[range.start..][0..range.len]) |*capture| {
+                const value = capture.value;
+                const cell = capture.ref_cell;
+                capture.value = .null;
+                capture.ref_cell = null;
+                self.releaseValue(value);
+                if (cell) |c| self.unbindCell(c);
+            }
+            if (range.ref_owner != 0) if (self.ref_index) |ri| ri.releaseOwner(self.allocator, range.ref_owner);
+            if (range.has_statics) self.purgeClosureStatics(owner.bytes);
+            if (self.capture_index.getPtr(owner.bytes)) |live_range| {
+                live_range.ref_owner = 0;
+                live_range.has_statics = false;
+            }
+        }
         self.cycle_candidates.clearRetainingCapacity();
         self.cycle_array_candidates.clearRetainingCapacity();
+        self.drainPendingDestruct();
+        for (self.cycle_closures.keys(), self.cycle_closures.values()) |owner, scratch| {
+            if (scratch == 0) self.releaseClosureByName(owner.bytes);
+        }
         self.drainPendingDestruct();
         self.gc_collected += collected;
         if (self.debug_gc_verify) {
@@ -18489,6 +18537,10 @@ pub const VM = struct {
         }
     }
 
+    fn closureOwnsStatic(name: []const u8, key: []const u8) bool {
+        return key.len > name.len + 2 and std.mem.startsWith(u8, key, name) and key[name.len] == ':' and key[name.len + 1] == ':';
+    }
+
     fn cycleVisitChild(self: *VM, v: Value, vo: anytype, va: anytype) void {
         switch (v) {
             .string => |string| {
@@ -18500,6 +18552,18 @@ pub const VM = struct {
                     self.cycleVisitChild(capture.value, vo, va);
                     if (capture.ref_cell) |value| {
                         const cell = cellOf(value);
+                        if (!cell.visited) {
+                            cell.visited = true;
+                            cell.scratch = @intCast(cell.binders);
+                            self.cycleVisitChild(cell.value, vo, va);
+                        }
+                    }
+                }
+                if (range.has_statics) {
+                    var statics = self.statics_cells.iterator();
+                    while (statics.next()) |entry| {
+                        if (!closureOwnsStatic(owner.bytes, entry.key_ptr.*)) continue;
+                        const cell = cellOf(entry.value_ptr.*);
                         if (!cell.visited) {
                             cell.visited = true;
                             cell.scratch = @intCast(cell.binders);
