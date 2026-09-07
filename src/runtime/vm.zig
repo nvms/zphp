@@ -529,6 +529,7 @@ pub const VM = struct {
     fiber_suspend_value: Value = .null,
     captures: std.ArrayListUnmanaged(CaptureEntry) = .{},
     capture_index: std.StringHashMapUnmanaged(CaptureRange) = .{},
+    cycle_closures: std.AutoArrayHashMapUnmanaged(*Value.String.Owner, i64) = .{},
     closure_instance_count: u32 = 0,
     captures_dead: usize = 0,
     // ZPHP_HEAP_STATS diagnostics: every live closure owner, so survivors of
@@ -2372,9 +2373,9 @@ pub const VM = struct {
         }
         for (self.objects.items[obj_start..]) |o| {
             if (!o.pooled) {
-                if (o.lazy_initializer == .string) {
-                    self.releaseValue(o.lazy_initializer);
-                    o.lazy_initializer = .null;
+                if (o.lazyInitializer() == .string) {
+                    self.releaseValue(o.lazyInitializer());
+                    o.lazy.?.initializer = .null;
                 }
                 if (o.slots) |slots| {
                     for (slots) |*slot| {
@@ -2876,7 +2877,7 @@ pub const VM = struct {
             if (obj.destructed) continue;
             if (self.pendingExceptionIs(obj)) continue;
             obj.destructed = true;
-            if (self.hasMethod(obj.class_name, "__destruct")) {
+            if (obj.lazyInitializer() == .null and self.hasMethod(obj.class_name, "__destruct")) {
                 _ = self.callMethod(obj, "__destruct", &.{}) catch {
                     self.pending_exception = null;
                 };
@@ -4464,6 +4465,10 @@ pub const VM = struct {
                     }
                     const obj = base.object;
                     const pname = prop_key.string.bytes();
+                    self.triggerLazyProperty(obj, pname, self.currentDefiningClass()) catch {
+                        if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
+                        return error.RuntimeError;
+                    };
                     const ik = Value.toArrayKey(inner_key);
                     // Hook reads must precede vivification/COW. A by-value hook
                     // may expose an object for offsetSet, but not writable array storage.
@@ -4603,6 +4608,10 @@ pub const VM = struct {
                         };
                         base_is_array_access_obj = true;
                     } else if (base == .object and outer_key == .string) {
+                        self.triggerLazyProperty(base.object, outer_key.string.bytes(), self.currentDefiningClass()) catch {
+                            if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
+                            return error.RuntimeError;
+                        };
                         existing = base.object.get(outer_key.string.bytes());
                     } else {
                         self.push(v);
@@ -5082,6 +5091,10 @@ pub const VM = struct {
                     // may expose an object for offsetSet, but not writable array storage.
                     eap_obj.refcount +%= 1;
                     defer self.releaseValue(.{ .object = eap_obj });
+                    self.triggerLazyProperty(eap_obj, prop_name, self.currentDefiningClass()) catch {
+                        if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
+                        return error.RuntimeError;
+                    };
                     var cur = eap_obj.get(prop_name);
                     var hook_cell: ?*Value = null;
                     defer if (hook_cell) |cell| self.unbindCell(cell);
@@ -5329,6 +5342,10 @@ pub const VM = struct {
                             self.push(.{ .int = 0 });
                         } else if (iterable == .object) {
                             const obj = iterable.object;
+                            self.triggerLazyInit(obj) catch {
+                                if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
+                                return error.RuntimeError;
+                            };
                             const arr = try self.allocator.create(PhpArray);
                             arr.* = .{};
                             try self.arrays.append(self.allocator, arr);
@@ -5991,6 +6008,10 @@ pub const VM = struct {
                     const obj_val = self.pop();
                     if (obj_val == .object) {
                         const obj = obj_val.object;
+                        self.triggerLazyProperty(obj, prop_name, self.currentDefiningClass()) catch {
+                            if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
+                            return error.RuntimeError;
+                        };
                         if (!obj.isUnset(prop_name)) {
                             if (try self.checkPropertyMutation(obj, prop_name, .unset)) continue;
                         }
@@ -6030,6 +6051,10 @@ pub const VM = struct {
                     const obj_val = self.pop();
                     if (obj_val == .object and name_val == .string) {
                         const obj = obj_val.object;
+                        self.triggerLazyProperty(obj, name_val.string.bytes(), self.currentDefiningClass()) catch {
+                            if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
+                            return error.RuntimeError;
+                        };
                         const prop_name = name_val.string.bytes();
                         if (!obj.isUnset(prop_name)) {
                             if (try self.checkPropertyMutation(obj, prop_name, .unset)) continue;
@@ -6389,6 +6414,10 @@ pub const VM = struct {
                     const obj_val = self.pop();
                     if (obj_val == .object) {
                         const obj = obj_val.object;
+                        self.triggerLazyProperty(obj, prop_name, self.currentDefiningClass()) catch {
+                            if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
+                            return error.RuntimeError;
+                        };
                         if (self.hasPropHook(obj.class_name, prop_name, .get) and !self.inPropHook(obj, prop_name)) {
                             obj.refcount +%= 1;
                             defer self.releaseValue(.{ .object = obj });
@@ -6416,6 +6445,10 @@ pub const VM = struct {
                     const obj_val = self.pop();
                     if (obj_val == .object and prop_name_val == .string) {
                         const obj = obj_val.object;
+                        self.triggerLazyProperty(obj, prop_name_val.string.bytes(), self.currentDefiningClass()) catch {
+                            if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
+                            return error.RuntimeError;
+                        };
                         const prop_name = prop_name_val.string.bytes();
                         if (self.hasPropHook(obj.class_name, prop_name, .get) and !self.inPropHook(obj, prop_name)) {
                             obj.refcount +%= 1;
@@ -6489,6 +6522,10 @@ pub const VM = struct {
                     }
                     if (val == .object) {
                         const src = val.object;
+                        self.triggerLazyInit(src) catch {
+                            if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
+                            return error.RuntimeError;
+                        };
                         const copy = try self.allocator.create(PhpObject);
                         self.next_object_id += 1;
                         copy.* = .{ .class_name = src.class_name, .id = self.next_object_id };
@@ -6616,6 +6653,7 @@ pub const VM = struct {
                             if (obj.slot_layout) |layout| {
                                 for (layout.names, 0..) |name, i| {
                                     if (i < slots.len) {
+                                        if (obj.isLazySlot(name, layout.declaring_classes[i])) continue;
                                         const vr = self.findPropertyVisibility(obj.class_name, name);
                                         // PHP omits uninitialized typed properties and
                                         // explicitly-unset properties from (array) casts
@@ -8020,7 +8058,10 @@ pub const VM = struct {
                         obj.refcount +%= 1;
                         defer self.releaseValue(.{ .object = obj });
 
-                        if (obj.lazy_initializer != .null) try self.triggerLazyInit(obj);
+                        if (obj.isLazySlot(prop_name, self.currentDefiningClass())) self.triggerLazyInit(obj) catch {
+                            if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
+                            return error.RuntimeError;
+                        };
 
                         // property hooks: dispatch to get hook if present (and not recursing).
                         // route exceptions through the local try/catch handler
@@ -8149,7 +8190,10 @@ pub const VM = struct {
                         const obj = obj_val.object;
                         obj.refcount +%= 1;
                         defer self.releaseValue(.{ .object = obj });
-                        if (obj.lazy_initializer != .null) try self.triggerLazyInit(obj);
+                        if (obj.isLazySlot(prop_name, self.currentDefiningClass())) self.triggerLazyInit(obj) catch {
+                            if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
+                            return error.RuntimeError;
+                        };
                         if (self.hasPropHook(obj.class_name, prop_name, .get) and !self.inPropHook(obj, prop_name)) {
                             const hook_result = self.callPropHook(obj, prop_name, .get, .null) catch {
                                 if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
@@ -8232,7 +8276,10 @@ pub const VM = struct {
                         obj.refcount +%= 1;
                         defer self.releaseValue(.{ .object = obj });
 
-                        if (obj.lazy_initializer != .null) try self.triggerLazyInit(obj);
+                        if (obj.isLazySlot(prop_name, self.currentDefiningClass())) self.triggerLazyInit(obj) catch {
+                            if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
+                            return error.RuntimeError;
+                        };
 
                         // the set-scope gate runs before hooks and __set, but only
                         // an asymmetric or readonly declaration can ever deny a write
@@ -8378,10 +8425,6 @@ pub const VM = struct {
 
                     // object/generator is below args on the stack
                     const obj_val = self.stack[self.sp - ac - 1];
-
-                    if (obj_val == .object and obj_val.object.lazy_initializer != .null) {
-                        try self.triggerLazyInit(obj_val.object);
-                    }
 
                     if (obj_val == .generator) {
                         const gen = obj_val.generator;
@@ -14118,7 +14161,7 @@ pub const VM = struct {
 
     fn methodByValue(self: *VM, receiver: Value, method: []const u8, pos: u8) ?bool {
         if (receiver != .object) return null;
-        if (receiver.object.lazy_initializer != .null) return null;
+        if (receiver.object.lazyInitializer() != .null) return null;
         return self.classMethodByValue(receiver.object.class_name, method, pos, "__call");
     }
 
@@ -15174,16 +15217,57 @@ pub const VM = struct {
         return null;
     }
 
+    pub fn triggerLazyProperty(self: *VM, obj: *PhpObject, name: []const u8, scope: ?[]const u8) RuntimeError!void {
+        if (obj.isLazySlot(name, scope)) try self.triggerLazyInit(obj);
+    }
+
     pub fn triggerLazyInit(self: *VM, obj: *PhpObject) RuntimeError!void {
-        if (obj.lazy_initializer == .null) return;
-        const initializer = obj.lazy_initializer;
-        obj.lazy_initializer = .null;
+        const state = obj.lazy orelse return;
+        if (state.initializer == .null or state.running) return;
+        obj.refcount +%= 1;
+        defer self.releaseValue(.{ .object = obj });
+        // Retained snapshots force COW for arrays changed by the initializer.
+        const slots = obj.slots orelse return;
+        const saved = try self.allocator.dupe(Value, slots);
+        defer self.allocator.free(saved);
+        for (saved) |v| retainValue(v);
+        defer for (saved) |v| self.releaseValue(v);
+        var props = try obj.properties.clone(self.allocator);
+        defer props.deinit(self.allocator);
+        for (props.values()) |v| retainValue(v);
+        defer for (props.values()) |v| self.releaseValue(v);
+        var unset = try obj.unset_slots.clone(self.allocator);
+        defer unset.deinit(self.allocator);
+        state.running = true;
+        defer state.running = false;
         var ctx = self.makeContext(null);
-        _ = ctx.invokeCallable(initializer, &.{.{ .object = obj }}) catch |err| {
-            obj.lazy_initializer = initializer;
+        const result = ctx.invokeCallable(state.initializer, &.{.{ .object = obj }}) catch |err| {
+            for (slots, saved, 0..) |*slot, v, i| {
+                if (self.ref_index) |ri| {
+                    if (obj.slot_layout) |layout| {
+                        if (ri.prop_rev.contains(.{ .object = obj, .class_name = "", .prop_name = layout.names[i] })) continue;
+                    }
+                }
+                self.releaseValue(slot.*);
+                retainValue(v);
+                slot.* = v;
+            }
+            for (obj.properties.values()) |v| self.releaseValue(v);
+            obj.properties.clearRetainingCapacity();
+            for (props.keys(), props.values()) |k, v| {
+                retainValue(v);
+                try obj.properties.put(self.allocator, k, v);
+            }
+            obj.unset_slots.deinit(self.allocator);
+            obj.unset_slots = unset;
+            unset = .{};
             return err;
         };
+        _ = result;
+        const initializer = state.initializer;
+        state.initializer = .null;
         self.releaseValue(initializer);
+        if (self.hasPendingReleases()) self.drainPendingDestruct();
     }
 
     pub fn propHookName(self: *VM, prop_name: []const u8, kind: enum { get, set }) ?[]const u8 {
@@ -16552,7 +16636,7 @@ pub const VM = struct {
     // property write coercion rejects null for such a type, so a null slot
     // value can only mean the property is still uninitialized. union types are
     // treated conservatively (skipped) - they might admit null
-    fn typedPropForbidsNull(_: *VM, type_str: []const u8) bool {
+    pub fn typedPropForbidsNull(_: *VM, type_str: []const u8) bool {
         if (type_str.len == 0) return false; // untyped
         if (type_str[0] == '?') return false; // ?T
         if (std.mem.indexOfScalar(u8, type_str, '|') != null) return false; // union
@@ -17746,7 +17830,7 @@ pub const VM = struct {
                 if (self.valueInGlobalsCell(.{ .object = obj })) continue;
                 if (self.debug_gc_verify) self.gcVerifyDestructing(obj);
                 obj.destructed = true;
-                if (self.hasMethod(obj.class_name, "__destruct")) {
+                if (obj.lazyInitializer() == .null and self.hasMethod(obj.class_name, "__destruct")) {
                     _ = self.callMethod(obj, "__destruct", &.{}) catch {
                         // a throwing destructor must not corrupt the drop site
                         // it was called from - swallow (revisit for fidelity)
@@ -17881,7 +17965,7 @@ pub const VM = struct {
     //    + free
     pub fn collectCycles(self: *VM) usize {
         if (self.draining_destructors) return 0;
-        if (self.cycle_candidates.items.len == 0 and self.cycle_array_candidates.items.len == 0) return 0;
+        if (self.cycle_candidates.items.len == 0 and self.cycle_array_candidates.items.len == 0 and self.capture_index.count() == 0) return 0;
         self.gc_runs += 1;
         // drain any pending normal destructs first so the candidate set
         // doesn't include objects that are about to be released anyway
@@ -17892,7 +17976,16 @@ pub const VM = struct {
         var visited_arrs = std.AutoArrayHashMapUnmanaged(*PhpArray, void){};
         defer visited_arrs.deinit(self.allocator);
 
+        defer {
+            self.cycle_closures.deinit(self.allocator);
+            self.cycle_closures = .{};
+        }
         for (self.ref_cells.items) |cell| cell.visited = false;
+
+        var closure_ranges = self.capture_index.valueIterator();
+        while (closure_ranges.next()) |range| {
+            if (range.owner) |owner| self.cycleVisitChild(.{ .string = .{ .ptr = owner.bytes.ptr, .len = owner.bytes.len, .owner = owner } }, &visited_objs, &visited_arrs);
+        }
 
         // pass 1: BFS from candidates, init scratch_rc on first visit
         for (self.cycle_candidates.items) |c| {
@@ -17902,6 +17995,14 @@ pub const VM = struct {
         for (self.cycle_array_candidates.items) |c| {
             if (c.elements_released) continue;
             self.cycleVisitArr(c, &visited_objs, &visited_arrs);
+        }
+
+        for (self.cycle_closures.keys()) |owner| {
+            const range = self.capture_index.get(owner.bytes) orelse continue;
+            for (self.captures.items[range.start..][0..range.len]) |capture| {
+                self.cycleDecChild(capture.value, &visited_objs, &visited_arrs);
+                if (capture.ref_cell) |cell| cellOf(cell).scratch -= 1;
+            }
         }
 
         // pass 2: walk every visited node, decrement child scratch_rc for
@@ -17944,6 +18045,19 @@ pub const VM = struct {
             for (self.ref_cells.items) |cell| {
                 if (cell.visited and cell.scratch != 0) {
                     if (self.cycleMarkAliveChild(cell.value, &visited_objs, &visited_arrs)) changed = true;
+                }
+            }
+            for (self.cycle_closures.keys(), self.cycle_closures.values()) |owner, scratch| {
+                if (scratch == 0) continue;
+                const range = self.capture_index.get(owner.bytes) orelse continue;
+                for (self.captures.items[range.start..][0..range.len]) |capture| {
+                    if (self.cycleMarkAliveChild(capture.value, &visited_objs, &visited_arrs)) changed = true;
+                    if (capture.ref_cell) |cell| {
+                        if (cellOf(cell).scratch == 0) {
+                            cellOf(cell).scratch = 1;
+                            changed = true;
+                        }
+                    }
                 }
             }
             var it = visited_objs.iterator();
@@ -18079,7 +18193,7 @@ pub const VM = struct {
             };
             var pit = obj.properties.iterator();
             while (pit.next()) |e| if (gcTargetMatches(t, e.value_ptr.*)) gcNote(&c, in_graph, "object {s}#{d} rc {d} scratch {d} prop {s}", .{ obj.class_name, obj.id, obj.refcount, obj.scratch_rc, e.key_ptr.* });
-            if (gcTargetMatches(t, obj.lazy_initializer)) gcNote(&c, in_graph, "object {s}#{d} lazy_initializer", .{ obj.class_name, obj.id });
+            if (gcTargetMatches(t, obj.lazyInitializer())) gcNote(&c, in_graph, "object {s}#{d} lazy_initializer", .{ obj.class_name, obj.id });
         }
         const rc: u32 = switch (t) {
             .obj => |o| o.refcount,
@@ -18349,6 +18463,7 @@ pub const VM = struct {
         if (vo.contains(obj)) return;
         vo.put(self.allocator, obj, {}) catch return;
         obj.scratch_rc = @intCast(obj.refcount);
+        self.cycleVisitChild(obj.lazyInitializer(), vo, va);
         if (obj.slots) |s| {
             for (s) |v| self.cycleVisitChild(v, vo, va);
         }
@@ -18376,6 +18491,23 @@ pub const VM = struct {
 
     fn cycleVisitChild(self: *VM, v: Value, vo: anytype, va: anytype) void {
         switch (v) {
+            .string => |string| {
+                const owner = string.owner orelse return;
+                if (!owner.closure or self.cycle_closures.contains(owner)) return;
+                const range = self.capture_index.get(owner.bytes) orelse return;
+                self.cycle_closures.put(self.allocator, owner, @intCast(owner.refcount)) catch return;
+                for (self.captures.items[range.start..][0..range.len]) |capture| {
+                    self.cycleVisitChild(capture.value, vo, va);
+                    if (capture.ref_cell) |value| {
+                        const cell = cellOf(value);
+                        if (!cell.visited) {
+                            cell.visited = true;
+                            cell.scratch = @intCast(cell.binders);
+                            self.cycleVisitChild(cell.value, vo, va);
+                        }
+                    }
+                }
+            },
             .object => |o| self.cycleVisit(o, vo, va),
             .array => |a| self.cycleVisitArr(a, vo, va),
             else => {},
@@ -18383,6 +18515,7 @@ pub const VM = struct {
     }
 
     fn cycleDecrementChildren(self: *VM, obj: *PhpObject, vo: anytype, va: anytype) void {
+        self.cycleDecChild(obj.lazyInitializer(), vo, va);
         if (obj.slots) |s| {
             for (s) |v| self.cycleDecChild(v, vo, va);
         }
@@ -18406,8 +18539,11 @@ pub const VM = struct {
         }
     }
 
-    fn cycleDecChild(_: *VM, v: Value, vo: anytype, va: anytype) void {
+    fn cycleDecChild(self: *VM, v: Value, vo: anytype, va: anytype) void {
         switch (v) {
+            .string => |string| if (string.owner) |owner| {
+                if (self.cycle_closures.getPtr(owner)) |scratch| scratch.* -= 1;
+            },
             .object => |o| if (vo.contains(o)) {
                 o.scratch_rc -= 1;
             },
@@ -18419,7 +18555,7 @@ pub const VM = struct {
     }
 
     fn cycleMarkAlive(self: *VM, obj: *PhpObject, vo: anytype, va: anytype) bool {
-        var changed = false;
+        var changed = self.cycleMarkAliveChild(obj.lazyInitializer(), vo, va);
         if (obj.slots) |s| {
             for (s) |v| if (self.cycleMarkAliveChild(v, vo, va)) {
                 changed = true;
@@ -18448,8 +18584,16 @@ pub const VM = struct {
         return changed;
     }
 
-    fn cycleMarkAliveChild(_: *VM, v: Value, vo: anytype, va: anytype) bool {
+    fn cycleMarkAliveChild(self: *VM, v: Value, vo: anytype, va: anytype) bool {
         switch (v) {
+            .string => |string| if (string.owner) |owner| {
+                if (self.cycle_closures.getPtr(owner)) |scratch| {
+                    if (scratch.* == 0) {
+                        scratch.* = 1;
+                        return true;
+                    }
+                }
+            },
             .object => |o| {
                 if (vo.contains(o) and o.scratch_rc == 0) {
                     o.scratch_rc = 1;
@@ -18609,9 +18753,9 @@ pub const VM = struct {
                 ri.removeTargetAllOwners(self.allocator, binding.cell, binding.target);
             }
         };
-        if (obj.lazy_initializer != .null) {
-            self.releaseValue(obj.lazy_initializer);
-            obj.lazy_initializer = .null;
+        if (obj.lazyInitializer() != .null) {
+            self.releaseValue(obj.lazyInitializer());
+            obj.lazy.?.initializer = .null;
         }
         if (obj.slots) |s| {
             for (s) |*v| {

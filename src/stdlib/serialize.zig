@@ -324,6 +324,9 @@ fn serializeValue(ctx: *NativeContext, buf: *std.ArrayListUnmanaged(u8), sctx: *
             try buf.append(a, '}');
         },
         .object => |obj| {
+            if (obj.lazy) |state| {
+                if (!state.skip_serialize) try ctx.vm.triggerLazyInit(obj);
+            }
             // emit a back-reference if we've already serialized this object
             if (sctx.objects.get(obj)) |existing_slot| {
                 // rewind the slot counter: this r: entry occupies the slot we already consumed
@@ -457,7 +460,13 @@ fn serializeValue(ctx: *NativeContext, buf: *std.ArrayListUnmanaged(u8), sctx: *
             if (sleep_props) |sp| {
                 total_count = @intCast(sp.entries.items.len);
             } else {
-                const slot_count: u32 = if (obj.slot_layout) |layout| @intCast(layout.names.len) else 0;
+                var slot_count: u32 = 0;
+                if (obj.slot_layout) |layout| for (layout.names, 0..) |name, i| {
+                    if (obj.isLazySlot(name, layout.declaring_classes[i]) or obj.isUnset(name)) continue;
+                    const vr = ctx.vm.findPropertyVisibility(layout.declaring_classes[i], name);
+                    if (obj.slots.?[i] == .null and ctx.vm.typedPropForbidsNull(vr.type_str)) continue;
+                    slot_count += 1;
+                };
                 total_count = slot_count + @as(u32, @intCast(obj.properties.count()));
             }
             const cl = std.fmt.bufPrint(&tmp, "{d}", .{total_count}) catch return;
@@ -480,6 +489,9 @@ fn serializeValue(ctx: *NativeContext, buf: *std.ArrayListUnmanaged(u8), sctx: *
             if (obj.slot_layout) |layout| {
                 if (obj.slots) |slots| {
                     for (layout.names, 0..) |name, i| {
+                        if (obj.isLazySlot(name, layout.declaring_classes[i]) or obj.isUnset(name)) continue;
+                        const vr = ctx.vm.findPropertyVisibility(layout.declaring_classes[i], name);
+                        if (slots[i] == .null and ctx.vm.typedPropForbidsNull(vr.type_str)) continue;
                         const vis: ClassDef.Visibility = if (class_def) |c| findPropertyVisibility(c, name) else .public;
                         try emitObjectPropertyKey(buf, a, obj.class_name, name, vis);
                         try serializeValue(ctx, buf, sctx, slots[i]);

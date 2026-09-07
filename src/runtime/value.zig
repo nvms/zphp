@@ -751,7 +751,8 @@ pub const PhpObject = struct {
     // a dynamic property and stops re-entry
     magic_set_active: std.StringHashMapUnmanaged(void) = .{},
     magic_get_active: std.StringHashMapUnmanaged(void) = .{},
-    lazy_initializer: Value = .null,
+    lazy: ?*LazyState = null,
+
     id: u32 = 0,
     // object refcounting (Stage 1). counts live references to this object,
     // including operand-stack slots. born at 0: the `new` opcode pushes the
@@ -771,6 +772,24 @@ pub const PhpObject = struct {
     // release path must detach those weak mirrors before the address is reused
     ref_mirrored: bool = false,
 
+    pub const LazyState = struct {
+        initializer: Value,
+        pending: []bool,
+        skip_serialize: bool = false,
+        running: bool = false,
+    };
+
+    pub fn lazyInitializer(self: *const PhpObject) Value {
+        const state = self.lazy orelse return .null;
+        return state.initializer;
+    }
+
+    pub fn isLazySlot(self: *const PhpObject, name: []const u8, scope: ?[]const u8) bool {
+        const state = self.lazy orelse return false;
+        if (state.running or state.initializer == .null) return false;
+        const index = self.getSlotIndexForScope(name, scope) orelse return false;
+        return state.pending[index];
+    }
     pub const SlotLayout = struct {
         names: []const []const u8,
         // mutable: set_prop_default patches an instance-property default after
@@ -786,6 +805,10 @@ pub const PhpObject = struct {
     };
 
     pub fn deinit(self: *PhpObject, allocator: std.mem.Allocator) void {
+        if (self.lazy) |state| {
+            allocator.free(state.pending);
+            allocator.destroy(state);
+        }
         self.properties.deinit(allocator);
         self.unset_slots.deinit(allocator);
         self.magic_set_active.deinit(allocator);

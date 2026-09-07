@@ -321,6 +321,7 @@ fn encodeValue(buf: *std.ArrayListUnmanaged(u8), a: std.mem.Allocator, val: Valu
             }
         },
         .object => |obj| {
+            if (vm) |runtime| try runtime.triggerLazyInit(obj);
             // PHP treats resources (fopen handles, curl handles, etc.) as
             // unsupported in json_encode: returns false + sets last_error to
             // 'Type is not supported' (and JsonException with THROW_ON_ERROR).

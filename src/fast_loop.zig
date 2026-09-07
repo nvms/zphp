@@ -747,7 +747,7 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                                 const gp_v = s[gp_entry.slot_index];
                                 // a null slot may be an uninitialized typed property
                                 // - bail so runLoop runs the type check
-                                if (gp_v != .null) {
+                                if (gp_v != .null and gp_obj.lazy == null) {
                                     // the receiver slot is replaced by the property
                                     // value: retain the new occupant, release the
                                     // receiver it overwrites (Stage 1)

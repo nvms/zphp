@@ -4,17 +4,27 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ZPHP="${ZPHP:-$SCRIPT_DIR/../../zig-out/bin/zphp}"
 [ -f "$ZPHP" ] || { echo "zphp not found at $ZPHP"; exit 1; }
 [ -d "$SCRIPT_DIR/app/vendor" ] || { echo "run tests/doctrine/setup first"; exit 1; }
+bounded() {
+    python3 - "$@" <<'PY'
+import subprocess
+import sys
+
+try:
+    result = subprocess.run(sys.argv[1:], timeout=60)
+except subprocess.TimeoutExpired:
+    print('Doctrine harness timed out', file=sys.stderr)
+    sys.exit(124)
+sys.exit(result.returncode if result.returncode >= 0 else 128 - result.returncode)
+PY
+}
 passed=0
 failed=0
 errors=""
 for f in "$SCRIPT_DIR"/harness/test-*.php; do
     name="$(basename "$f" .php)"
-    php_out="$(php -d 'error_reporting=E_ALL & ~E_DEPRECATED' "$f" 2>&1)" && php_exit=0 || php_exit=$?
-    TIMEOUT_CMD=""
-    command -v timeout >/dev/null && TIMEOUT_CMD="timeout 60"
-    command -v gtimeout >/dev/null && TIMEOUT_CMD="gtimeout 60"
-    zphp_out="$($TIMEOUT_CMD "$ZPHP" run "$f" 2>&1)" && zphp_exit=0 || zphp_exit=$?
-    if [ "$php_exit" -eq "$zphp_exit" ] && [ "$php_out" = "$zphp_out" ]; then
+    php_out="$(bounded php -d 'error_reporting=E_ALL & ~E_DEPRECATED' "$f" 2>&1)" && php_exit=0 || php_exit=$?
+    zphp_out="$(bounded "$ZPHP" run "$f" 2>&1)" && zphp_exit=0 || zphp_exit=$?
+    if [ "$php_exit" -eq 0 ] && [ "$zphp_exit" -eq 0 ] && [ "$php_out" = "$zphp_out" ]; then
         passed=$((passed + 1)); echo "  pass  $name"
     else
         failed=$((failed + 1)); echo "  FAIL  $name (php=$php_exit zphp=$zphp_exit)"

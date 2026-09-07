@@ -124,6 +124,8 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try rc_def.methods.put(a, "getProperty", .{ .name = "getProperty", .arity = 1 });
     try rc_def.methods.put(a, "hasProperty", .{ .name = "hasProperty", .arity = 1 });
     try rc_def.methods.put(a, "newInstanceWithoutConstructor", .{ .name = "newInstanceWithoutConstructor", .arity = 0 });
+    try rc_def.static_props.put(a, "SKIP_INITIALIZATION_ON_SERIALIZE", .{ .int = 8 });
+    try rc_def.constant_names.put(a, "SKIP_INITIALIZATION_ON_SERIALIZE", {});
     try rc_def.methods.put(a, "newLazyGhost", .{ .name = "newLazyGhost", .arity = 1 });
     try rc_def.methods.put(a, "newLazyProxy", .{ .name = "newLazyProxy", .arity = 1 });
     try rc_def.methods.put(a, "initializeLazyObject", .{ .name = "initializeLazyObject", .arity = 1 });
@@ -570,7 +572,7 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try vm.native_fns.put(a, "ReflectionProperty::getRawValue", rpGetValue);
     try vm.native_fns.put(a, "ReflectionProperty::setValue", rpSetValue);
     try vm.native_fns.put(a, "ReflectionProperty::setRawValue", rpSetValue);
-    try vm.native_fns.put(a, "ReflectionProperty::setRawValueWithoutLazyInitialization", rpSetValue);
+    try vm.native_fns.put(a, "ReflectionProperty::setRawValueWithoutLazyInitialization", rpSetWithoutLazy);
     try vm.native_fns.put(a, "ReflectionProperty::getName", rpropGetName);
     try vm.native_fns.put(a, "ReflectionProperty::getType", rpropGetType);
     try vm.native_fns.put(a, "ReflectionProperty::isPublic", rpropIsPublic);
@@ -584,8 +586,8 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try vm.native_fns.put(a, "ReflectionProperty::hasHook", rpropHasHook);
     try vm.native_fns.put(a, "ReflectionProperty::getHooks", rpropGetHooks);
     try vm.native_fns.put(a, "ReflectionProperty::getHook", rpropGetHook);
-    try vm.native_fns.put(a, "ReflectionProperty::isLazy", reflectionFalse);
-    try vm.native_fns.put(a, "ReflectionProperty::skipLazyInitialization", reflectionNoop);
+    try vm.native_fns.put(a, "ReflectionProperty::isLazy", rpIsLazy);
+    try vm.native_fns.put(a, "ReflectionProperty::skipLazyInitialization", rpSkipLazy);
     try vm.native_fns.put(a, "ReflectionProperty::getDefaultValue", rpropGetDefaultValue);
     try vm.native_fns.put(a, "ReflectionProperty::hasDefaultValue", rpropHasDefaultValue);
     try vm.native_fns.put(a, "ReflectionProperty::isInitialized", rpropIsInitialized);
@@ -1717,9 +1719,20 @@ fn rcNewLazyGhost(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     const obj = try ctx.vm.allocator.create(PhpObject);
     // the lazy object owns its initializer until it runs or is cleared
     VM.retainValue(args[0]);
-    obj.* = .{ .class_name = class_name, .lazy_initializer = args[0] };
+    obj.* = .{ .class_name = class_name };
     try ctx.vm.objects.append(ctx.vm.allocator, obj);
     try ctx.vm.initObjectProperties(obj, class_name);
+    const state = try ctx.allocator.create(PhpObject.LazyState);
+    const count = if (obj.slots) |slots| slots.len else 0;
+    state.* = .{ .initializer = args[0], .pending = try ctx.allocator.alloc(bool, count), .skip_serialize = args.len > 1 and args[1] == .int and (args[1].int & 8) != 0 };
+    @memset(state.pending, true);
+    obj.lazy = state;
+    ctx.vm.next_object_id += 1;
+    obj.id = ctx.vm.next_object_id;
+    if (count == 0) {
+        ctx.vm.releaseValue(state.initializer);
+        state.initializer = .null;
+    }
     return .{ .object = obj };
 }
 
@@ -1732,13 +1745,19 @@ fn rcInitializeLazyObject(ctx: *NativeContext, args: []const Value) RuntimeError
 
 fn rcIsUninitializedLazyObject(_: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len < 1 or args[0] != .object) return .{ .bool = false };
-    return .{ .bool = args[0].object.lazy_initializer != .null };
+    const state = args[0].object.lazy orelse return .{ .bool = false };
+    return .{ .bool = state.initializer != .null and !state.running };
 }
 
 fn rcMarkLazyObjectAsInitialized(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len < 1 or args[0] != .object) return .null;
-    ctx.vm.releaseValue(args[0].object.lazy_initializer);
-    args[0].object.lazy_initializer = .null;
+    if (args[0].object.lazy) |state| {
+        if (!state.running) {
+            const initializer = state.initializer;
+            state.initializer = .null;
+            ctx.vm.releaseValue(initializer);
+        }
+    }
     return .{ .object = args[0].object };
 }
 
@@ -3501,18 +3520,52 @@ fn rpGetValue(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
         const dc = this.get("_declaring_class");
         if (dc == .string and !ctx.vm.isInstanceOf(args[0].object.class_name, dc.string.bytes()))
             return throwReflection(ctx, "Given object is not an instance of the class this property was declared in");
+        try ctx.vm.triggerLazyProperty(args[0].object, prop_name, if (dc == .string) dc.string.bytes() else null);
         return args[0].object.getForScope(prop_name, if (dc == .string) dc.string.bytes() else null);
     }
     return .null;
 }
 
 fn rpSetValue(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    return rpWrite(ctx, args, false);
+}
+fn rpSetWithoutLazy(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    return rpWrite(ctx, args, true);
+}
+fn rpSkipLazy(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    const this = getThis(ctx) orelse return .null;
+    if (args.len == 0 or args[0] != .object) return .null;
+    const name = this.get("name");
+    const dc = this.get("_declaring_class");
+    if (name != .string) return .null;
+    const obj = args[0].object;
+    if (obj.lazy) |state| {
+        if (state.running or state.initializer == .null) return .null;
+        if (obj.getSlotIndexForScope(name.string.bytes(), if (dc == .string) dc.string.bytes() else null)) |i| state.pending[i] = false;
+        for (state.pending) |pending| {
+            if (pending) return .null;
+        }
+        const initializer = state.initializer;
+        state.initializer = .null;
+        ctx.vm.releaseValue(initializer);
+    }
+    return .null;
+}
+fn rpIsLazy(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+    const this = getThis(ctx) orelse return .{ .bool = false };
+    if (args.len == 0 or args[0] != .object) return .{ .bool = false };
+    const name = this.get("name");
+    const dc = this.get("_declaring_class");
+    return .{ .bool = name == .string and args[0].object.isLazySlot(name.string.bytes(), if (dc == .string) dc.string.bytes() else null) };
+}
+fn rpWrite(ctx: *NativeContext, args: []const Value, skip: bool) RuntimeError!Value {
     const this = getThis(ctx) orelse return .null;
     const prop_name = if (this.get("name") == .string) this.get("name").string.bytes() else return .null;
     if (args.len >= 2 and args[0] == .object) {
         const target = args[0].object;
         const dc = this.get("_declaring_class");
         const scope = if (dc == .string) dc.string.bytes() else target.class_name;
+        if (!skip) try ctx.vm.triggerLazyProperty(target, prop_name, scope);
         const vr = ctx.vm.findPropertyVisibility(scope, prop_name);
         if (vr.is_readonly and target.getForScope(prop_name, scope) != .null) {
             const msg = try std.fmt.allocPrint(ctx.allocator, "Cannot modify readonly property {s}::${s}", .{ vr.defining_class, prop_name });
@@ -3523,6 +3576,7 @@ fn rpSetValue(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
         var value = args[1];
         if (try ctx.vm.checkPropertyType(&value, vr.type_str, scope, prop_name)) return error.RuntimeError;
         try target.setForScope(ctx.allocator, prop_name, value, scope);
+        if (skip) _ = try rpSkipLazy(ctx, args);
     }
     return .null;
 }
@@ -3702,7 +3756,11 @@ fn rpropIsInitialized(ctx: *NativeContext, args: []const Value) RuntimeError!Val
     const this = getThis(ctx) orelse return .{ .bool = false };
     const prop_name = if (this.get("name") == .string) this.get("name").string.bytes() else return .{ .bool = false };
     if (args.len > 0 and args[0] == .object) {
-        return .{ .bool = args[0].object.get(prop_name) != .null };
+        const dc = this.get("_declaring_class");
+        const scope = if (dc == .string) dc.string.bytes() else args[0].object.class_name;
+        try ctx.vm.triggerLazyProperty(args[0].object, prop_name, scope);
+        const vr = ctx.vm.findPropertyVisibility(scope, prop_name);
+        return .{ .bool = !args[0].object.isUnset(prop_name) and (args[0].object.getForScope(prop_name, scope) != .null or vr.type_str.len == 0 or (findPropertyDef(ctx.vm, scope, prop_name) orelse return .{ .bool = false }).prop.has_default) };
     }
     return .{ .bool = true };
 }
