@@ -14,7 +14,32 @@ env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
+  changes:
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    permissions:
+      contents: read
+      actions: read
+      pull-requests: read
+    outputs:
+      run-tests: ${{ steps.check.outputs.run-tests }}
+    steps:
+      - uses: actions/checkout@v6
+      - run: python3 .github/scripts/test_ci_reuse.py
+      - id: check
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 .github/scripts/ci_reuse.py
+      - uses: actions/upload-artifact@v4
+        if: github.event_name == 'pull_request'
+        with:
+          name: tested-source
+          path: tested-source.json
+          retention-days: 30
+
   test:
+    needs: changes
+    if: needs.changes.outputs.run-tests == 'true'
     strategy:
       matrix:
         # macos pinned to 15: macos-latest resolved to macOS 26 in 2026-07 and
@@ -43,6 +68,8 @@ jobs:
       - run: zig build
 
   serve:
+    needs: changes
+    if: needs.changes.outputs.run-tests == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -62,6 +89,8 @@ jobs:
       - run: timeout 120 ./tests/serve_stress
 
   test-runner:
+    needs: changes
+    if: needs.changes.outputs.run-tests == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -81,6 +110,8 @@ jobs:
       - run: ./tests/dotenv_test
 
   packages:
+    needs: changes
+    if: needs.changes.outputs.run-tests == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -99,6 +130,8 @@ jobs:
       - run: ./tests/pkg_test
 
   fmt:
+    needs: changes
+    if: needs.changes.outputs.run-tests == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -117,6 +150,8 @@ jobs:
       - run: ./tests/fmt_test
 
   php-compat:
+    needs: changes
+    if: needs.changes.outputs.run-tests == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -141,6 +176,8 @@ jobs:
       - run: ./tests/run
 
   examples:
+    needs: changes
+    if: needs.changes.outputs.run-tests == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -162,6 +199,8 @@ jobs:
       - run: ./tests/examples_test
 
   laravel:
+    needs: changes
+    if: needs.changes.outputs.run-tests == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -185,6 +224,8 @@ jobs:
       - run: ./tests/laravel/run
 
   phpunit:
+    needs: changes
+    if: needs.changes.outputs.run-tests == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -209,6 +250,8 @@ jobs:
       - run: ./tests/phpunit/run
 
   composer:
+    needs: changes
+    if: needs.changes.outputs.run-tests == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -233,6 +276,8 @@ jobs:
       - run: ./tests/composer/run
 
   doctrine:
+    needs: changes
+    if: needs.changes.outputs.run-tests == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -257,6 +302,8 @@ jobs:
       - run: ./tests/doctrine/run
 
   symfony:
+    needs: changes
+    if: needs.changes.outputs.run-tests == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -281,6 +328,8 @@ jobs:
       - run: ./tests/symfony/serve_run
 
   wordpress:
+    needs: changes
+    if: needs.changes.outputs.run-tests == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -304,6 +353,8 @@ jobs:
       - run: ./tests/wordpress/run
 
   compile:
+    needs: changes
+    if: needs.changes.outputs.run-tests == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -328,6 +379,8 @@ jobs:
         run: ./tests/compile_test
 
   pdo:
+    needs: changes
+    if: needs.changes.outputs.run-tests == 'true'
     runs-on: ubuntu-latest
     services:
       mysql:
