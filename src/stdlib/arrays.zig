@@ -906,6 +906,31 @@ fn array_splice(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
             VM.retainValue(value.*);
         }
         break :blk values;
+    } else if (args.len >= 4 and args[3] == .object) blk: {
+        const object = args[3].object.storage();
+        var values: std.ArrayListUnmanaged(Value) = .{};
+        errdefer {
+            for (values.items) |value| ctx.vm.releaseValue(value);
+            values.deinit(ctx.allocator);
+        }
+        try values.ensureTotalCapacity(ctx.allocator, (if (object.slots) |slots| slots.len else 0) + object.properties.count());
+        if (object.slots) |slots| {
+            if (object.slot_layout) |layout| {
+                for (slots, 0..) |value, i| {
+                    const name = layout.names[i];
+                    if (object.isLazySlot(name, layout.declaring_classes[i]) or object.isUnset(name)) continue;
+                    const property = ctx.vm.findPropertyVisibility(layout.declaring_classes[i], name);
+                    if (value == .null and ctx.vm.typedPropForbidsNull(property.type_str)) continue;
+                    VM.retainValue(value);
+                    values.appendAssumeCapacity(value);
+                }
+            }
+        }
+        for (object.properties.values()) |value| {
+            VM.retainValue(value);
+            values.appendAssumeCapacity(value);
+        }
+        break :blk try values.toOwnedSlice(ctx.allocator);
     } else blk: {
         const count: usize = if (args.len >= 4 and args[3] != .null) 1 else 0;
         const values = try ctx.allocator.alloc(Value, count);

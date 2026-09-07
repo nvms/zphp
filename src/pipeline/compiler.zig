@@ -1384,45 +1384,11 @@ pub const Compiler = struct {
     // returns true if it handled the return (caller does not need to emit
     // return_val), false to fall back to the regular value-return path
     pub fn tryCompileRefReturn(self: *Compiler, expr_idx: u32) Error!bool {
-        const expr = self.ast.nodes[expr_idx];
-        const ret_name = "$__ret_ref";
-        const ret_name_idx = try self.addConstant(.{ .string = Value.String.borrowed(ret_name) });
-        if (expr.tag == .array_access) {
-            try @import("compiler_expr.zig").compileVivifyChain(self, expr.data.lhs); // writable dimension base
-            try self.compileNode(expr.data.rhs); // key
-            try self.emitOp(.make_var_array_elem_ref);
-            try self.emitU16(ret_name_idx);
-            try self.emitOp(.return_ref);
-            try self.emitU16(ret_name_idx);
-            return true;
-        }
-        if (expr.tag == .property_access) {
-            try self.compileNode(expr.data.lhs); // object
-            if (self.isDynamicProp(expr)) {
-                try self.compileNode(expr.data.rhs);
-                try self.emitOp(.make_var_prop_ref_dyn);
-                try self.emitU16(ret_name_idx);
-            } else {
-                const prop_idx = try self.addConstant(.{ .string = Value.String.borrowed(self.propName(expr)) });
-                try self.emitOp(.make_var_prop_ref);
-                try self.emitU16(ret_name_idx);
-                try self.emitU16(prop_idx);
-            }
-            try self.emitOp(.return_ref);
-            try self.emitU16(ret_name_idx);
-            return true;
-        }
-        if (expr.tag == .variable) {
-            const src_name = self.ast.tokenSlice(expr.main_token);
-            const src_idx = try self.addConstant(.{ .string = Value.String.borrowed(src_name) });
-            try self.emitOp(.make_var_ref);
-            try self.emitU16(ret_name_idx);
-            try self.emitU16(src_idx);
-            try self.emitOp(.return_ref);
-            try self.emitU16(ret_name_idx);
-            return true;
-        }
-        return false;
+        const name = try self.addConstant(.{ .string = Value.String.borrowed("$__ret_ref") });
+        if (!try compiler_expr.compileReferenceBinding(self, expr_idx, name)) return false;
+        try self.emitOp(.return_ref);
+        try self.emitU16(name);
+        return true;
     }
 
     // superinstruction: $local_dst op= $local_src as a statement (no stack effect)

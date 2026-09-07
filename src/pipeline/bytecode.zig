@@ -318,10 +318,16 @@ pub const OpCode = enum(u8) {
     arg_array_push,
     check_prop_dimension, // peek object + property name; guard indirect storage mutation
 
+    // Explicit reference sources use the same owning provenance as arguments.
+    reference_source, // u16 temporary binding name; move cell to a pushed value
+    array_set_elem_ref, // [array, key, source] -> [array], bind entry to source cell
+    array_push_ref, // [array, source] -> [array], append source cell
+
     pub fn width(self: OpCode) usize {
         return switch (self) {
             .arg_variable => 6,
             .arg_guard_prop, .arg_guard_prop_dynamic, .arg_guard_dim => 4,
+            .reference_source,
             .constant,
             .get_var,
             .set_var,
@@ -398,6 +404,7 @@ pub const OpCode = enum(u8) {
     pub fn stackEffect(self: OpCode) i8 {
         return switch (self) {
             // push a value
+            .reference_source,
             .constant,
             .op_null,
             .op_true,
@@ -463,9 +470,10 @@ pub const OpCode = enum(u8) {
             // scanCallerArgSources' backward arg-boundary walk whenever an
             // array literal appeared as a call argument
             .array_push,
+            .array_push_ref,
             .array_spread,
             => -1,
-            .array_set_elem => -2,
+            .array_set_elem, .array_set_elem_ref => -2,
             // unary ops: pop 1, push 1
             .negate,
             .bit_not,

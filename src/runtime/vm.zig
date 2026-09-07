@@ -4210,6 +4210,38 @@ pub const VM = struct {
                     }
                     self.push(val);
                 },
+                .reference_source => {
+                    const idx = self.readU16();
+                    const name = self.currentChunk().constants.items[idx].string.bytes();
+                    const frame = self.currentFrame();
+                    const cell = try self.getOrCreateVarCell(frame, name);
+                    self.push(cell.*);
+                    self.setArgSource(self.sp - 1, .{ .cell = .{ .value = cell } });
+                    self.unbindRefSlot(&frame.ref_slots, name);
+                },
+                .array_set_elem_ref, .array_push_ref => {
+                    var source = self.retainArgSource(self.ic.?.arg_stack[self.sp - 1]);
+                    defer self.releaseArgSource(&source);
+                    _ = self.pop();
+                    const key = if (op == .array_set_elem_ref) self.pop() else Value.null;
+                    const array = self.peek().array;
+                    if (key == .array or key == .object) {
+                        if (try self.throwOffsetKeyType(key, .access)) continue;
+                        return error.RuntimeError;
+                    }
+                    const ak = if (op == .array_push_ref)
+                        PhpArray.Key{ .int = if (array.has_int_keys) array.next_int_key else 0 }
+                    else
+                        Value.toArrayKey(key);
+                    if (source != .cell) return error.RuntimeError;
+                    try self.checkArgCell(source.cell.denial);
+                    const cell = source.cell.value;
+                    self.detachArrayEntryRef(array, ak);
+                    try self.arraySetOwned(array, ak, cell.*);
+                    self.setEntryRef(array.getPtr(ak).?, cell);
+                    try self.regRefArray(try self.persistentRefOwner(), cell, array, ak);
+                    self.array_ref_active = true;
+                },
                 .array_push, .arg_array_push => {
                     var source = if (op == .arg_array_push) self.retainArgSource(self.ic.?.arg_stack[self.sp - 1]) else RefSource.none;
                     defer self.releaseArgSource(&source);
@@ -4247,6 +4279,9 @@ pub const VM = struct {
                         }
                         const norm_key = Value.toArrayKey(key);
                         if (op == .arg_array_set) try self.recordArgArraySource(arr_val.array, norm_key, source);
+                        // A duplicate literal key replaces storage, not the value
+                        // of the reference previously installed at that key.
+                        if (op == .array_set_elem) self.detachArrayEntryRef(arr_val.array, norm_key);
                         if (!(self.array_ref_active and try self.writeArrayElemRef(arr_val.array, norm_key, val))) {
                             try self.arraySetOwned(arr_val.array, norm_key, val);
                         }
@@ -5644,6 +5679,7 @@ pub const VM = struct {
                     const src_name = self.currentChunk().constants.items[src_idx].string.bytes();
                     const frame = self.currentFrame();
                     const cell = try self.getOrCreateVarCell(frame, src_name);
+                    if (cell.* == .array) _ = try self.separateReferencedArray(frame, src_name, cell, cell.array);
                     if (isSuperglobal(dst_name)) {
                         try self.bindRefSlot(&self.globals_cells, dst_name, cell);
                         try self.putRequestVar(dst_name, cell.*);
@@ -5816,7 +5852,12 @@ pub const VM = struct {
                                 }
                             }
                             const fresh = try self.newRefCell();
-                            self.setCell(fresh, obj_ptr.get(prop_name));
+                            var value = obj_ptr.get(prop_name);
+                            if (value == .array and value.array.refcount > 1) {
+                                value = .{ .array = try self.shallowCloneCow(value.array) };
+                                try self.objectSetOwned(obj_ptr, prop_name, value);
+                            }
+                            self.setCell(fresh, value);
                             break :blk fresh;
                         };
 
@@ -5895,7 +5936,12 @@ pub const VM = struct {
                                 }
                             }
                             const fresh = try self.newRefCell();
-                            self.setCell(fresh, obj_ptr.get(prop_owned));
+                            var value = obj_ptr.get(prop_owned);
+                            if (value == .array and value.array.refcount > 1) {
+                                value = .{ .array = try self.shallowCloneCow(value.array) };
+                                try self.objectSetOwned(obj_ptr, prop_owned, value);
+                            }
+                            self.setCell(fresh, value);
                             break :blk fresh;
                         };
 
@@ -5918,7 +5964,7 @@ pub const VM = struct {
                             ri.releaseOwner(self.allocator, self.last_return_ref_owner);
                             self.last_return_ref_owner = 0;
                         }
-                        try frame.vars.put(self.allocator, dst_name, cell.*);
+                        if (dst_name.len == 0 or dst_name[0] != 0) try frame.vars.put(self.allocator, dst_name, cell.*);
                         if (frame.func) |func| {
                             for (func.slot_names, 0..) |sn, si| {
                                 if (std.mem.eql(u8, sn, dst_name)) {
@@ -5931,7 +5977,11 @@ pub const VM = struct {
                     } else {
                         // callee didn't return a ref - degrade to value copy
                         const val = self.peek();
-                        try frame.vars.put(self.allocator, dst_name, val);
+                        if (dst_name.len > 0 and dst_name[0] == 0) {
+                            const cell = try self.newRefCell();
+                            self.setCell(cell, val);
+                            try self.bindRefSlot(&frame.ref_slots, dst_name, cell);
+                        } else try frame.vars.put(self.allocator, dst_name, val);
                     }
                     // statement-level trailing .pop expects exactly one
                     // value on the stack from the assignment expression
@@ -5951,8 +6001,33 @@ pub const VM = struct {
                     const prop_name = self.currentChunk().constants.items[prop_idx].string.bytes();
                     const frame = self.currentFrame();
                     self.unbindRefSlot(&frame.ref_slots, dst_name);
-                    const cell = try self.newRefCell();
-                    self.setCell(cell, self.getStaticProp(class_name, prop_name) orelse .null);
+                    const cell = blk: {
+                        if (self.ref_index) |ri| {
+                            if (ri.prop_rev.get(.{ .object = null, .class_name = class_name, .prop_name = prop_name })) |cells| {
+                                if (cells.items.len > 0) {
+                                    const existing = cells.items[0];
+                                    if (existing.* == .array and existing.array.refcount > 1) {
+                                        const separated: Value = .{ .array = try self.shallowCloneCow(existing.array) };
+                                        self.setCell(existing, separated);
+                                        try self.propagateCellWrite(existing, separated);
+                                    }
+                                    break :blk existing;
+                                }
+                            }
+                        }
+                        var value = self.getStaticProp(class_name, prop_name) orelse .null;
+                        if (value == .array and value.array.refcount > 1) {
+                            value = .{ .array = try self.shallowCloneCow(value.array) };
+                            if (self.getStaticPropPtr(class_name, prop_name)) |slot| {
+                                VM.retainValue(value);
+                                self.releaseValue(slot.*);
+                                slot.* = value;
+                            }
+                        }
+                        const fresh = try self.newRefCell();
+                        self.setCell(fresh, value);
+                        break :blk fresh;
+                    };
 
                     try self.bindRefSlot(&frame.ref_slots, dst_name, cell);
                     try self.regRefStatic(try self.ensureRefOwner(frame), cell, class_name, prop_name);
@@ -18947,6 +19022,20 @@ pub const VM = struct {
     // both refcounted (arrays: refcounting Stage 2)
     // container stores release what they replace through the release hook;
     // these remain the named VM-aware store entry points
+    fn detachArrayEntryRef(self: *VM, array: *PhpArray, key: PhpArray.Key) void {
+        const entry = array.getPtr(key) orelse return;
+        const cell = entry.ref orelse return;
+        if (self.ref_index) |ri| ri.removeTargetAllOwners(self.allocator, cell, .{ .array = .{ .array = array, .key = entry.key } });
+        var i: usize = 0;
+        while (i < self.array_ref_bindings.items.len) {
+            const binding = self.array_ref_bindings.items[i];
+            if (binding.array == array and binding.key.eql(entry.key)) {
+                _ = self.array_ref_bindings.swapRemove(i);
+            } else i += 1;
+        }
+        self.setEntryRef(entry, null);
+    }
+
     pub fn arraySetOwned(self: *VM, array: *PhpArray, key: PhpArray.Key, value: Value) !void {
         try array.set(self.allocator, key, value);
         if (array == self.globals_array and key == .string) {

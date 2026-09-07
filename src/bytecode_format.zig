@@ -13,8 +13,9 @@ const MAGIC = "ZPHPC\x00";
 // v10 adds property-hook metadata and interface_decl property operands.
 // v15 renumbers opcodes and adds the argument guard operands.
 // Older chunks cannot be decoded by the current VM.
+// v17 adds owning reference-source and array-literal reference opcodes.
 // v16 instantiates capture-free class-scoped static closures.
-pub const FORMAT_VERSION: u16 = 16;
+pub const FORMAT_VERSION: u16 = 17;
 
 // tag bytes for serialized values
 const TAG_NULL: u8 = 0;
