@@ -127,7 +127,8 @@ fn array_shift(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len == 0 or args[0] != .array) return .null;
     const arr = args[0].array;
     if (arr.entries.items.len == 0) return .null;
-    const first = arr.entries.orderedRemove(0);
+    const first = arr.entries.items[0];
+    ctx.vm.arrayRemoveOwned(arr, first.key);
     // re-index numeric keys starting from 0
     var next_int: i64 = 0;
     for (arr.entries.items) |*entry| {
@@ -139,9 +140,8 @@ fn array_shift(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
             .string => {},
         }
     }
-    try arr.rebuildStringIndex(ctx.allocator);
-    // drop the array's retain on the shifted element (Stage 2)
-    ctx.vm.releaseValue(first.value);
+    arr.rebuildStringIndexAssumeCapacity();
+
     return first.value;
 }
 
@@ -583,6 +583,14 @@ pub const SortField = enum { value, key };
 
 pub fn mergeSort(comptime T: type, items: []T, ctx: *NativeContext, callback: Value, comptime field: SortField) RuntimeError!void {
     if (items.len <= 1) return;
+    const staged = try ctx.allocator.dupe(T, items);
+    defer ctx.allocator.free(staged);
+    try mergeSortStaged(T, staged, ctx, callback, field);
+    @memcpy(items, staged);
+}
+
+fn mergeSortStaged(comptime T: type, items: []T, ctx: *NativeContext, callback: Value, comptime field: SortField) RuntimeError!void {
+    if (items.len <= 1) return;
     if (items.len <= 16) {
         // insertion sort for small slices
         for (1..items.len) |i| {
@@ -599,9 +607,9 @@ pub fn mergeSort(comptime T: type, items: []T, ctx: *NativeContext, callback: Va
         return;
     }
     const mid = items.len / 2;
-    try mergeSort(T, items[0..mid], ctx, callback, field);
-    try mergeSort(T, items[mid..], ctx, callback, field);
-    const buf = ctx.allocator.alloc(T, items.len) catch return;
+    try mergeSortStaged(T, items[0..mid], ctx, callback, field);
+    try mergeSortStaged(T, items[mid..], ctx, callback, field);
+    const buf = try ctx.allocator.alloc(T, items.len);
     defer ctx.allocator.free(buf);
     var l: usize = 0;
     var r: usize = mid;
@@ -890,13 +898,31 @@ fn array_splice(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     } else @intCast(alen - offset);
     length = @min(length, arr.entries.items.len - uoffset);
 
-    var removed = try ctx.createArray();
+    const replacement_values: []Value = if (args.len >= 4 and args[3] == .array) blk: {
+        const source = args[3].array.entries.items;
+        const values = try ctx.allocator.alloc(Value, source.len);
+        for (source, values) |entry, *value| {
+            value.* = entry.value;
+            VM.retainValue(value.*);
+        }
+        break :blk values;
+    } else blk: {
+        const count: usize = if (args.len >= 4 and args[3] != .null) 1 else 0;
+        const values = try ctx.allocator.alloc(Value, count);
+        if (count != 0) {
+            values[0] = args[3];
+            VM.retainValue(values[0]);
+        }
+        break :blk values;
+    };
+    defer {
+        for (replacement_values) |value| ctx.vm.releaseValue(value);
+        ctx.allocator.free(replacement_values);
+    }
+    try arr.entries.ensureUnusedCapacity(ctx.allocator, replacement_values.len);
+    const removed = try ctx.createArray();
     var removed_int_idx: i64 = 0;
-    for (0..length) |_| {
-        const entry = arr.entries.orderedRemove(uoffset);
-        // arr loses its retain on the removed value; removed.set retains
-        // again - net 0 for objects/arrays (Stage 2 element-overwrite release)
-        ctx.vm.releaseValue(entry.value);
+    for (arr.entries.items[uoffset..][0..length]) |entry| {
         switch (entry.key) {
             .string => try removed.set(ctx.allocator, entry.key, entry.value),
             .int => {
@@ -905,20 +931,10 @@ fn array_splice(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
             },
         }
     }
-
-    if (args.len >= 4) {
-        if (args[3] == .array) {
-            const replacement = args[3].array;
-            var insert_idx = uoffset;
-            for (replacement.entries.items) |entry| {
-                VM.retainValue(entry.value);
-                try arr.entries.insert(ctx.allocator, insert_idx, .{ .key = .{ .int = 0 }, .value = entry.value });
-                insert_idx += 1;
-            }
-        } else if (args[3] != .null) {
-            // PHP: a non-array, non-null replacement is treated as a single element
-            try arr.entries.insert(ctx.allocator, uoffset, .{ .key = .{ .int = 0 }, .value = args[3] });
-        }
+    for (0..length) |_| ctx.vm.arrayRemoveOwned(arr, arr.entries.items[uoffset].key);
+    for (replacement_values, 0..) |value, i| {
+        VM.retainValue(value);
+        arr.entries.insertAssumeCapacity(uoffset + i, .{ .key = .{ .int = 0 }, .value = value });
     }
 
     // re-index numeric keys
@@ -931,7 +947,7 @@ fn array_splice(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     }
     arr.next_int_key = next_int;
     arr.has_int_keys = next_int > 0;
-    try arr.rebuildStringIndex(ctx.allocator);
+    arr.rebuildStringIndexAssumeCapacity();
 
     return .{ .array = removed };
 }
@@ -1358,6 +1374,7 @@ fn array_unshift(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len < 2 or args[0] != .array) return .{ .int = 0 };
     const arr = args[0].array;
 
+    try arr.entries.ensureUnusedCapacity(ctx.allocator, args.len - 1);
     var insert_idx: usize = 0;
     for (args[1..]) |val| {
         VM.retainValue(val);
@@ -1373,7 +1390,7 @@ fn array_unshift(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
         }
     }
     arr.next_int_key = next_int;
-    try arr.rebuildStringIndex(ctx.allocator);
+    arr.rebuildStringIndexAssumeCapacity();
     return .{ .int = arr.length() };
 }
 
@@ -1582,7 +1599,7 @@ fn native_ksort(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     const arr = args[0].array;
     const flags: i64 = if (args.len >= 2) Value.toInt(args[1]) else 0;
     sortKeysWithFlags(arr, flags, false);
-    try arr.rebuildStringIndex(ctx.allocator);
+    arr.rebuildStringIndexAssumeCapacity();
     arr.cursor = 0;
     return .{ .bool = true };
 }
@@ -1593,7 +1610,7 @@ fn native_krsort(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     const arr = args[0].array;
     const flags: i64 = if (args.len >= 2) Value.toInt(args[1]) else 0;
     sortKeysWithFlags(arr, flags, true);
-    try arr.rebuildStringIndex(ctx.allocator);
+    arr.rebuildStringIndexAssumeCapacity();
     arr.cursor = 0;
     return .{ .bool = true };
 }
@@ -1604,7 +1621,7 @@ fn native_asort(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     const arr = args[0].array;
     const flags: i64 = if (args.len >= 2) Value.toInt(args[1]) else 0;
     sortWithFlags(arr, flags, false);
-    try arr.rebuildStringIndex(ctx.allocator);
+    arr.rebuildStringIndexAssumeCapacity();
     arr.cursor = 0;
     return .{ .bool = true };
 }
@@ -1615,7 +1632,7 @@ fn native_arsort(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     const arr = args[0].array;
     const flags: i64 = if (args.len >= 2) Value.toInt(args[1]) else 0;
     sortWithFlags(arr, flags, true);
-    try arr.rebuildStringIndex(ctx.allocator);
+    arr.rebuildStringIndexAssumeCapacity();
     arr.cursor = 0;
     return .{ .bool = true };
 }
@@ -1672,7 +1689,7 @@ fn native_uasort(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     const arr = args[0].array;
     const callback = args[1];
     try mergeSort(PhpArray.Entry, arr.entries.items, ctx, callback, .value);
-    try arr.rebuildStringIndex(ctx.allocator);
+    arr.rebuildStringIndexAssumeCapacity();
     arr.cursor = 0;
     return .{ .bool = true };
 }
@@ -1683,7 +1700,7 @@ fn native_uksort(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     const arr = args[0].array;
     const callback = args[1];
     try mergeSort(PhpArray.Entry, arr.entries.items, ctx, callback, .key);
-    try arr.rebuildStringIndex(ctx.allocator);
+    arr.rebuildStringIndexAssumeCapacity();
     arr.cursor = 0;
     return .{ .bool = true };
 }
@@ -2365,4 +2382,37 @@ fn array_change_key_case(ctx: *NativeContext, args: []const Value) RuntimeError!
         try result.set(ctx.allocator, new_key, entry.value);
     }
     return .{ .array = result };
+}
+
+test "unshift allocation failure preserves entries and ownership" {
+    const testing = std.testing;
+    var vm = try VM.init(testing.allocator);
+    defer vm.deinit();
+    const arr = try vm.allocArray();
+    const owned = try Value.String.create(testing.allocator, "owned");
+    defer owned.release();
+    var failing = testing.FailingAllocator.init(testing.allocator, .{ .fail_index = 0 });
+    var ctx: NativeContext = .{ .allocator = failing.allocator(), .arrays = &vm.arrays, .strings = &vm.strings, .vm = &vm };
+    const count = owned.owner.?.refcount;
+    try testing.expectError(error.OutOfMemory, array_unshift(&ctx, &.{ .{ .array = arr }, .{ .string = owned } }));
+    try testing.expectEqual(@as(usize, 0), arr.entries.items.len);
+    try testing.expectEqual(count, owned.owner.?.refcount);
+    ctx.allocator = testing.allocator;
+    _ = try array_unshift(&ctx, &.{ .{ .array = arr }, .{ .string = owned } });
+    try testing.expectEqualStrings("owned", arr.get(.{ .int = 0 }).string.bytes());
+}
+
+test "callback sort staging failure preserves input" {
+    const testing = std.testing;
+    var vm = try VM.init(testing.allocator);
+    defer vm.deinit();
+    var failing = testing.FailingAllocator.init(testing.allocator, .{ .fail_index = 0 });
+    var ctx: NativeContext = .{ .allocator = failing.allocator(), .arrays = &vm.arrays, .strings = &vm.strings, .vm = &vm };
+    var items = [_]PhpArray.Entry{
+        .{ .key = .{ .int = 0 }, .value = .{ .int = 2 } },
+        .{ .key = .{ .int = 1 }, .value = .{ .int = 1 } },
+    };
+    try testing.expectError(error.OutOfMemory, mergeSort(PhpArray.Entry, &items, &ctx, .null, .value));
+    try testing.expectEqual(@as(i64, 2), items[0].value.int);
+    try testing.expectEqual(@as(i64, 1), items[1].value.int);
 }

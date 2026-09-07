@@ -381,14 +381,14 @@ fn removeHeaderByName(ctx: *NativeContext, name: []const u8) void {
         if (entry.value == .string) {
             const hdr = entry.value.string.bytes();
             if (hdr.len > name.len and hdr[name.len] == ':' and std.ascii.eqlIgnoreCase(hdr[0..name.len], name)) {
-                _ = arr.entries.orderedRemove(i);
+                ctx.vm.arrayRemoveOwned(arr, entry.key);
                 removed = true;
                 continue;
             }
         }
         i += 1;
     }
-    if (removed) arr.rebuildStringIndex(ctx.allocator) catch {};
+    if (removed) arr.rebuildStringIndexAssumeCapacity();
 }
 
 fn startsWithIgnoreCase(s: []const u8, prefix: []const u8) bool {

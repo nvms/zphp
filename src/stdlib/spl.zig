@@ -976,13 +976,7 @@ fn aoMagicUnset(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (!has_props) return .null;
     const arr = getData(obj) orelse return .null;
     const key = args[0].toArrayKey();
-    for (arr.entries.items, 0..) |entry, i| {
-        if (entry.key.eql(key)) {
-            _ = arr.entries.orderedRemove(i);
-            arr.rebuildStringIndex(ctx.allocator) catch {};
-            return .null;
-        }
-    }
+    ctx.vm.arrayRemoveOwned(arr, key);
     return .null;
 }
 
@@ -1024,13 +1018,7 @@ fn aoOffsetUnset(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     const arr = getData(obj) orelse return .null;
     if (args.len == 0) return .null;
     const key = args[0].toArrayKey();
-    for (arr.entries.items, 0..) |entry, i| {
-        if (entry.key.eql(key)) {
-            _ = arr.entries.orderedRemove(i);
-            arr.rebuildStringIndex(ctx.allocator) catch {};
-            return .null;
-        }
-    }
+    ctx.vm.arrayRemoveOwned(arr, key);
     return .null;
 }
 
@@ -1079,7 +1067,7 @@ fn aoKsort(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     const arr = getData(obj) orelse return .{ .bool = false };
     const flags: i64 = if (args.len >= 1) Value.toInt(args[0]) else 0;
     arrays_mod.sortKeysWithFlags(arr, flags, false);
-    try arr.rebuildStringIndex(ctx.allocator);
+    arr.rebuildStringIndexAssumeCapacity();
     return .{ .bool = true };
 }
 
@@ -1088,7 +1076,7 @@ fn aoKrsort(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     const arr = getData(obj) orelse return .{ .bool = false };
     const flags: i64 = if (args.len >= 1) Value.toInt(args[0]) else 0;
     arrays_mod.sortKeysWithFlags(arr, flags, true);
-    try arr.rebuildStringIndex(ctx.allocator);
+    arr.rebuildStringIndexAssumeCapacity();
     return .{ .bool = true };
 }
 
@@ -1097,7 +1085,7 @@ fn aoAsort(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     const arr = getData(obj) orelse return .{ .bool = false };
     const flags: i64 = if (args.len >= 1) Value.toInt(args[0]) else 0;
     arrays_mod.sortWithFlags(arr, flags, false);
-    try arr.rebuildStringIndex(ctx.allocator);
+    arr.rebuildStringIndexAssumeCapacity();
     return .{ .bool = true };
 }
 
@@ -1106,7 +1094,7 @@ fn aoArsort(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     const arr = getData(obj) orelse return .{ .bool = false };
     const flags: i64 = if (args.len >= 1) Value.toInt(args[0]) else 0;
     arrays_mod.sortWithFlags(arr, flags, true);
-    try arr.rebuildStringIndex(ctx.allocator);
+    arr.rebuildStringIndexAssumeCapacity();
     return .{ .bool = true };
 }
 
@@ -1115,7 +1103,7 @@ fn aoUasort(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     const arr = getData(obj) orelse return .{ .bool = false };
     if (args.len < 1) return .{ .bool = false };
     try arrays_mod.mergeSort(PhpArray.Entry, arr.entries.items, ctx, args[0], .value);
-    try arr.rebuildStringIndex(ctx.allocator);
+    arr.rebuildStringIndexAssumeCapacity();
     return .{ .bool = true };
 }
 
@@ -1124,7 +1112,7 @@ fn aoUksort(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     const arr = getData(obj) orelse return .{ .bool = false };
     if (args.len < 1) return .{ .bool = false };
     try arrays_mod.mergeSort(PhpArray.Entry, arr.entries.items, ctx, args[0], .key);
-    try arr.rebuildStringIndex(ctx.allocator);
+    arr.rebuildStringIndexAssumeCapacity();
     return .{ .bool = true };
 }
 
@@ -1132,7 +1120,7 @@ fn aoNatsort(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
     const obj = getThis(ctx) orelse return .{ .bool = false };
     const arr = getData(obj) orelse return .{ .bool = false };
     arrays_mod.sortWithFlags(arr, 6, false); // SORT_NATURAL
-    try arr.rebuildStringIndex(ctx.allocator);
+    arr.rebuildStringIndexAssumeCapacity();
     return .{ .bool = true };
 }
 
@@ -1140,7 +1128,7 @@ fn aoNatcasesort(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
     const obj = getThis(ctx) orelse return .{ .bool = false };
     const arr = getData(obj) orelse return .{ .bool = false };
     arrays_mod.sortWithFlags(arr, 6 | 8, false); // SORT_NATURAL | SORT_FLAG_CASE
-    try arr.rebuildStringIndex(ctx.allocator);
+    arr.rebuildStringIndexAssumeCapacity();
     return .{ .bool = true };
 }
 
@@ -1307,13 +1295,7 @@ fn aiOffsetUnset(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     const arr = getData(obj) orelse return .null;
     if (args.len == 0) return .null;
     const key = args[0].toArrayKey();
-    for (arr.entries.items, 0..) |entry, i| {
-        if (entry.key.eql(key)) {
-            _ = arr.entries.orderedRemove(i);
-            arr.rebuildStringIndex(ctx.allocator) catch {};
-            return .null;
-        }
-    }
+    ctx.vm.arrayRemoveOwned(arr, key);
     return .null;
 }
 
@@ -2519,7 +2501,7 @@ fn sosDetach(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
         if (real_key == .string) _ = objs.string_index.remove(real_key.string.bytes());
         info.remove(real_key);
         if (real_key == .string) {
-            objs.rebuildStringIndex(ctx.allocator) catch {};
+            objs.rebuildStringIndexAssumeCapacity();
         }
     }
     return .null;
@@ -2615,7 +2597,7 @@ fn sosRemoveAll(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
             _ = objs.entries.orderedRemove(idx);
             if (key == .string) {
                 _ = objs.string_index.remove(key.string.bytes());
-                objs.rebuildStringIndex(ctx.allocator) catch {};
+                objs.rebuildStringIndexAssumeCapacity();
             }
             info.remove(key);
         }
@@ -2659,7 +2641,7 @@ fn sosRemoveAllExcept(ctx: *NativeContext, args: []const Value) RuntimeError!Val
             i += 1;
         }
     }
-    objs.rebuildStringIndex(ctx.allocator) catch {};
+    objs.rebuildStringIndexAssumeCapacity();
     return .null;
 }
 

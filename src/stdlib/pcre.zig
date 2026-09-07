@@ -480,7 +480,7 @@ fn addNamedGroupsInterleaved(ctx: *NativeContext, arr: *PhpArray, code: *pcre2.C
         const insert_pos = lowest;
         const named_entry = PhpArray.Entry{ .key = .{ .string = Value.String.borrowed(try ctx.createString(ng.name)) }, .value = val };
         try insertNamedMatch(ctx, arr, insert_pos, named_entry);
-        try arr.rebuildStringIndex(ctx.allocator);
+        arr.rebuildStringIndexAssumeCapacity();
         inserted_names[inserted_count] = ng.name;
         inserted_count += 1;
     }
@@ -668,7 +668,7 @@ fn preg_match_all(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
             inserted_names[inserted_count] = ng.name;
             inserted_count += 1;
         }
-        try out.rebuildStringIndex(ctx.allocator);
+        out.rebuildStringIndexAssumeCapacity();
     }
 
     if (args.len >= 3 and args[2] != .array) {
@@ -741,7 +741,7 @@ fn addNamedGroupsToMatch(ctx: *NativeContext, arr: *PhpArray, code: *pcre2.Code,
         const named_entry = PhpArray.Entry{ .key = .{ .string = Value.String.borrowed(try ctx.createString(ng.name)) }, .value = val };
         try insertNamedMatch(ctx, arr, insert_pos, named_entry);
     }
-    try arr.rebuildStringIndex(ctx.allocator);
+    arr.rebuildStringIndexAssumeCapacity();
 }
 
 fn clearMatches(ctx: *NativeContext, arr: *PhpArray) void {
@@ -761,7 +761,7 @@ fn insertNamedMatch(ctx: *NativeContext, arr: *PhpArray, position: usize, entry:
         const stored = arr.entries.items[last];
         std.mem.copyBackwards(PhpArray.Entry, arr.entries.items[position + 1 ..], arr.entries.items[position..last]);
         arr.entries.items[position] = stored;
-        try arr.rebuildStringIndex(ctx.allocator);
+        arr.rebuildStringIndexAssumeCapacity();
     }
 }
 

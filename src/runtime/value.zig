@@ -143,14 +143,15 @@ pub const PhpArray = struct {
     pub fn append(self: *PhpArray, allocator: std.mem.Allocator, value: Value) !void {
         // a store choke point: the new element takes a reference (callers
         // pass raw values, never copyValue'd ones); weak containers count nothing
-        if (!self.weak) retainStored(value);
         const k = if (self.has_int_keys) self.next_int_key else 0;
         if (self.has_int_keys and k == std.math.maxInt(i64)) {
             for (self.entries.items) |entry| {
                 if (entry.key == .int and entry.key.int == k) return;
             }
         }
-        try self.entries.append(allocator, .{ .key = .{ .int = k }, .value = value });
+        try self.entries.ensureUnusedCapacity(allocator, 1);
+        if (!self.weak) retainStored(value);
+        self.entries.appendAssumeCapacity(.{ .key = .{ .int = k }, .value = value });
         self.next_int_key = if (k == std.math.maxInt(i64)) k else k + 1;
         self.has_int_keys = true;
     }
@@ -160,7 +161,6 @@ pub const PhpArray = struct {
         // value (callers pass raw values, never copyValue'd ones) and the
         // element it replaces is released through the VM's release hook.
         // weak containers ($GLOBALS view, WeakMap keys) count nothing
-        if (!self.weak) retainStored(value);
         const key = normalizeKey(raw_key);
         if (key == .int) {
             const idx = key.int;
@@ -169,9 +169,11 @@ pub const PhpArray = struct {
                 if (uidx < self.entries.items.len) {
                     const entry = &self.entries.items[uidx];
                     if (entry.key == .int and entry.key.int == idx) {
+                        if (!self.weak) retainStored(value);
                         const old = entry.value;
                         entry.value = value;
-                        self.next_int_key = if (self.has_int_keys) @max(self.next_int_key, idx + 1) else idx + 1;
+                        const next = if (idx == std.math.maxInt(i64)) idx else idx + 1;
+                        self.next_int_key = if (self.has_int_keys) @max(self.next_int_key, next) else next;
                         self.has_int_keys = true;
                         if (!self.weak) releaseReplaced(old);
                         return;
@@ -181,6 +183,7 @@ pub const PhpArray = struct {
         }
         if (key == .string) {
             if (self.string_index.get(key.string.bytes())) |idx| {
+                if (!self.weak) retainStored(value);
                 const old = self.entries.items[idx].value;
                 self.entries.items[idx].value = value;
                 if (!self.weak) releaseReplaced(old);
@@ -189,6 +192,7 @@ pub const PhpArray = struct {
         } else {
             for (self.entries.items) |*entry| {
                 if (entry.key.eql(key)) {
+                    if (!self.weak) retainStored(value);
                     const old = entry.value;
                     entry.value = value;
                     if (!self.weak) releaseReplaced(old);
@@ -197,15 +201,19 @@ pub const PhpArray = struct {
             }
         }
         const new_idx = self.entries.items.len;
+        // Capacity may grow on failure, but entries, index contents, key
+        // progression and ownership remain unchanged until both reserves succeed.
+        try self.entries.ensureUnusedCapacity(allocator, 1);
+        if (key == .string) try self.string_index.ensureUnusedCapacity(allocator, 1);
+        if (!self.weak) retainStored(value);
         if (key == .string) key.string.retain();
-        errdefer if (key == .string) key.string.release();
-        try self.entries.append(allocator, .{ .key = key, .value = value });
+        self.entries.appendAssumeCapacity(.{ .key = key, .value = value });
         if (key == .int) {
             const next = if (key.int == std.math.maxInt(i64)) key.int else key.int + 1;
             self.next_int_key = if (self.has_int_keys) @max(self.next_int_key, next) else next;
             self.has_int_keys = true;
         } else if (key == .string) {
-            try self.string_index.put(allocator, key.string.bytes(), new_idx);
+            self.string_index.putAssumeCapacity(key.string.bytes(), new_idx);
         }
     }
 
@@ -279,12 +287,30 @@ pub const PhpArray = struct {
         return @intCast(self.entries.items.len);
     }
 
+    // Build off to the side: a failed rebuild leaves the old index intact.
+    // Callers that mutate entries first must instead preflight capacity before
+    // mutation and use rebuildStringIndexAssumeCapacity for their commit.
     pub fn rebuildStringIndex(self: *PhpArray, allocator: std.mem.Allocator) !void {
+        var index: std.StringHashMapUnmanaged(usize) = .{};
+        errdefer index.deinit(allocator);
+        for (self.entries.items, 0..) |entry, i| {
+            if (entry.key == .string) try index.put(allocator, entry.key.string.bytes(), i);
+        }
+        self.string_index.deinit(allocator);
+        self.string_index = index;
+    }
+
+    // Reserve an upper bound on the number of string-keyed entries AFTER the
+    // caller's mutation. No entries or index contents change if this fails.
+    pub fn reserveStringIndex(self: *PhpArray, allocator: std.mem.Allocator, string_count: usize) !void {
+        const count = std.math.cast(u32, string_count) orelse return error.OutOfMemory;
+        try self.string_index.ensureTotalCapacity(allocator, count);
+    }
+
+    pub fn rebuildStringIndexAssumeCapacity(self: *PhpArray) void {
         self.string_index.clearRetainingCapacity();
         for (self.entries.items, 0..) |entry, i| {
-            if (entry.key == .string) {
-                try self.string_index.put(allocator, entry.key.string.bytes(), i);
-            }
+            if (entry.key == .string) self.string_index.putAssumeCapacity(entry.key.string.bytes(), i);
         }
     }
 
@@ -1878,4 +1904,161 @@ test "identical" {
     try std.testing.expect(Value.identical(.{ .int = 2 }, .{ .int = 2 }));
     try std.testing.expect(!Value.identical(.{ .int = 1 }, .{ .int = 2 }));
     try std.testing.expect(!Value.identical(.{ .int = 2 }, .{ .string = Value.String.borrowed("2") }));
+}
+
+// These tests deliberately use an owned key/value allocated independently of
+// the failing allocator, so every failure in the operation can check ownership.
+fn testArrayStoreFailures(allocator: std.mem.Allocator, mode: enum { append, integer, string }, weak: bool) !void {
+    const key = try PhpString.create(std.testing.allocator, "owned-key");
+    defer key.release();
+    const value = try PhpString.create(std.testing.allocator, "owned-value");
+    defer value.release();
+    var arr: PhpArray = .{ .weak = weak, .cursor = 7 };
+    defer arr.deinit(allocator);
+    // Deinit releases keys, but the VM normally releases stored values.
+    defer if (!weak) {
+        for (arr.entries.items) |entry| if (entry.value == .string) {
+            entry.value.string.release();
+        };
+    };
+    const result = switch (mode) {
+        .append => arr.append(allocator, .{ .string = value }),
+        .integer => arr.set(allocator, .{ .int = std.math.maxInt(i64) }, .{ .string = value }),
+        .string => arr.set(allocator, .{ .string = key }, .{ .string = value }),
+    };
+    result catch |err| {
+        try std.testing.expectEqual(@as(usize, 0), arr.entries.items.len);
+        try std.testing.expectEqual(@as(u32, 0), arr.string_index.count());
+        try std.testing.expectEqual(@as(i64, 0), arr.next_int_key);
+        try std.testing.expect(!arr.has_int_keys);
+        try std.testing.expectEqual(@as(usize, 7), arr.cursor);
+        try std.testing.expectEqual(@as(u32, 1), key.owner.?.refcount);
+        try std.testing.expectEqual(@as(u32, 1), value.owner.?.refcount);
+        return err;
+    };
+    try std.testing.expectEqual(@as(usize, 1), arr.entries.items.len);
+    try std.testing.expectEqual(@as(u32, if (weak) 1 else 2), value.owner.?.refcount);
+    try std.testing.expectEqual(@as(u32, if (mode == .string) 2 else 1), key.owner.?.refcount);
+    try std.testing.expect(arr.entries.items[0].ref == null);
+    if (mode == .string) {
+        try std.testing.expectEqual(@as(usize, 0), arr.string_index.get(key.bytes()).?);
+    } else {
+        try std.testing.expect(arr.has_int_keys);
+        try std.testing.expectEqual(@as(i64, if (mode == .append) 1 else std.math.maxInt(i64)), arr.next_int_key);
+    }
+}
+
+test "array append and set fail atomically at every allocation" {
+    inline for (.{ .append, .integer, .string }) |mode| {
+        inline for (.{ false, true }) |weak| {
+            try std.testing.checkAllAllocationFailures(std.testing.allocator, testArrayStoreFailures, .{ mode, weak });
+        }
+    }
+}
+
+fn testArrayRebuildFailures(allocator: std.mem.Allocator) !void {
+    var arr: PhpArray = .{};
+    defer arr.deinit(allocator);
+    // Use the failing allocator for setup too; the exhaustive runner reaches
+    // every growth in both the initial index and the temporary replacement.
+    const keys = [_][]const u8{ "a", "b", "c", "d", "e", "f", "g", "h", "i", "j", "k", "l", "m", "n", "o" };
+    for (keys, 0..) |key, i| try arr.set(allocator, .{ .string = PhpString.borrowed(key) }, .{ .int = @intCast(i) });
+    var cell: Value = .{ .int = 42 };
+    arr.entries.items[0].ref = &cell;
+    arr.cursor = 4;
+    arr.rebuildStringIndex(allocator) catch |err| {
+        try std.testing.expectEqual(@as(u32, keys.len), arr.string_index.count());
+        for (keys, 0..) |key, i| try std.testing.expectEqual(i, arr.string_index.get(key).?);
+        try std.testing.expect(arr.entries.items[0].ref == &cell);
+        try std.testing.expectEqual(@as(usize, 4), arr.cursor);
+        return err;
+    };
+    for (keys, 0..) |key, i| try std.testing.expectEqual(i, arr.string_index.get(key).?);
+}
+
+test "array index rebuild preserves old complete index on every allocation failure" {
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, testArrayRebuildFailures, .{});
+}
+
+const ArrayStoreTestRelease = struct {
+    calls: usize = 0,
+    fn call(ctx: *anyopaque, value: Value) void {
+        const self: *@This() = @ptrCast(@alignCast(ctx));
+        self.calls += 1;
+        if (value == .string) value.string.release();
+    }
+};
+
+test "array allocation-free stores preserve ownership metadata and overflow refusal" {
+    const allocator = std.testing.allocator;
+    var failing = std.testing.FailingAllocator.init(allocator, .{ .fail_index = 0 });
+    const noalloc = failing.allocator();
+    const value = try PhpString.create(allocator, "same value");
+    defer value.release();
+    var releases: ArrayStoreTestRelease = .{};
+    const saved = release_hook;
+    release_hook = .{ .ctx = &releases, .call = ArrayStoreTestRelease.call };
+    defer release_hook = saved;
+    var arr: PhpArray = .{};
+    defer arr.deinit(allocator);
+    defer for (arr.entries.items) |entry| {
+        if (entry.value == .string) entry.value.string.release();
+    };
+    try arr.entries.ensureUnusedCapacity(allocator, 4);
+    try arr.reserveStringIndex(allocator, 2);
+    try arr.append(noalloc, .{ .string = value });
+    try arr.set(noalloc, .{ .string = PhpString.borrowed("0") }, .{ .string = value });
+    try arr.set(noalloc, .{ .int = -5 }, .{ .string = value });
+    try arr.set(noalloc, .{ .int = -5 }, .{ .string = value });
+    try arr.set(noalloc, .{ .string = PhpString.borrowed("name") }, .{ .string = value });
+    var cell: Value = .null;
+    arr.entries.items[2].ref = &cell;
+    try arr.set(noalloc, .{ .string = PhpString.borrowed("name") }, .{ .string = value });
+    try std.testing.expect(arr.entries.items[2].ref == &cell);
+    try arr.set(noalloc, .{ .string = PhpString.borrowed("9223372036854775807") }, .{ .string = value });
+    try arr.set(noalloc, .{ .int = std.math.maxInt(i64) }, .{ .string = value });
+    try arr.append(noalloc, .{ .string = value }); // refused, no retain
+    try std.testing.expectEqual(@as(usize, 4), arr.entries.items.len);
+    try std.testing.expectEqual(@as(u32, 5), value.owner.?.refcount);
+    try std.testing.expectEqual(@as(usize, 4), releases.calls);
+    try std.testing.expectEqual(std.math.maxInt(i64), arr.next_int_key);
+    std.mem.swap(PhpArray.Entry, &arr.entries.items[0], &arr.entries.items[2]);
+    arr.rebuildStringIndexAssumeCapacity();
+    try std.testing.expectEqual(@as(usize, 0), arr.string_index.get("name").?);
+    try std.testing.expect(arr.entries.items[0].ref == &cell);
+    try std.testing.expect(!failing.has_induced_failure);
+}
+
+test "array failed growth preserves populated entries and reference bindings" {
+    const allocator = std.testing.allocator;
+    var arr: PhpArray = .{ .cursor = 3 };
+    defer arr.deinit(allocator);
+    var held: PhpArray = .{};
+    var candidate: PhpArray = .{};
+    var cell: Value = .{ .int = 99 };
+    try arr.set(allocator, .{ .string = PhpString.borrowed("existing") }, .{ .array = &held });
+    arr.entries.items[0].ref = &cell;
+    // Force entry growth regardless of ArrayList's growth policy.
+    while (arr.entries.items.len < arr.entries.capacity) try arr.append(allocator, .null);
+    const len = arr.entries.items.len;
+    const next = arr.next_int_key;
+    var failing = std.testing.FailingAllocator.init(allocator, .{ .fail_index = 0, .resize_fail_index = 0 });
+    try std.testing.expectError(error.OutOfMemory, arr.append(failing.allocator(), .{ .array = &candidate }));
+    try std.testing.expectError(error.OutOfMemory, arr.set(failing.allocator(), .{ .int = -20 }, .{ .array = &candidate }));
+    try std.testing.expectError(error.OutOfMemory, arr.set(failing.allocator(), .{ .string = PhpString.borrowed("new") }, .{ .array = &candidate }));
+    try std.testing.expectError(error.OutOfMemory, arr.reserveStringIndex(failing.allocator(), 100));
+    try std.testing.expectEqual(len, arr.entries.items.len);
+    try std.testing.expectEqual(next, arr.next_int_key);
+    try std.testing.expectEqual(@as(usize, 3), arr.cursor);
+    try std.testing.expectEqual(@as(u32, 1), held.refcount);
+    try std.testing.expectEqual(@as(u32, 0), candidate.refcount);
+    try std.testing.expect(arr.entries.items[0].ref == &cell);
+    try std.testing.expectEqual(@as(usize, 0), arr.string_index.get("existing").?);
+    try std.testing.expect(!arr.contains(.{ .string = PhpString.borrowed("new") }));
+    // A weak replacement neither retains the candidate nor releases the old.
+    arr.weak = true;
+    try arr.set(failing.allocator(), .{ .string = PhpString.borrowed("existing") }, .{ .array = &candidate });
+    try std.testing.expectEqual(@as(u32, 0), candidate.refcount);
+    try std.testing.expectEqual(@as(u32, 1), held.refcount);
+    try std.testing.expect(arr.entries.items[0].ref == &cell);
 }
