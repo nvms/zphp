@@ -17827,10 +17827,10 @@ pub const VM = struct {
         if (obj.refcount != 0) {
             // refcount went down but not to 0: object might be part of an
             // unreachable cycle (a -> b -> a where both still see each other).
-            // queue as a cycle-collector candidate. dedupe is handled inside
-            // collectCycles via the visited map - cheap to append duplicates
-            if (!obj.destructed) {
-                self.cycle_candidates.append(self.allocator, obj) catch {};
+            // each possible root occupies one candidate slot.
+            if (!obj.destructed and !obj.cycle_queued) {
+                self.cycle_candidates.append(self.allocator, obj) catch return;
+                obj.cycle_queued = true;
             }
             return;
         }
@@ -17861,13 +17861,14 @@ pub const VM = struct {
             self.pending_fiber_release.clearRetainingCapacity();
             self.fiber_release_cursor = 0;
             for (self.released_arrays.items) |arr| {
-                var i: usize = 0;
-                while (i < self.cycle_array_candidates.items.len) {
-                    if (self.cycle_array_candidates.items[i] == arr) {
-                        _ = self.cycle_array_candidates.swapRemove(i);
-                    } else {
-                        i += 1;
+                if (arr.cycle_queued) {
+                    for (self.cycle_array_candidates.items, 0..) |candidate, i| {
+                        if (candidate == arr) {
+                            _ = self.cycle_array_candidates.swapRemove(i);
+                            break;
+                        }
                     }
+                    arr.cycle_queued = false;
                 }
                 self.clearArgArraySources(arr);
                 arr.deinit(self.allocator);
@@ -17876,13 +17877,14 @@ pub const VM = struct {
             }
             self.released_arrays.clearRetainingCapacity();
             for (self.released_objects.items) |obj| {
-                var i: usize = 0;
-                while (i < self.cycle_candidates.items.len) {
-                    if (self.cycle_candidates.items[i] == obj) {
-                        _ = self.cycle_candidates.swapRemove(i);
-                    } else {
-                        i += 1;
+                if (obj.cycle_queued) {
+                    for (self.cycle_candidates.items, 0..) |candidate, i| {
+                        if (candidate == obj) {
+                            _ = self.cycle_candidates.swapRemove(i);
+                            break;
+                        }
                     }
+                    obj.cycle_queued = false;
                 }
                 obj.deinit(self.allocator);
                 obj.pooled = true;
@@ -18231,6 +18233,8 @@ pub const VM = struct {
                 live_range.has_statics = false;
             }
         }
+        for (self.cycle_candidates.items) |obj| obj.cycle_queued = false;
+        for (self.cycle_array_candidates.items) |arr| arr.cycle_queued = false;
         self.cycle_candidates.clearRetainingCapacity();
         self.cycle_array_candidates.clearRetainingCapacity();
         self.drainPendingDestruct();
@@ -18855,8 +18859,9 @@ pub const VM = struct {
         if (arr.refcount == 0) return;
         arr.refcount -= 1;
         if (arr.refcount != 0) {
-            if (!arr.elements_released) {
-                self.cycle_array_candidates.append(self.allocator, arr) catch {};
+            if (!arr.elements_released and !arr.cycle_queued) {
+                self.cycle_array_candidates.append(self.allocator, arr) catch return;
+                arr.cycle_queued = true;
             }
             return;
         }

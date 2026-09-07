@@ -65,6 +65,7 @@ pub const PhpArray = struct {
     refcount: u32 = 0,
     elements_released: bool = false,
     pooled: bool = false,
+    cycle_queued: bool = false,
     release_queued: bool = false,
     // a weak container (WeakMap key list): its entries hold no reference to
     // the objects they name, so freeing it releases nothing and the cycle
@@ -768,6 +769,7 @@ pub const PhpObject = struct {
     // and the end-of-request safety sweep must not double-fire it)
     destructed: bool = false,
     pooled: bool = false,
+    cycle_queued: bool = false,
     // a reference cell has targeted one of this object's properties; the
     // release path must detach those weak mirrors before the address is reused
     ref_mirrored: bool = false,
