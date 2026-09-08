@@ -574,7 +574,10 @@ fn native_rsort(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
 }
 
 fn reindexArray(arr: *PhpArray) void {
-    for (arr.entries.items, 0..) |*entry, i| entry.key = .{ .int = @intCast(i) };
+    for (arr.entries.items, 0..) |*entry, i| {
+        if (entry.key == .string) entry.key.string.release();
+        entry.key = .{ .int = @intCast(i) };
+    }
     arr.next_int_key = @intCast(arr.entries.items.len);
     arr.has_int_keys = arr.entries.items.len > 0;
     arr.string_index.clearRetainingCapacity();

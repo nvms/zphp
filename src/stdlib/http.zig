@@ -203,7 +203,7 @@ fn native_ob_list_handlers(ctx: *NativeContext, _: []const Value) RuntimeError!V
 
 fn native_header(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len == 0 or args[0] != .string) return .null;
-    const hdr = args[0].string.bytes();
+    const hdr = try ctx.createString(args[0].string.bytes());
     const replace = args.len < 2 or args[1] != .bool or args[1].bool;
 
     if (startsWithIgnoreCase(hdr, "Content-Type:")) {

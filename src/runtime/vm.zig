@@ -700,6 +700,8 @@ pub const VM = struct {
     // script's layout, not the most-recently-required file's
     top_slot_names: []const []const u8 = &.{},
     global_vars_dirty: bool = false,
+    method_cache_class_storage: [256]u8 = undefined,
+    method_cache_method_storage: [256]u8 = undefined,
     method_cache_class: []const u8 = "",
     method_cache_method: []const u8 = "",
     method_cache_result: []const u8 = "",
@@ -708,6 +710,8 @@ pub const VM = struct {
     // hasMethod single-entry cache. method dispatch repeatedly probes the
     // same (class, method) pair per call site (decide method-call vs __call
     // fallback) - this skips the bufPrint("{s}::{s}") cost on hits
+    has_method_cache_class_storage: [256]u8 = undefined,
+    has_method_cache_method_storage: [256]u8 = undefined,
     has_method_cache_class: []const u8 = "",
     has_method_cache_method: []const u8 = "",
     has_method_cache_result: bool = false,
@@ -1273,7 +1277,13 @@ pub const VM = struct {
             break :blk created;
         };
         self.next_object_id += 1;
-        obj.* = .{ .class_name = class_name, .id = self.next_object_id };
+        const stable_class_name = if (self.classes.getKey(class_name)) |registered| registered else blk: {
+            const owned = try self.allocator.dupe(u8, class_name);
+            errdefer self.allocator.free(owned);
+            try self.strings.append(self.allocator, owned);
+            break :blk owned;
+        };
+        obj.* = .{ .class_name = stable_class_name, .id = self.next_object_id };
         if (self.debug_trace_class) |trace_class| if (std.mem.eql(u8, trace_class, class_name)) {
             @import("value.zig").trace_obj = obj;
             @import("value.zig").trace_rc_verbose = true;
@@ -2783,6 +2793,7 @@ pub const VM = struct {
             while (ctfn_it.next()) |e| e.value_ptr.*.deinit(self.allocator);
             self.chunk_to_func_names.clearRetainingCapacity();
             self.php_constants.clearRetainingCapacity();
+            self.user_constants.clearRetainingCapacity();
             initConstants(&self.php_constants, self.allocator) catch {};
             // builtins persist across reset now (freeClassState kept them), so the
             // stdlib classes + their native methods + enum objects DON'T need
@@ -10988,7 +10999,13 @@ pub const VM = struct {
     pub fn setPendingException(self: *VM, class_name: []const u8, message: []const u8) !void {
         const obj = try self.allocator.create(PhpObject);
         self.next_object_id += 1;
-        obj.* = .{ .class_name = class_name, .id = self.next_object_id };
+        const stable_class_name = if (self.classes.getKey(class_name)) |registered| registered else blk: {
+            const owned = try self.allocator.dupe(u8, class_name);
+            errdefer self.allocator.free(owned);
+            try self.strings.append(self.allocator, owned);
+            break :blk owned;
+        };
+        obj.* = .{ .class_name = stable_class_name, .id = self.next_object_id };
         try self.initObjectProperties(obj, class_name);
         try obj.set(self.allocator, "message", .{ .string = Value.String.borrowed(message) });
         try obj.set(self.allocator, "code", .{ .int = 0 });
@@ -11280,7 +11297,13 @@ pub const VM = struct {
     pub fn throwBuiltinException(self: *VM, class_name: []const u8, message: []const u8) !bool {
         const obj = try self.allocator.create(PhpObject);
         self.next_object_id += 1;
-        obj.* = .{ .class_name = class_name, .id = self.next_object_id };
+        const stable_class_name = if (self.classes.getKey(class_name)) |registered| registered else blk: {
+            const owned = try self.allocator.dupe(u8, class_name);
+            errdefer self.allocator.free(owned);
+            try self.strings.append(self.allocator, owned);
+            break :blk owned;
+        };
+        obj.* = .{ .class_name = stable_class_name, .id = self.next_object_id };
         try self.initObjectProperties(obj, class_name);
         try obj.set(self.allocator, "message", .{ .string = Value.String.borrowed(message) });
         try obj.set(self.allocator, "code", .{ .int = 0 });
@@ -15585,8 +15608,14 @@ pub const VM = struct {
             }
             break false;
         };
-        self.has_method_cache_class = class_name;
-        self.has_method_cache_method = method_name;
+        if (class_name.len > self.has_method_cache_class_storage.len or method_name.len > self.has_method_cache_method_storage.len) {
+            self.has_method_cache_fn_count = std.math.maxInt(usize);
+            return result;
+        }
+        @memcpy(self.has_method_cache_class_storage[0..class_name.len], class_name);
+        @memcpy(self.has_method_cache_method_storage[0..method_name.len], method_name);
+        self.has_method_cache_class = self.has_method_cache_class_storage[0..class_name.len];
+        self.has_method_cache_method = self.has_method_cache_method_storage[0..method_name.len];
         self.has_method_cache_result = result;
         self.has_method_cache_fn_count = fn_count;
         self.has_method_cache_cls_count = cls_count;
@@ -15612,8 +15641,14 @@ pub const VM = struct {
             return self.method_cache_result;
         }
         const result = try self.resolveMethodSlow(class_name, method_name);
-        self.method_cache_class = class_name;
-        self.method_cache_method = method_name;
+        if (class_name.len > self.method_cache_class_storage.len or method_name.len > self.method_cache_method_storage.len) {
+            self.method_cache_fn_count = std.math.maxInt(usize);
+            return result;
+        }
+        @memcpy(self.method_cache_class_storage[0..class_name.len], class_name);
+        @memcpy(self.method_cache_method_storage[0..method_name.len], method_name);
+        self.method_cache_class = self.method_cache_class_storage[0..class_name.len];
+        self.method_cache_method = self.method_cache_method_storage[0..method_name.len];
         self.method_cache_result = result;
         self.method_cache_fn_count = fn_count;
         self.method_cache_cls_count = cls_count;
@@ -16274,7 +16309,13 @@ pub const VM = struct {
         }
         const obj = try self.allocator.create(PhpObject);
         self.next_object_id += 1;
-        obj.* = .{ .class_name = class_name, .id = self.next_object_id };
+        const stable_class_name = if (self.classes.getKey(class_name)) |registered| registered else blk: {
+            const owned = try self.allocator.dupe(u8, class_name);
+            errdefer self.allocator.free(owned);
+            try self.strings.append(self.allocator, owned);
+            break :blk owned;
+        };
+        obj.* = .{ .class_name = stable_class_name, .id = self.next_object_id };
         try self.objects.append(self.allocator, obj);
         try self.initObjectProperties(obj, class_name);
 

@@ -1043,7 +1043,8 @@ fn rcConstruct(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
         return throwReflection(ctx, msg);
     }
 
-    try this.set(ctx.allocator, "name", .{ .string = Value.String.borrowed(class_name) });
+    const stable_name = try ctx.createString(class_name);
+    try this.set(ctx.allocator, "name", .{ .string = Value.String.borrowed(stable_name) });
     try this.set(ctx.allocator, "_is_interface", .{ .bool = ctx.vm.interfaces.contains(class_name) });
     try this.set(ctx.allocator, "_is_trait", .{ .bool = ctx.vm.traits.contains(class_name) });
     return .null;
@@ -4301,7 +4302,8 @@ fn reConstruct(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
         return throwReflection(ctx, msg);
     }
 
-    try this.set(ctx.allocator, "name", .{ .string = Value.String.borrowed(class_name) });
+    const stable_name = try ctx.createString(class_name);
+    try this.set(ctx.allocator, "name", .{ .string = Value.String.borrowed(stable_name) });
     try this.set(ctx.allocator, "_is_interface", .{ .bool = false });
     try this.set(ctx.allocator, "_is_trait", .{ .bool = false });
     return .null;
