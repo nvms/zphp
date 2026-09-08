@@ -200,11 +200,17 @@ fn native_defined(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
 fn native_constant(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len == 0 or args[0] != .string) return .null;
     const name = args[0].string.bytes();
-    if (ctx.vm.php_constants.get(name)) |v| return v;
+    if (ctx.vm.php_constants.get(name)) |v| {
+        if (v == .string) v.string.retain();
+        return v;
+    }
     if (std.mem.indexOf(u8, name, "::")) |sep| {
         const class_name = name[0..sep];
         const prop_name = name[sep + 2 ..];
-        if (ctx.vm.getStaticProp(class_name, prop_name)) |v| return v;
+        if (ctx.vm.getStaticProp(class_name, prop_name)) |v| {
+            if (v == .string) v.string.retain();
+            return v;
+        }
     }
     const msg = try std.fmt.allocPrint(ctx.allocator, "Undefined constant \"{s}\"", .{name});
     try ctx.strings.append(ctx.allocator, msg);
