@@ -1910,3 +1910,47 @@ test "discarded split strings release allocations between batches" {
     _ = try vm.callByName("verifyHeld", &.{});
     try std.testing.expectEqualStrings("retained-1,RETAINED-2", vm.output.items);
 }
+
+test "discarded replacement strings release allocations between batches" {
+    var gpa = std.heap.DebugAllocator(.{ .enable_memory_limit = true }){};
+    defer std.testing.expect(gpa.deinit() == .ok) catch @panic("string batch leak");
+    const alloc = gpa.allocator();
+    const source =
+        \\<?php
+        \\$held = [str_replace('x', 'retained', 'x-1'), preg_replace('/x/', 'RETAINED', 'x-2')];
+        \\function verifyHeld() { global $held; echo implode(',', $held); }
+        \\function replacementCallback($matches) { return strtoupper($matches[0]); }
+        \\function batch() {
+        \\    for ($i = 0; $i < 1000; ++$i) {
+        \\        $s = 'temporary-' . $i;
+        \\        $a = str_replace(['temporary', '-'], ['value', ':'], $s);
+        \\        $b = preg_replace('/[0-9]+/', 'digits', $s);
+        \\        $c = preg_replace_callback('/[0-9]+/', 'replacementCallback', $s);
+        \\    }
+        \\}
+    ;
+    var ast = try parser.parse(alloc, source);
+    defer ast.deinit();
+    var result = try @import("pipeline/compiler.zig").compile(&ast, alloc);
+    defer result.deinit();
+    const vm = try VM.initOnHeap(alloc);
+    defer {
+        vm.deinit();
+        alloc.destroy(vm);
+    }
+    try vm.interpret(&result);
+    for (0..3) |_| {
+        _ = try vm.callByName("batch", &.{});
+        _ = try vm.callByName("gc_collect_cycles", &.{});
+    }
+    const warm_bytes = gpa.total_requested_bytes;
+    const warm_strings = vm.strings.items.len;
+    for (0..20) |_| {
+        _ = try vm.callByName("batch", &.{});
+        _ = try vm.callByName("gc_collect_cycles", &.{});
+        try std.testing.expectEqual(warm_strings, vm.strings.items.len);
+        try std.testing.expectEqual(warm_bytes, gpa.total_requested_bytes);
+    }
+    _ = try vm.callByName("verifyHeld", &.{});
+    try std.testing.expectEqualStrings("retained-1,RETAINED-2", vm.output.items);
+}

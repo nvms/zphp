@@ -823,6 +823,7 @@ fn preg_filter(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
         for (subj_arr.entries.items) |se| {
             var sub_args: [3]Value = .{ args[0], args[1], se.value };
             const replaced = try preg_replace(ctx, sub_args[0..3]);
+            defer if (replaced == .string) replaced.string.release();
             // PHP preg_filter keeps only entries where the replacement actually
             // changed the string (i.e. at least one match)
             if (replaced == .string and se.value == .string and !std.mem.eql(u8, replaced.string.bytes(), se.value.string.bytes())) {
@@ -833,6 +834,7 @@ fn preg_filter(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     }
     const replaced = try preg_replace(ctx, args);
     if (replaced == .string and args[2] == .string and !std.mem.eql(u8, replaced.string.bytes(), args[2].string.bytes())) return replaced;
+    if (replaced == .string) replaced.string.release();
     return .null;
 }
 
@@ -855,6 +857,7 @@ fn preg_replace(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
                 n = 4;
             }
             const replaced = try preg_replace(ctx, sub_args[0..n]);
+            defer if (replaced == .string) replaced.string.release();
             try result_arr.set(ctx.allocator, se.key, replaced);
         }
         return .{ .array = result_arr };
@@ -863,18 +866,18 @@ fn preg_replace(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args[0] == .array) {
         return try pregReplaceArrayPattern(ctx, args);
     }
-    if (args[0] != .string or args[2] != .string) return args[2];
+    if (args[0] != .string or args[2] != .string) return if (args[2] == .string) .{ .string = try Value.String.create(ctx.allocator, args[2].string.bytes()) } else args[2];
     const info = parsePattern(args[0].string.bytes()) orelse {
         setPregError(1);
         return .null;
     };
-    const replacement = if (args[1] == .string) args[1].string.bytes() else return args[2];
+    const replacement = if (args[1] == .string) args[1].string.bytes() else return if (args[2] == .string) .{ .string = try Value.String.create(ctx.allocator, args[2].string.bytes()) } else args[2];
     const subject = args[2].string.bytes();
     const limit: i64 = if (args.len >= 4 and args[3] != .null) Value.toInt(args[3]) else -1;
 
     if (limit == 0) {
         if (args.len >= 5) ctx.setCallerVar(4, args.len, .{ .int = 0 });
-        return .{ .string = Value.String.borrowed(try ctx.createString(subject)) };
+        return .{ .string = try Value.String.create(ctx.allocator, subject) };
     }
 
     const code = compilePattern(info.pattern, info.flags) orelse {
@@ -884,7 +887,7 @@ fn preg_replace(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     };
     defer pcre2.pcre2_code_free_8(code);
 
-    const match_data = pcre2.pcre2_match_data_create_from_pattern_8(code, null) orelse return args[2];
+    const match_data = pcre2.pcre2_match_data_create_from_pattern_8(code, null) orelse return if (args[2] == .string) .{ .string = try Value.String.create(ctx.allocator, args[2].string.bytes()) } else args[2];
     defer pcre2.pcre2_match_data_free_8(match_data);
 
     if (limit > 0) {
@@ -913,11 +916,11 @@ fn preg_replace(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
 
     if (rc >= 0) {
         ctx.setCallerVar(4, args.len, .{ .int = @intCast(rc) });
-        return args[2];
+        return if (args[2] == .string) .{ .string = try Value.String.create(ctx.allocator, args[2].string.bytes()) } else args[2];
     }
     if (rc != pcre2.ERROR_NOMEMORY) {
         ctx.setCallerVar(4, args.len, .{ .int = 0 });
-        return args[2];
+        return if (args[2] == .string) .{ .string = try Value.String.create(ctx.allocator, args[2].string.bytes()) } else args[2];
     }
 
     const buf = try ctx.allocator.alloc(u8, out_len);
@@ -938,18 +941,18 @@ fn preg_replace(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (rc < 0) {
         ctx.allocator.free(buf);
         ctx.setCallerVar(4, args.len, .{ .int = 0 });
-        return args[2];
+        return if (args[2] == .string) .{ .string = try Value.String.create(ctx.allocator, args[2].string.bytes()) } else args[2];
     }
 
     ctx.setCallerVar(4, args.len, .{ .int = @intCast(rc) });
-    const result = buf[0..out_len];
-    try ctx.strings.append(ctx.allocator, buf);
-    return .{ .string = Value.String.borrowed(result) };
+    const result = try Value.String.adopt(ctx.allocator, buf);
+    return .{ .string = result.borrowedSlice(0, out_len) };
 }
 
 fn pregReplaceArrayPattern(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     const patterns = args[0].array;
-    var current: Value = args[2];
+    var current: Value = if (args[2] == .string) .{ .string = try Value.String.create(ctx.allocator, args[2].string.bytes()) } else args[2];
+    errdefer if (current == .string) current.string.release();
     var total_count: i64 = 0;
     const limit_per: i64 = if (args.len >= 4) Value.toInt(args[3]) else -1;
     for (patterns.entries.items, 0..) |pe, idx| {
@@ -998,7 +1001,9 @@ fn pregReplaceArrayPattern(ctx: *NativeContext, args: []const Value) RuntimeErro
             single_args[3] = args[3];
             n = 4;
         }
-        current = try preg_replace(ctx, single_args[0..n]);
+        const next = try preg_replace(ctx, single_args[0..n]);
+        if (current == .string) current.string.release();
+        current = next;
     }
     ctx.setCallerVar(4, args.len, .{ .int = total_count });
     return current;
@@ -1070,13 +1075,12 @@ fn pregReplaceLimited(ctx: *NativeContext, code: *pcre2.Code, match_data: *pcre2
 
     const buf = try ctx.allocator.alloc(u8, parts.items.len);
     @memcpy(buf, parts.items);
-    try ctx.strings.append(ctx.allocator, buf);
     ctx.setCallerVar(4, args.len, .{ .int = @intCast(count) });
-    return .{ .string = Value.String.borrowed(buf) };
+    return .{ .string = try Value.String.adopt(ctx.allocator, buf) };
 }
 
 fn preg_replace_callback(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len < 3) return if (args.len >= 3) args[2] else Value.null;
+    if (args.len < 3) return .null;
     if (args[2] == .array) {
         const result = try ctx.createArray();
         for (args[2].array.entries.items) |entry| {
@@ -1085,13 +1089,15 @@ fn preg_replace_callback(ctx: *NativeContext, args: []const Value) RuntimeError!
             sub_args[1] = args[1];
             sub_args[2] = entry.value;
             if (args.len >= 4) sub_args[3] = args[3];
-            const replaced = try preg_replace_callback(ctx, sub_args[0..args.len]);
+            const replaced = try preg_replace_callback(ctx, sub_args[0..@min(args.len, 4)]);
+            defer if (replaced == .string) replaced.string.release();
             try result.set(ctx.allocator, entry.key, replaced);
         }
         return .{ .array = result };
     }
     if (args[0] == .array) {
-        var current = args[2];
+        var current: Value = if (args[2] == .string) .{ .string = try Value.String.create(ctx.allocator, args[2].string.bytes()) } else args[2];
+        errdefer if (current == .string) current.string.release();
         for (args[0].array.entries.items) |pat_entry| {
             if (pat_entry.value != .string) continue;
             var sub_args: [5]Value = undefined;
@@ -1099,19 +1105,21 @@ fn preg_replace_callback(ctx: *NativeContext, args: []const Value) RuntimeError!
             sub_args[1] = args[1];
             sub_args[2] = current;
             if (args.len >= 4) sub_args[3] = args[3];
-            current = try preg_replace_callback(ctx, sub_args[0..@min(args.len, 4)]);
+            const next = try preg_replace_callback(ctx, sub_args[0..@min(args.len, 4)]);
+            if (current == .string) current.string.release();
+            current = next;
         }
         return current;
     }
-    if (args[0] != .string or args[2] != .string) return args[2];
-    const info = parsePattern(args[0].string.bytes()) orelse return args[2];
+    if (args[0] != .string or args[2] != .string) return if (args[2] == .string) .{ .string = try Value.String.create(ctx.allocator, args[2].string.bytes()) } else args[2];
+    const info = parsePattern(args[0].string.bytes()) orelse return if (args[2] == .string) .{ .string = try Value.String.create(ctx.allocator, args[2].string.bytes()) } else args[2];
     const callback = args[1];
     const subject = args[2].string.bytes();
 
-    const code = compilePattern(info.pattern, info.flags) orelse return args[2];
+    const code = compilePattern(info.pattern, info.flags) orelse return if (args[2] == .string) .{ .string = try Value.String.create(ctx.allocator, args[2].string.bytes()) } else args[2];
     defer pcre2.pcre2_code_free_8(code);
 
-    const match_data = pcre2.pcre2_match_data_create_from_pattern_8(code, null) orelse return args[2];
+    const match_data = pcre2.pcre2_match_data_create_from_pattern_8(code, null) orelse return if (args[2] == .string) .{ .string = try Value.String.create(ctx.allocator, args[2].string.bytes()) } else args[2];
     defer pcre2.pcre2_match_data_free_8(match_data);
 
     var capture_count: u32 = 0;
@@ -1127,6 +1135,7 @@ fn preg_replace_callback(ctx: *NativeContext, args: []const Value) RuntimeError!
     if (name_count > 0) _ = pcre2.pcre2_pattern_info_8(code, pcre2.INFO_NAMETABLE, @ptrCast(&name_table_ptr));
 
     var result = std.ArrayListUnmanaged(u8){};
+    defer result.deinit(ctx.allocator);
     var offset: usize = 0;
     var replace_count: i64 = 0;
     const limit: i64 = if (args.len >= 4) Value.toInt(args[3]) else -1;
@@ -1142,9 +1151,7 @@ fn preg_replace_callback(ctx: *NativeContext, args: []const Value) RuntimeError!
 
         try result.appendSlice(ctx.allocator, subject[offset..match_start]);
 
-        const matches_arr = try ctx.allocator.create(PhpArray);
-        matches_arr.* = .{};
-        try ctx.arrays.append(ctx.allocator, matches_arr);
+        const matches_arr = try ctx.createArray();
         for (0..group_count) |gi| {
             const gs = ovector[gi * 2];
             const ge = ovector[gi * 2 + 1];
@@ -1152,6 +1159,8 @@ fn preg_replace_callback(ctx: *NativeContext, args: []const Value) RuntimeError!
                 ""
             else
                 subject[gs..ge];
+            const capture = try Value.String.create(ctx.allocator, slice);
+            defer capture.release();
             // PHP places the named entry just before the numeric one
             if (name_count > 0 and name_entry_size > 0) {
                 for (0..name_count) |ni| {
@@ -1160,11 +1169,13 @@ fn preg_replace_callback(ctx: *NativeContext, args: []const Value) RuntimeError!
                     if (gn == gi) {
                         const ne = std.mem.indexOfScalar(u8, entry[2..name_entry_size], 0) orelse (name_entry_size - 2);
                         const name = entry[2 .. 2 + ne];
-                        try matches_arr.set(ctx.allocator, .{ .string = Value.String.borrowed(try ctx.createString(name)) }, .{ .string = Value.String.borrowed(slice) });
+                        const key = try Value.String.create(ctx.allocator, name);
+                        defer key.release();
+                        try matches_arr.set(ctx.allocator, .{ .string = key }, .{ .string = capture });
                     }
                 }
             }
-            try matches_arr.append(ctx.allocator, .{ .string = Value.String.borrowed(slice) });
+            try matches_arr.append(ctx.allocator, .{ .string = capture });
         }
 
         const cb_result = try ctx.invokeCallable(callback, &.{.{ .array = matches_arr }});
@@ -1173,9 +1184,8 @@ fn preg_replace_callback(ctx: *NativeContext, args: []const Value) RuntimeError!
         } else {
             var buf = std.ArrayListUnmanaged(u8){};
             try cb_result.format(&buf, ctx.allocator);
-            const s = try buf.toOwnedSlice(ctx.allocator);
-            try ctx.strings.append(ctx.allocator, s);
-            try result.appendSlice(ctx.allocator, s);
+            defer buf.deinit(ctx.allocator);
+            try result.appendSlice(ctx.allocator, buf.items);
         }
 
         replace_count += 1;
@@ -1196,8 +1206,7 @@ fn preg_replace_callback(ctx: *NativeContext, args: []const Value) RuntimeError!
     if (args.len >= 5) ctx.setCallerVar(4, args.len, .{ .int = replace_count });
 
     const s = try result.toOwnedSlice(ctx.allocator);
-    try ctx.strings.append(ctx.allocator, s);
-    return .{ .string = Value.String.borrowed(s) };
+    return .{ .string = try Value.String.adopt(ctx.allocator, s) };
 }
 
 fn preg_replace_callback_array(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
@@ -1211,12 +1220,14 @@ fn preg_replace_callback_array(ctx: *NativeContext, args: []const Value) Runtime
             sub_args[1] = entry.value;
             if (args.len >= 3) sub_args[2] = args[2];
             const replaced = try preg_replace_callback_array(ctx, sub_args[0..args.len]);
+            defer if (replaced == .string) replaced.string.release();
             try result.set(ctx.allocator, entry.key, replaced);
         }
         return .{ .array = result };
     }
-    var current: Value = args[1];
-    if (current != .string) return current;
+    if (args[1] != .string) return args[1];
+    var current: Value = .{ .string = try Value.String.create(ctx.allocator, args[1].string.bytes()) };
+    errdefer if (current == .string) current.string.release();
     var total_count: i64 = 0;
     const limit: i64 = if (args.len >= 3) Value.toInt(args[2]) else -1;
 
@@ -1256,7 +1267,10 @@ fn preg_replace_callback_array(ctx: *NativeContext, args: []const Value) Runtime
             n = 4;
         }
         const r = try preg_replace_callback(ctx, sub_args[0..n]);
-        if (r == .string) current = r;
+        if (r == .string) {
+            current.string.release();
+            current = r;
+        }
     }
     ctx.setCallerVar(3, args.len, .{ .int = total_count });
     return current;

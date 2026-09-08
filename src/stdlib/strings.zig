@@ -203,11 +203,12 @@ fn strpos(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     return .{ .bool = false };
 }
 
-const ReplaceResult = struct { str: []const u8, count: i64 };
+const ReplaceResult = struct { str: Value.String, count: i64 };
 
 fn replaceOne(ctx: *NativeContext, subject: []const u8, search: []const u8, replace: []const u8) !ReplaceResult {
-    if (search.len == 0) return .{ .str = subject, .count = 0 };
+    if (search.len == 0) return .{ .str = try Value.String.create(ctx.allocator, subject), .count = 0 };
     var buf = std.ArrayListUnmanaged(u8){};
+    errdefer buf.deinit(ctx.allocator);
     var i: usize = 0;
     var cnt: i64 = 0;
     while (i < subject.len) {
@@ -221,8 +222,7 @@ fn replaceOne(ctx: *NativeContext, subject: []const u8, search: []const u8, repl
         }
     }
     const s = try buf.toOwnedSlice(ctx.allocator);
-    try ctx.strings.append(ctx.allocator, s);
-    return .{ .str = s, .count = cnt };
+    return .{ .str = try Value.String.adopt(ctx.allocator, s), .count = cnt };
 }
 
 fn str_replace(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
@@ -241,7 +241,8 @@ fn str_replace(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
         for (subject_arr.entries.items) |se| {
             const elem_str: []const u8 = if (se.value == .string) se.value.string.bytes() else "";
             const replaced = try strReplaceOnSingle(ctx, args[0], args[1], elem_str, &total_count);
-            try out.set(ctx.allocator, se.key, .{ .string = Value.String.borrowed(replaced) });
+            defer replaced.release();
+            try out.set(ctx.allocator, se.key, .{ .string = replaced });
         }
         if (args.len >= 4) ctx.setCallerVar(3, args.len, .{ .int = total_count });
         return .{ .array = out };
@@ -250,12 +251,13 @@ fn str_replace(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     const subject = if (args[2] == .object) try coerceToString(ctx, args[2]) else if (args[2] == .string) args[2].string.bytes() else return args[2];
     const replaced = try strReplaceOnSingle(ctx, args[0], args[1], subject, &total_count);
     if (args.len >= 4) ctx.setCallerVar(3, args.len, .{ .int = total_count });
-    return .{ .string = Value.String.borrowed(replaced) };
+    return .{ .string = replaced };
 }
 
-fn strReplaceOnSingle(ctx: *NativeContext, search: Value, replace: Value, subject: []const u8, total_count: *i64) ![]const u8 {
+fn strReplaceOnSingle(ctx: *NativeContext, search: Value, replace: Value, subject: []const u8, total_count: *i64) !Value.String {
     if (search == .array) {
-        var result = subject;
+        var result = try Value.String.create(ctx.allocator, subject);
+        errdefer result.release();
         for (search.array.entries.items, 0..) |entry, idx| {
             const needle = if (entry.value == .string) entry.value.string.bytes() else continue;
             const replacement = if (replace == .array) blk: {
@@ -264,13 +266,14 @@ fn strReplaceOnSingle(ctx: *NativeContext, search: Value, replace: Value, subjec
                 else
                     "";
             } else if (replace == .string) replace.string.bytes() else "";
-            const r = try replaceOne(ctx, result, needle, replacement);
+            const r = try replaceOne(ctx, result.bytes(), needle, replacement);
+            result.release();
             result = r.str;
             total_count.* += r.count;
         }
         return result;
     }
-    const s = if (search == .string) search.string.bytes() else return subject;
+    const s = if (search == .string) search.string.bytes() else return try Value.String.create(ctx.allocator, subject);
     const rep = if (replace == .string) replace.string.bytes() else "";
     const r = try replaceOne(ctx, subject, s, rep);
     total_count.* += r.count;
