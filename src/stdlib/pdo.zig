@@ -10,6 +10,11 @@ const ClassDef = vm_mod.ClassDef;
 const Allocator = std.mem.Allocator;
 const RuntimeError = error{ RuntimeError, OutOfMemory };
 
+fn retainReturned(value: Value) Value {
+    if (value == .string) value.string.retain();
+    return value;
+}
+
 const sqlite = struct {
     const Db = opaque {};
     const Stmt = opaque {};
@@ -481,12 +486,12 @@ fn stmtIterRewind(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
 
 fn stmtIterCurrent(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
     const obj = getThis(ctx) orelse return .null;
-    return obj.get("__iter_current");
+    return retainReturned(obj.get("__iter_current"));
 }
 
 fn stmtIterKey(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
     const obj = getThis(ctx) orelse return .{ .int = 0 };
-    return obj.get("__iter_key");
+    return retainReturned(obj.get("__iter_key"));
 }
 
 fn stmtIterNext(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
@@ -824,7 +829,7 @@ fn pdoConstruct(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     const driver = dsn[0..colon];
     const rest = dsn[colon + 1 ..];
 
-    try obj.set(ctx.allocator, "__driver", .{ .string = Value.String.borrowed(driver) });
+    try obj.set(ctx.allocator, "__driver", .{ .string = Value.String.borrowed(try ctx.createString(driver)) });
 
     if (std.mem.eql(u8, driver, "sqlite")) {
         const path_z = try dupeZ(ctx, rest);

@@ -251,7 +251,9 @@ fn buildAndAttachTrace(ctx: *NativeContext, obj: *@import("../runtime/value.zig"
 fn exceptionGetMessage(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
     const this_val = ctx.vm.currentFrame().vars.get("$this") orelse return .null;
     if (this_val != .object) return .null;
-    return this_val.object.get("message");
+    const message = this_val.object.get("message");
+    if (message == .string) message.string.retain();
+    return message;
 }
 
 fn exceptionToString(ctx: *NativeContext, _: []const Value) RuntimeError!Value {

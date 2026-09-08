@@ -83,6 +83,13 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                         locals[slot] = val;
                     }
                     self.releaseValue(sl_old);
+                    if (frame.vars.count() > 0) {
+                        if (frame.func) |func| {
+                            if (slot < func.slot_names.len) {
+                                if (frame.vars.getPtr(func.slot_names[slot])) |mirror| mirror.* = locals[slot];
+                            }
+                        }
+                    }
                     if (code[ip] == @intFromEnum(OpCode.pop)) {
                         ip += 1;
                         sp -= 1;
@@ -1256,14 +1263,14 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                     if (a == .string and b == .string) {
                         const as = a.string.bytes();
                         const bs = b.string.bytes();
-                        const owned = try self.allocator.alloc(u8, as.len + bs.len);
+                        const owned = try self.stringAllocator().alloc(u8, as.len + bs.len);
                         @memcpy(owned[0..as.len], as);
                         @memcpy(owned[as.len..], bs);
-                        try self.strings.append(self.allocator, owned);
+                        const result = try Value.String.adopt(self.stringAllocator(), owned);
                         self.stackRelease(a);
                         self.stackRelease(b);
                         sp -= 1;
-                        self.stack[sp - 1] = .{ .string = Value.String.borrowed(owned) };
+                        self.stack[sp - 1] = .{ .string = result };
                         const _next = code[ip];
                         ip += 1;
                         continue :dispatch @as(OpCode, @enumFromInt(_next));
@@ -1274,14 +1281,14 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                             self.sp = sp;
                             return;
                         };
-                        const owned = try self.allocator.alloc(u8, a.string.len + bs.len);
+                        const owned = try self.stringAllocator().alloc(u8, a.string.len + bs.len);
                         @memcpy(owned[0..a.string.len], a.string.bytes());
                         @memcpy(owned[a.string.len..], bs);
-                        try self.strings.append(self.allocator, owned);
+                        const result = try Value.String.adopt(self.stringAllocator(), owned);
                         self.stackRelease(a);
                         self.stackRelease(b);
                         sp -= 1;
-                        self.stack[sp - 1] = .{ .string = Value.String.borrowed(owned) };
+                        self.stack[sp - 1] = .{ .string = result };
                         const _next = code[ip];
                         ip += 1;
                         continue :dispatch @as(OpCode, @enumFromInt(_next));
@@ -1292,14 +1299,14 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                             self.sp = sp;
                             return;
                         };
-                        const owned = try self.allocator.alloc(u8, as.len + b.string.len);
+                        const owned = try self.stringAllocator().alloc(u8, as.len + b.string.len);
                         @memcpy(owned[0..as.len], as);
                         @memcpy(owned[as.len..], b.string.bytes());
-                        try self.strings.append(self.allocator, owned);
+                        const result = try Value.String.adopt(self.stringAllocator(), owned);
                         self.stackRelease(a);
                         self.stackRelease(b);
                         sp -= 1;
-                        self.stack[sp - 1] = .{ .string = Value.String.borrowed(owned) };
+                        self.stack[sp - 1] = .{ .string = result };
                         const _next = code[ip];
                         ip += 1;
                         continue :dispatch @as(OpCode, @enumFromInt(_next));

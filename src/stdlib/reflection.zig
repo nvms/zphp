@@ -12,6 +12,11 @@ const ObjFunction = @import("../pipeline/bytecode.zig").ObjFunction;
 const Allocator = std.mem.Allocator;
 const RuntimeError = error{ RuntimeError, OutOfMemory };
 
+fn retainReturned(value: Value) Value {
+    if (value == .string) value.string.retain();
+    return value;
+}
+
 pub fn register(vm: *VM, a: Allocator) !void {
     // Unit enum cases are request-lifetime objects, just like RoundingMode.
     var hook_type = ClassDef{ .name = "PropertyHookType", .is_enum = true, .is_final = true };
@@ -752,7 +757,7 @@ fn rextConstruct(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
 
 fn rextGetName(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
     const this = getThis(ctx) orelse return .null;
-    return this.get("name");
+    return retainReturned(this.get("name"));
 }
 
 fn rextGetVersion(_: *NativeContext, _: []const Value) RuntimeError!Value {
@@ -1046,7 +1051,7 @@ fn rcConstruct(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
 
 fn rcGetName(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
     const this = getThis(ctx) orelse return .null;
-    return this.get("name");
+    return retainReturned(this.get("name"));
 }
 
 fn rcGetConstructor(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
@@ -1946,7 +1951,7 @@ fn rcGetConstant(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     while (current) |name| {
         const cls = ctx.vm.classes.get(name) orelse break;
         if (cls.constant_names.contains(target)) {
-            if (cls.static_props.get(target)) |val| return val;
+            if (cls.static_props.get(target)) |val| return retainReturned(val);
         }
         current = cls.parent;
     }
@@ -1965,7 +1970,7 @@ fn buildReflectionClassConstant(ctx: *NativeContext, class_name: []const u8, con
 
 fn rccGetName(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
     const this = getThis(ctx) orelse return .null;
-    return this.get("name");
+    return retainReturned(this.get("name"));
 }
 
 fn rccGetDocComment(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
@@ -2015,7 +2020,7 @@ fn rccGetValue(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
     var current: ?[]const u8 = class_name;
     while (current) |name| {
         const cls = ctx.vm.classes.get(name) orelse break;
-        if (cls.static_props.get(const_name)) |val| return val;
+        if (cls.static_props.get(const_name)) |val| return retainReturned(val);
         current = cls.parent;
     }
     return .null;
@@ -2353,7 +2358,7 @@ fn rmConstruct(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
 
 fn rmGetName(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
     const this = getThis(ctx) orelse return .null;
-    return this.get("name");
+    return retainReturned(this.get("name"));
 }
 
 fn rmLookupFunc(ctx: *NativeContext) ?@TypeOf(ctx.vm.functions.get("").?) {
@@ -2511,7 +2516,7 @@ fn rmGetNumberOfRequiredParameters(ctx: *NativeContext, _: []const Value) Runtim
 
 fn rpGetName(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
     const this = getThis(ctx) orelse return .null;
-    return this.get("name");
+    return retainReturned(this.get("name"));
 }
 
 fn rpGetType(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
@@ -2543,7 +2548,7 @@ fn rpGetDefaultValue(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
     const this = getThis(ctx) orelse return .null;
     const has_default = this.get("_has_default");
     if (has_default != .bool or !has_default.bool) return throwReflection(ctx, "Internal error: no default value available");
-    return this.get("_default_value");
+    return retainReturned(this.get("_default_value"));
 }
 
 fn rpIsOptional(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
@@ -2839,7 +2844,7 @@ fn rfInvokeArgs(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
 
 fn rfGetName(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
     const this = getThis(ctx) orelse return .null;
-    return this.get("name");
+    return retainReturned(this.get("name"));
 }
 
 fn rfGetParameters(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
@@ -3589,7 +3594,7 @@ fn rpWrite(ctx: *NativeContext, args: []const Value, skip: bool) RuntimeError!Va
 
 fn rpropGetName(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
     const this = getThis(ctx) orelse return .null;
-    return this.get("name");
+    return retainReturned(this.get("name"));
 }
 
 fn rpropGetType(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
@@ -3749,7 +3754,7 @@ fn rpropGetDefaultValue(ctx: *NativeContext, _: []const Value) RuntimeError!Valu
     const this = getThis(ctx) orelse return .null;
     const has_default = this.get("_has_default");
     if (has_default != .bool or !has_default.bool) return throwReflection(ctx, "Property does not have a default value");
-    return this.get("_default_value");
+    return retainReturned(this.get("_default_value"));
 }
 
 fn rpropHasDefaultValue(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
@@ -4099,7 +4104,7 @@ fn attributeConstruct(ctx: *NativeContext, args: []const Value) RuntimeError!Val
 
 fn raGetName(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
     const this = getThis(ctx) orelse return .null;
-    return this.get("name");
+    return retainReturned(this.get("name"));
 }
 
 fn raGetArguments(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
@@ -4383,7 +4388,7 @@ fn reucConstruct(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
 
 fn reucGetName(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
     const this = getThis(ctx) orelse return .null;
-    return this.get("name");
+    return retainReturned(this.get("name"));
 }
 
 fn reucGetValue(ctx: *NativeContext, _: []const Value) RuntimeError!Value {

@@ -177,10 +177,10 @@ fn substr(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
             length = @max(0, slen - @as(i64, @intCast(ustart)) + length);
         }
         const end: usize = @min(s.len, ustart + @as(usize, @intCast(@max(0, length))));
-        if (args[0] == .string) return .{ .string = args[0].string.retainedSlice(ustart, end) };
+        if (args[0] == .string) return .{ .string = args[0].string.borrowedSlice(ustart, end) };
         return .{ .string = Value.String.borrowed(s[ustart..end]) };
     }
-    if (args[0] == .string) return .{ .string = args[0].string.retainedSlice(ustart, s.len) };
+    if (args[0] == .string) return .{ .string = args[0].string.borrowedSlice(ustart, s.len) };
     return .{ .string = Value.String.borrowed(s[ustart..]) };
 }
 
@@ -351,8 +351,7 @@ fn implode(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
         }
     }
     const s = try buf.toOwnedSlice(ctx.allocator);
-    try ctx.strings.append(ctx.allocator, s);
-    return .{ .string = Value.String.borrowed(s) };
+    return .{ .string = try Value.String.adopt(ctx.allocator, s) };
 }
 
 const default_trim_chars = " \t\n\r\x0b\x00";
@@ -391,7 +390,7 @@ fn trim(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     const s = try coerceToString(ctx, args[0]);
     const chars = if (args.len >= 2 and args[1] == .string) args[1].string.bytes() else default_trim_chars;
     const set = buildTrimSet(chars);
-    return .{ .string = Value.String.borrowed(try ctx.createString(trimWithSet(s, set, true, true))) };
+    return .{ .string = try Value.String.create(ctx.allocator, trimWithSet(s, set, true, true)) };
 }
 
 fn ltrim(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
@@ -399,7 +398,7 @@ fn ltrim(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     const s = try coerceToString(ctx, args[0]);
     const chars = if (args.len >= 2 and args[1] == .string) args[1].string.bytes() else default_trim_chars;
     const set = buildTrimSet(chars);
-    return .{ .string = Value.String.borrowed(try ctx.createString(trimWithSet(s, set, true, false))) };
+    return .{ .string = try Value.String.create(ctx.allocator, trimWithSet(s, set, true, false)) };
 }
 
 fn rtrim(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
@@ -407,7 +406,7 @@ fn rtrim(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     const s = try coerceToString(ctx, args[0]);
     const chars = if (args.len >= 2 and args[1] == .string) args[1].string.bytes() else default_trim_chars;
     const set = buildTrimSet(chars);
-    return .{ .string = Value.String.borrowed(try ctx.createString(trimWithSet(s, set, false, true))) };
+    return .{ .string = try Value.String.create(ctx.allocator, trimWithSet(s, set, false, true)) };
 }
 
 fn strtolower(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
@@ -416,8 +415,7 @@ fn strtolower(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     const s = try coerceToString(ctx, args[0]);
     const buf = try ctx.allocator.alloc(u8, s.len);
     for (s, 0..) |c, i| buf[i] = std.ascii.toLower(c);
-    try ctx.strings.append(ctx.allocator, buf);
-    return .{ .string = Value.String.borrowed(buf) };
+    return .{ .string = try Value.String.adopt(ctx.allocator, buf) };
 }
 
 fn strtoupper(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
@@ -431,8 +429,7 @@ fn strtoupper(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     const s = try coerceToString(ctx, args[0]);
     const buf = try ctx.allocator.alloc(u8, s.len);
     for (s, 0..) |c, i| buf[i] = std.ascii.toUpper(c);
-    try ctx.strings.append(ctx.allocator, buf);
-    return .{ .string = Value.String.borrowed(buf) };
+    return .{ .string = try Value.String.adopt(ctx.allocator, buf) };
 }
 
 fn str_contains(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
@@ -460,7 +457,7 @@ fn str_ends_with(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
 fn str_shuffle(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len == 0) return .{ .string = Value.String.borrowed("") };
     const s = try coerceToString(ctx, args[0]);
-    if (s.len <= 1) return .{ .string = Value.String.borrowed(s) };
+    if (s.len <= 1) return if (args[0] == .string) args[0] else .{ .string = Value.String.borrowed(s) };
     const buf = try ctx.allocator.alloc(u8, s.len);
     @memcpy(buf, s);
     // Fisher-Yates with the default PRNG
@@ -472,8 +469,7 @@ fn str_shuffle(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
         buf[i] = buf[j];
         buf[j] = tmp;
     }
-    try ctx.strings.append(ctx.allocator, buf);
-    return .{ .string = Value.String.borrowed(buf) };
+    return .{ .string = try Value.String.adopt(ctx.allocator, buf) };
 }
 
 fn str_repeat(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
@@ -484,13 +480,11 @@ fn str_repeat(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
         try ctx.vm.setPendingException("ValueError", "str_repeat(): Argument #2 ($times) must be greater than or equal to 0");
         return error.RuntimeError;
     }
-    const times = raw_times;
+    const times: usize = std.math.cast(usize, raw_times) orelse return error.OutOfMemory;
     if (times == 0 or s.len == 0) return .{ .string = Value.String.borrowed("") };
-
-    var buf = std.ArrayListUnmanaged(u8){};
-    var i: i64 = 0;
-    while (i < times) : (i += 1) try buf.appendSlice(ctx.allocator, s);
-    const result = try buf.toOwnedSlice(ctx.allocator);
+    const length = std.math.mul(usize, s.len, times) catch return error.OutOfMemory;
+    const result = try ctx.allocator.alloc(u8, length);
+    for (0..times) |i| @memcpy(result[i * s.len ..][0..s.len], s);
     return .{ .string = try Value.String.adopt(ctx.allocator, result) };
 }
 
@@ -501,8 +495,7 @@ fn ucfirst(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     const buf = try ctx.allocator.alloc(u8, s.len);
     @memcpy(buf, s);
     buf[0] = std.ascii.toUpper(buf[0]);
-    try ctx.strings.append(ctx.allocator, buf);
-    return .{ .string = Value.String.borrowed(buf) };
+    return .{ .string = try Value.String.adopt(ctx.allocator, buf) };
 }
 
 fn lcfirst(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
@@ -512,15 +505,14 @@ fn lcfirst(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     const buf = try ctx.allocator.alloc(u8, s.len);
     @memcpy(buf, s);
     buf[0] = std.ascii.toLower(buf[0]);
-    try ctx.strings.append(ctx.allocator, buf);
-    return .{ .string = Value.String.borrowed(buf) };
+    return .{ .string = try Value.String.adopt(ctx.allocator, buf) };
 }
 
 fn str_pad(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len < 2) return if (args.len > 0) args[0] else Value{ .string = Value.String.borrowed("") };
     const s = try coerceToString(ctx, args[0]);
     const target_len: usize = @intCast(@max(0, Value.toInt(args[1])));
-    if (s.len >= target_len) return .{ .string = Value.String.borrowed(s) };
+    if (s.len >= target_len) return if (args[0] == .string) args[0] else .{ .string = Value.String.borrowed(s) };
     const pad_str = if (args.len >= 3 and args[2] != .null) try coerceToString(ctx, args[2]) else " ";
     if (pad_str.len == 0) {
         try ctx.vm.setPendingException("ValueError", "str_pad(): Argument #3 ($pad_string) must not be empty");
@@ -552,8 +544,7 @@ fn str_pad(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
         while (i < diff) : (i += 1) try buf.append(ctx.allocator, pad_str[i % pad_str.len]);
     }
     const result = try buf.toOwnedSlice(ctx.allocator);
-    try ctx.strings.append(ctx.allocator, result);
-    return .{ .string = Value.String.borrowed(result) };
+    return .{ .string = try Value.String.adopt(ctx.allocator, result) };
 }
 
 fn native_strcmp(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
@@ -877,9 +868,9 @@ fn native_str_word_count(ctx: *NativeContext, args: []const Value) RuntimeError!
         } else {
             if (in_word) {
                 if (format == 2) {
-                    try arr.set(ctx.allocator, .{ .int = @intCast(word_start) }, .{ .string = args[0].string.retainedSlice(word_start, i) });
+                    try arr.set(ctx.allocator, .{ .int = @intCast(word_start) }, .{ .string = args[0].string.borrowedSlice(word_start, i) });
                 } else {
-                    try arr.append(ctx.allocator, .{ .string = args[0].string.retainedSlice(word_start, i) });
+                    try arr.append(ctx.allocator, .{ .string = args[0].string.borrowedSlice(word_start, i) });
                 }
                 in_word = false;
             }
@@ -887,9 +878,9 @@ fn native_str_word_count(ctx: *NativeContext, args: []const Value) RuntimeError!
     }
     if (in_word) {
         if (format == 2) {
-            try arr.set(ctx.allocator, .{ .int = @intCast(word_start) }, .{ .string = args[0].string.retainedSlice(word_start, s.len) });
+            try arr.set(ctx.allocator, .{ .int = @intCast(word_start) }, .{ .string = args[0].string.borrowedSlice(word_start, s.len) });
         } else {
-            try arr.append(ctx.allocator, .{ .string = args[0].string.retainedSlice(word_start, s.len) });
+            try arr.append(ctx.allocator, .{ .string = args[0].string.borrowedSlice(word_start, s.len) });
         }
     }
     return .{ .array = arr };

@@ -173,8 +173,10 @@ pub const entries = .{
 fn native_define(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len < 2 or args[0] != .string) return .{ .bool = false };
     if (ctx.vm.php_constants.contains(args[0].string.bytes())) return .{ .bool = false };
-    try ctx.vm.user_constants.put(ctx.allocator, args[0].string.bytes(), {});
-    try ctx.vm.php_constants.put(ctx.allocator, args[0].string.bytes(), args[1]);
+    const name = try ctx.createString(args[0].string.bytes());
+    try ctx.vm.user_constants.put(ctx.allocator, name, {});
+    try ctx.vm.php_constants.put(ctx.allocator, name, args[1]);
+    VM.retainValue(args[1]);
     return .{ .bool = true };
 }
 

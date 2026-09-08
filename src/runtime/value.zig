@@ -1015,9 +1015,13 @@ pub const PhpString = struct {
         try writer.writeAll(self.bytes());
     }
 
+    pub fn borrowedSlice(self: PhpString, start: usize, end: usize) PhpString {
+        return .{ .ptr = self.ptr + start, .len = end - start, .owner = self.owner };
+    }
+
     pub fn retainedSlice(self: PhpString, start: usize, end: usize) PhpString {
         self.retain();
-        return .{ .ptr = self.ptr + start, .len = end - start, .owner = self.owner };
+        return self.borrowedSlice(start, end);
     }
 
     pub fn retain(self: PhpString) void {

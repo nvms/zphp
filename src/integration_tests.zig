@@ -1804,3 +1804,54 @@ test "hash raw output length" {
         \\echo strlen(hash("sha256", "test", true));
     , "32");
 }
+
+test "discarded concatenations release allocations between batches" {
+    var gpa = std.heap.DebugAllocator(.{ .enable_memory_limit = true }){};
+    defer std.testing.expect(gpa.deinit() == .ok) catch @panic("string batch leak");
+    const alloc = gpa.allocator();
+    const source =
+        \\<?php
+        \\$held = ['retained-' . 1, strtoupper('retained-' . 2)];
+        \\function verifyHeld() {
+        \\    global $held;
+        \\    echo implode(',', $held);
+        \\}
+        \\function batch() {
+        \\    for ($i = 0; $i < 1000; ++$i) {
+        \\        $a = 'temporary-' . $i;
+        \\        $b = $a . '-suffix';
+        \\        $c = 'prefix';
+        \\        $c .= $b;
+        \\        $c .= $i;
+        \\        $upper = strtoupper($c);
+        \\        $trimmed = trim($upper);
+        \\        $repeated = str_repeat($trimmed, 2);
+        \\        $joined = implode(':', [$upper, $repeated]);
+        \\    }
+        \\}
+    ;
+    var ast = try parser.parse(alloc, source);
+    defer ast.deinit();
+    var result = try @import("pipeline/compiler.zig").compile(&ast, alloc);
+    defer result.deinit();
+    const vm = try VM.initOnHeap(alloc);
+    defer {
+        vm.deinit();
+        alloc.destroy(vm);
+    }
+    try vm.interpret(&result);
+    for (0..3) |_| {
+        _ = try vm.callByName("batch", &.{});
+        _ = try vm.callByName("gc_collect_cycles", &.{});
+    }
+    const warm_bytes = gpa.total_requested_bytes;
+    const warm_strings = vm.strings.items.len;
+    for (0..20) |_| {
+        _ = try vm.callByName("batch", &.{});
+        _ = try vm.callByName("gc_collect_cycles", &.{});
+        try std.testing.expectEqual(warm_strings, vm.strings.items.len);
+        try std.testing.expectEqual(warm_bytes, gpa.total_requested_bytes);
+    }
+    _ = try vm.callByName("verifyHeld", &.{});
+    try std.testing.expectEqualStrings("retained-1,RETAINED-2", vm.output.items);
+}

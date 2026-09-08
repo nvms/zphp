@@ -12,6 +12,11 @@ const RuntimeError = error{ RuntimeError, OutOfMemory };
 const arrays_mod = @import("arrays.zig");
 const phpTypeName = @import("types.zig").phpTypeName;
 
+fn retainReturned(value: Value) Value {
+    if (value == .string) value.string.retain();
+    return value;
+}
+
 // PHP's SplObjectStorage offset* methods strictly require an object key
 // and throw TypeError on any other type. centralized helper so all four
 // offsetExists/Get/Set/Unset emit the same PHP-format message
@@ -645,7 +650,7 @@ fn wmiCurrent(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
     const target = wmiCursorObj(this) orelse return .null;
     const info_v = this.get("__info");
     if (info_v != .array) return .null;
-    return info_v.array.get(.{ .int = sosObjKey(target) });
+    return retainReturned(info_v.array.get(.{ .int = sosObjKey(target) }));
 }
 
 fn wmiKey(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
@@ -690,7 +695,7 @@ fn weakRefCreate(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
 
 fn weakRefGet(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
     const this = getThis(ctx) orelse return .null;
-    return this.get("__target");
+    return retainReturned(this.get("__target"));
 }
 
 fn weakRefConstruct(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
@@ -772,7 +777,7 @@ fn stackTop(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
         try ctx.vm.setPendingException("RuntimeException", "Can't peek at an empty datastructure");
         return error.RuntimeError;
     }
-    return arr.entries.items[arr.entries.items.len - 1].value;
+    return retainReturned(arr.entries.items[arr.entries.items.len - 1].value);
 }
 
 fn stackBottom(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
@@ -782,7 +787,7 @@ fn stackBottom(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
         try ctx.vm.setPendingException("RuntimeException", "Can't peek at an empty datastructure");
         return error.RuntimeError;
     }
-    return arr.entries.items[0].value;
+    return retainReturned(arr.entries.items[0].value);
 }
 
 fn stackCount(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
@@ -835,7 +840,7 @@ fn stackCurrent(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
     const arr = getData(obj) orelse return .null;
     const cursor = Value.toInt(obj.get("__cursor"));
     if (cursor < 0 or cursor >= arr.length()) return .{ .bool = false };
-    return arr.entries.items[@intCast(cursor)].value;
+    return retainReturned(arr.entries.items[@intCast(cursor)].value);
 }
 
 fn stackKey(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
@@ -940,7 +945,7 @@ fn aoMagicGet(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     const has_props = flags == .int and (flags.int & 2) != 0; // ArrayObject::ARRAY_AS_PROPS
     if (!has_props) return .null;
     const arr = getData(obj) orelse return .null;
-    return arr.get(args[0].toArrayKey());
+    return retainReturned(arr.get(args[0].toArrayKey()));
 }
 
 fn aoMagicSet(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
@@ -983,10 +988,10 @@ fn aoMagicUnset(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
 fn aoOffsetGet(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     const obj = getThis(ctx) orelse return .null;
     if (args.len > 0 and obj.get("__data") == .object and args[0] == .string)
-        return obj.get("__data").object.get(args[0].string.bytes());
+        return retainReturned(obj.get("__data").object.get(args[0].string.bytes()));
     const arr = getData(obj) orelse return .null;
     if (args.len == 0) return .null;
-    return arr.get(args[0].toArrayKey());
+    return retainReturned(arr.get(args[0].toArrayKey()));
 }
 
 fn aoOffsetSet(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
@@ -1210,7 +1215,7 @@ fn aiCurrent(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
     const arr = getData(obj) orelse return .{ .bool = false };
     const cursor: usize = @intCast(@max(Value.toInt(obj.get("__cursor")), 0));
     if (cursor >= arr.entries.items.len) return .{ .bool = false };
-    return arr.entries.items[cursor].value;
+    return retainReturned(arr.entries.items[cursor].value);
 }
 
 fn aiKey(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
@@ -1260,10 +1265,10 @@ fn aiCount(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
 fn aiOffsetGet(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     const obj = getThis(ctx) orelse return .null;
     if (args.len > 0 and obj.get("__data") == .object and args[0] == .string)
-        return obj.get("__data").object.get(args[0].string.bytes());
+        return retainReturned(obj.get("__data").object.get(args[0].string.bytes()));
     const arr = getData(obj) orelse return .null;
     if (args.len == 0) return .null;
-    return arr.get(args[0].toArrayKey());
+    return retainReturned(arr.get(args[0].toArrayKey()));
 }
 
 fn aiOffsetSet(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
@@ -1379,7 +1384,7 @@ fn wmOffsetGet(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     const arr = getData(obj) orelse return .null;
     if (args.len == 0) return .null;
     const key = wmObjKey(args[0]) orelse return .null;
-    return arr.get(.{ .int = key });
+    return retainReturned(arr.get(.{ .int = key }));
 }
 
 fn wmOffsetSet(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
@@ -1408,7 +1413,7 @@ fn wmOffsetUnset(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     const arr = getData(obj) orelse return .null;
     if (args.len == 0) return .null;
     const key = wmObjKey(args[0]) orelse return .null;
-    arr.remove(.{ .int = key });
+    ctx.vm.arrayRemoveOwned(arr, .{ .int = key });
     if (args[0] == .object) {
         const keys_v = obj.get("__keys");
         if (keys_v == .array) {
@@ -1542,7 +1547,7 @@ fn pqFormatEntry(ctx: *NativeContext, obj: *PhpObject, entry: Value) Value {
     const flags = Value.toInt(obj.get("__flags"));
     if (entry != .array) return entry;
     const pair = entry.array;
-    if (flags == EXTR_PRIORITY) return pair.get(.{ .int = 1 });
+    if (flags == EXTR_PRIORITY) return retainReturned(pair.get(.{ .int = 1 }));
     if (flags == EXTR_BOTH) {
         const result = ctx.allocator.create(PhpArray) catch return entry;
         result.* = .{};
@@ -1551,7 +1556,7 @@ fn pqFormatEntry(ctx: *NativeContext, obj: *PhpObject, entry: Value) Value {
         result.set(ctx.allocator, .{ .string = Value.String.borrowed("priority") }, pair.get(.{ .int = 1 })) catch return entry;
         return .{ .array = result };
     }
-    return pair.get(.{ .int = 0 });
+    return retainReturned(pair.get(.{ .int = 0 }));
 }
 
 fn pqExtract(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
@@ -1682,7 +1687,7 @@ fn userHeapTop(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
     const obj = getThis(ctx) orelse return .null;
     const arr = getData(obj) orelse return .null;
     const idx = (findUserBestIdx(ctx, obj, arr) catch return .null) orelse return .null;
-    return arr.entries.items[idx].value;
+    return retainReturned(arr.entries.items[idx].value);
 }
 
 fn minHeapExtract(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
@@ -1702,7 +1707,7 @@ fn minHeapTop(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
         try ctx.vm.setPendingException("RuntimeException", "Can't peek at an empty heap");
         return error.RuntimeError;
     };
-    return arr.entries.items[idx].value;
+    return retainReturned(arr.entries.items[idx].value);
 }
 
 fn maxHeapExtract(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
@@ -1722,7 +1727,7 @@ fn maxHeapTop(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
         try ctx.vm.setPendingException("RuntimeException", "Can't peek at an empty heap");
         return error.RuntimeError;
     };
-    return arr.entries.items[idx].value;
+    return retainReturned(arr.entries.items[idx].value);
 }
 
 fn heapCount(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
@@ -1742,7 +1747,7 @@ fn heapCurrent(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
     const arr = getData(obj) orelse return .{ .bool = false };
     const cursor: usize = @intCast(@max(Value.toInt(obj.get("__cursor")), 0));
     if (cursor >= arr.entries.items.len) return .{ .bool = false };
-    return arr.entries.items[cursor].value;
+    return retainReturned(arr.entries.items[cursor].value);
 }
 
 fn heapKey(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
@@ -1920,7 +1925,7 @@ fn faOffsetGet(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
         try ctx.vm.setPendingException("OutOfBoundsException", "Index invalid or out of range");
         return error.RuntimeError;
     }
-    return arr.entries.items[@intCast(raw)].value;
+    return retainReturned(arr.entries.items[@intCast(raw)].value);
 }
 
 fn faOffsetSet(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
@@ -1967,7 +1972,7 @@ fn faCurrent(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
     const arr = getData(obj) orelse return .{ .bool = false };
     const cursor: usize = @intCast(@max(Value.toInt(obj.get("__cursor")), 0));
     if (cursor >= arr.entries.items.len) return .{ .bool = false };
-    return arr.entries.items[cursor].value;
+    return retainReturned(arr.entries.items[cursor].value);
 }
 
 fn faKey(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
@@ -2035,7 +2040,7 @@ fn sqBottom(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
         try ctx.vm.setPendingException("RuntimeException", "Can't peek at an empty datastructure");
         return error.RuntimeError;
     }
-    return arr.entries.items[0].value;
+    return retainReturned(arr.entries.items[0].value);
 }
 
 fn sqTop(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
@@ -2045,7 +2050,7 @@ fn sqTop(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
         try ctx.vm.setPendingException("RuntimeException", "Can't peek at an empty datastructure");
         return error.RuntimeError;
     }
-    return arr.entries.items[arr.entries.items.len - 1].value;
+    return retainReturned(arr.entries.items[arr.entries.items.len - 1].value);
 }
 
 fn sqCount(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
@@ -2065,7 +2070,7 @@ fn sqCurrent(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
     const arr = getData(obj) orelse return .{ .bool = false };
     const cursor: usize = @intCast(@max(Value.toInt(obj.get("__cursor")), 0));
     if (cursor >= arr.entries.items.len) return .{ .bool = false };
-    return arr.entries.items[cursor].value;
+    return retainReturned(arr.entries.items[cursor].value);
 }
 
 fn sqKey(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
@@ -2162,7 +2167,7 @@ fn dllTop(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
         try ctx.vm.setPendingException("RuntimeException", "Can't peek at an empty datastructure");
         return error.RuntimeError;
     }
-    return arr.entries.items[arr.entries.items.len - 1].value;
+    return retainReturned(arr.entries.items[arr.entries.items.len - 1].value);
 }
 
 fn dllBottom(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
@@ -2172,7 +2177,7 @@ fn dllBottom(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
         try ctx.vm.setPendingException("RuntimeException", "Can't peek at an empty datastructure");
         return error.RuntimeError;
     }
-    return arr.entries.items[0].value;
+    return retainReturned(arr.entries.items[0].value);
 }
 
 fn dllCount(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
@@ -2221,7 +2226,7 @@ fn dllCurrent(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
     const arr = getData(obj) orelse return .{ .bool = false };
     const cursor = Value.toInt(obj.get("__cursor"));
     if (cursor < 0 or cursor >= @as(i64, @intCast(arr.entries.items.len))) return .{ .bool = false };
-    return arr.entries.items[@intCast(cursor)].value;
+    return retainReturned(arr.entries.items[@intCast(cursor)].value);
 }
 
 fn dllKey(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
@@ -2284,7 +2289,7 @@ fn stackOffsetGet(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
         try ctx.vm.setPendingException("OutOfRangeException", "Offset invalid or out of range");
         return error.RuntimeError;
     }
-    return arr.entries.items[@intCast(n - 1 - idx)].value;
+    return retainReturned(arr.entries.items[@intCast(n - 1 - idx)].value);
 }
 
 fn stackOffsetSet(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
@@ -2332,7 +2337,7 @@ fn dllOffsetGet(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
         try ctx.vm.setPendingException("OutOfRangeException", "Offset invalid or out of range");
         return error.RuntimeError;
     }
-    return arr.entries.items[@intCast(idx)].value;
+    return retainReturned(arr.entries.items[@intCast(idx)].value);
 }
 
 fn dllOffsetSet(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
@@ -2499,7 +2504,7 @@ fn sosDetach(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
         const idx = sosFindIndexByKey(objs, real_key).?;
         _ = objs.entries.orderedRemove(idx);
         if (real_key == .string) _ = objs.string_index.remove(real_key.string.bytes());
-        info.remove(real_key);
+        ctx.vm.arrayRemoveOwned(info, real_key);
         if (real_key == .string) {
             objs.rebuildStringIndexAssumeCapacity();
         }
@@ -2527,7 +2532,7 @@ fn sosGetInfoMethod(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
     const info = sosGetInfo(obj) orelse return .null;
     const cursor = Value.toInt(obj.get("__cursor"));
     if (cursor < 0 or cursor >= @as(i64, @intCast(objs.entries.items.len))) return .null;
-    return info.get(objs.entries.items[@intCast(cursor)].key);
+    return retainReturned(info.get(objs.entries.items[@intCast(cursor)].key));
 }
 
 fn sosSetInfoMethod(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
@@ -2599,7 +2604,7 @@ fn sosRemoveAll(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
                 _ = objs.string_index.remove(key.string.bytes());
                 objs.rebuildStringIndexAssumeCapacity();
             }
-            info.remove(key);
+            ctx.vm.arrayRemoveOwned(info, key);
         }
     }
     return .null;
@@ -2636,7 +2641,7 @@ fn sosRemoveAllExcept(ctx: *NativeContext, args: []const Value) RuntimeError!Val
             if (key == .string) {
                 _ = objs.string_index.remove(key.string.bytes());
             }
-            info.remove(key);
+            ctx.vm.arrayRemoveOwned(info, key);
         } else {
             i += 1;
         }
@@ -2680,7 +2685,7 @@ fn sosOffsetGet(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
         try ctx.vm.setPendingException("UnexpectedValueException", "Object not found");
         return error.RuntimeError;
     };
-    return info.get(real_key);
+    return retainReturned(info.get(real_key));
 }
 
 fn sosOffsetSet(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
