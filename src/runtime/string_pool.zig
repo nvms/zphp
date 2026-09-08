@@ -68,13 +68,13 @@ fn free(ctx: *anyopaque, bytes: []u8, alignment: Alignment, ra: usize) void {
 test "string pool reuses bounded blocks and preserves realloc contents" {
     var pool: StringPool = .{ .backing = std.testing.allocator };
     defer pool.deinit();
-    const allocator = pool.allocator();
-    var bytes = try allocator.dupe(u8, "retained value");
-    bytes = try allocator.realloc(bytes, 100);
+    const alloc_api = pool.allocator();
+    var bytes = try alloc_api.dupe(u8, "retained value");
+    bytes = try alloc_api.realloc(bytes, 100);
     try std.testing.expectEqualStrings("retained value", bytes[0..14]);
-    allocator.free(bytes);
+    alloc_api.free(bytes);
     var blocks: [100][]u8 = undefined;
-    for (&blocks) |*block| block.* = try allocator.alloc(u8, 4096);
-    for (blocks) |block| allocator.free(block);
+    for (&blocks) |*block| block.* = try alloc_api.alloc(u8, 4096);
+    for (blocks) |block| alloc_api.free(block);
     try std.testing.expectEqual(@as(usize, 32), pool.counts[8]);
 }
