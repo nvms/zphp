@@ -383,10 +383,12 @@ fn preg_match(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
             const end = ovector[i * 2 + 1];
             if (start == pcre2.UNSET or end == pcre2.UNSET) {
                 const val: Value = if (unmatched_as_null) .null else if (offset_capture) try makeOffsetPair(ctx, "", -1) else Value{ .string = Value.String.borrowed("") };
+                defer if (val == .string) val.string.release();
                 try matches_arr.append(ctx.allocator, val);
             } else {
-                const str = try ctx.createString(subject[start..end]);
-                const val = if (offset_capture) try makeOffsetPair(ctx, str, @intCast(start)) else Value{ .string = Value.String.borrowed(str) };
+                const str = subject[start..end];
+                const val = if (offset_capture) try makeOffsetPair(ctx, str, @intCast(start)) else Value{ .string = try Value.String.create(ctx.allocator, str) };
+                defer if (val == .string) val.string.release();
                 try matches_arr.append(ctx.allocator, val);
             }
         }
@@ -394,7 +396,9 @@ fn preg_match(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
         if (pcre2.pcre2_get_mark_8(match_data)) |mark_ptr| {
             const mark = std.mem.sliceTo(mark_ptr, 0);
             if (mark.len > 0) {
-                try matches_arr.set(ctx.allocator, .{ .string = Value.String.borrowed(try ctx.createString("MARK")) }, .{ .string = Value.String.borrowed(try ctx.createString(mark)) });
+                const owned = try Value.String.create(ctx.allocator, mark);
+                defer owned.release();
+                try matches_arr.set(ctx.allocator, .{ .string = Value.String.borrowed("MARK") }, .{ .string = owned });
             }
         }
         if (args[2] != .array) {
@@ -474,11 +478,13 @@ fn addNamedGroupsInterleaved(ctx: *NativeContext, arr: *PhpArray, code: *pcre2.C
             if (unmatched_as_null) break :blk .null;
             break :blk if (offset_capture) try makeOffsetPair(ctx, "", -1) else Value{ .string = Value.String.borrowed("") };
         } else blk: {
-            const s = try ctx.createString(subject[start..end]);
-            break :blk if (offset_capture) try makeOffsetPair(ctx, s, @intCast(start)) else Value{ .string = Value.String.borrowed(s) };
+            const s = subject[start..end];
+            break :blk if (offset_capture) try makeOffsetPair(ctx, s, @intCast(start)) else Value{ .string = try Value.String.create(ctx.allocator, s) };
         };
         const insert_pos = lowest;
-        const named_entry = PhpArray.Entry{ .key = .{ .string = Value.String.borrowed(try ctx.createString(ng.name)) }, .value = val };
+        const named_entry = PhpArray.Entry{ .key = .{ .string = try Value.String.create(ctx.allocator, ng.name) }, .value = val };
+        defer named_entry.key.string.release();
+        defer if (val == .string) val.string.release();
         try insertNamedMatch(ctx, arr, insert_pos, named_entry);
         arr.rebuildStringIndexAssumeCapacity();
         inserted_names[inserted_count] = ng.name;
@@ -508,8 +514,11 @@ fn addNamedGroups(ctx: *NativeContext, arr: *PhpArray, code: *pcre2.Code, ovecto
             const val: Value = if (start == pcre2.UNSET or end == pcre2.UNSET)
                 .{ .string = Value.String.borrowed("") }
             else
-                .{ .string = Value.String.borrowed(try ctx.createString(subject[start..end])) };
-            try arr.set(ctx.allocator, .{ .string = Value.String.borrowed(try ctx.createString(name)) }, val);
+                .{ .string = try Value.String.create(ctx.allocator, subject[start..end]) };
+            defer if (val == .string) val.string.release();
+            const key = try Value.String.create(ctx.allocator, name);
+            defer key.release();
+            try arr.set(ctx.allocator, .{ .string = key }, val);
         }
     }
 }
@@ -584,6 +593,7 @@ fn preg_match_all(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
             };
             for (0..last_idx + 1) |i| {
                 const val = try matchGroupValue(ctx, subject, ovector, count, i, offset_capture);
+                defer if (val == .string) val.string.release();
                 try match_arr.append(ctx.allocator, val);
             }
             try addNamedGroupsToMatch(ctx, match_arr, code, ovector, subject, count, offset_capture);
@@ -591,6 +601,7 @@ fn preg_match_all(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
         } else {
             for (0..group_count) |i| {
                 const val = try matchGroupValue(ctx, subject, ovector, count, i, offset_capture);
+                defer if (val == .string) val.string.release();
                 try group_arrays.?.items[i].append(ctx.allocator, val);
             }
         }
@@ -661,9 +672,10 @@ fn preg_match_all(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
             }
             const insert_pos = lowest;
             const named_entry = PhpArray.Entry{
-                .key = .{ .string = Value.String.borrowed(try ctx.createString(ng.name)) },
+                .key = .{ .string = try Value.String.create(ctx.allocator, ng.name) },
                 .value = .{ .array = group_arrays.?.items[ng.group_num] },
             };
+            defer named_entry.key.string.release();
             try insertNamedMatch(ctx, out, insert_pos, named_entry);
             inserted_names[inserted_count] = ng.name;
             inserted_count += 1;
@@ -685,15 +697,17 @@ fn matchGroupValue(ctx: *NativeContext, subject: []const u8, ovector: [*]usize, 
         if (start == pcre2.UNSET or end == pcre2.UNSET) {
             return if (offset_capture) try makeOffsetPair(ctx, "", -1) else Value{ .string = Value.String.borrowed("") };
         }
-        const str = try ctx.createString(subject[start..end]);
-        return if (offset_capture) try makeOffsetPair(ctx, str, @intCast(start)) else Value{ .string = Value.String.borrowed(str) };
+        const str = subject[start..end];
+        return if (offset_capture) try makeOffsetPair(ctx, str, @intCast(start)) else Value{ .string = try Value.String.create(ctx.allocator, str) };
     }
     return if (offset_capture) try makeOffsetPair(ctx, "", -1) else Value{ .string = Value.String.borrowed("") };
 }
 
 fn makeOffsetPair(ctx: *NativeContext, str: []const u8, offset: i64) RuntimeError!Value {
     const pair = try ctx.createArray();
-    try pair.append(ctx.allocator, .{ .string = Value.String.borrowed(str) });
+    const owned = try Value.String.create(ctx.allocator, str);
+    defer owned.release();
+    try pair.append(ctx.allocator, .{ .string = owned });
     try pair.append(ctx.allocator, .{ .int = offset });
     return Value{ .array = pair };
 }
@@ -734,11 +748,13 @@ fn addNamedGroupsToMatch(ctx: *NativeContext, arr: *PhpArray, code: *pcre2.Code,
         const val: Value = if (start == pcre2.UNSET or end == pcre2.UNSET) blk: {
             break :blk if (offset_capture) try makeOffsetPair(ctx, "", -1) else Value{ .string = Value.String.borrowed("") };
         } else blk: {
-            const s = try ctx.createString(subject[start..end]);
-            break :blk if (offset_capture) try makeOffsetPair(ctx, s, @intCast(start)) else Value{ .string = Value.String.borrowed(s) };
+            const s = subject[start..end];
+            break :blk if (offset_capture) try makeOffsetPair(ctx, s, @intCast(start)) else Value{ .string = try Value.String.create(ctx.allocator, s) };
         };
         const insert_pos = ng.group_num;
-        const named_entry = PhpArray.Entry{ .key = .{ .string = Value.String.borrowed(try ctx.createString(ng.name)) }, .value = val };
+        const named_entry = PhpArray.Entry{ .key = .{ .string = try Value.String.create(ctx.allocator, ng.name) }, .value = val };
+        defer named_entry.key.string.release();
+        defer if (val == .string) val.string.release();
         try insertNamedMatch(ctx, arr, insert_pos, named_entry);
     }
     arr.rebuildStringIndexAssumeCapacity();
@@ -1337,15 +1353,16 @@ fn preg_split(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
             continue;
         }
 
-        const piece = try ctx.createString(subject[prev_end..match_start]);
+        const piece = try Value.String.create(ctx.allocator, subject[prev_end..match_start]);
+        defer piece.release();
         if (!no_empty or piece.len > 0) {
             if (offset_capture) {
                 var pair = try ctx.createArray();
-                try pair.append(ctx.allocator, .{ .string = Value.String.borrowed(piece) });
+                try pair.append(ctx.allocator, .{ .string = piece });
                 try pair.append(ctx.allocator, .{ .int = @intCast(prev_end) });
                 try result.append(ctx.allocator, .{ .array = pair });
             } else {
-                try result.append(ctx.allocator, .{ .string = Value.String.borrowed(piece) });
+                try result.append(ctx.allocator, .{ .string = piece });
             }
         }
         splits += 1;
@@ -1356,15 +1373,16 @@ fn preg_split(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
                 const gs = ovector[2 * i];
                 const ge = ovector[2 * i + 1];
                 if (gs <= subject.len and ge <= subject.len) {
-                    const cap = try ctx.createString(subject[gs..ge]);
+                    const cap = try Value.String.create(ctx.allocator, subject[gs..ge]);
+                    defer cap.release();
                     if (!no_empty or cap.len > 0) {
                         if (offset_capture) {
                             var pair = try ctx.createArray();
-                            try pair.append(ctx.allocator, .{ .string = Value.String.borrowed(cap) });
+                            try pair.append(ctx.allocator, .{ .string = cap });
                             try pair.append(ctx.allocator, .{ .int = @intCast(gs) });
                             try result.append(ctx.allocator, .{ .array = pair });
                         } else {
-                            try result.append(ctx.allocator, .{ .string = Value.String.borrowed(cap) });
+                            try result.append(ctx.allocator, .{ .string = cap });
                         }
                     }
                 } else if (!no_empty) {
@@ -1395,15 +1413,16 @@ fn preg_split(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
         }
     }
 
-    const tail = try ctx.createString(subject[prev_end..]);
+    const tail = try Value.String.create(ctx.allocator, subject[prev_end..]);
+    defer tail.release();
     if (!no_empty or tail.len > 0) {
         if (offset_capture) {
             var pair = try ctx.createArray();
-            try pair.append(ctx.allocator, .{ .string = Value.String.borrowed(tail) });
+            try pair.append(ctx.allocator, .{ .string = tail });
             try pair.append(ctx.allocator, .{ .int = @intCast(prev_end) });
             try result.append(ctx.allocator, .{ .array = pair });
         } else {
-            try result.append(ctx.allocator, .{ .string = Value.String.borrowed(tail) });
+            try result.append(ctx.allocator, .{ .string = tail });
         }
     }
 
