@@ -21,16 +21,30 @@ trap 'rm -rf "$capture_dir"' EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
+bounded() {
+    python3 - "$@" <<'PY'
+import subprocess
+import sys
+try:
+    result = subprocess.run(sys.argv[1:], timeout=60)
+    sys.exit(result.returncode if result.returncode >= 0 else 128 - result.returncode)
+except subprocess.TimeoutExpired:
+    print("test exceeded 60 seconds", file=sys.stderr)
+    sys.exit(124)
+PY
+}
+
 for f in "$SCRIPT_DIR"/*.php; do
     name="$(basename "$f")"
     # skip tests that require external database servers
     case "$name" in pdo_mysql.php|pdo_pgsql.php) continue ;; esac
     php_status=0
     zphp_status=0
-    php -d error_reporting='E_ALL & ~E_DEPRECATED' -d display_errors=0 -d zend.exception_ignore_args=0 -d zend.exception_string_param_max_len=15 "$f" >"$capture_dir/php.stdout" 2>"$capture_dir/php.stderr" || php_status=$?
-    "$ZPHP" run "$f" >"$capture_dir/zphp.stdout" 2>"$capture_dir/zphp.stderr" || zphp_status=$?
+    bounded php -d error_reporting='E_ALL & ~E_DEPRECATED' -d display_errors=0 -d zend.exception_ignore_args=0 -d zend.exception_string_param_max_len=15 "$f" >"$capture_dir/php.stdout" 2>"$capture_dir/php.stderr" || php_status=$?
+    bounded "$ZPHP" run "$f" >"$capture_dir/zphp.stdout" 2>"$capture_dir/zphp.stderr" || zphp_status=$?
 
-    if [ "$php_status" -eq "$zphp_status" ] &&
+    if [ "$php_status" -ne 124 ] && [ "$zphp_status" -ne 124 ] &&
+        [ "$php_status" -eq "$zphp_status" ] &&
         cmp -s "$capture_dir/php.stdout" "$capture_dir/zphp.stdout" &&
         cmp -s "$capture_dir/php.stderr" "$capture_dir/zphp.stderr"; then
         passed=$((passed + 1))

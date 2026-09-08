@@ -3047,7 +3047,7 @@ pub const VM = struct {
             }
         }
         for (caller_slot_names, 0..) |name, caller_slot| {
-            if (name.len == 0 or caller_slot >= caller.locals.len or inherited_vars.contains(name)) continue;
+            if (name.len == 0 or caller_slot >= caller.locals.len) continue;
             try inherited_vars.put(self.allocator, name, caller.locals[caller_slot]);
         }
         const saved_slot_names = self.global_slot_names;
@@ -4518,6 +4518,14 @@ pub const VM = struct {
                     const inner_key = self.pop();
                     const prop_key = self.pop();
                     const base = self.pop();
+                    VM.retainValue(v);
+                    VM.retainValue(inner_key);
+                    VM.retainValue(prop_key);
+                    VM.retainValue(base);
+                    defer self.releaseValue(v);
+                    defer self.releaseValue(inner_key);
+                    defer self.releaseValue(prop_key);
+                    defer self.releaseValue(base);
                     if (base != .object or prop_key != .string) {
                         self.push(v);
                         continue;

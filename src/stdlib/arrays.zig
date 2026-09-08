@@ -115,11 +115,9 @@ fn array_pop(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
         if (e.key == .int and e.key.int > max_int) max_int = e.key.int;
     }
     arr.next_int_key = max_int + 1;
-    // the array no longer references this value - drop the array's retain.
-    // the caller's stack push will retain again, rescuing the destruct if the
-    // result is kept; if the result is discarded the refcount returns to 0
-    // and __destruct fires at the next drain (Stage 2 element-overwrite release)
-    ctx.vm.releaseValue(entry.value);
+    // native strings transfer ownership; other heap results remain borrowed.
+    if (entry.key == .string) entry.key.string.release();
+    if (entry.value != .string) ctx.vm.releaseValue(entry.value);
     return entry.value;
 }
 
@@ -128,6 +126,7 @@ fn array_shift(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     const arr = args[0].array;
     if (arr.entries.items.len == 0) return .null;
     const first = arr.entries.items[0];
+    if (first.value == .string) first.value.string.retain();
     ctx.vm.arrayRemoveOwned(arr, first.key);
     // re-index numeric keys starting from 0
     var next_int: i64 = 0;
@@ -229,7 +228,10 @@ fn array_search(_: *NativeContext, args: []const Value) RuntimeError!Value {
         if (match) {
             return switch (entry.key) {
                 .int => |i| .{ .int = i },
-                .string => |s| .{ .string = s },
+                .string => |s| blk: {
+                    s.retain();
+                    break :blk .{ .string = s };
+                },
             };
         }
     }
@@ -1672,13 +1674,18 @@ fn array_reduce(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     return carry;
 }
 
+fn retainReturnedString(value: Value) Value {
+    if (value == .string) value.string.retain();
+    return value;
+}
+
 fn array_key_first(_: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len == 0 or args[0] != .array) return .null;
     const arr = args[0].array;
     if (arr.entries.items.len == 0) return .null;
     return switch (arr.entries.items[0].key) {
         .int => |i| .{ .int = i },
-        .string => |s| .{ .string = s },
+        .string => |s| retainReturnedString(.{ .string = s }),
     };
 }
 
@@ -1688,7 +1695,7 @@ fn array_key_last(_: *NativeContext, args: []const Value) RuntimeError!Value {
     if (arr.entries.items.len == 0) return .null;
     return switch (arr.entries.items[arr.entries.items.len - 1].key) {
         .int => |i| .{ .int = i },
-        .string => |s| .{ .string = s },
+        .string => |s| retainReturnedString(.{ .string = s }),
     };
 }
 
@@ -1697,7 +1704,7 @@ fn array_first(_: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len == 0 or args[0] != .array) return .null;
     const arr = args[0].array;
     if (arr.entries.items.len == 0) return .null;
-    return arr.entries.items[0].value;
+    return retainReturnedString(arr.entries.items[0].value);
 }
 
 fn array_last(_: *NativeContext, args: []const Value) RuntimeError!Value {
@@ -1705,7 +1712,7 @@ fn array_last(_: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len == 0 or args[0] != .array) return .null;
     const arr = args[0].array;
     if (arr.entries.items.len == 0) return .null;
-    return arr.entries.items[arr.entries.items.len - 1].value;
+    return retainReturnedString(arr.entries.items[arr.entries.items.len - 1].value);
 }
 
 fn native_uasort(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
@@ -1831,7 +1838,7 @@ fn native_current(_: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len == 0 or args[0] != .array) return Value{ .bool = false };
     const arr = args[0].array;
     if (arr.cursor >= arr.entries.items.len) return Value{ .bool = false };
-    return arr.entries.items[arr.cursor].value;
+    return retainReturnedString(arr.entries.items[arr.cursor].value);
 }
 
 fn native_next(_: *NativeContext, args: []const Value) RuntimeError!Value {
@@ -1839,7 +1846,7 @@ fn native_next(_: *NativeContext, args: []const Value) RuntimeError!Value {
     const arr = args[0].array;
     if (arr.cursor < arr.entries.items.len) arr.cursor += 1;
     if (arr.cursor >= arr.entries.items.len) return Value{ .bool = false };
-    return arr.entries.items[arr.cursor].value;
+    return retainReturnedString(arr.entries.items[arr.cursor].value);
 }
 
 fn native_prev(_: *NativeContext, args: []const Value) RuntimeError!Value {
@@ -1850,7 +1857,7 @@ fn native_prev(_: *NativeContext, args: []const Value) RuntimeError!Value {
         return Value{ .bool = false };
     }
     arr.cursor -= 1;
-    return arr.entries.items[arr.cursor].value;
+    return retainReturnedString(arr.entries.items[arr.cursor].value);
 }
 
 fn native_reset(_: *NativeContext, args: []const Value) RuntimeError!Value {
@@ -1858,7 +1865,7 @@ fn native_reset(_: *NativeContext, args: []const Value) RuntimeError!Value {
     const arr = args[0].array;
     arr.cursor = 0;
     if (arr.entries.items.len == 0) return Value{ .bool = false };
-    return arr.entries.items[0].value;
+    return retainReturnedString(arr.entries.items[0].value);
 }
 
 fn native_end(_: *NativeContext, args: []const Value) RuntimeError!Value {
@@ -1866,7 +1873,7 @@ fn native_end(_: *NativeContext, args: []const Value) RuntimeError!Value {
     const arr = args[0].array;
     if (arr.entries.items.len == 0) return Value{ .bool = false };
     arr.cursor = arr.entries.items.len - 1;
-    return arr.entries.items[arr.cursor].value;
+    return retainReturnedString(arr.entries.items[arr.cursor].value);
 }
 
 fn native_key(_: *NativeContext, args: []const Value) RuntimeError!Value {
@@ -1875,7 +1882,7 @@ fn native_key(_: *NativeContext, args: []const Value) RuntimeError!Value {
     if (arr.cursor >= arr.entries.items.len) return .null;
     return switch (arr.entries.items[arr.cursor].key) {
         .int => |i| Value{ .int = i },
-        .string => |s| Value{ .string = s },
+        .string => |s| retainReturnedString(.{ .string = s }),
     };
 }
 
