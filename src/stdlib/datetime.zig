@@ -1917,7 +1917,7 @@ fn dtzConstruct(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
                 return error.RuntimeError;
             }
         }
-        try obj.set(ctx.allocator, "timezone", .{ .string = Value.String.borrowed(stored) });
+        try obj.set(ctx.allocator, "timezone", .{ .string = Value.String.borrowed(try ctx.createString(stored)) });
     }
     return .null;
 }
