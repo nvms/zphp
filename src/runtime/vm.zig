@@ -14448,7 +14448,7 @@ pub const VM = struct {
         };
         self.clearArgStackFrom(floor);
         if (floor < self.sp) for (self.stack[floor..self.sp]) |v| {
-            if (v == .array and v.array.refcount == 0) self.queueArrayRelease(v.array);
+            self.stackRelease(v);
         };
     }
 
