@@ -295,22 +295,31 @@ fn explode(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     var count: i64 = 0;
     while (i <= s.len) {
         if (limit > 0 and count >= limit - 1) {
-            try arr.append(ctx.allocator, .{ .string = Value.String.borrowed(try ctx.createString(s[i..])) });
+            const part = try Value.String.create(ctx.allocator, s[i..]);
+            defer part.release();
+            try arr.append(ctx.allocator, .{ .string = part });
             break;
         }
         if (std.mem.indexOf(u8, s[i..], delim)) |pos| {
-            try arr.append(ctx.allocator, .{ .string = Value.String.borrowed(try ctx.createString(s[i .. i + pos])) });
+            const part = try Value.String.create(ctx.allocator, s[i .. i + pos]);
+            defer part.release();
+            try arr.append(ctx.allocator, .{ .string = part });
             i += pos + delim.len;
             count += 1;
         } else {
-            try arr.append(ctx.allocator, .{ .string = Value.String.borrowed(try ctx.createString(s[i..])) });
+            const part = try Value.String.create(ctx.allocator, s[i..]);
+            defer part.release();
+            try arr.append(ctx.allocator, .{ .string = part });
             break;
         }
     }
 
     if (limit < 0) {
         const drop: usize = @intCast(@min(@as(i64, @intCast(arr.entries.items.len)), -limit));
-        arr.entries.items.len = arr.entries.items.len -| drop;
+        for (0..drop) |_| {
+            const entry = arr.entries.items[arr.entries.items.len - 1];
+            ctx.vm.arrayRemoveOwned(arr, entry.key);
+        }
     }
 
     return .{ .array = arr };
@@ -700,7 +709,9 @@ fn native_str_split(ctx: *NativeContext, args: []const Value) RuntimeError!Value
     var i: usize = 0;
     while (i < s.len) {
         const end = @min(i + chunk_len, s.len);
-        try arr.append(ctx.allocator, .{ .string = Value.String.borrowed(try ctx.createString(s[i..end])) });
+        const part = try Value.String.create(ctx.allocator, s[i..end]);
+        defer part.release();
+        try arr.append(ctx.allocator, .{ .string = part });
         i = end;
     }
     return .{ .array = arr };

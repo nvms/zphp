@@ -981,7 +981,8 @@ pub const VM = struct {
     }
 
     fn regRefArray(self: *VM, owner: RefIndex.OwnerId, cell: *Value, arr: *PhpArray, key: PhpArray.Key) RuntimeError!void {
-        try (try self.refIndex()).addOwned(self.allocator, owner, cell, .{ .array = .{ .array = arr, .key = key } });
+        const entry = arr.getPtr(key) orelse return;
+        try (try self.refIndex()).addOwned(self.allocator, owner, cell, .{ .array = .{ .array = arr, .key = entry.key } });
     }
     fn regRefObject(self: *VM, owner: RefIndex.OwnerId, cell: *Value, obj: *PhpObject, prop_name: []const u8) RuntimeError!void {
         try (try self.refIndex()).addOwned(self.allocator, owner, cell, .{ .object = .{ .object = obj, .prop_name = prop_name } });
