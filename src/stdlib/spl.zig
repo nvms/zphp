@@ -1224,6 +1224,7 @@ fn aiKey(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
     const cursor: usize = @intCast(@max(Value.toInt(obj.get("__cursor")), 0));
     if (cursor >= arr.entries.items.len) return .null;
     const key = arr.entries.items[cursor].key;
+    if (key == .string) key.string.retain();
     return switch (key) {
         .int => |i| .{ .int = i },
         .string => |s| .{ .string = s },
