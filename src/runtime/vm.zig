@@ -597,6 +597,9 @@ pub const VM = struct {
     global_vars: std.ArrayListUnmanaged(StaticEntry) = .{},
     file_loader: ?*const FileLoader = null,
     loaded_files: std.StringHashMapUnmanaged(void) = .{},
+    // canonical directory paths keyed by the spelling a require used, so a
+    // file load costs one lstat instead of a realpath per file
+    realdir_cache: std.StringHashMapUnmanaged([]const u8) = .{},
     // protocols whose builtin stream wrapper has been disabled via stream_wrapper_unregister
     stream_wrappers_unregistered: std.StringHashMapUnmanaged(void) = .{},
     // protocol -> user class name registered via stream_wrapper_register
@@ -2646,6 +2649,8 @@ pub const VM = struct {
         self.static_vars.deinit(self.allocator);
         self.global_vars.deinit(self.allocator);
         self.loaded_files.deinit(self.allocator);
+        self.clearRealDirCache();
+        self.realdir_cache.deinit(self.allocator);
         self.stream_wrappers_unregistered.deinit(self.allocator);
         self.stream_wrappers_user.deinit(self.allocator);
         if (self.serve_mode) {
@@ -2665,6 +2670,15 @@ pub const VM = struct {
         for (self.serve_cache_keys.items) |k| self.allocator.free(k);
         self.serve_cache_keys.deinit(self.allocator);
         self.serve_compile_cache.deinit(self.allocator);
+    }
+
+    pub fn clearRealDirCache(self: *VM) void {
+        var it = self.realdir_cache.iterator();
+        while (it.next()) |entry| {
+            self.allocator.free(entry.key_ptr.*);
+            self.allocator.free(entry.value_ptr.*);
+        }
+        self.realdir_cache.clearRetainingCapacity();
     }
 
     pub fn reset(self: *VM) void {
@@ -2770,6 +2784,7 @@ pub const VM = struct {
         self.static_vars.clearRetainingCapacity();
         self.global_vars.clearRetainingCapacity();
         self.loaded_files.clearRetainingCapacity();
+        self.clearRealDirCache();
         self.stream_wrappers_unregistered.clearRetainingCapacity();
         self.stream_wrappers_user.clearRetainingCapacity();
         self.magic_get_guard.clearRetainingCapacity();

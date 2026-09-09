@@ -173,9 +173,62 @@ fn compileCachePath(allocator: std.mem.Allocator, path: []const u8, stat: std.fs
     hasher.update(std.mem.asBytes(&closure_counter));
     hasher.final(&digest);
     const hex = std.fmt.bytesToHex(digest, .lower);
-    const cache_root = try std.fs.getAppDataDir(allocator, "zphp");
-    defer allocator.free(cache_root);
+    const cache_root = try compileCacheRoot(allocator);
     return std.fmt.allocPrint(allocator, "{s}/{s}/{s}.zphpc", .{ cache_root, compile_cache_dir, hex });
+}
+
+// resolved once per process from the page allocator so the Debug allocator
+// does not report a deliberate process-lifetime allocation at exit
+var compile_cache_root: ?[]const u8 = null;
+
+fn compileCacheRoot(allocator: std.mem.Allocator) ![]const u8 {
+    if (compile_cache_root) |root| return root;
+    _ = allocator;
+    const root = try std.fs.getAppDataDir(std.heap.page_allocator, "zphp");
+    compile_cache_root = root;
+    return root;
+}
+
+const ResolvedSource = struct { abs_path: []const u8, stat: std.fs.File.Stat };
+
+// a file load used to cost a realpath (open + fcntl + close on macOS) plus
+// open + fstat before the bytecode cache was even consulted. directories
+// are canonicalized once per process and the file itself gets one lstat;
+// a file that is itself a symlink takes the full realpath route
+fn resolveSource(allocator: std.mem.Allocator, vm: *VM, path: []const u8) ?ResolvedSource {
+    const base = std.fs.path.basename(path);
+    if (base.len > 0 and !std.mem.eql(u8, base, ".") and !std.mem.eql(u8, base, "..")) {
+        if (realDir(vm, std.fs.path.dirname(path) orelse ".")) |real_dir| {
+            const sep: []const u8 = if (std.mem.endsWith(u8, real_dir, "/")) "" else "/";
+            const abs = std.fmt.allocPrint(allocator, "{s}{s}{s}", .{ real_dir, sep, base }) catch return null;
+            if (std.posix.fstatat(std.posix.AT.FDCWD, abs, std.posix.AT.SYMLINK_NOFOLLOW)) |st| {
+                const mode: u32 = @intCast(st.mode);
+                if (std.posix.S.ISREG(mode)) return .{ .abs_path = abs, .stat = std.fs.File.Stat.fromPosix(st) };
+            } else |_| {}
+            allocator.free(abs);
+        }
+    }
+    const abs = std.fs.cwd().realpathAlloc(allocator, path) catch allocator.dupe(u8, path) catch return null;
+    const stat = std.fs.cwd().statFile(abs) catch {
+        allocator.free(abs);
+        return null;
+    };
+    return .{ .abs_path = abs, .stat = stat };
+}
+
+fn realDir(vm: *VM, dir: []const u8) ?[]const u8 {
+    if (vm.realdir_cache.get(dir)) |real| return real;
+    const real = std.fs.cwd().realpathAlloc(vm.allocator, dir) catch return null;
+    const key = vm.allocator.dupe(u8, dir) catch {
+        vm.allocator.free(real);
+        return null;
+    };
+    vm.realdir_cache.put(vm.allocator, key, real) catch {
+        vm.allocator.free(key);
+        vm.allocator.free(real);
+        return null;
+    };
+    return real;
 }
 
 fn loadCompileCache(allocator: std.mem.Allocator, path: []const u8, stat: std.fs.File.Stat, closure_counter: u32) ?*CompileResult {
@@ -292,20 +345,18 @@ fn loadFile(path: []const u8, allocator: std.mem.Allocator, vm: *@import("runtim
             return null;
         };
     } else {
-        abs_path = std.fs.cwd().realpathAlloc(allocator, path) catch allocator.dupe(u8, path) catch return null;
+        const resolved = resolveSource(allocator, vm, path) orelse return null;
+        abs_path = resolved.abs_path;
+        const stat = resolved.stat;
+        if (loadCompileCache(allocator, abs_path, stat, closure_counter)) |cached| {
+            allocator.free(abs_path);
+            return cached;
+        }
         const file = std.fs.cwd().openFile(abs_path, .{}) catch {
             allocator.free(abs_path);
             return null;
         };
         defer file.close();
-        const stat = file.stat() catch {
-            allocator.free(abs_path);
-            return null;
-        };
-        if (loadCompileCache(allocator, abs_path, stat, closure_counter)) |cached| {
-            allocator.free(abs_path);
-            return cached;
-        }
         source = file.readToEndAlloc(allocator, max_source_size) catch {
             allocator.free(abs_path);
             return null;

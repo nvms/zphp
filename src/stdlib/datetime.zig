@@ -3792,10 +3792,22 @@ const TzBytes = struct {
     }
 };
 
+// zone files are read once per process: tzdata does not change while zphp
+// runs and every date() call in a timezone-aware app would otherwise reopen
+// /usr/share/zoneinfo/<name>. entries are keyed by the requested name and
+// never freed (a few KB per distinct zone); the mutex covers threaded serve
+var zone_cache: std.StringHashMapUnmanaged([]const u8) = .{};
+var zone_cache_mutex: std.Thread.Mutex = .{};
+
 fn resolveTzif(allocator: Allocator, name: []const u8) ?TzBytes {
-    if (readZoneInfo(allocator, name)) |b| return .{ .bytes = b, .owned = true };
-    if (embeddedZoneInfo(name)) |b| return .{ .bytes = b, .owned = false };
-    return null;
+    zone_cache_mutex.lock();
+    defer zone_cache_mutex.unlock();
+    if (zone_cache.get(name)) |b| return .{ .bytes = b, .owned = false };
+    const bytes: []const u8 = readZoneInfo(std.heap.page_allocator, name) orelse embeddedZoneInfo(name) orelse return null;
+    const key = std.heap.page_allocator.dupe(u8, name) catch return .{ .bytes = bytes, .owned = false };
+    zone_cache.put(std.heap.page_allocator, key, bytes) catch {};
+    _ = allocator;
+    return .{ .bytes = bytes, .owned = false };
 }
 
 test "embedded tzdata resolves non-table zones without system zoneinfo" {
