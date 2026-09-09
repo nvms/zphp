@@ -94,6 +94,13 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                         ip += 1;
                         sp -= 1;
                         self.stackRelease(val);
+                        // the fused pop is still a statement boundary: free
+                        // the temporaries this statement dropped, as .pop does
+                        if (self.hasPendingReleases()) {
+                            self.sp = sp;
+                            self.drainPendingDestruct();
+                            sp = self.sp;
+                        }
                     }
                     const _next = code[ip];
                     ip += 1;
@@ -341,6 +348,11 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                         ip += 1;
                         sp -= 1;
                         self.stackRelease(self.stack[sp]);
+                        if (self.hasPendingReleases()) {
+                            self.sp = sp;
+                            self.drainPendingDestruct();
+                            sp = self.sp;
+                        }
                     }
                     const _next = code[ip];
                     ip += 1;
@@ -355,6 +367,11 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                         ip += 1;
                         sp -= 1;
                         self.stackRelease(self.stack[sp]);
+                        if (self.hasPendingReleases()) {
+                            self.sp = sp;
+                            self.drainPendingDestruct();
+                            sp = self.sp;
+                        }
                     }
                     const _next = code[ip];
                     ip += 1;

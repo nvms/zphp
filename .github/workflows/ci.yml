@@ -149,6 +149,26 @@ jobs:
       - run: zig build
       - run: ./tests/fmt_test
 
+  memory-soak:
+    needs: changes
+    if: needs.changes.outputs.run-tests == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.15.1
+      - name: install system libs
+        timeout-minutes: 5
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          sudo sed -i 's|http://azure.archive.ubuntu.com/ubuntu|https://archive.ubuntu.com/ubuntu|g' /etc/apt/apt-mirrors.txt /etc/apt/sources.list /etc/apt/sources.list.d/ubuntu.sources 2>/dev/null || true
+          sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20 update
+          sudo apt-get install -y libpcre2-dev libsqlite3-dev zlib1g-dev libmysqlclient-dev libpq-dev libssl-dev libnghttp2-dev libcurl4-openssl-dev libxml2-dev libicu-dev libgmp-dev libgd-dev libsodium-dev libldap2-dev
+      - run: zig build -Doptimize=ReleaseFast
+      - run: python3 ./tests/memory_soak
+
   php-compat:
     needs: changes
     if: needs.changes.outputs.run-tests == 'true'

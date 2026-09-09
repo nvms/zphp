@@ -32,6 +32,11 @@ bench: ## Run runtime benchmarks (ReleaseFast)
 	zig build -Doptimize=ReleaseFast
 	./benchmarks/runtime/run
 
+.PHONY: soak
+soak: ## Run the memory soak (ReleaseFast): a string-heavy loop must hold a flat RSS
+	zig build -Doptimize=ReleaseFast
+	python3 ./tests/memory_soak
+
 .PHONY: bench-macro
 bench-macro: ## Track real-app perf vs php (WordPress + Laravel harnesses, ReleaseFast)
 	zig build -Doptimize=ReleaseFast

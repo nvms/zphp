@@ -10,10 +10,18 @@ const error_format = @import("error_format.zig");
 
 const max_source_size = 1024 * 1024 * 64;
 
+// debug builds keep the checked allocator so the test suites report leaks
+// and double frees; release builds use the retaining allocator, because the
+// checked one hands every freed bucket back to the kernel and string churn
+// turns into mmap/munmap
+const release_allocator = @import("builtin").mode != .Debug;
+
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer _ = gpa.deinit();
-    const allocator = gpa.allocator();
+    defer if (!release_allocator) {
+        _ = gpa.deinit();
+    };
+    const allocator = if (release_allocator) std.heap.smp_allocator else gpa.allocator();
 
     const args = try std.process.argsAlloc(allocator);
     defer std.process.argsFree(allocator, args);

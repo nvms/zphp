@@ -179,6 +179,7 @@ pub fn serializeToString(ctx: *NativeContext, val: Value) RuntimeError!NativeRes
     return NativeResult.takeString(try Value.String.adopt(ctx.allocator, result));
 }
 
+// a string result carries one reference the caller must release or store
 pub fn unserializeFromString(ctx: *NativeContext, s: []const u8) ?Value {
     var uctx = UnserCtx{};
     defer uctx.deinit(ctx.allocator);
@@ -553,7 +554,19 @@ fn native_unserialize(ctx: *NativeContext, args: []const Value) RuntimeError!Nat
         ctx.vm.emitWarning(msg2);
         return NativeResult.scalar(.{ .bool = false });
     };
-    return NativeResult.share(result.value);
+    return NativeResult.transfer(result.value);
+}
+
+// every parsed string result carries one reference for its consumer; the
+// consumer drops it once the value is stored (containers retain their own)
+fn releaseParsed(v: Value) void {
+    if (v == .string) v.string.release();
+}
+
+fn strippedKey(str: Value.String) Value.String {
+    const full = str.bytes();
+    const stripped = stripVisibilityPrefix(full);
+    return str.borrowedSlice(full.len - stripped.len, full.len);
 }
 
 const ParseResult = struct {
@@ -615,7 +628,7 @@ fn unserializeValue(ctx: *NativeContext, uctx: *UnserCtx, s: []const u8, pos: us
         },
         's' => {
             const r = try parseString(s, pos);
-            const v: Value = .{ .string = Value.String.borrowed(try ctx.createString(r.str)) };
+            const v: Value = .{ .string = try Value.String.create(ctx.allocator, r.str) };
             try uctx.slots.append(ctx.allocator, v);
             return .{ .value = v, .pos = r.pos };
         },
@@ -643,12 +656,14 @@ fn unserializeValue(ctx: *NativeContext, uctx: *UnserCtx, s: []const u8, pos: us
                 // UnserCtx stack position that we roll back after each key parse.
                 const key_slots_before = uctx.slots.items.len;
                 const key_result = try unserializeValue(ctx, uctx, s, p);
+                defer releaseParsed(key_result.value);
                 p = key_result.pos;
                 uctx.slots.items.len = key_slots_before;
 
                 const value_pos = p;
                 const value_slot = uctx.slots.items.len;
                 const val_result = try unserializeValue(ctx, uctx, s, p);
+                defer releaseParsed(val_result.value);
                 p = val_result.pos;
                 const key: PhpArray.Key = switch (key_result.value) {
                     .int => |i| .{ .int = i },
@@ -683,6 +698,7 @@ fn unserializeValue(ctx: *NativeContext, uctx: *UnserCtx, s: []const u8, pos: us
             const case_name = payload[sep + 1 ..];
             const def = ctx.vm.classes.get(cls_name) orelse return error.RuntimeError;
             const v = def.static_props.get(case_name) orelse return error.RuntimeError;
+            if (v == .string) v.string.retain();
             try uctx.slots.append(ctx.allocator, v);
             var p = colon1 + 2 + name_len + 1;
             if (p < s.len and s[p] == ';') p += 1;
@@ -754,14 +770,16 @@ fn unserializeValue(ctx: *NativeContext, uctx: *UnserCtx, s: []const u8, pos: us
             for (0..prop_count) |_| {
                 const key_slots_before = uctx.slots.items.len;
                 const key_result = try unserializeValue(ctx, uctx, s, p);
+                defer releaseParsed(key_result.value);
                 p = key_result.pos;
                 uctx.slots.items.len = key_slots_before;
 
                 const val_result = try unserializeValue(ctx, uctx, s, p);
+                defer releaseParsed(val_result.value);
                 p = val_result.pos;
                 if (collected) |arr| {
                     const k: PhpArray.Key = switch (key_result.value) {
-                        .string => |str| .{ .string = Value.String.borrowed(stripVisibilityPrefix(str.bytes())) },
+                        .string => |str| .{ .string = strippedKey(str) },
                         .int => |n| .{ .int = n },
                         else => continue,
                     };
@@ -769,7 +787,10 @@ fn unserializeValue(ctx: *NativeContext, uctx: *UnserCtx, s: []const u8, pos: us
                 } else if (fixed_data) |arr| {
                     if (key_result.value == .int) try arr.set(ctx.allocator, .{ .int = key_result.value.int }, val_result.value);
                 } else if (key_result.value == .string) {
-                    const stripped = stripVisibilityPrefix(key_result.value.string.bytes());
+                    // property names are kept by the object as given, so
+                    // they need request-lifetime bytes rather than the
+                    // counted key that dies with this iteration
+                    const stripped = try ctx.createString(stripVisibilityPrefix(key_result.value.string.bytes()));
                     // when restoring into a kept class, assigning an
                     // __PHP_Incomplete_Class value to a typed property whose
                     // declared type isn't compatible is a TypeError in PHP
@@ -852,6 +873,7 @@ fn unserializeValue(ctx: *NativeContext, uctx: *UnserCtx, s: []const u8, pos: us
             const v = uctx.slots.items[idx - 1];
             if (s[pos] == 'r' and v != .object) return error.RuntimeError;
             if (s[pos] == 'r') try uctx.slots.append(ctx.allocator, v);
+            if (v == .string) v.string.retain();
             return .{ .value = v, .pos = end + 1 };
         },
         else => return error.RuntimeError,

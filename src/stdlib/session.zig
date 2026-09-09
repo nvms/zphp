@@ -109,7 +109,10 @@ fn loadSessionData(ctx: *NativeContext, sid: []const u8) !*PhpArray {
     // a corrupt session can never break session_start.
     if (data.len == 0) return try ctx.createArray();
     const parsed = serialize_mod.unserializeFromString(ctx, data) orelse return try ctx.createArray();
-    if (parsed != .array) return try ctx.createArray();
+    if (parsed != .array) {
+        if (parsed == .string) parsed.string.release();
+        return try ctx.createArray();
+    }
     return parsed.array;
 }
 
@@ -350,7 +353,10 @@ fn native_session_encode(ctx: *NativeContext, _: []const Value) RuntimeError!Nat
 fn native_session_decode(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     if (args.len < 1 or args[0] != .string) return NativeResult.scalar(.{ .bool = false });
     const parsed = serialize_mod.unserializeFromString(ctx, args[0].string.bytes()) orelse return NativeResult.scalar(.{ .bool = false });
-    if (parsed != .array) return NativeResult.scalar(.{ .bool = false });
+    if (parsed != .array) {
+        if (parsed == .string) parsed.string.release();
+        return NativeResult.scalar(.{ .bool = false });
+    }
     try ctx.vm.putRequestVar("$_SESSION", parsed);
     return NativeResult.scalar(.{ .bool = true });
 }

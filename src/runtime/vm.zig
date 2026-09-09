@@ -6707,10 +6707,9 @@ pub const VM = struct {
                     } else {
                         if (v == .array) self.emitWarning("Array to string conversion");
                         var buf = std.ArrayListUnmanaged(u8){};
+                        defer buf.deinit(self.allocator);
                         try v.format(&buf, self.allocator);
-                        const s = try buf.toOwnedSlice(self.allocator);
-                        try self.strings.append(self.allocator, s);
-                        self.push(.{ .string = Value.String.borrowed(s) });
+                        self.pushTransfer(.{ .string = try Value.String.create(self.allocator, buf.items) });
                     }
                 },
                 .cast_bool => {
