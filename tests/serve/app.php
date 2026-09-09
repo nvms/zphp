@@ -100,6 +100,64 @@ if ($path === "/health") {
 } elseif ($path === "/redirect") {
     header("Location: /headers", true, 302);
     echo "redirecting";
+} elseif ($path === "/isolation/dirty") {
+    // touch every kind of request-scoped state; /isolation/probe must not see any of it
+    function isolation_counter() { static $n = 0; return ++$n; }
+    $GLOBALS["leak"] = "leaked-global";
+    $_ENV["LEAK"] = "x";
+    isolation_counter();
+    header("X-Leak: yes");
+    http_response_code(201);
+    ob_start();
+    echo "buffered";
+    set_error_handler(fn() => true);
+    set_exception_handler(fn($e) => null);
+    register_shutdown_function(fn() => null);
+    spl_autoload_register(fn($c) => null);
+    ini_set("precision", 5);
+    ini_set("memory_limit", "1M");
+    error_reporting(0);
+    date_default_timezone_set("Asia/Tokyo");
+    mb_internal_encoding("ISO-8859-1");
+    define("LEAKCONST", 1);
+    class LeakClass {}
+    function leak_fn() {}
+    session_start();
+    $_SESSION["leak"] = "session";
+    srand(42);
+    umask(0077);
+    strtok("a,b,c", ",");
+    @trigger_error("leaked warning", E_USER_WARNING);
+    date_parse("not a date");
+    ob_end_clean();
+    echo "dirty";
+} elseif ($path === "/isolation/probe") {
+    function isolation_counter() { static $n = 0; return ++$n; }
+    echo json_encode([
+        "global" => $GLOBALS["leak"] ?? null,
+        "env" => $_ENV["LEAK"] ?? null,
+        "static" => isolation_counter(),
+        "headers" => headers_list(),
+        "status" => http_response_code(),
+        "ob_level" => ob_get_level(),
+        "error_handler" => set_error_handler(null),
+        "exception_handler" => set_exception_handler(null),
+        "autoloaders" => count(spl_autoload_functions()),
+        "precision" => ini_get("precision"),
+        "memory_limit" => ini_get("memory_limit"),
+        "error_reporting" => error_reporting(),
+        "tz" => date_default_timezone_get(),
+        "mb" => mb_internal_encoding(),
+        "const" => defined("LEAKCONST"),
+        "class" => class_exists("LeakClass", false),
+        "fn" => function_exists("leak_fn"),
+        "session_status" => session_status(),
+        "session" => $_SESSION["leak"] ?? null,
+        "umask" => umask(),
+        "strtok" => strtok(","),
+        "last_error" => error_get_last(),
+        "dt_errors" => DateTime::getLastErrors(),
+    ]);
 } elseif ($path === "/header-trailing-space") {
     header("X-Trailing-Space: hello    ");
     header("X-Tab-Space: world\t  ");

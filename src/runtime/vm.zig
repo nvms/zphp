@@ -2791,6 +2791,25 @@ pub const VM = struct {
         self.headers_sent = false;
         self.default_tz_name = "UTC";
         self.default_tz_offset = 0;
+        // per-request runtime settings and last-error state; the strings
+        // below live in the request arena that this reset frees
+        self.error_reporting_level = 30719;
+        // ini_set stores keys and values in the request arena freed below;
+        // a stale entry would compare freed bytes on the next put
+        self.ini_settings.clearRetainingCapacity();
+        self.rng_seeded = false;
+        self.strtok_state = null;
+        self.strtok_pos = 0;
+        self.last_error_type = 0;
+        self.last_error_message = "";
+        self.last_error_file = "";
+        self.last_error_line = 0;
+        self.last_dt_error_count = 0;
+        self.last_dt_error_text = "";
+        self.last_dt_error_pos = 0;
+        self.last_dt_parse_failed = false;
+        self.last_intl_error_code = 0;
+        self.exit_code = 0;
         self.statics.clearRetainingCapacity();
         self.statics_cells.clearRetainingCapacity();
         self.globals_cells.clearRetainingCapacity();
@@ -13423,7 +13442,7 @@ pub const VM = struct {
                 self.saveFrameArgs(arg_count);
                 self.dropN(ac);
                 try self.fillDefaults(&new_vars, func, bind_count);
-                const inherit_cc = self.closureScopeByName(name) orelse self.currentFrame().called_class;
+                const inherit_cc = self.closureScopeByName(name) orelse self.callerCalledClass();
                 self.frames[self.frame_count] = .{ .chunk = &func.chunk, .ip = 0, .vars = new_vars, .locals = try self.allocLocals(func, &new_vars), .func = func, .ref_slots = closure_refs, .called_class = inherit_cc, .call_name = name };
                 self.frames[self.frame_count].entry_sp = self.sp;
                 self.setFrameArgCount(arg_count);
@@ -13471,7 +13490,7 @@ pub const VM = struct {
             }
         }
 
-        self.frames[self.frame_count] = .{ .chunk = &func.chunk, .ip = 0, .vars = .{}, .locals = locals, .func = func, .called_class = self.closureScopeByName(name) orelse self.currentFrame().called_class, .call_name = name };
+        self.frames[self.frame_count] = .{ .chunk = &func.chunk, .ip = 0, .vars = .{}, .locals = locals, .func = func, .called_class = self.closureScopeByName(name) orelse self.callerCalledClass(), .call_name = name };
         self.frames[self.frame_count].entry_sp = self.sp;
         self.setFrameArgCount(arg_count);
         self.frame_count += 1;
@@ -17158,7 +17177,7 @@ pub const VM = struct {
                     return error.RuntimeError;
                 }
                 const inherit_cc = if (std.mem.startsWith(u8, name, "__closure_"))
-                    self.closureScopeByName(name) orelse self.currentFrame().called_class
+                    self.closureScopeByName(name) orelse self.callerCalledClass()
                 else
                     null;
                 self.frames[self.frame_count] = .{ .chunk = &func.chunk, .ip = 0, .vars = new_vars, .locals = try self.allocLocals(func, &new_vars), .func = func, .ref_slots = callee_refs, .ref_owner = callee_owner, .called_class = inherit_cc, .call_name = name };
@@ -17486,6 +17505,13 @@ pub const VM = struct {
         return self.capture_index.get(name);
     }
 
+    // a closure invoked with no frame on the stack (a shutdown callback after
+    // a serve request) has no caller scope to inherit
+    fn callerCalledClass(self: *VM) ?[]const u8 {
+        if (self.frame_count == 0) return null;
+        return self.currentFrame().called_class;
+    }
+
     fn executeClosureLocalsOnly(self: *VM, func: *const ObjFunction, name: []const u8, args: []const Value) RuntimeError!Value {
         const base_frame = self.frame_count;
         const lc: usize = func.local_count;
@@ -17525,7 +17551,7 @@ pub const VM = struct {
         const base_handler = self.handler_count;
         const prev_floor = self.handler_floor;
         self.handler_floor = self.handler_count;
-        self.frames[self.frame_count] = .{ .chunk = &func.chunk, .ip = 0, .vars = .{}, .locals = locals, .func = func, .called_class = self.closureScopeByName(name) orelse self.currentFrame().called_class, .call_name = name };
+        self.frames[self.frame_count] = .{ .chunk = &func.chunk, .ip = 0, .vars = .{}, .locals = locals, .func = func, .called_class = self.closureScopeByName(name) orelse self.callerCalledClass(), .call_name = name };
         self.frames[self.frame_count].entry_sp = self.sp;
         self.consumePendingArgCount();
         self.saveFrameArgsSlice(args);

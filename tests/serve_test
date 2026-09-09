@@ -503,6 +503,22 @@ if [ $curl_fails -gt 0 ]; then
     errors="$errors\n--- curl client ---\n$curl_out\n"
 fi
 
+# test: request isolation - two dirty requests reach both workers, later probes must match the first
+iso1=$(curl -s http://localhost:$PORT/isolation/probe)
+curl -s -o /dev/null http://localhost:$PORT/isolation/dirty
+curl -s -o /dev/null http://localhost:$PORT/isolation/dirty
+iso2=$(curl -s http://localhost:$PORT/isolation/probe)
+iso3=$(curl -s http://localhost:$PORT/isolation/probe)
+check_contains "isolation probe shape" '"tz":"UTC"' "$iso1"
+check "request isolation after dirty request" "$iso1" "$iso2"
+check "request isolation second probe" "$iso1" "$iso3"
+iso_loop_ok=1
+for i in $(seq 1 25); do
+    curl -s -o /dev/null http://localhost:$PORT/isolation/dirty
+    if [ "$(curl -s http://localhost:$PORT/isolation/probe)" != "$iso1" ]; then iso_loop_ok=0; break; fi
+done
+check "request isolation over repeated dirty requests" "1" "$iso_loop_ok"
+
 # test: graceful shutdown
 kill -TERM $SERVER_PID
 exit_code=0

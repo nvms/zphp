@@ -121,7 +121,12 @@ pub const EnvSnapshot = struct {
 
 pub fn populateEnvSuperglobal(vm: *VM, a: std.mem.Allocator, snapshot: ?*const EnvSnapshot) !void {
     if (snapshot) |snap| {
-        try vm.putRequestVar("$_ENV", .{ .array = snap.env_arr });
+        // the request gets its own array over the snapshot's bytes: a script
+        // writing $_ENV must not change what the next request sees, and the
+        // per-request copy dies with the request heap
+        const env_arr = try vm.allocArray();
+        for (snap.env_arr.entries.items) |entry| try env_arr.set(a, entry.key, entry.value);
+        try vm.putRequestVar("$_ENV", .{ .array = env_arr });
         return;
     }
 

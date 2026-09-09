@@ -209,6 +209,9 @@ const Worker = struct {
     // instead of the front-controller entry. compiled bytecode is cached here
     // per worker, keyed by absolute path, so each such script compiles once
     script_cache: std.StringHashMapUnmanaged(*CompileResult),
+    // the process umask a request may change with umask(); restored before
+    // the next request runs, as php_request_shutdown does
+    umask: std.c.mode_t,
 };
 
 // what to run for a request, and how to shape $_SERVER for it
@@ -296,7 +299,14 @@ fn initWorker(allocator: Allocator, result: *const CompileResult, doc_root: []co
         .conns = [_]?Connection{null} ** (MAX_CONNS + 1),
         .n_fds = 1,
         .script_cache = .{},
+        .umask = currentUmask(),
     };
+}
+
+fn currentUmask() std.c.mode_t {
+    const current = std.c.umask(0);
+    _ = std.c.umask(current);
+    return current;
 }
 
 // workers come up one at a time into the leading slots. a worker whose VM,
@@ -897,6 +907,7 @@ fn processHttpRead(w: *Worker, c: *Connection) void {
     // PHP execution - php-fpm dispatch: an existing .php file runs directly,
     // anything else routes to the front-controller entry
     const dispatch = resolveDispatch(w, &req);
+    _ = std.c.umask(w.umask);
     w.vm.reset();
     const mock_conn = std.net.Server.Connection{
         .stream = c.stream,
@@ -1028,6 +1039,7 @@ fn handleH2Request(w: *Worker, conn: *Connection, session: *h2.H2Session, stream
 
     // PHP execution - php-fpm dispatch (see HTTP/1.1 path)
     const dispatch = resolveDispatch(w, &req);
+    _ = std.c.umask(w.umask);
     w.vm.reset();
     const mock_conn = std.net.Server.Connection{
         .stream = conn.stream,
@@ -1103,6 +1115,7 @@ fn handleWsUpgrade(w: *Worker, c: *Connection, ws_key: []const u8) void {
     };
 
     if (!w.ws_initialized) {
+        _ = std.c.umask(w.umask);
         w.vm.reset();
         w.vm.interpret(w.result) catch {
             c.state = .closing;
