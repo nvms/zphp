@@ -273,8 +273,14 @@ fn loadFile(path: []const u8, allocator: Allocator, _: *@import("runtime/vm.zig"
 
 fn initWorker(allocator: Allocator, result: *const CompileResult, doc_root: []const u8, port: u16, ws_enabled: bool, tls_ctx: ?*tls.SSL_CTX) !Worker {
     var vm = try VM.init(allocator);
+    errdefer vm.deinit();
     vm.file_loader = &loadFile;
     vm.serve_mode = true;
+    const wake_pipe = try posix.pipe();
+    errdefer {
+        posix.close(wake_pipe[0]);
+        posix.close(wake_pipe[1]);
+    }
     return .{
         .allocator = allocator,
         .result = result,
@@ -285,12 +291,49 @@ fn initWorker(allocator: Allocator, result: *const CompileResult, doc_root: []co
         .ws_initialized = false,
         .tls_ctx = tls_ctx,
         .env_snapshot = env.EnvSnapshot.capture(allocator),
-        .wake_pipe = try posix.pipe(),
+        .wake_pipe = wake_pipe,
         .poll_fds = [_]posix.pollfd{.{ .fd = -1, .events = 0, .revents = 0 }} ** (MAX_CONNS + 1),
         .conns = [_]?Connection{null} ** (MAX_CONNS + 1),
         .n_fds = 1,
         .script_cache = .{},
     };
+}
+
+// workers come up one at a time into the leading slots. a worker whose VM,
+// pipe, or thread fails is torn down on the spot and never counted, so
+// routing and shutdown only ever touch the first `active` slots
+fn startWorkers(allocator: Allocator, workers: []Worker, threads: []std.Thread, result: *const CompileResult, doc_root: []const u8, port: u16, ws_enabled: bool, tls_ctx: ?*tls.SSL_CTX) !usize {
+    var active: usize = 0;
+    errdefer stopWorkers(workers[0..active], threads[0..active]);
+    for (0..workers.len) |_| {
+        const wd = &workers[active];
+        wd.* = initWorker(allocator, result, doc_root, port, ws_enabled, tls_ctx) catch |err| {
+            reportWorkerFailure(err);
+            continue;
+        };
+        wd.poll_fds[0] = .{ .fd = wd.wake_pipe[0], .events = posix.POLL.IN, .revents = 0 };
+        threads[active] = std.Thread.spawn(.{}, eventLoop, .{wd}) catch |err| {
+            deinitWorker(wd);
+            reportWorkerFailure(err);
+            continue;
+        };
+        active += 1;
+    }
+    if (active == 0) return error.NoWorkersStarted;
+    return active;
+}
+
+fn stopWorkers(workers: []Worker, threads: []std.Thread) void {
+    queue.close();
+    for (workers) |*wd| _ = posix.write(wd.wake_pipe[1], &[_]u8{1}) catch {};
+    for (threads) |t| t.join();
+    for (workers) |*wd| deinitWorker(wd);
+}
+
+fn reportWorkerFailure(err: anyerror) void {
+    writeStderr("warning: worker failed to start: ") catch {};
+    writeStderr(@errorName(err)) catch {};
+    writeStderr("\n") catch {};
 }
 
 fn deinitWorker(w: *Worker) void {
@@ -522,10 +565,18 @@ pub fn serve(allocator: Allocator, config: ServeConfig) !void {
         }
 
         queue.reset();
-        for (workers_data, threads) |*wd, *t| {
-            wd.* = initWorker(allocator, &result, doc_root, config.port, ws_enabled, tls_ctx) catch continue;
-            wd.poll_fds[0] = .{ .fd = wd.wake_pipe[0], .events = posix.POLL.IN, .revents = 0 };
-            t.* = try std.Thread.spawn(.{}, eventLoop, .{wd});
+        const active = startWorkers(allocator, workers_data, threads, &result, doc_root, config.port, ws_enabled, tls_ctx) catch |err| {
+            try writeStderr("error: no worker could start\n");
+            result.deinit();
+            ast.deinit();
+            allocator.free(source);
+            return err;
+        };
+        if (active < worker_count) {
+            var active_buf: [8]u8 = undefined;
+            try writeStderr("warning: running with ");
+            try writeStderr(std.fmt.bufPrint(&active_buf, "{d}", .{active}) catch "?");
+            try writeStderr(" workers\n");
         }
 
         var main_poll: [2]posix.pollfd = .{
@@ -548,7 +599,7 @@ pub fn serve(allocator: Allocator, config: ServeConfig) !void {
                 const conn = server.accept() catch continue;
                 queue.push(.{ .conn = conn });
                 _ = posix.write(workers_data[robin].wake_pipe[1], &[_]u8{1}) catch {};
-                robin = (robin + 1) % worker_count;
+                robin = (robin + 1) % active;
             }
 
             if (tls_cert_z != null and tls_key_z != null) {
@@ -574,12 +625,7 @@ pub fn serve(allocator: Allocator, config: ServeConfig) !void {
             }
         }
 
-        queue.close();
-        for (workers_data) |*wd| {
-            _ = posix.write(wd.wake_pipe[1], &[_]u8{1}) catch {};
-        }
-        for (threads) |t| t.join();
-        for (workers_data) |*wd| deinitWorker(wd);
+        stopWorkers(workers_data[0..active], threads[0..active]);
 
         result.deinit();
         ast.deinit();
@@ -1747,4 +1793,33 @@ fn gzipCompress(allocator: Allocator, input: []const u8) ?[]u8 {
 
 fn writeStderr(msg: []const u8) !void {
     _ = try posix.write(posix.STDERR_FILENO, msg);
+}
+
+test "worker startup keeps only the workers that came up and stops cleanly" {
+    const testing = std.testing;
+    var ast = try parser.parse(testing.allocator, "<?php echo 1;");
+    defer ast.deinit();
+    var result = try compiler.compileWithPath(&ast, testing.allocator, "serve_test.php");
+    defer result.deinit();
+    var workers: [2]Worker = undefined;
+    var threads: [2]std.Thread = undefined;
+
+    var probe = testing.FailingAllocator.init(testing.allocator, .{ .fail_index = std.math.maxInt(usize) });
+    queue.reset();
+    const all = try startWorkers(probe.allocator(), &workers, &threads, &result, ".", 0, false, null);
+    try testing.expectEqual(@as(usize, 2), all);
+    stopWorkers(workers[0..all], threads[0..all]);
+    const per_worker = probe.alloc_index / 2;
+
+    // the first allocation of the second worker: its VM never gets past
+    // the first registration, so only the slot bookkeeping is under test
+    var partial = testing.FailingAllocator.init(testing.allocator, .{ .fail_index = per_worker });
+    queue.reset();
+    const some = try startWorkers(partial.allocator(), &workers, &threads, &result, ".", 0, false, null);
+    try testing.expectEqual(@as(usize, 1), some);
+    stopWorkers(workers[0..some], threads[0..some]);
+
+    var none = testing.FailingAllocator.init(testing.allocator, .{ .fail_index = 0 });
+    queue.reset();
+    try testing.expectError(error.NoWorkersStarted, startWorkers(none.allocator(), &workers, &threads, &result, ".", 0, false, null));
 }

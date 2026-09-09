@@ -1328,15 +1328,20 @@ pub const VM = struct {
         return initInPlace(allocator);
     }
 
+    // every field defaults to an empty container, so a VM whose init failed
+    // part way can be torn down with the ordinary deinit
     pub fn initInPlace(allocator: Allocator) RuntimeError!VM {
         var vm = VM{ .allocator = allocator };
+        errdefer vm.deinit();
         try initVm(&vm, allocator);
         return vm;
     }
 
     pub fn initOnHeap(allocator: Allocator) RuntimeError!*VM {
         const vm = try allocator.create(VM);
+        errdefer allocator.destroy(vm);
         vm.* = .{ .allocator = allocator };
+        errdefer vm.deinit();
         try initVm(vm, allocator);
         return vm;
     }
