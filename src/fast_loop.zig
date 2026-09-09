@@ -109,6 +109,11 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                 .add => {
                     const b = self.stack[sp - 1];
                     const a = self.stack[sp - 2];
+                    if (a == .object or b == .object) {
+                        frame.ip = ip - 1;
+                        self.sp = sp;
+                        return;
+                    }
                     sp -= 2;
                     self.stackRelease(a);
                     self.stackRelease(b);
@@ -121,6 +126,11 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                 .subtract => {
                     const b = self.stack[sp - 1];
                     const a = self.stack[sp - 2];
+                    if (a == .object or b == .object) {
+                        frame.ip = ip - 1;
+                        self.sp = sp;
+                        return;
+                    }
                     sp -= 2;
                     self.stackRelease(a);
                     self.stackRelease(b);
@@ -133,6 +143,11 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                 .multiply => {
                     const b = self.stack[sp - 1];
                     const a = self.stack[sp - 2];
+                    if (a == .object or b == .object) {
+                        frame.ip = ip - 1;
+                        self.sp = sp;
+                        return;
+                    }
                     sp -= 2;
                     self.stackRelease(a);
                     self.stackRelease(b);
@@ -227,6 +242,11 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                 .modulo => {
                     const b_mod = self.stack[sp - 1];
                     const a_mod = self.stack[sp - 2];
+                    if (a_mod == .object or b_mod == .object) {
+                        frame.ip = ip - 1;
+                        self.sp = sp;
+                        return;
+                    }
                     sp -= 2;
                     self.stackRelease(a_mod);
                     self.stackRelease(b_mod);

@@ -326,14 +326,24 @@ fn bcDivInternal(allocator: Allocator, a: BcNum, b: BcNum, target_scale: usize) 
     // we can truncate. simpler approach: convert both to integer reps with extra
     // zeros to control the scale.
 
-    // make a' = a * 10^(target_scale + b.scale - a.scale) (integer), b' = b (integer)
-    const extra_a: usize = target_scale + b.scale - a.scale + 1;
+    // make a' = a * 10^(target_scale + b.scale - a.scale) (integer), b' = b (integer).
+    // a dividend more precise than the target needs its low digits dropped
+    // instead: truncating before an integer division truncates the quotient
+    // at the same place
+    const shift: i64 = @as(i64, @intCast(target_scale + b.scale + 1)) - @as(i64, @intCast(a.scale));
 
     var num_digits = std.ArrayListUnmanaged(u8){};
     defer num_digits.deinit(allocator);
-    try num_digits.appendSlice(allocator, a.digits.items);
-    var i: usize = 0;
-    while (i < extra_a) : (i += 1) try num_digits.append(allocator, 0);
+    if (shift >= 0) {
+        try num_digits.appendSlice(allocator, a.digits.items);
+        var i: usize = 0;
+        while (i < @as(usize, @intCast(shift))) : (i += 1) try num_digits.append(allocator, 0);
+    } else {
+        const drop: usize = @intCast(-shift);
+        const keep = if (drop >= a.digits.items.len) 0 else a.digits.items.len - drop;
+        try num_digits.appendSlice(allocator, a.digits.items[0..keep]);
+        if (num_digits.items.len == 0) try num_digits.append(allocator, 0);
+    }
 
     var div_digits = std.ArrayListUnmanaged(u8){};
     defer div_digits.deinit(allocator);
@@ -1059,3 +1069,535 @@ pub const entries = .{
     .{ "bcfloor", bcFloor },
     .{ "bcround", bcRound },
 };
+
+// ---------------- BcMath\Number (PHP 8.4) ----------------
+//
+// an immutable arbitrary-precision decimal: `value` is the canonical digit
+// string, `scale` its count of fractional digits. every operation is routed
+// through the procedural natives above with the scale PHP picks: add/sub/mod
+// use the larger operand scale, mul the sum, div/sqrt/negative pow compute
+// ten extra digits and drop trailing zeros back down to the left operand's
+// scale, positive pow multiplies the scale by the exponent
+
+const number_class = "BcMath\\Number";
+
+pub fn register(vm: *VM, a: Allocator) !void {
+    var def = ClassDef{ .name = number_class, .is_final = true, .is_readonly = true, .native_binop = numberBinop };
+    try def.properties.append(a, .{ .name = "value", .default = .{ .string = Value.String.borrowed("0") }, .has_default = true, .is_readonly = true, .type_str = "string" });
+    try def.properties.append(a, .{ .name = "scale", .default = .{ .int = 0 }, .has_default = true, .is_readonly = true, .type_str = "int" });
+    const methods = .{
+        .{ "__construct", 1 }, .{ "add", 2 },     .{ "sub", 2 },        .{ "mul", 2 },         .{ "div", 2 },           .{ "mod", 2 },
+        .{ "divmod", 2 },      .{ "powmod", 3 },  .{ "pow", 2 },        .{ "sqrt", 1 },        .{ "floor", 0 },         .{ "ceil", 0 },
+        .{ "round", 2 },       .{ "compare", 2 }, .{ "__toString", 0 }, .{ "__serialize", 0 }, .{ "__unserialize", 1 },
+    };
+    inline for (methods) |m| try def.methods.put(a, m[0], .{ .name = m[0], .arity = m[1] });
+    try vm.classes.put(a, number_class, def);
+    const natives = .{
+        .{ "__construct", numberConstruct },     .{ "add", numberAdd },         .{ "sub", numberSub },             .{ "mul", numberMul },
+        .{ "div", numberDiv },                   .{ "mod", numberMod },         .{ "divmod", numberDivmod },       .{ "powmod", numberPowmod },
+        .{ "pow", numberPow },                   .{ "sqrt", numberSqrt },       .{ "floor", numberFloor },         .{ "ceil", numberCeil },
+        .{ "round", numberRound },               .{ "compare", numberCompare }, .{ "__toString", numberToString }, .{ "__serialize", numberSerialize },
+        .{ "__unserialize", numberUnserialize },
+    };
+    inline for (natives) |n| try vm.native_fns.put(a, number_class ++ "::" ++ n[0], n[1]);
+}
+
+fn isNumberObject(v: Value) bool {
+    return v == .object and std.mem.eql(u8, v.object.class_name, number_class);
+}
+
+fn numberThis(ctx: *NativeContext) ?*PhpObject {
+    const this_v = ctx.vm.currentFrame().vars.get("$this") orelse return null;
+    if (!isNumberObject(this_v)) return null;
+    return this_v.object;
+}
+
+fn wellFormed(s: []const u8) bool {
+    var i: usize = 0;
+    if (i < s.len and (s[i] == '+' or s[i] == '-')) i += 1;
+    var digits: usize = 0;
+    while (i < s.len and std.ascii.isDigit(s[i])) : (i += 1) digits += 1;
+    if (i < s.len and s[i] == '.') {
+        i += 1;
+        while (i < s.len and std.ascii.isDigit(s[i])) : (i += 1) digits += 1;
+    }
+    return i == s.len and digits > 0;
+}
+
+fn scaleOf(s: []const u8) usize {
+    const dot = std.mem.indexOfScalar(u8, s, '.') orelse return 0;
+    return s.len - dot - 1;
+}
+
+// canonical form: no plus sign, no leading zeros in the integer part, the
+// fractional digits exactly as given, and no sign on zero
+fn canonical(allocator: Allocator, raw: []const u8) ![]u8 {
+    var s = raw;
+    var neg = false;
+    if (s.len > 0 and (s[0] == '+' or s[0] == '-')) {
+        neg = s[0] == '-';
+        s = s[1..];
+    }
+    const dot = std.mem.indexOfScalar(u8, s, '.');
+    var int_part = if (dot) |d| s[0..d] else s;
+    const frac_part = if (dot) |d| s[d + 1 ..] else "";
+    while (int_part.len > 1 and int_part[0] == '0') int_part = int_part[1..];
+    if (int_part.len == 0) int_part = "0";
+    var nonzero = false;
+    for (int_part) |c| if (c != '0') {
+        nonzero = true;
+    };
+    for (frac_part) |c| if (c != '0') {
+        nonzero = true;
+    };
+    var out = std.ArrayListUnmanaged(u8){};
+    errdefer out.deinit(allocator);
+    if (neg and nonzero) try out.append(allocator, '-');
+    try out.appendSlice(allocator, int_part);
+    if (frac_part.len > 0) {
+        try out.append(allocator, '.');
+        try out.appendSlice(allocator, frac_part);
+    }
+    return out.toOwnedSlice(allocator);
+}
+
+// drops trailing fractional zeros, never below `min_scale` digits
+fn stripToScale(s: []const u8, min_scale: usize) []const u8 {
+    const dot = std.mem.indexOfScalar(u8, s, '.') orelse return s;
+    var end = s.len;
+    while (end > dot + 1 + min_scale and s[end - 1] == '0') end -= 1;
+    if (end == dot + 1) end = dot;
+    return s[0..end];
+}
+
+fn throwNotWellFormed(ctx: *NativeContext, comptime method: []const u8, comptime arg: []const u8) RuntimeError {
+    _ = ctx.vm.throwBuiltinException("ValueError", number_class ++ "::" ++ method ++ "(): Argument #1 ($" ++ arg ++ ") is not well-formed") catch {};
+    return error.RuntimeError;
+}
+
+// the decimal string an operand contributes; owned by the caller
+fn operandString(ctx: *NativeContext, v: Value, comptime method: []const u8, comptime arg: []const u8) RuntimeError![]u8 {
+    switch (v) {
+        .object => |obj| {
+            if (!isNumberObject(v)) return throwNotWellFormed(ctx, method, arg);
+            const val = obj.get("value");
+            return try ctx.allocator.dupe(u8, if (val == .string) val.string.bytes() else "0");
+        },
+        .int => |i| return try std.fmt.allocPrint(ctx.allocator, "{d}", .{i}),
+        .float => |f| return try std.fmt.allocPrint(ctx.allocator, "{d}", .{@as(i64, @intFromFloat(f))}),
+        .bool => |b| return try ctx.allocator.dupe(u8, if (b) "1" else "0"),
+        .string => |str| {
+            if (str.len == 0) return try ctx.allocator.dupe(u8, "0");
+            if (!wellFormed(str.bytes())) return throwNotWellFormed(ctx, method, arg);
+            return try canonical(ctx.allocator, str.bytes());
+        },
+        else => return throwNotWellFormed(ctx, method, arg),
+    }
+}
+
+fn makeNumber(ctx: *NativeContext, raw: []const u8) RuntimeError!*PhpObject {
+    const obj = try ctx.createObject(number_class);
+    try setNumber(ctx, obj, raw);
+    return obj;
+}
+
+fn setNumber(ctx: *NativeContext, obj: *PhpObject, raw: []const u8) RuntimeError!void {
+    const canon = try canonical(ctx.allocator, raw);
+    defer ctx.allocator.free(canon);
+    const owned = try Value.String.create(ctx.allocator, canon);
+    defer owned.release();
+    try obj.set(ctx.allocator, "value", .{ .string = owned });
+    try obj.set(ctx.allocator, "scale", .{ .int = @intCast(scaleOf(canon)) });
+}
+
+fn explicitScale(args: []const Value, idx: usize) ?usize {
+    if (args.len > idx and args[idx] == .int and args[idx].int >= 0) return @intCast(args[idx].int);
+    return null;
+}
+
+// runs a procedural native on two decimal strings at a fixed scale and hands
+// back the result string; released by the caller
+fn runNative(ctx: *NativeContext, comptime native: anytype, a: []const u8, b: ?[]const u8, scale: usize) RuntimeError!Value.String {
+    var args: [3]Value = .{ .{ .string = Value.String.borrowed(a) }, .{ .int = @intCast(scale) }, .null };
+    var n: usize = 2;
+    if (b) |bs| {
+        args[1] = .{ .string = Value.String.borrowed(bs) };
+        args[2] = .{ .int = @intCast(scale) };
+        n = 3;
+    }
+    const result = try native(ctx, args[0..n]);
+    if (result.value != .string) {
+        if (result.value == .array) {
+            // divmod hands back its pair through the array path
+        }
+        return error.RuntimeError;
+    }
+    return result.value.string;
+}
+
+const BinaryScale = enum { larger, sum, expand };
+
+fn numberBinary(ctx: *NativeContext, this: *PhpObject, other: Value, args: []const Value, comptime method: []const u8, comptime native: anytype, comptime rule: BinaryScale) RuntimeError!NativeResult {
+    const a = try operandString(ctx, .{ .object = this }, method, "num");
+    defer ctx.allocator.free(a);
+    const b = try operandString(ctx, other, method, "num");
+    defer ctx.allocator.free(b);
+    return NativeResult.borrowed(.{ .object = try binaryResult(ctx, a, b, explicitScale(args, 1), native, rule) });
+}
+
+fn binaryResult(ctx: *NativeContext, a: []const u8, b: []const u8, explicit: ?usize, comptime native: anytype, comptime rule: BinaryScale) RuntimeError!*PhpObject {
+    const sa = scaleOf(a);
+    const sb = scaleOf(b);
+    const natural: usize = switch (rule) {
+        .larger => @max(sa, sb),
+        .sum => sa + sb,
+        .expand => sa + 10,
+    };
+    const scale = explicit orelse natural;
+    const result = try runNative(ctx, native, a, b, scale);
+    defer result.release();
+    const bytes = if (explicit == null and rule == .expand) stripToScale(result.bytes(), sa) else result.bytes();
+    return makeNumber(ctx, bytes);
+}
+
+fn numberConstruct(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const this = numberThis(ctx) orelse return NativeResult.scalar(.null);
+    if (args.len < 1) return NativeResult.scalar(.null);
+    const s = try operandString(ctx, args[0], "__construct", "num");
+    defer ctx.allocator.free(s);
+    try setNumber(ctx, this, s);
+    return NativeResult.scalar(.null);
+}
+
+fn numberAdd(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const this = numberThis(ctx) orelse return NativeResult.scalar(.null);
+    if (args.len < 1) return NativeResult.scalar(.null);
+    return numberBinary(ctx, this, args[0], args, "add", bcAdd, .larger);
+}
+
+fn numberSub(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const this = numberThis(ctx) orelse return NativeResult.scalar(.null);
+    if (args.len < 1) return NativeResult.scalar(.null);
+    return numberBinary(ctx, this, args[0], args, "sub", bcSub, .larger);
+}
+
+fn numberMul(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const this = numberThis(ctx) orelse return NativeResult.scalar(.null);
+    if (args.len < 1) return NativeResult.scalar(.null);
+    return numberBinary(ctx, this, args[0], args, "mul", bcMul, .sum);
+}
+
+fn numberDiv(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const this = numberThis(ctx) orelse return NativeResult.scalar(.null);
+    if (args.len < 1) return NativeResult.scalar(.null);
+    return numberBinary(ctx, this, args[0], args, "div", bcDiv, .expand);
+}
+
+fn numberMod(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const this = numberThis(ctx) orelse return NativeResult.scalar(.null);
+    if (args.len < 1) return NativeResult.scalar(.null);
+    return numberBinary(ctx, this, args[0], args, "mod", bcMod, .larger);
+}
+
+fn numberDivmod(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const this = numberThis(ctx) orelse return NativeResult.scalar(.null);
+    if (args.len < 1) return NativeResult.scalar(.null);
+    const a = try operandString(ctx, .{ .object = this }, "divmod", "num");
+    defer ctx.allocator.free(a);
+    const b = try operandString(ctx, args[0], "divmod", "num");
+    defer ctx.allocator.free(b);
+    const scale = explicitScale(args, 1) orelse @max(scaleOf(a), scaleOf(b));
+    var call_args: [3]Value = .{ .{ .string = Value.String.borrowed(a) }, .{ .string = Value.String.borrowed(b) }, .{ .int = @intCast(scale) } };
+    const pair = try bcDivmod(ctx, &call_args);
+    if (pair.value != .array) return error.RuntimeError;
+    const out = try ctx.createArray();
+    for (pair.value.array.entries.items) |entry| {
+        if (entry.value != .string) continue;
+        try out.append(ctx.allocator, .{ .object = try makeNumber(ctx, entry.value.string.bytes()) });
+    }
+    return NativeResult.borrowed(.{ .array = out });
+}
+
+fn integralString(s: []const u8) bool {
+    return scaleOf(stripToScale(s, 0)) == 0;
+}
+
+fn numberPow(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const this = numberThis(ctx) orelse return NativeResult.scalar(.null);
+    if (args.len < 1) return NativeResult.scalar(.null);
+    const a = try operandString(ctx, .{ .object = this }, "pow", "exponent");
+    defer ctx.allocator.free(a);
+    const e = try operandString(ctx, args[0], "pow", "exponent");
+    defer ctx.allocator.free(e);
+    if (!integralString(e)) {
+        _ = ctx.vm.throwBuiltinException("ValueError", number_class ++ "::pow(): Argument #1 ($exponent) exponent cannot have a fractional part") catch {};
+        return error.RuntimeError;
+    }
+    const exp = std.fmt.parseInt(i64, stripToScale(e, 0), 10) catch return error.RuntimeError;
+    return NativeResult.borrowed(.{ .object = try powResult(ctx, a, exp, explicitScale(args, 1)) });
+}
+
+fn powResult(ctx: *NativeContext, a: []const u8, exp: i64, explicit: ?usize) RuntimeError!*PhpObject {
+    const sa = scaleOf(a);
+    const natural: usize = if (exp > 0) sa * @as(usize, @intCast(exp)) else sa + 10;
+    const scale = explicit orelse natural;
+    var exp_buf: [24]u8 = undefined;
+    const e = std.fmt.bufPrint(&exp_buf, "{d}", .{exp}) catch return error.RuntimeError;
+    const result = try runNative(ctx, bcPow, a, e, scale);
+    defer result.release();
+    const bytes = if (explicit == null and exp <= 0) stripToScale(result.bytes(), 0) else result.bytes();
+    return makeNumber(ctx, bytes);
+}
+
+fn numberPowmod(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const this = numberThis(ctx) orelse return NativeResult.scalar(.null);
+    if (args.len < 2) return NativeResult.scalar(.null);
+    const a = try operandString(ctx, .{ .object = this }, "powmod", "exponent");
+    defer ctx.allocator.free(a);
+    const e = try operandString(ctx, args[0], "powmod", "exponent");
+    defer ctx.allocator.free(e);
+    const m = try operandString(ctx, args[1], "powmod", "modulus");
+    defer ctx.allocator.free(m);
+    if (!integralString(a)) {
+        _ = ctx.vm.throwBuiltinException("ValueError", "Base number cannot have a fractional part") catch {};
+        return error.RuntimeError;
+    }
+    const scale = explicitScale(args, 2) orelse 0;
+    var call_args: [4]Value = .{ .{ .string = Value.String.borrowed(a) }, .{ .string = Value.String.borrowed(e) }, .{ .string = Value.String.borrowed(m) }, .{ .int = @intCast(scale) } };
+    const result = try bcPowmod(ctx, &call_args);
+    if (result.value != .string) return error.RuntimeError;
+    defer result.value.string.release();
+    return NativeResult.borrowed(.{ .object = try makeNumber(ctx, result.value.string.bytes()) });
+}
+
+fn numberSqrt(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const this = numberThis(ctx) orelse return NativeResult.scalar(.null);
+    const a = try operandString(ctx, .{ .object = this }, "sqrt", "scale");
+    defer ctx.allocator.free(a);
+    const explicit = explicitScale(args, 0);
+    const sa = scaleOf(a);
+    const result = try runNative(ctx, bcSqrt, a, null, explicit orelse sa + 10);
+    defer result.release();
+    const bytes = if (explicit == null) stripToScale(result.bytes(), sa) else result.bytes();
+    return NativeResult.borrowed(.{ .object = try makeNumber(ctx, bytes) });
+}
+
+fn numberFloor(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    return numberUnary(ctx, bcFloor);
+}
+
+fn numberCeil(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    return numberUnary(ctx, bcCeil);
+}
+
+fn numberUnary(ctx: *NativeContext, comptime native: anytype) RuntimeError!NativeResult {
+    const this = numberThis(ctx) orelse return NativeResult.scalar(.null);
+    const a = try operandString(ctx, .{ .object = this }, "floor", "num");
+    defer ctx.allocator.free(a);
+    var call_args: [1]Value = .{.{ .string = Value.String.borrowed(a) }};
+    const result = try native(ctx, &call_args);
+    if (result.value != .string) return error.RuntimeError;
+    defer result.value.string.release();
+    return NativeResult.borrowed(.{ .object = try makeNumber(ctx, result.value.string.bytes()) });
+}
+
+const RoundMode = enum { half_away, half_towards, half_even, half_odd, towards_zero, away_from_zero, negative_inf, positive_inf };
+
+fn roundModeOf(v: Value) RoundMode {
+    if (v == .object and std.mem.eql(u8, v.object.class_name, "RoundingMode")) {
+        const name = v.object.get("name");
+        if (name == .string) {
+            const n = name.string.bytes();
+            const table = .{ .{ "HalfAwayFromZero", RoundMode.half_away }, .{ "HalfTowardsZero", RoundMode.half_towards }, .{ "HalfEven", RoundMode.half_even }, .{ "HalfOdd", RoundMode.half_odd }, .{ "TowardsZero", RoundMode.towards_zero }, .{ "AwayFromZero", RoundMode.away_from_zero }, .{ "NegativeInfinity", RoundMode.negative_inf }, .{ "PositiveInfinity", RoundMode.positive_inf } };
+            inline for (table) |entry| if (std.mem.eql(u8, n, entry[0])) return entry[1];
+        }
+    }
+    if (v == .int) return switch (v.int) {
+        2 => .half_towards,
+        3 => .half_even,
+        4 => .half_odd,
+        else => .half_away,
+    };
+    return .half_away;
+}
+
+// rounds the canonical decimal `s` to `precision` fractional digits (negative
+// precision rounds integer positions) by inspecting the digits past the cut
+fn roundDecimal(allocator: Allocator, s: []const u8, precision: i64, mode: RoundMode) ![]u8 {
+    const neg = s.len > 0 and s[0] == '-';
+    const body = if (neg) s[1..] else s;
+    const dot = std.mem.indexOfScalar(u8, body, '.');
+    const int_part = if (dot) |d| body[0..d] else body;
+    const frac_part = if (dot) |d| body[d + 1 ..] else "";
+    var digits = std.ArrayListUnmanaged(u8){};
+    defer digits.deinit(allocator);
+    try digits.appendSlice(allocator, int_part);
+    try digits.appendSlice(allocator, frac_part);
+    // cut is the count of digits kept from the front; it may run past either end
+    const cut_signed: i64 = @as(i64, @intCast(int_part.len)) + precision;
+    const cut: usize = @intCast(@max(cut_signed, 0));
+    var kept = std.ArrayListUnmanaged(u8){};
+    defer kept.deinit(allocator);
+    if (cut <= digits.items.len) {
+        try kept.appendSlice(allocator, digits.items[0..cut]);
+    } else {
+        try kept.appendSlice(allocator, digits.items);
+        try kept.appendNTimes(allocator, '0', cut - digits.items.len);
+    }
+    const rest = if (cut < digits.items.len) digits.items[cut..] else "";
+    var rest_nonzero = false;
+    for (rest) |c| if (c != '0') {
+        rest_nonzero = true;
+    };
+    const first: u8 = if (rest.len > 0) rest[0] else '0';
+    var tail_nonzero = false;
+    if (rest.len > 1) for (rest[1..]) |c| if (c != '0') {
+        tail_nonzero = true;
+    };
+    const above_half = first > '5' or (first == '5' and tail_nonzero);
+    const exactly_half = first == '5' and !tail_nonzero;
+    const last_digit: u8 = if (kept.items.len > 0) kept.items[kept.items.len - 1] else '0';
+    const last_odd = (last_digit - '0') % 2 == 1;
+    const bump = switch (mode) {
+        .half_away => above_half or exactly_half,
+        .half_towards => above_half,
+        .half_even => above_half or (exactly_half and last_odd),
+        .half_odd => above_half or (exactly_half and !last_odd),
+        .towards_zero => false,
+        .away_from_zero => rest_nonzero,
+        .negative_inf => neg and rest_nonzero,
+        .positive_inf => !neg and rest_nonzero,
+    };
+    if (bump) {
+        var i: usize = kept.items.len;
+        var carry = true;
+        while (carry and i > 0) {
+            i -= 1;
+            if (kept.items[i] == '9') {
+                kept.items[i] = '0';
+            } else {
+                kept.items[i] += 1;
+                carry = false;
+            }
+        }
+        if (carry) try kept.insert(allocator, 0, '1');
+    }
+    // kept digits end `precision` places after the point; rebuild the string
+    var out = std.ArrayListUnmanaged(u8){};
+    errdefer out.deinit(allocator);
+    if (neg) try out.append(allocator, '-');
+    if (precision <= 0) {
+        try out.appendSlice(allocator, if (kept.items.len == 0) "0" else kept.items);
+        try out.appendNTimes(allocator, '0', @intCast(-precision));
+    } else {
+        const frac_len: usize = @intCast(precision);
+        if (kept.items.len <= frac_len) {
+            try out.append(allocator, '0');
+            try out.append(allocator, '.');
+            try out.appendNTimes(allocator, '0', frac_len - kept.items.len);
+            try out.appendSlice(allocator, kept.items);
+        } else {
+            try out.appendSlice(allocator, kept.items[0 .. kept.items.len - frac_len]);
+            try out.append(allocator, '.');
+            try out.appendSlice(allocator, kept.items[kept.items.len - frac_len ..]);
+        }
+    }
+    return out.toOwnedSlice(allocator);
+}
+
+fn numberRound(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const this = numberThis(ctx) orelse return NativeResult.scalar(.null);
+    const a = try operandString(ctx, .{ .object = this }, "round", "precision");
+    defer ctx.allocator.free(a);
+    const precision: i64 = if (args.len > 0 and args[0] == .int) args[0].int else 0;
+    const mode = if (args.len > 1) roundModeOf(args[1]) else RoundMode.half_away;
+    const rounded = try roundDecimal(ctx.allocator, a, precision, mode);
+    defer ctx.allocator.free(rounded);
+    return NativeResult.borrowed(.{ .object = try makeNumber(ctx, rounded) });
+}
+
+fn numberCompare(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const this = numberThis(ctx) orelse return NativeResult.scalar(.null);
+    if (args.len < 1) return NativeResult.scalar(.null);
+    const a = try operandString(ctx, .{ .object = this }, "compare", "num");
+    defer ctx.allocator.free(a);
+    const b = try operandString(ctx, args[0], "compare", "num");
+    defer ctx.allocator.free(b);
+    return NativeResult.scalar(.{ .int = try compareStrings(ctx, a, b, explicitScale(args, 1)) });
+}
+
+fn compareStrings(ctx: *NativeContext, a: []const u8, b: []const u8, explicit: ?usize) RuntimeError!i64 {
+    const scale = explicit orelse @max(scaleOf(a), scaleOf(b));
+    var call_args: [3]Value = .{ .{ .string = Value.String.borrowed(a) }, .{ .string = Value.String.borrowed(b) }, .{ .int = @intCast(scale) } };
+    const result = try bcComp(ctx, &call_args);
+    return if (result.value == .int) result.value.int else 0;
+}
+
+fn numberToString(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const this = numberThis(ctx) orelse return NativeResult.literal("");
+    return NativeResult.share(this.get("value"));
+}
+
+fn numberSerialize(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const this = numberThis(ctx) orelse return NativeResult.scalar(.null);
+    const arr = try ctx.createArray();
+    try arr.set(ctx.allocator, .{ .string = Value.String.borrowed("value") }, this.get("value"));
+    return NativeResult.borrowed(.{ .array = arr });
+}
+
+fn numberUnserialize(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const this = numberThis(ctx) orelse return NativeResult.scalar(.null);
+    if (args.len < 1 or args[0] != .array) return NativeResult.scalar(.null);
+    const v = args[0].array.get(.{ .string = Value.String.borrowed("value") });
+    if (v == .string and wellFormed(v.string.bytes())) try setNumber(ctx, this, v.string.bytes());
+    return NativeResult.scalar(.null);
+}
+
+// operator overloading: the Number side supplies the semantics, the other
+// operand may be a Number, an int, or a numeric string. anything else is
+// left to the VM's ordinary TypeError
+fn numberBinop(ctx: *NativeContext, op: vm_mod.NativeBinop, a: Value, b: Value) RuntimeError!?Value {
+    const supported = struct {
+        fn ok(v: Value) bool {
+            return isNumberObject(v) or v == .int or v == .string or v == .float or v == .bool;
+        }
+    };
+    if (!supported.ok(a)) return null;
+    if (op != .negate and !supported.ok(b)) return null;
+    const sa = try operandString(ctx, a, "add", "num");
+    defer ctx.allocator.free(sa);
+    switch (op) {
+        .negate => {
+            const result = try binaryResult(ctx, "0", sa, null, bcSub, .larger);
+            return .{ .object = result };
+        },
+        .compare => {
+            const sb = try operandString(ctx, b, "compare", "num");
+            defer ctx.allocator.free(sb);
+            return .{ .int = try compareStrings(ctx, sa, sb, null) };
+        },
+        .pow => {
+            const sb = try operandString(ctx, b, "pow", "exponent");
+            defer ctx.allocator.free(sb);
+            if (!integralString(sb)) {
+                _ = ctx.vm.throwBuiltinException("ValueError", number_class ++ "::pow(): Argument #1 ($exponent) exponent cannot have a fractional part") catch {};
+                return error.RuntimeError;
+            }
+            const exp = std.fmt.parseInt(i64, stripToScale(sb, 0), 10) catch return error.RuntimeError;
+            return .{ .object = try powResult(ctx, sa, exp, null) };
+        },
+        else => {
+            const sb = try operandString(ctx, b, "add", "num");
+            defer ctx.allocator.free(sb);
+            const result = switch (op) {
+                .add => try binaryResult(ctx, sa, sb, null, bcAdd, .larger),
+                .sub => try binaryResult(ctx, sa, sb, null, bcSub, .larger),
+                .mul => try binaryResult(ctx, sa, sb, null, bcMul, .sum),
+                .div => try binaryResult(ctx, sa, sb, null, bcDiv, .expand),
+                .mod => try binaryResult(ctx, sa, sb, null, bcMod, .larger),
+                else => unreachable,
+            };
+            return .{ .object = result };
+        },
+    }
+}

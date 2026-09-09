@@ -1255,10 +1255,22 @@ fn dtiSetTimestamp(ctx: *NativeContext, args: []const Value) RuntimeError!Native
     return NativeResult.borrowed(.{ .object = new_obj });
 }
 
+// a float timestamp keeps its sub-second part as microseconds
+fn setTimestampWithFraction(ctx: *NativeContext, obj: *PhpObject, ts: Value) !void {
+    if (ts == .float) {
+        const whole = @floor(ts.float);
+        try obj.set(ctx.allocator, "timestamp", .{ .int = @intFromFloat(whole) });
+        const micros: i64 = @intFromFloat(@round((ts.float - whole) * 1_000_000.0));
+        if (micros != 0) try obj.set(ctx.allocator, "__microseconds", .{ .int = micros });
+        return;
+    }
+    try obj.set(ctx.allocator, "timestamp", .{ .int = Value.toInt(ts) });
+}
+
 fn dtCreateFromTimestamp(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     if (args.len == 0) return NativeResult.scalar(.null);
     const obj = try ctx.createObject("DateTime");
-    try obj.set(ctx.allocator, "timestamp", .{ .int = Value.toInt(args[0]) });
+    try setTimestampWithFraction(ctx, obj, args[0]);
     return NativeResult.borrowed(.{ .object = obj });
 }
 
@@ -1826,7 +1838,7 @@ fn weekdayNameLen(s: []const u8) ?usize {
 fn dtiCreateFromTimestamp(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     if (args.len == 0) return NativeResult.scalar(.null);
     const obj = try ctx.createObject("DateTimeImmutable");
-    try obj.set(ctx.allocator, "timestamp", .{ .int = Value.toInt(args[0]) });
+    try setTimestampWithFraction(ctx, obj, args[0]);
     return NativeResult.borrowed(.{ .object = obj });
 }
 

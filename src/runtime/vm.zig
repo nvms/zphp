@@ -224,6 +224,7 @@ pub const NativeContext = struct {
 
 pub const NativeResult = @import("native_result.zig").NativeResult;
 const NativeFn = *const fn (*NativeContext, []const Value) RuntimeError!NativeResult;
+pub const NativeBinop = enum { add, sub, mul, div, mod, pow, compare, negate };
 
 pub const CaptureEntry = struct {
     closure_name: []const u8,
@@ -280,6 +281,10 @@ pub const ClassDef = struct {
     is_final: bool = false,
     is_readonly: bool = false,
     native_cleanup: ?*const fn (*PhpObject) bool = null,
+    // arithmetic and comparison on instances of a native class (BcMath\Number).
+    // null result means the operand pair is not supported and the ordinary
+    // TypeError path runs
+    native_binop: ?*const fn (*NativeContext, NativeBinop, Value, Value) RuntimeError!?Value = null,
     // set when any property-hook method ($hook_get/$hook_set) is registered on
     // this class. lets hasPropHook skip the per-access bufPrint + method lookup
     // for the >99% of classes that declare no hooks (PHP 8.4 feature). does not
@@ -1410,6 +1415,7 @@ pub const VM = struct {
         try @import("../stdlib/xml_parser.zig").register(vm, allocator);
         try @import("../stdlib/intl.zig").register(vm, allocator);
         try @import("../stdlib/gmp.zig").register(vm, allocator);
+        try @import("../stdlib/bcmath.zig").register(vm, allocator);
         try @import("../stdlib/gd.zig").register(vm, allocator);
         try @import("../stdlib/soap.zig").register(vm, allocator);
         try @import("../stdlib/mysqli.zig").register(vm, allocator);
@@ -1880,6 +1886,9 @@ pub const VM = struct {
         try c.put(a, "E_USER_WARNING", .{ .int = 512 });
         try c.put(a, "E_USER_NOTICE", .{ .int = 1024 });
         try c.put(a, "E_STRICT", .{ .int = 2048 });
+        inline for (.{ .{ "PHP_OUTPUT_HANDLER_START", 1 }, .{ "PHP_OUTPUT_HANDLER_WRITE", 0 }, .{ "PHP_OUTPUT_HANDLER_FLUSH", 4 }, .{ "PHP_OUTPUT_HANDLER_CLEAN", 2 }, .{ "PHP_OUTPUT_HANDLER_FINAL", 8 }, .{ "PHP_OUTPUT_HANDLER_CONT", 0 }, .{ "PHP_OUTPUT_HANDLER_END", 8 }, .{ "PHP_OUTPUT_HANDLER_CLEANABLE", 16 }, .{ "PHP_OUTPUT_HANDLER_FLUSHABLE", 32 }, .{ "PHP_OUTPUT_HANDLER_REMOVABLE", 64 }, .{ "PHP_OUTPUT_HANDLER_STDFLAGS", 112 }, .{ "PHP_OUTPUT_HANDLER_STARTED", 4096 }, .{ "PHP_OUTPUT_HANDLER_DISABLED", 8192 }, .{ "PHP_OUTPUT_HANDLER_PROCESSED", 16384 } }) |k| {
+            try c.put(a, k[0], .{ .int = k[1] });
+        }
         try c.put(a, "E_RECOVERABLE_ERROR", .{ .int = 4096 });
         try c.put(a, "E_DEPRECATED", .{ .int = 8192 });
         try c.put(a, "E_USER_DEPRECATED", .{ .int = 16384 });
@@ -3415,6 +3424,10 @@ pub const VM = struct {
                     if (a == .array and b == .array) {
                         self.push(.{ .array = try self.arrayUnion(a.array, b.array) });
                     } else {
+                        if (try self.objectBinop(.add, a, b)) |r| {
+                            self.push(r);
+                            continue;
+                        }
                         if (try self.checkArithOperands(a, b, "+")) continue;
                         self.push(Value.add(a, b));
                     }
@@ -3422,12 +3435,20 @@ pub const VM = struct {
                 .subtract => {
                     const b = self.pop();
                     const a = self.pop();
+                    if (try self.objectBinop(.sub, a, b)) |r| {
+                        self.push(r);
+                        continue;
+                    }
                     if (try self.checkArithOperands(a, b, "-")) continue;
                     self.push(Value.subtract(a, b));
                 },
                 .multiply => {
                     const b = self.pop();
                     const a = self.pop();
+                    if (try self.objectBinop(.mul, a, b)) |r| {
+                        self.push(r);
+                        continue;
+                    }
                     if (try self.checkArithOperands(a, b, "*")) continue;
                     self.push(Value.multiply(a, b));
                 },
@@ -3444,6 +3465,10 @@ pub const VM = struct {
                 .divide => {
                     const b = self.pop();
                     const a = self.pop();
+                    if (try self.objectBinop(.div, a, b)) |r| {
+                        self.push(r);
+                        continue;
+                    }
                     if (try self.checkArithOperands(a, b, "/")) continue;
                     const bv = Value.toFloat(b);
                     if (bv == 0.0) {
@@ -3455,6 +3480,10 @@ pub const VM = struct {
                 .modulo => {
                     const b = self.pop();
                     const a = self.pop();
+                    if (try self.objectBinop(.mod, a, b)) |r| {
+                        self.push(r);
+                        continue;
+                    }
                     if (try self.checkArithOperands(a, b, "%")) continue;
                     const bi = Value.toInt(b);
                     if (bi == 0) {
@@ -3466,11 +3495,19 @@ pub const VM = struct {
                 .power => {
                     const b = self.pop();
                     const a = self.pop();
+                    if (try self.objectBinop(.pow, a, b)) |r| {
+                        self.push(r);
+                        continue;
+                    }
                     if (try self.checkArithOperands(a, b, "**")) continue;
                     self.push(Value.power(a, b));
                 },
                 .negate => {
                     const v = self.pop();
+                    if (try self.objectBinop(.negate, v, .null)) |r| {
+                        self.push(r);
+                        continue;
+                    }
                     if (!isArithOperand(v)) {
                         const tn = arithTypeName(v);
                         const msg = try std.fmt.allocPrint(self.allocator, "Cannot negate {s}", .{tn});
@@ -10778,24 +10815,42 @@ pub const VM = struct {
     pub fn getStaticProp(self: *VM, class_name: []const u8, prop_name: []const u8) ?Value {
         var current: ?[]const u8 = class_name;
         while (current) |cn| {
-            if (self.classes.getPtr(cn)) |cls| {
-                if (cls.static_props.get(prop_name)) |val| return val;
-                for (cls.interfaces.items) |iface| {
-                    if (self.getStaticProp(iface, prop_name)) |val| return val;
-                }
-                current = cls.parent;
+            if (self.classes.contains(cn)) {
+                if (self.staticPropStep(cn, prop_name)) |step| {
+                    if (step.found) |val| return val;
+                    current = step.parent;
+                } else break;
             } else {
                 self.tryAutoload(cn) catch {};
-                if (self.classes.getPtr(cn)) |cls| {
-                    if (cls.static_props.get(prop_name)) |val| return val;
-                    for (cls.interfaces.items) |iface| {
-                        if (self.getStaticProp(iface, prop_name)) |val| return val;
-                    }
-                    current = cls.parent;
+                if (self.staticPropStep(cn, prop_name)) |step| {
+                    if (step.found) |val| return val;
+                    current = step.parent;
                 } else break;
             }
         }
         return null;
+    }
+
+    const StaticPropStep = struct { found: ?Value, parent: ?[]const u8 };
+
+    // one class of the lookup chain. the interface walk can autoload, which
+    // rehashes `classes`, so the class entry is never held across that
+    // recursion: names are copied out first and only they are used after
+    fn staticPropStep(self: *VM, cn: []const u8, prop_name: []const u8) ?StaticPropStep {
+        var ifaces: [64][]const u8 = undefined;
+        var n: usize = 0;
+        var parent: ?[]const u8 = null;
+        {
+            const cls = self.classes.getPtr(cn) orelse return null;
+            if (cls.static_props.get(prop_name)) |val| return .{ .found = val, .parent = null };
+            n = @min(cls.interfaces.items.len, ifaces.len);
+            @memcpy(ifaces[0..n], cls.interfaces.items[0..n]);
+            parent = cls.parent;
+        }
+        for (ifaces[0..n]) |iface| {
+            if (self.getStaticProp(iface, prop_name)) |val| return .{ .found = val, .parent = null };
+        }
+        return .{ .found = null, .parent = parent };
     }
 
     // like getStaticProp but returns a pointer to the storage slot (walking the
@@ -11147,6 +11202,17 @@ pub const VM = struct {
     /// PHP 8 rejects non-numeric strings, arrays (except for +), and objects
     /// without __toString as arithmetic operands with TypeError. returns true
     /// when the throw was caught in-frame and the caller should `continue`
+    fn objectBinop(self: *VM, op: NativeBinop, a: Value, b: Value) RuntimeError!?Value {
+        if (a != .object and b != .object) return null;
+        const hook = blk: {
+            if (a == .object) if (self.classes.get(a.object.class_name)) |cls| if (cls.native_binop) |h| break :blk h;
+            if (b == .object) if (self.classes.get(b.object.class_name)) |cls| if (cls.native_binop) |h| break :blk h;
+            return null;
+        };
+        var ctx = self.makeContext(null);
+        return hook(&ctx, op, a, b);
+    }
+
     pub fn checkArithOperands(self: *VM, a: Value, b: Value, comptime op: []const u8) RuntimeError!bool {
         if (isArithOperand(a) and isArithOperand(b)) {
             if (a == .string and isPartialNumericString(a.string.bytes())) self.emitNonNumericWarning();
@@ -14842,6 +14908,7 @@ pub const VM = struct {
 
     // mirror of looseEqualWithStringable for ordered comparisons
     pub fn compareWithStringable(self: *VM, a: Value, b: Value) RuntimeError!i64 {
+        if (try self.objectBinop(.compare, a, b)) |r| return r.int;
         if (a == .object and b == .string) {
             if (self.hasMethod(a.object.class_name, "__toString")) {
                 const s = try self.callMethod(a.object, "__toString", &.{});
@@ -14860,6 +14927,7 @@ pub const VM = struct {
     // __toString and compares as strings. Value.equal can't reach into the VM
     // to call methods, so this wrapper does that coercion before delegating
     pub fn looseEqualWithStringable(self: *VM, a: Value, b: Value) RuntimeError!bool {
+        if (try self.objectBinop(.compare, a, b)) |r| return r.int == 0;
         if (a == .object and b == .string) {
             if (self.hasMethod(a.object.class_name, "__toString")) {
                 const s = try self.callMethod(a.object, "__toString", &.{});

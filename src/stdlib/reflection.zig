@@ -79,6 +79,32 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try sp_def.attributes.append(a, .{ .name = "Attribute", .args = &.{} });
     try vm.classes.put(a, "SensitiveParameter", sp_def);
 
+    // PHP 8.4 #[Deprecated]: reflection reports it through isDeprecated();
+    // the runtime does not reproduce the E_DEPRECATED message
+    var dep_def = ClassDef{ .name = "Deprecated", .is_final = true };
+    try dep_def.properties.append(a, .{ .name = "message", .default = .null, .has_default = true, .is_readonly = true, .type_str = "?string" });
+    try dep_def.properties.append(a, .{ .name = "since", .default = .null, .has_default = true, .is_readonly = true, .type_str = "?string" });
+    try dep_def.methods.put(a, "__construct", .{ .name = "__construct", .arity = 2 });
+    try dep_def.attributes.append(a, .{ .name = "Attribute", .args = &.{} });
+    try vm.classes.put(a, "Deprecated", dep_def);
+    try vm.native_fns.put(a, "Deprecated::__construct", deprecatedConstruct);
+
+    var rconst_def = ClassDef{ .name = "ReflectionConstant" };
+    try rconst_def.properties.append(a, .{ .name = "name", .default = .{ .string = Value.String.borrowed("") } });
+    inline for (.{ .{ "__construct", 1 }, .{ "getName", 0 }, .{ "getValue", 0 }, .{ "getShortName", 0 }, .{ "getNamespaceName", 0 }, .{ "isDeprecated", 0 }, .{ "getAttributes", 2 }, .{ "getFileName", 0 }, .{ "__toString", 0 } }) |m| {
+        try rconst_def.methods.put(a, m[0], .{ .name = m[0], .arity = m[1] });
+    }
+    try vm.classes.put(a, "ReflectionConstant", rconst_def);
+    try vm.native_fns.put(a, "ReflectionConstant::__construct", rconstConstruct);
+    try vm.native_fns.put(a, "ReflectionConstant::getName", rconstGetName);
+    try vm.native_fns.put(a, "ReflectionConstant::getValue", rconstGetValue);
+    try vm.native_fns.put(a, "ReflectionConstant::getShortName", rconstGetShortName);
+    try vm.native_fns.put(a, "ReflectionConstant::getNamespaceName", rconstGetNamespaceName);
+    try vm.native_fns.put(a, "ReflectionConstant::isDeprecated", reflectionFalse);
+    try vm.native_fns.put(a, "ReflectionConstant::getAttributes", reflectionEmptyArray);
+    try vm.native_fns.put(a, "ReflectionConstant::getFileName", reflectionFalse);
+    try vm.native_fns.put(a, "ReflectionConstant::__toString", rconstToString);
+
     // SensitiveParameterValue (PHP 8.2) - returned by debug_backtrace for
     // redacted sensitive params. simple value wrapper
     var spv_def = ClassDef{ .name = "SensitiveParameterValue" };
@@ -137,6 +163,9 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try rc_def.methods.put(a, "initializeLazyObject", .{ .name = "initializeLazyObject", .arity = 1 });
     try rc_def.methods.put(a, "isUninitializedLazyObject", .{ .name = "isUninitializedLazyObject", .arity = 1 });
     try rc_def.methods.put(a, "markLazyObjectAsInitialized", .{ .name = "markLazyObjectAsInitialized", .arity = 1 });
+    try rc_def.methods.put(a, "resetAsLazyGhost", .{ .name = "resetAsLazyGhost", .arity = 2 });
+    try rc_def.methods.put(a, "resetAsLazyProxy", .{ .name = "resetAsLazyProxy", .arity = 2 });
+    try rc_def.methods.put(a, "getLazyInitializer", .{ .name = "getLazyInitializer", .arity = 1 });
     try rc_def.methods.put(a, "getShortName", .{ .name = "getShortName", .arity = 0 });
     try rc_def.methods.put(a, "getNamespaceName", .{ .name = "getNamespaceName", .arity = 0 });
     try rc_def.methods.put(a, "inNamespace", .{ .name = "inNamespace", .arity = 0 });
@@ -190,6 +219,9 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try vm.native_fns.put(a, "ReflectionClass::initializeLazyObject", rcInitializeLazyObject);
     try vm.native_fns.put(a, "ReflectionClass::isUninitializedLazyObject", rcIsUninitializedLazyObject);
     try vm.native_fns.put(a, "ReflectionClass::markLazyObjectAsInitialized", rcMarkLazyObjectAsInitialized);
+    try vm.native_fns.put(a, "ReflectionClass::resetAsLazyGhost", rcResetAsLazyGhost);
+    try vm.native_fns.put(a, "ReflectionClass::resetAsLazyProxy", rcResetAsLazyProxy);
+    try vm.native_fns.put(a, "ReflectionClass::getLazyInitializer", rcGetLazyInitializer);
     try vm.native_fns.put(a, "ReflectionClass::getShortName", rcGetShortName);
     try vm.native_fns.put(a, "ReflectionClass::getNamespaceName", rcGetNamespaceName);
     try vm.native_fns.put(a, "ReflectionClass::inNamespace", rcInNamespace);
@@ -316,7 +348,7 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try vm.native_fns.put(a, "ReflectionMethod::inNamespace", reflectionFalse);
     try vm.native_fns.put(a, "ReflectionMethod::isInternal", rmIsInternal);
     try vm.native_fns.put(a, "ReflectionMethod::isUserDefined", rmIsUserDefined);
-    try vm.native_fns.put(a, "ReflectionMethod::isDeprecated", reflectionFalse);
+    try vm.native_fns.put(a, "ReflectionMethod::isDeprecated", rmIsDeprecated);
 
     var rp_def = ClassDef{ .name = "ReflectionParameter" };
     try rp_def.properties.append(a, .{ .name = "name", .default = .{ .string = Value.String.borrowed("") } });
@@ -506,7 +538,7 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try vm.native_fns.put(a, "ReflectionFunction::inNamespace", rfInNamespace);
     try vm.native_fns.put(a, "ReflectionFunction::getExtension", reflectionFalse);
     try vm.native_fns.put(a, "ReflectionFunction::getExtensionName", reflectionFalse);
-    try vm.native_fns.put(a, "ReflectionFunction::isDeprecated", reflectionFalse);
+    try vm.native_fns.put(a, "ReflectionFunction::isDeprecated", rfIsDeprecated);
     try vm.native_fns.put(a, "ReflectionFunction::isDisabled", reflectionFalse);
 
     var rprop_def = ClassDef{ .name = "ReflectionProperty" };
@@ -517,6 +549,7 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try rprop_def.methods.put(a, "getValue", .{ .name = "getValue", .arity = 1 });
     try rprop_def.methods.put(a, "getName", .{ .name = "getName", .arity = 0 });
     try rprop_def.methods.put(a, "getType", .{ .name = "getType", .arity = 0 });
+    try rprop_def.methods.put(a, "getSettableType", .{ .name = "getSettableType", .arity = 0 });
     try rprop_def.methods.put(a, "isPublic", .{ .name = "isPublic", .arity = 0 });
     try rprop_def.methods.put(a, "isProtected", .{ .name = "isProtected", .arity = 0 });
     try rprop_def.methods.put(a, "isPrivate", .{ .name = "isPrivate", .arity = 0 });
@@ -581,6 +614,7 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try vm.native_fns.put(a, "ReflectionProperty::setRawValueWithoutLazyInitialization", rpSetWithoutLazy);
     try vm.native_fns.put(a, "ReflectionProperty::getName", rpropGetName);
     try vm.native_fns.put(a, "ReflectionProperty::getType", rpropGetType);
+    try vm.native_fns.put(a, "ReflectionProperty::getSettableType", rpropGetType);
     try vm.native_fns.put(a, "ReflectionProperty::isPublic", rpropIsPublic);
     try vm.native_fns.put(a, "ReflectionProperty::isProtected", rpropIsProtected);
     try vm.native_fns.put(a, "ReflectionProperty::isPrivate", rpropIsPrivate);
@@ -641,12 +675,14 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try rcc_def.methods.put(a, "isPrivate", .{ .name = "isPrivate", .arity = 0 });
     try rcc_def.methods.put(a, "isFinal", .{ .name = "isFinal", .arity = 0 });
     try rcc_def.methods.put(a, "isEnumCase", .{ .name = "isEnumCase", .arity = 0 });
+    try rcc_def.methods.put(a, "isDeprecated", .{ .name = "isDeprecated", .arity = 0 });
     try rcc_def.methods.put(a, "getType", .{ .name = "getType", .arity = 0 });
     try rcc_def.methods.put(a, "hasType", .{ .name = "hasType", .arity = 0 });
     try rcc_def.methods.put(a, "getModifiers", .{ .name = "getModifiers", .arity = 0 });
     try rcc_def.methods.put(a, "getDocComment", .{ .name = "getDocComment", .arity = 0 });
     try vm.classes.put(a, "ReflectionClassConstant", rcc_def);
     try vm.native_fns.put(a, "ReflectionClassConstant::getDocComment", rccGetDocComment);
+    try vm.native_fns.put(a, "ReflectionClassConstant::isDeprecated", rccIsDeprecated);
 
     try vm.native_fns.put(a, "ReflectionClassConstant::__construct", rccConstruct);
     try vm.native_fns.put(a, "ReflectionClassConstant::getName", rccGetName);
@@ -4253,6 +4289,26 @@ fn raNewInstance(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResul
                     }
                 }
                 if (count > 0) _ = try ctx.callMethod(obj, "__construct", resolved[0..count]);
+            } else if (@import("native_params.zig").map.get(ctor_key)) |params| {
+                // a native attribute constructor (#[Deprecated]) resolves its
+                // names from the same table named calls use
+                var resolved: [16]Value = .{.null} ** 16;
+                var pos: usize = 0;
+                for (arr.entries.items) |entry| {
+                    if (entry.key == .string) {
+                        for (params, 0..) |p, pi| {
+                            if (pi < resolved.len and std.mem.eql(u8, p[1..], entry.key.string.bytes())) {
+                                resolved[pi] = entry.value;
+                                if (pi >= pos) pos = pi + 1;
+                                break;
+                            }
+                        }
+                    } else if (pos < resolved.len) {
+                        resolved[pos] = entry.value;
+                        pos += 1;
+                    }
+                }
+                _ = try ctx.callMethod(obj, "__construct", resolved[0..pos]);
             } else {
                 var call_args: [16]Value = undefined;
                 const count = @min(arr.entries.items.len, 16);
@@ -4544,4 +4600,154 @@ fn rfibGetTrace(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult
         try arr.append(ctx.allocator, .{ .array = frame });
     }
     return NativeResult.borrowed(.{ .array = arr });
+}
+
+fn hasDeprecatedAttribute(attrs: []const AttributeDef) bool {
+    for (attrs) |attr| {
+        const name = std.mem.trimLeft(u8, attr.name, "\\");
+        if (std.ascii.eqlIgnoreCase(name, "Deprecated")) return true;
+    }
+    return false;
+}
+
+fn deprecatedConstruct(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const this = getThis(ctx) orelse return NativeResult.scalar(.null);
+    if (args.len > 0 and args[0] == .string) try this.set(ctx.allocator, "message", args[0]);
+    if (args.len > 1 and args[1] == .string) try this.set(ctx.allocator, "since", args[1]);
+    return NativeResult.scalar(.null);
+}
+
+fn rfIsDeprecated(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const this = getThis(ctx) orelse return NativeResult.scalar(.{ .bool = false });
+    const func_name = if (this.get("name") == .string) this.get("name").string.bytes() else return NativeResult.scalar(.{ .bool = false });
+    const attrs = ctx.vm.function_attributes.get(ctx.vm.getOrigClosureName(func_name)) orelse return NativeResult.scalar(.{ .bool = false });
+    return NativeResult.scalar(.{ .bool = hasDeprecatedAttribute(attrs) });
+}
+
+fn rmIsDeprecated(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const this = getThis(ctx) orelse return NativeResult.scalar(.{ .bool = false });
+    const method_name = methodLookupName(this) orelse return NativeResult.scalar(.{ .bool = false });
+    const declaring = if (this.get("_declaring_class") == .string) this.get("_declaring_class").string.bytes() else return NativeResult.scalar(.{ .bool = false });
+    const cls = ctx.vm.classes.get(declaring) orelse return NativeResult.scalar(.{ .bool = false });
+    const attrs = cls.method_attributes.get(method_name) orelse return NativeResult.scalar(.{ .bool = false });
+    return NativeResult.scalar(.{ .bool = hasDeprecatedAttribute(attrs) });
+}
+
+fn rccIsDeprecated(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const this = getThis(ctx) orelse return NativeResult.scalar(.{ .bool = false });
+    const class_name = if (this.get("class") == .string) this.get("class").string.bytes() else return NativeResult.scalar(.{ .bool = false });
+    const const_name = if (this.get("name") == .string) this.get("name").string.bytes() else return NativeResult.scalar(.{ .bool = false });
+    const cls = ctx.vm.classes.get(class_name) orelse return NativeResult.scalar(.{ .bool = false });
+    const attrs = cls.constant_attributes.get(const_name) orelse return NativeResult.scalar(.{ .bool = false });
+    return NativeResult.scalar(.{ .bool = hasDeprecatedAttribute(attrs) });
+}
+
+fn rconstConstruct(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const this = getThis(ctx) orelse return NativeResult.scalar(.null);
+    if (args.len < 1 or args[0] != .string) return throwReflection(ctx, "ReflectionConstant::__construct() expects a constant name");
+    const name = std.mem.trimLeft(u8, args[0].string.bytes(), "\\");
+    if (!ctx.vm.php_constants.contains(name)) {
+        const msg = std.fmt.allocPrint(ctx.allocator, "Constant \"{s}\" does not exist", .{name}) catch return throwReflection(ctx, "Constant does not exist");
+        try ctx.strings.append(ctx.allocator, msg);
+        return throwReflection(ctx, msg);
+    }
+    const owned = try Value.String.create(ctx.allocator, name);
+    defer owned.release();
+    try this.set(ctx.allocator, "name", .{ .string = owned });
+    return NativeResult.scalar(.null);
+}
+
+fn rconstGetName(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const this = getThis(ctx) orelse return NativeResult.scalar(.null);
+    return NativeResult.share(this.get("name"));
+}
+
+fn rconstGetValue(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const this = getThis(ctx) orelse return NativeResult.scalar(.null);
+    const name_v = this.get("name");
+    if (name_v != .string) return NativeResult.scalar(.null);
+    return NativeResult.share(ctx.vm.php_constants.get(name_v.string.bytes()) orelse .null);
+}
+
+fn rconstGetShortName(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const this = getThis(ctx) orelse return NativeResult.scalar(.null);
+    const name_v = this.get("name");
+    if (name_v != .string) return NativeResult.scalar(.null);
+    const name = name_v.string.bytes();
+    const pos = std.mem.lastIndexOfScalar(u8, name, '\\') orelse return NativeResult.shareString(name_v.string);
+    return try NativeResult.copyString(ctx.allocator, name[pos + 1 ..]);
+}
+
+fn rconstGetNamespaceName(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const this = getThis(ctx) orelse return NativeResult.literal("");
+    const name_v = this.get("name");
+    if (name_v != .string) return NativeResult.literal("");
+    const name = name_v.string.bytes();
+    const pos = std.mem.lastIndexOfScalar(u8, name, '\\') orelse return NativeResult.literal("");
+    return try NativeResult.copyString(ctx.allocator, name[0..pos]);
+}
+
+fn rconstToString(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const this = getThis(ctx) orelse return NativeResult.literal("");
+    const name_v = this.get("name");
+    if (name_v != .string) return NativeResult.literal("");
+    const value = ctx.vm.php_constants.get(name_v.string.bytes()) orelse Value.null;
+    var buf = std.ArrayListUnmanaged(u8){};
+    defer buf.deinit(ctx.allocator);
+    try buf.appendSlice(ctx.allocator, "Constant [ ");
+    try buf.appendSlice(ctx.allocator, @tagName(value));
+    try buf.append(ctx.allocator, ' ');
+    try buf.appendSlice(ctx.allocator, name_v.string.bytes());
+    try buf.appendSlice(ctx.allocator, " ] { ");
+    try value.format(&buf, ctx.allocator);
+    try buf.appendSlice(ctx.allocator, " }\n");
+    return try NativeResult.copyString(ctx.allocator, buf.items);
+}
+
+// resetAsLazyGhost / resetAsLazyProxy: an existing instance drops every
+// property value it holds and becomes lazy again around the new initializer
+fn rcResetAsLazy(ctx: *NativeContext, args: []const Value, proxy: bool) RuntimeError!NativeResult {
+    if (args.len < 2 or args[0] != .object) return NativeResult.scalar(.null);
+    const obj = args[0].object;
+    if (obj.lazy) |state| {
+        if (state.initializer != .null) ctx.vm.releaseValue(state.initializer);
+        ctx.allocator.free(state.pending);
+        ctx.allocator.destroy(state);
+        obj.lazy = null;
+    }
+    if (obj.slots) |slots| {
+        for (slots) |v| ctx.vm.releaseValue(v);
+        ctx.allocator.free(slots);
+        obj.slots = null;
+    }
+    for (obj.properties.values()) |v| ctx.vm.releaseValue(v);
+    obj.properties.clearRetainingCapacity();
+    obj.unset_slots.clearRetainingCapacity();
+    try ctx.vm.initObjectProperties(obj, obj.class_name);
+    VM.retainValue(args[1]);
+    const state = try ctx.allocator.create(PhpObject.LazyState);
+    const count = if (obj.slots) |slots| slots.len else 0;
+    state.* = .{ .initializer = args[1], .proxy = proxy, .pending = try ctx.allocator.alloc(bool, count), .skip_serialize = args.len > 2 and args[2] == .int and (args[2].int & 8) != 0 };
+    @memset(state.pending, true);
+    obj.lazy = state;
+    if (count == 0) {
+        ctx.vm.releaseValue(state.initializer);
+        state.initializer = .null;
+    }
+    return NativeResult.borrowed(.{ .object = obj });
+}
+
+fn rcResetAsLazyGhost(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    return rcResetAsLazy(ctx, args, false);
+}
+
+fn rcResetAsLazyProxy(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    return rcResetAsLazy(ctx, args, true);
+}
+
+fn rcGetLazyInitializer(_: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len < 1 or args[0] != .object) return NativeResult.scalar(.null);
+    const state = args[0].object.lazy orelse return NativeResult.scalar(.null);
+    if (state.initializer == .null) return NativeResult.scalar(.null);
+    return NativeResult.share(state.initializer);
 }
