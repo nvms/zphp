@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run tests/memory_soak.php and fail if the process keeps growing.
+"""Run tests/soak/memory.php and fail if the process keeps growing.
 
 RSS is sampled while the script runs. The footprint may settle during the
 first part of the run (allocator pools fill, caches warm), so the check
@@ -28,7 +28,7 @@ def main():
     if not os.path.exists(ZPHP):
         print(f"error: {ZPHP} not found - build first", file=sys.stderr)
         return 2
-    script = os.path.join(ROOT, "tests", "memory_soak.php")
+    script = os.path.join(ROOT, "tests", "soak", "memory.php")
     proc = subprocess.Popen([ZPHP, "run", script, ROUNDS], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
     started = time.time()
     samples = []
